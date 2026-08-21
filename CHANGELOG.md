@@ -4,6 +4,12 @@ All notable changes to Mobile Release Kit are documented here. The project follo
 
 ## Unreleased
 
+## 0.1.2 - 2026-08-21
+
+### Fixed
+
+- Canonicalize the final signed AAB with `jarsigner` so strict verification sees the same signed entries through both JAR stream and central-directory readers.
+
 ## 0.1.1 - 2026-08-21
 
 ### Fixed

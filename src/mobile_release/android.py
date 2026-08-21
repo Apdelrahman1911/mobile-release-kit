@@ -215,7 +215,9 @@ def _verify_jar_signature(path: Path) -> bool | None:
     allowed_warning = re.compile(
         r"This jar contains signatures that do not include a timestamp\."
         r"(?: Without a timestamp, users may not be able to validate this jar after any of the "
-        r"signer certificates expire \(as early as [0-9]{4}-[0-9]{2}-[0-9]{2}\)\.)?",
+        r"signer certificates expire \(as early as [0-9]{4}-[0-9]{2}-[0-9]{2}\)\.)?"
+        r"(?:\nPOSIX file permission and/or symlink attributes detected\. These attributes "
+        r"are ignored when signing and are not protected by the signature\.)?",
         re.I,
     )
     warnings_allowed = all(
@@ -223,7 +225,10 @@ def _verify_jar_signature(path: Path) -> bool | None:
     )
     # OpenJDK aggregates several unrelated failures into exit bit 4. Permit it
     # only when the sole exceptional condition is the expected self-signed
-    # Android upload certificate; every validity/algorithm/content warning fails.
+    # Android upload certificate. A preceding ZIP structure pass rejects actual
+    # symlink/special entries; only the exact bounded POSIX-attribute notice may
+    # accompany the no-timestamp warning. Every validity/algorithm/content
+    # warning still fails.
     if (
         result.returncode not in {0, 4}
         or not re.search(r"\bjar verified(?:, with signer errors)?\.\s*", output, re.I)
@@ -241,6 +246,61 @@ def _verify_jar_signature(path: Path) -> bool | None:
     ):
         raise ValidationError("jarsigner rejected the final AAB signature or signed content")
     return True
+
+
+def _canonicalize_aab_signature(path: Path) -> None:
+    """Re-sign the final copy so JAR stream and central-directory views agree."""
+
+    required = (
+        "MOBILE_RELEASE_ANDROID_KEYSTORE_PATH",
+        "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
+        "MOBILE_RELEASE_ANDROID_KEY_ALIAS",
+        "MOBILE_RELEASE_ANDROID_KEY_PASSWORD",
+    )
+    missing = [name for name in required if not os.environ.get(name)]
+    if missing:
+        raise ValidationError(
+            "Android final signing inputs are incomplete: " + ", ".join(missing)
+        )
+    try:
+        keystore = canonical_external_path(
+            Path(os.environ["MOBILE_RELEASE_ANDROID_KEYSTORE_PATH"]),
+            label="Android keystore",
+        )
+    except (FileNotFoundError, OSError, ValidationError) as error:
+        raise ValidationError("Android keystore must be a regular non-symlink file") from error
+    if not keystore.is_file():
+        raise ValidationError("Android keystore must be a regular non-symlink file")
+    signing_environment = _validation_environment()
+    for name in (
+        "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
+        "MOBILE_RELEASE_ANDROID_KEY_PASSWORD",
+    ):
+        signing_environment[name] = os.environ[name]
+    try:
+        result = subprocess.run(
+            [
+                "jarsigner",
+                "-keystore",
+                str(keystore),
+                "-storepass:env",
+                "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
+                "-keypass:env",
+                "MOBILE_RELEASE_ANDROID_KEY_PASSWORD",
+                str(path),
+                os.environ["MOBILE_RELEASE_ANDROID_KEY_ALIAS"],
+            ],
+            env=signing_environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=120,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as error:
+        raise ValidationError("jarsigner could not canonicalize the final AAB signature") from error
+    if result.returncode:
+        raise ValidationError("jarsigner could not canonicalize the final AAB signature")
 
 
 def validate_aab(
@@ -460,6 +520,8 @@ def run_android_build(config: ReleaseConfig, *, signed: bool) -> dict[str, Path]
     if aab.is_symlink():
         raise ValidationError("normalized AAB destination must not be a symlink")
     shutil.copy2(bundle_source, aab)
+    if signed:
+        _canonicalize_aab_signature(aab)
     result_paths = {"android-aab": aab}
     mapping = module_dir / "build/outputs/mapping" / variant / "mapping.txt"
     mapping = config.project_path(str(mapping))
