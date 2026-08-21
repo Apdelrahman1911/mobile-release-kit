@@ -4,6 +4,14 @@ All notable changes to Mobile Release Kit are documented here. The project follo
 
 ## Unreleased
 
+## 0.1.1 - 2026-08-21
+
+### Fixed
+
+- Query effective Android Debug application IDs through the modern Android Components API while retaining the legacy variant fallback.
+
+## 0.1.0 - 2026-08-21
+
 ### Added
 
 - Strict project, immutable candidate, and Store-receipt schemas.

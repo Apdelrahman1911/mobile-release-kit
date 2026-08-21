@@ -37,7 +37,11 @@ from mobile_release.credentials import (
 from mobile_release.discovery import discover_project
 from mobile_release.ios import run_ios_build
 from mobile_release.metadata import build_metadata_archive
-from mobile_release.preflight import _xcode_toolchain_finding, preflight
+from mobile_release.preflight import (
+    _effective_android_identity_finding,
+    _xcode_toolchain_finding,
+    preflight,
+)
 from mobile_release.provenance import sha256_file
 from mobile_release.reporting import FAILING_STATUSES, Finding, Report, Status
 from mobile_release.stores import (
@@ -103,6 +107,39 @@ class CliBuildTests(unittest.TestCase):
         )
         self.assertEqual(ci.ci_command, "production-submit")
 
+    def test_effective_android_identity_uses_modern_components_api(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = load_config(write_project(root, android_config()))
+            discovered = discover_project(root)
+
+            def run_gradle(command, **_kwargs):
+                self.assertIn("--no-configuration-cache", command)
+                init_script = Path(command[command.index("--init-script") + 1]).read_text(
+                    encoding="utf-8"
+                )
+                self.assertIn("androidComponents", init_script)
+                self.assertIn("components.onVariants", init_script)
+                self.assertIn("applicationVariants", init_script)
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=(
+                        "MOBILE_RELEASE_EFFECTIVE_ANDROID_ID|"
+                        "demoDebug|com.example.reader.debug\n"
+                    ),
+                    stderr="",
+                )
+
+            with (
+                patch("mobile_release.preflight.discover_project", return_value=discovered),
+                patch("mobile_release.preflight.subprocess.run", side_effect=run_gradle),
+            ):
+                finding = _effective_android_identity_finding(config)
+
+            self.assertEqual(finding.status, Status.PASS)
+            self.assertEqual(finding.details, {"verifiedVariants": ["demoDebug"]})
+
     def test_distribution_declares_and_resolves_single_source_tooling_assets(self) -> None:
         repository = Path(__file__).resolve().parents[2]
         pyproject = tomllib.loads((repository / "pyproject.toml").read_text(encoding="utf-8"))
@@ -165,7 +202,7 @@ class CliBuildTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertEqual(completed.stdout.strip(), "mobile-release 0.1.0")
+            self.assertEqual(completed.stdout.strip(), "mobile-release 0.1.1")
             self.assertFalse(marker.exists())
 
     def test_init_preflights_sha_and_every_destination_before_writing(self) -> None:

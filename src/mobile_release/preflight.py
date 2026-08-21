@@ -104,13 +104,34 @@ def _effective_android_identity_finding(config: ReleaseConfig) -> Finding:
             category="identity",
         )
     script = """
+def mobileReleaseTargetPath = '__MODULE__'
+def mobileReleaseModernApi = false
+
+gradle.beforeProject { project ->
+    if (project.path == mobileReleaseTargetPath) {
+        project.pluginManager.withPlugin('com.android.application') {
+            def components = project.extensions.findByName('androidComponents')
+            if (components != null) {
+                mobileReleaseModernApi = true
+                components.onVariants(components.selector().all()) { variant ->
+                    if (variant.name.toString().toLowerCase().endsWith('debug')) {
+                        println("MOBILE_RELEASE_EFFECTIVE_ANDROID_ID|${variant.name}|${variant.applicationId.get()}")
+                    }
+                }
+            }
+        }
+    }
+}
+
 gradle.projectsEvaluated {
-    def target = gradle.rootProject.findProject('__MODULE__')
-    def android = target?.extensions?.findByName('android')
-    def variants = android?.hasProperty('applicationVariants') ? android.applicationVariants : null
-    variants?.all { variant ->
-        if (variant.buildType?.name == 'debug') {
-            println("MOBILE_RELEASE_EFFECTIVE_ANDROID_ID|${variant.name}|${variant.applicationId}")
+    if (!mobileReleaseModernApi) {
+        def target = gradle.rootProject.findProject(mobileReleaseTargetPath)
+        def android = target?.extensions?.findByName('android')
+        def variants = android?.hasProperty('applicationVariants') ? android.applicationVariants : null
+        variants?.all { variant ->
+            if (variant.buildType?.name == 'debug') {
+                println("MOBILE_RELEASE_EFFECTIVE_ANDROID_ID|${variant.name}|${variant.applicationId}")
+            }
         }
     }
 }
@@ -129,7 +150,15 @@ gradle.projectsEvaluated {
             init_script.write_text(script, encoding="utf-8")
             task = f"{module}:tasks" if module != ":" else ":tasks"
             result = subprocess.run(
-                [str(wrapper), "--no-daemon", "--quiet", "--init-script", str(init_script), task],
+                [
+                    str(wrapper),
+                    "--no-daemon",
+                    "--no-configuration-cache",
+                    "--quiet",
+                    "--init-script",
+                    str(init_script),
+                    task,
+                ],
                 cwd=config.root,
                 env=environment,
                 text=True,
