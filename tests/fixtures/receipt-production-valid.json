@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "stage": "production-submit",
+  "candidateManifestSha256": "0df7de6f898b62a761ed7b7d086ad9362ee6416c6f147fc2516cb315e3dae928",
+  "previousReceiptSha256": "35f6263dbb51726e881f99aaaf9a75470495158fbef831f081d66140fee98bb0",
+  "tooling": {
+    "version": "0.1.0",
+    "commit": "1111111111111111111111111111111111111111"
+  },
+  "repository": {
+    "fullName": "example/mobile-app",
+    "id": "100000000"
+  },
+  "source": {
+    "commit": "2222222222222222222222222222222222222222",
+    "tree": "3333333333333333333333333333333333333333"
+  },
+  "platform": "android",
+  "provider": "google-play",
+  "applicationId": "com.example.reader",
+  "version": {
+    "marketing": "1.2.3",
+    "build": 42
+  },
+  "storeBuildId": "42",
+  "operation": "promoted",
+  "destination": {
+    "channel": "production",
+    "releaseStatus": "draft"
+  },
+  "readback": {
+    "state": "draft",
+    "observedAt": "2026-01-03T00:00:00Z"
+  },
+  "createdBy": {
+    "workflow": "mobile-production-submit",
+    "runId": "1000000002",
+    "attempt": 1
+  },
+  "createdAt": "2026-01-03T00:00:00Z",
+  "integrity": {
+    "algorithm": "sha256",
+    "sha256": "3a812f00e544839c1020e2cc95e1ed1010c230c8ac15ed2aad510b51cccf5b2e"
+  }
+}

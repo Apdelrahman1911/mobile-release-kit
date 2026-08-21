@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "tooling": {
+    "version": "0.1.0",
+    "commit": "1111111111111111111111111111111111111111"
+  },
+  "repository": {
+    "fullName": "example/mobile-app",
+    "id": "100000000"
+  },
+  "source": {
+    "commit": "2222222222222222222222222222222222222222",
+    "tree": "3333333333333333333333333333333333333333",
+    "ref": "refs/heads/main"
+  },
+  "configuration": {
+    "path": "release/mobile-release.json",
+    "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "metadataSha256": "5555555555555555555555555555555555555555555555555555555555555555"
+  },
+  "version": {
+    "marketing": "1.2.3",
+    "build": 42
+  },
+  "platforms": {
+    "android": {
+      "applicationId": "com.example.reader"
+    }
+  },
+  "artifacts": [
+    {
+      "logicalName": "android-aab",
+      "platform": "android",
+      "kind": "aab",
+      "fileName": "reader-1.2.3-42.aab",
+      "size": 12345678,
+      "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "architectures": ["arm64-v8a", "x86_64"]
+    },
+    {
+      "logicalName": "store-metadata",
+      "platform": "shared",
+      "kind": "metadata",
+      "fileName": "store-metadata-1.2.3-42.zip",
+      "size": 34567,
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "architectures": []
+    },
+    {
+      "logicalName": "validation-report",
+      "platform": "shared",
+      "kind": "validation-report",
+      "fileName": "validation-report-1.2.3-42.json",
+      "size": 2345,
+      "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "architectures": []
+    }
+  ],
+  "signing": [
+    {
+      "platform": "android",
+      "kind": "android-upload",
+      "certificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "storeReceipts": [
+    {
+      "provider": "google-play",
+      "applicationId": "com.example.reader",
+      "storeBuildId": "42",
+      "marketingVersion": "1.2.3",
+      "build": 42,
+      "channel": "internal",
+      "state": "available-to-testers",
+      "observedAt": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "createdBy": {
+    "workflow": "mobile-candidate",
+    "runId": "1000000000",
+    "attempt": 1
+  },
+  "createdAt": "2026-01-01T00:00:00Z",
+  "integrity": {
+    "algorithm": "sha256",
+    "sha256": "0df7de6f898b62a761ed7b7d086ad9362ee6416c6f147fc2516cb315e3dae928"
+  }
+}

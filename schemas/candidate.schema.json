@@ -1,0 +1,569 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mobile-release-kit:schema:candidate:1",
+  "title": "Mobile Release Kit immutable candidate manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "tooling",
+    "repository",
+    "source",
+    "configuration",
+    "version",
+    "platforms",
+    "artifacts",
+    "signing",
+    "storeReceipts",
+    "createdBy",
+    "createdAt",
+    "integrity"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "tooling": {
+      "$ref": "#/$defs/tooling"
+    },
+    "repository": {
+      "$ref": "#/$defs/repository"
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "configuration": {
+      "$ref": "#/$defs/configuration"
+    },
+    "version": {
+      "$ref": "#/$defs/version"
+    },
+    "platforms": {
+      "$ref": "#/$defs/platforms"
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/artifact"
+      },
+      "allOf": [
+        {"contains": {"properties": {"logicalName": {"const": "android-aab"}}, "required": ["logicalName"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"logicalName": {"const": "android-mapping"}}, "required": ["logicalName"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"logicalName": {"const": "android-native-symbols"}}, "required": ["logicalName"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"logicalName": {"const": "ios-ipa"}}, "required": ["logicalName"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"logicalName": {"const": "ios-archive"}}, "required": ["logicalName"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"logicalName": {"const": "ios-dsyms"}}, "required": ["logicalName"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"logicalName": {"const": "store-metadata"}}, "required": ["logicalName"]}, "minContains": 0, "maxContains": 1},
+        {"contains": {"properties": {"logicalName": {"const": "validation-report"}}, "required": ["logicalName"]}, "minContains": 0, "maxContains": 1}
+      ]
+    },
+    "signing": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "$ref": "#/$defs/signingIdentity"
+      }
+    },
+    "storeReceipts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "$ref": "#/$defs/storeReceipt"
+      }
+    },
+    "createdBy": {
+      "$ref": "#/$defs/workflowRun"
+    },
+    "createdAt": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "integrity": {
+      "$ref": "#/$defs/integrity"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "platforms": {
+            "required": ["android"]
+          }
+        },
+        "required": ["platforms"]
+      },
+      "then": {
+        "properties": {
+          "artifacts": {
+            "items": {
+              "properties": {
+                "logicalName": {
+                  "enum": [
+                    "android-aab",
+                    "android-mapping",
+                    "android-native-symbols",
+                    "store-metadata",
+                    "validation-report"
+                  ]
+                }
+              }
+            },
+            "allOf": [
+              {"contains": {"properties": {"logicalName": {"const": "android-aab"}}, "required": ["logicalName"]}},
+              {"contains": {"properties": {"logicalName": {"const": "store-metadata"}}, "required": ["logicalName"]}},
+              {"contains": {"properties": {"logicalName": {"const": "validation-report"}}, "required": ["logicalName"]}}
+            ]
+          },
+          "storeReceipts": {
+            "items": {
+              "properties": {
+                "provider": {"const": "google-play"},
+                "channel": {"const": "internal"},
+                "state": {"const": "available-to-testers"}
+              }
+            }
+          },
+          "platforms": {
+            "properties": {
+              "android": {
+                "not": {"required": ["storeAppId"]}
+              }
+            }
+          },
+          "signing": {
+            "items": {
+              "properties": {
+                "platform": {"const": "android"},
+                "kind": {"const": "android-upload"}
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platforms": {
+            "required": ["ios"]
+          }
+        },
+        "required": ["platforms"]
+      },
+      "then": {
+        "properties": {
+          "artifacts": {
+            "items": {
+              "properties": {
+                "logicalName": {
+                  "enum": [
+                    "ios-ipa",
+                    "ios-archive",
+                    "ios-dsyms",
+                    "store-metadata",
+                    "validation-report"
+                  ]
+                }
+              }
+            },
+            "allOf": [
+              {"contains": {"properties": {"logicalName": {"const": "ios-ipa"}}, "required": ["logicalName"]}},
+              {"contains": {"properties": {"logicalName": {"const": "store-metadata"}}, "required": ["logicalName"]}},
+              {"contains": {"properties": {"logicalName": {"const": "validation-report"}}, "required": ["logicalName"]}}
+            ]
+          },
+          "platforms": {
+            "properties": {
+              "ios": {
+                "required": ["storeAppId"]
+              }
+            }
+          },
+          "version": {
+            "properties": {
+              "marketing": {
+                "pattern": "^[0-9]+(?:\\.[0-9]+){1,2}$"
+              }
+            }
+          },
+          "storeReceipts": {
+            "items": {
+              "properties": {
+                "provider": {"const": "app-store-connect"},
+                "channel": {"const": "testflight-internal"},
+                "marketingVersion": {
+                  "pattern": "^[0-9]+(?:\\.[0-9]+){1,2}$"
+                },
+                "state": {
+                  "enum": ["processed", "available-to-testers"]
+                }
+              }
+            }
+          },
+          "signing": {
+            "items": {
+              "properties": {
+                "platform": {"const": "ios"},
+                "kind": {"const": "apple-distribution"}
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "sha256"],
+      "properties": {
+        "algorithm": {
+          "const": "sha256"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "gitObjectId": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{40}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "tooling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "commit"],
+      "properties": {
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
+        },
+        "commit": {
+          "$ref": "#/$defs/gitObjectId"
+        }
+      }
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fullName", "id"],
+      "properties": {
+        "fullName": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit", "tree", "ref"],
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/gitObjectId"
+        },
+        "tree": {
+          "$ref": "#/$defs/gitObjectId"
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    },
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "metadataSha256"],
+      "properties": {
+        "path": {
+          "const": "release/mobile-release.json"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "metadataSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["marketing", "build"],
+      "properties": {
+        "marketing": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[0-9]+(?:\\.[0-9]+){1,3}(?:[-+][0-9A-Za-z.-]+)?$"
+        },
+        "build": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2100000000
+        }
+      }
+    },
+    "platformIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["applicationId"],
+      "properties": {
+        "applicationId": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 255
+        },
+        "storeAppId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      }
+    },
+    "platforms": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "android": {
+          "$ref": "#/$defs/platformIdentity"
+        },
+        "ios": {
+          "$ref": "#/$defs/platformIdentity"
+        }
+      }
+    },
+    "safeFileName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[^/\\\\]+$",
+      "not": {
+        "enum": [".", ".."]
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "logicalName",
+        "platform",
+        "kind",
+        "fileName",
+        "size",
+        "sha256",
+        "architectures"
+      ],
+      "properties": {
+        "logicalName": {
+          "enum": [
+            "android-aab",
+            "android-mapping",
+            "android-native-symbols",
+            "ios-ipa",
+            "ios-archive",
+            "ios-dsyms",
+            "store-metadata",
+            "validation-report"
+          ]
+        },
+        "platform": {
+          "enum": ["android", "ios", "shared"]
+        },
+        "kind": {
+          "enum": [
+            "aab",
+            "ipa",
+            "xcarchive",
+            "dsym",
+            "r8-mapping",
+            "native-symbols",
+            "metadata",
+            "validation-report"
+          ]
+        },
+        "fileName": {
+          "$ref": "#/$defs/safeFileName"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "architectures": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]+$"
+          }
+        }
+      },
+      "oneOf": [
+        {"properties": {"logicalName": {"const": "android-aab"}, "platform": {"const": "android"}, "kind": {"const": "aab"}}},
+        {"properties": {"logicalName": {"const": "android-mapping"}, "platform": {"const": "android"}, "kind": {"const": "r8-mapping"}}},
+        {"properties": {"logicalName": {"const": "android-native-symbols"}, "platform": {"const": "android"}, "kind": {"const": "native-symbols"}}},
+        {"properties": {"logicalName": {"const": "ios-ipa"}, "platform": {"const": "ios"}, "kind": {"const": "ipa"}}},
+        {"properties": {"logicalName": {"const": "ios-archive"}, "platform": {"const": "ios"}, "kind": {"const": "xcarchive"}}},
+        {"properties": {"logicalName": {"const": "ios-dsyms"}, "platform": {"const": "ios"}, "kind": {"const": "dsym"}}},
+        {"properties": {"logicalName": {"const": "store-metadata"}, "platform": {"const": "shared"}, "kind": {"const": "metadata"}}},
+        {"properties": {"logicalName": {"const": "validation-report"}, "platform": {"const": "shared"}, "kind": {"const": "validation-report"}}}
+      ]
+    },
+    "signingIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform", "kind", "certificateSha256"],
+      "properties": {
+        "platform": {
+          "enum": ["android", "ios"]
+        },
+        "kind": {
+          "enum": ["android-upload", "apple-distribution"]
+        },
+        "certificateSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "teamId": {
+          "type": "string",
+          "pattern": "^[A-Z0-9]{10}$"
+        },
+        "profileUuid": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}$"
+        },
+        "profileExpiresAt": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "platform": {
+                "const": "ios"
+              }
+            },
+            "required": ["platform"]
+          },
+          "then": {
+            "required": ["teamId", "profileUuid", "profileExpiresAt"],
+            "properties": {
+              "kind": {
+                "const": "apple-distribution"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "kind": {
+                "const": "android-upload"
+              }
+            },
+            "not": {
+              "anyOf": [
+                {"required": ["teamId"]},
+                {"required": ["profileUuid"]},
+                {"required": ["profileExpiresAt"]}
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "storeReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "applicationId",
+        "storeBuildId",
+        "marketingVersion",
+        "build",
+        "channel",
+        "state",
+        "observedAt"
+      ],
+      "properties": {
+        "provider": {
+          "enum": ["google-play", "app-store-connect"]
+        },
+        "applicationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "storeBuildId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "marketingVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[0-9]+(?:\\.[0-9]+){1,3}(?:[-+][0-9A-Za-z.-]+)?$"
+        },
+        "build": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2100000000
+        },
+        "channel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "state": {
+          "enum": ["uploaded", "processed", "available-to-testers"]
+        },
+        "observedAt": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "workflowRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workflow", "runId", "attempt"],
+      "properties": {
+        "workflow": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "runId": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

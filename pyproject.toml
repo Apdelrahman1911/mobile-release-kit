@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mobile-release-kit"
+version = "0.1.0"
+description = "Fail-early release validation and orchestration for Gradle Android and Xcode iOS applications"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Mobile Release Kit contributors" }]
+dependencies = []
+
+[project.optional-dependencies]
+test = [
+  "attrs==26.1.0",
+  "jsonschema==4.25.1",
+  "jsonschema-specifications==2025.9.1",
+  "referencing==0.36.2",
+  "rpds-py==0.27.1",
+  "typing-extensions==4.16.0; python_version < '3.13'",
+]
+
+[project.scripts]
+mobile-release = "mobile_release.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.data-files]
+"share/mobile-release-kit" = ["Gemfile", "Gemfile.lock"]
+"share/mobile-release-kit/fastlane" = [
+  "fastlane/Fastfile",
+  "fastlane/release_support.rb",
+  "fastlane/run_lane.rb",
+]
+"share/mobile-release-kit/templates" = ["templates/mobile-release.json"]
+"share/mobile-release-kit/templates/workflows" = ["templates/workflows/*.yml"]
+"share/mobile-release-kit/schemas" = ["schemas/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]
+addopts = "-q"

@@ -1,0 +1,36 @@
+name: Mobile internal candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to build once and upload to internal testing
+        required: true
+        type: choice
+        options:
+          - android
+          - ios
+          - both
+      confirmation:
+        description: candidate:<platform>:<version>:<build>
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  # The called jobs select mobile-candidate; credentials must be scoped there.
+  # This caller intentionally forwards no repository/organization secrets.
+  candidate:
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    uses: __MOBILE_RELEASE_KIT_REPOSITORY__/.github/workflows/reusable-candidate.yml@__MOBILE_RELEASE_KIT_SHA__
+    with:
+      tooling_sha: __MOBILE_RELEASE_KIT_SHA__
+      source_sha: ${{ github.sha }}
+      platform: ${{ inputs.platform }}
+      confirmation: ${{ inputs.confirmation }}

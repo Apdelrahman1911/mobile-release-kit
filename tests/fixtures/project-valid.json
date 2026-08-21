@@ -1,0 +1,59 @@
+{
+  "$schema": "https://example.invalid/mobile-release-kit/project.schema.json",
+  "schemaVersion": 1,
+  "version": {
+    "source": "release/version.properties",
+    "nameKey": "VERSION_NAME",
+    "buildKey": "BUILD_NUMBER"
+  },
+  "source": {
+    "candidateBranch": "main",
+    "productionBranch": "main"
+  },
+  "android": {
+    "enabled": true,
+    "applicationId": "com.example.reader",
+    "identityStatus": "approved",
+    "module": ":app",
+    "variant": "release",
+    "externalTrack": {
+      "name": "closed-testing",
+      "kind": "closed"
+    },
+    "uploadCertificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "ios": {
+    "enabled": true,
+    "bundleId": "com.example.reader",
+    "identityStatus": "approved",
+    "appStoreAppId": "0000000000",
+    "teamId": "ABCDE12345",
+    "project": "iosApp/Reader.xcodeproj",
+    "scheme": "Reader",
+    "archiveConfiguration": "Release",
+    "externalTestFlightGroup": "External Testers",
+    "distributionCertificateSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "symbols": {
+      "policy": "required",
+      "uploadCommand": ["./scripts/upload-symbols", "--dsym", "${MOBILE_RELEASE_DSYM_PATH}"]
+    },
+    "review": {
+      "usesNonExemptEncryption": false,
+      "demoAccountRequired": false
+    }
+  },
+  "metadata": {
+    "root": "release/store",
+    "androidLocales": ["en-US"],
+    "iosLocales": ["en-US"]
+  },
+  "services": {
+    "androidFirebase": "required",
+    "iosFirebase": "required"
+  },
+  "projectChecks": {
+    "preflight": [["./gradlew", "check"]],
+    "androidArtifact": [["./scripts/verify-android", "${MOBILE_RELEASE_AAB_PATH}"]],
+    "iosArtifact": [["./scripts/verify-ios", "${MOBILE_RELEASE_IPA_PATH}"]]
+  }
+}

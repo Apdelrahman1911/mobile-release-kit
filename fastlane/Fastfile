@@ -1,0 +1,777 @@
+require "base64"
+require "fileutils"
+require "json"
+require "time"
+require "google/apis/androidpublisher_v3"
+require "googleauth"
+require_relative "release_support"
+
+PLAY_SCOPE = "https://www.googleapis.com/auth/androidpublisher"
+IOS_PLATFORM = Spaceship::ConnectAPI::Platform::IOS
+
+def required_env(name)
+  MobileReleaseKit.required_environment(ENV, name, strip: true)
+rescue MobileReleaseKit::ContractError => e
+  UI.user_error!(e.message)
+end
+
+def required_secret_env(name)
+  MobileReleaseKit.required_environment(ENV, name, strip: false)
+rescue MobileReleaseKit::ContractError => e
+  UI.user_error!(e.message)
+end
+
+def app_root
+  @app_root ||= File.realpath(required_env("MOBILE_RELEASE_APP_ROOT"))
+end
+
+def safe_app_path(path, must_exist: true)
+  MobileReleaseKit.safe_path(app_root, path, must_exist: must_exist)
+rescue MobileReleaseKit::ContractError => e
+  UI.user_error!(e.message)
+end
+
+def project_config
+  return @project_config if @project_config
+
+  path = safe_app_path(required_env("MOBILE_RELEASE_CONFIG_PATH"))
+  @project_config = JSON.parse(File.read(path, encoding: "UTF-8"))
+rescue JSON::ParserError => e
+  UI.user_error!("Invalid mobile release configuration: #{e.message}")
+end
+
+def config_value(*keys)
+  value = keys.reduce(project_config) do |current, key|
+    current.is_a?(Hash) ? current[key] : nil
+  end
+  UI.user_error!("Missing configuration value: #{keys.join('.')}") if value.nil?
+  value
+end
+
+def release_version
+  return @release_version if @release_version
+
+  version = config_value("version")
+  source = safe_app_path(version.fetch("source"))
+  @release_version = MobileReleaseKit.release_version(
+    source,
+    name_key: version.fetch("nameKey"),
+    build_key: version.fetch("buildKey"),
+  )
+rescue MobileReleaseKit::ContractError => e
+  UI.user_error!(e.message)
+end
+
+def metadata_root
+  safe_app_path(config_value("metadata", "root"))
+end
+
+def write_receipt(operation:, platform:, identity:, result:, extra:)
+  path = safe_app_path(required_env("MOBILE_RELEASE_STORE_RECEIPT_PATH"), must_exist: false)
+  UI.user_error!("Refusing to overwrite a Store receipt") if File.exist?(path) || File.symlink?(path)
+  FileUtils.mkdir_p(File.dirname(path), mode: 0o700)
+  version = release_version
+  receipt = {
+    schemaVersion: 1,
+    operation: operation,
+    platform: platform,
+    appIdentity: identity,
+    marketingVersion: version.fetch(:marketing),
+    buildNumber: version.fetch(:build),
+    observedAt: Time.now.utc.iso8601,
+    result: result,
+  }.merge(extra)
+  temporary = "#{path}.tmp-#{Process.pid}"
+  File.open(temporary, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
+    file.write(JSON.pretty_generate(receipt))
+    file.write("\n")
+    file.flush
+    file.fsync
+  end
+  File.rename(temporary, path)
+ensure
+  FileUtils.rm_f(temporary) if defined?(temporary) && temporary
+end
+
+def play_service
+  service = Google::Apis::AndroidpublisherV3::AndroidPublisherService.new
+  service.authorization = Google::Auth.get_application_default([PLAY_SCOPE])
+  service
+end
+
+def android_identity
+  config_value("android", "applicationId")
+end
+
+def android_external_track
+  config_value("android", "externalTrack", "name")
+end
+
+def closed_android_external_track?
+  config_value("android", "externalTrack", "kind") == "closed"
+end
+
+def require_closed_track_testers(service:, edit_id:, track_name:)
+  return nil unless closed_android_external_track?
+
+  testers = service.get_edit_tester(
+    android_identity,
+    edit_id,
+    track_name,
+    fields: "googleGroups",
+  )
+  unless MobileReleaseKit.closed_tester_assignment?(testers)
+    UI.user_error!(
+      "Closed Play track has no API-verifiable Google Group assignment; " \
+      "email-list-only assignment requires manual Console evidence",
+    )
+  end
+  true
+rescue Google::Apis::ClientError
+  UI.user_error!(
+    "Closed Play tester assignment could not be verified through the Android Publisher API",
+  )
+end
+
+def verify_closed_track_testers(track_name)
+  return nil unless closed_android_external_track?
+
+  service = play_service
+  package_name = android_identity
+  edit = service.insert_edit(package_name, Google::Apis::AndroidpublisherV3::AppEdit.new)
+  begin
+    require_closed_track_testers(service: service, edit_id: edit.id, track_name: track_name)
+  ensure
+    service.delete_edit(package_name, edit.id) if edit&.id
+  end
+end
+
+def play_snapshot(track_name)
+  service = play_service
+  package_name = android_identity
+  edit = service.insert_edit(package_name, Google::Apis::AndroidpublisherV3::AppEdit.new)
+  begin
+    track = service.get_edit_track(package_name, edit.id, track_name)
+    bundles = service.list_edit_bundles(package_name, edit.id).bundles || []
+    { edit_id: edit.id.to_s, track: track, bundles: bundles }
+  ensure
+    service.delete_edit(package_name, edit.id) if edit&.id
+  end
+end
+
+def play_release(snapshot, version_code)
+  releases = snapshot.fetch(:track).releases || []
+  releases.find do |release|
+    Array(release.version_codes).map(&:to_i).include?(version_code)
+  end
+end
+
+def require_play_release(track_name, expected_status)
+  snapshot = play_snapshot(track_name)
+  version_code = release_version.fetch(:build)
+  release = play_release(snapshot, version_code)
+  UI.user_error!("Play track #{track_name} does not contain version code #{version_code}") unless release
+  actual = release.status.to_s
+  UI.user_error!("Play track #{track_name} status is #{actual}, expected #{expected_status}") unless actual == expected_status
+  [snapshot, release]
+end
+
+def play_upload_options
+  aab = safe_app_path(required_env("MOBILE_RELEASE_ANDROID_AAB_PATH"))
+  mapping_value = ENV["MOBILE_RELEASE_ANDROID_MAPPING_PATH"].to_s.strip
+  mapping = mapping_value.empty? ? nil : safe_app_path(mapping_value)
+  metadata = File.join(metadata_root, "android")
+  options = {
+    package_name: android_identity,
+    aab: aab,
+    track: "internal",
+    release_status: "completed",
+    version_name: release_version.fetch(:marketing),
+    version_code: release_version.fetch(:build),
+    json_key: required_env("GOOGLE_APPLICATION_CREDENTIALS"),
+    metadata_path: metadata,
+    mapping: mapping,
+    skip_upload_metadata: true,
+    skip_upload_changelogs: true,
+    skip_upload_images: true,
+    skip_upload_screenshots: true,
+    ack_bundle_installation_warning: true,
+    timeout: 600,
+  }
+  options.delete(:mapping) unless mapping
+  options
+end
+
+def promote_play(from:, to:, status:, upload_metadata: false)
+  metadata = File.join(metadata_root, "android")
+  UI.user_error!("Validated Android Store metadata directory is missing") if upload_metadata && !File.directory?(metadata)
+  upload_to_play_store(
+    package_name: android_identity,
+    json_key: required_env("GOOGLE_APPLICATION_CREDENTIALS"),
+    track: from,
+    track_promote_to: to,
+    track_promote_release_status: status,
+    version_code: release_version.fetch(:build),
+    skip_upload_apk: true,
+    skip_upload_aab: true,
+    metadata_path: metadata,
+    skip_upload_metadata: !upload_metadata,
+    skip_upload_changelogs: !upload_metadata,
+    skip_upload_images: !upload_metadata,
+    skip_upload_screenshots: !upload_metadata,
+    timeout: 600,
+  )
+end
+
+def asc_api_key
+  app_store_connect_api_key(
+    key_id: required_env("MOBILE_RELEASE_ASC_KEY_ID"),
+    issuer_id: required_env("MOBILE_RELEASE_ASC_ISSUER_ID"),
+    key_content: required_secret_env("MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64"),
+    is_key_content_base64: true,
+    duration: 1_200,
+    in_house: false,
+    set_spaceship_token: true,
+  )
+end
+
+def ios_identity
+  config_value("ios", "bundleId")
+end
+
+def ios_app_store_id
+  config_value("ios", "appStoreAppId").to_s
+end
+
+def verified_ios_app
+  app = Spaceship::ConnectAPI::App.find(ios_identity)
+  UI.user_error!("App Store Connect has no app for #{ios_identity}") unless app
+  UI.user_error!("App Store Connect app ID does not match configuration") unless app.id.to_s == ios_app_store_id
+  UI.user_error!("App Store Connect Bundle ID does not match configuration") unless app.bundle_id == ios_identity
+  app
+end
+
+def ios_build(app)
+  version = release_version
+  build = Spaceship::ConnectAPI::Build.all(
+    app_id: app.id,
+    version: version.fetch(:marketing),
+    build_number: version.fetch(:build).to_s,
+    platform: IOS_PLATFORM,
+    includes: "app,buildBetaDetail,preReleaseVersion,betaAppReviewSubmission",
+  ).first
+  UI.user_error!("The exact build is not visible in App Store Connect") unless build
+  build
+end
+
+def ios_build_state(build)
+  state = build.processing_state.to_s
+  UI.user_error!("App Store Connect returned no build processing state") if state.empty?
+  UI.user_error!("App Store Connect build processing state is #{state}, expected VALID") unless state.upcase == "VALID"
+  state
+end
+
+def existing_external_group(app)
+  name = config_value("ios", "externalTestFlightGroup")
+  matching = app.get_beta_groups.select { |group| group.name == name }
+  UI.user_error!("Configured TestFlight group does not exist") if matching.empty?
+  UI.user_error!("Configured TestFlight group is internal") if matching.any?(&:is_internal_group)
+  UI.user_error!("Configured TestFlight group name is ambiguous") unless matching.length == 1
+  matching.first
+end
+
+def required_metadata_text(path)
+  full = MobileReleaseKit.safe_path(metadata_root, path)
+  unless File.file?(full) && !File.symlink?(full)
+    UI.user_error!("Reviewed metadata is not a safe regular file: #{path}")
+  end
+  value = File.read(full, encoding: "UTF-8").strip
+  UI.user_error!("Missing or empty reviewed metadata: #{path}") if value.empty?
+  value
+rescue MobileReleaseKit::ContractError => e
+  UI.user_error!(e.message)
+end
+
+def review_contact(beta: false)
+  first = required_env("MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME")
+  last = required_env("MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME")
+  email = required_env("MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL")
+  phone = required_env("MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE")
+  notes_path = beta ? "review/ios-beta-notes.txt" : "review/ios-notes.txt"
+  notes = required_metadata_text(notes_path)
+  if beta
+    result = {
+      contact_first_name: first,
+      contact_last_name: last,
+      contact_email: email,
+      contact_phone: phone,
+      demo_account_required: config_value("ios", "review", "demoAccountRequired") == true,
+      notes: notes,
+    }
+    if result.fetch(:demo_account_required)
+      result[:demo_account_name] = required_secret_env("MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME")
+      result[:demo_account_password] = required_secret_env("MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD")
+    end
+    result
+  else
+    demo_required = config_value("ios", "review", "demoAccountRequired") == true
+    result = {
+      first_name: first,
+      last_name: last,
+      email_address: email,
+      phone_number: phone,
+      demo_user: demo_required ? required_secret_env("MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME") : "",
+      demo_password: demo_required ? required_secret_env("MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD") : "",
+      notes: notes,
+    }
+    result
+  end
+end
+
+def uses_non_exempt_encryption
+  value = config_value("ios", "review", "usesNonExemptEncryption")
+  UI.user_error!("Committed encryption declaration must be true or false") unless [true, false].include?(value)
+  value
+end
+
+def write_preflight_readback(contents)
+  path = safe_app_path(required_env("MOBILE_RELEASE_PREFLIGHT_READBACK_PATH"), must_exist: false)
+  UI.user_error!("Refusing to overwrite a preflight readback") if File.exist?(path) || File.symlink?(path)
+  FileUtils.mkdir_p(File.dirname(path), mode: 0o700)
+  File.open(path, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
+    file.write(JSON.pretty_generate(contents))
+    file.write("\n")
+  end
+end
+
+def external_testflight_state(app, build)
+  group = existing_external_group(app)
+  assigned = group.fetch_builds.any? { |candidate| candidate.id.to_s == build.id.to_s }
+  external_state = build.build_beta_detail&.external_build_state.to_s
+  review_state = build.beta_app_review_submission&.beta_review_state.to_s
+  {
+    group: group,
+    assigned: assigned,
+    external_state: external_state.empty? ? "UNKNOWN" : external_state,
+    review_state: review_state.empty? ? "NOT_SUBMITTED" : review_state,
+  }
+end
+
+def normalized_external_state(state)
+  external = state.fetch(:external_state).to_s.upcase.tr(" ", "_")
+  review = state.fetch(:review_state).to_s.upcase.tr(" ", "_")
+  return "available-to-testers" if external == "IN_BETA_TESTING"
+  return "approved" if %w[BETA_APPROVED APPROVED].include?(review)
+  return "in-review" if %w[IN_BETA_REVIEW IN_REVIEW].include?(external) || %w[IN_BETA_REVIEW IN_REVIEW].include?(review)
+  if %w[WAITING_FOR_BETA_REVIEW WAITING_FOR_REVIEW SUBMITTED].include?(external) ||
+     %w[WAITING_FOR_BETA_REVIEW WAITING_FOR_REVIEW SUBMITTED].include?(review)
+    return "submitted-for-review"
+  end
+  UI.user_error!("External TestFlight readback has no affirmative review/testing state")
+end
+
+def normalized_submission_state(value)
+  state = value.to_s.upcase.tr(" ", "_")
+  return "pending-developer-release" if state == "PENDING_DEVELOPER_RELEASE"
+  return "in-review" if state == "IN_REVIEW"
+  return "submitted-for-review" if %w[WAITING_FOR_REVIEW SUBMITTED].include?(state)
+  return "approved" if %w[ACCEPTED APPROVED].include?(state)
+  if %w[READY_FOR_DISTRIBUTION READY_FOR_SALE].include?(state)
+    UI.user_error!("App Store readback says the version is already public; this workflow never releases publicly")
+  end
+  UI.user_error!("App Store readback has unsupported submission state: #{value}")
+end
+
+desc "Upload one signed AAB to Play internal testing"
+lane :android_internal_upload do
+  version_code = release_version.fetch(:build)
+  begin
+    existing = play_snapshot("internal")
+    used_bundle = existing.fetch(:bundles).any? { |bundle| bundle.version_code.to_i == version_code }
+    if used_bundle || play_release(existing, version_code)
+      UI.user_error!("Version code #{version_code} already exists; refusing candidate adoption")
+    end
+  rescue Google::Apis::ClientError => e
+    raise unless e.status_code.to_i == 404
+  end
+
+  upload_to_play_store(**play_upload_options)
+  snapshot, release = require_play_release("internal", "completed")
+  write_receipt(
+    operation: "android_internal_upload",
+    platform: "android",
+    identity: android_identity,
+    result: "accepted",
+    extra: {
+      versionCode: version_code,
+      destinationTrack: "internal",
+      releaseStatus: release.status.to_s,
+      state: "available-to-testers",
+      storeEditId: snapshot.fetch(:edit_id),
+    },
+  )
+end
+
+desc "Read Play identity, tracks, and build uniqueness without committing an edit"
+lane :android_online_preflight do
+  service = play_service
+  package_name = android_identity
+  edit = service.insert_edit(package_name, Google::Apis::AndroidpublisherV3::AppEdit.new)
+  begin
+    tracks = (service.list_edit_tracks(package_name, edit.id).tracks || [])
+    bundles = (service.list_edit_bundles(package_name, edit.id).bundles || [])
+    names = tracks.map { |track| track.track.to_s }
+    required_tracks = ["internal", android_external_track]
+    missing = required_tracks.reject { |track| names.include?(track) }
+    UI.user_error!("Required Play tracks are missing: #{missing.join(', ')}") unless missing.empty?
+    closed_testers_verified = require_closed_track_testers(
+      service: service,
+      edit_id: edit.id,
+      track_name: android_external_track,
+    )
+    version_code = release_version.fetch(:build)
+    used_in_bundles = bundles.any? { |bundle| bundle.version_code.to_i == version_code }
+    used_in_tracks = tracks.any? do |track|
+      Array(track.releases).any? do |release|
+        Array(release.version_codes).map(&:to_i).include?(version_code)
+      end
+    end
+    UI.user_error!("Build number #{version_code} is already present in Google Play") if used_in_bundles || used_in_tracks
+    readback = {
+      schemaVersion: 1,
+      platform: "android",
+      appIdentity: package_name,
+      buildNumber: version_code,
+      buildUnused: true,
+      requiredTracks: required_tracks,
+      observedAt: Time.now.utc.iso8601,
+    }
+    readback[:closedTesterAssignmentVerified] = true if closed_testers_verified
+    write_preflight_readback(readback)
+  ensure
+    # Google Play inventory is edit-scoped. This edit is never validated or committed.
+    service.delete_edit(package_name, edit.id) if edit&.id
+  end
+end
+
+desc "Promote the exact internal Play build to the configured external track"
+lane :android_external_promote do
+  require_play_release("internal", "completed")
+  destination = android_external_track
+  UI.user_error!("External track cannot be internal or production") if %w[internal production].include?(destination)
+  closed_testers_verified = verify_closed_track_testers(destination)
+  version_code = release_version.fetch(:build)
+  result = "accepted"
+  begin
+    current = play_snapshot(destination)
+    release = play_release(current, version_code)
+    result = "already_present" if release&.status.to_s == "completed"
+  rescue Google::Apis::ClientError => e
+    raise unless e.status_code.to_i == 404
+  end
+  promote_play(from: "internal", to: destination, status: "completed") unless result == "already_present"
+  snapshot, release = require_play_release(destination, "completed")
+  closed_testers_verified = verify_closed_track_testers(destination) if closed_android_external_track?
+  extra = {
+    versionCode: version_code,
+    sourceTrack: "internal",
+    destinationTrack: destination,
+    releaseStatus: release.status.to_s,
+    state: "available-to-testers",
+    storeEditId: snapshot.fetch(:edit_id),
+  }
+  extra[:closedTesterAssignmentVerified] = true if closed_testers_verified
+  write_receipt(
+    operation: "android_external_promote",
+    platform: "android",
+    identity: android_identity,
+    result: result,
+    extra: extra,
+  )
+end
+
+desc "Prepare the exact externally tested Play build as a non-served production draft"
+lane :android_production_draft do
+  source = android_external_track
+  require_play_release(source, "completed")
+  version_code = release_version.fetch(:build)
+  begin
+    current = play_snapshot("production")
+    release = play_release(current, version_code)
+    if release
+      UI.user_error!(
+        "Version code #{version_code} already exists on production; " \
+        "refusing production-draft adoption because metadata cannot be proven identical",
+      )
+    end
+  rescue Google::Apis::ClientError => e
+    raise unless e.status_code.to_i == 404
+  end
+  promote_play(from: source, to: "production", status: "draft", upload_metadata: true)
+  snapshot, release = require_play_release("production", "draft")
+  write_receipt(
+    operation: "android_production_draft",
+    platform: "android",
+    identity: android_identity,
+    result: "accepted",
+    extra: {
+      versionCode: version_code,
+      sourceTrack: source,
+      destinationTrack: "production",
+      releaseStatus: release.status.to_s,
+      state: "draft",
+      storeEditId: snapshot.fetch(:edit_id),
+    },
+  )
+end
+
+desc "Upload one signed IPA to internal TestFlight without external distribution"
+lane :ios_testflight_internal do
+  api_key = asc_api_key
+  app = verified_ios_app
+  version = release_version
+  existing = Spaceship::ConnectAPI::Build.all(
+    app_id: app.id,
+    version: version.fetch(:marketing),
+    build_number: version.fetch(:build).to_s,
+    platform: IOS_PLATFORM,
+  ).first
+  UI.user_error!("Build #{version.fetch(:build)} already exists; refusing candidate adoption") if existing
+  ipa = safe_app_path(required_env("MOBILE_RELEASE_IOS_IPA_PATH"))
+  upload_to_testflight(
+    api_key: api_key,
+    apple_id: ios_app_store_id,
+    app_identifier: ios_identity,
+    app_platform: "ios",
+    app_version: version.fetch(:marketing),
+    build_number: version.fetch(:build).to_s,
+    ipa: ipa,
+    distribute_external: false,
+    submit_beta_review: false,
+    notify_external_testers: false,
+    skip_waiting_for_build_processing: false,
+    wait_processing_interval: 30,
+    wait_processing_timeout_duration: 3_600,
+    uses_non_exempt_encryption: uses_non_exempt_encryption,
+    expire_previous_builds: false,
+  )
+  build = ios_build(app)
+  write_receipt(
+    operation: "ios_testflight_internal",
+    platform: "ios",
+    identity: ios_identity,
+    result: "accepted",
+    extra: {
+      appStoreAppId: ios_app_store_id,
+      buildResourceId: build.id.to_s,
+      processingState: ios_build_state(build),
+      state: "processed",
+    },
+  )
+end
+
+desc "Read App Store Connect identity, group, and build uniqueness without mutation"
+lane :ios_online_preflight do
+  asc_api_key
+  app = verified_ios_app
+  group = existing_external_group(app)
+  version = release_version
+  existing = Spaceship::ConnectAPI::Build.all(
+    app_id: app.id,
+    version: version.fetch(:marketing),
+    build_number: version.fetch(:build).to_s,
+    platform: IOS_PLATFORM,
+  ).first
+  UI.user_error!("Build #{version.fetch(:build)} is already present in App Store Connect") if existing
+  write_preflight_readback(
+    schemaVersion: 1,
+    platform: "ios",
+    appIdentity: ios_identity,
+    appStoreAppId: app.id.to_s,
+    buildNumber: version.fetch(:build),
+    buildUnused: true,
+    externalGroup: group.name,
+    observedAt: Time.now.utc.iso8601,
+  )
+end
+
+desc "Distribute the exact existing TestFlight build to an existing external group"
+lane :ios_testflight_external do
+  api_key = asc_api_key
+  app = verified_ios_app
+  build = ios_build(app)
+  what_to_test = required_metadata_text("testflight/what-to-test.txt")
+  state = external_testflight_state(app, build)
+  result = "already_present"
+  unless state.fetch(:assigned) && state.fetch(:review_state) != "NOT_SUBMITTED"
+    result = "accepted"
+    upload_to_testflight(
+      api_key: api_key,
+      apple_id: ios_app_store_id,
+      app_identifier: ios_identity,
+      app_platform: "ios",
+      app_version: release_version.fetch(:marketing),
+      build_number: release_version.fetch(:build).to_s,
+      distribute_only: true,
+      distribute_external: true,
+      groups: [state.fetch(:group).name],
+      submit_beta_review: true,
+      notify_external_testers: false,
+      skip_waiting_for_build_processing: false,
+      uses_non_exempt_encryption: uses_non_exempt_encryption,
+      expire_previous_builds: false,
+      reject_build_waiting_for_review: false,
+      beta_app_review_info: review_contact(beta: true),
+      changelog: what_to_test,
+    )
+    build = ios_build(app)
+    state = external_testflight_state(app, build)
+  end
+  UI.user_error!("Exact build is not assigned to the configured external group") unless state.fetch(:assigned)
+  write_receipt(
+    operation: "ios_testflight_external",
+    platform: "ios",
+    identity: ios_identity,
+    result: result,
+    extra: {
+      appStoreAppId: ios_app_store_id,
+      buildResourceId: build.id.to_s,
+      processingState: ios_build_state(build),
+      externalGroup: state.fetch(:group).name,
+      betaReviewState: state.fetch(:review_state),
+      state: normalized_external_state(state),
+    },
+  )
+end
+
+def matching_app_store_version(app)
+  includes = "appStoreVersionSubmission,build"
+  active = [
+    app.get_edit_app_store_version(platform: IOS_PLATFORM, includes: includes),
+    app.get_in_review_app_store_version(platform: IOS_PLATFORM, includes: includes),
+    app.get_pending_release_app_store_version(platform: IOS_PLATFORM, includes: includes),
+  ].compact.uniq { |candidate| candidate.id.to_s }
+  conflicting = active.reject do |candidate|
+    candidate.version_string.to_s == release_version.fetch(:marketing)
+  end
+  unless conflicting.empty?
+    UI.user_error!(
+      "Another App Store version is already editable, in review, or pending release; " \
+      "resolve it manually instead of repurposing it for this candidate",
+    )
+  end
+
+  candidates = app.get_app_store_versions(
+    filter: { platform: IOS_PLATFORM },
+    includes: includes,
+  ).select do |candidate|
+    candidate.version_string.to_s == release_version.fetch(:marketing)
+  end
+  UI.user_error!("App Store Connect returned duplicate records for the intended version") if candidates.length > 1
+  candidates.first
+end
+
+def app_store_submission_state(version)
+  state = version.app_store_state.to_s
+  state = version.app_version_state.to_s if state.empty?
+  UI.user_error!("Submitted App Store version has no review state") if state.empty?
+  state
+end
+
+def require_manual_app_store_release(version)
+  return if MobileReleaseKit.manual_app_store_release?(version)
+
+  UI.user_error!(
+    "App Store version is not proven to use manual release with no scheduled release date; " \
+    "resolve it in App Store Connect before continuing",
+  )
+end
+
+def require_exact_submitted_app_store_version(version, build)
+  UI.user_error!("Submitted App Store version is not visible during readback") unless version
+  attached = version.build
+  UI.user_error!(
+    "Existing App Store version has no build; refusing ambiguous production rerun. " \
+    "Inspect App Store Connect and use a new committed build if exact recovery is impossible",
+  ) unless attached
+  UI.user_error!(
+    "Existing App Store version references a different build; refusing production adoption. " \
+    "Resolve the version manually or create a new committed build",
+  ) unless attached.id.to_s == build.id.to_s
+  require_manual_app_store_release(version)
+  submission_state = app_store_submission_state(version)
+  normalized = normalized_submission_state(submission_state)
+  {
+    submission_state: submission_state,
+    normalized_state: normalized,
+  }
+end
+
+def existing_app_store_submission(app, build)
+  version = matching_app_store_version(app)
+  return nil unless version
+
+  unless version.build
+    UI.user_error!(
+      "Existing App Store version has no selected build; refusing a production rerun because " \
+      "a partial earlier submission cannot be distinguished from a clean record. Inspect it " \
+      "manually and use a new committed build if exact recovery is impossible",
+    )
+  end
+
+  readback = require_exact_submitted_app_store_version(version, build)
+  { version: version }.merge(readback)
+end
+
+desc "Submit the exact tested build for App Review without automatic public release"
+lane :ios_app_store_submit do
+  api_key = asc_api_key
+  app = verified_ios_app
+  build = ios_build(app)
+  metadata = File.join(metadata_root, "ios")
+  screenshots = File.join(metadata, "screenshots")
+  UI.user_error!("Validated iOS Store metadata directory is missing") unless File.directory?(metadata)
+  existing = existing_app_store_submission(app, build)
+  if existing
+    result = "already_present"
+    submission_state = existing.fetch(:submission_state)
+    normalized_state = existing.fetch(:normalized_state)
+  else
+    result = "accepted"
+    upload_to_app_store(
+      api_key: api_key,
+      app_identifier: ios_identity,
+      app_version: release_version.fetch(:marketing),
+      build_number: release_version.fetch(:build).to_s,
+      metadata_path: metadata,
+      screenshots_path: screenshots,
+      app_review_information: review_contact(beta: false),
+      skip_binary_upload: true,
+      skip_metadata: false,
+      skip_screenshots: !File.directory?(screenshots),
+      submit_for_review: true,
+      automatic_release: false,
+      phased_release: false,
+      force: true,
+      precheck_include_in_app_purchases: false,
+    )
+    version = matching_app_store_version(app)
+    readback = require_exact_submitted_app_store_version(version, build)
+    submission_state = readback.fetch(:submission_state)
+    normalized_state = readback.fetch(:normalized_state)
+  end
+  write_receipt(
+    operation: "ios_app_store_submit",
+    platform: "ios",
+    identity: ios_identity,
+    result: result,
+    extra: {
+      appStoreAppId: ios_app_store_id,
+      buildResourceId: build.id.to_s,
+      processingState: ios_build_state(build),
+      submissionState: submission_state,
+      automaticRelease: false,
+      state: normalized_state,
+    },
+  )
+end

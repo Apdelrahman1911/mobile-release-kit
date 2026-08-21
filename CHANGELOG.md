@@ -1,0 +1,44 @@
+# Changelog
+
+All notable changes to Mobile Release Kit are documented here. The project follows Semantic Versioning after the initial `0.x` pilot series.
+
+## Unreleased
+
+### Added
+
+- Strict project, immutable candidate, and Store-receipt schemas.
+- Sanitized configuration and evidence fixtures.
+- Local discovery, credential inventory, preflight, artifact validation, and evidence contracts.
+- Reusable preflight, candidate, external-testing, and production-submission workflow contracts.
+- Pinned Fastlane boundary for Store upload, promotion, submission, and readback.
+- Integration, credential, lifecycle, troubleshooting, security, and upgrade documentation.
+
+### Safety defaults
+
+- One committed cross-platform version/build source.
+- Build once and promote exact Store build IDs.
+- Separate Debug and canonical Store identities.
+- Google production ends as a non-served draft.
+- App Store production ends at review submission with automatic release disabled.
+- Public release remains a manual Store-console decision.
+- TestFlight production eligibility requires an externally assigned build read back as available to testers; pending Beta Review evidence cannot authorize production.
+- App Store production reruns adopt only the exact already-submitted manual-release build and refuse ambiguous partial state.
+- Candidate Store gates, application build/signing, and Store upload/evidence run as separate jobs;
+  application code never shares a job with Store credentials or OIDC authority.
+- Fixed-name same-run candidate handoffs are artifact-digest/checksum bound and independently
+  revalidated for final identity and signature before upload.
+- Candidate artifacts retain the exact manifest-bound metadata archive and signing/project-check validation report.
+- Tooling repository ownership is a consumer input; the reusable core has no personal GitHub
+  coordinate and binds itself through GitHub's resolved reusable-workflow repository/SHA context.
+- Promotion verifies predecessor workflow identity, exact head SHA, and successful completion before
+  consuming uploaded evidence.
+- Project initialization safely ensures generated `.mobile-release/` state is ignored without
+  replacing an existing root `.gitignore`.
+- Candidate mutation credentials are acquired only by the Store job after the signed handoff and
+  never coexist with a Gradle, Xcode, or project-check invocation.
+- Every reusable job aborts its steps when `runner.environment` is not `github-hosted`, with an
+  explicit activation prerequisite that administrators prevent self-hosted runners from being
+  eligible for the pinned labels because the first-step guard is not a scheduling boundary.
+- Python safe-path mode prevents application-owned packages from shadowing the pinned shared CLI.
+- `symbols.policy: retain` validates and retains exact dSYMs; automated third-party symbol upload is
+  intentionally absent, and `required` blocks as an activation sentinel.

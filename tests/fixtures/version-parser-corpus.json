@@ -1,0 +1,36 @@
+{
+  "valid": [
+    {
+      "name": "plain properties",
+      "text": "VERSION_NAME=1.2.3\nBUILD_NUMBER=42\n",
+      "marketing": "1.2.3",
+      "build": 42
+    },
+    {
+      "name": "matching quotes and comments",
+      "text": "// generated values\nVERSION_NAME = '1.2.3'\n; build\nBUILD_NUMBER = \"42\"\n",
+      "marketing": "1.2.3",
+      "build": 42
+    },
+    {
+      "name": "four-component prerelease",
+      "text": "# Android-compatible shared version\nVERSION_NAME=1.2.3.4-beta.1\nBUILD_NUMBER=2100000000\n",
+      "marketing": "1.2.3.4-beta.1",
+      "build": 2100000000
+    }
+  ],
+  "invalid": [
+    {"name": "duplicate key", "text": "VERSION_NAME=1.2\nVERSION_NAME=1.3\nBUILD_NUMBER=1\n"},
+    {"name": "invalid key", "text": "VERSION NAME=1.2\nBUILD_NUMBER=1\n"},
+    {"name": "dollar expansion", "text": "VERSION_NAME=1.2${HOME}\nBUILD_NUMBER=1\n"},
+    {"name": "bare dollar", "text": "VERSION_NAME=1.2$HOME\nBUILD_NUMBER=1\n"},
+    {"name": "backtick", "text": "VERSION_NAME=`version`\nBUILD_NUMBER=1\n"},
+    {"name": "empty quotes", "text": "VERSION_NAME=\"\"\nBUILD_NUMBER=1\n"},
+    {"name": "mixed quotes", "text": "VERSION_NAME='1.2\"\nBUILD_NUMBER=1\n"},
+    {"name": "non-dotted marketing", "text": "VERSION_NAME=release-1\nBUILD_NUMBER=1\n"},
+    {"name": "zero build", "text": "VERSION_NAME=1.2\nBUILD_NUMBER=0\n"},
+    {"name": "leading-zero build", "text": "VERSION_NAME=1.2\nBUILD_NUMBER=042\n"},
+    {"name": "oversized build", "text": "VERSION_NAME=1.2\nBUILD_NUMBER=2100000001\n"},
+    {"name": "quoted whitespace build", "text": "VERSION_NAME=1.2\nBUILD_NUMBER=\" 42 \"\n"}
+  ]
+}

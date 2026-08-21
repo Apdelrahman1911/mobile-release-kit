@@ -1,0 +1,45 @@
+name: Mobile production submission
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Exactly one platform to prepare for production review
+        required: true
+        type: choice
+        options:
+          - android
+          - ios
+      candidate_run_id:
+        description: Successful candidate workflow run ID
+        required: true
+        type: string
+      external_run_id:
+        description: Successful external-testing workflow run ID
+        required: true
+        type: string
+      confirmation:
+        description: production-submit:<platform>:<version>:<build>
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  # The called jobs select mobile-production; credentials must be scoped there.
+  # This caller intentionally forwards no repository/organization secrets.
+  production-submit:
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    uses: __MOBILE_RELEASE_KIT_REPOSITORY__/.github/workflows/reusable-production-submit.yml@__MOBILE_RELEASE_KIT_SHA__
+    with:
+      tooling_sha: __MOBILE_RELEASE_KIT_SHA__
+      source_sha: ${{ github.sha }}
+      platform: ${{ inputs.platform }}
+      candidate_run_id: ${{ inputs.candidate_run_id }}
+      external_run_id: ${{ inputs.external_run_id }}
+      confirmation: ${{ inputs.confirmation }}

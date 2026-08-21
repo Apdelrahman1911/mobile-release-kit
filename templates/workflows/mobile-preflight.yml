@@ -1,0 +1,25 @@
+name: Mobile release preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to validate
+        required: true
+        default: both
+        type: choice
+        options:
+          - android
+          - ios
+          - both
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    uses: __MOBILE_RELEASE_KIT_REPOSITORY__/.github/workflows/reusable-preflight.yml@__MOBILE_RELEASE_KIT_SHA__
+    with:
+      tooling_sha: __MOBILE_RELEASE_KIT_SHA__
+      source_sha: ${{ github.sha }}
+      platform: ${{ inputs.platform }}

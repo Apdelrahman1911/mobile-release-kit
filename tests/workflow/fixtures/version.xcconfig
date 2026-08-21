@@ -1,0 +1,5 @@
+// Xcode-style comments are valid in an existing version source.
+APP_VERSION_NAME = 1.2.3
+; Semicolon comments are accepted by the shared KEY=VALUE contract.
+APP_BUILD_NUMBER = 123
+# Hash comments remain valid as well.

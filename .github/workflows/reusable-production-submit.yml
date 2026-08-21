@@ -1,0 +1,524 @@
+name: Reusable mobile production preparation
+
+on:
+  workflow_call:
+    inputs:
+      tooling_sha:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+      platform:
+        description: Exactly one of android or ios.
+        required: true
+        type: string
+      candidate_run_id:
+        description: Successful candidate workflow run containing attested evidence.
+        required: true
+        type: string
+      external_run_id:
+        description: Successful external-testing run containing attested evidence.
+        required: true
+        type: string
+      confirmation:
+        description: production-submit:<platform>:<version>:<build>.
+        required: true
+        type: string
+permissions: {}
+
+env:
+  FASTLANE_HIDE_CHANGELOG: 'true'
+  FASTLANE_OPT_OUT_USAGE: 'true'
+  FASTLANE_SKIP_UPDATE_CHECK: 'true'
+  PYTHONPATH: ${{ github.workspace }}/tooling/src
+  PYTHONSAFEPATH: '1'
+
+concurrency:
+  group: mobile-release-store-mutations
+  cancel-in-progress: false
+
+jobs:
+  validate-platform:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Reject unsupported platform input
+        env:
+          MOBILE_RELEASE_PLATFORM: ${{ inputs.platform }}
+          MOBILE_RELEASE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$MOBILE_RELEASE_PLATFORM" =~ ^(android|ios)$ ]]
+          [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == "github-hosted" ]]
+
+  android:
+    needs: validate-platform
+    if: inputs.platform == 'android'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: mobile-production
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Validate immutable workflow authority
+        env:
+          MOBILE_RELEASE_PLATFORM: ${{ inputs.platform }}
+          MOBILE_RELEASE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MOBILE_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
+          MOBILE_RELEASE_CALLER_SHA: ${{ github.sha }}
+          MOBILE_RELEASE_TOOLING_SHA: ${{ inputs.tooling_sha }}
+          MOBILE_RELEASE_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          MOBILE_RELEASE_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          MOBILE_RELEASE_WORKFLOW_REF: ${{ job.workflow_ref }}
+          MOBILE_RELEASE_CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          MOBILE_RELEASE_EXTERNAL_RUN_ID: ${{ inputs.external_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$MOBILE_RELEASE_PLATFORM" =~ ^(android|ios)$ ]]
+          [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == "github-hosted" ]]
+          [[ "$MOBILE_RELEASE_SOURCE_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
+          [[ "$MOBILE_RELEASE_SOURCE_SHA" == "$MOBILE_RELEASE_CALLER_SHA" ]]
+          [[ "$MOBILE_RELEASE_TOOLING_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
+          [[ "$MOBILE_RELEASE_CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$MOBILE_RELEASE_EXTERNAL_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$MOBILE_RELEASE_WORKFLOW_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+          [[ "$MOBILE_RELEASE_WORKFLOW_SHA" == "$MOBILE_RELEASE_TOOLING_SHA" ]]
+          [[ "$MOBILE_RELEASE_WORKFLOW_REF" == "$MOBILE_RELEASE_WORKFLOW_REPOSITORY/.github/workflows/reusable-production-submit.yml@$MOBILE_RELEASE_TOOLING_SHA" ]]
+      - name: Check out exact application source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          path: app
+          persist-credentials: false
+      - name: Establish safe private workflow output directory
+        run: |
+          set -euo pipefail
+          workspace_root="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+          app_root="$(cd app && pwd -P)"
+          [[ ! -L app && "$app_root" == "$workspace_root/app" ]]
+          output=app/.mobile-release
+          if [[ -e "$output" || -L "$output" ]]; then
+            [[ -d "$output" && ! -L "$output" ]]
+            [[ -z "$(find "$output" -mindepth 1 -print -quit)" ]]
+          fi
+          mkdir -p -- "$output"
+          [[ ! -L "$output" && "$(cd "$output" && pwd -P)" == "$app_root/.mobile-release" ]]
+      - name: Check out pinned release tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: tooling
+          persist-credentials: false
+      - name: Download Android candidate evidence only
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: mobile-release-candidate-evidence-android
+          path: app/.mobile-release/input/candidate
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.candidate_run_id }}
+      - name: Download Android external-testing evidence only
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: mobile-release-external-evidence-android
+          path: app/.mobile-release/input/external-testing
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.external_run_id }}
+      - name: Verify source tree and all prior attestations
+        working-directory: app
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MOBILE_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
+          MOBILE_RELEASE_TOOLING_SHA: ${{ inputs.tooling_sha }}
+          MOBILE_RELEASE_TOOLING_REPOSITORY: ${{ job.workflow_repository }}
+          MOBILE_RELEASE_CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          MOBILE_RELEASE_EXTERNAL_RUN_ID: ${{ inputs.external_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$MOBILE_RELEASE_SOURCE_SHA" ]]
+          [[ "$(git -C ../tooling rev-parse HEAD)" == "$MOBILE_RELEASE_TOOLING_SHA" ]]
+          candidate=.mobile-release/input/candidate/candidate-manifest.json
+          candidate_commit="$(jq -er .source.commit "$candidate")"
+          candidate_tree="$(jq -er .source.tree "$candidate")"
+          candidate_attempt="$(jq -er .createdBy.attempt "$candidate")"
+          external=.mobile-release/input/external-testing/external-testing-receipt.json
+          external_attempt="$(jq -er .createdBy.attempt "$external")"
+          [[ "$candidate_commit" =~ ^[0-9A-Fa-f]{40}$ ]]
+          [[ "$candidate_tree" =~ ^[0-9A-Fa-f]{40}$ ]]
+          [[ "$candidate_attempt" =~ ^[1-9][0-9]*$ ]]
+          [[ "$external_attempt" =~ ^[1-9][0-9]*$ ]]
+          [[ "$(jq -er .createdBy.runId "$candidate")" == "$MOBILE_RELEASE_CANDIDATE_RUN_ID" ]]
+          [[ "$(jq -er .createdBy.runId "$external")" == "$MOBILE_RELEASE_EXTERNAL_RUN_ID" ]]
+          git cat-file -e "$candidate_commit^{commit}"
+          [[ "$(git rev-parse "$candidate_commit^{tree}")" == "$candidate_tree" ]]
+          if [[ "$candidate_commit" != "$MOBILE_RELEASE_SOURCE_SHA" ]]; then
+            if ! git merge-base --is-ancestor "$candidate_commit" "$MOBILE_RELEASE_SOURCE_SHA"; then
+              git merge-base "$candidate_commit" "$MOBILE_RELEASE_SOURCE_SHA" >/dev/null
+              [[ "$candidate_tree" == "$(git rev-parse 'HEAD^{tree}')" ]]
+            fi
+          fi
+          candidate_run="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/runs/$MOBILE_RELEASE_CANDIDATE_RUN_ID")"
+          external_run="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/runs/$MOBILE_RELEASE_EXTERNAL_RUN_ID")"
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg head "$candidate_commit" \
+            --argjson attempt "$candidate_attempt" \
+            '.repository.full_name == $repository and
+             .path == ".github/workflows/mobile-candidate.yml" and
+             .event == "workflow_dispatch" and
+             .head_sha == $head and
+             .run_attempt == $attempt and
+             .status == "completed" and
+             .conclusion == "success"' \
+            <<<"$candidate_run" >/dev/null
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg head "$candidate_commit" \
+            --argjson attempt "$external_attempt" \
+            '.repository.full_name == $repository and
+             .path == ".github/workflows/mobile-external-testing.yml" and
+             .event == "workflow_dispatch" and
+             .head_sha == $head and
+             .run_attempt == $attempt and
+             .status == "completed" and
+             .conclusion == "success"' \
+            <<<"$external_run" >/dev/null
+          for evidence in candidate-manifest.json candidate-receipt.json; do
+            [[ -f ".mobile-release/input/candidate/$evidence" && ! -L ".mobile-release/input/candidate/$evidence" ]]
+            gh attestation verify ".mobile-release/input/candidate/$evidence" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$MOBILE_RELEASE_TOOLING_REPOSITORY/.github/workflows/reusable-candidate.yml" \
+              --signer-digest "$MOBILE_RELEASE_TOOLING_SHA" \
+              --source-digest "$candidate_commit" \
+              --deny-self-hosted-runners >/dev/null
+          done
+          [[ -f .mobile-release/input/external-testing/external-testing-receipt.json && ! -L .mobile-release/input/external-testing/external-testing-receipt.json ]]
+          gh attestation verify .mobile-release/input/external-testing/external-testing-receipt.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$MOBILE_RELEASE_TOOLING_REPOSITORY/.github/workflows/reusable-external-testing.yml" \
+            --signer-digest "$MOBILE_RELEASE_TOOLING_SHA" \
+            --source-digest "$candidate_commit" \
+            --deny-self-hosted-runners >/dev/null
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+      - name: Set up pinned Ruby dependencies
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: '3.3.12'
+          bundler-cache: true
+          working-directory: tooling
+      - name: Authenticate to production Google identity
+        id: google_production_auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.MOBILE_RELEASE_GOOGLE_WIF_PROVIDER }}
+          service_account: ${{ vars.MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+          export_environment_variables: true
+      - name: Prepare exact Android build as production draft
+        working-directory: app
+        env:
+          BUNDLE_GEMFILE: ${{ github.workspace }}/tooling/Gemfile
+          MOBILE_RELEASE_APP_ROOT: ${{ github.workspace }}/app
+          MOBILE_RELEASE_CONFIG_PATH: release/mobile-release.json
+          MOBILE_RELEASE_TOOLING_ROOT: ${{ github.workspace }}/tooling
+          MOBILE_RELEASE_TOOLING_SHA: ${{ inputs.tooling_sha }}
+          MOBILE_RELEASE_STORE_RECEIPT_PATH: .mobile-release/store/android-production-draft.json
+          MOBILE_RELEASE_CI_MUTATIONS_ALLOWED: 'true'
+          MOBILE_RELEASE_ENVIRONMENT: mobile-production
+          MOBILE_RELEASE_CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          [[ "$(git -C ../tooling rev-parse HEAD)" == "$MOBILE_RELEASE_TOOLING_SHA" ]]
+          python -P -m mobile_release ci production-submit \
+            --config release/mobile-release.json \
+            --platform android \
+            --candidate-manifest .mobile-release/input/candidate/candidate-manifest.json \
+            --candidate-receipt .mobile-release/input/candidate/candidate-receipt.json \
+            --external-receipt .mobile-release/input/external-testing/external-testing-receipt.json \
+            --output-dir .mobile-release/staging/production-submit/android \
+            --confirm "$MOBILE_RELEASE_CONFIRMATION" \
+            --execute-store
+          mkdir -p .mobile-release/reports
+          python -P -m mobile_release status \
+            --config release/mobile-release.json \
+            --candidate-manifest .mobile-release/input/candidate/candidate-manifest.json \
+            --receipt .mobile-release/input/candidate/candidate-receipt.json \
+            --receipt .mobile-release/input/external-testing/external-testing-receipt.json \
+            --receipt .mobile-release/staging/production-submit/android/production-submit-receipt.json \
+            --format json > .mobile-release/reports/status-production-android.json
+          mkdir -p .mobile-release/receipts/production-submit .mobile-release/package/evidence/production-submit/android
+          cp .mobile-release/staging/production-submit/android/production-submit-receipt.json .mobile-release/receipts/production-submit/android.json
+          cp .mobile-release/staging/production-submit/android/production-submit-receipt.json .mobile-release/package/evidence/production-submit/android/production-submit-receipt.json
+          cp .mobile-release/store/android-production-draft.json .mobile-release/package/evidence/production-submit/android/store-receipt.json
+          cp .mobile-release/reports/status-production-android.json .mobile-release/package/evidence/production-submit/android/status.json
+      - name: Remove production Google Play credentials
+        if: ${{ always() && steps.google_production_auth.outcome == 'success' }}
+        env:
+          MOBILE_RELEASE_GOOGLE_ADC_PATH: ${{ steps.google_production_auth.outputs.credentials_file_path }}
+        run: |
+          set -euo pipefail
+          [[ -n "$MOBILE_RELEASE_GOOGLE_ADC_PATH" ]]
+          case "$MOBILE_RELEASE_GOOGLE_ADC_PATH" in
+            "$GITHUB_WORKSPACE"/*|"$RUNNER_TEMP"/*) ;;
+            *) echo "Google credential path is outside the runner's scoped directories" >&2; exit 1 ;;
+          esac
+          [[ -f "$MOBILE_RELEASE_GOOGLE_ADC_PATH" && ! -L "$MOBILE_RELEASE_GOOGLE_ADC_PATH" ]]
+          rm -f -- "$MOBILE_RELEASE_GOOGLE_ADC_PATH"
+          [[ ! -e "$MOBILE_RELEASE_GOOGLE_ADC_PATH" && ! -L "$MOBILE_RELEASE_GOOGLE_ADC_PATH" ]]
+          {
+            echo 'GOOGLE_APPLICATION_CREDENTIALS='
+            echo 'CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE='
+            echo 'GOOGLE_GHA_CREDS_PATH='
+          } >> "$GITHUB_ENV"
+      - name: Attest Android production-draft receipt
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: app/.mobile-release/package/evidence/production-submit/android/production-submit-receipt.json
+      - name: Upload Android production-draft evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mobile-release-production-evidence-android
+          path: app/.mobile-release/package/evidence/production-submit/android
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
+
+  ios:
+    needs: validate-platform
+    if: inputs.platform == 'ios'
+    runs-on: macos-26
+    timeout-minutes: 60
+    environment: mobile-production
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Validate immutable workflow authority
+        env:
+          MOBILE_RELEASE_PLATFORM: ${{ inputs.platform }}
+          MOBILE_RELEASE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MOBILE_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
+          MOBILE_RELEASE_CALLER_SHA: ${{ github.sha }}
+          MOBILE_RELEASE_TOOLING_SHA: ${{ inputs.tooling_sha }}
+          MOBILE_RELEASE_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          MOBILE_RELEASE_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          MOBILE_RELEASE_WORKFLOW_REF: ${{ job.workflow_ref }}
+          MOBILE_RELEASE_CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          MOBILE_RELEASE_EXTERNAL_RUN_ID: ${{ inputs.external_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$MOBILE_RELEASE_PLATFORM" =~ ^(android|ios)$ ]]
+          [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == "github-hosted" ]]
+          [[ "$MOBILE_RELEASE_SOURCE_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
+          [[ "$MOBILE_RELEASE_SOURCE_SHA" == "$MOBILE_RELEASE_CALLER_SHA" ]]
+          [[ "$MOBILE_RELEASE_TOOLING_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
+          [[ "$MOBILE_RELEASE_CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$MOBILE_RELEASE_EXTERNAL_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$MOBILE_RELEASE_WORKFLOW_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+          [[ "$MOBILE_RELEASE_WORKFLOW_SHA" == "$MOBILE_RELEASE_TOOLING_SHA" ]]
+          [[ "$MOBILE_RELEASE_WORKFLOW_REF" == "$MOBILE_RELEASE_WORKFLOW_REPOSITORY/.github/workflows/reusable-production-submit.yml@$MOBILE_RELEASE_TOOLING_SHA" ]]
+      - name: Verify pinned Apple toolchain
+        run: |
+          set -euo pipefail
+          [[ -x "$DEVELOPER_DIR/usr/bin/xcodebuild" ]]
+          [[ "$(xcodebuild -version | sed -n '1p')" == "Xcode 26.3" ]]
+          [[ "$(xcodebuild -version | sed -n '2p')" == "Build version 17C529" ]]
+      - name: Check out exact application source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          path: app
+          persist-credentials: false
+      - name: Establish safe private workflow output directory
+        run: |
+          set -euo pipefail
+          workspace_root="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+          app_root="$(cd app && pwd -P)"
+          [[ ! -L app && "$app_root" == "$workspace_root/app" ]]
+          output=app/.mobile-release
+          if [[ -e "$output" || -L "$output" ]]; then
+            [[ -d "$output" && ! -L "$output" ]]
+            [[ -z "$(find "$output" -mindepth 1 -print -quit)" ]]
+          fi
+          mkdir -p -- "$output"
+          [[ ! -L "$output" && "$(cd "$output" && pwd -P)" == "$app_root/.mobile-release" ]]
+      - name: Check out pinned release tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: tooling
+          persist-credentials: false
+      - name: Download iOS candidate evidence only
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: mobile-release-candidate-evidence-ios
+          path: app/.mobile-release/input/candidate
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.candidate_run_id }}
+      - name: Download iOS external-testing evidence only
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: mobile-release-external-evidence-ios
+          path: app/.mobile-release/input/external-testing
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.external_run_id }}
+      - name: Verify source tree and all prior attestations
+        working-directory: app
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MOBILE_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
+          MOBILE_RELEASE_TOOLING_SHA: ${{ inputs.tooling_sha }}
+          MOBILE_RELEASE_TOOLING_REPOSITORY: ${{ job.workflow_repository }}
+          MOBILE_RELEASE_CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          MOBILE_RELEASE_EXTERNAL_RUN_ID: ${{ inputs.external_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$MOBILE_RELEASE_SOURCE_SHA" ]]
+          [[ "$(git -C ../tooling rev-parse HEAD)" == "$MOBILE_RELEASE_TOOLING_SHA" ]]
+          candidate=.mobile-release/input/candidate/candidate-manifest.json
+          candidate_commit="$(jq -er .source.commit "$candidate")"
+          candidate_tree="$(jq -er .source.tree "$candidate")"
+          candidate_attempt="$(jq -er .createdBy.attempt "$candidate")"
+          external=.mobile-release/input/external-testing/external-testing-receipt.json
+          external_attempt="$(jq -er .createdBy.attempt "$external")"
+          [[ "$candidate_commit" =~ ^[0-9A-Fa-f]{40}$ ]]
+          [[ "$candidate_tree" =~ ^[0-9A-Fa-f]{40}$ ]]
+          [[ "$candidate_attempt" =~ ^[1-9][0-9]*$ ]]
+          [[ "$external_attempt" =~ ^[1-9][0-9]*$ ]]
+          [[ "$(jq -er .createdBy.runId "$candidate")" == "$MOBILE_RELEASE_CANDIDATE_RUN_ID" ]]
+          [[ "$(jq -er .createdBy.runId "$external")" == "$MOBILE_RELEASE_EXTERNAL_RUN_ID" ]]
+          git cat-file -e "$candidate_commit^{commit}"
+          [[ "$(git rev-parse "$candidate_commit^{tree}")" == "$candidate_tree" ]]
+          if [[ "$candidate_commit" != "$MOBILE_RELEASE_SOURCE_SHA" ]]; then
+            if ! git merge-base --is-ancestor "$candidate_commit" "$MOBILE_RELEASE_SOURCE_SHA"; then
+              git merge-base "$candidate_commit" "$MOBILE_RELEASE_SOURCE_SHA" >/dev/null
+              [[ "$candidate_tree" == "$(git rev-parse 'HEAD^{tree}')" ]]
+            fi
+          fi
+          candidate_run="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/runs/$MOBILE_RELEASE_CANDIDATE_RUN_ID")"
+          external_run="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/runs/$MOBILE_RELEASE_EXTERNAL_RUN_ID")"
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg head "$candidate_commit" \
+            --argjson attempt "$candidate_attempt" \
+            '.repository.full_name == $repository and
+             .path == ".github/workflows/mobile-candidate.yml" and
+             .event == "workflow_dispatch" and
+             .head_sha == $head and
+             .run_attempt == $attempt and
+             .status == "completed" and
+             .conclusion == "success"' \
+            <<<"$candidate_run" >/dev/null
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg head "$candidate_commit" \
+            --argjson attempt "$external_attempt" \
+            '.repository.full_name == $repository and
+             .path == ".github/workflows/mobile-external-testing.yml" and
+             .event == "workflow_dispatch" and
+             .head_sha == $head and
+             .run_attempt == $attempt and
+             .status == "completed" and
+             .conclusion == "success"' \
+            <<<"$external_run" >/dev/null
+          for evidence in candidate-manifest.json candidate-receipt.json; do
+            [[ -f ".mobile-release/input/candidate/$evidence" && ! -L ".mobile-release/input/candidate/$evidence" ]]
+            gh attestation verify ".mobile-release/input/candidate/$evidence" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$MOBILE_RELEASE_TOOLING_REPOSITORY/.github/workflows/reusable-candidate.yml" \
+              --signer-digest "$MOBILE_RELEASE_TOOLING_SHA" \
+              --source-digest "$candidate_commit" \
+              --deny-self-hosted-runners >/dev/null
+          done
+          [[ -f .mobile-release/input/external-testing/external-testing-receipt.json && ! -L .mobile-release/input/external-testing/external-testing-receipt.json ]]
+          gh attestation verify .mobile-release/input/external-testing/external-testing-receipt.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$MOBILE_RELEASE_TOOLING_REPOSITORY/.github/workflows/reusable-external-testing.yml" \
+            --signer-digest "$MOBILE_RELEASE_TOOLING_SHA" \
+            --source-digest "$candidate_commit" \
+            --deny-self-hosted-runners >/dev/null
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+      - name: Set up pinned Ruby dependencies
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: '3.3.12'
+          bundler-cache: true
+          working-directory: tooling
+      - name: Submit exact iOS build for review without automatic release
+        working-directory: app
+        env:
+          BUNDLE_GEMFILE: ${{ github.workspace }}/tooling/Gemfile
+          MOBILE_RELEASE_APP_ROOT: ${{ github.workspace }}/app
+          MOBILE_RELEASE_CONFIG_PATH: release/mobile-release.json
+          MOBILE_RELEASE_TOOLING_ROOT: ${{ github.workspace }}/tooling
+          MOBILE_RELEASE_TOOLING_SHA: ${{ inputs.tooling_sha }}
+          MOBILE_RELEASE_STORE_RECEIPT_PATH: .mobile-release/store/ios-production-submit.json
+          MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64: ${{ secrets.MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64 }}
+          MOBILE_RELEASE_ASC_KEY_ID: ${{ vars.MOBILE_RELEASE_ASC_KEY_ID }}
+          MOBILE_RELEASE_ASC_ISSUER_ID: ${{ vars.MOBILE_RELEASE_ASC_ISSUER_ID }}
+          MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME: ${{ secrets.MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME }}
+          MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME: ${{ secrets.MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME }}
+          MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL: ${{ secrets.MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL }}
+          MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE: ${{ secrets.MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE }}
+          MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME: ${{ secrets.MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME }}
+          MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD: ${{ secrets.MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD }}
+          MOBILE_RELEASE_CI_MUTATIONS_ALLOWED: 'true'
+          MOBILE_RELEASE_ENVIRONMENT: mobile-production
+          MOBILE_RELEASE_CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          [[ "$(git -C ../tooling rev-parse HEAD)" == "$MOBILE_RELEASE_TOOLING_SHA" ]]
+          python -P -m mobile_release ci production-submit \
+            --config release/mobile-release.json \
+            --platform ios \
+            --candidate-manifest .mobile-release/input/candidate/candidate-manifest.json \
+            --candidate-receipt .mobile-release/input/candidate/candidate-receipt.json \
+            --external-receipt .mobile-release/input/external-testing/external-testing-receipt.json \
+            --output-dir .mobile-release/staging/production-submit/ios \
+            --confirm "$MOBILE_RELEASE_CONFIRMATION" \
+            --execute-store
+          mkdir -p .mobile-release/reports
+          python -P -m mobile_release status \
+            --config release/mobile-release.json \
+            --candidate-manifest .mobile-release/input/candidate/candidate-manifest.json \
+            --receipt .mobile-release/input/candidate/candidate-receipt.json \
+            --receipt .mobile-release/input/external-testing/external-testing-receipt.json \
+            --receipt .mobile-release/staging/production-submit/ios/production-submit-receipt.json \
+            --format json > .mobile-release/reports/status-production-ios.json
+          mkdir -p .mobile-release/receipts/production-submit .mobile-release/package/evidence/production-submit/ios
+          cp .mobile-release/staging/production-submit/ios/production-submit-receipt.json .mobile-release/receipts/production-submit/ios.json
+          cp .mobile-release/staging/production-submit/ios/production-submit-receipt.json .mobile-release/package/evidence/production-submit/ios/production-submit-receipt.json
+          cp .mobile-release/store/ios-production-submit.json .mobile-release/package/evidence/production-submit/ios/store-receipt.json
+          cp .mobile-release/reports/status-production-ios.json .mobile-release/package/evidence/production-submit/ios/status.json
+      - name: Attest iOS App Review submission receipt
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: app/.mobile-release/package/evidence/production-submit/ios/production-submit-receipt.json
+      - name: Upload iOS App Review submission evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mobile-release-production-evidence-ios
+          path: app/.mobile-release/package/evidence/production-submit/ios
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90

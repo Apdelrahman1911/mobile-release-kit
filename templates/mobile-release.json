@@ -1,0 +1,37 @@
+{
+  "$schema": "https://raw.githubusercontent.com/__MOBILE_RELEASE_KIT_REPOSITORY__/__MOBILE_RELEASE_KIT_SHA__/schemas/project.schema.json",
+  "schemaVersion": 1,
+  "version": {
+    "source": "release/version.properties",
+    "nameKey": "VERSION_NAME",
+    "buildKey": "BUILD_NUMBER"
+  },
+  "source": {
+    "candidateBranch": "main",
+    "productionBranch": "main"
+  },
+  "android": {
+    "enabled": true,
+    "applicationId": "com.example.product",
+    "identityStatus": "unverified"
+  },
+  "ios": {
+    "enabled": true,
+    "bundleId": "com.example.product",
+    "identityStatus": "unverified"
+  },
+  "metadata": {
+    "root": "release/store",
+    "androidLocales": ["en-US"],
+    "iosLocales": ["en-US"]
+  },
+  "services": {
+    "androidFirebase": "disabled",
+    "iosFirebase": "disabled"
+  },
+  "projectChecks": {
+    "preflight": [],
+    "androidArtifact": [],
+    "iosArtifact": []
+  }
+}

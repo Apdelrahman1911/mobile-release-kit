@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "stage": "external-testing",
+  "candidateManifestSha256": "0df7de6f898b62a761ed7b7d086ad9362ee6416c6f147fc2516cb315e3dae928",
+  "previousReceiptSha256": "7c3e97f6ec084964d71a19dd5660e981cde3323ca29676752e55e9e449c9be67",
+  "tooling": {
+    "version": "0.1.0",
+    "commit": "1111111111111111111111111111111111111111"
+  },
+  "repository": {
+    "fullName": "example/mobile-app",
+    "id": "100000000"
+  },
+  "source": {
+    "commit": "2222222222222222222222222222222222222222",
+    "tree": "3333333333333333333333333333333333333333"
+  },
+  "platform": "android",
+  "provider": "google-play",
+  "applicationId": "com.example.reader",
+  "version": {
+    "marketing": "1.2.3",
+    "build": 42
+  },
+  "storeBuildId": "42",
+  "operation": "promoted",
+  "destination": {
+    "closedTesterAssignmentVerified": true,
+    "channel": "closed-testing",
+    "releaseStatus": "completed"
+  },
+  "readback": {
+    "state": "available-to-testers",
+    "observedAt": "2026-01-02T00:00:00Z"
+  },
+  "createdBy": {
+    "workflow": "mobile-external-testing",
+    "runId": "1000000001",
+    "attempt": 1
+  },
+  "createdAt": "2026-01-02T00:00:00Z",
+  "integrity": {
+    "algorithm": "sha256",
+    "sha256": "35f6263dbb51726e881f99aaaf9a75470495158fbef831f081d66140fee98bb0"
+  }
+}

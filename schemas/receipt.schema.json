@@ -1,0 +1,531 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mobile-release-kit:schema:receipt:1",
+  "title": "Mobile Release Kit Store mutation receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "stage",
+    "candidateManifestSha256",
+    "tooling",
+    "repository",
+    "source",
+    "platform",
+    "provider",
+    "applicationId",
+    "version",
+    "storeBuildId",
+    "operation",
+    "destination",
+    "readback",
+    "createdBy",
+    "createdAt",
+    "integrity"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "stage": {
+      "enum": ["candidate", "external-testing", "production-submit"]
+    },
+    "candidateManifestSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "previousReceiptSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "tooling": {
+      "$ref": "#/$defs/tooling"
+    },
+    "repository": {
+      "$ref": "#/$defs/repository"
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "platform": {
+      "enum": ["android", "ios"]
+    },
+    "provider": {
+      "enum": ["google-play", "app-store-connect"]
+    },
+    "applicationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255
+    },
+    "version": {
+      "$ref": "#/$defs/version"
+    },
+    "storeBuildId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255
+    },
+    "operation": {
+      "enum": ["uploaded", "promoted", "distributed", "submitted"]
+    },
+    "destination": {
+      "$ref": "#/$defs/destination"
+    },
+    "readback": {
+      "$ref": "#/$defs/readback"
+    },
+    "createdBy": {
+      "$ref": "#/$defs/workflowRun"
+    },
+    "createdAt": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "integrity": {
+      "$ref": "#/$defs/integrity"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "stage": {
+            "enum": ["external-testing", "production-submit"]
+          }
+        },
+        "required": ["stage"]
+      },
+      "then": {
+        "required": ["previousReceiptSha256"]
+      },
+      "else": {
+        "not": {
+          "required": ["previousReceiptSha256"]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "android"
+          }
+        },
+        "required": ["platform"]
+      },
+      "then": {
+        "properties": {
+          "provider": {
+            "const": "google-play"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "provider": {
+            "const": "app-store-connect"
+          },
+          "version": {
+            "properties": {
+              "marketing": {
+                "pattern": "^[0-9]+(?:\\.[0-9]+){1,2}$"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": {
+            "const": "external-testing"
+          },
+          "platform": {
+            "const": "android"
+          }
+        },
+        "required": ["stage", "platform"]
+      },
+      "then": {
+        "properties": {
+          "destination": {
+            "properties": {
+              "closedTesterAssignmentVerified": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "destination": {
+            "not": {
+              "required": ["closedTesterAssignmentVerified"]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": {
+            "const": "production-submit"
+          },
+          "platform": {
+            "const": "android"
+          }
+        },
+        "required": ["stage", "platform"]
+      },
+      "then": {
+        "properties": {
+          "operation": {
+            "const": "promoted"
+          },
+          "destination": {
+            "properties": {
+              "channel": {
+                "const": "production"
+              },
+              "releaseStatus": {
+                "const": "draft"
+              }
+            },
+            "required": ["channel", "releaseStatus"],
+            "not": {"required": ["automaticRelease"]}
+          },
+          "readback": {
+            "properties": {
+              "state": {
+                "const": "draft"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": {
+            "const": "production-submit"
+          },
+          "platform": {
+            "const": "ios"
+          }
+        },
+        "required": ["stage", "platform"]
+      },
+      "then": {
+        "properties": {
+          "operation": {
+            "const": "submitted"
+          },
+          "destination": {
+            "properties": {
+              "channel": {
+                "const": "app-store-review"
+              },
+              "automaticRelease": {
+                "const": false
+              }
+            },
+            "required": ["channel", "automaticRelease"],
+            "not": {"required": ["releaseStatus"]}
+          },
+          "readback": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "submitted-for-review",
+                  "in-review",
+                  "approved",
+                  "pending-developer-release"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": {"const": "candidate"},
+          "platform": {"const": "android"}
+        },
+        "required": ["stage", "platform"]
+      },
+      "then": {
+        "properties": {
+          "operation": {"const": "uploaded"},
+          "destination": {
+            "properties": {
+              "channel": {"const": "internal"},
+              "releaseStatus": {"const": "completed"}
+            },
+            "required": ["channel", "releaseStatus"],
+            "not": {"required": ["automaticRelease"]}
+          },
+          "readback": {
+            "properties": {
+              "state": {"const": "available-to-testers"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": {"const": "candidate"},
+          "platform": {"const": "ios"}
+        },
+        "required": ["stage", "platform"]
+      },
+      "then": {
+        "properties": {
+          "operation": {"const": "uploaded"},
+          "destination": {
+            "properties": {
+              "channel": {"const": "testflight-internal"}
+            },
+            "required": ["channel"],
+            "not": {
+              "anyOf": [
+                {"required": ["releaseStatus"]},
+                {"required": ["automaticRelease"]}
+              ]
+            }
+          },
+          "readback": {
+            "properties": {
+              "state": {
+                "enum": ["processed", "available-to-testers"]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": {"const": "external-testing"},
+          "platform": {"const": "android"}
+        },
+        "required": ["stage", "platform"]
+      },
+      "then": {
+        "properties": {
+          "operation": {"const": "promoted"},
+          "destination": {
+            "properties": {
+              "channel": {
+                "not": {"enum": ["internal", "production"]}
+              },
+              "releaseStatus": {"const": "completed"}
+            },
+            "required": ["channel", "releaseStatus"],
+            "not": {"required": ["automaticRelease"]}
+          },
+          "readback": {
+            "properties": {
+              "state": {"const": "available-to-testers"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": {"const": "external-testing"},
+          "platform": {"const": "ios"}
+        },
+        "required": ["stage", "platform"]
+      },
+      "then": {
+        "properties": {
+          "operation": {"const": "distributed"},
+          "destination": {
+            "properties": {
+              "channel": {"const": "testflight-external"}
+            },
+            "required": ["channel"],
+            "not": {
+              "anyOf": [
+                {"required": ["releaseStatus"]},
+                {"required": ["automaticRelease"]}
+              ]
+            }
+          },
+          "readback": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "available-to-testers",
+                  "submitted-for-review",
+                  "in-review",
+                  "approved"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "sha256"],
+      "properties": {
+        "algorithm": {
+          "const": "sha256"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "gitObjectId": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{40}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "tooling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "commit"],
+      "properties": {
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
+        },
+        "commit": {
+          "$ref": "#/$defs/gitObjectId"
+        }
+      }
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fullName", "id"],
+      "properties": {
+        "fullName": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit", "tree"],
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/gitObjectId"
+        },
+        "tree": {
+          "$ref": "#/$defs/gitObjectId"
+        }
+      }
+    },
+    "version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["marketing", "build"],
+      "properties": {
+        "marketing": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[0-9]+(?:\\.[0-9]+){1,3}(?:[-+][0-9A-Za-z.-]+)?$"
+        },
+        "build": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2100000000
+        }
+      }
+    },
+    "destination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["channel"],
+      "properties": {
+        "channel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "releaseStatus": {
+          "enum": ["draft", "completed", "in-progress"]
+        },
+        "automaticRelease": {
+          "type": "boolean"
+        },
+        "closedTesterAssignmentVerified": {
+          "const": true
+        }
+      }
+    },
+    "readback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "observedAt"],
+      "properties": {
+        "state": {
+          "enum": [
+            "uploaded",
+            "processed",
+            "available-to-testers",
+            "submitted-for-review",
+            "in-review",
+            "approved",
+            "pending-developer-release",
+            "draft"
+          ]
+        },
+        "observedAt": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "workflowRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workflow", "runId", "attempt"],
+      "properties": {
+        "workflow": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "runId": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}
