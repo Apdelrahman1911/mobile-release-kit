@@ -202,7 +202,7 @@ class CliBuildTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertEqual(completed.stdout.strip(), "mobile-release 0.1.1")
+            self.assertEqual(completed.stdout.strip(), "mobile-release 0.1.2")
             self.assertFalse(marker.exists())
 
     def test_init_preflights_sha_and_every_destination_before_writing(self) -> None:
@@ -527,6 +527,58 @@ class CliBuildTests(unittest.TestCase):
                 )
             self.assertFalse(any(item.status in FAILING_STATUSES for item in findings))
 
+    def test_signed_android_build_canonicalizes_final_aab_without_password_argv(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = load_config(write_project(root, android_config()))
+            discovered = discover_project(root)
+            keystore = Path(temporary) / "upload.jks"
+            keystore.write_bytes(b"fixture")
+            commands: list[list[str]] = []
+            signing_environment: dict[str, str] = {}
+
+            def fake_run(command, **kwargs):
+                commands.append(command)
+                if Path(command[0]).name == "gradlew":
+                    bundle = root / "app/build/outputs/bundle/release/app-release.aab"
+                    bundle.parent.mkdir(parents=True)
+                    with zipfile.ZipFile(bundle, "w") as archive:
+                        archive.writestr("BundleConfig.pb", b"x")
+                        archive.writestr("base/manifest/AndroidManifest.xml", b"x")
+                        archive.writestr("base/dex/classes.dex", b"x")
+                else:
+                    signing_environment.update(kwargs["env"])
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+            signing = {
+                "MOBILE_RELEASE_ANDROID_KEYSTORE_PATH": str(keystore),
+                "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD": "store-secret",
+                "MOBILE_RELEASE_ANDROID_KEY_ALIAS": "upload",
+                "MOBILE_RELEASE_ANDROID_KEY_PASSWORD": "key-secret",
+            }
+            with (
+                patch.dict(os.environ, signing, clear=False),
+                patch("mobile_release.android.discover_project", return_value=discovered),
+                patch("mobile_release.android.subprocess.run", side_effect=fake_run),
+            ):
+                run_android_build(config, signed=True)
+
+            jarsigner = commands[-1]
+            self.assertEqual(jarsigner[0], "jarsigner")
+            self.assertIn("-storepass:env", jarsigner)
+            self.assertIn("-keypass:env", jarsigner)
+            self.assertNotIn("store-secret", jarsigner)
+            self.assertNotIn("key-secret", jarsigner)
+            self.assertEqual(
+                signing_environment["MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD"],
+                "store-secret",
+            )
+            self.assertEqual(
+                signing_environment["MOBILE_RELEASE_ANDROID_KEY_PASSWORD"],
+                "key-secret",
+            )
+            self.assertNotIn("MOBILE_RELEASE_ANDROID_KEYSTORE_PATH", signing_environment)
+
     def test_signed_ios_archive_uses_target_safe_generic_signing_variables(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -601,6 +653,8 @@ class CliBuildTests(unittest.TestCase):
                 "to requested target\n"
                 "This jar contains entries whose signer certificate is self-signed.\n"
                 "Warning:\nThis jar contains signatures that do not include a timestamp.\n"
+                "POSIX file permission and/or symlink attributes detected. These attributes "
+                "are ignored when signing and are not protected by the signature.\n"
             ),
         )
         with patch("mobile_release.android.subprocess.run", return_value=accepted):
