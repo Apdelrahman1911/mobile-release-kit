@@ -39,7 +39,8 @@ The separate Android/iOS build jobs receive only their platform signing, service
 read-only project dependency inputs. They have no OIDC permission, Play ADC, App Store Connect P8,
 or Store mutation path.
 
-For Android, each Google job validates and removes its exact bounded short-lived ADC file. The build
+For Android, each Google job confines the exact generated ADC path to runner-scoped directories,
+rejects symlinks and non-files, restricts it to mode `0600`, validates it, and removes it. The build
 job runs on a fresh runner after the non-publishing online gate, so Gradle and project checks cannot inherit ADC
 state. The later Store job downloads the fixed same-run handoff, revalidates its checksum and final
 signature, authenticates, uploads, reads back, then removes ADC before attestation or retained-artifact
@@ -100,7 +101,8 @@ GitHub CI uses OIDC/Workload Identity Federation. Exported service-account JSON 
 
 The GitHub authentication action writes a short-lived `external_account` ADC file. The pinned
 Fastlane/Supply version dispatches that JSON type to Google external-account credentials; the
-workflow passes the exact ADC path and never reinterprets it as a long-lived service-account key.
+workflow restricts the generated regular file to owner-only mode `0600`, passes its exact path, and
+never reinterprets it as a long-lived service-account key.
 The shared CI inspects the locked Supply source for this compatibility contract without requesting
 an access token or contacting Google.
 

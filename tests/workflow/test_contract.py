@@ -484,6 +484,46 @@ class ReusableWorkflowContractTests(unittest.TestCase):
                 self.assertIn('rm -f -- "$MOBILE_RELEASE_GOOGLE_ADC_PATH"', body)
                 self.assertIn("GOOGLE_APPLICATION_CREDENTIALS", body)
 
+    def test_every_generated_google_adc_is_restricted_before_use(self) -> None:
+        expectations = {
+            "candidate-online": (
+                job_block(read(REUSABLE["candidate"]), "android_online"),
+                "google_online_auth",
+                "Restrict online-gate Google credential file",
+                "Check Android Store state without running application commands",
+            ),
+            "candidate-upload": (
+                job_block(read(REUSABLE["candidate"]), "android_store"),
+                "google_upload_auth",
+                "Restrict candidate-upload Google credential file",
+                "Revalidate, upload once, and read back the Android candidate",
+            ),
+            "external-testing": (
+                job_block(read(REUSABLE["external-testing"]), "android"),
+                "google_external_auth",
+                "Restrict external-testing Google credential file",
+                "Promote exact Android build and emit evidence",
+            ),
+            "production": (
+                job_block(read(REUSABLE["production-submit"]), "android"),
+                "google_production_auth",
+                "Restrict production Google credential file",
+                "Prepare exact Android build as production draft",
+            ),
+        }
+        for name, (body, auth_id, restriction, consumer) in expectations.items():
+            with self.subTest(name=name):
+                self.assertLess(body.index(restriction), body.index(consumer))
+                restricted = body[body.index(restriction) : body.index(consumer)]
+                self.assertIn(
+                    f"steps.{auth_id}.outputs.credentials_file_path", restricted
+                )
+                self.assertIn('[[ -f "$MOBILE_RELEASE_GOOGLE_ADC_PATH"', restricted)
+                self.assertIn('! -L "$MOBILE_RELEASE_GOOGLE_ADC_PATH"', restricted)
+                self.assertIn('chmod 600 -- "$MOBILE_RELEASE_GOOGLE_ADC_PATH"', restricted)
+                self.assertIn("stat -c '%a'", restricted)
+                self.assertIn('"$GITHUB_WORKSPACE"/*|"$RUNNER_TEMP"/*', restricted)
+
     def test_candidate_store_credentials_cannot_reenter_project_code(self) -> None:
         candidate = read(REUSABLE["candidate"])
         for platform, window in (

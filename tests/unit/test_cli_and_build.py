@@ -202,7 +202,7 @@ class CliBuildTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertEqual(completed.stdout.strip(), "mobile-release 0.1.2")
+            self.assertEqual(completed.stdout.strip(), "mobile-release 0.1.3")
             self.assertFalse(marker.exists())
 
     def test_init_preflights_sha_and_every_destination_before_writing(self) -> None:

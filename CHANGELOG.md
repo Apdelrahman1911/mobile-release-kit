@@ -4,6 +4,14 @@ All notable changes to Mobile Release Kit are documented here. The project follo
 
 ## Unreleased
 
+## 0.1.3 - 2026-08-22
+
+### Fixed
+
+- Restrict every GitHub OIDC-generated Google ADC file to owner-only mode `0600` before the shared
+  private-credential validator or a Play Store adapter can read it, while retaining bounded-path,
+  non-symlink, and unconditional-cleanup checks.
+
 ## 0.1.2 - 2026-08-21
 
 ### Fixed

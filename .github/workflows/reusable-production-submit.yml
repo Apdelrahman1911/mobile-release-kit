@@ -224,6 +224,19 @@ jobs:
           service_account: ${{ vars.MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT }}
           create_credentials_file: true
           export_environment_variables: true
+      - name: Restrict production Google credential file
+        env:
+          MOBILE_RELEASE_GOOGLE_ADC_PATH: ${{ steps.google_production_auth.outputs.credentials_file_path }}
+        run: |
+          set -euo pipefail
+          [[ -n "$MOBILE_RELEASE_GOOGLE_ADC_PATH" ]]
+          case "$MOBILE_RELEASE_GOOGLE_ADC_PATH" in
+            "$GITHUB_WORKSPACE"/*|"$RUNNER_TEMP"/*) ;;
+            *) echo "Google credential path is outside the runner's scoped directories" >&2; exit 1 ;;
+          esac
+          [[ -f "$MOBILE_RELEASE_GOOGLE_ADC_PATH" && ! -L "$MOBILE_RELEASE_GOOGLE_ADC_PATH" ]]
+          chmod 600 -- "$MOBILE_RELEASE_GOOGLE_ADC_PATH"
+          [[ "$(stat -c '%a' -- "$MOBILE_RELEASE_GOOGLE_ADC_PATH")" == '600' ]]
       - name: Prepare exact Android build as production draft
         working-directory: app
         env:
