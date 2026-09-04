@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mobile-release-kit"
-version = "0.1.3"
+version = "0.2.0"
 description = "Fail-early release validation and orchestration for Gradle Android and Xcode iOS applications"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -36,6 +36,7 @@ where = ["src"]
 "share/mobile-release-kit" = ["Gemfile", "Gemfile.lock"]
 "share/mobile-release-kit/fastlane" = [
   "fastlane/Fastfile",
+  "fastlane/play_store.rb",
   "fastlane/release_support.rb",
   "fastlane/run_lane.rb",
 ]

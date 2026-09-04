@@ -13,6 +13,7 @@ REQUIRED_TOOLING_FILES = (
     "Gemfile",
     "Gemfile.lock",
     "fastlane/Fastfile",
+    "fastlane/play_store.rb",
     "fastlane/release_support.rb",
     "fastlane/run_lane.rb",
     "schemas/candidate.schema.json",

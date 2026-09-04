@@ -195,6 +195,10 @@ Run the repository tests without credentials:
 ```bash
 python3 -m pip install -e '.[test]'
 python3 -m unittest discover -s tests
+bundle exec ruby tests/workflow/test_play_store.rb
+ruby -I. tests/workflow/test_fastlane_support.rb
+bundle exec ruby tests/workflow/test_supply_wif.rb
+bundle exec ruby fastlane/run_lane.rb --validate
 ```
 
 Workflow-contract tests reject mutable action references, inherited secrets, Store/OIDC authority

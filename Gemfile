@@ -6,3 +6,7 @@ ruby "~> 3.3.0"
 gem "fastlane", "= 2.235.0"
 gem "google-apis-androidpublisher_v3", "= 0.106.0"
 gem "multi_json", ">= 1.15", "< 2.0"
+
+group :test do
+  gem "minitest", "= 5.25.5", require: false
+end

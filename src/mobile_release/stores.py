@@ -86,6 +86,12 @@ def _private_app_directory(config: ReleaseConfig, relative: str) -> Path:
     return _repository_path(config, relative, "tool-owned Store directory")
 
 
+def _play_state_journal_path(receipt_path: Path) -> Path:
+    """Derive the one journal path shared by Python, Fastlane, and workflows."""
+
+    return receipt_path.with_name(f"{receipt_path.stem}-play-state.json")
+
+
 @dataclass(frozen=True)
 class StoreRequest:
     stage: str
@@ -187,6 +193,9 @@ def _store_environment(
             "production-submit": "production",
         }[request.stage]
         env["MOBILE_RELEASE_DESTINATION_TRACK"] = track
+        journal_path = _play_state_journal_path(receipt_path)
+        journal_path = _repository_path(config, journal_path, "Play state journal path")
+        env["MOBILE_RELEASE_PLAY_STATE_PATH"] = str(journal_path)
     else:
         env["MOBILE_RELEASE_ASC_APP_ID"] = str(platform_config.get("appStoreAppId", ""))
         env["MOBILE_RELEASE_TESTFLIGHT_EXTERNAL_GROUP"] = str(
@@ -281,11 +290,12 @@ def execute_store_operation(
                 "or set MOBILE_RELEASE_TOOLING_ROOT"
             )
         fastfile = tooling_root / "fastlane/Fastfile"
+        play_store = tooling_root / "fastlane/play_store.rb"
         runner = tooling_root / "fastlane/run_lane.rb"
         support = tooling_root / "fastlane/release_support.rb"
         gemfile = tooling_root / "Gemfile"
         lockfile = tooling_root / "Gemfile.lock"
-        tooling_files = (fastfile, runner, support, gemfile, lockfile)
+        tooling_files = (fastfile, play_store, runner, support, gemfile, lockfile)
         if any(path.is_symlink() or not path.is_file() for path in tooling_files):
             raise StoreOperationError("pinned shared Fastlane/Gem bundle is incomplete")
         _require_fastlane_bundle(tooling_root)
@@ -347,13 +357,14 @@ def online_preflight_findings(
             )
         ]
     fastfile = tooling_root / "fastlane/Fastfile"
+    play_store = tooling_root / "fastlane/play_store.rb"
     runner = tooling_root / "fastlane/run_lane.rb"
     support = tooling_root / "fastlane/release_support.rb"
     gemfile = tooling_root / "Gemfile"
     lockfile = tooling_root / "Gemfile.lock"
     if any(
         path.is_symlink() or not path.is_file()
-        for path in (fastfile, runner, support, gemfile, lockfile)
+        for path in (fastfile, play_store, runner, support, gemfile, lockfile)
     ):
         return [
             Finding(

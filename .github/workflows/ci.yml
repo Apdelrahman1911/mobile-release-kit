@@ -64,7 +64,7 @@ jobs:
           test -f .github/workflows/mobile-production-submit.yml
           grep -Fx '.mobile-release/' .gitignore
           grep -F 'example/mobile-release-kit/.github/workflows/reusable-candidate.yml@1111111111111111111111111111111111111111' .github/workflows/mobile-candidate.yml
-          "$venv_dir/bin/python" -c 'from mobile_release.tooling import resolve_tooling_root; root = resolve_tooling_root(environ={}); assert root is not None; required = ("Gemfile", "Gemfile.lock", "fastlane/Fastfile", "fastlane/release_support.rb", "fastlane/run_lane.rb", "schemas/project.schema.json", "schemas/candidate.schema.json", "schemas/receipt.schema.json", "templates/mobile-release.json", "templates/workflows/mobile-preflight.yml", "templates/workflows/mobile-candidate.yml", "templates/workflows/mobile-external-testing.yml", "templates/workflows/mobile-production-submit.yml"); assert all((root / path).is_file() for path in required)'
+          "$venv_dir/bin/python" -c 'from mobile_release.tooling import resolve_tooling_root; root = resolve_tooling_root(environ={}); assert root is not None; required = ("Gemfile", "Gemfile.lock", "fastlane/Fastfile", "fastlane/play_store.rb", "fastlane/release_support.rb", "fastlane/run_lane.rb", "schemas/project.schema.json", "schemas/candidate.schema.json", "schemas/receipt.schema.json", "templates/mobile-release.json", "templates/workflows/mobile-preflight.yml", "templates/workflows/mobile-candidate.yml", "templates/workflows/mobile-external-testing.yml", "templates/workflows/mobile-production-submit.yml"); assert all((root / path).is_file() for path in required)'
       - name: Install pinned actionlint
         env:
           ACTIONLINT_VERSION: 1.7.12
@@ -93,6 +93,7 @@ jobs:
       - name: Run credential-free Fastlane support tests
         run: |
           ruby -I. tests/workflow/test_fastlane_support.rb
+          bundle exec ruby tests/workflow/test_play_store.rb
           ruby tests/workflow/test_workflow_yaml.rb
           bundle exec ruby tests/workflow/test_supply_wif.rb
       - name: Parse the shared Fastfile without credentials

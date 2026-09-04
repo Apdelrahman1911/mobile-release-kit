@@ -68,6 +68,14 @@ Unknown fields are rejected so an old tool cannot silently ignore new security p
 
 Old manifests and receipts remain immutable historical evidence. Do not rewrite them to a new schema. Promotions require a tool version that understands the exact recorded schema; if retained evidence is no longer supported or has expired, create a new candidate.
 
+### v0.2 receipt migration
+
+Candidate manifests remain schema v1. Raw Store receipts and sealed lifecycle receipts are schema
+v2 and add an explicit `outcome`; Android receipts also bind guarded before/expected/readback track
+state. v0.2 intentionally rejects receipt v1. Finish an existing v0.1 candidate with its exact
+pinned v0.1 tooling, or allocate a new committed build number and create a v0.2 candidate. Do not
+translate or reseal old evidence.
+
 ## Rollback
 
 Before any Store mutation, reverting the consumer SHA/configuration is an ordinary source change.

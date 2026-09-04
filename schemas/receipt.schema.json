@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:mobile-release-kit:schema:receipt:1",
+  "$id": "urn:mobile-release-kit:schema:receipt:2",
   "title": "Mobile Release Kit Store mutation receipt",
   "type": "object",
   "additionalProperties": false,
@@ -17,6 +17,7 @@
     "version",
     "storeBuildId",
     "operation",
+    "outcome",
     "destination",
     "readback",
     "createdBy",
@@ -25,10 +26,14 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": 1
+      "const": 2
     },
     "stage": {
-      "enum": ["candidate", "external-testing", "production-submit"]
+      "enum": [
+        "candidate",
+        "external-testing",
+        "production-submit"
+      ]
     },
     "candidateManifestSha256": {
       "$ref": "#/$defs/sha256"
@@ -46,10 +51,16 @@
       "$ref": "#/$defs/source"
     },
     "platform": {
-      "enum": ["android", "ios"]
+      "enum": [
+        "android",
+        "ios"
+      ]
     },
     "provider": {
-      "enum": ["google-play", "app-store-connect"]
+      "enum": [
+        "google-play",
+        "app-store-connect"
+      ]
     },
     "applicationId": {
       "type": "string",
@@ -65,13 +76,28 @@
       "maxLength": 255
     },
     "operation": {
-      "enum": ["uploaded", "promoted", "distributed", "submitted"]
+      "enum": [
+        "uploaded",
+        "promoted",
+        "distributed",
+        "submitted"
+      ]
+    },
+    "outcome": {
+      "enum": [
+        "mutated",
+        "reconciled",
+        "already-present"
+      ]
     },
     "destination": {
       "$ref": "#/$defs/destination"
     },
     "readback": {
       "$ref": "#/$defs/readback"
+    },
+    "storeState": {
+      "$ref": "#/$defs/storeState"
     },
     "createdBy": {
       "$ref": "#/$defs/workflowRun"
@@ -88,17 +114,26 @@
       "if": {
         "properties": {
           "stage": {
-            "enum": ["external-testing", "production-submit"]
+            "enum": [
+              "external-testing",
+              "production-submit"
+            ]
           }
         },
-        "required": ["stage"]
+        "required": [
+          "stage"
+        ]
       },
       "then": {
-        "required": ["previousReceiptSha256"]
+        "required": [
+          "previousReceiptSha256"
+        ]
       },
       "else": {
         "not": {
-          "required": ["previousReceiptSha256"]
+          "required": [
+            "previousReceiptSha256"
+          ]
         }
       }
     },
@@ -109,14 +144,19 @@
             "const": "android"
           }
         },
-        "required": ["platform"]
+        "required": [
+          "platform"
+        ]
       },
       "then": {
         "properties": {
           "provider": {
             "const": "google-play"
           }
-        }
+        },
+        "required": [
+          "storeState"
+        ]
       },
       "else": {
         "properties": {
@@ -130,6 +170,11 @@
               }
             }
           }
+        },
+        "not": {
+          "required": [
+            "storeState"
+          ]
         }
       }
     },
@@ -143,7 +188,10 @@
             "const": "android"
           }
         },
-        "required": ["stage", "platform"]
+        "required": [
+          "stage",
+          "platform"
+        ]
       },
       "then": {
         "properties": {
@@ -153,6 +201,13 @@
                 "const": true
               }
             }
+          },
+          "outcome": {
+            "enum": [
+              "mutated",
+              "reconciled",
+              "already-present"
+            ]
           }
         }
       },
@@ -160,7 +215,9 @@
         "properties": {
           "destination": {
             "not": {
-              "required": ["closedTesterAssignmentVerified"]
+              "required": [
+                "closedTesterAssignmentVerified"
+              ]
             }
           }
         }
@@ -176,7 +233,10 @@
             "const": "android"
           }
         },
-        "required": ["stage", "platform"]
+        "required": [
+          "stage",
+          "platform"
+        ]
       },
       "then": {
         "properties": {
@@ -192,8 +252,15 @@
                 "const": "draft"
               }
             },
-            "required": ["channel", "releaseStatus"],
-            "not": {"required": ["automaticRelease"]}
+            "required": [
+              "channel",
+              "releaseStatus"
+            ],
+            "not": {
+              "required": [
+                "automaticRelease"
+              ]
+            }
           },
           "readback": {
             "properties": {
@@ -201,6 +268,22 @@
                 "const": "draft"
               }
             }
+          },
+          "outcome": {
+            "enum": [
+              "mutated",
+              "reconciled"
+            ]
+          },
+          "storeState": {
+            "required": [
+              "sourceBeforeSha256",
+              "sourceExpectedSha256",
+              "sourceCommittedSha256",
+              "sourceUnrelatedBeforeSha256",
+              "sourceUnrelatedCommittedSha256",
+              "sourceTargetTransition"
+            ]
           }
         }
       }
@@ -215,7 +298,10 @@
             "const": "ios"
           }
         },
-        "required": ["stage", "platform"]
+        "required": [
+          "stage",
+          "platform"
+        ]
       },
       "then": {
         "properties": {
@@ -231,8 +317,15 @@
                 "const": false
               }
             },
-            "required": ["channel", "automaticRelease"],
-            "not": {"required": ["releaseStatus"]}
+            "required": [
+              "channel",
+              "automaticRelease"
+            ],
+            "not": {
+              "required": [
+                "releaseStatus"
+              ]
+            }
           },
           "readback": {
             "properties": {
@@ -245,33 +338,12 @@
                 ]
               }
             }
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "stage": {"const": "candidate"},
-          "platform": {"const": "android"}
-        },
-        "required": ["stage", "platform"]
-      },
-      "then": {
-        "properties": {
-          "operation": {"const": "uploaded"},
-          "destination": {
-            "properties": {
-              "channel": {"const": "internal"},
-              "releaseStatus": {"const": "completed"}
-            },
-            "required": ["channel", "releaseStatus"],
-            "not": {"required": ["automaticRelease"]}
           },
-          "readback": {
-            "properties": {
-              "state": {"const": "available-to-testers"}
-            }
+          "outcome": {
+            "enum": [
+              "mutated",
+              "already-present"
+            ]
           }
         }
       }
@@ -279,31 +351,89 @@
     {
       "if": {
         "properties": {
-          "stage": {"const": "candidate"},
-          "platform": {"const": "ios"}
+          "stage": {
+            "const": "candidate"
+          },
+          "platform": {
+            "const": "android"
+          }
         },
-        "required": ["stage", "platform"]
+        "required": [
+          "stage",
+          "platform"
+        ]
       },
       "then": {
         "properties": {
-          "operation": {"const": "uploaded"},
+          "operation": {
+            "const": "uploaded"
+          },
           "destination": {
             "properties": {
-              "channel": {"const": "testflight-internal"}
+              "channel": {
+                "const": "internal"
+              },
+              "releaseStatus": {
+                "const": "completed"
+              }
             },
-            "required": ["channel"],
+            "required": [
+              "channel",
+              "releaseStatus"
+            ],
             "not": {
-              "anyOf": [
-                {"required": ["releaseStatus"]},
-                {"required": ["automaticRelease"]}
+              "required": [
+                "automaticRelease"
               ]
             }
           },
           "readback": {
             "properties": {
               "state": {
-                "enum": ["processed", "available-to-testers"]
+                "const": "available-to-testers"
               }
+            }
+          },
+          "outcome": {
+            "enum": [
+              "mutated",
+              "reconciled"
+            ]
+          },
+          "storeState": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "sourceBeforeSha256"
+                  ]
+                },
+                {
+                  "required": [
+                    "sourceExpectedSha256"
+                  ]
+                },
+                {
+                  "required": [
+                    "sourceCommittedSha256"
+                  ]
+                },
+                {
+                  "required": [
+                    "sourceUnrelatedBeforeSha256"
+                  ]
+                },
+                {
+                  "required": [
+                    "sourceUnrelatedCommittedSha256"
+                  ]
+                },
+                {
+                  "required": [
+                    "sourceTargetTransition"
+                  ]
+                }
+              ]
             }
           }
         }
@@ -312,28 +442,61 @@
     {
       "if": {
         "properties": {
-          "stage": {"const": "external-testing"},
-          "platform": {"const": "android"}
+          "stage": {
+            "const": "candidate"
+          },
+          "platform": {
+            "const": "ios"
+          }
         },
-        "required": ["stage", "platform"]
+        "required": [
+          "stage",
+          "platform"
+        ]
       },
       "then": {
         "properties": {
-          "operation": {"const": "promoted"},
+          "operation": {
+            "const": "uploaded"
+          },
           "destination": {
             "properties": {
               "channel": {
-                "not": {"enum": ["internal", "production"]}
-              },
-              "releaseStatus": {"const": "completed"}
+                "const": "testflight-internal"
+              }
             },
-            "required": ["channel", "releaseStatus"],
-            "not": {"required": ["automaticRelease"]}
+            "required": [
+              "channel"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "releaseStatus"
+                  ]
+                },
+                {
+                  "required": [
+                    "automaticRelease"
+                  ]
+                }
+              ]
+            }
           },
           "readback": {
             "properties": {
-              "state": {"const": "available-to-testers"}
+              "state": {
+                "enum": [
+                  "processed",
+                  "available-to-testers"
+                ]
+              }
             }
+          },
+          "outcome": {
+            "enum": [
+              "mutated"
+            ]
           }
         }
       }
@@ -341,23 +504,115 @@
     {
       "if": {
         "properties": {
-          "stage": {"const": "external-testing"},
-          "platform": {"const": "ios"}
+          "stage": {
+            "const": "external-testing"
+          },
+          "platform": {
+            "const": "android"
+          }
         },
-        "required": ["stage", "platform"]
+        "required": [
+          "stage",
+          "platform"
+        ]
       },
       "then": {
         "properties": {
-          "operation": {"const": "distributed"},
+          "operation": {
+            "const": "promoted"
+          },
           "destination": {
             "properties": {
-              "channel": {"const": "testflight-external"}
+              "channel": {
+                "not": {
+                  "enum": [
+                    "internal",
+                    "production"
+                  ]
+                }
+              },
+              "releaseStatus": {
+                "const": "completed"
+              }
             },
-            "required": ["channel"],
+            "required": [
+              "channel",
+              "releaseStatus"
+            ],
+            "not": {
+              "required": [
+                "automaticRelease"
+              ]
+            }
+          },
+          "readback": {
+            "properties": {
+              "state": {
+                "const": "available-to-testers"
+              }
+            }
+          },
+          "outcome": {
+            "enum": [
+              "mutated",
+              "reconciled",
+              "already-present"
+            ]
+          },
+          "storeState": {
+            "required": [
+              "sourceBeforeSha256",
+              "sourceExpectedSha256",
+              "sourceCommittedSha256",
+              "sourceUnrelatedBeforeSha256",
+              "sourceUnrelatedCommittedSha256",
+              "sourceTargetTransition"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": {
+            "const": "external-testing"
+          },
+          "platform": {
+            "const": "ios"
+          }
+        },
+        "required": [
+          "stage",
+          "platform"
+        ]
+      },
+      "then": {
+        "properties": {
+          "operation": {
+            "const": "distributed"
+          },
+          "destination": {
+            "properties": {
+              "channel": {
+                "const": "testflight-external"
+              }
+            },
+            "required": [
+              "channel"
+            ],
             "not": {
               "anyOf": [
-                {"required": ["releaseStatus"]},
-                {"required": ["automaticRelease"]}
+                {
+                  "required": [
+                    "releaseStatus"
+                  ]
+                },
+                {
+                  "required": [
+                    "automaticRelease"
+                  ]
+                }
               ]
             }
           },
@@ -369,6 +624,81 @@
                   "submitted-for-review",
                   "in-review",
                   "approved"
+                ]
+              }
+            }
+          },
+          "outcome": {
+            "enum": [
+              "mutated",
+              "already-present"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "android"
+          },
+          "outcome": {
+            "const": "already-present"
+          }
+        },
+        "required": [
+          "platform",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "storeState": {
+            "properties": {
+              "mode": {
+                "const": "observation"
+              },
+              "sourceTargetTransition": {
+                "enum": [
+                  "retained",
+                  "already-deactivated"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "android"
+          },
+          "outcome": {
+            "enum": [
+              "mutated",
+              "reconciled"
+            ]
+          }
+        },
+        "required": [
+          "platform",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "storeState": {
+            "properties": {
+              "mode": {
+                "const": "mutation"
+              },
+              "sourceTargetTransition": {
+                "enum": [
+                  "retained",
+                  "deactivated"
                 ]
               }
             }
@@ -385,7 +715,10 @@
     "integrity": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["algorithm", "sha256"],
+      "required": [
+        "algorithm",
+        "sha256"
+      ],
       "properties": {
         "algorithm": {
           "const": "sha256"
@@ -407,7 +740,10 @@
     "tooling": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "commit"],
+      "required": [
+        "version",
+        "commit"
+      ],
       "properties": {
         "version": {
           "type": "string",
@@ -421,7 +757,10 @@
     "repository": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["fullName", "id"],
+      "required": [
+        "fullName",
+        "id"
+      ],
       "properties": {
         "fullName": {
           "type": "string",
@@ -436,7 +775,10 @@
     "source": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["commit", "tree"],
+      "required": [
+        "commit",
+        "tree"
+      ],
       "properties": {
         "commit": {
           "$ref": "#/$defs/gitObjectId"
@@ -449,7 +791,10 @@
     "version": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["marketing", "build"],
+      "required": [
+        "marketing",
+        "build"
+      ],
       "properties": {
         "marketing": {
           "type": "string",
@@ -467,7 +812,9 @@
     "destination": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["channel"],
+      "required": [
+        "channel"
+      ],
       "properties": {
         "channel": {
           "type": "string",
@@ -475,7 +822,11 @@
           "maxLength": 255
         },
         "releaseStatus": {
-          "enum": ["draft", "completed", "in-progress"]
+          "enum": [
+            "draft",
+            "completed",
+            "in-progress"
+          ]
         },
         "automaticRelease": {
           "type": "boolean"
@@ -488,7 +839,10 @@
     "readback": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["state", "observedAt"],
+      "required": [
+        "state",
+        "observedAt"
+      ],
       "properties": {
         "state": {
           "enum": [
@@ -510,7 +864,11 @@
     "workflowRun": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["workflow", "runId", "attempt"],
+      "required": [
+        "workflow",
+        "runId",
+        "attempt"
+      ],
       "properties": {
         "workflow": {
           "type": "string",
@@ -526,6 +884,154 @@
           "minimum": 1
         }
       }
+    },
+    "storeState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonicalization",
+        "mode",
+        "readbackEditId",
+        "destinationBeforeSha256",
+        "destinationExpectedSha256",
+        "destinationCommittedSha256",
+        "unrelatedBeforeSha256",
+        "unrelatedCommittedSha256",
+        "targetReleaseSha256"
+      ],
+      "properties": {
+        "canonicalization": {
+          "const": "mrk-play-track-state-v1"
+        },
+        "mode": {
+          "enum": [
+            "mutation",
+            "observation"
+          ]
+        },
+        "mutationEditId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "readbackEditId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "destinationBeforeSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "destinationExpectedSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "destinationCommittedSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "unrelatedBeforeSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "unrelatedCommittedSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "targetReleaseSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sourceBeforeSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sourceExpectedSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sourceCommittedSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sourceUnrelatedBeforeSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sourceUnrelatedCommittedSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sourceTargetTransition": {
+          "enum": [
+            "retained",
+            "deactivated",
+            "already-deactivated"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "mutation"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "required": [
+              "mutationEditId"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "mutationEditId"
+              ]
+            }
+          }
+        },
+        {
+          "dependentRequired": {
+            "sourceBeforeSha256": [
+              "sourceExpectedSha256",
+              "sourceCommittedSha256",
+              "sourceUnrelatedBeforeSha256",
+              "sourceUnrelatedCommittedSha256",
+              "sourceTargetTransition"
+            ],
+            "sourceExpectedSha256": [
+              "sourceBeforeSha256",
+              "sourceCommittedSha256",
+              "sourceUnrelatedBeforeSha256",
+              "sourceUnrelatedCommittedSha256",
+              "sourceTargetTransition"
+            ],
+            "sourceCommittedSha256": [
+              "sourceBeforeSha256",
+              "sourceExpectedSha256",
+              "sourceUnrelatedBeforeSha256",
+              "sourceUnrelatedCommittedSha256",
+              "sourceTargetTransition"
+            ],
+            "sourceUnrelatedBeforeSha256": [
+              "sourceBeforeSha256",
+              "sourceExpectedSha256",
+              "sourceCommittedSha256",
+              "sourceUnrelatedCommittedSha256",
+              "sourceTargetTransition"
+            ],
+            "sourceUnrelatedCommittedSha256": [
+              "sourceBeforeSha256",
+              "sourceExpectedSha256",
+              "sourceCommittedSha256",
+              "sourceUnrelatedBeforeSha256",
+              "sourceTargetTransition"
+            ],
+            "sourceTargetTransition": [
+              "sourceBeforeSha256",
+              "sourceExpectedSha256",
+              "sourceCommittedSha256",
+              "sourceUnrelatedBeforeSha256",
+              "sourceUnrelatedCommittedSha256"
+            ]
+          }
+        }
+      ]
     }
   }
 }

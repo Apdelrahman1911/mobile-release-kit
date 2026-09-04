@@ -202,7 +202,7 @@ class CliBuildTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertEqual(completed.stdout.strip(), "mobile-release 0.1.3")
+            self.assertEqual(completed.stdout.strip(), "mobile-release 0.2.0")
             self.assertFalse(marker.exists())
 
     def test_init_preflights_sha_and_every_destination_before_writing(self) -> None:
@@ -993,7 +993,7 @@ class CliBuildTests(unittest.TestCase):
                 receipt_path.write_text(
                     json.dumps(
                         {
-                            "schemaVersion": 1,
+                            "schemaVersion": 2,
                             "operation": "android_internal_upload",
                             "platform": "android",
                             "appIdentity": "com.example.reader",
@@ -1005,7 +1005,19 @@ class CliBuildTests(unittest.TestCase):
                             "versionCode": 42,
                             "destinationTrack": "internal",
                             "releaseStatus": "completed",
-                            "storeEditId": "edit-1",
+                            "storeEditId": "readback-edit",
+                            "storeState": {
+                                "canonicalization": "mrk-play-track-state-v1",
+                                "mode": "mutation",
+                                "mutationEditId": "mutation-edit",
+                                "readbackEditId": "readback-edit",
+                                "destinationBeforeSha256": "a" * 64,
+                                "destinationExpectedSha256": "b" * 64,
+                                "destinationCommittedSha256": "b" * 64,
+                                "unrelatedBeforeSha256": "c" * 64,
+                                "unrelatedCommittedSha256": "c" * 64,
+                                "targetReleaseSha256": "d" * 64,
+                            },
                         }
                     ),
                     encoding="utf-8",
@@ -1055,6 +1067,10 @@ class CliBuildTests(unittest.TestCase):
             )
             self.assertEqual(
                 Path(captured_environment["MOBILE_RELEASE_ANDROID_AAB_PATH"]), aab.resolve()
+            )
+            self.assertEqual(
+                Path(captured_environment["MOBILE_RELEASE_PLAY_STATE_PATH"]),
+                receipt_path.with_name("raw-store-receipt-play-state.json").resolve(),
             )
             self.assertNotEqual(captured_cwd, root)
             self.assertNotIn("MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD", captured_environment)

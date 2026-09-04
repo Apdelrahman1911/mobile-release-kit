@@ -233,6 +233,7 @@ def validate_evidence_document(value: Mapping[str, Any]) -> None:
             "version",
             "storeBuildId",
             "operation",
+            "outcome",
             "destination",
             "readback",
             "createdBy",
@@ -240,12 +241,19 @@ def validate_evidence_document(value: Mapping[str, Any]) -> None:
         }
         if payload.get("stage") != "candidate":
             required.add("previousReceiptSha256")
+        if payload.get("platform") == "android":
+            required.add("storeState")
         receipt = _exact_keys(payload, required, "receipt")
-        if type(receipt["schemaVersion"]) is not int or receipt["schemaVersion"] != 1 or receipt["stage"] not in {
-            "candidate",
-            "external-testing",
-            "production-submit",
-        }:
+        if (
+            type(receipt["schemaVersion"]) is not int
+            or receipt["schemaVersion"] != 2
+            or receipt["stage"]
+            not in {
+                "candidate",
+                "external-testing",
+                "production-submit",
+            }
+        ):
             raise ValidationError("receipt schemaVersion/stage is invalid")
         if not common_sha(receipt["candidateManifestSha256"]) or (
             "previousReceiptSha256" in receipt
@@ -284,6 +292,24 @@ def validate_evidence_document(value: Mapping[str, Any]) -> None:
         }
         if receipt["operation"] != expected_operations[(receipt["stage"], platform)]:
             raise ValidationError("receipt operation does not match its stage/platform")
+        if receipt["outcome"] not in {"mutated", "reconciled", "already-present"}:
+            raise ValidationError("receipt outcome is invalid")
+        if receipt["stage"] == "candidate" and receipt["outcome"] == "already-present":
+            raise ValidationError("candidate receipt cannot adopt an already-present build")
+        if (
+            platform == "android"
+            and receipt["stage"] == "production-submit"
+            and receipt["outcome"] == "already-present"
+        ):
+            raise ValidationError("production Play receipt cannot adopt an existing draft")
+        if platform == "ios" and receipt["outcome"] == "reconciled":
+            raise ValidationError("iOS receipt cannot claim unsupported reconciliation")
+        if platform == "android":
+            _validate_play_store_state(
+                receipt["storeState"],
+                stage=receipt["stage"],
+                outcome=receipt["outcome"],
+            )
         destination_keys = {"channel"}
         if platform == "android":
             destination_keys.add("releaseStatus")
@@ -320,6 +346,8 @@ def validate_evidence_document(value: Mapping[str, Any]) -> None:
             if receipt["stage"] == "production-submit" and destination["channel"] != "production":
                 raise ValidationError("production Play receipt must target production draft")
         else:
+            if "storeState" in receipt:
+                raise ValidationError("iOS receipt must not contain Play Store-state evidence")
             expected_channel = {
                 "candidate": "testflight-internal",
                 "external-testing": "testflight-external",
@@ -606,6 +634,117 @@ def load_store_receipt(path: Path) -> dict[str, Any]:
     return receipt
 
 
+def _validate_play_store_state(
+    value: object,
+    *,
+    stage: str,
+    outcome: str,
+    store_edit_id: object | None = None,
+) -> dict[str, Any]:
+    required = {
+        "canonicalization",
+        "mode",
+        "readbackEditId",
+        "destinationBeforeSha256",
+        "destinationExpectedSha256",
+        "destinationCommittedSha256",
+        "unrelatedBeforeSha256",
+        "unrelatedCommittedSha256",
+        "targetReleaseSha256",
+    }
+    if outcome in {"mutated", "reconciled"}:
+        required.add("mutationEditId")
+    if stage != "candidate":
+        required.update(
+            {
+                "sourceBeforeSha256",
+                "sourceExpectedSha256",
+                "sourceCommittedSha256",
+                "sourceUnrelatedBeforeSha256",
+                "sourceUnrelatedCommittedSha256",
+                "sourceTargetTransition",
+            }
+        )
+    state = _exact_keys(value, required, "receipt.storeState")
+    if state["canonicalization"] != "mrk-play-track-state-v1":
+        raise ValidationError("Play Store-state canonicalization is unsupported")
+    expected_mode = "observation" if outcome == "already-present" else "mutation"
+    if state["mode"] != expected_mode:
+        raise ValidationError("Play Store-state mode does not match receipt outcome")
+    for field in required & {
+        "mutationEditId",
+        "readbackEditId",
+    }:
+        if (
+            not isinstance(state[field], str)
+            or not state[field].strip()
+            or len(state[field]) > 255
+        ):
+            raise ValidationError(f"Play Store-state {field} is invalid")
+    if store_edit_id is not None and state["readbackEditId"] != store_edit_id:
+        raise ValidationError("Play Store receipt/readback edit IDs do not match")
+    if "mutationEditId" in state and state["mutationEditId"] == state["readbackEditId"]:
+        raise ValidationError("Play mutation and readback must use distinct edits")
+    hash_fields = required - {
+        "canonicalization",
+        "mode",
+        "mutationEditId",
+        "readbackEditId",
+        "sourceTargetTransition",
+    }
+    if not all(
+        isinstance(state[field], str) and HEX_SHA256_RE.fullmatch(state[field])
+        for field in hash_fields
+    ):
+        raise ValidationError("Play Store-state evidence contains an invalid SHA-256")
+    if state["destinationExpectedSha256"] != state["destinationCommittedSha256"]:
+        raise ValidationError("Play committed destination differs from the guarded expected state")
+    if state["unrelatedBeforeSha256"] != state["unrelatedCommittedSha256"]:
+        raise ValidationError("Play receipt does not preserve unrelated destination releases")
+    if stage != "candidate":
+        if (
+            state["sourceUnrelatedBeforeSha256"]
+            != state["sourceUnrelatedCommittedSha256"]
+        ):
+            raise ValidationError("Play receipt does not preserve unrelated source releases")
+        transition = state["sourceTargetTransition"]
+        if outcome == "already-present":
+            if transition not in {"retained", "already-deactivated"}:
+                raise ValidationError("Play observation has an invalid source transition")
+            if not (
+                state["sourceBeforeSha256"]
+                == state["sourceExpectedSha256"]
+                == state["sourceCommittedSha256"]
+            ):
+                raise ValidationError("Play observation contains a source-state change")
+        else:
+            if transition not in {"retained", "deactivated"}:
+                raise ValidationError("Play mutation has an invalid source transition")
+            if state["sourceExpectedSha256"] not in {
+                state["sourceBeforeSha256"],
+                state["sourceCommittedSha256"],
+            }:
+                raise ValidationError("Play source expected state is outside the allowed transition")
+            if transition == "retained" and not (
+                state["sourceBeforeSha256"]
+                == state["sourceExpectedSha256"]
+                == state["sourceCommittedSha256"]
+            ):
+                raise ValidationError("Play retained source transition changed source state")
+            if (
+                transition == "deactivated"
+                and state["sourceBeforeSha256"] == state["sourceCommittedSha256"]
+            ):
+                raise ValidationError("Play deactivated source transition did not change source state")
+    if outcome == "already-present" and not (
+        state["destinationBeforeSha256"]
+        == state["destinationExpectedSha256"]
+        == state["destinationCommittedSha256"]
+    ):
+        raise ValidationError("Play observation receipt contains a mutation-shaped state change")
+    return state
+
+
 def validate_store_receipt(
     receipt: Mapping[str, Any],
     *,
@@ -639,15 +778,22 @@ def validate_store_receipt(
     missing = sorted(required_common - set(receipt))
     if missing:
         raise ValidationError(f"Store receipt is missing fields: {', '.join(missing)}")
-    if type(receipt["schemaVersion"]) is not int or receipt["schemaVersion"] != 1:
-        raise ValidationError("Store receipt schemaVersion must be 1")
+    if type(receipt["schemaVersion"]) is not int or receipt["schemaVersion"] != 2:
+        raise ValidationError("Store receipt schemaVersion must be 2")
     if receipt["operation"] != operation or receipt["platform"] != platform:
         raise ValidationError("Store receipt operation/platform does not match the requested stage")
     platform_config = config.section(platform)
     allowed = set(required_common)
     if platform == "android":
         allowed.update(
-            {"destinationTrack", "releaseStatus", "versionCode", "storeEditId", "releaseId"}
+            {
+                "destinationTrack",
+                "releaseStatus",
+                "versionCode",
+                "storeEditId",
+                "releaseId",
+                "storeState",
+            }
         )
         if stage != "candidate":
             allowed.add("sourceTrack")
@@ -674,10 +820,20 @@ def validate_store_receipt(
         or receipt["buildNumber"] != release.build
     ):
         raise ValidationError("Store receipt version/build does not match committed release version")
-    if receipt["result"] not in {"accepted", "already_present"}:
-        raise ValidationError("Store receipt does not prove accepted or already-present Store state")
-    if stage == "candidate" and receipt["result"] != "accepted":
+    if receipt["result"] not in {"accepted", "reconciled", "already_present"}:
+        raise ValidationError(
+            "Store receipt does not prove accepted, reconciled, or already-present Store state"
+        )
+    if platform == "ios" and receipt["result"] == "reconciled":
+        raise ValidationError("iOS Store receipt cannot claim unsupported reconciliation")
+    if stage == "candidate" and receipt["result"] == "already_present":
         raise ValidationError("candidate upload must be newly accepted; adoption is forbidden")
+    if (
+        platform == "android"
+        and stage == "production-submit"
+        and receipt["result"] == "already_present"
+    ):
+        raise ValidationError("production Play draft adoption is forbidden")
     _validate_timestamp(receipt["observedAt"], "Store receipt observedAt")
 
     if platform == "android":
@@ -695,6 +851,17 @@ def validate_store_receipt(
                 or len(receipt[field]) > 255
             ):
                 raise ValidationError(f"Android Store receipt {field} is invalid")
+        outcome = {
+            "accepted": "mutated",
+            "reconciled": "reconciled",
+            "already_present": "already-present",
+        }[receipt["result"]]
+        _validate_play_store_state(
+            receipt.get("storeState"),
+            stage=stage,
+            outcome=outcome,
+            store_edit_id=receipt.get("storeEditId"),
+        )
         expected_track = {
             "candidate": "internal",
             "external-testing": platform_config.get("externalTrack", {}).get("name"),
@@ -1047,8 +1214,13 @@ def build_receipt(
     }
     if state not in allowed_states:
         raise ValidationError("Store readback lacks an allowed explicit state")
+    outcome = {
+        "accepted": "mutated",
+        "reconciled": "reconciled",
+        "already_present": "already-present",
+    }[store_receipt["result"]]
     payload: dict[str, Any] = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "stage": stage,
         "candidateManifestSha256": candidate_manifest["integrity"]["sha256"],
         "tooling": candidate_payload["tooling"],
@@ -1063,11 +1235,14 @@ def build_receipt(
         "version": candidate_payload["version"],
         "storeBuildId": store_build_id,
         "operation": operations[(stage, platform)],
+        "outcome": outcome,
         "destination": destination,
         "readback": {"state": state, "observedAt": store_receipt["observedAt"]},
         "createdBy": _workflow_run(stage),
         "createdAt": timestamp(),
     }
+    if platform == "android":
+        payload["storeState"] = dict(store_receipt["storeState"])
     predecessor = previous_receipt or external_receipt
     if stage != "candidate":
         if predecessor is None:
@@ -1156,6 +1331,15 @@ def validate_receipt_chain(
             raise ValidationError(
                 "iOS production requires an external receipt whose readback.state is "
                 "available-to-testers; rerun external-testing after Beta Review approval"
+            )
+        if (
+            platform == "android"
+            and (production_receipt is not None or require_production_eligible_external)
+            and receipt.get("outcome") not in {"mutated", "reconciled"}
+        ):
+            raise ValidationError(
+                "Android production requires an external receipt produced by a confirmed "
+                "promotion; an observation-only already-present receipt is not authorization"
             )
     if production_receipt is not None:
         if candidate_receipt is None or external_receipt is None:

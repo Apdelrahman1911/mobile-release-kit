@@ -4,6 +4,17 @@ All notable changes to Mobile Release Kit are documented here. The project follo
 
 ## Unreleased
 
+### Fixed
+
+- Replace Supply's destructive one-release Google Play track writes with a guarded adapter that
+  preserves every unrelated release, validates the complete source/destination state before
+  commit, commits once without transport retries, and verifies the exact committed state through a
+  fresh edit while allowing only Play's documented target-only source deactivation.
+- Introduce Store receipt schema v2 with explicit mutation/reconciliation/observation outcomes and
+  checksum-bound Play track-state relationships. Receipt v1 is no longer accepted by v0.2 tooling.
+- Retain a private per-attempt Play state journal after Google credentials are removed so an
+  ambiguous or post-commit failure can be investigated without exposing credentials or binaries.
+
 ## 0.1.3 - 2026-08-22
 
 ### Fixed

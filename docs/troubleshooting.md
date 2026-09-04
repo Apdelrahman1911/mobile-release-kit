@@ -88,6 +88,13 @@ a temporary edit that is deleted without commit; Apple inspection performs reads
 
 Do not rerun candidate upload immediately. Query the Store for the exact package/Bundle ID, marketing version, build number, and expected state. Resume only when exact identity can be proved. Otherwise commit a new build number.
 
+For Android, download the attempt-specific `mobile-release-play-state-android-*` diagnostic
+artifact before it expires. Check its ordered `history`, failure classifications,
+mutation/readback edit IDs, and complete before/expected/observed track snapshots.
+`committed-and-read-back` is a successful exact reconciliation;
+`commit-response-ambiguous` or `failed` requires explicit reconciliation and must not be treated as
+a receipt. Never edit or locally reseal evidence to manufacture success.
+
 If the candidate build job succeeded and the Store job failed before any possible upload, rerun only
 the failed Store job so it consumes the original one-day same-run handoff. Rerunning all jobs would
 compile a replacement binary and is not a valid continuation after an ambiguous mutation. If the
@@ -117,6 +124,11 @@ not rebuild or re-upload the IPA.
 - Production is not a generic track input and accepts one platform per dispatch.
 
 Never delete/replace unrelated releases in a destination track automatically.
+The guarded adapter treats any unrelated release change, duplicate target, multi-version source
+release, unsupported source transition, or post-commit mismatch as a hard failure. Google may
+remove only the promoted target from its source track automatically; that transition is recorded,
+not treated as collateral loss. Resolve concurrent
+Console edits before retrying; the tool never rolls back by overwriting current Store state.
 
 ## Git source rejected after a protected rebase
 
