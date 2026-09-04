@@ -93,7 +93,7 @@ jobs:
       - name: Run credential-free Fastlane support tests
         run: |
           ruby -I. tests/workflow/test_fastlane_support.rb
-          ruby tests/workflow/test_play_store.rb
+          bundle exec ruby tests/workflow/test_play_store.rb
           ruby tests/workflow/test_workflow_yaml.rb
           bundle exec ruby tests/workflow/test_supply_wif.rb
       - name: Parse the shared Fastfile without credentials
