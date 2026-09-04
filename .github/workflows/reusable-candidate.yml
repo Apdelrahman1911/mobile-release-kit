@@ -518,6 +518,7 @@ jobs:
           fi
           python -P -m mobile_release ci candidate "${args[@]}"
       - name: Remove candidate-upload Google Play credentials
+        id: cleanup_google_upload
         if: ${{ always() && steps.google_upload_auth.outcome == 'success' }}
         env:
           MOBILE_RELEASE_GOOGLE_ADC_PATH: ${{ steps.google_upload_auth.outputs.credentials_file_path }}
@@ -536,6 +537,15 @@ jobs:
             echo 'CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE='
             echo 'GOOGLE_GHA_CREDS_PATH='
           } >> "$GITHUB_ENV"
+      - name: Retain Android candidate Play state journal
+        if: ${{ always() && steps.cleanup_google_upload.outcome == 'success' && hashFiles('app/.mobile-release/store/android-internal-play-state.json') != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mobile-release-play-state-android-candidate-${{ github.run_attempt }}
+          path: app/.mobile-release/store/android-internal-play-state.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
       - name: Validate and package Android candidate evidence
         working-directory: app
         run: |

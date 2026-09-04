@@ -43,7 +43,7 @@ class JsonFileTests(unittest.TestCase):
         expected_ids = {
             "project.schema.json": "urn:mobile-release-kit:schema:project:1",
             "candidate.schema.json": "urn:mobile-release-kit:schema:candidate:1",
-            "receipt.schema.json": "urn:mobile-release-kit:schema:receipt:1",
+            "receipt.schema.json": "urn:mobile-release-kit:schema:receipt:2",
         }
         for path in SCHEMAS.glob("*.json"):
             schema = json.loads(path.read_text(encoding="utf-8"))
@@ -51,7 +51,10 @@ class JsonFileTests(unittest.TestCase):
                 self.assertEqual(schema["$schema"], "https://json-schema.org/draft/2020-12/schema")
                 self.assertEqual(schema["$id"], expected_ids[path.name])
                 self.assertIs(schema.get("additionalProperties"), False)
-                self.assertEqual(schema["properties"]["schemaVersion"], {"const": 1})
+                expected_version = 2 if path.name == "receipt.schema.json" else 1
+                self.assertEqual(
+                    schema["properties"]["schemaVersion"], {"const": expected_version}
+                )
 
     def test_evidence_fixtures_have_valid_canonical_integrity(self) -> None:
         for path in FIXTURES.glob("*.json"):
@@ -444,6 +447,7 @@ class JsonFileTests(unittest.TestCase):
                 },
             }
         )
+        del ios_receipt["storeState"]
         self.assertTrue(receipt_validator.is_valid(ios_receipt))
         ios_receipt["version"]["marketing"] = "1.2.3.4"
         self.assertFalse(receipt_validator.is_valid(ios_receipt))
@@ -473,6 +477,7 @@ class JsonFileTests(unittest.TestCase):
                 "destination": {"channel": "testflight-external"},
             }
         )
+        del external["storeState"]
         for state in (
             "available-to-testers",
             "submitted-for-review",
@@ -524,6 +529,7 @@ class JsonFileTests(unittest.TestCase):
                 },
             }
         )
+        del ios["storeState"]
         self.assertTrue(validator.is_valid(ios), list(validator.iter_errors(ios)))
         ios["destination"]["automaticRelease"] = True
         self.assertFalse(validator.is_valid(ios))

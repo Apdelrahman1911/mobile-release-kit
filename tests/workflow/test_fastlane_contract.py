@@ -10,6 +10,7 @@ FASTFILE = (ROOT / "fastlane/Fastfile").read_text(encoding="utf-8")
 GEMFILE = (ROOT / "Gemfile").read_text(encoding="utf-8")
 LOCKFILE = (ROOT / "Gemfile.lock").read_text(encoding="utf-8")
 RUNNER = (ROOT / "fastlane/run_lane.rb").read_text(encoding="utf-8")
+PLAY_STORE = (ROOT / "fastlane/play_store.rb").read_text(encoding="utf-8")
 
 
 class FastlaneContractTests(unittest.TestCase):
@@ -57,7 +58,7 @@ class FastlaneContractTests(unittest.TestCase):
         self.assertIn('automatic_release: false', FASTFILE)
         self.assertIn('submit_for_review: true', FASTFILE)
         self.assertIn("this workflow never releases publicly", FASTFILE)
-        self.assertIn("refusing production-draft adoption", FASTFILE)
+        self.assertIn("Target version code already exists in the destination Play track", PLAY_STORE)
         self.assertNotIn("create_app_store_version_release_request", FASTFILE)
 
     def test_candidate_uploads_no_store_listing_metadata(self) -> None:

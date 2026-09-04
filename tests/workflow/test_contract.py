@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from mobile_release.stores import _play_state_journal_path
+
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -252,11 +254,42 @@ class ReusableWorkflowContractTests(unittest.TestCase):
         self.assertIn("from mobile_release.tooling import resolve_tooling_root", text)
         for packaged in (
             "fastlane/Fastfile",
+            "fastlane/play_store.rb",
             "schemas/project.schema.json",
             "templates/mobile-release.json",
             "templates/workflows/mobile-production-submit.yml",
         ):
             self.assertIn(packaged, text)
+
+    def test_android_play_state_journals_are_retained_after_credential_cleanup(self) -> None:
+        expected = {
+            "candidate": (
+                "android-internal.json",
+                "Remove candidate-upload Google Play credentials",
+                "Retain Android candidate Play state journal",
+            ),
+            "external-testing": (
+                "android-external.json",
+                "Remove external-testing Google Play credentials",
+                "Retain Android external-testing Play state journal",
+            ),
+            "production-submit": (
+                "android-production-draft.json",
+                "Remove production Google Play credentials",
+                "Retain Android production Play state journal",
+            ),
+        }
+        for workflow, (receipt, cleanup, retain) in expected.items():
+            job = "android_store" if workflow == "candidate" else "android"
+            android = job_block(read(REUSABLE[workflow]), job)
+            journal = _play_state_journal_path(Path(receipt)).name
+            with self.subTest(workflow=workflow):
+                self.assertNotIn("MOBILE_RELEASE_PLAY_STATE_PATH:", android)
+                self.assertIn(f"hashFiles('app/.mobile-release/store/{journal}')", android)
+                self.assertIn(f"path: app/.mobile-release/store/{journal}", android)
+                self.assertIn("if: ${{ always()", android)
+                self.assertLess(android.index(cleanup), android.index(retain))
+                self.assertIn("include-hidden-files: true", android[android.index(retain) :])
 
     def test_reusable_workflows_execute_exact_checkout_without_package_install(self) -> None:
         forbidden = (

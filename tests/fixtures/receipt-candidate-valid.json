@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "stage": "candidate",
   "candidateManifestSha256": "0df7de6f898b62a761ed7b7d086ad9362ee6416c6f147fc2516cb315e3dae928",
   "tooling": {
@@ -37,8 +37,21 @@
     "attempt": 1
   },
   "createdAt": "2026-01-01T00:00:00Z",
+  "outcome": "mutated",
+  "storeState": {
+    "canonicalization": "mrk-play-track-state-v1",
+    "mode": "mutation",
+    "mutationEditId": "mutation-edit-1",
+    "readbackEditId": "readback-edit-1",
+    "destinationBeforeSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "destinationExpectedSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "destinationCommittedSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "unrelatedBeforeSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "unrelatedCommittedSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "targetReleaseSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  },
   "integrity": {
     "algorithm": "sha256",
-    "sha256": "7c3e97f6ec084964d71a19dd5660e981cde3323ca29676752e55e9e449c9be67"
+    "sha256": "de767e4f4506b8bb0fcdb3ad39b2aa55a3cec931a3ec7fc9f33650e46065e6ea"
   }
 }

@@ -89,6 +89,19 @@ The external-testing workflow:
 7. writes `.mobile-release/receipts/external-testing/android.json`.
 
 It never invokes Gradle or receives the Android keystore. Internal upload and external promotion are separate operator decisions.
+The Play adapter snapshots every release in the source and destination tracks inside the mutation
+edit, promotes exactly one completed version-code release, preserves all unrelated completed,
+staged, halted, and draft releases, validates the complete edit, and commits once with API retries
+disabled. Play may automatically deactivate the promoted release in its source track; the guard
+allows only exact retention or removal of that one release and records when the transition becomes
+visible. A fresh read-only edit must match the validated destination and that narrow source policy.
+The same guard protects candidate upload and production-draft creation, including the full-track
+changelog update used for production metadata.
+
+If the exact build is already present in the external track, the lane performs an observation-only
+readback and records `outcome: already-present`; it does not claim that the current run performed
+the promotion. That diagnostic receipt cannot authorize production. Production requires an
+external receipt whose outcome is `mutated` or `reconciled`.
 For a closed track, promotion also proves that the Play edit has at least one Google Group assigned
 before and after the mutation. The receipt records only
 `closedTesterAssignmentVerified: true`; it never records group names or tester identities. A track
@@ -128,6 +141,14 @@ Production is a separate manual Android-only dispatch. It requires:
 - the production Google WIF identity.
 
 The workflow reads the exact external-tested version code, promotes only that build to the Play `production` track with release status `draft`, and proves through readback that it remains draft. It writes `.mobile-release/receipts/production-submit/android.json`.
+
+Every Android mutation also writes an owner-only Store-state journal before commit and after
+readback. GitHub retains that journal as a separate private diagnostic artifact only after the
+Google credential file is removed. It contains Store track snapshots and hashes, but no
+credentials, tester identities, or binaries. Its ordered phase history retains the original commit
+failure classification and any partial readback snapshots instead of overwriting them with a later
+error. The attested schema-v2 receipt binds the resulting state evidence; a checksum beside
+untrusted content is not independent authentication.
 
 A draft is not served. The application owner later selects first/full release or an eligible staged rollout in Play Console. The shared system never completes or starts that rollout.
 

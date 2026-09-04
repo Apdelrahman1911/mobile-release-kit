@@ -5,6 +5,7 @@ require "time"
 require "google/apis/androidpublisher_v3"
 require "googleauth"
 require_relative "release_support"
+require_relative "play_store"
 
 PLAY_SCOPE = "https://www.googleapis.com/auth/androidpublisher"
 IOS_PLATFORM = Spaceship::ConnectAPI::Platform::IOS
@@ -72,7 +73,7 @@ def write_receipt(operation:, platform:, identity:, result:, extra:)
   FileUtils.mkdir_p(File.dirname(path), mode: 0o700)
   version = release_version
   receipt = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     operation: operation,
     platform: platform,
     appIdentity: identity,
@@ -176,6 +177,19 @@ def require_play_release(track_name, expected_status)
   [snapshot, release]
 end
 
+def play_state_journal_path
+  safe_app_path(required_env("MOBILE_RELEASE_PLAY_STATE_PATH"), must_exist: false)
+end
+
+def guarded_play_upload(options)
+  MobileReleaseKit::PreservingSupplyUploader.run(
+    options: options,
+    journal_path: play_state_journal_path,
+  )
+rescue MobileReleaseKit::ContractError => e
+  UI.user_error!(e.message)
+end
+
 def play_upload_options
   aab = safe_app_path(required_env("MOBILE_RELEASE_ANDROID_AAB_PATH"))
   mapping_value = ENV["MOBILE_RELEASE_ANDROID_MAPPING_PATH"].to_s.strip
@@ -196,16 +210,18 @@ def play_upload_options
     skip_upload_images: true,
     skip_upload_screenshots: true,
     ack_bundle_installation_warning: true,
+    changes_not_sent_for_review: false,
+    rescue_changes_not_sent_for_review: false,
     timeout: 600,
   }
   options.delete(:mapping) unless mapping
   options
 end
 
-def promote_play(from:, to:, status:, upload_metadata: false)
+def play_promotion_options(from:, to:, status:, upload_metadata: false)
   metadata = File.join(metadata_root, "android")
   UI.user_error!("Validated Android Store metadata directory is missing") if upload_metadata && !File.directory?(metadata)
-  upload_to_play_store(
+  {
     package_name: android_identity,
     json_key: required_env("GOOGLE_APPLICATION_CREDENTIALS"),
     track: from,
@@ -219,8 +235,34 @@ def promote_play(from:, to:, status:, upload_metadata: false)
     skip_upload_changelogs: !upload_metadata,
     skip_upload_images: !upload_metadata,
     skip_upload_screenshots: !upload_metadata,
+    changes_not_sent_for_review: false,
+    rescue_changes_not_sent_for_review: false,
     timeout: 600,
+  }
+end
+
+def promote_play(from:, to:, status:, upload_metadata: false)
+  guarded_play_upload(
+    play_promotion_options(from: from, to: to, status: status, upload_metadata: upload_metadata),
   )
+end
+
+def observe_existing_play_release(source:, destination:, status:)
+  MobileReleaseKit::PreservingSupplyUploader.observe_existing(
+    options: play_promotion_options(
+      from: source,
+      to: destination,
+      status: status,
+      upload_metadata: false,
+    ),
+    journal_path: play_state_journal_path,
+    source_track: source,
+    destination_track: destination,
+    version_code: release_version.fetch(:build),
+    expected_status: status,
+  )
+rescue MobileReleaseKit::ContractError => e
+  UI.user_error!(e.message)
 end
 
 def asc_api_key
@@ -395,19 +437,20 @@ lane :android_internal_upload do
     raise unless e.status_code.to_i == 404
   end
 
-  upload_to_play_store(**play_upload_options)
-  snapshot, release = require_play_release("internal", "completed")
+  uploader = guarded_play_upload(play_upload_options)
+  state_evidence = uploader.state_evidence
   write_receipt(
     operation: "android_internal_upload",
     platform: "android",
     identity: android_identity,
-    result: "accepted",
+    result: uploader.outcome == "reconciled" ? "reconciled" : "accepted",
     extra: {
       versionCode: version_code,
       destinationTrack: "internal",
-      releaseStatus: release.status.to_s,
+      releaseStatus: "completed",
       state: "available-to-testers",
-      storeEditId: snapshot.fetch(:edit_id),
+      storeEditId: state_evidence.fetch(:readbackEditId),
+      storeState: state_evidence,
     },
   )
 end
@@ -456,29 +499,31 @@ end
 
 desc "Promote the exact internal Play build to the configured external track"
 lane :android_external_promote do
-  require_play_release("internal", "completed")
   destination = android_external_track
   UI.user_error!("External track cannot be internal or production") if %w[internal production].include?(destination)
   closed_testers_verified = verify_closed_track_testers(destination)
   version_code = release_version.fetch(:build)
-  result = "accepted"
-  begin
-    current = play_snapshot(destination)
-    release = play_release(current, version_code)
-    result = "already_present" if release&.status.to_s == "completed"
-  rescue Google::Apis::ClientError => e
-    raise unless e.status_code.to_i == 404
-  end
-  promote_play(from: "internal", to: destination, status: "completed") unless result == "already_present"
-  snapshot, release = require_play_release(destination, "completed")
+  uploader = observe_existing_play_release(
+    source: "internal",
+    destination: destination,
+    status: "completed",
+  )
+  uploader ||= promote_play(from: "internal", to: destination, status: "completed")
+  result = {
+    "mutated" => "accepted",
+    "reconciled" => "reconciled",
+    "already-present" => "already_present",
+  }.fetch(uploader.outcome)
+  state_evidence = uploader.state_evidence
   closed_testers_verified = verify_closed_track_testers(destination) if closed_android_external_track?
   extra = {
     versionCode: version_code,
     sourceTrack: "internal",
     destinationTrack: destination,
-    releaseStatus: release.status.to_s,
+    releaseStatus: "completed",
     state: "available-to-testers",
-    storeEditId: snapshot.fetch(:edit_id),
+    storeEditId: state_evidence.fetch(:readbackEditId),
+    storeState: state_evidence,
   }
   extra[:closedTesterAssignmentVerified] = true if closed_testers_verified
   write_receipt(
@@ -493,34 +538,22 @@ end
 desc "Prepare the exact externally tested Play build as a non-served production draft"
 lane :android_production_draft do
   source = android_external_track
-  require_play_release(source, "completed")
   version_code = release_version.fetch(:build)
-  begin
-    current = play_snapshot("production")
-    release = play_release(current, version_code)
-    if release
-      UI.user_error!(
-        "Version code #{version_code} already exists on production; " \
-        "refusing production-draft adoption because metadata cannot be proven identical",
-      )
-    end
-  rescue Google::Apis::ClientError => e
-    raise unless e.status_code.to_i == 404
-  end
-  promote_play(from: source, to: "production", status: "draft", upload_metadata: true)
-  snapshot, release = require_play_release("production", "draft")
+  uploader = promote_play(from: source, to: "production", status: "draft", upload_metadata: true)
+  state_evidence = uploader.state_evidence
   write_receipt(
     operation: "android_production_draft",
     platform: "android",
     identity: android_identity,
-    result: "accepted",
+    result: uploader.outcome == "reconciled" ? "reconciled" : "accepted",
     extra: {
       versionCode: version_code,
       sourceTrack: source,
       destinationTrack: "production",
-      releaseStatus: release.status.to_s,
+      releaseStatus: "draft",
       state: "draft",
-      storeEditId: snapshot.fetch(:edit_id),
+      storeEditId: state_evidence.fetch(:readbackEditId),
+      storeState: state_evidence,
     },
   )
 end

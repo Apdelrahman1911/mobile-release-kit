@@ -1,8 +1,8 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "stage": "production-submit",
   "candidateManifestSha256": "0df7de6f898b62a761ed7b7d086ad9362ee6416c6f147fc2516cb315e3dae928",
-  "previousReceiptSha256": "35f6263dbb51726e881f99aaaf9a75470495158fbef831f081d66140fee98bb0",
+  "previousReceiptSha256": "57c39648015ace47264e056e993ad2c15cc17a892d7969c978754082373d79bc",
   "tooling": {
     "version": "0.1.0",
     "commit": "1111111111111111111111111111111111111111"
@@ -38,8 +38,27 @@
     "attempt": 1
   },
   "createdAt": "2026-01-03T00:00:00Z",
+  "outcome": "mutated",
+  "storeState": {
+    "canonicalization": "mrk-play-track-state-v1",
+    "mode": "mutation",
+    "mutationEditId": "mutation-edit-3",
+    "readbackEditId": "readback-edit-3",
+    "destinationBeforeSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "destinationExpectedSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+    "destinationCommittedSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+    "unrelatedBeforeSha256": "7777777777777777777777777777777777777777777777777777777777777777",
+    "unrelatedCommittedSha256": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targetReleaseSha256": "9999999999999999999999999999999999999999999999999999999999999999",
+    "sourceBeforeSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "sourceCommittedSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "sourceExpectedSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "sourceUnrelatedBeforeSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "sourceUnrelatedCommittedSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "sourceTargetTransition": "retained"
+  },
   "integrity": {
     "algorithm": "sha256",
-    "sha256": "3a812f00e544839c1020e2cc95e1ed1010c230c8ac15ed2aad510b51cccf5b2e"
+    "sha256": "20bd09eb11a2cc7aca1ec84dba70b68716e1947d869a8c04b74d062111892f74"
   }
 }

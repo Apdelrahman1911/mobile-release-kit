@@ -27,7 +27,64 @@ from mobile_release.provenance import (
 from .helpers import android_config, ios_config, write_project
 
 
+def play_store_state(*, stage: str = "candidate", outcome: str = "mutated") -> dict:
+    observed = "a" * 64
+    state = {
+        "canonicalization": "mrk-play-track-state-v1",
+        "mode": "observation" if outcome == "already-present" else "mutation",
+        "readbackEditId": "readback-edit",
+        "destinationBeforeSha256": observed if outcome == "already-present" else "b" * 64,
+        "destinationExpectedSha256": observed,
+        "destinationCommittedSha256": observed,
+        "unrelatedBeforeSha256": "c" * 64,
+        "unrelatedCommittedSha256": "c" * 64,
+        "targetReleaseSha256": "d" * 64,
+    }
+    if outcome != "already-present":
+        state["mutationEditId"] = "mutation-edit"
+    if stage != "candidate":
+        state["sourceBeforeSha256"] = "e" * 64
+        state["sourceExpectedSha256"] = "e" * 64
+        state["sourceCommittedSha256"] = "e" * 64
+        state["sourceUnrelatedBeforeSha256"] = "f" * 64
+        state["sourceUnrelatedCommittedSha256"] = "f" * 64
+        state["sourceTargetTransition"] = "retained"
+    return state
+
+
 class ProvenanceTests(unittest.TestCase):
+    def test_observation_only_android_external_receipt_cannot_authorize_production(self) -> None:
+        fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+        candidate = json.loads((fixtures / "candidate-valid.json").read_text(encoding="utf-8"))
+        candidate_receipt = json.loads(
+            (fixtures / "receipt-candidate-valid.json").read_text(encoding="utf-8")
+        )
+        external = verify_sealed(
+            json.loads((fixtures / "receipt-external-valid.json").read_text(encoding="utf-8"))
+        )
+        external["outcome"] = "already-present"
+        state = external["storeState"]
+        state["mode"] = "observation"
+        state.pop("mutationEditId")
+        state["destinationBeforeSha256"] = state["destinationExpectedSha256"]
+        state["sourceTargetTransition"] = "already-deactivated"
+        observation = seal(external)
+
+        validate_receipt_chain(
+            candidate_manifest=candidate,
+            candidate_receipt=candidate_receipt,
+            external_receipt=observation,
+            platform="android",
+        )
+        with self.assertRaisesRegex(ValidationError, "observation-only"):
+            validate_receipt_chain(
+                candidate_manifest=candidate,
+                candidate_receipt=candidate_receipt,
+                external_receipt=observation,
+                platform="android",
+                require_production_eligible_external=True,
+            )
+
     def test_builder_round_trip_matches_committed_schema_shape(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -52,7 +109,7 @@ class ProvenanceTests(unittest.TestCase):
                 dirty=False,
             )
             raw = {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "operation": "android_internal_upload",
                 "platform": "android",
                 "appIdentity": "com.example.reader",
@@ -64,7 +121,8 @@ class ProvenanceTests(unittest.TestCase):
                 "versionCode": 42,
                 "destinationTrack": "internal",
                 "releaseStatus": "completed",
-                "storeEditId": "edit-1",
+                "storeEditId": "readback-edit",
+                "storeState": play_store_state(),
             }
             release = config.release_version()
             validated = validate_store_receipt(
@@ -140,12 +198,14 @@ class ProvenanceTests(unittest.TestCase):
                     candidate_manifest=manifest,
                     previous_receipt=receipt,
                     store_receipt={
+                        "result": "accepted",
                         "versionCode": 42,
                         "destinationTrack": "closed-testing",
                         "releaseStatus": "completed",
                         "state": "available-to-testers",
                         "observedAt": "2026-01-01T00:01:00Z",
                         "closedTesterAssignmentVerified": True,
+                        "storeState": play_store_state(stage="external-testing"),
                     },
                 )
                 production = build_receipt(
@@ -154,11 +214,13 @@ class ProvenanceTests(unittest.TestCase):
                     candidate_manifest=manifest,
                     previous_receipt=external,
                     store_receipt={
+                        "result": "accepted",
                         "versionCode": 42,
                         "destinationTrack": "production",
                         "releaseStatus": "draft",
                         "state": "draft",
                         "observedAt": "2026-01-01T00:02:00Z",
+                        "storeState": play_store_state(stage="production-submit"),
                     },
                 )
                 validate_receipt_chain(
@@ -194,7 +256,7 @@ class ProvenanceTests(unittest.TestCase):
             root = Path(temporary)
             config = load_config(write_project(root, ios_config(), platform="ios"))
             raw = {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "operation": "ios_testflight_external",
                 "platform": "ios",
                 "appIdentity": "com.example.reader",
@@ -223,7 +285,7 @@ class ProvenanceTests(unittest.TestCase):
             root = Path(temporary)
             config = load_config(write_project(root, android_config()))
             raw = {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "operation": "android_internal_upload",
                 "platform": "android",
                 "appIdentity": "com.example.reader",
@@ -235,7 +297,8 @@ class ProvenanceTests(unittest.TestCase):
                 "versionCode": 42,
                 "destinationTrack": "internal",
                 "releaseStatus": "completed",
-                "storeEditId": "edit-1",
+                "storeEditId": "readback-edit",
+                "storeState": play_store_state(),
             }
             with self.assertRaisesRegex(ValidationError, "availability"):
                 validate_store_receipt(
@@ -251,7 +314,7 @@ class ProvenanceTests(unittest.TestCase):
             root = Path(temporary)
             config = load_config(write_project(root, android_config()))
             raw = {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "operation": "android_external_promote",
                 "platform": "android",
                 "appIdentity": "com.example.reader",
@@ -264,7 +327,8 @@ class ProvenanceTests(unittest.TestCase):
                 "sourceTrack": "internal",
                 "destinationTrack": "closed-testing",
                 "releaseStatus": "completed",
-                "storeEditId": "edit-1",
+                "storeEditId": "readback-edit",
+                "storeState": play_store_state(stage="external-testing"),
             }
             with self.assertRaisesRegex(ValidationError, "tester-group"):
                 validate_store_receipt(
@@ -283,6 +347,42 @@ class ProvenanceTests(unittest.TestCase):
                 platform="android",
             )
             self.assertTrue(validated["closedTesterAssignmentVerified"])
+
+    def test_play_source_transition_evidence_is_fail_closed(self) -> None:
+        fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+        external = verify_sealed(
+            json.loads((fixtures / "receipt-external-valid.json").read_text(encoding="utf-8"))
+        )
+
+        invalid_cases = []
+        changed_unrelated = json.loads(json.dumps(external))
+        changed_unrelated["storeState"]["sourceUnrelatedCommittedSha256"] = "1" * 64
+        invalid_cases.append((changed_unrelated, "unrelated source"))
+
+        retained_changed = json.loads(json.dumps(external))
+        retained_changed["storeState"]["sourceCommittedSha256"] = "2" * 64
+        invalid_cases.append((retained_changed, "retained source"))
+
+        false_deactivation = json.loads(json.dumps(external))
+        false_deactivation["storeState"]["sourceTargetTransition"] = "deactivated"
+        invalid_cases.append((false_deactivation, "did not change"))
+
+        impossible_expected = json.loads(json.dumps(external))
+        impossible_expected["storeState"]["sourceTargetTransition"] = "deactivated"
+        impossible_expected["storeState"]["sourceCommittedSha256"] = "2" * 64
+        impossible_expected["storeState"]["sourceExpectedSha256"] = "3" * 64
+        invalid_cases.append((impossible_expected, "outside the allowed transition"))
+
+        for payload, message in invalid_cases:
+            with self.subTest(message=message), self.assertRaisesRegex(ValidationError, message):
+                validate_evidence_document(seal(payload))
+
+        deactivated = json.loads(json.dumps(external))
+        state = deactivated["storeState"]
+        state["sourceTargetTransition"] = "deactivated"
+        state["sourceCommittedSha256"] = "2" * 64
+        state["sourceExpectedSha256"] = state["sourceCommittedSha256"]
+        validate_evidence_document(seal(deactivated))
 
 
 if __name__ == "__main__":
