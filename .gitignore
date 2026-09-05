@@ -18,6 +18,9 @@ fastlane/test_output/
 
 # Generated release evidence and private build outputs
 .mobile-release/
+.mobile-release-init-prepare/
+.mobile-release-init/
+.mobile-release-init-cleanup/
 *.aab
 *.apk
 *.ipa

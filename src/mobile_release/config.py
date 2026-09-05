@@ -618,27 +618,3 @@ def default_config(root: Path, discovered: dict[str, Any]) -> dict[str, Any]:
         "services": {"androidFirebase": "disabled", "iosFirebase": "disabled"},
         "projectChecks": {"preflight": [], "androidArtifact": [], "iosArtifact": []},
     }
-
-
-def write_json_exclusive(path: Path, value: dict[str, Any], *, force: bool = False) -> None:
-    path = path.expanduser().absolute()
-    if path.is_symlink():
-        raise ConfigurationError(f"refusing to write through symbolic link: {path}")
-    if path.exists() and not force:
-        raise ConfigurationError(f"refusing to overwrite existing file: {path}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(value, indent=2, ensure_ascii=False) + "\n"
-    flags = os.O_WRONLY | os.O_CREAT
-    flags |= os.O_TRUNC if force else os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        descriptor = os.open(path, flags, 0o644)
-    except FileExistsError as error:
-        raise ConfigurationError(f"refusing to overwrite existing file: {path}") from error
-    except OSError as error:
-        if path.is_symlink():
-            raise ConfigurationError(f"refusing to write through symbolic link: {path}") from error
-        raise
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(payload)

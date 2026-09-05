@@ -64,6 +64,12 @@ jobs:
             --tooling-repository example/mobile-release-kit \
             --tooling-sha 1111111111111111111111111111111111111111 \
             > init-apply.txt
+          "$venv_dir/bin/mobile-release" init --recover > init-recover.txt
+          "$venv_dir/bin/python" -c 'import json; assert json.load(open("init-recover.txt"))["recovery"] == "no-op"'
+          for name in .mobile-release-init-prepare .mobile-release-init .mobile-release-init-cleanup; do
+            test ! -e "$name"
+            grep -Fx "$name/" .gitignore
+          done
           test -f release/mobile-release.json
           test -f .github/workflows/mobile-preflight.yml
           test -f .github/workflows/mobile-candidate.yml

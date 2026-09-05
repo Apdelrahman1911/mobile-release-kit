@@ -37,6 +37,7 @@ from mobile_release.credentials import (
 )
 from mobile_release.discovery import discover_project
 from mobile_release.ios import run_ios_build
+from mobile_release.init_transaction import IGNORE_LINES
 from mobile_release.metadata import build_metadata_archive
 from mobile_release.preflight import (
     _effective_android_identity_finding,
@@ -312,7 +313,7 @@ class CliBuildTests(unittest.TestCase):
             self.assertEqual(notes.read_bytes(), b"")
             self.assertEqual(
                 (root / ".gitignore").read_text(encoding="utf-8"),
-                "build/\n.mobile-release/\n",
+                "build/\n" + "".join(line + "\n" for line in IGNORE_LINES),
             )
             self.assertIn(
                 "example/mobile-release-kit/.github/workflows/reusable.yml@" + sha,

@@ -81,9 +81,14 @@ mobile-release preflight --offline
 
 The first `init` previews its proposed files and does not write. Review discovered values and
 unresolved policy fields, then run the explicit `--apply` command with the same full commit used to
-install the CLI. Apply also creates or safely appends the exact `.mobile-release/` line to the root
-`.gitignore`; it preserves every existing line and refuses an unsafe/symlinked ignore file. Only
-then run `doctor`. Store identities begin as `unverified`; candidate upload
+install the CLI. Apply stages the complete integration under a project lock, preserves existing
+metadata and ignore bytes, and rolls back ordinary precommit failures. After abrupt termination,
+run `mobile-release init --recover` before applying again; committed recovery only finishes cleanup.
+Never commit/upload the private `.mobile-release-init-prepare/`, `.mobile-release-init/` or
+`.mobile-release-init-cleanup/` directories: they can contain original configuration backups.
+Apply appends their exact ignore lines and `.mobile-release/`, but interruption may precede that
+write. See [initialization recovery](docs/init-recovery.md) for supported filesystems and conflicts.
+Only then run `doctor`. Store identities begin as `unverified`; candidate upload
 remains blocked until ownership is proved and the reviewed configuration says `approved`.
 
 Before CI, validate signing and Store access locally using an explicit credentials file outside the repository:
@@ -134,6 +139,7 @@ The authoritative schema is [`schemas/project.schema.json`](schemas/project.sche
 | Command | Network or credentials | Purpose |
 |---|---|---|
 | `mobile-release init` | none | Discover a project and preview the thin integration. |
+| `mobile-release init --recover` | none | Restore an interrupted init, or finish private cleanup after commit; no project discovery or Store calls. |
 | `mobile-release doctor` | none | Validate configuration, discovery, tool availability, and identity policy. |
 | `mobile-release credentials` | optional name-only GitHub access or local files | Report `CONFIGURED`, `MISSING`, `INVALID`, `NOT_APPLICABLE`, or `MANUAL_EXTERNAL` without revealing values. |
 | `mobile-release preflight --offline` | no Store access | Run project checks and inspect unsigned release outputs/effective settings. |

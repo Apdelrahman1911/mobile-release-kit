@@ -253,6 +253,7 @@ class ReusableWorkflowContractTests(unittest.TestCase):
         self.assertIn('"$venv_dir/bin/mobile-release" --version', text)
         self.assertIn('"$venv_dir/bin/mobile-release" init', text)
         self.assertIn("init --apply", text)
+        self.assertIn("init --recover", text)
         self.assertIn("--tooling-repository example/mobile-release-kit", text)
         self.assertIn("test -f .github/workflows/mobile-production-submit.yml", text)
         self.assertIn("from mobile_release.tooling import resolve_tooling_root", text)
