@@ -31,6 +31,7 @@ from mobile_release.provenance import (
 from .evidence_helpers import android_precondition, build_lifecycle, git_identity, ios_precondition, raw_receipt, workflow_environment
 from .helpers import android_config, ios_config, write_project
 from .ios_artifact_helpers import native_image
+from .ios_entitlement_helpers import NativeProfileSeam, binary_dictionary, modernize_ipa_fixture, rewrite_zip_members, signed_entitlements
 
 
 def directory_snapshot(directory: Path) -> dict[Path, tuple[str, bytes | None]]:
@@ -626,6 +627,37 @@ class IosOperationRecoveryTests(unittest.TestCase):
         authenticate.assert_called_once_with(self.intent_path.resolve(), stage="candidate", platform="ios")
         store.assert_not_called()
         self.assertEqual(before, directory_snapshot(self.output))
+
+    def test_real_ungranted_entitlement_stops_fresh_intent_before_store_read_or_mutation(self) -> None:
+        modernize_ipa_fixture(self.root / "app.ipa")
+        native = NativeProfileSeam()
+        native.claims["Reader.app"] = {**signed_entitlements(), "com.apple.developer.associated-domains": ["applinks:fictional.example"]}
+        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.subprocess.run", side_effect=native), patch("mobile_release.cli.prepare_store_operation") as prepare, patch("mobile_release.cli.execute_store_operation") as mutate:
+            with self.assertRaisesRegex(ValidationError, "final candidate artifact validation failed"):
+                self.invoke("prepare-operation")
+        prepare.assert_not_called()
+        mutate.assert_not_called()
+        self.assertFalse(self.intent_path.exists())
+        self.assertTrue(any("--entitlements" in argv for argv, _ in native.calls))
+
+    def test_malformed_generic_resource_plist_stops_fresh_intent_before_signing_or_store(self) -> None:
+        resource = "Resources/Extra/Info.plist"
+        for archive, ipa in ((b'<plist><dict><key>discarded</key><string>archive-only</string></dict><dict/></plist>',
+                              b'<plist><dict/></plist>'),
+                             (b'<plist><dict><key>x</key><data>Y&#81;==</data></dict></plist>',
+                              b'<plist><dict><key>x</key><data>YQ==</data></dict></plist>'),
+                             (binary_dictionary(b"\x5f\x00\x01A"),
+                              b'<plist><dict><key>x</key><string>A</string></dict></plist>')):
+            rewrite_zip_members(self.root / "app.ipa", {f"Payload/Reader.app/{resource}": ipa})
+            rewrite_zip_members(self.root / "archive.zip", {
+                f"archive.xcarchive/Products/Applications/Reader.app/{resource}": archive,
+            })
+            with patch("mobile_release.cli.validate_ipa_current_signing", side_effect=AssertionError("correspondence must reject first")), patch("mobile_release.cli.prepare_store_operation") as prepare, patch("mobile_release.cli.execute_store_operation") as mutate:
+                with self.assertRaisesRegex(ValidationError, "plist"):
+                    self.invoke("prepare-operation")
+            prepare.assert_not_called()
+            mutate.assert_not_called()
+            self.assertFalse(self.intent_path.exists())
 
     def test_authenticated_original_validation_allows_raw_completion_after_profile_expiry(self) -> None:
         intent = self.documents["candidate_intent"]

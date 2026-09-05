@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import os
 import plistlib
-import sys
 import tempfile
 import types
 import unittest
@@ -30,13 +29,19 @@ from mobile_release.ios import (
 )
 from mobile_release.reporting import FAILING_STATUSES
 
+from .ios_artifact_helpers import native_image
+from .ios_entitlement_helpers import der_entitlements, modern_profile_bytes
+
 
 class IosArtifactTests(unittest.TestCase):
     @staticmethod
     def _ipa(path: Path) -> None:
         with zipfile.ZipFile(path, "w") as archive:
-            archive.writestr("Payload/Reader.app/Info.plist", b"test-plist")
-            archive.writestr("Payload/Reader.app/Reader", b"executable")
+            archive.writestr("Payload/Reader.app/Info.plist", plistlib.dumps({
+                "CFBundleIdentifier": "com.example.reader", "CFBundleVersion": "42",
+                "CFBundleShortVersionString": "1.2.3", "CFBundleExecutable": "Reader",
+            }))
+            archive.writestr("Payload/Reader.app/Reader", native_image())
             archive.writestr("Payload/Reader.app/_CodeSignature/CodeResources", b"signature")
             archive.writestr("Payload/Reader.app/embedded.mobileprovision", b"profile")
 
@@ -45,6 +50,7 @@ class IosArtifactTests(unittest.TestCase):
         return {
             "Entitlements": {
                 "application-identifier": "ABCDE12345.com.example.reader",
+                "com.apple.developer.team-identifier": "ABCDE12345",
                 "get-task-allow": False,
                 "beta-reports-active": beta,
             },
@@ -65,18 +71,6 @@ class IosArtifactTests(unittest.TestCase):
         value.update(overrides)
         return value
 
-    @staticmethod
-    def _plist_module() -> types.ModuleType:
-        module = types.ModuleType("plistlib")
-        module.InvalidFileException = ValueError
-        module.loads = lambda _value: {
-            "CFBundleIdentifier": "com.example.reader",
-            "CFBundleShortVersionString": "1.2.3",
-            "CFBundleVersion": "42",
-            "CFBundleExecutable": "Reader",
-        }
-        return module
-
     def test_final_ipa_requires_beta_profile_and_actual_signer_membership(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             ipa = Path(temporary) / "Reader.ipa"
@@ -90,7 +84,7 @@ class IosArtifactTests(unittest.TestCase):
                 "release": ReleaseVersion("1.2.3", 42),
                 "require_tools": True,
             }
-            with patch.dict(sys.modules, {"plistlib": self._plist_module()}), patch(
+            with patch(
                 "mobile_release.ios._profile_details",
                 return_value=self._profile(signer_certificate, beta=False),
             ), patch(
@@ -102,7 +96,7 @@ class IosArtifactTests(unittest.TestCase):
                 findings = validate_ipa(ipa, **common)
             self.assertTrue(any("TestFlight" in item.message for item in findings))
 
-            with patch.dict(sys.modules, {"plistlib": self._plist_module()}), patch(
+            with patch(
                 "mobile_release.ios._profile_details",
                 return_value=self._profile(b"different authorized certificate"),
             ), patch(
@@ -114,7 +108,7 @@ class IosArtifactTests(unittest.TestCase):
                 findings = validate_ipa(ipa, **common)
             self.assertTrue(any("not authorized" in item.message for item in findings))
 
-            with patch.dict(sys.modules, {"plistlib": self._plist_module()}), patch(
+            with patch(
                 "mobile_release.ios._profile_details",
                 return_value=self._profile(signer_certificate),
             ), patch(
@@ -144,7 +138,7 @@ class IosArtifactTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             extension = Path(temporary) / "ReaderWidget.appex"
             extension.mkdir()
-            (extension / "Info.plist").write_bytes(b"nested-info")
+            (extension / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.example.reader.widget"}))
             (extension / "embedded.mobileprovision").write_bytes(b"profile")
             certificate = b"nested signer certificate"
             fingerprint = hashlib.sha256(certificate).hexdigest()
@@ -159,12 +153,7 @@ class IosArtifactTests(unittest.TestCase):
                 "application-identifier"
             ]
             profile["Entitlements"]["aps-environment"] = "production"
-            plist_module = types.ModuleType("plistlib")
-            plist_module.InvalidFileException = ValueError
-            plist_module.loads = lambda _value: {
-                "CFBundleIdentifier": "com.example.reader.widget"
-            }
-            with patch.dict(sys.modules, {"plistlib": plist_module}), patch(
+            with patch(
                 "mobile_release.ios._profile_details", return_value=profile
             ):
                 _validate_nested_bundle_security(
@@ -198,10 +187,11 @@ class IosArtifactTests(unittest.TestCase):
             app = root / "Reader.app"
             app.mkdir()
             executable = app / "Reader"
-            executable.write_bytes(b"\xcf\xfa\xed\xfe" + b"binary")
+            executable.write_bytes(native_image())
+            (app / "Info.plist").write_bytes(plistlib.dumps({"CFBundleExecutable": "Reader"}))
             helper = app / "Helpers/NoSuffix"
             helper.parent.mkdir()
-            helper.write_bytes(b"\xca\xfe\xba\xbe" + b"helper")
+            helper.write_bytes(native_image("helper"))
             resource = app / "Resources/data.bin"
             resource.parent.mkdir()
             resource.write_bytes(b"data")
@@ -304,7 +294,9 @@ class IosArtifactTests(unittest.TestCase):
             calls = []
             with self.subTest(before=before, after=after), tempfile.TemporaryDirectory() as temporary, patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/usr/bin/tool"), patch("mobile_release.ios._utc_now", return_value=now), patch("mobile_release.ios.subprocess.run", side_effect=self._fake_native_certificate(before=before, after=after, calls=calls)):
                 with self.assertRaises(ValidationError):
-                    _codesign_fingerprint(Path(temporary) / "Reader.app", Path(temporary))
+                    code = Path(temporary) / "Reader"
+                    code.write_bytes(native_image())
+                    _codesign_fingerprint(code, Path(temporary))
             self.assertEqual(len(calls), 3)
             self.assertIn("--verify", calls[0][0])
             self.assertIn("--extract-certificates", calls[1][0])
@@ -314,21 +306,32 @@ class IosArtifactTests(unittest.TestCase):
         now = datetime(2026, 9, 5, 12, tzinfo=timezone.utc)
         calls, intervals = [], []
         with tempfile.TemporaryDirectory() as temporary, patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/usr/bin/tool"), patch("mobile_release.ios._utc_now", return_value=now), patch("mobile_release.ios.subprocess.run", side_effect=self._fake_native_certificate(before="Sep  5 12:00:00 2026 GMT", after="Sep  6 12:00:00 2026 GMT", calls=calls)):
-            self.assertEqual(_codesign_fingerprint(Path(temporary) / "Reader.app", Path(temporary), _validity_intervals=intervals), "aa" * 32)
+            code = Path(temporary) / "Reader"
+            code.write_bytes(native_image())
+            self.assertEqual(_codesign_fingerprint(code, Path(temporary), _validity_intervals=intervals), "aa" * 32)
         self.assertEqual(intervals, [SigningValidityInterval(now, now + timedelta(days=1))])
 
     def test_native_certificate_dates_missing_duplicate_or_ambiguous_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            (root / "Reader").write_bytes(native_image())
             for dates in (
                 "", "notBefore=Sep  1 12:00:00 2026 GMT\n", "notBefore=bad\nnotAfter=Sep  6 12:00:00 2026 GMT\n",
                 "notBefore=Sep  1 12:00:00 2026 GMT\nnotBefore=Sep  1 12:00:00 2026 GMT\nnotAfter=Sep  6 12:00:00 2026 GMT\n",
                 "notBefore=Sep  1 12:00:00 2026 GMT\nnotAfter=Sep  6 12:00:00 2026 GMT\nnotAfter=Sep  6 12:00:00 2026 GMT\n",
             ):
-                (root / "leaf0").write_bytes(b"fake leaf")
                 completed = types.SimpleNamespace(returncode=0, stdout=f"sha256 Fingerprint={'AA:' * 31}AA\n{dates}", stderr="")
-                with self.subTest(dates=dates), patch("mobile_release.ios.subprocess.run", return_value=completed), self.assertRaises(ValidationError):
+                calls = []
+                def native(argv, **kwargs):
+                    calls.append(argv)
+                    if "--extract-certificates" in argv:
+                        prefix = argv[argv.index("--extract-certificates") + 1]
+                        Path(prefix + "0").write_bytes(b"fake leaf")
+                        return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+                    return completed
+                with self.subTest(dates=dates), patch("mobile_release.ios.subprocess.run", side_effect=native), self.assertRaises(ValidationError):
                     _codesign_leaf_fingerprint(root / "Reader", root / "leaf")
+                self.assertEqual(calls[-1][0], "openssl", "date rejection must inspect the actual newly extracted leaf")
         for date in ("Sep  1 12:00:00 2026", "Sep  1 12:00:00 2026 +00:00", "Feb 30 12:00:00 2026 GMT", "Sep  1 12:00:60 2026 GMT", "SEP  1 12:00:00 2026 GMT"):
             with self.subTest(date=date), self.assertRaises(ValidationError):
                 _openssl_certificate_date(date)
@@ -354,11 +357,10 @@ class IosArtifactTests(unittest.TestCase):
                 self._ipa(ipa)
                 extension = root / "ReaderWidget.appex"
                 extension.mkdir()
-                (extension / "Info.plist").write_bytes(b"nested-info")
+                (extension / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.example.reader"}))
                 (extension / "embedded.mobileprovision").write_bytes(b"profile")
                 profile = self._profile(certificate)
                 profile[field] = value
-                stack.enter_context(patch.dict(sys.modules, {"plistlib": self._plist_module()}))
                 stack.enter_context(patch("mobile_release.ios._utc_now", return_value=now))
                 stack.enter_context(patch("mobile_release.ios._profile_details", return_value=profile))
                 native = stack.enter_context(patch("mobile_release.ios._codesign_fingerprint", return_value=signer))
@@ -387,7 +389,6 @@ class IosArtifactTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
             ipa = Path(temporary) / "Reader.ipa"
             self._ipa(ipa)
-            stack.enter_context(patch.dict(sys.modules, {"plistlib": self._plist_module()}))
             stack.enter_context(patch("mobile_release.ios._profile_details", return_value=self._profile(certificate)))
             stack.enter_context(patch("mobile_release.ios._codesign_entitlements", return_value=self._signed_entitlements()))
             stack.enter_context(patch("mobile_release.ios._codesign_fingerprint", side_effect=primary))
@@ -431,7 +432,7 @@ class IosArtifactTests(unittest.TestCase):
                             "CFBundleIdentifier": bundle_id, "CFBundleExecutable": name,
                             "CFBundleShortVersionString": "1.2.3", "CFBundleVersion": "42",
                         }))
-                        archive.writestr(bundle + "/" + name, b"\xcf\xfa\xed\xfe" + b"synthetic")
+                        archive.writestr(bundle + "/" + name, native_image(name))
                         archive.writestr(bundle + "/_CodeSignature/CodeResources", b"synthetic signature")
                         profile = self._profile(certificate)
                         profile["Entitlements"]["application-identifier"] = f"ABCDE12345.{bundle_id}"
@@ -444,8 +445,9 @@ class IosArtifactTests(unittest.TestCase):
                                 lower = now + timedelta(seconds=1)
                         profile["CreationDate"] = lower.replace(tzinfo=None)
                         profile["ExpirationDate"] = upper.replace(tzinfo=None)
-                        archive.writestr(bundle + "/embedded.mobileprovision", plistlib.dumps(profile))
-                    archive.writestr("Payload/Reader.app/Frameworks/ReaderKit.framework/ReaderKit", b"\xcf\xfa\xed\xfe" + b"synthetic framework")
+                        archive.writestr(bundle + "/embedded.mobileprovision", modern_profile_bytes(profile))
+                    archive.writestr("Payload/Reader.app/Frameworks/ReaderKit.framework/ReaderKit", native_image("framework", file_type=6))
+                    archive.writestr("Payload/Reader.app/Frameworks/ReaderKit.framework/Info.plist", plistlib.dumps({"CFBundleExecutable": "ReaderKit"}))
                     archive.writestr("Payload/Reader.app/Frameworks/ReaderKit.framework/_CodeSignature/CodeResources", b"synthetic signature")
 
                 def native(argv, **kwargs):
@@ -456,7 +458,9 @@ class IosArtifactTests(unittest.TestCase):
                     if "--entitlements" in argv:
                         bundle_id = "com.example.reader.widget" if ".appex" in argv[-1] else "com.example.reader"
                         value = self._signed_entitlements(**{"application-identifier": f"ABCDE12345.{bundle_id}"})
-                        return types.SimpleNamespace(returncode=0, stdout=plistlib.dumps(value), stderr=b"")
+                        if ".framework" in argv[-1]:
+                            value = {}
+                        return types.SimpleNamespace(returncode=0, stdout=der_entitlements(value) if "--der" in argv else plistlib.dumps(value), stderr=b"")
                     if "--extract-certificates" in argv:
                         prefix = Path(argv[argv.index("--extract-certificates") + 1])
                         leaf = Path(str(prefix) + "0")
@@ -496,7 +500,7 @@ class IosArtifactTests(unittest.TestCase):
                     inspected = set(extracted_leaf_paths.values())
                     for suffix in ("/Reader.app", "/Reader", "/Widget.appex", "/Widget", "/ReaderKit.framework", "/ReaderKit"):
                         self.assertTrue(any(path.endswith(suffix) for path in inspected), suffix)
-                    self.assertEqual(sum(argv[0] == "security" for argv in native_calls), 2)
+                    self.assertEqual(sum(argv[0] == "security" for argv in native_calls), 4)
                 else:
                     self.assertIsNone(interval)
                     self.assertTrue(any(item.status in FAILING_STATUSES for item in findings), defect)

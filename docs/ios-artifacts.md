@@ -29,6 +29,11 @@ Store preparation never executes application build scripts or project checks.
   executables, Bundle IDs, and type-sensitive Info.plists. XML versus binary plist
   encoding may differ, but values may not; duplicate keys fail. Applications and
   extensions use the committed version/build. Frameworks retain their own versions.
+  Bundle, generic resource and dSYM Info.plists share the strict dictionary loader:
+  malformed XML cannot discard a preceding dictionary or silently ignored element.
+  Binary object spans/markers are validated before conversion; lossy date/integer
+  encodings fail. Finite real equality preserves signed zero.
+  See [supported plist forms](ios-entitlements.md#supported-profile-and-entitlement-formats).
 - Every Mach-O, including embedded dylibs and suffixless helpers: CPU/subtype,
   UUID, file type, and signature-neutral content hash. Identical framework copies
   at different paths are allowed; conflicting images with the same UUID are not.
@@ -61,7 +66,11 @@ The candidate/intent's authenticated **whole-file** SHA-256 binds all bytes,
 including signatures and slack. Changing them after sealing fails execution.
 Neither a UUID nor a signature-neutral hash independently proves authenticity or
 the semantic truth of arbitrary DWARF data. Native Apple signing/profile checks
-and original producer/attestation evidence remain required.
+and original producer/attestation evidence remain required. Complete, per-slice
+signed-entitlement/profile-content comparison is described in
+[iOS entitlements](ios-entitlements.md). Apple profile issuer authentication is
+still a separate confirmed production blocker (QA-002), not a guarantee supplied
+by CMS decoding or the correspondence checks.
 
 ## Supported exporter and limits
 

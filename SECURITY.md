@@ -37,6 +37,13 @@ The final public-release decision is intentionally outside automation.
   artifact hashes authenticate the actual retained bytes, including signature-allocation slack
   that native codesign may not cover. UUIDs alone do not authenticate binaries or debug data.
   Original archive/symbol bindings remain mandatory for incomplete-operation execution/recovery.
+- Every iOS signed entitlement is compared with its own app/extension's modern DER profile
+  content, with typed allowlist rules and explicit architecture selection. Profileless code cannot
+  borrow parent grants. Fresh per-slice certificate extraction prevents stale-leaf reuse.
+  **Open production blocker QA-002:** CMS decoding does not authenticate Apple's profile issuer;
+  complete content comparison, app signing and workflow attestations cannot establish that
+  independent authority. This is not an accepted limitation or a READY state. See
+  [iOS entitlement validation](docs/ios-entitlements.md).
 - Historical Android recovery retains authenticated original signing/identity evidence rather than
   requiring an accepted build to remain eligible for a new upload. Every actual new AAB send repeats
   current pinned native validation in a credential-free child, full Store-state classification and a

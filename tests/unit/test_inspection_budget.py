@@ -225,16 +225,17 @@ class InspectionBudgetTests(unittest.TestCase):
     def test_typed_plist_conversion_checks_shared_clock_after_parsing(self):
         info = self.root / "Info.plist"
         info.write_bytes(plistlib.dumps({"nested": {"value": 1}}))
-        require = ios_artifacts._require
+        from mobile_release import ios_entitlements
+        require = ios_entitlements._require
         with patch("mobile_release.inspection.time.monotonic", return_value=0) as clock:
             deadline = InspectionDeadline()
 
             def conversion(condition, message):
                 require(condition, message)
-                if message == "plist complexity exceeds its bound":
+                if message == "iOS plist complexity exceeds its bound":
                     clock.return_value = MAX_INSPECTION_SECONDS
 
-            with patch("mobile_release.ios_artifacts._require", side_effect=conversion), self.assertRaisesRegex(ValidationError, "shared time bound"):
+            with patch("mobile_release.ios_entitlements._require", side_effect=conversion), self.assertRaisesRegex(ValidationError, "shared time bound"):
                 ios_artifacts.typed_plist(info, deadline=deadline)
 
     def test_native_expiry_stops_next_child_and_preserves_per_child_timeout(self):

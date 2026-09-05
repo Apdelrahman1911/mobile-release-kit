@@ -22,6 +22,7 @@ from mobile_release.ios_artifacts import (
 from mobile_release.macho import inspect_macho
 
 from .ios_artifact_helpers import artifact_set, fat_image, native_image, packed_artifact_set, zip_tree
+from .ios_entitlement_helpers import binary_dictionary, malformed_xml_cases
 
 
 class MachOCorrespondenceTests(unittest.TestCase):
@@ -272,6 +273,80 @@ class IOSSetCorrespondenceTests(unittest.TestCase):
             path.write_bytes(content)
             with self.assertRaises(ValidationError):
                 typed_plist(path)
+
+    def test_shared_correspondence_plist_reader_rejects_entire_malformed_xml_corpus(self):
+        path = self.root / "Info.plist"
+        for name, raw in malformed_xml_cases().items():
+            path.write_bytes(raw)
+            with self.subTest(case=name), self.assertRaises(ValidationError) as error:
+                typed_plist(path)
+            self.assertNotIn("canary", str(error.exception))
+
+    def test_generic_resource_plist_cannot_hide_an_archive_only_dictionary(self):
+        paths = artifact_set(self.root)
+        archive = paths["ios-archive"] / "Products/Applications/Reader.app/Resources/Extra/Info.plist"
+        exported = self.root / "export/Payload/Reader.app/Resources/Extra/Info.plist"
+        for path in (archive, exported):
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"<plist><dict/></plist>")
+        zip_tree(self.root / "export", paths["ios-ipa"])
+        self.assertEqual(self.inspect(paths)["nativePaths"], 5)
+        archive.write_bytes(b'<plist><dict><key>discarded-resource-value</key><string>archive-only</string></dict><dict/></plist>')
+        with self.assertRaisesRegex(ValidationError, "XML plist"):
+            self.inspect(paths)
+
+    def test_resource_native_data_and_cr_newline_differences_cannot_compare_equal(self):
+        paths = artifact_set(self.root)
+        archive = paths["ios-archive"] / "Products/Applications/Reader.app/Resources/Extra/Info.plist"
+        exported = self.root / "export/Payload/Reader.app/Resources/Extra/Info.plist"
+        for path in (archive, exported):
+            path.parent.mkdir(parents=True)
+        for left, right in ((b'<data>Y&#81;==</data>', b'<data>YQ==</data>'),
+                            (b'<string>a\rb</string>', b'<string>a\nb</string>'),
+                            (b'<string><![CDATA[a\r\nb]]></string>', b'<string>a\nb</string>')):
+            archive.write_bytes(b'<plist><dict><key>x</key>' + left + b'</dict></plist>')
+            exported.write_bytes(b'<plist><dict><key>x</key>' + right + b'</dict></plist>')
+            zip_tree(self.root / "export", paths["ios-ipa"])
+            with self.subTest(left=left), self.assertRaises(ValidationError):
+                self.inspect(paths)
+        # The ordinary CR value remains usable and corresponds to a native
+        # binary representation, rather than banning valid multiline content.
+        expected = {"x": "a\rb\r\nc"}
+        # plistlib's XML writer normalizes newlines before writing; it is not
+        # an oracle for the original native CR/CRLF spelling under test.
+        archive.write_bytes(b'<plist><dict><key>x</key><string>a\rb\r\nc</string></dict></plist>')
+        exported.write_bytes(plistlib.dumps(expected, fmt=plistlib.FMT_BINARY))
+        zip_tree(self.root / "export", paths["ios-ipa"])
+        self.assertEqual(self.inspect(paths)["nativePaths"], 5)
+
+    def test_native_numeric_and_original_binary_structure_mismatches_fail_full_pairs(self):
+        paths = artifact_set(self.root)
+        archive = paths["ios-archive"] / "Products/Applications/Reader.app/Resources/Extra/Info.plist"
+        exported = self.root / "export/Payload/Reader.app/Resources/Extra/Info.plist"
+        for path in (archive, exported):
+            path.parent.mkdir(parents=True)
+        zero = b'<plist><dict><key>x</key><real>0.0</real></dict></plist>'
+        minus_zero = zero.replace(b">0.0<", b">-0.0<")
+        cases = [
+            (minus_zero, zero),
+            (binary_dictionary(b"\x22" + struct.pack(">f", -0.0)), binary_dictionary(b"\x23" + struct.pack(">d", 0.0))),
+            (binary_dictionary(b"\x14" + b"\xff" * 16), plistlib.dumps({"x": -1})),
+            (binary_dictionary(b"\x33" + struct.pack(">d", 1e-7)), binary_dictionary(b"\x33" + struct.pack(">d", 2e-7))),
+            (binary_dictionary(b"\x33" + struct.pack(">d", -0.0)), binary_dictionary(b"\x33" + struct.pack(">d", 0.0))),
+            (binary_dictionary(b"\x5f\x00\x01A"), plistlib.dumps({"x": "A"})),
+            (b'<plist><dict><key>x</key><string>&#000000065;</string></dict></plist>', plistlib.dumps({"x": "A"})),
+        ]
+        for index, (left, right) in enumerate(cases):
+            archive.write_bytes(left); exported.write_bytes(right)
+            zip_tree(self.root / "export", paths["ios-ipa"])
+            with self.subTest(case=index), self.assertRaises(ValidationError):
+                self.inspect(paths)
+        for value in (-0.0, 0.0, 1.5):
+            archive.write_bytes(plistlib.dumps({"x": value}))
+            exported.write_bytes(binary_dictionary(b"\x22" + struct.pack(">f", value)))
+            zip_tree(self.root / "export", paths["ios-ipa"])
+            with self.subTest(same_value=value):
+                self.assertEqual(self.inspect(paths)["nativePaths"], 5)
 
     def test_duplicate_identical_code_paths_allowed_conflicting_uuid_and_duplicate_dsyms_rejected(self):
         paths = artifact_set(self.root)

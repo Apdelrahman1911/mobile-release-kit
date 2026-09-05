@@ -145,7 +145,10 @@ The Store API key is distinct from the Apple distribution certificate and provis
 - P12 contains the distribution signing private key and certificate.
 - The provisioning profile authorizes the Store application identity, Team, entitlements, and distribution method.
 
-All three relationships are checked; possession of one is not evidence that another is correct.
+Possession of one is not evidence that another is correct. The toolkit checks
+API access, final signatures and complete profile-content relationships separately.
+Apple profile issuer authentication remains an open production blocker (QA-002);
+CMS decoding is not proof of Apple authority. See [entitlement validation](ios-entitlements.md).
 
 ### Private review-state commitments
 
@@ -191,7 +194,8 @@ Signed final-artifact validation checks:
 
 - the final AAB signature and configured public upload-certificate fingerprint;
 - the exported application signature/nested code and configured Apple distribution fingerprint;
-- embedded profile Bundle ID, Team, distribution type, expiry, production entitlements, and certificate relationship established by the signed export;
+- embedded profile Bundle ID, Team, distribution type, validity interval, complete
+  typed entitlement grants and certificate membership, correlated with modern DER content;
 - exact artifact identities and committed version/build values.
 
 Fresh Android preparation and every new AAB send require the pinned bundletool,
@@ -208,6 +212,11 @@ leaf-certificate validity. A new Transporter upload repeats current validation i
 dispatch, including explicit same-byte upload retries. Reconciliation of an already accepted build
 can use the original authenticated validation and exact original hashes after signing assets expire;
 it cannot use that old validation to authorize a new upload. See [Recovery](recovery.md).
+
+Every code architecture must have consistent signed claims, Team and signer.
+Nested apps/extensions use their own profiles; profileless code cannot borrow
+an enclosing app's grants. These checks do not yet prove Apple issued the decoded
+profile (QA-002); see the supported formats and rules in [iOS entitlements](ios-entitlements.md).
 
 Online preflight proves that the configured Google or Apple API credential can authenticate and see the intended Store application. Provider authentication is the authority for API-key suitability; a Base64 format check is not.
 

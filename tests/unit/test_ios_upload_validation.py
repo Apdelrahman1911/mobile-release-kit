@@ -6,6 +6,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,14 +15,18 @@ from unittest.mock import patch
 from mobile_release.config import load_config
 from mobile_release.credentials import artifact_validation_environment
 from mobile_release.errors import MobileReleaseError, ValidationError
-from mobile_release.ios import SigningValidityInterval
+from mobile_release.ios import SigningValidityInterval, validate_ipa_current_signing
 from mobile_release.inspection import MAX_INSPECTION_SECONDS
 from mobile_release.ios_upload_validation import main, validate_current_upload
-from mobile_release.provenance import sha256_file
+from mobile_release.provenance import seal, sha256_file
 from mobile_release.reporting import Finding, Status
 
 from .evidence_helpers import build_lifecycle
 from .helpers import ios_config, write_project
+from .ios_entitlement_helpers import (
+    NativeProfileSeam, add_discardable_root_dictionary, binary_dictionary, modernize_ipa_fixture,
+    rewrite_zip_members, signed_entitlements,
+)
 
 
 class IosCurrentUploadTests(unittest.TestCase):
@@ -88,6 +93,42 @@ class IosCurrentUploadTests(unittest.TestCase):
             deadline=deadline,
         )
         self.signer.assert_called_once_with(inspected, deadline=deadline)
+
+    def test_real_current_entitlement_failure_cannot_authorize_a_new_upload(self) -> None:
+        modernize_ipa_fixture(self.ipa)
+        payload = {key: value for key, value in self.intent.items() if key != "integrity"}
+        record = next(item for item in payload["artifacts"] if item["logicalName"] == "ios-ipa")
+        record.update(sha256=sha256_file(self.ipa), size=self.ipa.stat().st_size)
+        self.intent = seal(payload)
+        self.intent_path.write_text(json.dumps(self.intent))
+        self.native.side_effect = validate_ipa_current_signing
+        native = NativeProfileSeam()
+        native.claims["Reader.app"] = {**signed_entitlements(), "com.apple.developer.associated-domains": ["applinks:fictional.example"]}
+        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.subprocess.run", side_effect=native):
+            with self.assertRaisesRegex(ValidationError, "new IPA upload is ineligible.*not authorized"):
+                self.validate()
+        self.signer.assert_not_called()
+        self.assertTrue(any("--entitlements" in argv for argv, _ in native.calls))
+        self.assertFalse(any("--extract-certificates" in argv for argv, _ in native.calls))
+
+    def test_malformed_primary_plist_stops_current_upload_before_native_inspection(self) -> None:
+        with zipfile.ZipFile(self.ipa) as archive:
+            original = archive.read("Payload/Reader.app/Info.plist")
+        self.assertEqual(original.count(b"</dict>"), 1)
+        for malformed in (add_discardable_root_dictionary(original), original.replace(
+                b"</dict>", b"<key>ReviewProbe</key><data>Y&#81;==</data></dict>"),
+                binary_dictionary(b"\x5f\x00\x01A")):
+            rewrite_zip_members(self.ipa, {"Payload/Reader.app/Info.plist": malformed})
+            payload = {key: value for key, value in self.intent.items() if key != "integrity"}
+            record = next(item for item in payload["artifacts"] if item["logicalName"] == "ios-ipa")
+            record.update(sha256=sha256_file(self.ipa), size=self.ipa.stat().st_size)
+            self.intent = seal(payload)
+            self.intent_path.write_text(json.dumps(self.intent))
+            self.native.side_effect = validate_ipa_current_signing
+            with patch("mobile_release.ios._run_native", side_effect=AssertionError("must fail before native inspection")):
+                with self.assertRaisesRegex(ValidationError, "new IPA upload is ineligible.*plist"):
+                    self.validate()
+            self.signer.assert_not_called()
 
     def test_no_authenticated_historical_intent_can_replace_current_signing_eligibility(self) -> None:
         for status in (Status.FAIL, Status.BLOCKED, Status.SKIP):
