@@ -271,7 +271,7 @@ def profile(certificate: bytes = CERTIFICATE, bundle_id: str = BUNDLE) -> dict[s
 
 
 def modern_profile_bytes(outer: dict[str, Any], *, authoritative: dict[str, Any] | None = None) -> bytes:
-    # The native CMS test seam returns its input. This wraps real DER in a
+    # The explicitly mocked authentication seam returns its input. This wraps real DER in a
     # real plist, but neither layer has a CMS signature; never use as a profile.
     inner = dict(outer if authoritative is None else authoritative)
     inner.pop("DER-Encoded-Profile", None)
@@ -297,7 +297,11 @@ def modernize_ipa_fixture(path: Path) -> None:
 
 
 class NativeProfileSeam:
-    """Fake only native crypto/CMS, preserving actual bytes, parsers and inventory."""
+    """Fake native app signing, preserving actual bytes, parsers and inventory.
+
+    Entitlement-content tests must separately patch authenticate_cms with the
+    explicit method below. These fixtures do NOT establish Apple issuer trust.
+    """
     def __init__(self):
         self.claims = {}
         self.teams = {}
@@ -306,6 +310,12 @@ class NativeProfileSeam:
         self.calls = []
         self.extracted = []
         self.failures = set()
+        self.cms_calls = []
+
+    def authenticate_cms(self, content, *, deadline):
+        deadline.check()
+        self.cms_calls.append(content)
+        return content
 
     def __call__(self, argv, **kwargs):
         self.calls.append((argv, kwargs))
@@ -316,7 +326,7 @@ class NativeProfileSeam:
         if (operation, *key) in self.failures:
             return types.SimpleNamespace(returncode=1, stdout=b"private-native-canary", stderr=b"private-native-canary")
         if argv[0] == "security":
-            return types.SimpleNamespace(returncode=0, stdout=path.read_bytes(), stderr=b"")
+            raise AssertionError("CMS decoding must not replace authenticated profile authority")
         if "--entitlements" in argv:
             if key in self.claims:
                 value = self.claims[key]

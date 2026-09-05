@@ -8,17 +8,15 @@ or nested `.app`/`.appex` uses its own profile; a parent cannot authorize a chil
 Unclaimed profile capabilities are allowed. A missing grant, incompatible type,
 unsupported expression or unavailable native inspection fails closed.
 
-**Open production blocker (QA-002):** this comparison does not yet authenticate
-Apple's provisioning-profile issuer. `security cms -D` decodes CMS but can also
-accept unsigned content. App signatures, certificate membership, profile-content
-comparison and GitHub attestations do not substitute for Apple issuer verification.
-Do not interpret a comparison PASS as cryptographic profile authorization or
-production readiness. The separate issuer-authentication correction is required
-before activation; it is not an accepted integration limitation.
+Both profile CMS layers also require independent signature verification and the
+Apple production iOS provisioning-profile issuer policy under pinned public roots.
+`security cms -D` is not used as authority. Content comparison, app signatures and
+workflow attestations remain distinct from that check; see
+[profile authority, isolation and external requirements](ios-profile-authority.md).
 
 ## Supported profile and entitlement formats
 
-Modern profiles must contain `DER-Encoded-Profile`. The toolkit decodes its CMS
+Modern profiles must contain `DER-Encoded-Profile`. The toolkit authenticates its CMS
 payload and uses that DER dictionary as the authoritative **content**. Complete
 entitlements, TeamIdentifier, UUID, creation/expiry dates and device-distribution
 fields must agree with the outer plist. Actual outer certificate bytes must hash
@@ -134,4 +132,5 @@ current-upload regressions prove invalid claims stop before a Store request.
 `test_macho_native.py` independently generates ad-hoc multi-architecture DER using
 native tools; it is not Apple Distribution signing. A protected, non-public
 valid-profile archive/export rehearsal on the pinned Xcode remains an external
-consumer gate, and cannot substitute for fixing QA-002.
+consumer gate, not a repository CI result. Actual Apple issuer-policy and native CMS
+regressions are documented separately in [profile authority](ios-profile-authority.md).

@@ -68,8 +68,24 @@ If the workflow fails after credential import, verify temporary keychains/profil
   profileless frameworks/helpers. App groups are exact grants, not arbitrary wildcards.
 - Correct capability/profile settings before a new candidate; never re-sign an
   accepted candidate to finish its original evidence. See [entitlement rules](ios-entitlements.md).
-- A content-comparison PASS is not Apple issuer verification: QA-002 remains an
-  open production blocker, not something an operator confirmation can waive.
+- An issuer/signature failure requires a genuine modern Apple-issued profile and
+  supported macOS policy APIs/pinned toolkit resources. Do not remove DER, import
+  a custom root, backdate validation or use `security cms -D` as a bypass.
+- Issuer validation is offline, not a live revocation/account-status check. Finish
+  existing candidates under their original authenticated pin/bytes; never renew
+  profiles or rebuild an accepted candidate for evidence completion. See
+  [profile authority and cleanup limits](ios-profile-authority.md).
+- Do not overlap local signing preflights: global keychain/profile lifetime
+  coordination remains the separate confirmed QA-003 blocker, pending remediation.
+- A profile descriptor, selector, worker, scratch or handler-cleanup error is a
+  failed validation even when authentication already completed. Do not retry an
+  ambiguous descriptor close; end that process and inspect only its recorded
+  owned residues. Default-signal protection does not cover custom host handlers
+  or hard termination.
+- QA-004 separately leaves outer build-input scratch/client restoration vulnerable
+  to cancellation at cleanup entry. Verify decoded scratch removal and original
+  client configuration before retrying. Do not infer outer cleanup from successful
+  inner profile/keychain cleanup, or remove another task's files.
 
 ## dSYM or Crashlytics failure
 

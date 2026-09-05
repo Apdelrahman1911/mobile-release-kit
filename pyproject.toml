@@ -32,6 +32,9 @@ package-dir = { "" = "src" }
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+mobile_release = ["data/apple-profile-roots.pem"]
+
 [tool.setuptools.data-files]
 "share/mobile-release-kit" = ["Gemfile", "Gemfile.lock"]
 "share/mobile-release-kit/fastlane" = [

@@ -40,10 +40,15 @@ The final public-release decision is intentionally outside automation.
 - Every iOS signed entitlement is compared with its own app/extension's modern DER profile
   content, with typed allowlist rules and explicit architecture selection. Profileless code cannot
   borrow parent grants. Fresh per-slice certificate extraction prevents stale-leaf reuse.
-  **Open production blocker QA-002:** CMS decoding does not authenticate Apple's profile issuer;
-  complete content comparison, app signing and workflow attestations cannot establish that
-  independent authority. This is not an accepted limitation or a READY state. See
-  [iOS entitlement validation](docs/ios-entitlements.md).
+  Both profile CMS layers additionally require real signatures and the exact production Apple
+  iOS provisioning issuer under independently pinned roots, with keychain/network lookup disabled.
+  Native workers have independent parent-liveness/deadline/process-group containment and no
+  inherited Store/signing capabilities. This is offline issuance, not live revocation status;
+  see [profile authority](docs/ios-profile-authority.md). The separately confirmed QA-003
+  global local-signing concurrency blocker remains open; atomic profile installation is not
+  a lifetime lease and does not justify a READY verdict. QA-004 also remains open:
+  default cancellation can interrupt outer build-input scratch/client restoration.
+  The corrected inner profile/signing/native-resource cleanup does not cover that owner.
 - Historical Android recovery retains authenticated original signing/identity evidence rather than
   requiring an accepted build to remain eligible for a new upload. Every actual new AAB send repeats
   current pinned native validation in a credential-free child, full Store-state classification and a
@@ -58,7 +63,12 @@ The final public-release decision is intentionally outside automation.
   `init --recover`; unknown journals and intervening edits are conflicts, not authorization to
   overwrite or delete user files. This coordinates cooperating commands, not a hostile same-user
   process or a compromised filesystem. See [initialization recovery](docs/init-recovery.md).
-- Temporary credentials are created after cleanup handlers and removed on every exit path.
+- Temporary credential cleanup is attempted on catchable exit paths and failures are reported.
+  Profile/signing/authentication owners protect default main-thread cleanup dispatch/entry,
+  track exact resources and report ambiguous cleanup without unsafe retries. QA-004 means
+  outer materialization still requires correction; it is not an accepted cleanup exception.
+  Hard termination/power loss cannot run cleanup; private residual paths and global local-signing
+  state require owned cleanup or hosted-runner disposal, not a blanket guarantee of deletion.
 - Secret values and private identities are not logged, summarized, cached, attested, or uploaded as artifacts.
 - Store jobs remove preparation ADC files before intent attestation/upload, then separately acquire
   execution credentials and remove them before diagnostics/final actions. Apple P8/review/HMAC values

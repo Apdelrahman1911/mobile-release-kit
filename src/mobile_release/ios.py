@@ -201,46 +201,11 @@ def _validated_ipa_entries(path: Path, *, deadline: InspectionDeadline | None = 
 
 
 def _profile_details(path: Path, *, deadline: InspectionDeadline | None = None) -> dict[str, Any] | None:
-    if sys.platform != "darwin" or not shutil.which("security"):
+    if sys.platform != "darwin":
         return None
-    from .ios_der import decode_der_dictionary
-    from .ios_entitlements import MAX_PLIST_BYTES, correlate_profile, load_plist_dictionary
+    from .ios_profiles import load_authenticated_profile
 
-    deadline = deadline if deadline is not None else InspectionDeadline()
-    deadline.check()
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_PLIST_BYTES:
-        raise ValidationError("embedded provisioning profile must be a bounded regular file")
-    result = _run_native(
-        ["security", "cms", "-D", "-i", str(path)],
-        deadline=deadline,
-        env=_validation_environment(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=30,
-        check=False,
-    )
-    if result.returncode:
-        raise ValidationError("security could not decode the embedded provisioning profile")
-    outer = load_plist_dictionary(result.stdout, deadline=deadline)
-    encoded = outer.get("DER-Encoded-Profile")
-    if type(encoded) is not bytes or not 0 < len(encoded) <= MAX_PLIST_BYTES:
-        raise ValidationError("modern iOS profile requires its authoritative DER-Encoded-Profile; legacy-only profiles are unsupported")
-    with tempfile.TemporaryDirectory(prefix="mobile-release-profile-der-") as directory:
-        inner = Path(directory) / "profile.cms"
-        inner.write_bytes(encoded)
-        inner.chmod(0o600)
-        result = _run_native(
-            ["security", "cms", "-D", "-i", str(inner)], deadline=deadline,
-            env=_validation_environment(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=30, check=False,
-        )
-        if result.returncode:
-            raise ValidationError("security could not decode the authoritative DER provisioning profile")
-        authoritative = decode_der_dictionary(result.stdout, profile=True, deadline=deadline)
-    # CMS decoding is not Apple issuer authentication. That independently
-    # confirmed authority blocker is tracked as QA-002; comparison alone must
-    # not be advertised as cryptographic profile authorization.
-    return correlate_profile(outer, authoritative, deadline=deadline)
+    return load_authenticated_profile(path, deadline=deadline)
 
 
 def _code_executable(code_path: Path, *, deadline: InspectionDeadline) -> Path | None:
