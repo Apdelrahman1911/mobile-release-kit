@@ -24,6 +24,12 @@ All notable changes to Mobile Release Kit are documented here. The project follo
 
 ### Fixed
 
+- Make `init --apply` recoverable across all configuration, caller, metadata and ignore writes,
+  including forced replacements. Stage complete output before installation, restore original
+  inodes on precommit rollback, serialize cooperating commands, reject path aliases, and preserve
+  existing metadata/ignore bytes. Add explicit `init --recover` for interrupted transactions;
+  committed cleanup never rewrites destinations. Require local Linux/macOS filesystem semantics
+  for mutation, leaving preview portable; document private-state retention and conflict handling.
 - Require and correlate iOS IPA/archive native images, typed bundle metadata, resources and every
   present retained dSYM on private snapshots before candidate authorization. Bind archive/symbol
   hashes at execution, reject source-path ABA/substitution, and disable export stripping/thinning.

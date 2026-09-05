@@ -123,7 +123,7 @@ mobile-release init --apply \
 ```text
 release/mobile-release.json
 release/store/
-.gitignore (`.mobile-release/` is appended when absent)
+.gitignore (release evidence and the three private init-state paths are ignored)
 .github/workflows/mobile-preflight.yml
 .github/workflows/mobile-candidate.yml
 .github/workflows/mobile-external-testing.yml
@@ -133,9 +133,27 @@ release/store/
 `--apply` creates the required locale/review/TestFlight text files as empty review prompts. Empty
 content intentionally fails metadata preflight until the product owner completes it. Existing
 regular metadata files are preserved even with `--force`; a symlink or non-file at a required
-destination aborts the entire integration before any file is written. The root `.gitignore` is
-created when missing or receives one exact `.mobile-release/` line when absent; existing text is
-preserved, while a symlink, non-file, non-UTF-8 file, or file over 1 MiB fails before any write.
+destination aborts installation. The root `.gitignore` is created when missing or receives missing
+exact lines for `.mobile-release/`, `.mobile-release-init-prepare/`, `.mobile-release-init/` and
+`.mobile-release-init-cleanup/`. Existing bytes (including CRLF) are preserved; a symlink, non-file,
+non-UTF-8 file, or ignore file exceeding 1 MiB before or after the append fails before any
+destination write. Special permission bits on the project root or destination ancestors are
+unsupported and rejected before staging.
+
+On supported local Linux/macOS filesystems, apply stages every file and missing directory before
+installation and restores original files after ordinary precommit failures. `--force` permits
+configuration/caller replacements, not metadata replacement or an overwrite of pending recovery
+state. After cancellation, termination or an incomplete-recovery error, run:
+
+```bash
+mobile-release init --root /path/to/application --recover
+```
+
+Do not commit/upload any private init-state directory: backups can contain original configuration,
+and interruption can happen before `.gitignore` is updated. Do not discard those directories to
+retry. Recovery preserves intervening edits and fails on conflicts rather than deleting them; a
+committed transaction only needs cleanup. Read [initialization recovery](init-recovery.md) before
+reconciling a conflict. Success reports actual `created`/`updated` files and still requires review.
 
 ## 4. Complete application policy
 

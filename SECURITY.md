@@ -44,6 +44,13 @@ The final public-release decision is intentionally outside automation.
   upload. The owned request disables logical retries without replacing Google's resumable protocol.
 - Expected public certificate fingerprints are reviewed application policy.
 - Local files live outside the repository with restrictive permissions.
+- Initialization uses a root-directory lock and private recoverable staging on supported local
+  Linux/macOS filesystems. Never commit/upload `.mobile-release-init-prepare/`,
+  `.mobile-release-init/` or `.mobile-release-init-cleanup/`: their backups can contain original
+  configuration. Ignore installation itself can be interrupted. Preserve pending state and use
+  `init --recover`; unknown journals and intervening edits are conflicts, not authorization to
+  overwrite or delete user files. This coordinates cooperating commands, not a hostile same-user
+  process or a compromised filesystem. See [initialization recovery](docs/init-recovery.md).
 - Temporary credentials are created after cleanup handlers and removed on every exit path.
 - Secret values and private identities are not logged, summarized, cached, attested, or uploaded as artifacts.
 - Store jobs remove preparation ADC files before intent attestation/upload, then separately acquire

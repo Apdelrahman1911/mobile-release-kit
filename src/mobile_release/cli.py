@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 from contextlib import ExitStack
@@ -12,7 +13,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from . import __version__
 from .android import validate_aab, validate_aab_structure
-from .config import ConfigurationError, default_config, load_config, write_json_exclusive
+from .config import ConfigurationError, default_config, load_config
 from .credentials import credential_findings
 from .discovery import discover_project, git_context
 from .errors import MobileReleaseError, ValidationError
@@ -21,6 +22,7 @@ from .ios import (
     validate_ipa_current_signing, validate_preparation_signing_time,
 )
 from .ios_artifacts import inspect_ios_artifact_set, snapshot_ios_artifacts
+from .init_transaction import IGNORE_LINES, InitInterrupted, InitWorkspace, validate_paths
 from .metadata import build_metadata_archive, metadata_findings
 from .preflight import doctor, preflight
 from .provenance import (
@@ -92,7 +94,9 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser = commands.add_parser("init", help="Discover a project and propose thin configuration.")
     init_parser.add_argument("--root", type=Path, default=Path.cwd())
     init_parser.add_argument("--config", default=DEFAULT_CONFIG)
-    init_parser.add_argument("--apply", action="store_true")
+    init_mode = init_parser.add_mutually_exclusive_group()
+    init_mode.add_argument("--apply", action="store_true")
+    init_mode.add_argument("--recover", action="store_true", help="Recover interrupted initialization without building or contacting Stores.")
     init_parser.add_argument("--force", action="store_true")
     init_parser.add_argument("--tooling-sha", help="Full shared-tool commit used in caller templates.")
     init_parser.add_argument(
@@ -264,23 +268,6 @@ def _validate_init_destination(
         raise ValidationError(f"{label} destination is not a regular file: {destination}")
 
 
-def _write_text_exclusive(path: Path, value: str, *, force: bool) -> None:
-    flags = os.O_WRONLY | os.O_CREAT
-    flags |= os.O_TRUNC if force else os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        descriptor = os.open(path, flags, 0o644)
-    except FileExistsError as error:
-        raise ValidationError(f"refusing to overwrite workflow caller: {path}") from error
-    except OSError as error:
-        if path.is_symlink():
-            raise ValidationError(f"refusing to write workflow caller through symbolic link: {path}") from error
-        raise
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(value)
-
-
 def _metadata_skeleton(configuration: Mapping[str, Any]) -> tuple[str, ...]:
     metadata = configuration.get("metadata", {})
     root = str(metadata.get("root", "release/store")).rstrip("/")
@@ -315,119 +302,120 @@ def _metadata_skeleton(configuration: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(sorted(paths))
 
 
-def _init(args: argparse.Namespace) -> int:
-    root = args.root.expanduser().resolve()
+def _init_proposal(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     discovered = discover_project(root)
     proposed = default_config(root, discovered)
     if not any(proposed[platform].get("enabled") for platform in ("android", "ios")):
-        raise ValidationError(
-            "no supported Android application or iOS application project was discovered"
-        )
-    if not args.apply:
+        raise ValidationError("no supported Android application or iOS application project was discovered")
+    return discovered, proposed
+
+
+def _init(args: argparse.Namespace) -> int:
+    root = args.root.expanduser().resolve()
+    if not args.apply and not args.recover:
+        discovered, proposed = _init_proposal(root)
         print(json.dumps({"discovery": discovered, "proposedConfiguration": proposed}, indent=2))
         return 0
+    try:
+        with InitWorkspace(root) as workspace:
+            if args.recover:
+                try:
+                    outcome = workspace.recover()
+                except KeyboardInterrupt as error:
+                    raise InitInterrupted("init recovery interrupted; preserve private state and run init --recover again") from error
+                print(json.dumps({"recovery": outcome, "requiresReview": True}, indent=2))
+                return 0
+            workspace.require_clean()
+            _, proposed = _init_proposal(root)
+            return _init_apply(args, root, proposed, workspace)
+    except OSError as error:
+        raise ValidationError(
+            "init filesystem operation failed; preserve any private transaction state and use init --recover"
+        ) from error
+
+
+def _init_apply(args: argparse.Namespace, root: Path, proposed: dict[str, Any], workspace: InitWorkspace) -> int:
     config_path = _lexical_project_path(root, args.config)
     template_dir = _find_template_dir(root, args.template_dir)
     if template_dir is None:
         raise ValidationError("workflow caller templates are unavailable")
     if not args.tooling_sha or not re.fullmatch(r"[0-9A-Fa-f]{40}", args.tooling_sha):
         raise ValidationError("--tooling-sha full commit is required to install workflow callers")
-    if not args.tooling_repository or not TOOLING_REPOSITORY_RE.fullmatch(
-        args.tooling_repository
-    ):
-        raise ValidationError(
-            "--tooling-repository must be a safe GitHub OWNER/REPO coordinate"
-        )
+    if not args.tooling_repository or not TOOLING_REPOSITORY_RE.fullmatch(args.tooling_repository):
+        raise ValidationError("--tooling-repository must be a safe GitHub OWNER/REPO coordinate")
     proposed["$schema"] = (
         f"https://raw.githubusercontent.com/{args.tooling_repository}/"
         f"{args.tooling_sha.lower()}/schemas/project.schema.json"
     )
     sources = sorted(template_dir.glob("*.yml"))
-    if not sources:
-        raise ValidationError(f"workflow caller template directory is empty: {template_dir}")
-
-    workflow_dir = root / ".github/workflows"
-    prepared: list[tuple[Path, str]] = []
-    metadata_files: list[Path] = []
-    gitignore = _lexical_project_path(root, ".gitignore")
-    _validate_init_destination(root, gitignore, force=True, label="root .gitignore")
-    gitignore_existed = gitignore.exists()
-    if gitignore_existed:
-        if gitignore.stat().st_size > 1024 * 1024:
-            raise ValidationError("root .gitignore is unexpectedly large")
-        try:
-            gitignore_text = gitignore.read_text(encoding="utf-8")
-        except UnicodeDecodeError as error:
-            raise ValidationError("root .gitignore must be UTF-8") from error
-    else:
-        gitignore_text = ""
-    ignore_present = ".mobile-release/" in {
-        line.strip() for line in gitignore_text.splitlines()
-    }
-    if not ignore_present:
-        if gitignore_text and not gitignore_text.endswith("\n"):
-            gitignore_text += "\n"
-        gitignore_text += ".mobile-release/\n"
-    destinations = {config_path}
-    _validate_init_destination(root, config_path, force=args.force, label="configuration")
+    if not 1 <= len(sources) <= 64:
+        raise ValidationError("workflow caller template directory must contain 1–64 callers")
+    prepared: list[tuple[Path, bytes, str]] = [
+        (config_path, (json.dumps(proposed, indent=2, ensure_ascii=False) + "\n").encode("utf-8"), "configuration")
+    ]
     for source in sources:
         if source.is_symlink() or not source.is_file():
             raise ValidationError(f"workflow caller template is not a regular file: {source}")
-        rendered = source.read_text(encoding="utf-8")
+        descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise ValidationError("workflow caller template must be a regular file")
+            data = handle.read(1024 * 1024 + 1)
+        if len(data) > 1024 * 1024:
+            raise ValidationError("workflow caller template exceeds 1 MiB")
+        try:
+            rendered = data.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValidationError("workflow caller template must be UTF-8") from error
         placeholders = {
             "__MOBILE_RELEASE_KIT_SHA__": args.tooling_sha.lower(),
             "__MOBILE_RELEASE_KIT_REPOSITORY__": args.tooling_repository,
         }
-        missing = [name for name in placeholders if name not in rendered]
-        if missing:
-            raise ValidationError(
-                f"workflow caller template lacks required placeholder(s): {source}"
-            )
-        destination = _lexical_project_path(root, workflow_dir / source.name)
-        if destination in destinations:
-            raise ValidationError(f"duplicate init destination: {destination}")
-        destinations.add(destination)
-        _validate_init_destination(
-            root, destination, force=args.force, label="workflow caller"
-        )
+        if any(name not in rendered for name in placeholders):
+            raise ValidationError(f"workflow caller template lacks required placeholder(s): {source}")
         for placeholder, replacement in placeholders.items():
             rendered = rendered.replace(placeholder, replacement)
-        prepared.append((destination, rendered))
-    for relative in _metadata_skeleton(proposed):
-        destination = _lexical_project_path(root, relative)
-        if destination in destinations:
-            raise ValidationError(f"duplicate init destination: {destination}")
-        destinations.add(destination)
-        if destination.exists():
-            if destination.is_symlink() or not destination.is_file():
-                raise ValidationError(
-                    f"metadata skeleton destination is not a regular file: {destination}"
-                )
-            continue
-        _validate_init_destination(
-            root, destination, force=False, label="metadata skeleton"
-        )
-        metadata_files.append(destination)
-
-    write_json_exclusive(config_path, proposed, force=args.force)
-    created = [str(config_path.relative_to(root))]
-    workflow_dir.mkdir(parents=True, exist_ok=True)
-    for destination, rendered in prepared:
-        _write_text_exclusive(destination, rendered, force=args.force)
-        created.append(str(destination.relative_to(root)))
-    for destination in metadata_files:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        _write_text_exclusive(destination, "", force=False)
-        created.append(str(destination.relative_to(root)))
-    updated: list[str] = []
-    if not ignore_present:
-        _write_text_exclusive(gitignore, gitignore_text, force=gitignore_existed)
-        (updated if gitignore_existed else created).append(".gitignore")
-    print(
-        json.dumps(
-            {"created": created, "updated": updated, "requiresReview": True}, indent=2
-        )
-    )
+        destination = _lexical_project_path(root, root / ".github/workflows" / source.name)
+        prepared.append((destination, rendered.encode("utf-8"), "workflow caller"))
+    metadata_paths = [_lexical_project_path(root, path) for path in _metadata_skeleton(proposed)]
+    gitignore = root / ".gitignore"
+    paths = [path for path, _, _ in prepared] + metadata_paths + [gitignore]
+    validate_paths([path.relative_to(root).as_posix() for path in paths])
+    for path, _, label in prepared:
+        _validate_init_destination(root, path, force=args.force, label=label)
+    for path in metadata_paths + [gitignore]:
+        _validate_init_destination(root, path, force=True, label="metadata skeleton" if path != gitignore else "root .gitignore")
+    observed = {path: workspace.observe(path.relative_to(root).as_posix(), limit=1024 * 1024 if path == gitignore else 8 * 1024**2)
+                for path in paths}
+    for path, _, label in prepared:
+        if observed[path].before is not None and not args.force:
+            raise ValidationError(f"refusing to overwrite {label} observed during planning; use --force only after review")
+    before_ignore = observed[gitignore].data or b""
+    try:
+        before_ignore.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValidationError("root .gitignore must be UTF-8") from error
+    ignore_text = before_ignore
+    for line in IGNORE_LINES:
+        if line.encode() not in ignore_text.splitlines():
+            if ignore_text and not ignore_text.endswith(b"\n"):
+                ignore_text += b"\n"
+            ignore_text += line.encode() + b"\n"
+    if len(ignore_text) > 1024 * 1024:
+        raise ValidationError("root .gitignore including required ignore lines must fit within 1 MiB")
+    desired = [(path, payload) for path, payload, _ in prepared]
+    desired += [(path, None if observed[path].before is not None else b"") for path in metadata_paths]
+    desired.append((gitignore, ignore_text))
+    changes, created, updated = [], [], []
+    for path, payload in desired:
+        item = observed[path]
+        if payload == item.data and item.before is not None:
+            payload = None  # Idempotent force never replaces an identical inode.
+        changes.append((item, payload))
+        if payload is not None:
+            (created if item.before is None else updated).append(item.path)
+    workspace.apply(changes)
+    print(json.dumps({"created": created, "updated": updated, "requiresReview": True}, indent=2))
     return 0
 
 
@@ -1235,6 +1223,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except MobileReleaseError as error:
         print(f"mobile-release: {error}", file=sys.stderr)
         return 2
+    except InitInterrupted as error:
+        print(f"mobile-release: {error}", file=sys.stderr)
+        return 130
     except KeyboardInterrupt:
         print("mobile-release: interrupted", file=sys.stderr)
         return 130

@@ -9,8 +9,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .config import ReleaseConfig
+from .init_transaction import STATE_NAMES, is_state_name
 
 IGNORED_PARTS = {
+    *STATE_NAMES,
     ".git",
     ".gradle",
     ".idea",
@@ -112,7 +114,7 @@ def _ignored_path(root: Path, path: Path) -> bool:
         parts = path.relative_to(root).parts
     except ValueError:
         return True
-    return any(part in IGNORED_PARTS for part in parts) or any(
+    return any(part in IGNORED_PARTS or is_state_name(part) for part in parts) or any(
         parts[: len(prefix)] == prefix for prefix in PRIVATE_PREFIXES
     )
 
