@@ -396,6 +396,154 @@ class PlayReleaseLanesTest < Minitest::Test
     end
   end
 
+  def test_production_requires_every_locale_changelog_before_any_play_request
+    [nil, "", "\u00a0", "TODO", "x" * 501, "\xff".b].each do |text|
+      reset_case
+      fr = File.join(@root, "release/store/android/fr-FR/changelogs")
+      FileUtils.mkdir_p(fr)
+      File.binwrite(File.join(fr, "default.txt"), text) unless text.nil?
+      config_path = File.join(@root, "release/mobile-release.json")
+      config = JSON.parse(File.read(config_path))
+      config.fetch("metadata")["androidLocales"] = %w[en-US fr-FR]
+      File.write(config_path, JSON.generate(config))
+      fresh_process
+      assert_raises(FastlaneCore::Interface::FastlaneError) { prepare("production-submit") }
+      assert_empty @service.requests
+      assert_empty @service.mutations
+      assert_empty @service.commits
+      refute File.exist?(File.join(@root, "precondition.json"))
+    end
+  end
+
+  def test_invalid_exact_or_changed_notes_after_intent_cannot_reach_store_execution
+    [nil, "", "TODO", "x" * 501, "Valid but different notes"].each do |text|
+      reset_case
+      prepare("production-submit")
+      before = @service.clone(@service.state)
+      requests = @service.requests.length
+      directory = File.join(@root, "release/store/android/en-US/changelogs")
+      text.nil? ? File.delete(File.join(directory, "default.txt")) : File.binwrite(File.join(directory, "200.txt"), text)
+      assert_raises(FastlaneCore::Interface::FastlaneError) { execute }
+      assert_equal requests, @service.requests.length
+      assert_equal before, @service.state
+      assert_empty @service.mutations
+      assert_empty @service.commits
+      assert_no_receipt
+    end
+  end
+
+  def test_production_uses_frozen_original_notes_when_disk_changes_after_validation
+    notes = "Reviewed exported copy 🚀\r\n"
+    path = File.join(@root, "release/store/android/en-US/changelogs/default.txt")
+    File.binwrite(path, notes)
+    prepare("production-submit")
+    original_intent = File.binread(File.join(@root, "intent.json"))
+    changed = false
+    @service.before_request = lambda do |entry|
+      next unless !changed && entry.fetch(:method) == :post && entry.fetch(:path).end_with?("/edits")
+      File.binwrite(path, "x" * 501)
+      changed = true
+    end
+    execute
+    assert changed
+    target = @service.state.fetch("tracks").fetch("production").fetch("releases").find { |row| row["versionCodes"] == ["200"] }
+    assert_equal [{ "language" => "en-US", "text" => notes }], target.fetch("releaseNotes")
+    assert_equal original_intent, File.binread(File.join(@root, "intent.json"))
+    assert_equal 1, @service.commits.length
+    @service.before_request = nil
+    File.delete(File.join(@root, "receipt.json"))
+    retry_process
+    requests = @service.requests.length
+    assert_raises(FastlaneCore::Interface::FastlaneError) { execute }
+    assert_equal requests, @service.requests.length
+    File.binwrite(path, notes)
+    execute
+    assert_equal "reconciled", receipt.fetch("result")
+    assert_equal 1, @service.commits.length
+  end
+
+  def test_all_production_notes_and_unrelated_blank_long_history_survive_complete_state_checks
+    @unrelated[0]["releaseNotes"][0]["text"] = ""
+    @unrelated[1]["releaseNotes"][0]["text"] = "x" * 600
+    %w[internal closed-qa production].each { |name| @service.add_track(name, @unrelated) }
+    @service.state.fetch("listings")["de-DE"] = listing("de-DE", "Untouched German")
+    config_path = File.join(@root, "release/mobile-release.json")
+    config = JSON.parse(File.read(config_path))
+    config.fetch("metadata")["androidLocales"] = %w[en-US fr-FR]
+    File.write(config_path, JSON.generate(config))
+    expected = [
+      { "language" => "en-US", "text" => "Exact reviewed notes 🚀\r\n" },
+      { "language" => "fr-FR", "text" => "Améliorations validées.\n" },
+    ]
+    expected.each do |note|
+      directory = File.join(@root, "release/store/android", note.fetch("language"), "changelogs")
+      FileUtils.mkdir_p(directory)
+      File.binwrite(File.join(directory, note.fetch("language") == "en-US" ? "200.txt" : "default.txt"), note.fetch("text"))
+    end
+    unconfigured = File.join(@root, "release/store/android/de-DE/changelogs")
+    FileUtils.mkdir_p(unconfigured)
+    File.write(File.join(unconfigured, "default.txt"), "Not authorized for this operation")
+    fresh_process
+    prepare("production-submit")
+    before = @service.clone(@service.state)
+    execute
+    assert_equal expected, snapshot.fetch("targetRelease").fetch("releaseNotes")
+    target = @service.state.fetch("tracks").fetch("production").fetch("releases").find { |row| row["versionCodes"] == ["200"] }
+    assert_equal expected, target.fetch("releaseNotes").sort_by { |note| note.fetch("language") }
+    assert_equal "draft", target.fetch("status")
+    assert_equal @unrelated, @service.state.fetch("tracks").fetch("production").fetch("releases").reject { |row| row["versionCodes"] == ["200"] }
+    assert_equal before.fetch("tracks").reject { |name, _| name == "production" }, @service.state.fetch("tracks").reject { |name, _| name == "production" }
+    assert_equal before.fetch("listings").fetch("de-DE"), @service.state.fetch("listings").fetch("de-DE")
+    assert_equal before.fetch("bundles"), @service.state.fetch("bundles")
+    committed = @service.clone(@service.state)
+    File.delete(File.join(@root, "receipt.json"))
+    retry_process
+    execute
+    assert_equal committed, @service.state
+    assert_equal 1, @service.commits.length
+    assert_equal "reconciled", receipt.fetch("result")
+  end
+
+  def test_production_changelogs_reconcile_after_lost_response_cancellation_and_receipt_failure
+    %i[lost_response cancellation receipt_failure].each do |failure|
+      reset_case
+      File.binwrite(File.join(@root, "release/store/android/en-US/changelogs/default.txt"), "Original copy\r\n")
+      prepare("production-submit")
+      original_intent = File.binread(File.join(@root, "intent.json"))
+      if failure == :receipt_failure
+        original = @fastfile.method(:atomic_store_document)
+        @fastfile.define_singleton_method(:atomic_store_document) do |contents, label:|
+          raise IOError, "Synthetic production receipt failure" if label == "a Store receipt"
+          original.call(contents, label: label)
+        end
+      else
+        @service.after_request = lambda do |entry|
+          next unless entry.fetch(:path).end_with?(":commit")
+          raise Interrupt, "Synthetic cancellation" if failure == :cancellation
+          raise Google::Apis::TransmissionError, "Synthetic lost commit response"
+        end
+      end
+      case failure
+      when :receipt_failure then assert_raises(IOError) { execute }
+      when :cancellation then assert_raises(Interrupt) { execute }
+      else execute
+      end
+      assert_equal 1, @service.commits.length
+      committed = @service.clone(@service.state)
+      mutations = @service.mutations.length
+      File.delete(File.join(@root, "receipt.json")) if File.exist?(File.join(@root, "receipt.json"))
+      @service.after_request = nil
+      retry_process
+      execute
+      assert_equal "reconciled", receipt.fetch("result")
+      assert_equal committed, @service.state
+      assert_equal mutations, @service.mutations.length
+      assert_equal 1, @service.commits.length
+      assert_equal original_intent, File.binread(File.join(@root, "intent.json"))
+      assert_equal snapshot.fetch("targetRelease").fetch("releaseNotes"), committed.fetch("tracks").fetch("production").fetch("releases").find { |row| row["versionCodes"] == ["200"] }.fetch("releaseNotes")
+    end
+  end
+
   def test_lost_commit_response_is_read_back_without_second_commit
     prepare("candidate")
     @service.after_request = ->(entry) { raise Google::Apis::TransmissionError, "Synthetic lost commit response" if entry.fetch(:path).end_with?(":commit") }

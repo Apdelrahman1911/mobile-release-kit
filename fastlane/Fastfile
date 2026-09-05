@@ -442,7 +442,24 @@ def local_play_metadata_target(before)
   target
 end
 
+def validated_play_release_notes(intent_snapshot = nil)
+  notes = MobileReleaseKit.android_release_notes(
+    app_root,
+    metadata_path: File.join(metadata_root, "android"),
+    languages: config_value("metadata", "androidLocales"),
+    version_code: release_version.fetch(:build),
+  )
+  if intent_snapshot && notes != intent_snapshot.fetch("targetRelease")["releaseNotes"]
+    UI.user_error!("Android release notes differ from the authenticated production intent")
+  end
+  notes
+rescue MobileReleaseKit::ContractError => e
+  UI.user_error!(e.message)
+end
+
 def play_operation_snapshot(stage)
+  # Validate every locale before even opening the noncommitting preparation edit.
+  notes = validated_play_release_notes if stage == "production-submit"
   service = play_service
   package_name = android_identity
   edit = service.insert_edit(package_name, Google::Apis::AndroidpublisherV3::AppEdit.new)
@@ -489,13 +506,7 @@ def play_operation_snapshot(stage)
                        )
                      end
     if stage == "production-submit"
-      notes = Array(config_value("metadata", "androidLocales")).map do |language|
-        exact = File.join(metadata_root, "android", language, "changelogs", "#{code}.txt")
-        fallback = File.join(metadata_root, "android", language, "changelogs", "default.txt")
-        path = File.file?(exact) ? exact : fallback
-        { "language" => language, "text" => File.file?(path) ? File.read(path, encoding: "UTF-8") : "" }
-      end
-      target_release["releaseNotes"] = notes unless notes.empty?
+      target_release["releaseNotes"] = notes
     end
     target_release = MobileReleaseKit::PreservingSupplyUploader.normalize_release(target_release)
     destination_target = if target_present
@@ -782,7 +793,7 @@ def play_state_journal_path
   safe_app_path(required_env("MOBILE_RELEASE_PLAY_STATE_PATH"), must_exist: false)
 end
 
-def guarded_play_upload(options, stage:, intent_snapshot:)
+def guarded_play_upload(options, stage:, intent_snapshot:, release_notes: nil)
   expected = expected_play_aab
   MobileReleaseKit::PreservingSupplyUploader.run(
     options: options,
@@ -794,6 +805,7 @@ def guarded_play_upload(options, stage:, intent_snapshot:)
       require_play_target_in_edit!(client, stage, intent_snapshot)
     end,
     metadata_languages: stage == "production-submit" ? Array(config_value("metadata", "androidLocales")) : nil,
+    changelog_input: stage == "production-submit" ? { version_code: release_version.fetch(:build), notes: release_notes } : nil,
     intent_sha256: operation_intent.fetch(:digest),
     expected_bundle_sha256: expected.fetch("sha256"),
     expected_bundle: expected,
@@ -864,11 +876,12 @@ def play_promotion_options(from:, to:, status:, upload_metadata: false)
   }
 end
 
-def promote_play(from:, to:, status:, stage:, intent_snapshot:, upload_metadata: false)
+def promote_play(from:, to:, status:, stage:, intent_snapshot:, upload_metadata: false, release_notes: nil)
   guarded_play_upload(
     play_promotion_options(from: from, to: to, status: status, upload_metadata: upload_metadata),
     stage: stage,
     intent_snapshot: intent_snapshot,
+    release_notes: release_notes,
   )
 end
 
@@ -1865,6 +1878,7 @@ lane :android_production_draft do
     next
   end
   intent_snapshot = require_operation_intent!("android_production_draft", "android")
+  notes = validated_play_release_notes(intent_snapshot)
   classified = classify_play_intent_state("production-submit", intent_snapshot)
   if classified.fetch(:phase) == :target
     require_play_recovery_dispatch!
@@ -1880,6 +1894,7 @@ lane :android_production_draft do
       stage: "production-submit",
       intent_snapshot: intent_snapshot,
       upload_metadata: true,
+      release_notes: notes,
     )
     classified = classify_play_intent_state("production-submit", intent_snapshot)
     UI.user_error!("Google Play production preparation did not reach its authenticated target") unless classified.fetch(:phase) == :target

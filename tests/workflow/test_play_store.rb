@@ -693,6 +693,71 @@ class PreservingSupplyUploaderTests < Minitest::Test
     assert_equal "mutated", uploader.outcome
   end
 
+  def test_changelog_input_must_bind_nonempty_text_locales_and_exact_version_before_begin_edit
+    valid = [{ "language" => "en-US", "text" => "Reviewed notes" }]
+    cases = [
+      [nil, ["en-US"]],
+      [[], ["en-US"]],
+      [{ version_code: 200, "notes" => valid }, ["en-US"]],
+      [{ version_code: 200, notes: [{ "language" => "en-US", text: "Reviewed notes" }] }, ["en-US"]],
+      [{ version_code: 199, notes: valid }, ["en-US"]],
+      [{ version_code: "200", notes: valid }, ["en-US"]],
+      [{ version_code: 200, notes: [] }, ["en-US"]],
+      [{ version_code: 200, notes: valid }, nil],
+      [{ version_code: 200, notes: valid }, []],
+      [{ version_code: 200, notes: valid * 2 }, ["en-US", "en-US"]],
+      [{ version_code: 200, notes: valid }, ["fr-FR"]],
+      *["", "TODO", "x" * 501, "\xff".b, nil].map { |text| [{ version_code: 200, notes: [{ "language" => "en-US", "text" => text }] }, ["en-US"]] },
+    ]
+    cases.each do |input, languages|
+      client = FakePlayClient.new("internal" => track("internal", [release(200, status: "completed")]), "production" => track("production", unrelated_releases))
+      Supply.config = MobileReleaseKit::PreservingSupplyUploader.configuration(
+        promotion_options(destination: "production", status: "draft", skip_upload_changelogs: false),
+      )
+      uploader = MobileReleaseKit::PreservingSupplyUploader.new(
+        journal_path: @journal, client: client, metadata_languages: languages, changelog_input: input,
+      )
+      FastlaneCore::PrintTable.stub(:print_values, nil) do
+        assert_raises(MobileReleaseKit::ContractError) { uploader.perform_upload }
+      end
+      assert_empty client.events
+      assert_empty client.updates
+      assert_empty client.commits
+    end
+  end
+
+  def test_changelog_workers_use_a_deeply_frozen_copy_and_reject_wrong_scope
+    languages = ["en-US".dup]
+    notes = [{ "language" => "en-US".dup, "text" => "Original notes\r\n".dup }]
+    input = { version_code: 200, notes: notes }
+    client = FakePlayClient.new("internal" => track("internal", [release(200, status: "completed")]), "production" => track("production", unrelated_releases))
+    Supply.config = MobileReleaseKit::PreservingSupplyUploader.configuration(
+      promotion_options(destination: "production", status: "draft", skip_upload_changelogs: false),
+    )
+    uploader = MobileReleaseKit::PlayStoreHarness.new(journal_path: @journal, client: client, metadata_languages: languages, changelog_input: input)
+    uploader.metadata_hook = lambda do |adapter, store|
+      input[:version_code] = 201
+      notes.first.fetch("text").replace("Changed copy")
+      notes.first.fetch("language").replace("fr-FR")
+      languages.first.replace("fr-FR")
+      note = adapter.send(:upload_changelog, "en-US", "200")
+      assert_equal "Original notes\r\n", note.text
+      assert note.text.frozen?
+      assert_equal ["en-US"], adapter.send(:all_languages)
+      assert adapter.send(:all_languages).frozen?
+      assert adapter.send(:all_languages).first.frozen?
+      assert_raises(MobileReleaseKit::ContractError) { adapter.send(:upload_changelog, "fr-FR", 200) }
+      assert_raises(MobileReleaseKit::ContractError) { adapter.send(:upload_changelog, "en-US", 201) }
+      current = store.tracks("production").first
+      target = current.releases.find { |row| Array(row.version_codes).map(&:to_i) == [200] }
+      adapter.apply_supply_changelogs([note], target, current, "production")
+    end
+    FastlaneCore::PrintTable.stub(:print_values, nil) { uploader.perform_upload }
+    target = client.committed_state("production").fetch("releases").find { |row| row["versionCodes"] == ["200"] }
+    assert_equal [{ "language" => "en-US", "text" => "Original notes\r\n" }], target.fetch("releaseNotes")
+    assert_equal 1, client.commits.length
+  end
+
   def test_empty_destination_is_created_and_missing_source_is_rejected
     candidate = FakePlayClient.new({})
     uploader = run_uploader(candidate_options, candidate)

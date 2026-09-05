@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import struct
 import zipfile
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Iterable
 from urllib.parse import urlsplit
 
 from .config import ReleaseConfig
-from .errors import ValidationError
+from .errors import ConfigurationError, ValidationError
 from .reporting import Finding, Status
 
 MAX_FILE_SIZE = 10 * 1024 * 1024
@@ -55,6 +56,116 @@ PLATFORM_METADATA_ROOTS = {
     "android": ("android",),
     "ios": ("ios", "review", "testflight"),
 }
+ANDROID_NOTE_LIMIT = 500
+ANDROID_NOTE_MAX_BYTES = 4 * ANDROID_NOTE_LIMIT
+# Validation only: upload the original text, never this case-mapped view. Explicit
+# ASCII boundaries conservatively recognize placeholders next to Unicode text.
+ANDROID_NOTE_CASE_MAP = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ\u0130\u0131\u017f\u212a",
+    "abcdefghijklmnopqrstuvwxyziisk",
+)
+ANDROID_NOTE_PLACEHOLDER_RE = re.compile(
+    r"(?<![a-z0-9_])(?:todo|tbd|changeme)(?![a-z0-9_])|"
+    r"example\.(?:com|org)|<[^>]+>|\{\{[^}]+\}\}"
+)
+ANDROID_NOTE_SECRET_RE = re.compile(
+    r"-----begin [a-z0-9 ]*private key-----|akia[0-9a-z]{16}|"
+    r"[\"'](?:client_secret|private_key|private_key_id)[\"']\s*:\s*[\"'][^\"']{8,}|"
+    r"(?:password|api[_ -]?key|secret)\s*[:=]\s*[^\s]{8,}"
+)
+
+
+def validate_android_release_note(text: object) -> str:
+    """Validate public Play copy without trimming or normalizing uploaded bytes."""
+    if not isinstance(text, str):
+        raise ValidationError("Android release notes must be UTF-8 text")
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ValidationError("Android release notes must be UTF-8 text") from error
+    if not text.strip() or "\x00" in text:
+        raise ValidationError("Android release notes must contain non-whitespace text without NUL")
+    if len(text) > ANDROID_NOTE_LIMIT:
+        raise ValidationError(
+            f"Android release notes exceed the {ANDROID_NOTE_LIMIT}-character limit (including whitespace)"
+        )
+    validation_view = text.translate(ANDROID_NOTE_CASE_MAP)
+    if ANDROID_NOTE_PLACEHOLDER_RE.search(validation_view):
+        raise ValidationError("Android release notes contain an unresolved placeholder")
+    if ANDROID_NOTE_SECRET_RE.search(validation_view):
+        raise ValidationError("Android release notes contain possible secret material")
+    return text
+
+
+def _read_android_release_note(config: ReleaseConfig, path: Path) -> str:
+    path = config.project_path(str(path))  # Reject every in-repository symlink component.
+    relative = path.relative_to(config.root)
+    try:
+        flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+        with os.fdopen(os.open(path, flags), "rb") as handle:
+            attributes = os.fstat(handle.fileno())
+            if not stat.S_ISREG(attributes.st_mode) or attributes.st_size > ANDROID_NOTE_MAX_BYTES:
+                raise ValidationError(f"Android release notes must be a bounded regular file: {relative}")
+            raw = handle.read(ANDROID_NOTE_MAX_BYTES + 1)
+        if len(raw) > ANDROID_NOTE_MAX_BYTES:
+            raise ValidationError(f"Android release notes exceed the bounded UTF-8 file size: {relative}")
+        # read_text() would translate CRLF, changing both the length and intent.
+        text = raw.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise ValidationError(
+            f"Required Android release notes must be a readable regular UTF-8 file: {relative}"
+        ) from error
+    try:
+        return validate_android_release_note(text)
+    except ValidationError as error:
+        raise ValidationError(f"{relative}: {error}") from error
+
+
+def android_release_note(config: ReleaseConfig, locale: str, build: int) -> str:
+    if not isinstance(locale, str) or not LOCALE_RE.fullmatch(locale):
+        raise ValidationError("Android release note locale is invalid")
+    if type(build) is not int or not 1 <= build <= 2_100_000_000:
+        raise ValidationError("Android release notes require the authoritative positive build number")
+    directory = config.project_path(
+        f"{config.section('metadata')['root']}/android/{locale}/changelogs"
+    )
+    exact = directory / f"{build}.txt"
+    try:
+        exact.lstat()
+    except FileNotFoundError:
+        selected = directory / "default.txt"
+    except OSError as error:
+        raise ValidationError(f"Android release notes cannot be inspected safely: android/{locale}") from error
+    else:
+        # Presence, not validity, determines precedence. Never hide a broken,
+        # nonregular or malicious exact-version path behind a valid fallback.
+        selected = exact
+    return _read_android_release_note(config, selected)
+
+
+def android_release_notes(config: ReleaseConfig) -> list[dict[str, str]]:
+    locales = config.section("metadata").get("androidLocales")
+    if (
+        not isinstance(locales, list)
+        or not 1 <= len(locales) <= 250
+        or any(not isinstance(locale, str) or not LOCALE_RE.fullmatch(locale) for locale in locales)
+        or len(set(locales)) != len(locales)
+    ):
+        raise ValidationError("Android release notes require a unique nonempty configured locale set")
+    build = config.release_version().build
+    return [
+        {"language": locale, "text": android_release_note(config, locale, build)}
+        for locale in sorted(locales)
+    ]
+
+
+def _is_android_changelog(relative: Path) -> bool:
+    return (
+        len(relative.parts) == 4
+        and relative.parts[0] == "android"
+        and relative.parts[2] == "changelogs"
+        and re.fullmatch(r"(?:default|[1-9][0-9]{0,9})\.txt", relative.name) is not None
+    )
 
 
 def _safe_files(root: Path) -> Iterable[Path]:
@@ -165,8 +276,11 @@ def metadata_findings(
     del check_urls  # Network URL validation belongs to the explicit online Store preflight.
     metadata = config.section("metadata")
     relative_root = metadata.get("root", "release/store")
-    root = config.project_path(relative_root)
     findings: list[Finding] = []
+    try:
+        root = config.project_path(relative_root)
+    except ConfigurationError as error:
+        return [Finding("metadata.paths", Status.INVALID, str(error), category="metadata")]
     if not root.is_dir():
         return [
             Finding(
@@ -179,6 +293,16 @@ def metadata_findings(
         ]
 
     selected = set(platforms if platforms is not None else config.enabled_platforms)
+    android_build = None
+    if "android" in selected and config.platform_enabled("android"):
+        try:
+            android_build = config.release_version().build
+        except (ConfigurationError, OSError):
+            findings.append(Finding(
+                "metadata.android.release-notes.version", Status.INVALID,
+                "Android release notes require a valid committed version/build source.",
+                category="metadata", remediation="Fix the configured version source before selecting changelogs.",
+            ))
     for platform, key in (("android", "androidLocales"), ("ios", "iosLocales")):
         if platform not in selected:
             continue
@@ -252,6 +376,19 @@ def metadata_findings(
                         )
                     )
 
+            if platform == "android" and android_build is not None:
+                try:
+                    android_release_note(config, locale, android_build)
+                except (ConfigurationError, ValidationError) as error:
+                    findings.append(Finding(
+                        f"metadata.android.{locale}.release-notes", Status.INVALID,
+                        str(error), category="metadata",
+                        remediation=(
+                            f"Add reviewed changelogs/{android_build}.txt or changelogs/default.txt "
+                            "for this locale; fill or remove unused empty stubs."
+                        ),
+                    ))
+
     if "ios" in selected and config.platform_enabled("ios"):
         for relative in (
             "review/ios-beta-notes.txt",
@@ -284,6 +421,15 @@ def metadata_findings(
 
     for path in files:
         relative = path.relative_to(root)
+        if _is_android_changelog(relative):
+            try:
+                _read_android_release_note(config, path)
+            except (ConfigurationError, ValidationError) as error:
+                findings.append(Finding(
+                    "metadata.android.release-notes", Status.INVALID,
+                    str(error), category="metadata",
+                ))
+            continue
         suffix = path.suffix.lower()
         if suffix in {".txt", ".md", ".json"}:
             try:

@@ -4,11 +4,88 @@ require "minitest/autorun"
 require "json"
 require "tmpdir"
 require "tempfile"
+require "fileutils"
 require_relative "../../fastlane/release_support"
 
 class FastlaneReleaseSupportTest < Minitest::Test
   Testers = Struct.new(:google_groups)
   StoreVersion = Struct.new(:release_type, :earliest_release_date)
+
+  def test_shared_android_note_corpus_validates_raw_text_and_files
+    corpus = JSON.parse(File.read(File.expand_path("../fixtures/android-release-notes-corpus.json", __dir__), encoding: "UTF-8"))
+    Dir.mktmpdir("mrk-notes-") do |temporary|
+      root = File.realpath(temporary)
+      metadata = File.join(root, "android")
+      directory = File.join(metadata, "en-US/changelogs")
+      FileUtils.mkdir_p(directory)
+      path = File.join(directory, "default.txt")
+      %w[valid invalid].each do |group|
+        corpus.fetch(group).each do |entry|
+          text = entry.fetch("text") * entry.fetch("repeat", 1) + entry.fetch("suffix", "")
+          File.binwrite(path, text)
+          if group == "valid"
+            assert_equal text, MobileReleaseKit.validate_android_release_note(text), entry.fetch("name")
+            assert_equal [{ "language" => "en-US", "text" => text }], MobileReleaseKit.android_release_notes(root, metadata_path: metadata, languages: ["en-US"], version_code: 42), entry.fetch("name")
+          else
+            assert_raises(MobileReleaseKit::ContractError, entry.fetch("name")) { MobileReleaseKit.validate_android_release_note(text) }
+            assert_raises(MobileReleaseKit::ContractError, entry.fetch("name")) { MobileReleaseKit.android_release_notes(root, metadata_path: metadata, languages: ["en-US"], version_code: 42) }
+          end
+        end
+      end
+      corpus.fetch("invalidUtf8").each do |entry|
+        File.binwrite(path, [entry.fetch("hex")].pack("H*"))
+        assert_raises(MobileReleaseKit::ContractError, entry.fetch("name")) { MobileReleaseKit.android_release_notes(root, metadata_path: metadata, languages: ["en-US"], version_code: 42) }
+      end
+    end
+  end
+
+  def test_android_note_path_scope_precedence_and_nonregular_inputs
+    Dir.mktmpdir("mrk-notes-") do |temporary|
+      root = File.realpath(temporary)
+      metadata = File.join(root, "android")
+      directory = File.join(metadata, "en-US/changelogs")
+      FileUtils.mkdir_p(directory)
+      fallback = File.join(directory, "default.txt")
+      exact = File.join(directory, "42.txt")
+      read = -> { MobileReleaseKit.android_release_notes(root, metadata_path: metadata, languages: ["en-US"], version_code: 42) }
+      assert_raises(MobileReleaseKit::ContractError) { read.call }
+      File.write(fallback, "Default copy")
+      assert_equal "Default copy", read.call.first.fetch("text")
+      File.binwrite(exact, "Exact copy\r\n")
+      assert_equal "Exact copy\r\n", read.call.first.fetch("text")
+      ["", "TODO", "x" * 501].each do |text|
+        File.write(exact, text)
+        assert_raises(MobileReleaseKit::ContractError) { read.call }
+      end
+      File.delete(exact)
+      [:in_root, :broken, :outside, :directory, :fifo].each do |kind|
+        case kind
+        when :in_root then File.symlink(fallback, exact)
+        when :broken then File.symlink(File.join(root, "absent.txt"), exact)
+        when :outside then File.symlink(__FILE__, exact)
+        when :directory then Dir.mkdir(exact)
+        when :fifo then File.mkfifo(exact)
+        end
+        begin
+          assert_raises(MobileReleaseKit::ContractError, kind.to_s) { read.call }
+        ensure
+          kind == :directory ? Dir.rmdir(exact) : File.delete(exact)
+        end
+      end
+      moved = File.join(root, "saved")
+      File.rename(directory, moved)
+      File.symlink(moved, directory)
+      assert_raises(MobileReleaseKit::ContractError) { read.call }
+      File.delete(directory)
+      File.rename(moved, directory)
+      [nil, [], ["en-US", "en-US"], ["../../escape"], [1], ["en-US", "fr-FR"]].each do |languages|
+        assert_raises(MobileReleaseKit::ContractError) { MobileReleaseKit.android_release_notes(root, metadata_path: metadata, languages: languages, version_code: 42) }
+      end
+      [nil, "42", 0, 42.0, true, 2_100_000_001].each do |version|
+        assert_raises(MobileReleaseKit::ContractError) { MobileReleaseKit.android_release_notes(root, metadata_path: metadata, languages: ["en-US"], version_code: version) }
+      end
+    end
+  end
 
   def version_parser_corpus
     @version_parser_corpus ||= JSON.parse(

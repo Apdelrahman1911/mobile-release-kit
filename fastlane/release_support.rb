@@ -17,6 +17,87 @@ module MobileReleaseKit
   end
 
   COMMENT_PREFIXES = ["#", "//", ";"].freeze
+  ANDROID_NOTE_LIMIT = 500
+  ANDROID_NOTE_MAX_BYTES = 4 * ANDROID_NOTE_LIMIT
+  ANDROID_NOTE_LOCALE = /\A[a-z]{2,3}(?:-[A-Z][a-z]{3})?(?:-[A-Z]{2}|-[0-9]{3})?\z/
+  # Python's Unicode whitespace set, not Ruby's ASCII-only String#strip / \s.
+  NOTE_WHITESPACE = "\\u0009-\\u000d\\u001c-\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000"
+  NOTE_NON_WHITESPACE = Regexp.new("[^#{NOTE_WHITESPACE}]")
+  NOTE_PLACEHOLDER = /(?<![a-z0-9_])(?:todo|tbd|changeme)(?![a-z0-9_])|example\.(?:com|org)|<[^>]+>|\{\{[^}]+\}\}/
+  NOTE_SECRET = Regexp.new(
+    "-----begin [a-z0-9 ]*private key-----|akia[0-9a-z]{16}|" \
+    "[\"'](?:client_secret|private_key|private_key_id)[\"'][#{NOTE_WHITESPACE}]*:[#{NOTE_WHITESPACE}]*[\"'][^\"']{8,}|" \
+    "(?:password|api[_ -]?key|secret)[#{NOTE_WHITESPACE}]*[:=][#{NOTE_WHITESPACE}]*[^#{NOTE_WHITESPACE}]{8,}",
+  )
+
+  def self.validate_android_release_note(text)
+    raise ContractError, "Android release notes must be UTF-8 text" unless text.is_a?(String)
+    text = text.dup.force_encoding(Encoding::UTF_8)
+    raise ContractError, "Android release notes must be UTF-8 text" unless text.valid_encoding?
+    if !NOTE_NON_WHITESPACE.match?(text) || text.include?("\0")
+      raise ContractError, "Android release notes must contain non-whitespace text without NUL"
+    end
+    if text.length > ANDROID_NOTE_LIMIT
+      raise ContractError, "Android release notes exceed the 500-character limit (including whitespace)"
+    end
+    # A validation-only, single-character map matches the explicit Python policy.
+    # Native Ruby /i and \b differ for dotted/dotless I and combining marks.
+    view = text.tr("ABCDEFGHIJKLMNOPQRSTUVWXYZ\u0130\u0131\u017f\u212a", "abcdefghijklmnopqrstuvwxyziisk")
+    raise ContractError, "Android release notes contain an unresolved placeholder" if NOTE_PLACEHOLDER.match?(view)
+    raise ContractError, "Android release notes contain possible secret material" if NOTE_SECRET.match?(view)
+    text
+  end
+
+  def self.validate_android_note_scope(languages, version_code)
+    unless languages.is_a?(Array) && languages.length.between?(1, 250) && languages.uniq == languages &&
+           languages.all? { |language| language.is_a?(String) && ANDROID_NOTE_LOCALE.match?(language) }
+      raise ContractError, "Android release notes require a unique nonempty configured locale set"
+    end
+    unless version_code.is_a?(Integer) && version_code.between?(1, 2_100_000_000)
+      raise ContractError, "Android release notes require the authoritative positive build number"
+    end
+  end
+
+  def self.android_release_notes(root, metadata_path:, languages:, version_code:)
+    validate_android_note_scope(languages, version_code)
+    root = File.realpath(root)
+    metadata_path = File.expand_path(metadata_path, root)
+    languages.sort.map do |language|
+      directory = safe_path(root, File.join(metadata_path, language, "changelogs"))
+      # safe_path enforces containment; reject even in-root component symlinks
+      # before inspecting exact/default presence below the locale directory.
+      current = root
+      directory.delete_prefix(root + File::SEPARATOR).split(File::SEPARATOR).each do |part|
+        current = File.join(current, part)
+        unless File.lstat(current).directory? && !File.lstat(current).symlink?
+          raise ContractError, "Android release note directories must be regular, not symlinks"
+        end
+      end
+      exact = File.join(directory, "#{version_code}.txt")
+      present = begin
+        File.lstat(exact)
+        true
+      rescue Errno::ENOENT
+        false
+      end
+      selected = present ? exact : File.join(directory, "default.txt")
+      path = safe_path(root, selected)
+      raise ContractError, "Android release note paths must not traverse symlinks" if File.lstat(path).symlink?
+      text = File.open(path, File::RDONLY | File::NOFOLLOW | File::NONBLOCK) do |file|
+        unless file.stat.file? && file.stat.size <= ANDROID_NOTE_MAX_BYTES
+          raise ContractError, "Android release notes must be a bounded regular file: #{language}"
+        end
+        raw = file.read(ANDROID_NOTE_MAX_BYTES + 1) || ""
+        if raw.bytesize > ANDROID_NOTE_MAX_BYTES
+          raise ContractError, "Android release notes exceed the bounded UTF-8 file size: #{language}"
+        end
+        validate_android_release_note(raw)
+      end
+      { "language" => language, "text" => text }
+    end
+  rescue SystemCallError, IOError
+    raise ContractError, "Required Android release notes must be readable regular UTF-8 files for every locale"
+  end
 
   def self.required_environment(environ, name, strip:)
     raw = environ[name]

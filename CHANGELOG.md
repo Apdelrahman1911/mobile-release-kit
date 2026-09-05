@@ -24,6 +24,10 @@ All notable changes to Mobile Release Kit are documented here. The project follo
 
 ### Fixed
 
+- Require bounded, reviewed Android release notes for every configured locale before candidate
+  creation and production preparation. Generate an owner-completed default stub, bind exact raw
+  text to the production intent, and use immutable validated notes in Supply workers without
+  changing unrelated historical releases or retry/reconciliation behavior.
 - Replace Supply's destructive one-release Google Play track writes with a guarded adapter that
   preserves every unrelated release, validates the complete source/destination state before
   commit, commits once without transport retries, and verifies the exact committed state through a

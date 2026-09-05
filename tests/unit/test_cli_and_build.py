@@ -307,6 +307,9 @@ class CliBuildTests(unittest.TestCase):
             title = root / "release/store/android/en-US/title.txt"
             self.assertTrue(title.is_file())
             self.assertEqual(title.read_text(encoding="utf-8"), "")
+            notes = root / "release/store/android/en-US/changelogs/default.txt"
+            self.assertTrue(notes.is_file())
+            self.assertEqual(notes.read_bytes(), b"")
             self.assertEqual(
                 (root / ".gitignore").read_text(encoding="utf-8"),
                 "build/\n.mobile-release/\n",
@@ -315,6 +318,10 @@ class CliBuildTests(unittest.TestCase):
                 "example/mobile-release-kit/.github/workflows/reusable.yml@" + sha,
                 (root / ".github/workflows/a.yml").read_text(encoding="utf-8"),
             )
+            notes.write_bytes(b"Existing reviewed notes\r\n")
+            args.force = True
+            _init(args)
+            self.assertEqual(notes.read_bytes(), b"Existing reviewed notes\r\n")
 
     def test_init_rejects_unusable_pin_repository_and_empty_project(self) -> None:
         parser = build_parser()

@@ -37,14 +37,14 @@
   "storeState": {
     "canonicalization": "mrk-play-track-state-v2",
     "mode": "mutation",
-    "mutationEditId": "mutation-edit",
     "readbackEditId": "readback-edit",
     "destinationBeforeSha256": "12454dc247a41000663f6d954a40a7e9cb3a2589fac6619b46f407f71ddd8876",
-    "destinationExpectedSha256": "81c72ac40d5f766053278d049d8d94b9dafb8e431bbded4c9c4a935844e20177",
-    "destinationCommittedSha256": "81c72ac40d5f766053278d049d8d94b9dafb8e431bbded4c9c4a935844e20177",
+    "destinationExpectedSha256": "f3ce935639789d30a56060b5aad6bcac9460f3ea9be93cce85c83f790a74302e",
+    "destinationCommittedSha256": "f3ce935639789d30a56060b5aad6bcac9460f3ea9be93cce85c83f790a74302e",
     "unrelatedBeforeSha256": "d29df4c391084898c9e1235849f1114ed9b174a335a72299a80fa7d1a2822a36",
     "unrelatedCommittedSha256": "d29df4c391084898c9e1235849f1114ed9b174a335a72299a80fa7d1a2822a36",
-    "targetReleaseSha256": "4f5c223758d387afc065b3e1e725b8b54bac3c8baba8e6f94f5352ffb6a0c58b",
+    "targetReleaseSha256": "f49d1e2d39d4433032984d631c81db9fd04830ad32521719336b30d4168cb8cd",
+    "mutationEditId": "mutation-edit",
     "sourceBeforeSha256": "2b1358dd222a816d824cd5462315e4d0e18fddb298751eee9ceffb9c231dcea2",
     "sourceExpectedSha256": "2b1358dd222a816d824cd5462315e4d0e18fddb298751eee9ceffb9c231dcea2",
     "sourceCommittedSha256": "2b1358dd222a816d824cd5462315e4d0e18fddb298751eee9ceffb9c231dcea2",
@@ -56,7 +56,7 @@
     "metadataCommittedSha256": "602f321adfe1ecdbfc0f1e5176050e9610f1f1a267e3520c569f8dadf0e6970e"
   },
   "documentType": "store-receipt",
-  "operationIntentSha256": "9db63ff0329fd43bfc9398195d42d2d982df4f784a9914b1ff13dc16bffc1d50",
+  "operationIntentSha256": "a4aa90356161a58e176cea3b03897d6e9d4c62dc6136fe74d6b97c07c93e5306",
   "authorizedBy": {
     "workflow": "Mobile production-submit",
     "callerPath": ".github/workflows/mobile-production-submit.yml",
@@ -95,6 +95,6 @@
   },
   "integrity": {
     "algorithm": "sha256",
-    "sha256": "2bcec0d794b42a6d6f78858df0c95bf1098a61af0e19a421adb34d9902530774"
+    "sha256": "f391447685a2fcad2076b5e63fd25a0211835b83b26314e07fc04482bcabceb6"
   }
 }

@@ -226,6 +226,7 @@ Use the configured metadata root:
 ```text
 release/store/
 ├── android/<locale>/
+│   ├── changelogs/default.txt
 │   └── images/
 ├── ios/<locale>/
 ├── ios/screenshots/
@@ -236,8 +237,21 @@ release/store/
 
 Only public product copy and approved fictional screenshots belong in Git. Private tester lists, reviewer contacts, demo credentials, signing material, and API keys do not.
 
-Every configured Android locale requires `title.txt`, `short_description.txt`, and
-`full_description.txt`. Every configured iOS locale requires `description.txt`, `keywords.txt`,
+Every configured Android locale requires `title.txt`, `short_description.txt`,
+`full_description.txt`, and reviewed release notes in `changelogs/<versionCode>.txt` or
+`changelogs/default.txt`. The version code comes only from the committed version/build source.
+An existing version-specific file takes precedence; an empty, invalid, nonregular or symlinked
+exact file is rejected, never bypassed with a fallback. Notes must be UTF-8, non-whitespace,
+placeholder/secret-pattern-free text of at most **500 Unicode characters**, including every
+space, CR and LF uploaded. No trimming or newline normalization occurs.
+
+Prepare notes before the first candidate: preflight and every CI stage validate them, and the
+candidate's metadata archive is immutable. `init --apply` creates an empty default for owner
+completion without replacing existing metadata. If using only a version-specific file, fill or
+remove that unused empty default. Empty/invalid historical or unselected metadata files still
+fail validation; a valid selected note does not excuse them.
+
+Every configured iOS locale requires `description.txt`, `keywords.txt`,
 `privacy_url.txt`, `support_url.txt`, and `release_notes.txt`; iOS also requires reviewed
 `testflight/what-to-test.txt`, `review/ios-beta-notes.txt`, and `review/ios-notes.txt`. Images alone
 never satisfy metadata preflight.

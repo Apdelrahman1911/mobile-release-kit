@@ -150,6 +150,11 @@ PNG/JPEG headers with positive dimensions. Local metadata validation does not co
 Store/device-specific screenshot dimensions, color profiles, counts, or visual truth; those remain
 Store and human review gates.
 
+Android requires reviewed `changelogs/<versionCode>.txt` or `changelogs/default.txt` for each
+configured locale before candidate creation. Notes are limited to 500 Unicode characters including
+uploaded whitespace/newlines, and the production intent binds their exact text. Fill or remove
+init's empty default when using exact-version files; see [metadata setup](docs/integration.md#6-add-product-owned-metadata).
+
 Reusable preflight compiles credential-free projects. If a project explicitly declares a private
 dependency token requirement, the public job records compilation as deferred and leaves that check
 to local preflight with an explicit read-only credential or the protected candidate environment.
