@@ -188,6 +188,12 @@ The read-only helper verifies GitHub attestations against the actual producer at
 pinned workflow, not the latest run attempt or overall success flag. These are private workflow
 artifacts, not source files or public release assets.
 
+iOS candidates require the retained archive under every symbol policy. Private-snapshot checks
+correlate every IPA/archive native image, bundle/resource inventory and present dSYM before
+authorization; exact artifact hashes remain authoritative during recovery. Export permits
+re-signing but not stripping/thinning. See [iOS artifact correspondence](docs/ios-artifacts.md),
+including the separate outstanding nested-symbol completeness requirement and native rehearsal.
+
 Each candidate hashes a deterministic platform-scoped metadata archive: Android includes only
 `android/**`; iOS includes `ios/**`, `review/**`, and `testflight/**`. An unrelated platform's
 metadata cannot invalidate promotion of the selected candidate.

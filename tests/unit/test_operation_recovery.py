@@ -7,16 +7,18 @@ import subprocess
 import tempfile
 import unittest
 import zipfile
-from contextlib import ExitStack, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+from mobile_release import cli, ios_artifacts
 from mobile_release.cli import _ci, _status, build_parser
 from mobile_release.config import load_config
 from mobile_release.errors import StoreOperationError, ValidationError
 from mobile_release.ios import SigningValidityInterval
+from mobile_release.inspection import MAX_INSPECTION_SECONDS
 from mobile_release.reporting import Finding, Status
 from mobile_release.provenance import (
     copy_immutable_file,
@@ -28,6 +30,7 @@ from mobile_release.provenance import (
 
 from .evidence_helpers import android_precondition, build_lifecycle, git_identity, ios_precondition, raw_receipt, workflow_environment
 from .helpers import android_config, ios_config, write_project
+from .ios_artifact_helpers import native_image
 
 
 def directory_snapshot(directory: Path) -> dict[Path, tuple[str, bytes | None]]:
@@ -610,6 +613,7 @@ class IosOperationRecoveryTests(unittest.TestCase):
 
     def invoke(self, mode: str, *, attempt: int = 1) -> int:
         argv = ["ci", "candidate", "--config", str(self.config.path), "--platform", "ios", "--confirm", "candidate:ios:1.2.3:42", "--output-dir", str(self.output), f"--{mode}", "--artifact", f"ios-ipa={self.root / 'app.ipa'}", "--artifact", f"validation-report={self.root / 'validation-report.json'}"]
+        argv.extend(["--artifact", f"ios-archive={self.root / 'archive.zip'}", "--artifact", f"ios-dsyms={self.root / 'dsyms.zip'}"])
         with patch.dict(os.environ, workflow_environment(attempt=attempt), clear=True), redirect_stdout(io.StringIO()):
             return _ci(build_parser().parse_args(argv))
 
@@ -665,6 +669,222 @@ class IosOperationRecoveryTests(unittest.TestCase):
         with patch("mobile_release.cli.validate_ipa_current_signing", return_value=([], interval)), patch("mobile_release.cli.ipa_signing_evidence", return_value=self.documents["signing"]), patch("mobile_release.cli.prepare_store_operation", return_value=ios_precondition(self.config)), patch("mobile_release.cli.authenticate_operation_intent", side_effect=AssertionError("fresh preparation does not consume historical validation")):
             self.assertEqual(self.invoke("prepare-operation"), 0)
         self.assertEqual(load_operation_intent(self.intent_path)["storePrecondition"]["snapshot"]["serverObservedAt"], "2026-01-01T00:00:00Z")
+
+    @staticmethod
+    def replace_member(path, name, contents):
+        with zipfile.ZipFile(path) as archive:
+            entries = {item.filename: archive.read(item) for item in archive.infolist()}
+        entries[name] = contents
+        with zipfile.ZipFile(path, "w") as archive:
+            for member, data in entries.items():
+                archive.writestr(member, data)
+
+    def test_fresh_preparation_rejects_each_substituted_artifact_before_store_or_native_signing(self):
+        cases = (
+            ("app.ipa", "Payload/Reader.app/Reader", native_image(code=b"substituted same UUID")),
+            ("archive.zip", "archive.xcarchive/Products/Applications/Reader.app/Reader", native_image("unrelated")),
+            ("dsyms.zip", "dsyms/Reader.dSYM/Contents/Resources/DWARF/Reader", native_image("unrelated", dsym=True)),
+        )
+        for filename, name, contents in cases:
+            path = self.root / filename
+            original = path.read_bytes()
+            self.replace_member(path, name, contents)
+            with self.subTest(filename=filename), patch("mobile_release.cli.prepare_store_operation") as prepare, patch("mobile_release.cli.execute_store_operation") as execute, patch("mobile_release.cli.validate_ipa_current_signing") as native:
+                with self.assertRaises(ValidationError):
+                    self.invoke("prepare-operation")
+                prepare.assert_not_called()
+                execute.assert_not_called()
+                native.assert_not_called()
+                self.assertFalse(self.intent_path.exists())
+            path.write_bytes(original)
+
+    def test_fresh_preparation_aba_never_validates_b_then_seals_a(self):
+        ipa = self.root / "app.ipa"
+        original = ipa.read_bytes()
+        alternate = b"otherwise acceptable synthetic signature B"
+        observed = []
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        interval = SigningValidityInterval(start, start + timedelta(days=1))
+
+        def native(path, **_kwargs):
+            ipa.write_bytes(alternate)
+            try:
+                observed.append(path.read_bytes())
+                if observed[-1] == alternate:
+                    return [], interval
+                return [Finding("synthetic-signature-A", Status.FAIL, "A is not signed by the synthetic authorized signer")], None
+            finally:
+                ipa.write_bytes(original)
+
+        with patch("mobile_release.cli.validate_ipa_current_signing", side_effect=native), patch("mobile_release.cli.ipa_signing_evidence", return_value=self.documents["signing"]), patch("mobile_release.cli.prepare_store_operation", return_value=ios_precondition(self.config)) as store:
+            with self.assertRaisesRegex(ValidationError, "synthetic-signature-A"):
+                self.invoke("prepare-operation")
+        self.assertEqual(observed, [original])
+        self.assertEqual(ipa.read_bytes(), original)
+        store.assert_not_called()
+        self.assertFalse(self.intent_path.exists())
+
+    def test_mutation_during_preparation_read_cannot_be_sealed(self):
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        interval = SigningValidityInterval(start, start + timedelta(days=1))
+
+        def prepare(**_kwargs):
+            path = self.root / "archive.zip"
+            path.write_bytes(path.read_bytes() + b"changed during Store read")
+            return ios_precondition(self.config)
+
+        with patch("mobile_release.cli.validate_ipa_current_signing", return_value=([], interval)), patch("mobile_release.cli.ipa_signing_evidence", return_value=self.documents["signing"]), patch("mobile_release.cli.prepare_store_operation", side_effect=prepare), patch("mobile_release.cli.execute_store_operation") as execute:
+            with self.assertRaisesRegex(ValidationError, "changed after snapshotting"):
+                self.invoke("prepare-operation")
+        self.assertFalse(self.intent_path.exists())
+        execute.assert_not_called()
+
+    def test_shared_deadline_prevents_next_authorization_boundary_and_cleans_snapshots(self):
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        interval = SigningValidityInterval(start, start + timedelta(days=1))
+        originals = {path: path.read_bytes() for path in self.root.glob("*.zip")}
+        originals[self.root / "app.ipa"] = (self.root / "app.ipa").read_bytes()
+        # Expire at actual work boundaries, not after a fragile count of clock reads.
+        for phase in ("paired-inspection", "evidence-context", "intent-construction"):
+            snapshots = []
+
+            @contextmanager
+            def capture_snapshot(paths):
+                with ios_artifacts.snapshot_ios_artifacts(paths) as snapshot:
+                    snapshots.append(snapshot)
+                    yield snapshot
+
+            with self.subTest(phase=phase), ExitStack() as stack:
+                clock = stack.enter_context(patch("mobile_release.inspection.time.monotonic", return_value=0))
+                stack.enter_context(patch("mobile_release.cli.snapshot_ios_artifacts", side_effect=capture_snapshot))
+                native = stack.enter_context(patch("mobile_release.cli.validate_ipa_current_signing", return_value=([], interval)))
+                stack.enter_context(patch("mobile_release.cli.ipa_signing_evidence", return_value=self.documents["signing"]))
+                prepare = stack.enter_context(patch("mobile_release.cli.prepare_store_operation", return_value=ios_precondition(self.config)))
+                execute = stack.enter_context(patch("mobile_release.cli.execute_store_operation"))
+                publish = stack.enter_context(patch("mobile_release.cli.write_evidence", wraps=write_evidence))
+                seam, real = {
+                    "paired-inspection": ("mobile_release.ios_artifacts.inspect_macho", ios_artifacts.inspect_macho),
+                    "evidence-context": ("mobile_release.cli.validate_evidence_context", cli.validate_evidence_context),
+                    "intent-construction": ("mobile_release.cli.build_operation_intent", cli.build_operation_intent),
+                }[phase]
+
+                def expire(*args, **kwargs):
+                    result = real(*args, **kwargs)
+                    clock.return_value = MAX_INSPECTION_SECONDS
+                    return result
+
+                stack.enter_context(patch(seam, side_effect=expire))
+                with self.assertRaisesRegex(ValidationError, "shared time bound"):
+                    self.invoke("prepare-operation")
+                if phase == "paired-inspection":
+                    native.assert_not_called()
+                else:
+                    self.assertIs(native.call_args.kwargs["deadline"], snapshots[0].deadline)
+                self.assertEqual(prepare.call_count, int(phase == "intent-construction"))
+                execute.assert_not_called()
+                publish.assert_not_called()
+                self.assertFalse(self.intent_path.exists())
+                self.assertEqual(len(snapshots), 1)
+                self.assertFalse(snapshots[0].temporary.exists())
+                self.assertEqual(originals, {path: path.read_bytes() for path in originals})
+
+    def test_deadline_after_readback_preserves_precondition_and_retry_recaptures_same_candidate(self):
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        interval = SigningValidityInterval(start, start + timedelta(days=3))
+        paths, modes, sent_artifacts, snapshots = [], [], [], []
+        real_intent = cli.build_operation_intent
+        before = {path: path.read_bytes() for path in self.root.glob("*.zip")}
+        before[self.root / "app.ipa"] = (self.root / "app.ipa").read_bytes()
+
+        @contextmanager
+        def capture_snapshot(inputs):
+            with ios_artifacts.snapshot_ios_artifacts(inputs) as snapshot:
+                snapshots.append(snapshot)
+                yield snapshot
+
+        def wire(command, **kwargs):
+            environment = kwargs["env"]
+            modes.append(environment["MOBILE_RELEASE_STORE_MODE"])
+            self.assertEqual(modes[-1], "prepare", "a retry must not mutate the Store")
+            path = Path(environment["MOBILE_RELEASE_STORE_RECEIPT_PATH"])
+            paths.append(path)
+            precondition = ios_precondition(self.config)
+            precondition["snapshot"]["serverObservedAt"] = f"2026-01-0{len(paths)}T00:00:00Z"
+            path.write_text(json.dumps(precondition))
+            return subprocess.CompletedProcess(command, 0)
+
+        with ExitStack() as stack:
+            clock = stack.enter_context(patch("mobile_release.inspection.time.monotonic", return_value=0))
+            stack.enter_context(patch("mobile_release.cli.snapshot_ios_artifacts", side_effect=capture_snapshot))
+            stack.enter_context(patch("mobile_release.cli.validate_ipa_current_signing", return_value=([], interval)))
+            stack.enter_context(patch("mobile_release.cli.ipa_signing_evidence", return_value=self.documents["signing"]))
+            stack.enter_context(patch("mobile_release.stores._require_fastlane_bundle"))
+            stack.enter_context(patch("mobile_release.stores.resolve_tooling_root", return_value=Path(__file__).resolve().parents[2]))
+            stack.enter_context(patch("mobile_release.stores.subprocess.run", side_effect=wire))
+
+            def expire_after_intent(**kwargs):
+                intent = real_intent(**kwargs)
+                sent_artifacts.append(intent["artifacts"])
+                clock.return_value = MAX_INSPECTION_SECONDS
+                return intent
+
+            with patch("mobile_release.cli.build_operation_intent", side_effect=expire_after_intent), self.assertRaisesRegex(ValidationError, "shared time bound"):
+                self.invoke("prepare-operation")
+            self.assertFalse(self.intent_path.exists())
+            self.assertEqual(len(paths), 1)
+            first_readback = paths[0].read_bytes()
+            # A new preparation owns a new budget but must read new Store state;
+            # surviving unsealed readback is diagnostic, never authorization.
+            self.assertEqual(self.invoke("prepare-operation", attempt=2), 0)
+        intent = load_operation_intent(self.intent_path)
+        self.assertEqual(intent["artifacts"], sent_artifacts[0])
+        self.assertEqual(intent["storePrecondition"]["snapshot"]["serverObservedAt"], "2026-01-02T00:00:00Z")
+        self.assertEqual(modes, ["prepare", "prepare"])
+        self.assertNotEqual(paths[0], paths[1])
+        self.assertEqual(paths[0].read_bytes(), first_readback)
+        self.assertEqual(before, {path: path.read_bytes() for path in before})
+        self.assertEqual(len(snapshots), 2)
+        self.assertIsNot(snapshots[0].deadline, snapshots[1].deadline)
+        self.assertTrue(all(not snapshot.temporary.exists() for snapshot in snapshots))
+
+    def test_accepted_signature_slack_cannot_change_after_authenticated_intent_sealing(self):
+        import struct
+        from mobile_release.macho import inspect_macho
+
+        write_evidence(self.intent_path, self.documents["candidate_intent"])
+        with zipfile.ZipFile(self.root / "app.ipa") as archive:
+            binary = bytearray(archive.read("Payload/Reader.app/Reader"))
+        image = self.root / "synthetic-native"
+        image.write_bytes(binary)
+        before = inspect_macho(image)
+        position = 32
+        for _ in range(struct.unpack_from("<I", binary, 16)[0]):
+            command, size = struct.unpack_from("<II", binary, position)
+            if command == 0x1D:
+                offset, allocation = struct.unpack_from("<II", binary, position + 8)
+            position += size
+        envelope = struct.unpack_from(">I", binary, offset + 4)[0]
+        self.assertLess(envelope, allocation)
+        binary[offset + allocation - 1] = 1
+        image.write_bytes(binary)
+        self.assertEqual(before, inspect_macho(image))  # Signature-neutral equality is not artifact authenticity.
+        self.replace_member(self.root / "app.ipa", "Payload/Reader.app/Reader", binary)
+        with patch("mobile_release.cli.authenticate_operation_intent", return_value=self.documents["candidate_intent"]), patch("mobile_release.cli.execute_store_operation") as execute:
+            with self.assertRaisesRegex(ValidationError, "artifacts do not match"):
+                self.invoke("execute-store", attempt=2)
+        execute.assert_not_called()
+
+    def test_historical_recovery_checks_original_archive_and_detached_hashes(self):
+        write_evidence(self.intent_path, self.documents["candidate_intent"])
+        for name in ("archive.zip", "dsyms.zip"):
+            path = self.root / name
+            original = path.read_bytes()
+            path.write_bytes(original + b"replacement")
+            with self.subTest(name=name), patch("mobile_release.cli.authenticate_operation_intent", return_value=self.documents["candidate_intent"]), patch("mobile_release.cli.validate_ipa_current_signing", side_effect=AssertionError("historical recovery must not reinterpret expiry")), patch("mobile_release.cli.execute_store_operation") as execute:
+                with self.assertRaisesRegex(ValidationError, "artifacts do not match"):
+                    self.invoke("execute-store", attempt=2)
+                execute.assert_not_called()
+            path.write_bytes(original)
 
 
 if __name__ == "__main__":

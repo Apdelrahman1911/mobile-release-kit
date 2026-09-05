@@ -374,10 +374,14 @@ class IosArtifactTests(unittest.TestCase):
         signer = hashlib.sha256(certificate).hexdigest()
         leaf = SigningValidityInterval(now - timedelta(days=2), now + timedelta(days=2))
         nested = SigningValidityInterval(now - timedelta(hours=1), now + timedelta(hours=1))
-        def primary(_app, _temporary, *, _validity_intervals=None):
+        def primary(_app, _temporary, *, _validity_intervals=None, deadline=None):
+            self.assertIsNotNone(deadline)
+            deadline.check()
             _validity_intervals.append(leaf)
             return signer
-        def nested_codesign(_app, _temporary, *, _validity_intervals=None):
+        def nested_codesign(_app, _temporary, *, _validity_intervals=None, deadline=None):
+            self.assertIsNotNone(deadline)
+            deadline.check()
             _validity_intervals.append(nested)
             return []
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:

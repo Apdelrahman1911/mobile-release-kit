@@ -192,6 +192,12 @@ full current IPA/signing/profile validation, a final absence read and an immedia
 expiry gate. No arbitrary validation date, ignore-expiry option, rebuild or re-sign
 is available. Complete-final reuse needs neither native tools nor the original binary.
 
+New iOS intents bind the required correlated archive and any detached dSYMs, as well as the IPA.
+Restore those exact packed inputs for incomplete recovery; never supply a different archive or
+regenerate symbols to fill a missing handoff. Historical authenticated validation remains valid
+for accepted-build reconciliation after signing expiry. An actual new IPA send separately checks
+current signing on a private copy. See [iOS artifact correspondence](ios-artifacts.md).
+
 ## Apple resource-creation ambiguity
 
 External testing and App Review preparation reconcile each supported resource

@@ -184,7 +184,7 @@ MOBILE_RELEASE_REQUIRE_SIGNING=true
 
 It may permit unsigned Release assembly for `preflight --offline`, but it must fail when signing is required and any field is missing. The final AAB signer must match `uploadCertificateSha256`.
 
-The Xcode Archive action remains Release and uses the application’s existing manual-signing configuration. The shared candidate workflow installs the configured P12/profile into an ephemeral keychain and passes explicit signing/export settings. The archive and exported IPA are validated independently.
+The Xcode Archive action remains Release and uses the application’s existing manual-signing configuration. The shared candidate workflow installs the configured P12/profile into an ephemeral keychain and passes explicit signing/export settings. Signed validation requires the retained archive and exported IPA together: all native images, bundle/resource inventories, and every present dSYM must correspond. Fresh Store preparation repeats this check independently. Export disables Swift-symbol stripping and thinning; see [iOS artifact correspondence](ios-artifacts.md) for supported layouts, symbol-coverage boundaries, and recovery rules.
 
 The shared credential contract owns exactly one provisioning profile and maps export options
 only for the configured main application Bundle ID. If an archive contains an extension, watch app,
@@ -193,7 +193,8 @@ project-owned signing-preparation step for those additional profiles and export 
 project is otherwise unsupported by the shared profile inventory. Final nested-code validation
 still checks the exported artifact; it does not discover or install the missing profiles.
 
-The toolkit supports `ios.symbols.policy: retain`: it verifies the exact archive dSYMs, retains
+The toolkit supports `ios.symbols.policy: retain`: it checks every present archive dSYM against
+the IPA/archive native identity set (requiring primary-app symbols), retains
 them with the candidate, and never contacts Crashlytics or another third party. Automated symbol
 upload is intentionally not part of the shared pipeline. `required` is a fail-closed activation
 sentinel: its argv is syntax-checked but never executed, and signing preflight blocks until a

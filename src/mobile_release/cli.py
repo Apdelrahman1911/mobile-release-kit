@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import tempfile
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -19,6 +20,7 @@ from .ios import (
     SigningValidityInterval, _validated_ipa_entries, ipa_signing_evidence,
     validate_ipa_current_signing, validate_preparation_signing_time,
 )
+from .ios_artifacts import inspect_ios_artifact_set, snapshot_ios_artifacts
 from .metadata import build_metadata_archive, metadata_findings
 from .preflight import doctor, preflight
 from .provenance import (
@@ -620,6 +622,8 @@ def _set_artifact_environment(artifacts: Mapping[str, Path]) -> None:
         "android-aab": "MOBILE_RELEASE_ANDROID_AAB_PATH",
         "android-mapping": "MOBILE_RELEASE_ANDROID_MAPPING_PATH",
         "ios-ipa": "MOBILE_RELEASE_IOS_IPA_PATH",
+        "ios-archive": "MOBILE_RELEASE_IOS_ARCHIVE_PATH",
+        "ios-dsyms": "MOBILE_RELEASE_IOS_DSYMS_PATH",
     }
     for name, path in artifacts.items():
         if name in mapping:
@@ -650,6 +654,8 @@ def _validate_ci_artifact_selection(
             f"candidate contains unsupported {platform} artifact(s): {', '.join(unexpected)}"
         )
     required = {"android-aab" if platform == "android" else "ios-ipa", "validation-report"}
+    if platform == "ios":
+        required.add("ios-archive")
     missing = sorted(required - set(artifacts))
     if missing:
         raise ValidationError(
@@ -800,11 +806,12 @@ def _ci(args: argparse.Namespace) -> int:
     # Keep temporary metadata alive through validation and final publication.
     # It must not appear beside incompatible surviving evidence as a side effect
     # of a failed invocation.
-    with tempfile.TemporaryDirectory(prefix="mobile-release-intent-metadata-") as temporary:
-        return _ci_operation(args, metadata_directory=Path(temporary))
+    with ExitStack() as resources:
+        temporary = resources.enter_context(tempfile.TemporaryDirectory(prefix="mobile-release-intent-metadata-"))
+        return _ci_operation(args, metadata_directory=Path(temporary), resources=resources)
 
 
-def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path) -> int:
+def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path, resources: ExitStack) -> int:
     config = load_config(args.config)
     platform = args.platform
     stage = args.ci_command
@@ -928,6 +935,7 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path) -> int:
 
     signing_evidence: Mapping[str, Any] | None = None
     signing_validity: SigningValidityInterval | None = None
+    ios_snapshot = None
     records: list[dict[str, Any]] = []
     current_metadata = metadata_directory / "store-metadata.zip"
     build_metadata_archive(
@@ -959,15 +967,24 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path) -> int:
                 check_signer=True,
             )
         else:
-            validated_ipa_sha256 = sha256_file(artifacts[primary])
+            # Inspect and sign-check the SAME private bytes, not mutable caller
+            # paths bracketed by hashes (which would permit an A→B→A swap).
+            ios_snapshot = resources.enter_context(snapshot_ios_artifacts(artifacts))
+            inspect_ios_artifact_set(
+                ios_snapshot, expected_bundle_id=config.section("ios")["bundleId"],
+                release=release, symbols_policy=config.section("ios").get("symbols", {}).get("policy", "disabled"),
+            )
+            ios_snapshot.deadline.check()
             findings, signing_validity = validate_ipa_current_signing(
-                artifacts[primary],
+                ios_snapshot.paths[primary],
                 expected_bundle_id=config.section("ios")["bundleId"],
                 expected_team_id=config.section("ios")["teamId"],
                 expected_fingerprint=config.section("ios")["distributionCertificateSha256"],
                 release=release,
                 require_tools=True,
+                deadline=ios_snapshot.deadline,
             )
+            ios_snapshot.deadline.check()
         failed = [item.code for item in findings if item.status in FAILING_STATUSES]
         if failed:
             raise ValidationError(
@@ -976,14 +993,16 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path) -> int:
         if platform == "ios" and authenticated_intent is None:
             if signing_validity is None:
                 raise ValidationError("candidate lacks complete current signing validity evidence")
-            signing_evidence = ipa_signing_evidence(artifacts[primary])
-            if sha256_file(artifacts[primary]) != validated_ipa_sha256:
-                raise ValidationError("candidate IPA changed during signing validation")
+            assert ios_snapshot is not None
+            ios_snapshot.deadline.check()
+            signing_evidence = ipa_signing_evidence(ios_snapshot.paths[primary], deadline=ios_snapshot.deadline)
+            ios_snapshot.assert_unchanged()
         artifacts["store-metadata"] = current_metadata
         _set_artifact_environment(artifacts)
-        records = artifact_records(artifacts.items())
-        if platform == "ios" and authenticated_intent is None and next(item["sha256"] for item in records if item["logicalName"] == "ios-ipa") != validated_ipa_sha256:
-            raise ValidationError("candidate IPA changed after signing validation")
+        record_paths = {**artifacts, **(ios_snapshot.paths if ios_snapshot else {})}
+        records = artifact_records(record_paths.items())
+        if ios_snapshot:
+            ios_snapshot.assert_unchanged()
 
     validate_evidence_context(source, stage=stage)
 
@@ -1009,6 +1028,8 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path) -> int:
             )
         if stage == "candidate":
             copy_immutable_file(current_metadata, output_dir / "store-metadata.zip")
+        if ios_snapshot:
+            ios_snapshot.deadline.check()
         precondition = prepare_store_operation(config=config, release=release, request=request)
         if platform == "ios" and stage == "candidate":
             assert signing_validity is not None
@@ -1016,6 +1037,10 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path) -> int:
                 signing_validity, precondition["snapshot"]["serverObservedAt"],
             )
         commitments = precondition.get("snapshot", {}).get("privateStateCommitments", {})
+        if ios_snapshot:
+            # Recheck even after Store read latency; no changed input may be
+            # sealed into an original authorization for a different artifact set.
+            ios_snapshot.assert_unchanged()
         intent = build_operation_intent(
             config=config,
             release=release,
@@ -1032,6 +1057,8 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path) -> int:
             external_receipt=external_receipt,
             private_state_commitments=commitments,
         )
+        if ios_snapshot:
+            ios_snapshot.deadline.check()
         write_evidence(operation_intent_path, intent)
         print(
             json.dumps(

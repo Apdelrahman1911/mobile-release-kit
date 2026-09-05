@@ -1126,10 +1126,10 @@ jobs:
         mkdir .mobile-release/handoff "$target_dir"
         [[ ! -L "$target_dir" && "$(cd "$target_dir" && pwd -P)" == "$output_root/handoff/ios" ]]
         cp "$source_dir/app.ipa" "$target_dir/app.ipa"
-        ditto -c -k --sequesterRsrc --keepParent "$source_dir/archive.xcarchive" "$target_dir/archive.zip"
+        ditto -c -k --norsrc --noextattr --noqtn --keepParent "$source_dir/archive.xcarchive" "$target_dir/archive.zip"
         files=(app.ipa archive.zip validation-report.json)
         if [[ -d "$source_dir/dsyms" && ! -L "$source_dir/dsyms" ]]; then
-          ditto -c -k --sequesterRsrc --keepParent "$source_dir/dsyms" "$target_dir/dsyms.zip"
+          ditto -c -k --norsrc --noextattr --noqtn --keepParent "$source_dir/dsyms" "$target_dir/dsyms.zip"
           files+=(dsyms.zip)
         fi
         cp .mobile-release/reports/signing-ios.json "$target_dir/validation-report.json"

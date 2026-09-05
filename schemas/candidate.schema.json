@@ -380,6 +380,20 @@
                     "logicalName"
                   ]
                 }
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "ios-archive"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
               }
             ]
           },

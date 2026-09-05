@@ -1233,7 +1233,10 @@ def validate_operation_intent(value: Mapping[str, Any]) -> dict[str, Any]:
         if name == "store-metadata" and artifact["sha256"] != configuration["metadataSha256"]:
             raise ValidationError("intent metadata artifact and configuration digests differ")
     primary = "android-aab" if platform == "android" else "ios-ipa"
-    if not {primary, "store-metadata", "validation-report"} <= artifact_names:
+    required_artifacts = {primary, "store-metadata", "validation-report"}
+    if platform == "ios":
+        required_artifacts.add("ios-archive")
+    if not required_artifacts <= artifact_names:
         raise ValidationError("operation intent lacks required candidate artifacts")
     if len(intent["signing"]) != 1:
         raise ValidationError("operation intent requires exactly one signing identity")
@@ -1652,9 +1655,11 @@ def validate_evidence_document(value: Mapping[str, Any]) -> None:
             raise ValidationError("candidate artifact architectures are invalid")
     required_primary = "android-aab" if platform == "android" else "ios-ipa"
     required_artifacts = {required_primary, "store-metadata", "validation-report"}
+    if platform == "ios":
+        required_artifacts.add("ios-archive")
     if not required_artifacts <= artifact_names:
         raise ValidationError(
-            "candidate lacks its primary binary, deterministic metadata, or validation report"
+            "candidate lacks its primary binary, retained iOS archive, deterministic metadata, or validation report"
         )
     if not isinstance(manifest["signing"], list) or not manifest["signing"]:
         raise ValidationError("candidate signing evidence must be non-empty")

@@ -100,7 +100,13 @@ Working outputs live under `.mobile-release/staging/<stage>/<platform>/`; all ar
 not source files. Evidence manifests contain public identities and hashes, not binaries or private
 review/tester credentials. Retained binary/archive/symbol handoffs are separate private artifacts.
 
-For `ios.symbols.policy: retain`, symbols are validated/retained without a third-party uploader.
+Every iOS candidate requires the retained archive, irrespective of symbol policy. Before fresh
+authorization, the IPA/archive's complete native/resource inventories and every present dSYM are
+correlated on private snapshots. Execution binds the exact archive and supplied detached symbols,
+not just the IPA. See [iOS artifact correspondence](ios-artifacts.md) for supported exports and
+the distinction between present-symbol consistency and complete nested coverage.
+
+For `ios.symbols.policy: retain`, primary symbols are required and every present symbol is checked/retained without a third-party uploader.
 `required` remains a fail-closed activation sentinel, not an implemented upload integration.
 
 ## Android external testing

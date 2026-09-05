@@ -19,6 +19,7 @@ from .config import ReleaseConfig, ReleaseVersion
 from .credentials import artifact_validation_environment
 from .discovery import discover_project, selected_ios_container, selected_ios_scheme
 from .errors import ValidationError
+from .inspection import InspectionDeadline
 from .reporting import FAILING_STATUSES, Finding, Status
 from .tooling import recreate_private_build_directory
 
@@ -118,7 +119,21 @@ def _validation_environment() -> dict[str, str]:
     return artifact_validation_environment(os.environ)
 
 
-def _validated_ipa_entries(path: Path) -> tuple[zipfile.ZipFile, list[zipfile.ZipInfo]]:
+def _run_native(argv: list[str], *, deadline: InspectionDeadline | None = None, **kwargs: Any) -> subprocess.CompletedProcess:
+    # Never start another child after the shared inspection budget expires.
+    # Already-running tools keep their explicit subprocess timeout, not a new
+    # inspection clock. This is cooperative bounding, not syscall preemption.
+    if deadline is not None:
+        deadline.check()
+    result = subprocess.run(argv, **kwargs)
+    if deadline is not None:
+        deadline.check()
+    return result
+
+
+def _validated_ipa_entries(path: Path, *, deadline: InspectionDeadline | None = None) -> tuple[zipfile.ZipFile, list[zipfile.ZipInfo]]:
+    if deadline is not None:
+        deadline.check()
     if path.is_symlink() or not path.is_file():
         raise ValidationError(f"IPA must be a regular non-symlink file: {path}")
     try:
@@ -133,6 +148,12 @@ def _validated_ipa_entries(path: Path) -> tuple[zipfile.ZipFile, list[zipfile.Zi
     portable_seen: set[str] = set()
     total = 0
     for entry in entries:
+        if deadline is not None:
+            try:
+                deadline.check()
+            except ValidationError:
+                archive.close()
+                raise
         raw_name = entry.filename
         portable_name = unicodedata.normalize("NFC", raw_name).casefold().rstrip("/")
         pure = PurePosixPath(raw_name)
@@ -168,21 +189,27 @@ def _validated_ipa_entries(path: Path) -> tuple[zipfile.ZipFile, list[zipfile.Zi
         if total > MAX_TOTAL_SIZE:
             archive.close()
             raise ValidationError("IPA uncompressed content exceeds safety limit")
-    if archive.testzip() is not None:
+    try:
+        if archive.testzip() is not None:
+            raise ValidationError("IPA contains a corrupt entry")
+        if deadline is not None:
+            deadline.check()
+    except BaseException:
         archive.close()
-        raise ValidationError("IPA contains a corrupt entry")
+        raise
     return archive, entries
 
 
-def _profile_details(path: Path) -> dict[str, Any] | None:
+def _profile_details(path: Path, *, deadline: InspectionDeadline | None = None) -> dict[str, Any] | None:
     # Keep plist support lazy so Android-only/Linux use does not import the
     # platform XML parser at process start.
     import plistlib
 
     if sys.platform != "darwin" or not shutil.which("security"):
         return None
-    result = subprocess.run(
+    result = _run_native(
         ["security", "cms", "-D", "-i", str(path)],
+        deadline=deadline,
         env=_validation_environment(),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -205,11 +232,13 @@ def _codesign_fingerprint(
     temporary: Path,
     *,
     _validity_intervals: list[SigningValidityInterval] | None = None,
+    deadline: InspectionDeadline | None = None,
 ) -> str | None:
     if sys.platform != "darwin" or not shutil.which("codesign") or not shutil.which("openssl"):
         return None
-    verify = subprocess.run(
+    verify = _run_native(
         ["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app_path)],
+        deadline=deadline,
         env=_validation_environment(),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -219,7 +248,7 @@ def _codesign_fingerprint(
     if verify.returncode:
         raise ValidationError("codesign rejected the exported application or nested code")
     return _codesign_leaf_fingerprint(
-        app_path, temporary / "signer", _validity_intervals=_validity_intervals
+        app_path, temporary / "signer", _validity_intervals=_validity_intervals, deadline=deadline,
     )
 
 
@@ -249,9 +278,11 @@ def _codesign_leaf_fingerprint(
     prefix: Path,
     *,
     _validity_intervals: list[SigningValidityInterval] | None = None,
+    deadline: InspectionDeadline | None = None,
 ) -> str:
-    extract = subprocess.run(
+    extract = _run_native(
         ["codesign", "-d", "--extract-certificates", str(prefix), str(code_path)],
+        deadline=deadline,
         env=_validation_environment(),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -261,7 +292,7 @@ def _codesign_leaf_fingerprint(
     certificate = prefix.parent / f"{prefix.name}0"
     if extract.returncode or certificate.is_symlink() or not certificate.is_file():
         raise ValidationError("codesign could not extract the leaf signing certificate")
-    fingerprint = subprocess.run(
+    fingerprint = _run_native(
         [
             "openssl",
             "x509",
@@ -274,6 +305,7 @@ def _codesign_leaf_fingerprint(
             "-sha256",
             "-dates",
         ],
+        deadline=deadline,
         env=_validation_environment(),
         text=True,
         stdout=subprocess.PIPE,
@@ -310,6 +342,7 @@ def _nested_codesign_identities(
     temporary: Path,
     *,
     _validity_intervals: list[SigningValidityInterval] | None = None,
+    deadline: InspectionDeadline | None = None,
 ) -> list[tuple[Path, str, str]] | None:
     if sys.platform != "darwin" or not shutil.which("codesign") or not shutil.which("openssl"):
         return None
@@ -326,6 +359,8 @@ def _nested_codesign_identities(
 
     nested_candidates: set[Path] = set()
     for path in app_path.rglob("*"):
+        if deadline is not None:
+            deadline.check()
         if path.is_symlink():
             raise ValidationError(f"nested code must not be a symbolic link: {path.name}")
         if path.suffix.lower() in NESTED_CODE_SUFFIXES and (
@@ -343,7 +378,7 @@ def _nested_codesign_identities(
         raise ValidationError("IPA contains too many nested signed-code components")
     result: list[tuple[Path, str, str]] = []
     for index, code_path in enumerate(nested):
-        requirement = subprocess.run(
+        requirement = _run_native(
             [
                 "codesign",
                 "--verify",
@@ -353,6 +388,7 @@ def _nested_codesign_identities(
                 "=designated",
                 str(code_path),
             ],
+            deadline=deadline,
             env=_validation_environment(),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -363,8 +399,9 @@ def _nested_codesign_identities(
             raise ValidationError(
                 f"nested code does not satisfy its designated requirement: {code_path.name}"
             )
-        details = subprocess.run(
+        details = _run_native(
             ["codesign", "-d", "--verbose=4", str(code_path)],
+            deadline=deadline,
             env=_validation_environment(),
             text=True,
             stdout=subprocess.PIPE,
@@ -379,10 +416,10 @@ def _nested_codesign_identities(
             raise ValidationError(f"nested code lacks a TeamIdentifier: {code_path.name}")
         fingerprint = _codesign_leaf_fingerprint(
             code_path, temporary / f"nested-signer-{index}-",
-            _validity_intervals=_validity_intervals,
+            _validity_intervals=_validity_intervals, deadline=deadline,
         )
         if code_path.suffix.lower() in {".app", ".appex"}:
-            entitlements = _codesign_entitlements(code_path)
+            entitlements = _codesign_entitlements(code_path, deadline=deadline)
             if entitlements is None:
                 raise ValidationError(
                     f"nested application entitlements could not be inspected: {code_path.name}"
@@ -393,18 +430,20 @@ def _nested_codesign_identities(
                 team_id=match.group(1),
                 signer_fingerprint=fingerprint,
                 _validity_intervals=_validity_intervals,
+                deadline=deadline,
             )
         result.append((code_path, match.group(1), fingerprint))
     return result
 
 
-def _codesign_entitlements(app_path: Path) -> dict[str, Any] | None:
+def _codesign_entitlements(app_path: Path, *, deadline: InspectionDeadline | None = None) -> dict[str, Any] | None:
     if sys.platform != "darwin" or not shutil.which("codesign"):
         return None
     import plistlib
 
-    result = subprocess.run(
+    result = _run_native(
         ["codesign", "-d", "--entitlements", ":-", "--xml", str(app_path)],
+        deadline=deadline,
         env=_validation_environment(),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -469,6 +508,7 @@ def _validate_nested_bundle_security(
     team_id: str,
     signer_fingerprint: str,
     _validity_intervals: list[SigningValidityInterval] | None = None,
+    deadline: InspectionDeadline | None = None,
 ) -> None:
     """Bind a nested app/extension to its signer, profile, team, and release entitlements."""
 
@@ -505,7 +545,7 @@ def _validate_nested_bundle_security(
         raise ValidationError(
             f"nested application lacks a safe embedded provisioning profile: {code_path.name}"
         )
-    profile = _profile_details(profile_path)
+    profile = _profile_details(profile_path, deadline=deadline)
     if profile is None:
         raise ValidationError(
             f"nested provisioning profile could not be inspected: {code_path.name}"
@@ -567,12 +607,14 @@ def _validate_ipa(
     release: ReleaseVersion,
     require_tools: bool = False,
     _validity_intervals: list[SigningValidityInterval] | None = None,
+    deadline: InspectionDeadline | None = None,
 ) -> list[Finding]:
     import plistlib
 
     findings: list[Finding] = []
+    deadline = deadline if deadline is not None else InspectionDeadline()
     try:
-        archive, entries = _validated_ipa_entries(path)
+        archive, entries = _validated_ipa_entries(path, deadline=deadline)
     except ValidationError as error:
         return [Finding("ios.ipa.structure", Status.FAIL, str(error), category="ios-artifact")]
     try:
@@ -624,9 +666,10 @@ def _validate_ipa(
         with tempfile.TemporaryDirectory(prefix="mobile-release-ipa-") as temporary_string:
             temporary = Path(temporary_string)
             archive.extractall(temporary)
+            deadline.check()
             app_path = temporary / app_prefix.rstrip("/")
             profile_path = app_path / "embedded.mobileprovision"
-            profile = _profile_details(profile_path)
+            profile = _profile_details(profile_path, deadline=deadline)
             profile_fingerprints: set[str] | None = None
             if profile is None:
                 findings.append(
@@ -666,7 +709,7 @@ def _validate_ipa(
                     )
                 )
 
-            entitlements = _codesign_entitlements(app_path)
+            entitlements = _codesign_entitlements(app_path, deadline=deadline)
             if entitlements is None:
                 findings.append(
                     Finding(
@@ -700,7 +743,7 @@ def _validate_ipa(
                 )
 
             fingerprint = _codesign_fingerprint(
-                app_path, temporary, _validity_intervals=_validity_intervals
+                app_path, temporary, _validity_intervals=_validity_intervals, deadline=deadline,
             )
             if fingerprint is None:
                 findings.append(
@@ -719,7 +762,7 @@ def _validate_ipa(
                 )
             else:
                 nested_identities = _nested_codesign_identities(
-                    app_path, temporary, _validity_intervals=_validity_intervals
+                    app_path, temporary, _validity_intervals=_validity_intervals, deadline=deadline,
                 )
                 if nested_identities is None:
                     raise ValidationError(
@@ -739,6 +782,7 @@ def _validate_ipa(
                         category="ios-artifact",
                     )
                 )
+        deadline.check()
     except ValidationError as error:
         findings.append(Finding("ios.ipa.validation", Status.FAIL, str(error), category="ios-artifact"))
     finally:
@@ -754,6 +798,7 @@ def validate_ipa(
     expected_fingerprint: str | None,
     release: ReleaseVersion,
     require_tools: bool = False,
+    deadline: InspectionDeadline | None = None,
 ) -> list[Finding]:
     """Validate the final IPA against current-time signing/profile policy."""
 
@@ -764,6 +809,7 @@ def validate_ipa(
         expected_fingerprint=expected_fingerprint,
         release=release,
         require_tools=require_tools,
+        deadline=deadline,
     )
 
 
@@ -775,6 +821,7 @@ def validate_ipa_current_signing(
     expected_fingerprint: str | None,
     release: ReleaseVersion,
     require_tools: bool = True,
+    deadline: InspectionDeadline | None = None,
 ) -> tuple[list[Finding], SigningValidityInterval | None]:
     """Perform every IPA check and retain the intersection of validated dates.
 
@@ -791,6 +838,7 @@ def validate_ipa_current_signing(
         release=release,
         require_tools=require_tools,
         _validity_intervals=intervals,
+        deadline=deadline,
     )
     if any(item.status in FAILING_STATUSES or item.status == Status.SKIP for item in findings):
         return findings, None
@@ -807,10 +855,11 @@ def validate_ipa_current_signing(
     return findings, interval
 
 
-def ipa_signing_evidence(path: Path) -> dict[str, str]:
+def ipa_signing_evidence(path: Path, *, deadline: InspectionDeadline | None = None) -> dict[str, str]:
     """Extract public signing/profile identity from a previously validated IPA."""
 
-    archive, entries = _validated_ipa_entries(path)
+    deadline = deadline if deadline is not None else InspectionDeadline()
+    archive, entries = _validated_ipa_entries(path, deadline=deadline)
     try:
         profile_entries = [
             item
@@ -830,11 +879,12 @@ def ipa_signing_evidence(path: Path) -> dict[str, str]:
         with tempfile.TemporaryDirectory(prefix="mobile-release-profile-") as temporary_string:
             temporary = Path(temporary_string)
             archive.extractall(temporary)
+            deadline.check()
             app_path = temporary / app_prefix.rstrip("/")
             profile_path = app_path / "embedded.mobileprovision"
             profile_path.write_bytes(archive.read(profile_entries[0]))
-            profile = _profile_details(profile_path)
-            signer_fingerprint = _codesign_fingerprint(app_path, temporary)
+            profile = _profile_details(profile_path, deadline=deadline)
+            signer_fingerprint = _codesign_fingerprint(app_path, temporary, deadline=deadline)
         if profile is None:
             raise ValidationError("iOS signing evidence extraction requires macOS security tooling")
         if signer_fingerprint is None:
@@ -859,6 +909,7 @@ def ipa_signing_evidence(path: Path) -> dict[str, str]:
             or profile.get("ProvisionsAllDevices")
         ):
             raise ValidationError("provisioning profile lacks stable public identity fields")
+        deadline.check()
         return {
             "platform": "ios",
             "kind": "apple-distribution",
@@ -882,190 +933,32 @@ def validate_xcarchive(
     symbols_policy: str,
     require_tools: bool = False,
 ) -> list[Finding]:
-    """Validate effective archive identity/version before export or upload."""
+    """Validate a private archive snapshot; a signed candidate also needs pairing.
+
+    UUID parsing is now bounded, structural and independent of dwarfdump output.
+    ``require_tools`` remains compatible with archive-only preflight callers;
+    signature authenticity is checked on the final IPA, not inferred here.
+    """
+    from .ios_artifacts import inspect_archive_symbols, snapshot_ios_artifacts
 
     try:
-        _validate_generated_tree(archive, label="xcarchive")
-    except ValidationError as error:
-        return [
-            Finding(
-                "ios.archive.structure",
-                Status.FAIL,
-                str(error),
-                category="ios-artifact",
+        with snapshot_ios_artifacts({"ios-archive": archive}) as snapshot:
+            symbols = inspect_archive_symbols(
+                snapshot.unpack("ios-archive"), expected_bundle_id=expected_bundle_id,
+                release=release, require_main=symbols_policy in {"retain", "required"},
+                deadline=snapshot.deadline,
             )
-        ]
-    apps = [path for path in (archive / "Products/Applications").glob("*.app")]
-    if len(apps) != 1 or apps[0].is_symlink():
-        return [
-            Finding(
-                "ios.archive.structure",
-                Status.FAIL,
-                f"xcarchive must contain exactly one regular application; found {len(apps)}.",
-                category="ios-artifact",
-            )
-        ]
-    import plistlib
-
-    info_path = apps[0] / "Info.plist"
-    try:
-        info = plistlib.loads(info_path.read_bytes())
-    except (OSError, plistlib.InvalidFileException):
-        return [
-            Finding(
-                "ios.archive.info",
-                Status.FAIL,
-                "Archived application Info.plist is missing or invalid.",
-                category="ios-artifact",
-            )
-        ]
-    expected = {
-        "CFBundleIdentifier": expected_bundle_id,
-        "CFBundleShortVersionString": release.name,
-        "CFBundleVersion": str(release.build),
-    }
-    for key, value in expected.items():
-        if str(info.get(key)) != value:
-            return [
-                Finding(
-                    f"ios.archive.{key}",
-                    Status.FAIL,
-                    f"Archived application {key} does not match committed release configuration.",
-                    category="ios-artifact",
-                )
-            ]
-    executable_name = info.get("CFBundleExecutable")
-    if (
-        not isinstance(executable_name, str)
-        or not executable_name
-        or not (apps[0] / executable_name).is_file()
-        or (apps[0] / executable_name).is_symlink()
-    ):
-        return [
-            Finding(
-                "ios.archive.executable",
-                Status.FAIL,
-                "Archived application executable is missing or unsafe.",
-                category="ios-artifact",
-            )
-        ]
-    findings = [
-        Finding(
-            "ios.archive.identity",
-            Status.PASS,
-            "Archived application identity and committed version match.",
-            category="ios-artifact",
-        )
-    ]
-    if symbols_policy == "disabled":
-        findings.append(
-            Finding(
-                "ios.archive.dsym",
-                Status.NOT_APPLICABLE,
-                "dSYM validation is disabled by committed policy.",
-                category="ios-artifact",
-            )
-        )
-    else:
-        findings.extend(validate_archive_dsyms(archive, require_tools=require_tools))
-    return findings
-
-
-def validate_archive_dsyms(archive: Path, *, require_tools: bool = False) -> list[Finding]:
-    try:
-        _validate_generated_tree(archive, label="xcarchive")
-    except ValidationError as error:
-        return [
-            Finding(
-                "ios.archive",
-                Status.FAIL,
-                str(error),
-                category="ios-artifact",
-            )
-        ]
-    apps = list((archive / "Products/Applications").glob("*.app"))
-    dsyms = list((archive / "dSYMs").glob("*.app.dSYM"))
-    if len(apps) != 1 or len(dsyms) != 1:
-        return [
-            Finding(
-                "ios.archive.dsym",
-                Status.FAIL,
-                f"Expected one app and matching app dSYM; found {len(apps)} app(s), {len(dsyms)} dSYM(s).",
-                category="ios-artifact",
-            )
-        ]
-    import plistlib
-
-    try:
-        app_info = plistlib.loads((apps[0] / "Info.plist").read_bytes())
-    except (OSError, plistlib.InvalidFileException):
-        app_info = {}
-    executable_name = app_info.get("CFBundleExecutable")
-    if not isinstance(executable_name, str) or not executable_name:
-        return [
-            Finding(
-                "ios.archive.dsym",
-                Status.FAIL,
-                "Archive application Info.plist lacks CFBundleExecutable.",
-                category="ios-artifact",
-            )
-        ]
-    executable = apps[0] / executable_name
-    dsym_binary = dsyms[0] / "Contents/Resources/DWARF" / executable_name
-    if not executable.is_file() or not dsym_binary.is_file():
-        return [
-            Finding(
-                "ios.archive.dsym",
-                Status.FAIL,
-                "Archive executable or dSYM DWARF binary is missing.",
-                category="ios-artifact",
-            )
-        ]
-    if not shutil.which("dwarfdump"):
-        return [
-            Finding(
-                "ios.archive.dsym",
-                Status.FAIL if require_tools else Status.SKIP,
-                "dwarfdump is unavailable for executable/dSYM UUID validation.",
-                category="ios-artifact",
-            )
-        ]
-
-    def uuids(path: Path) -> set[str]:
-        result = subprocess.run(
-            ["dwarfdump", "--uuid", str(path)],
-            env=_validation_environment(),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=30,
-            check=False,
-        )
-        if result.returncode:
-            raise ValidationError(f"dwarfdump could not inspect {path.name}")
-        return {value.lower() for value in re.findall(r"UUID: ([0-9A-Fa-f-]+)", result.stdout)}
-
-    try:
-        executable_uuids = uuids(executable)
-        dsym_uuids = uuids(dsym_binary)
-    except ValidationError as error:
-        return [Finding("ios.archive.dsym", Status.FAIL, str(error), category="ios-artifact")]
-    if not executable_uuids or executable_uuids != dsym_uuids:
-        return [
-            Finding(
-                "ios.archive.dsym",
-                Status.FAIL,
-                "Archive executable and dSYM UUID sets do not match.",
-                category="ios-artifact",
-            )
-        ]
+            snapshot.assert_unchanged()
+    except (ValidationError, OSError) as error:
+        message = str(error) if isinstance(error, ValidationError) else "Archive required layout is missing or unreadable."
+        return [Finding("ios.archive.structure", Status.FAIL, message, category="ios-artifact")]
     return [
-        Finding(
-            "ios.archive.dsym",
-            Status.PASS,
-            "Archive executable and dSYM UUID sets match.",
-            category="ios-artifact",
-        )
+        Finding("ios.archive.identity", Status.PASS,
+                "Archived application identity and committed version match; IPA correspondence is a separate paired check.",
+                category="ios-artifact"),
+        Finding("ios.archive.dsym", Status.PASS if symbols else Status.NOT_APPLICABLE,
+                "Every present retained dSYM slice matches an archived native identity; this is not complete nested symbol coverage."
+                if symbols else "No dSYMs retained under disabled symbol policy.", category="ios-artifact"),
     ]
 
 
@@ -1187,7 +1080,8 @@ def run_ios_build(config: ReleaseConfig, *, signed: bool) -> dict[str, Path]:
         "teamID": ios.get("teamId"),
         "signingCertificate": "Apple Distribution",
         "provisioningProfiles": {ios.get("bundleId"): os.environ["MOBILE_RELEASE_IOS_PROFILE_SPECIFIER"]},
-        "stripSwiftSymbols": True,
+        "stripSwiftSymbols": False,
+        "thinning": "<none>",
         "uploadSymbols": False,
     }
     export_plist = build_root / "ExportOptions.plist"

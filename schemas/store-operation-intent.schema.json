@@ -2657,7 +2657,7 @@
                     "logicalName"
                   ]
                 },
-                "minContains": 0,
+                "minContains": 1,
                 "maxContains": 1
               },
               {
@@ -3049,7 +3049,7 @@
                     "logicalName"
                   ]
                 },
-                "minContains": 0,
+                "minContains": 1,
                 "maxContains": 1
               },
               {
@@ -3438,7 +3438,7 @@
                     "logicalName"
                   ]
                 },
-                "minContains": 0,
+                "minContains": 1,
                 "maxContains": 1
               },
               {

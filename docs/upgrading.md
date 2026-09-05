@@ -109,6 +109,19 @@ into an in-flight chain. Resolve earlier operations using their original pin/own
 before upgrading. Invalid legacy production targets are not silently repaired or adopted by the
 new validation. See [metadata setup](integration.md#6-add-product-owned-metadata).
 
+### Correlated iOS artifacts
+
+Before creating a new candidate, upgrade the toolkit pin and confirm your protected Xcode
+archive/export produces a corresponding pair with Swift-symbol stripping and thinning disabled.
+The archive is now required under every symbol policy; candidate v2 and intent v1 wire versions
+are unchanged, but creation and all consumers reject missing archives. All native/resource
+counterparts and every present dSYM are checked; this is not yet complete missing-nested symbol
+coverage. See [supported layouts and limits](ios-artifacts.md).
+
+Do not repin or reseal an existing independently validated candidate into this stronger contract.
+Resolve an in-flight operation using its original pin and retained bytes/owner review. Never
+rebuild, re-sign, or substitute symbols/archive as recovery for the original candidate.
+
 ## Rollback
 
 Before any Store mutation, reverting the consumer SHA/configuration is an ordinary source change.

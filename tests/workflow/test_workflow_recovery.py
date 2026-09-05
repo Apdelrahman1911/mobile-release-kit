@@ -232,7 +232,9 @@ class Lifecycle:
             # The resolver authenticates but must never extract nested archives.
             with zipfile.ZipFile(self.handoff / "archive.zip", "w") as archive:
                 archive.writestr("../opaque-retained-archive-not-extracted-here", "fixture")
-            self.records.append({"logicalName": "ios-archive", "platform": "ios", "kind": "xcarchive", "fileName": "archive.zip", "size": (self.handoff / "archive.zip").stat().st_size, "sha256": sha256_file(self.handoff / "archive.zip"), "architectures": []})
+            record = next(item for item in self.records if item["logicalName"] == "ios-archive")
+            record.update(size=(self.handoff / "archive.zip").stat().st_size, sha256=sha256_file(self.handoff / "archive.zip"))
+            shutil.copyfile(self.config.root / "dsyms.zip", self.handoff / "dsyms.zip")
         self.records.sort(key=lambda item: item["logicalName"])
         (self.handoff / "SHA256SUMS").write_text("".join(f"{sha256_file(file)}  {file.name}\n" for file in sorted(self.handoff.iterdir())))
 

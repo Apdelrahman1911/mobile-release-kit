@@ -22,6 +22,7 @@ from .config import load_config
 from .credentials import artifact_validation_environment
 from .errors import MobileReleaseError, ValidationError
 from .ios import ipa_signing_evidence, validate_ipa_current_signing
+from .ios_artifacts import snapshot_ios_artifacts
 from .provenance import load_operation_intent, sha256_file, validate_operation_intent
 from .reporting import FAILING_STATUSES, Status
 
@@ -66,24 +67,30 @@ def validate_current_upload(
     before_hash = sha256_file(ipa_path)
     if ipa_path.name != record["fileName"] or ipa_path.stat().st_size != record["size"] or before_hash != record["sha256"]:
         raise ValidationError("current-upload IPA differs from the original intent's exact artifact")
-    findings, interval = validate_ipa_current_signing(
-        ipa_path,
-        expected_bundle_id=section["bundleId"],
-        expected_team_id=section["teamId"],
-        expected_fingerprint=section["distributionCertificateSha256"],
-        release=release,
-        require_tools=True,
-    )
-    failures = [item for item in findings if item.status in FAILING_STATUSES or item.status == Status.SKIP]
-    if failures or interval is None:
-        # Findings contain only toolkit-supplied diagnostics, not native-tool
-        # stdout/stderr, Store secrets, private profiles, or certificate bytes.
-        detail = failures[0].message if failures else "complete current signing evidence is missing"
-        raise ValidationError(f"new IPA upload is ineligible: {detail}")
-    if [ipa_signing_evidence(ipa_path)] != intent["signing"]:
-        raise ValidationError("current-upload signer/profile differs from the original intent")
-    if sha256_file(ipa_path) != before_hash or ipa_path.stat().st_size != record["size"]:
-        raise ValidationError("current-upload IPA changed during native validation")
+    with snapshot_ios_artifacts({"ios-ipa": ipa_path}) as snapshot:
+        inspected_ipa = snapshot.paths["ios-ipa"]
+        if sha256_file(inspected_ipa) != before_hash:
+            raise ValidationError("current-upload IPA changed before snapshotting")
+        snapshot.deadline.check()
+        findings, interval = validate_ipa_current_signing(
+            inspected_ipa,
+            expected_bundle_id=section["bundleId"],
+            expected_team_id=section["teamId"],
+            expected_fingerprint=section["distributionCertificateSha256"],
+            release=release,
+            require_tools=True,
+            deadline=snapshot.deadline,
+        )
+        snapshot.deadline.check()
+        failures = [item for item in findings if item.status in FAILING_STATUSES or item.status == Status.SKIP]
+        if failures or interval is None:
+            # Findings contain only toolkit-supplied diagnostics, not native-tool
+            # stdout/stderr, Store secrets, private profiles, or certificate bytes.
+            detail = failures[0].message if failures else "complete current signing evidence is missing"
+            raise ValidationError(f"new IPA upload is ineligible: {detail}")
+        if [ipa_signing_evidence(inspected_ipa, deadline=snapshot.deadline)] != intent["signing"]:
+            raise ValidationError("current-upload signer/profile differs from the original intent")
+        snapshot.assert_unchanged()
     interval.require_current()
     return {
         "documentType": "ios-current-upload-validation",
