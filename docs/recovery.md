@@ -90,6 +90,28 @@ mixed origins; conflicting common and platform-specific references fail.
 References select artifacts, not authority: every consumer authenticates them.
 An already-prepared operation must retain its exact original predecessor hashes.
 
+### Mixed attempts in the same run
+
+If Android completes candidate run **A**, attempt 1, and iOS completes after
+**Re-run failed jobs** on attempt 2, both candidate references still name **A**.
+For that iOS retry, attempt 1 must have failed before durable authorization and
+any possible Store mutation, with the original handoff retained and execution
+positively proven skipped. An ambiguous prior iOS upload still requires a new
+protected recovery dispatch and owner attribution as described below.
+External testing may likewise retain Android evidence from attempt 2 and iOS
+evidence from attempt 1 of run **B**. Production selects **A** and **B**, not their
+latest attempt numbers. Each platform's original authorization, actual execution,
+final producer, job ID, attested inventory and immutable artifact are verified
+independently using the recorded attempt-specific GitHub records.
+
+There is no latest-attempt override. A newer successful job cannot replace a
+missing original job or authenticate older evidence. Conversely, a sibling job
+failure or cancellation after the complete final upload does not invalidate an
+otherwise authenticated platform. A final completed by recovery retains its
+original intent and the actual later final producer; it never rewrites either
+identity to the current attempt. Missing or mismatched proof fails closed even
+when the overall run is successful.
+
 ## Google Play reconciliation
 
 Recovery opens a fresh edit rather than replaying an old edit ID. It compares the

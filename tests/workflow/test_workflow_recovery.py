@@ -236,8 +236,8 @@ class Lifecycle:
         self.records.sort(key=lambda item: item["logicalName"])
         (self.handoff / "SHA256SUMS").write_text("".join(f"{sha256_file(file)}  {file.name}\n" for file in sorted(self.handoff.iterdir())))
 
-    def prepare(self, stage: str, *, run_id: str | None = None) -> tuple[Context, Path, dict]:
-        selected = context(stage, self.platform, run_id=run_id)
+    def prepare(self, stage: str, *, run_id: str | None = None, attempt: int = 1) -> tuple[Context, Path, dict]:
+        selected = context(stage, self.platform, run_id=run_id, attempt=attempt)
         self.contexts[stage] = selected
         self.api.register(selected, active=True)
         app = self.root / (stage + "-app")
