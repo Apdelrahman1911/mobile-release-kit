@@ -1289,83 +1289,53 @@ class WorkflowRecoveryTests(unittest.TestCase):
         with patch.dict(os.environ, {"PATH": str(self.root) + os.pathsep + os.environ["PATH"]}), self.assertRaisesRegex(ValidationError, "timed out"):
             Transport().run(["gh", "api", "--method", "GET", "fixed"], timeout=1)
 
-    def process_tree_command(self, *, exit_root=False):
-        child_code = f"import time; from pathlib import Path; time.sleep(1.5); Path({str(self.root / 'escaped-descendant')!r}).touch()"
-        gh = self.root / "gh"
-        gh.write_text(f"#!{sys.executable}\nimport os,sys,subprocess\nfrom pathlib import Path\np=Path({str(self.root)!r})\n(p/'gh.pid').write_text(str(os.getpid()))\nchild=subprocess.Popen([sys.executable,'-c',{child_code!r}])\n(p/'child.pid').write_text(str(child.pid))\n" + ("sys.exit(0)\n" if exit_root else "child.wait()\n"))
-        gh.chmod(0o700)
-        env = {"PATH": str(self.root) + os.pathsep + os.environ["PATH"], "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src")}
-
-        def cleanup():
-            # Never search for or kill unrelated processes; this is the exact
-            # private process-group ID created by this disposable fake gh.
-            if (self.root / "gh.pid").is_file():
-                try:
-                    os.killpg(int((self.root / "gh.pid").read_text()), signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-        self.addCleanup(cleanup)
-        return env
-
     def test_transport_timeout_kills_descendant_pipes_even_after_gh_root_exits(self):
-        env = self.process_tree_command(exit_root=True)
-        started = time.monotonic()
-        with patch.dict(os.environ, env), self.assertRaisesRegex(ValidationError, "timed out"):
-            Transport().run(["gh", "api", "--method", "GET", "fixed"], timeout=1)
-        self.assertLess(time.monotonic() - started, 5)
-        time.sleep(0.8)
-        self.assertTrue((self.root / "child.pid").exists())
-        self.assertFalse((self.root / "escaped-descendant").exists())
+        from workflow.process_fixture import run_case
+
+        result = run_case(self.root, "timeout")
+        self.assertEqual(result["result"], "timeout")
+        self.assertGreater(result["selectorWaitsAfterLeaderExit"], 0)
+        self.assertTrue(result["deadBeforeFallback"])
+
+    def test_transport_descendant_timeout_is_independent_of_fixture_startup(self):
+        from workflow.process_fixture import run_case
+
+        # Delay longer than the unchanged one-second Transport test deadline.
+        # The test clock advances only after a real orphaned-pipe selector wait.
+        result = run_case(self.root, "timeout", delay=1.2)
+        self.assertGreaterEqual(result["realSeconds"], 1.2)
+        self.assertEqual(result["result"], "timeout")
+        self.assertGreater(result["selectorWaitsAfterLeaderExit"], 0)
+
+    def test_transport_fixture_startup_failure_cleans_up_before_own_pid_marker(self):
+        from workflow.process_fixture import run_case
+
+        result = run_case(self.root, "unready")
+        self.assertEqual(result["result"], "readiness-failure")
+        self.assertTrue((self.root / "launcher.pid").is_file())
+        self.assertFalse((self.root / "gh.pid").exists())
+        self.assertFalse((self.root / "child.pid").exists())
+        self.assertTrue(result["deadBeforeFallback"])
 
     def test_transport_sigterm_cleans_detached_process_tree_and_reraises_cancellation(self):
-        env = self.process_tree_command()
-        code = "from mobile_release.workflow import Transport\nimport sys\ntry:\n Transport().run(['gh','api','--method','GET','fixed'])\nexcept KeyboardInterrupt:\n sys.exit(130)\n"
-        driver = subprocess.Popen([sys.executable, "-P", "-c", code], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        try:
-            deadline = time.monotonic() + 10
-            while not (self.root / "child.pid").exists() and driver.poll() is None and time.monotonic() < deadline:
-                time.sleep(0.01)
-            self.assertTrue((self.root / "child.pid").is_file())
-            driver.send_signal(signal.SIGTERM)
-            stdout, stderr = driver.communicate(timeout=5)
-            self.assertEqual(driver.returncode, 130, stderr.decode())
-            self.assertEqual(stdout, b"")
-            self.assertEqual(stderr, b"")
-            time.sleep(1.7)
-            self.assertFalse((self.root / "escaped-descendant").exists())
-        finally:
-            if driver.poll() is None:
-                driver.kill()
-                driver.communicate()
+        from workflow.process_fixture import run_case
+
+        result = run_case(self.root, "cancel")
+        self.assertEqual(result["result"], "cancelled")
+        self.assertTrue(result["ready"] and result["deadBeforeFallback"])
 
     def test_transport_cancellation_during_popen_cannot_lose_child_handle(self):
-        env = self.process_tree_command()
-        # Inject the signal precisely after the OS child exists but BEFORE
-        # Transport receives Popen's handle. Keep the driver separate so a
-        # regression cannot terminate the entire test process.
-        code = """from mobile_release.workflow import Transport
-import os, signal, subprocess, sys, time
-from pathlib import Path
-real = subprocess.Popen
-def spawn(*args, **kwargs):
-    process = real(*args, **kwargs)
-    deadline = time.monotonic() + 10
-    while not Path(sys.argv[1]).exists() and time.monotonic() < deadline:
-        time.sleep(.01)
-    os.kill(os.getpid(), signal.SIGTERM)
-    return process
-subprocess.Popen = spawn
-try:
-    Transport().run(['gh','api','--method','GET','fixed'])
-except KeyboardInterrupt:
-    sys.exit(130)
-"""
-        result = subprocess.run([sys.executable, "-P", "-c", code, str(self.root / "child.pid")], env=env, capture_output=True, timeout=15)
-        self.assertEqual(result.returncode, 130, result.stderr.decode())
-        self.assertEqual(result.stdout, b"")
-        self.assertEqual(result.stderr, b"")
-        time.sleep(1.7)
-        self.assertFalse((self.root / "escaped-descendant").exists())
+        from workflow.process_fixture import run_case
+
+        result = run_case(self.root, "popen-cancel")
+        self.assertEqual(result["result"], "cancelled")
+        self.assertTrue(result["ready"] and result["deadBeforeFallback"])
+
+    def test_transport_fixture_does_not_relax_gh_only_public_boundary(self):
+        with patch("mobile_release.workflow.subprocess.Popen") as spawn:
+            with self.assertRaisesRegex(ValidationError, "only permits the GitHub CLI"):
+                Transport().run([sys.executable, "-c", "print('not gh')"])
+        spawn.assert_not_called()
 
     def test_transport_restores_default_handlers_and_respects_custom_handlers_and_threads(self):
         gh = self.root / "gh"
