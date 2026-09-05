@@ -1,0 +1,281 @@
+{
+  "valid": [
+    {
+      "name": "plain",
+      "text": "Reviewed reliability improvements."
+    },
+    {
+      "name": "ascii-500",
+      "text": "x",
+      "repeat": 500
+    },
+    {
+      "name": "supplementary-500",
+      "text": "🚀",
+      "repeat": 500
+    },
+    {
+      "name": "cjk-500",
+      "text": "界",
+      "repeat": 500
+    },
+    {
+      "name": "crlf-500",
+      "text": "x",
+      "repeat": 498,
+      "suffix": "\r\n"
+    },
+    {
+      "name": "newline-500",
+      "text": "x",
+      "repeat": 499,
+      "suffix": "\n"
+    },
+    {
+      "name": "padded-copy",
+      "text": " Reviewed\r\ncopy. "
+    },
+    {
+      "name": "ascii-word-neighbors",
+      "text": "ATODOA _TODO_ todolist"
+    },
+    {
+      "name": "no-multi-character-fold",
+      "text": "paßword=fictional-value"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "empty",
+      "text": ""
+    },
+    {
+      "name": "unicode-whitespace",
+      "text": "\t\n\u000b\f\r\u001c\u001d\u001e\u001f                  　"
+    },
+    {
+      "name": "ascii-501",
+      "text": "x",
+      "repeat": 501
+    },
+    {
+      "name": "supplementary-501",
+      "text": "🚀",
+      "repeat": 501
+    },
+    {
+      "name": "crlf-501",
+      "text": "x",
+      "repeat": 499,
+      "suffix": "\r\n"
+    },
+    {
+      "name": "newline-501",
+      "text": "x",
+      "repeat": 500,
+      "suffix": "\n"
+    },
+    {
+      "name": "nul",
+      "text": "Reviewed\u0000copy"
+    },
+    {
+      "name": "todo",
+      "text": "TODO"
+    },
+    {
+      "name": "case",
+      "text": "tBd"
+    },
+    {
+      "name": "change-me",
+      "text": "CHANGEME"
+    },
+    {
+      "name": "angle",
+      "text": "<reviewed copy>"
+    },
+    {
+      "name": "template",
+      "text": "{{copy}}"
+    },
+    {
+      "name": "domain",
+      "text": "https://EXAMPLE.COM/help"
+    },
+    {
+      "name": "combining-neighbors",
+      "text": "́TODÓ"
+    },
+    {
+      "name": "letter-neighbors",
+      "text": "éTODOé"
+    },
+    {
+      "name": "digit-neighbors",
+      "text": "١TODO١"
+    },
+    {
+      "name": "dotless-i",
+      "text": "\"prıvate_key\": \"fictional-value\""
+    },
+    {
+      "name": "dotted-i",
+      "text": "\"clİent_secret\": \"fictional-value\""
+    },
+    {
+      "name": "long-s",
+      "text": "ſecret = fictional-value"
+    },
+    {
+      "name": "kelvin-key",
+      "text": "api_Key=fictional-value"
+    },
+    {
+      "name": "private-header",
+      "text": "-----begın prıvate Key-----"
+    },
+    {
+      "name": "nonascii-label-space",
+      "text": "password = fictional-value"
+    },
+    {
+      "name": "mixed-case",
+      "text": "\"PrIvAtE_KeY_Id\": \"fictional-value\""
+    },
+    {
+      "name": "whitespace-u0009",
+      "text": "\t"
+    },
+    {
+      "name": "whitespace-u000a",
+      "text": "\n"
+    },
+    {
+      "name": "whitespace-u000b",
+      "text": "\u000b"
+    },
+    {
+      "name": "whitespace-u000c",
+      "text": "\f"
+    },
+    {
+      "name": "whitespace-u000d",
+      "text": "\r"
+    },
+    {
+      "name": "whitespace-u001c",
+      "text": "\u001c"
+    },
+    {
+      "name": "whitespace-u001d",
+      "text": "\u001d"
+    },
+    {
+      "name": "whitespace-u001e",
+      "text": "\u001e"
+    },
+    {
+      "name": "whitespace-u001f",
+      "text": "\u001f"
+    },
+    {
+      "name": "whitespace-u0020",
+      "text": " "
+    },
+    {
+      "name": "whitespace-u0085",
+      "text": ""
+    },
+    {
+      "name": "whitespace-u00a0",
+      "text": " "
+    },
+    {
+      "name": "whitespace-u1680",
+      "text": " "
+    },
+    {
+      "name": "whitespace-u2000",
+      "text": " "
+    },
+    {
+      "name": "whitespace-u2001",
+      "text": " "
+    },
+    {
+      "name": "whitespace-u2002",
+      "text": " "
+    },
+    {
+      "name": "whitespace-u2003",
+      "text": " "
+    },
+    {
+      "name": "whitespace-u2004",
+      "text": " "
+    },
+    {
+      "name": "whitespace-u2005",
+      "text": " "
+    },
+    {
+      "name": "whitespace-u2006",
+      "text": " "
+    },
+    {
+      "name": "whitespace-u2007",
+      "text": " "
+    },
+    {
+      "name": "whitespace-u2008",
+      "text": " "
+    },
+    {
+      "name": "whitespace-u2009",
+      "text": " "
+    },
+    {
+      "name": "whitespace-u200a",
+      "text": " "
+    },
+    {
+      "name": "whitespace-u2028",
+      "text": " "
+    },
+    {
+      "name": "whitespace-u2029",
+      "text": " "
+    },
+    {
+      "name": "whitespace-u202f",
+      "text": " "
+    },
+    {
+      "name": "whitespace-u205f",
+      "text": " "
+    },
+    {
+      "name": "whitespace-u3000",
+      "text": "　"
+    }
+  ],
+  "invalidUtf8": [
+    {
+      "name": "truncated",
+      "hex": "c3"
+    },
+    {
+      "name": "surrogate",
+      "hex": "eda080"
+    },
+    {
+      "name": "overlong-nul",
+      "hex": "c080"
+    },
+    {
+      "name": "invalid-leading",
+      "hex": "ff"
+    }
+  ]
+}

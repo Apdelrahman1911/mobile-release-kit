@@ -93,6 +93,22 @@ operations. Rehearse post-mutation failure and same-candidate recovery before ac
 [Recovery](recovery.md). Completed finals are reused unchanged, including pending TestFlight
 observations. Record later availability with a new external dispatch, never by resealing old bytes.
 
+### Required Android release notes
+
+Android preflight and every CI stage now require nonempty, reviewed UTF-8 notes per configured
+locale: `changelogs/<committed-build-number>.txt`, or `changelogs/default.txt` only when the exact
+file is absent. The 500-character limit counts actual uploaded whitespace/newlines. Fill or
+remove init's empty default even when supplying an exact file; all present metadata stays subject
+to validation. The v1 intent wire shape is unchanged. The schema requires nonblank, bounded
+target notes; runtime validation also enforces public-text safety and exact configured locale/text
+binding. Historical unrelated Store releases retain their original observational rules.
+
+Add valid notes and update toolkit pins **before creating a new candidate**. Do not add notes to
+an existing candidate's immutable archive, reseal a production intent, or substitute a new toolkit
+into an in-flight chain. Resolve earlier operations using their original pin/owner Store review
+before upgrading. Invalid legacy production targets are not silently repaired or adopted by the
+new validation. See [metadata setup](integration.md#6-add-product-owned-metadata).
+
 ## Rollback
 
 Before any Store mutation, reverting the consumer SHA/configuration is an ordinary source change.

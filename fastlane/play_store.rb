@@ -67,6 +67,7 @@ module MobileReleaseKit
       before_mutation_guard: nil,
       after_mutation_guard: nil,
       metadata_languages: nil,
+      changelog_input: nil,
       intent_sha256: nil,
       expected_bundle_sha256: nil,
       expected_bundle: nil,
@@ -78,6 +79,7 @@ module MobileReleaseKit
         before_mutation_guard: before_mutation_guard,
         after_mutation_guard: after_mutation_guard,
         metadata_languages: metadata_languages,
+        changelog_input: changelog_input,
         intent_sha256: intent_sha256,
         expected_bundle_sha256: expected_bundle_sha256,
         expected_bundle: expected_bundle,
@@ -249,6 +251,7 @@ module MobileReleaseKit
       before_mutation_guard: nil,
       after_mutation_guard: nil,
       metadata_languages: nil,
+      changelog_input: nil,
       intent_sha256: nil,
       expected_bundle_sha256: nil,
       expected_bundle: nil,
@@ -267,6 +270,7 @@ module MobileReleaseKit
       @before_mutation_guard = before_mutation_guard
       @after_mutation_guard = after_mutation_guard
       @metadata_languages = metadata_languages
+      @changelog_input = changelog_input
       @intent_sha256 = intent_sha256
       @expected_bundle_sha256 = expected_bundle_sha256
       @expected_bundle = expected_bundle
@@ -291,6 +295,7 @@ module MobileReleaseKit
       )
       verify_config!
       reject_unsafe_supply_options!
+      validate_changelog_input!
       client.begin_edit(package_name: Supply.config[:package_name])
       @mutation_edit_id = client.current_edit.id.to_s
       precondition = @before_mutation_guard&.call(client)
@@ -433,6 +438,46 @@ module MobileReleaseKit
     end
 
     private
+
+    def validate_changelog_input!
+      if Supply.config[:skip_upload_changelogs]
+        raise ContractError, "Skipped Play changelogs must not receive replacement notes" unless @changelog_input.nil?
+        return
+      end
+      unless @changelog_input.is_a?(Hash) && @changelog_input.length == 2 &&
+             @changelog_input.key?(:notes) && @changelog_input.key?(:version_code)
+        raise ContractError, "Play changelog upload requires validated version-bound notes"
+      end
+      version = @changelog_input.fetch(:version_code)
+      MobileReleaseKit.validate_android_note_scope(@metadata_languages, version)
+      unless version.to_s == Supply.config[:version_code].to_s
+        raise ContractError, "Play changelog version differs from the upload/promotion version"
+      end
+      notes = @changelog_input.fetch(:notes)
+      unless notes.is_a?(Array) && notes.length == @metadata_languages.length
+        raise ContractError, "Play changelog upload must bind each configured locale exactly once"
+      end
+      notes.each do |note|
+        unless note.is_a?(Hash) && note.length == 2 && note.key?("language") && note.key?("text") && note["language"].is_a?(String)
+          raise ContractError, "Play changelog records require only language and text"
+        end
+      end
+      unless notes.map { |note| note.fetch("language") }.sort == @metadata_languages.sort
+        raise ContractError, "Play changelog locale scope differs from configuration"
+      end
+      @validated_changelog_version = version.to_s.freeze
+      @metadata_languages = @metadata_languages.map { |language| language.dup.freeze }.freeze
+      @validated_changelogs = notes.to_h do |note|
+        [note.fetch("language").dup.freeze, MobileReleaseKit.validate_android_release_note(note.fetch("text")).freeze]
+      end.freeze
+    end
+
+    def upload_changelog(language, version_code)
+      unless @validated_changelogs && version_code.to_s == @validated_changelog_version && @validated_changelogs.key?(language)
+        raise ContractError, "Play changelog worker differs from the validated locale/version scope"
+      end
+      AndroidPublisher::LocalizedText.new(language: language, text: @validated_changelogs.fetch(language))
+    end
 
     def all_languages
       # Supply otherwise scans every directory, including locales not authorized

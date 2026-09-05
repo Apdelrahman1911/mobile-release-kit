@@ -287,7 +287,9 @@ def _metadata_skeleton(configuration: Mapping[str, Any]) -> tuple[str, ...]:
         for locale in metadata.get("androidLocales", []):
             paths.extend(
                 f"{root}/android/{locale}/{name}"
-                for name in ("title.txt", "short_description.txt", "full_description.txt")
+                for name in (
+                    "title.txt", "short_description.txt", "full_description.txt", "changelogs/default.txt"
+                )
             )
     if configuration.get("ios", {}).get("enabled"):
         for locale in metadata.get("iosLocales", []):

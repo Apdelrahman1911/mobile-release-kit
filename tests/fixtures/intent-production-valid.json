@@ -137,6 +137,12 @@
         "status": "draft",
         "versionCodes": [
           "42"
+        ],
+        "releaseNotes": [
+          {
+            "language": "en-US",
+            "text": "Reliability improvements.\n"
+          }
         ]
       },
       "destinationTargetState": {
@@ -148,6 +154,12 @@
             "status": "draft",
             "versionCodes": [
               "42"
+            ],
+            "releaseNotes": [
+              {
+                "language": "en-US",
+                "text": "Reliability improvements.\n"
+              }
             ]
           }
         ]
@@ -187,6 +199,6 @@
   "createdAt": "2026-01-01T00:00:00Z",
   "integrity": {
     "algorithm": "sha256",
-    "sha256": "9db63ff0329fd43bfc9398195d42d2d982df4f784a9914b1ff13dc16bffc1d50"
+    "sha256": "a4aa90356161a58e176cea3b03897d6e9d4c62dc6136fe74d6b97c07c93e5306"
   }
 }

@@ -1200,7 +1200,7 @@
           "const": false
         },
         "targetRelease": {
-          "$ref": "#/$defs/playRelease"
+          "$ref": "#/$defs/playProductionRelease"
         },
         "destinationTargetState": {
           "$ref": "#/$defs/playTrack"
@@ -2293,6 +2293,50 @@
           "type": "object"
         }
       }
+    },
+    "playProductionRelease": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/playRelease"
+        },
+        {
+          "type": "object",
+          "required": [
+            "releaseNotes"
+          ],
+          "properties": {
+            "releaseNotes": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 250,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "language",
+                  "text"
+                ],
+                "properties": {
+                  "language": {
+                    "$ref": "#/$defs/locale"
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500,
+                    "pattern": "^[^\\u0000]*$",
+                    "allOf": [
+                      {
+                        "pattern": "[^\\u0009-\\u000d\\u001c-\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
     }
   },
   "allOf": [

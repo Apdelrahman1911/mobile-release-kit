@@ -76,6 +76,7 @@ def write_project(root: Path, value: dict, *, platform: str = "android") -> Path
             "title.txt": "Reader",
             "short_description.txt": "Read safely on every device.",
             "full_description.txt": "A real application description.",
+            "changelogs/default.txt": "Reliability improvements.",
         },
         "ios": {
             "description.txt": "A real application description.",
@@ -86,6 +87,7 @@ def write_project(root: Path, value: dict, *, platform: str = "android") -> Path
         },
     }
     for name, content in required_text[platform].items():
+        (metadata / name).parent.mkdir(parents=True, exist_ok=True)
         (metadata / name).write_text(content + "\n", encoding="utf-8")
     if platform == "ios":
         review = root / "release/store/review"

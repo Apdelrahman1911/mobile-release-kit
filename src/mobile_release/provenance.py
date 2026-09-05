@@ -17,6 +17,7 @@ from . import __version__
 from .config import ReleaseConfig, ReleaseVersion
 from .discovery import GitContext
 from .errors import ValidationError
+from .metadata import android_release_notes, validate_android_release_note
 
 HEX_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SENSITIVE_KEY_RE = re.compile(r"(?i)(password|private.?key|secret|token|credential|keystore.?base64)")
@@ -935,6 +936,11 @@ def _validate_store_precondition(value: object, *, stage: str, platform: str) ->
             if allowed_sources != expected_sources:
                 raise ValidationError("intent Play allowed source states would change unrelated releases")
         if stage == "production-submit":
+            notes = release_target.get("releaseNotes")
+            if not notes:
+                raise ValidationError("production Play target requires nonempty release notes")
+            for note in notes:
+                validate_android_release_note(note["text"])
             _validate_play_metadata(snapshot["metadataBefore"], observed=True)
             _validate_play_metadata(snapshot["metadataTarget"], observed=False)
     else:
@@ -2683,6 +2689,13 @@ def _validate_external_locale_scope(intent: Mapping[str, Any], config: ReleaseCo
         raise ValidationError("TestFlight intent must preserve unconfigured locales and target exactly the configured locale scope")
 
 
+def _validate_android_note_scope(intent: Mapping[str, Any], config: ReleaseConfig) -> None:
+    if intent["platform"] == "android" and intent["stage"] == "production-submit":
+        target = intent["storePrecondition"]["snapshot"]["targetRelease"]["releaseNotes"]
+        if target != android_release_notes(config):
+            raise ValidationError("Play intent release notes differ from configured locales/committed-build text")
+
+
 def build_operation_intent(
     *,
     config: ReleaseConfig,
@@ -2755,6 +2768,7 @@ def build_operation_intent(
     result = seal(payload)
     validate_operation_intent(result)
     _validate_external_locale_scope(payload, config)
+    _validate_android_note_scope(payload, config)
     return result
 
 
@@ -2790,6 +2804,7 @@ def validate_operation_intent_context(
     if intent["configuration"] != _intent_configuration(config, metadata_sha256):
         raise ValidationError("operation intent configuration or metadata has changed")
     _validate_external_locale_scope(intent, config)
+    _validate_android_note_scope(intent, config)
     if intent["destination"] != _intent_destination(config, stage, platform):
         raise ValidationError("operation intent destination has changed")
     section = config.section(platform)

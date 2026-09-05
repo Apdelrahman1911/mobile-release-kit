@@ -154,6 +154,14 @@ readback, and records the observed draft. A successful mutation remains recovera
 receipt/manifest/attestation persistence failed: the original intent identifies both before and
 target states. An unrelated existing draft or metadata drift cannot be adopted or overwritten.
 
+Every configured Android locale must already have valid exact-version or default release notes
+in the candidate metadata. Preparation validates all notes before opening a Store edit and binds
+their original UTF-8 text to the production intent. Execution and recovery require that exact
+locale/text set; Supply workers receive an immutable copy, never an empty fallback or a later
+filesystem read. The new target's 500-character requirement does not rewrite or reject unrelated
+historical Store releases with empty or longer notes. Complete Store readback must still match
+the entire authorized target, including notes, before a receipt can report success.
+
 Play supplies the bundle SHA-256, but no mapping-file digest readback. Candidate recovery may replay
 only the same original mapping for the same version code and requires an acknowledged edit commit;
 this is documented scoped idempotency, not independent proof of the mapping's Store bytes.
