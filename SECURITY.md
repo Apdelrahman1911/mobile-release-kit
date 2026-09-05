@@ -31,6 +31,12 @@ The final public-release decision is intentionally outside automation.
   Original preparation verifies its trusted build-output/service digest, safe layout, file hashes,
   final identity and signing. Recovery additionally requires the original attested intent's complete
   artifact binding; artifact names and adjacent checksums alone cannot authorize Store access.
+- Fresh iOS preparation inspects the required IPA/archive and supplied symbols on private
+  immutable input snapshots. Every native image, bundle/resource counterpart and present dSYM
+  must correspond. Signature-neutral hashes permit only bounded signing changes; complete signed
+  artifact hashes authenticate the actual retained bytes, including signature-allocation slack
+  that native codesign may not cover. UUIDs alone do not authenticate binaries or debug data.
+  Original archive/symbol bindings remain mandatory for incomplete-operation execution/recovery.
 - Historical Android recovery retains authenticated original signing/identity evidence rather than
   requiring an accepted build to remain eligible for a new upload. Every actual new AAB send repeats
   current pinned native validation in a credential-free child, full Store-state classification and a

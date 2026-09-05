@@ -24,6 +24,11 @@ All notable changes to Mobile Release Kit are documented here. The project follo
 
 ### Fixed
 
+- Require and correlate iOS IPA/archive native images, typed bundle metadata, resources and every
+  present retained dSYM on private snapshots before candidate authorization. Bind archive/symbol
+  hashes at execution, reject source-path ABA/substitution, and disable export stripping/thinning.
+  Preserve signature-only changes and authenticated historical recovery; complete missing-nested
+  symbol coverage remains a separate requirement.
 - Require bounded, reviewed Android release notes for every configured locale before candidate
   creation and production preparation. Generate an owner-completed default stub, bind exact raw
   text to the production intent, and use immutable validated notes in Supply workers without

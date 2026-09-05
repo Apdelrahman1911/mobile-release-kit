@@ -120,19 +120,32 @@ def raw_receipt(intent: dict, *, result: str = "accepted", executed_by: dict | N
 def build_lifecycle(config, *, platform: str = "android") -> dict:
     """Build an offline evidence chain; this does not pretend to validate a binary."""
     import os
+    import shutil
+    import tempfile
     import zipfile
     from unittest.mock import patch
     from mobile_release.metadata import build_metadata_archive
     from mobile_release.provenance import artifact_records, build_operation_intent, build_candidate_manifest, build_receipt, sha256_file, validate_store_receipt
 
     binary = config.root / ("app.aab" if platform == "android" else "app.ipa")
-    with zipfile.ZipFile(binary, "w") as archive:
-        archive.writestr("base/lib/arm64-v8a/libx.so" if platform == "android" else "Payload/Reader.app/Reader", b"fixture, not an executable")
+    inputs = []
+    if platform == "ios":
+        from .ios_artifact_helpers import packed_artifact_set
+
+        with tempfile.TemporaryDirectory() as temporary:
+            for name, path in packed_artifact_set(Path(temporary)).items():
+                destination = config.root / path.name
+                shutil.copyfile(path, destination)
+                inputs.append((name, destination))
+    else:
+        with zipfile.ZipFile(binary, "w") as archive:
+            archive.writestr("base/lib/arm64-v8a/libx.so", b"fixture, not an executable")
+        inputs.append(("android-aab", binary))
     metadata = config.root / "store-metadata.zip"
     build_metadata_archive(config.project_path(config.section("metadata")["root"]), metadata, platform=platform)
     report = config.root / "validation-report.json"
     report.write_text('{"fixture":true}\n')
-    records = artifact_records([("android-aab" if platform == "android" else "ios-ipa", binary), ("store-metadata", metadata), ("validation-report", report)])
+    records = artifact_records([*inputs, ("store-metadata", metadata), ("validation-report", report)])
     signing = None if platform == "android" else {"platform": "ios", "kind": "apple-distribution", "certificateSha256": "b" * 64, "teamId": "ABCDE12345", "profileUuid": "11111111-2222-3333-4444-555555555555", "profileExpiresAt": "2027-01-01T00:00:00Z"}
     docs = {"records": records, "metadata_sha256": sha256_file(metadata), "signing": signing}
     for stage in STAGES:

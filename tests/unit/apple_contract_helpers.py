@@ -53,11 +53,14 @@ def wrap_apple_contracts(root: Path, *, samples: dict | None = None) -> tuple[ob
     ipa = root / "candidate.ipa"
     with zipfile.ZipFile(ipa, "w") as archive:
         archive.writestr("Payload/Fictional.app/Fictional", b"not executable or signed")
+    retained = root / "archive.zip"
+    with zipfile.ZipFile(retained, "w") as archive:
+        archive.writestr("archive.xcarchive/Products/Applications/Fictional.app/Fictional", b"opaque Store-envelope fixture, not native validation")
     report = root / "validation-report.json"
     report.write_text('{"fixture":true}\n')
     metadata = root / "store-metadata.zip"
     build_metadata_archive(root / "release/store", metadata, platform="ios")
-    artifacts = artifact_records([("ios-ipa", ipa), ("store-metadata", metadata), ("validation-report", report)])
+    artifacts = artifact_records([("ios-ipa", ipa), ("ios-archive", retained), ("store-metadata", metadata), ("validation-report", report)])
     metadata_sha256 = sha256_file(metadata)
     signing = {"platform": "ios", "kind": "apple-distribution", "certificateSha256": "b" * 64, "teamId": "ABCDE12345", "profileUuid": "11111111-2222-3333-4444-555555555555", "profileExpiresAt": "2027-01-01T00:00:00Z"}
     docs: dict[str, dict] = {}

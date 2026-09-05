@@ -115,11 +115,20 @@ def require_operation_intent!(operation, platform)
     UI.user_error!("Operation intent does not match the requested Store operation")
   end
   candidate_artifacts = payload["stage"] == "candidate" ? payload.fetch("artifacts") : []
+  if payload["stage"] == "candidate" && platform == "ios"
+    %w[ios-ipa ios-archive].each do |name|
+      unless candidate_artifacts.count { |artifact| artifact["logicalName"] == name } == 1
+        UI.user_error!("iOS candidate execution requires exactly one IPA and retained archive")
+      end
+    end
+  end
   candidate_artifacts.each do |artifact|
     environment = {
       "android-aab" => "MOBILE_RELEASE_ANDROID_AAB_PATH",
       "android-mapping" => "MOBILE_RELEASE_ANDROID_MAPPING_PATH",
       "ios-ipa" => "MOBILE_RELEASE_IOS_IPA_PATH",
+      "ios-archive" => "MOBILE_RELEASE_IOS_ARCHIVE_PATH",
+      "ios-dsyms" => "MOBILE_RELEASE_IOS_DSYMS_PATH",
     }[artifact["logicalName"]]
     next unless environment
 

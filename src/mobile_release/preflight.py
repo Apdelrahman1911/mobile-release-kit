@@ -36,6 +36,7 @@ from .discovery import (
 )
 from .errors import CredentialError, ValidationError
 from .ios import run_ios_build, validate_ipa, validate_xcarchive
+from .ios_artifacts import inspect_ios_artifact_set, snapshot_ios_artifacts
 from .metadata import metadata_findings
 from .reporting import FAILING_STATUSES, Finding, Report, Status
 from .stores import online_preflight_findings
@@ -1101,7 +1102,8 @@ def preflight(
         ios = config.section("ios")
         symbols_policy = ios.get("symbols", {}).get("policy", "disabled")
         archive = collected.get("ios-archive")
-        if archive:
+        ipa = collected.get("ios-ipa")
+        if archive and not ipa:
             archive_findings = validate_xcarchive(
                 archive,
                 expected_bundle_id=ios["bundleId"],
@@ -1121,38 +1123,53 @@ def preflight(
                         "symbol upload before activating this project."
                     ),
                 )
-        elif mode == "signing" and symbols_policy in {"retain", "required"}:
+        elif not archive and mode == "signing" and (ipa or symbols_policy in {"retain", "required"}):
             report.add(
                 "ios.archive.symbols",
                 Status.FAIL,
-                "Committed symbol policy requires the signed xcarchive.",
+                "Signed IPA validation requires its retained xcarchive, regardless of symbol policy.",
                 category="ios-artifact",
             )
-        ipa = collected.get("ios-ipa")
         if ipa:
-            report.extend(
-                validate_ipa(
-                    ipa,
-                    expected_bundle_id=ios["bundleId"],
-                    expected_team_id=ios["teamId"],
-                    expected_fingerprint=ios.get("distributionCertificateSha256"),
-                    release=release,
-                    require_tools=require_tools or mode == "signing",
-                )
-            )
-            artifact_environment = artifact_validation_environment(os.environ)
-            artifact_environment.update(
-                {
-                    "MOBILE_RELEASE_IPA_PATH": str(ipa),
-                    "MOBILE_RELEASE_VERSION_NAME": release.name,
-                    "MOBILE_RELEASE_BUILD_NUMBER": str(release.build),
-                }
-            )
-            if archive:
-                artifact_environment["MOBILE_RELEASE_DSYM_PATH"] = str(archive / "dSYMs")
-            report.extend(
-                run_project_checks(config, "iosArtifact", environ=artifact_environment)
-            )
+            try:
+                with snapshot_ios_artifacts(collected) as snapshot:
+                    if archive:
+                        inspect_ios_artifact_set(snapshot, expected_bundle_id=ios["bundleId"],
+                                                 release=release, symbols_policy=symbols_policy)
+                    else:
+                        report.add("ios.artifacts.correspondence", Status.FAIL if mode == "signing" else Status.SKIP,
+                                   "IPA-only inspection cannot establish retained archive/symbol correspondence.", category="ios-artifact")
+                    snapshot.deadline.check()
+                    report.extend(validate_ipa(
+                        snapshot.paths["ios-ipa"], expected_bundle_id=ios["bundleId"],
+                        expected_team_id=ios["teamId"], expected_fingerprint=ios.get("distributionCertificateSha256"),
+                        release=release, require_tools=require_tools or mode == "signing",
+                        deadline=snapshot.deadline,
+                    ))
+                    snapshot.deadline.check()
+                    artifact_environment = artifact_validation_environment(os.environ)
+                    artifact_environment.update({
+                        "MOBILE_RELEASE_IPA_PATH": str(ipa),
+                        "MOBILE_RELEASE_VERSION_NAME": release.name,
+                        "MOBILE_RELEASE_BUILD_NUMBER": str(release.build),
+                    })
+                    if archive:
+                        symbol_archive = archive if archive.is_dir() else snapshot.unpack("ios-archive")
+                        artifact_environment["MOBILE_RELEASE_DSYM_PATH"] = str(symbol_archive / "dSYMs")
+                    if report.ok:
+                        snapshot.deadline.check()
+                        report.extend(run_project_checks(config, "iosArtifact", environ=artifact_environment))
+                    snapshot.assert_unchanged()
+                    if archive:
+                        report.add("ios.artifacts.correspondence", Status.PASS,
+                                   "IPA/archive native images, resources and every present retained dSYM correspond; nested symbol completeness is a separate requirement.",
+                                   category="ios-artifact")
+            except ValidationError as error:
+                report.add("ios.artifacts.correspondence", Status.FAIL, str(error), category="ios-artifact")
+            if mode == "signing" and symbols_policy == "required":
+                report.add("ios.symbols.upload", Status.BLOCKED,
+                           "Automatic symbol upload is not available in validation-only local preflight.", category="ios-artifact",
+                           remediation="Use symbols.policy=retain, or add a separately guarded candidate-stage symbol upload before activation.")
         elif mode == "signing" and run_builds:
             report.add(
                 "ios.ipa",

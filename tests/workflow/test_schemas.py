@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -20,6 +22,34 @@ except ImportError:  # pragma: no cover - exercised in dependency-minimal enviro
 
 
 class JsonFileTests(unittest.TestCase):
+    @unittest.skipIf(jsonschema is None, "jsonschema is not installed")
+    def test_ios_archive_is_required_once_in_candidate_and_all_descendant_intents(self):
+        from mobile_release.config import load_config
+        from mobile_release.provenance import verify_sealed
+        from unit.evidence_helpers import build_lifecycle
+        from unit.helpers import ios_config, write_project
+
+        with tempfile.TemporaryDirectory() as temporary:
+            config = load_config(write_project(Path(temporary), ios_config(), platform="ios"))
+            documents = build_lifecycle(config, platform="ios")
+            for name in ("candidate", "candidate_intent", "external_intent", "production_intent"):
+                schema_name = "candidate" if name == "candidate" else "store-operation-intent"
+                validator = jsonschema.Draft202012Validator(json.loads((SCHEMAS / f"{schema_name}.schema.json").read_text()))
+                original = documents[name]
+                self.assertTrue(validator.is_valid(original), name)
+                for duplicate in (False, True):
+                    payload = copy.deepcopy(verify_sealed(original))
+                    archived = next(item for item in payload["artifacts"] if item["logicalName"] == "ios-archive")
+                    if duplicate:
+                        payload["artifacts"].append(archived)
+                    else:
+                        payload["artifacts"].remove(archived)
+                    invalid = seal(payload)
+                    with self.subTest(name=name, duplicate=duplicate):
+                        self.assertFalse(validator.is_valid(invalid))
+                        with self.assertRaises(ValidationError):
+                            validate_evidence_document(invalid)
+
     def test_all_json_files_parse(self) -> None:
         paths = [
             *SCHEMAS.glob("*.json"),
@@ -420,6 +450,10 @@ class JsonFileTests(unittest.TestCase):
             if item["logicalName"] in {"store-metadata", "validation-report"}
         }
         ios_candidate["artifacts"] = [
+            {
+                "logicalName": "ios-archive", "platform": "ios", "kind": "xcarchive",
+                "fileName": "archive.zip", "size": 1, "sha256": "c" * 64, "architectures": [],
+            },
             {
                 "logicalName": "ios-ipa",
                 "platform": "ios",

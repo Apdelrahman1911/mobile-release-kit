@@ -20,6 +20,8 @@ class AppleReleaseLanesTest < Minitest::Test
     end
     File.write(File.join(@root, "version.properties"), "VERSION_NAME=1.2.3\nVERSION_CODE=123\n")
     File.write(File.join(@root, "candidate.ipa"), "not a real binary; Python validation is tested separately")
+    File.write(File.join(@root, "archive.zip"), "opaque archive; Python correlation is tested separately")
+    File.write(File.join(@root, "dsyms.zip"), "opaque symbols; Python correlation is tested separately")
     File.write(File.join(@root, "release/mobile-release.json"), JSON.generate(
       "version" => { "source" => "version.properties", "nameKey" => "VERSION_NAME", "buildKey" => "VERSION_CODE" },
       "ios" => { "bundleId" => "test.example.release", "appStoreAppId" => "12345", "externalTestFlightGroup" => "External QA",
@@ -34,6 +36,8 @@ class AppleReleaseLanesTest < Minitest::Test
       "MOBILE_RELEASE_OPERATION_INTENT_PATH" => "intent.json",
       "MOBILE_RELEASE_APPLE_STATE_PATH" => "journal.json",
       "MOBILE_RELEASE_IOS_IPA_PATH" => "candidate.ipa",
+      "MOBILE_RELEASE_IOS_ARCHIVE_PATH" => "archive.zip",
+      "MOBILE_RELEASE_IOS_DSYMS_PATH" => "dsyms.zip",
       "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64" => Base64.strict_encode64("k" * 32),
       "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION" => "test-v1",
       "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME" => "Fictional",
@@ -129,8 +133,10 @@ class AppleReleaseLanesTest < Minitest::Test
       "schemaVersion" => 1, "documentType" => "store-operation-intent", "stage" => stage, "platform" => "ios",
       "storePrecondition" => precondition, "authorizedBy" => @authority.dup,
       "privateStateCommitments" => precondition.fetch("snapshot").fetch("privateStateCommitments", {}),
-      "artifacts" => [{ "logicalName" => "ios-ipa", "size" => File.size(File.join(@root, "candidate.ipa")),
-                        "sha256" => Digest::SHA256.file(File.join(@root, "candidate.ipa")).hexdigest }],
+      "artifacts" => { "ios-ipa" => "candidate.ipa", "ios-archive" => "archive.zip", "ios-dsyms" => "dsyms.zip" }.map do |name, file|
+        { "logicalName" => name, "size" => File.size(File.join(@root, file)),
+          "sha256" => Digest::SHA256.file(File.join(@root, file)).hexdigest }
+      end,
     }
     @intent_digest = Digest::SHA256.hexdigest(MobileReleaseKit.canonical_json(@payload))
     File.write(File.join(@root, "intent.json"), JSON.generate(@payload.merge("integrity" => { "algorithm" => "sha256", "sha256" => @intent_digest })))
@@ -180,6 +186,31 @@ class AppleReleaseLanesTest < Minitest::Test
     assert_equal "reconciled", receipt.fetch("result")
     assert_equal false, receipt.fetch("autoNotifyEnabled")
     assert_equal ["/v1/builds/build-1", "/v1/buildBetaDetails/detail-1"], @service.writes.map { |_, path, _| path }
+  end
+
+  def test_candidate_retained_archive_and_symbols_are_checked_before_any_mutation
+    @service.visible = false
+    prepare("candidate")
+    %w[archive.zip dsyms.zip].each do |name|
+      path = File.join(@root, name)
+      original = File.binread(path)
+      File.binwrite(path, "X" + original.byteslice(1..)) # Same size, different hash.
+      error = assert_raises(FastlaneCore::Interface::FastlaneError) { execute }
+      assert_includes error.message, "differs from the authenticated operation intent"
+      assert_equal 0, @upload_count
+      assert_empty @service.writes
+      File.binwrite(path, original)
+    end
+    %w[MOBILE_RELEASE_IOS_ARCHIVE_PATH MOBILE_RELEASE_IOS_DSYMS_PATH].each do |name|
+      path = ENV.delete(name)
+      error = assert_raises(FastlaneCore::Interface::FastlaneError) { execute }
+      assert_includes error.message, "artifact is missing"
+      assert_equal 0, @upload_count
+      assert_empty @service.writes
+      ENV[name] = path
+    end
+    execute
+    assert_equal 1, @upload_count
   end
 
   def test_prior_attempt_absence_is_never_authority_to_upload_again

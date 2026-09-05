@@ -619,7 +619,11 @@ class CliBuildTests(unittest.TestCase):
                     (export / "Reader.ipa").write_bytes(b"ipa")
 
             fake_plist = types.ModuleType("plistlib")
-            fake_plist.dump = lambda _value, handle, sort_keys=True: handle.write(b"plist")
+            export_options = {}
+            def capture_export(value, handle, sort_keys=True):
+                export_options.update(value)
+                handle.write(b"plist")
+            fake_plist.dump = capture_export
             with patch.dict(
                 os.environ,
                 {"MOBILE_RELEASE_IOS_PROFILE_SPECIFIER": "PROFILE-UUID"},
@@ -628,6 +632,8 @@ class CliBuildTests(unittest.TestCase):
                 "mobile_release.ios.sys.platform", "darwin"
             ), patch("mobile_release.ios._run_checked", side_effect=fake_run):
                 run_ios_build(config, signed=True)
+            self.assertIs(export_options["stripSwiftSymbols"], False)
+            self.assertEqual(export_options["thinning"], "<none>")
             archive_command = commands[0]
             self.assertIn("MOBILE_RELEASE_IOS_CODE_SIGN_STYLE=Manual", archive_command)
             self.assertIn(
@@ -877,6 +883,8 @@ class CliBuildTests(unittest.TestCase):
                 "android-aab": root / "app.aab",
                 "android-mapping": root / "mapping.txt",
                 "ios-ipa": root / "app.ipa",
+                "ios-archive": root / "archive.zip",
+                "ios-dsyms": root / "dsyms.zip",
             }
             _set_artifact_environment(artifacts)
             self.assertEqual(
@@ -891,9 +899,14 @@ class CliBuildTests(unittest.TestCase):
             )
             self.assertNotIn("MOBILE_RELEASE_AAB_PATH", os.environ)
             self.assertNotIn("MOBILE_RELEASE_IPA_PATH", os.environ)
+            self.assertEqual(os.environ["MOBILE_RELEASE_IOS_ARCHIVE_PATH"], str(artifacts["ios-archive"]))
+            self.assertEqual(os.environ["MOBILE_RELEASE_IOS_DSYMS_PATH"], str(artifacts["ios-dsyms"]))
 
     def test_ci_candidate_artifacts_are_platform_scoped_and_promotions_are_receipt_only(self) -> None:
         artifact = Path("artifact")
+        with self.assertRaisesRegex(ValidationError, "ios-archive"):
+            _validate_ci_artifact_selection(stage="candidate", platform="ios", artifacts={"ios-ipa": artifact, "validation-report": artifact})
+        _validate_ci_artifact_selection(stage="candidate", platform="ios", artifacts={"ios-ipa": artifact, "ios-archive": artifact, "validation-report": artifact})
         _validate_ci_artifact_selection(
             stage="candidate",
             platform="android",

@@ -15,6 +15,7 @@ from mobile_release.config import load_config
 from mobile_release.credentials import artifact_validation_environment
 from mobile_release.errors import MobileReleaseError, ValidationError
 from mobile_release.ios import SigningValidityInterval
+from mobile_release.inspection import MAX_INSPECTION_SECONDS
 from mobile_release.ios_upload_validation import main, validate_current_upload
 from mobile_release.provenance import sha256_file
 from mobile_release.reporting import Finding, Status
@@ -75,12 +76,18 @@ class IosCurrentUploadTests(unittest.TestCase):
             "notBefore": "2026-09-05T11:00:00Z",
             "notAfter": "2026-09-05T13:00:00Z",
         })
+        inspected = self.native.call_args.args[0]
+        deadline = self.native.call_args.kwargs["deadline"]
+        self.assertNotEqual(inspected, self.ipa)
+        self.assertEqual(inspected.name, self.ipa.name)
+        self.assertFalse(inspected.exists(), "private snapshot must be cleaned")
         self.native.assert_called_once_with(
-            self.ipa, expected_bundle_id="com.example.reader",
+            inspected, expected_bundle_id="com.example.reader",
             expected_team_id="ABCDE12345", expected_fingerprint="b" * 64,
             release=self.config.release_version(), require_tools=True,
+            deadline=deadline,
         )
-        self.signer.assert_called_once_with(self.ipa)
+        self.signer.assert_called_once_with(inspected, deadline=deadline)
 
     def test_no_authenticated_historical_intent_can_replace_current_signing_eligibility(self) -> None:
         for status in (Status.FAIL, Status.BLOCKED, Status.SKIP):
@@ -158,9 +165,54 @@ class IosCurrentUploadTests(unittest.TestCase):
                 return ([], self.interval) if boundary == "native" else self.docs["signing"]
             seam = self.native if boundary == "native" else self.signer
             seam.side_effect = change_during_validation
-            with self.subTest(boundary=boundary), self.assertRaisesRegex(ValidationError, "changed during"):
+            with self.subTest(boundary=boundary), self.assertRaisesRegex(ValidationError, "changed after snapshotting"):
                 self.validate()
             seam.side_effect = None
+
+    def test_current_upload_native_gate_never_inspects_an_aba_replacement(self):
+        original = self.ipa.read_bytes()
+        observed = []
+
+        def native(path, **_kwargs):
+            self.ipa.write_bytes(b"temporarily substituted B")
+            try:
+                observed.append(path.read_bytes())
+                return [], self.interval
+            finally:
+                self.ipa.write_bytes(original)
+
+        self.native.side_effect = native
+        result = self.validate()
+        self.assertEqual(observed, [original])
+        self.assertEqual(result["ipaSha256"], sha256_file(self.ipa))
+
+    def test_deadline_expiry_in_native_or_evidence_work_never_authorizes_new_send(self):
+        original = self.ipa.read_bytes()
+        for phase in ("native", "evidence"):
+            self.native.reset_mock()
+            self.signer.reset_mock()
+            private_inputs = []
+            with self.subTest(phase=phase), patch("mobile_release.inspection.time.monotonic", return_value=0) as clock:
+                def expire(path, *, deadline, **_kwargs):
+                    private_inputs.append(path)
+                    deadline.check()
+                    clock.return_value = MAX_INSPECTION_SECONDS
+                    return ([], self.interval) if phase == "native" else self.docs["signing"]
+
+                seam = self.native if phase == "native" else self.signer
+                seam.side_effect = expire
+                try:
+                    with self.assertRaisesRegex(ValidationError, "shared time bound"):
+                        self.validate()
+                finally:
+                    seam.side_effect = None
+                if phase == "native":
+                    self.signer.assert_not_called()
+                else:
+                    self.assertIs(self.native.call_args.kwargs["deadline"], self.signer.call_args.kwargs["deadline"])
+            self.assertEqual(len(private_inputs), 1)
+            self.assertFalse(private_inputs[0].exists())
+            self.assertEqual(self.ipa.read_bytes(), original)
 
     def test_outside_relative_or_symlink_inputs_cannot_reach_native_tools(self) -> None:
         link = self.root / "alias.ipa"

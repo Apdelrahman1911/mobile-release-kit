@@ -57,11 +57,21 @@
             "logicalName": "ios-ipa",
             "size": 57,
             "sha256": "ba638b8a215b1e5b911237c5b87480b89d18c3bdaba9f7540b1bc760f8aa05b0"
+          },
+          {
+            "logicalName": "ios-archive",
+            "size": 55,
+            "sha256": "c3738afb7ce0975ccae5cf6fa3d40153fc175bb01c41481e5a51efe3a5c5a678"
+          },
+          {
+            "logicalName": "ios-dsyms",
+            "size": 55,
+            "sha256": "1c4866dc444581fe8b8de05e703d83a015f6e0a0eb8d38227caafb861bd8d2c5"
           }
         ],
         "integrity": {
           "algorithm": "sha256",
-          "sha256": "2171369c191f105742377703ecdc245d38d5625f437b4d5b69b4408d56d9f4ef"
+          "sha256": "9089f2627a6cb26a0ddb98971c276e84cd9d490d69984975f8bf6c18bcdf2b03"
         }
       },
       "receipt": {
@@ -73,7 +83,7 @@
         "buildNumber": 123,
         "observedAt": "2026-01-01T00:00:00Z",
         "result": "accepted",
-        "operationIntentSha256": "2171369c191f105742377703ecdc245d38d5625f437b4d5b69b4408d56d9f4ef",
+        "operationIntentSha256": "9089f2627a6cb26a0ddb98971c276e84cd9d490d69984975f8bf6c18bcdf2b03",
         "authorizedBy": {
           "attempt": 1,
           "callerPath": ".github/workflows/mobile-candidate.yml",
@@ -161,11 +171,21 @@
             "logicalName": "ios-ipa",
             "size": 57,
             "sha256": "ba638b8a215b1e5b911237c5b87480b89d18c3bdaba9f7540b1bc760f8aa05b0"
+          },
+          {
+            "logicalName": "ios-archive",
+            "size": 55,
+            "sha256": "c3738afb7ce0975ccae5cf6fa3d40153fc175bb01c41481e5a51efe3a5c5a678"
+          },
+          {
+            "logicalName": "ios-dsyms",
+            "size": 55,
+            "sha256": "1c4866dc444581fe8b8de05e703d83a015f6e0a0eb8d38227caafb861bd8d2c5"
           }
         ],
         "integrity": {
           "algorithm": "sha256",
-          "sha256": "2171369c191f105742377703ecdc245d38d5625f437b4d5b69b4408d56d9f4ef"
+          "sha256": "9089f2627a6cb26a0ddb98971c276e84cd9d490d69984975f8bf6c18bcdf2b03"
         }
       },
       "receipt": {
@@ -177,7 +197,7 @@
         "buildNumber": 123,
         "observedAt": "2026-01-01T00:10:00Z",
         "result": "operator_authorized_retry",
-        "operationIntentSha256": "2171369c191f105742377703ecdc245d38d5625f437b4d5b69b4408d56d9f4ef",
+        "operationIntentSha256": "9089f2627a6cb26a0ddb98971c276e84cd9d490d69984975f8bf6c18bcdf2b03",
         "authorizedBy": {
           "attempt": 1,
           "callerPath": ".github/workflows/mobile-candidate.yml",
@@ -408,11 +428,21 @@
             "logicalName": "ios-ipa",
             "size": 57,
             "sha256": "ba638b8a215b1e5b911237c5b87480b89d18c3bdaba9f7540b1bc760f8aa05b0"
+          },
+          {
+            "logicalName": "ios-archive",
+            "size": 55,
+            "sha256": "c3738afb7ce0975ccae5cf6fa3d40153fc175bb01c41481e5a51efe3a5c5a678"
+          },
+          {
+            "logicalName": "ios-dsyms",
+            "size": 55,
+            "sha256": "1c4866dc444581fe8b8de05e703d83a015f6e0a0eb8d38227caafb861bd8d2c5"
           }
         ],
         "integrity": {
           "algorithm": "sha256",
-          "sha256": "69e92376968152dfe5831734e0e00e48d63695e1cba316502997b2163f6a384b"
+          "sha256": "59b8ec8395203f62f0c6a59636bc063356ac8fc1aa8528fe17906605c3e145d6"
         }
       },
       "receipt": {
@@ -424,7 +454,7 @@
         "buildNumber": 123,
         "observedAt": "2026-01-01T00:00:00Z",
         "result": "accepted",
-        "operationIntentSha256": "69e92376968152dfe5831734e0e00e48d63695e1cba316502997b2163f6a384b",
+        "operationIntentSha256": "59b8ec8395203f62f0c6a59636bc063356ac8fc1aa8528fe17906605c3e145d6",
         "authorizedBy": {
           "attempt": 1,
           "callerPath": ".github/workflows/mobile-external-testing.yml",
@@ -657,11 +687,21 @@
             "logicalName": "ios-ipa",
             "size": 57,
             "sha256": "ba638b8a215b1e5b911237c5b87480b89d18c3bdaba9f7540b1bc760f8aa05b0"
+          },
+          {
+            "logicalName": "ios-archive",
+            "size": 55,
+            "sha256": "c3738afb7ce0975ccae5cf6fa3d40153fc175bb01c41481e5a51efe3a5c5a678"
+          },
+          {
+            "logicalName": "ios-dsyms",
+            "size": 55,
+            "sha256": "1c4866dc444581fe8b8de05e703d83a015f6e0a0eb8d38227caafb861bd8d2c5"
           }
         ],
         "integrity": {
           "algorithm": "sha256",
-          "sha256": "69e92376968152dfe5831734e0e00e48d63695e1cba316502997b2163f6a384b"
+          "sha256": "59b8ec8395203f62f0c6a59636bc063356ac8fc1aa8528fe17906605c3e145d6"
         }
       },
       "receipt": {
@@ -673,7 +713,7 @@
         "buildNumber": 123,
         "observedAt": "2026-01-01T00:02:00Z",
         "result": "operator_authorized_retry",
-        "operationIntentSha256": "69e92376968152dfe5831734e0e00e48d63695e1cba316502997b2163f6a384b",
+        "operationIntentSha256": "59b8ec8395203f62f0c6a59636bc063356ac8fc1aa8528fe17906605c3e145d6",
         "authorizedBy": {
           "attempt": 1,
           "callerPath": ".github/workflows/mobile-external-testing.yml",
@@ -707,11 +747,11 @@
         "state": "submitted-for-review",
         "createRetry": {
           "mode": "operator-authorized-create-retry",
-          "inventorySha256": "bc7cadb1b5b0b79ee77a9de0e3776f2f035a7d101e5e6bd2c727416218d7a1bd",
+          "inventorySha256": "c05420ba33ae33500a0784d6c9bbf9574c0211d7632b907ff4bd36c9a0d55efc",
           "inventory": {
             "documentType": "ios-create-retry-inventory",
             "schemaVersion": 1,
-            "operationIntentSha256": "69e92376968152dfe5831734e0e00e48d63695e1cba316502997b2163f6a384b",
+            "operationIntentSha256": "59b8ec8395203f62f0c6a59636bc063356ac8fc1aa8528fe17906605c3e145d6",
             "stage": "external-testing",
             "platform": "ios",
             "application": {
@@ -1032,11 +1072,21 @@
             "logicalName": "ios-ipa",
             "size": 57,
             "sha256": "ba638b8a215b1e5b911237c5b87480b89d18c3bdaba9f7540b1bc760f8aa05b0"
+          },
+          {
+            "logicalName": "ios-archive",
+            "size": 55,
+            "sha256": "c3738afb7ce0975ccae5cf6fa3d40153fc175bb01c41481e5a51efe3a5c5a678"
+          },
+          {
+            "logicalName": "ios-dsyms",
+            "size": 55,
+            "sha256": "1c4866dc444581fe8b8de05e703d83a015f6e0a0eb8d38227caafb861bd8d2c5"
           }
         ],
         "integrity": {
           "algorithm": "sha256",
-          "sha256": "39a005837cf5483e747ad53a0cb50bcb4cbbd46353df1ed42b603f51898e9d93"
+          "sha256": "6e8d27ab6dd186d34c57e67b2fe2dcb3dfad1897d79715add468f54ad9fdbaef"
         }
       },
       "receipt": {
@@ -1048,7 +1098,7 @@
         "buildNumber": 123,
         "observedAt": "2026-01-01T00:00:00Z",
         "result": "accepted",
-        "operationIntentSha256": "39a005837cf5483e747ad53a0cb50bcb4cbbd46353df1ed42b603f51898e9d93",
+        "operationIntentSha256": "6e8d27ab6dd186d34c57e67b2fe2dcb3dfad1897d79715add468f54ad9fdbaef",
         "authorizedBy": {
           "attempt": 1,
           "callerPath": ".github/workflows/mobile-external-testing.yml",
