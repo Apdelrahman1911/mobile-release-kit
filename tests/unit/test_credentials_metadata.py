@@ -4,9 +4,7 @@ import base64
 import json
 import os
 import subprocess
-import sys
 import tempfile
-import types
 import unittest
 import zipfile
 from pathlib import Path
@@ -32,6 +30,7 @@ from mobile_release.metadata import build_metadata_archive, metadata_findings
 from mobile_release.reporting import Status
 
 from .helpers import android_config, ios_config, write_project
+from .ios_entitlement_helpers import profile as fictional_profile
 
 
 class CredentialMetadataTests(unittest.TestCase):
@@ -244,9 +243,6 @@ class CredentialMetadataTests(unittest.TestCase):
             p12.write_bytes(b"p12")
             profile.write_bytes(b"profile")
             profile_uuid = "12345678-1234-1234-1234-1234567890AB"
-            fake_plist = types.ModuleType("plistlib")
-            fake_plist.InvalidFileException = ValueError
-            fake_plist.loads = lambda _value: {"UUID": profile_uuid}
             calls: list[list[str]] = []
 
             def fake_private_run(
@@ -263,11 +259,9 @@ class CredentialMetadataTests(unittest.TestCase):
                     stdout = '"/tmp/login.keychain-db"\n'
                 elif argv[1:4] == ["list-keychains", "-d", "user"] and "-s" not in argv:
                     stdout = '"/tmp/login.keychain-db" "/tmp/secondary.keychain-db"\n'
-                elif argv[1:3] == ["cms", "-D"]:
-                    stdout = "plist"
                 return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
 
-            with patch.dict(sys.modules, {"plistlib": fake_plist}), patch(
+            with patch("mobile_release.ios_profiles.decode_authenticated_profile", return_value=fictional_profile()), patch(
                 "mobile_release.credentials._run_private", side_effect=fake_private_run
             ):
                 with _temporary_apple_signing_environment(

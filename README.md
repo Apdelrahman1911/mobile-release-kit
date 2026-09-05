@@ -202,9 +202,12 @@ including the separate outstanding nested-symbol completeness requirement and na
 
 All iOS signed entitlements are compared with their own bundle's modern DER profile
 grants across every native architecture; profileless code cannot borrow a parent's
-grants. [Entitlement validation](docs/ios-entitlements.md) documents the rules and the
-separate unresolved Apple profile issuer-authentication blocker (QA-002). Content
-comparison alone is not cryptographic profile authorization or production readiness.
+grants. Both profile CMS signatures and the production Apple issuer are independently
+verified with pinned public roots in isolated credential-free workers. See
+[entitlement validation](docs/ios-entitlements.md) and
+[profile authority](docs/ios-profile-authority.md) for the supported native policy,
+offline scope, recovery, required consumer rehearsal and separate local-signing
+concurrency blocker. These checks alone do not establish overall production readiness.
 
 Each candidate hashes a deterministic platform-scoped metadata archive: Android includes only
 `android/**`; iOS includes `ios/**`, `review/**`, and `testflight/**`. An unrelated platform's

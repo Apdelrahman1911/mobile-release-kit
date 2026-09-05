@@ -14,11 +14,13 @@ import subprocess
 import tempfile
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping
+from sys import exc_info
+from typing import Any, Iterable, Mapping
 
+from .cancellation import CleanupScope as _ProfileCleanup, DefaultCancellation as _ProfileCancellation
 from .config import ConfigurationError, ReleaseConfig
 from .errors import CredentialError, ValidationError
 from .reporting import Finding, Status
@@ -838,6 +840,15 @@ def _run_private(
         raise CredentialError(f"credential validation tool failed or timed out: {argv[0]}") from error
 
 
+def _close_profile_descriptor(descriptor: int) -> None:
+    # The caller relinquishes this number before calling: close may have taken
+    # effect even when it raises. Retrying could close a reused foreign handle.
+    try:
+        os.close(descriptor)
+    except OSError:
+        raise CredentialError("local profile descriptor cleanup could not be confirmed; end this process before retrying") from None
+
+
 def _open_profile_directory(home: Path) -> tuple[Path, int]:
     """Create/open the provisioning-profile directory without following child symlinks."""
 
@@ -852,12 +863,13 @@ def _open_profile_directory(home: Path) -> tuple[Path, int]:
         flags |= os.O_DIRECTORY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    try:
-        descriptor = os.open(resolved_home, flags)
-    except OSError as error:
-        raise CredentialError("the local home directory could not be opened safely") from error
+    descriptor = child = None
     current = resolved_home
     try:
+        try:
+            descriptor = os.open(resolved_home, flags)
+        except OSError as error:
+            raise CredentialError("the local home directory could not be opened safely") from error
         for component in ("Library", "MobileDevice", "Provisioning Profiles"):
             try:
                 os.mkdir(component, mode=0o700, dir_fd=descriptor)
@@ -869,28 +881,189 @@ def _open_profile_directory(home: Path) -> tuple[Path, int]:
                 raise CredentialError(
                     "provisioning-profile directory must not traverse a symbolic link"
                 ) from error
-            os.close(descriptor)
+            previous = descriptor
             descriptor = child
+            child = None
+            _close_profile_descriptor(previous)
             current /= component
         return current, descriptor
     except BaseException:
-        os.close(descriptor)
+        try:
+            if child is not None:
+                closing, child = child, None
+                _close_profile_descriptor(closing)
+        finally:
+            if descriptor is not None:
+                closing, descriptor = descriptor, None
+                _close_profile_descriptor(closing)
         raise
 
 
 def _read_regular_at(directory_descriptor: int, name: str) -> bytes:
-    flags = os.O_RDONLY
+    flags = os.O_RDONLY | os.O_NONBLOCK
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    descriptor = os.open(name, flags, dir_fd=directory_descriptor)
+    descriptor = None
     try:
+        descriptor = os.open(name, flags, dir_fd=directory_descriptor)
         details = os.fstat(descriptor)
-        if not stat.S_ISREG(details.st_mode):
+        if not stat.S_ISREG(details.st_mode) or details.st_size > MAX_PRIVATE_MATERIAL_SIZE:
             raise CredentialError("provisioning-profile destination is not a regular file")
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
-            return handle.read(MAX_PRIVATE_MATERIAL_SIZE + 1)
+            content = handle.read(MAX_PRIVATE_MATERIAL_SIZE + 1)
+        after = os.fstat(descriptor)
+        if len(content) != details.st_size or any(
+            getattr(details, key) != getattr(after, key) for key in ("st_size", "st_mtime_ns", "st_ctime_ns")
+        ):
+            raise CredentialError("provisioning-profile destination changed while being inspected")
+        return content
     finally:
-        os.close(descriptor)
+        if descriptor is not None:
+            closing, descriptor = descriptor, None
+            _close_profile_descriptor(closing)
+
+
+@contextmanager
+def _temporary_profile_installation(
+    content: bytes, profile_uuid: str, home: Path, *, cancellation: _ProfileCancellation | None = None,
+):
+    """Install already-authenticated exact bytes without clobbering another file.
+
+    Inode ownership is not a multi-context lifetime lease: local signing's shared
+    keychain/profile concurrency is separately tracked as QA-003.
+    """
+    if (type(profile_uuid) is not str or not PROFILE_UUID_RE.fullmatch(profile_uuid)
+            or type(content) is not bytes or not 0 < len(content) <= MAX_PRIVATE_MATERIAL_SIZE):
+        raise CredentialError("authenticated provisioning profile identity is invalid")
+    owns_cancellation = cancellation is None
+    cancellation = cancellation if cancellation is not None else _ProfileCancellation(
+        CredentialError, "local signing cancellation handlers could not be restored",
+    )
+    directory = descriptor = None
+    name = f"{profile_uuid}.mobileprovision"
+    stage = None
+    created = False
+    identity = None
+    attempted = False
+    linked = False
+    failed_cleanup = False
+
+    def file_identity(filename: str):
+        details = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+        return (details.st_dev, details.st_ino) if stat.S_ISREG(details.st_mode) else None
+
+    def cleanup() -> None:
+        nonlocal directory, failed_cleanup
+        try:
+            if attempted and identity is not None:
+                try:
+                    current_identity = file_identity(name)
+                    if current_identity == identity:
+                        if _read_regular_at(directory, name) == content:
+                            os.unlink(name, dir_fd=directory)
+                        else:
+                            failed_cleanup = True
+                    elif linked:
+                        failed_cleanup = True  # Preserve an intervening replacement.
+                except FileNotFoundError:
+                    pass
+                except (OSError, CredentialError):
+                    failed_cleanup = True
+            if stage is not None and created:
+                if identity is None:
+                    failed_cleanup = True  # Empty private residue, not a guessed unlink.
+                else:
+                    try:
+                        if file_identity(stage) == identity:
+                            os.unlink(stage, dir_fd=directory)
+                        else:
+                            failed_cleanup = True
+                    except FileNotFoundError:
+                        pass
+                    except OSError:
+                        failed_cleanup = True
+        finally:
+            if directory is not None:
+                closing, directory = directory, None
+                try:
+                    _close_profile_descriptor(closing)
+                except CredentialError:
+                    failed_cleanup = True
+        if failed_cleanup:
+            raise CredentialError(
+                "temporary provisioning profile changed or could not be cleaned up safely; "
+                "end this process and inspect its owned private staging files before retrying"
+            )
+
+    scope = _ProfileCleanup(cancellation, cleanup, owns_cancellation=owns_cancellation)
+    try:
+        with scope:
+            if owns_cancellation:
+                cancellation.install()
+                cancellation.activate()
+            with cancellation.deferred():
+                _, directory = _open_profile_directory(home)
+                cancellation.check()
+                try:
+                    existing = _read_regular_at(directory, name)
+                except FileNotFoundError:
+                    existing = None
+                cancellation.check()
+                if existing is not None:
+                    if existing != content:
+                        raise CredentialError("a different provisioning profile is already installed with the same UUID")
+                else:
+                    stage = f".mobile-release-profile-{secrets.token_hex(16)}"
+                    try:
+                        descriptor = os.open(stage, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+                        created = True
+                        details = os.fstat(descriptor)
+                        identity = (details.st_dev, details.st_ino)
+                        cancellation.check()
+                        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                            handle.write(content)
+                            handle.flush()
+                            os.fsync(descriptor)
+                    finally:
+                        if descriptor is not None:
+                            # Initial fstat can fail before any bytes are written.
+                            # Only this still-owned FD can recover deletion authority.
+                            if identity is None:
+                                try:
+                                    details = os.fstat(descriptor)
+                                    identity = (details.st_dev, details.st_ino)
+                                except OSError:
+                                    failed_cleanup = True
+                            closing, descriptor = descriptor, None
+                            try:
+                                _close_profile_descriptor(closing)
+                            except CredentialError:
+                                failed_cleanup = True
+                    if failed_cleanup:
+                        raise CredentialError("private provisioning-profile descriptor cleanup could not be confirmed")
+                    cancellation.check()
+                    # Arm ownership before the syscall: interruption after a successful
+                    # link must still remove our file, never a pre-existing destination.
+                    attempted = True
+                    try:
+                        os.link(stage, name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+                        linked = True
+                    except FileExistsError:
+                        if _read_regular_at(directory, name) != content:
+                            raise CredentialError("a different provisioning profile appeared during installation") from None
+                        linked = file_identity(name) == identity
+                    cancellation.check()
+                    if file_identity(stage) != identity:
+                        raise CredentialError("private provisioning-profile staging file was replaced")
+                    os.unlink(stage, dir_fd=directory)
+                    stage = None
+                    cancellation.check()
+            yield
+    except OSError:
+        raise CredentialError("provisioning profile could not be installed safely") from None
+    finally:
+        # Normal with-exit dispatch precedes __exit__'s protected frame.
+        scope.__exit__(*exc_info())
 
 
 def _utc_datetime(value: datetime) -> datetime:
@@ -914,7 +1087,20 @@ def _temporary_apple_signing_environment(
 ):
     """Install validated Apple material temporarily without exposing it in output."""
 
-    import plistlib
+    from .ios import _profile_validity
+    from .ios_profiles import decode_authenticated_profile, read_profile_bytes
+
+    # Authenticate ONE snapshot before inspecting or mutating user keychains.
+    # A later replacement of the supplied path cannot change installed bytes.
+    try:
+        supplied = read_profile_bytes(profile)
+        profile_payload = decode_authenticated_profile(supplied)
+        _profile_validity(profile_payload)
+    except ValidationError as error:
+        raise CredentialError(str(error)) from None
+    profile_uuid = profile_payload.get("UUID")
+    if not isinstance(profile_uuid, str) or not PROFILE_UUID_RE.fullmatch(profile_uuid):
+        raise CredentialError("provisioning profile UUID is missing or invalid")
 
     env = scrub_credential_capabilities(os.environ)
     env["MOBILE_RELEASE_LOCAL_P12_PASSWORD"] = password
@@ -928,10 +1114,7 @@ def _temporary_apple_signing_environment(
     created_keychain = False
     changed_keychain_search = False
     changed_default = False
-    installed_profile: Path | None = None
-    installed_profile_digest: bytes | None = None
-    installed_profile_name: str | None = None
-    profile_directory_descriptor: int | None = None
+    installed_profile = ExitStack()
 
     def require(argv: list[str], action: str) -> subprocess.CompletedProcess[str]:
         result = _run_private(argv, environ=env)
@@ -957,170 +1140,7 @@ def _temporary_apple_signing_environment(
         if result.returncode:
             raise CredentialError(f"could not {action} for local Apple signing preflight")
 
-    try:
-        default_result = require(
-            ["security", "default-keychain", "-d", "user"],
-            "inspect the default keychain",
-        )
-        original_default = default_result.stdout.strip().strip('"')
-        if not original_default:
-            raise CredentialError("the current default keychain could not be identified")
-        list_result = require(
-            ["security", "list-keychains", "-d", "user"],
-            "inspect the keychain search list",
-        )
-        original_keychains = [
-            quoted or bare
-            for quoted, bare in re.findall(
-                r'"([^"\r\n]+)"|([^\s"]+)', list_result.stdout
-            )
-        ]
-        require(
-            ["security", "create-keychain", "-p", keychain_password, str(keychain)],
-            "create an ephemeral keychain",
-        )
-        created_keychain = True
-        require(
-            ["security", "set-keychain-settings", "-lut", "21600", str(keychain)],
-            "configure the ephemeral keychain",
-        )
-        require(
-            ["security", "unlock-keychain", "-p", keychain_password, str(keychain)],
-            "unlock the ephemeral keychain",
-        )
-        extract(
-            ["-clcerts", "-nokeys", "-out", str(certificate)],
-            "extract the Apple distribution certificate",
-        )
-        extract(
-            ["-nocerts", "-nodes", "-out", str(private_key)],
-            "extract the Apple distribution private key",
-        )
-        extract(
-            ["-cacerts", "-nokeys", "-out", str(chain_certificates)],
-            "extract the Apple distribution certificate chain",
-        )
-        private_key.chmod(0o600)
-        require(
-            [
-                "security",
-                "import",
-                str(private_key),
-                "-k",
-                str(keychain),
-                "-T",
-                "/usr/bin/codesign",
-                "-T",
-                "/usr/bin/security",
-            ],
-            "import the Apple distribution identity",
-        )
-        require(
-            [
-                "security",
-                "import",
-                str(certificate),
-                "-k",
-                str(keychain),
-                "-T",
-                "/usr/bin/codesign",
-                "-T",
-                "/usr/bin/security",
-            ],
-            "import the Apple distribution certificate",
-        )
-        if (
-            chain_certificates.is_file()
-            and b"-----BEGIN CERTIFICATE-----" in chain_certificates.read_bytes()
-        ):
-            require(
-                [
-                    "security",
-                    "import",
-                    str(chain_certificates),
-                    "-k",
-                    str(keychain),
-                    "-T",
-                    "/usr/bin/codesign",
-                    "-T",
-                    "/usr/bin/security",
-                ],
-                "import the Apple distribution certificate chain",
-            )
-        require(
-            [
-                "security",
-                "set-key-partition-list",
-                "-S",
-                "apple-tool:,apple:,codesign:",
-                "-s",
-                "-k",
-                keychain_password,
-                str(keychain),
-            ],
-            "authorize codesign to use the ephemeral keychain",
-        )
-        require(
-            ["security", "list-keychains", "-d", "user", "-s", str(keychain)],
-            "activate the ephemeral keychain",
-        )
-        changed_keychain_search = True
-        require(
-            ["security", "default-keychain", "-d", "user", "-s", str(keychain)],
-            "select the ephemeral keychain",
-        )
-        changed_default = True
-
-        decoded = require(
-            ["security", "cms", "-D", "-i", str(profile)],
-            "decode the provisioning profile",
-        )
-        try:
-            profile_payload = plistlib.loads(decoded.stdout.encode("utf-8"))
-        except (plistlib.InvalidFileException, UnicodeEncodeError) as error:
-            raise CredentialError("provisioning profile could not be decoded for installation") from error
-        profile_uuid = profile_payload.get("UUID") if isinstance(profile_payload, dict) else None
-        if not isinstance(profile_uuid, str) or not PROFILE_UUID_RE.fullmatch(profile_uuid):
-            raise CredentialError("provisioning profile UUID is missing or invalid")
-
-        profile_dir, profile_directory_descriptor = _open_profile_directory(
-            home or Path.home()
-        )
-        installed_profile_name = f"{profile_uuid}.mobileprovision"
-        destination = profile_dir / installed_profile_name
-        supplied = profile.read_bytes()
-        try:
-            existing = _read_regular_at(profile_directory_descriptor, installed_profile_name)
-        except FileNotFoundError:
-            existing = None
-        except OSError as error:
-            raise CredentialError(
-                "provisioning-profile destination could not be inspected safely"
-            ) from error
-        if existing is not None:
-            if existing != supplied:
-                raise CredentialError(
-                    "a different provisioning profile is already installed with the same UUID"
-                )
-        else:
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-            if hasattr(os, "O_NOFOLLOW"):
-                flags |= os.O_NOFOLLOW
-            try:
-                descriptor = os.open(
-                    installed_profile_name,
-                    flags,
-                    0o600,
-                    dir_fd=profile_directory_descriptor,
-                )
-            except OSError as error:
-                raise CredentialError("could not safely install the provisioning profile") from error
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(supplied)
-            installed_profile = destination
-            installed_profile_digest = hashlib.sha256(supplied).digest()
-        yield {"MOBILE_RELEASE_IOS_PROFILE_SPECIFIER": profile_uuid}
-    finally:
+    def cleanup_signing() -> None:
         cleanup_failed = False
 
         def cleanup(argv: list[str]) -> bool:
@@ -1129,45 +1149,158 @@ def _temporary_apple_signing_environment(
             except CredentialError:
                 return False
 
-        if changed_keychain_search:
-            cleanup_failed = not cleanup(
-                ["security", "list-keychains", "-d", "user", "-s", *original_keychains]
-            ) or cleanup_failed
-        if changed_default and original_default:
-            cleanup_failed = not cleanup(
-                ["security", "default-keychain", "-d", "user", "-s", original_default]
-            ) or cleanup_failed
-        if created_keychain:
-            cleanup_failed = not cleanup(
-                ["security", "delete-keychain", str(keychain)]
-            ) or cleanup_failed
-        if (
-            installed_profile is not None
-            and installed_profile_name is not None
-            and profile_directory_descriptor is not None
-        ):
+        try:
+            if changed_keychain_search:
+                cleanup_failed = not cleanup(
+                    ["security", "list-keychains", "-d", "user", "-s", *original_keychains]
+                ) or cleanup_failed
+            if changed_default and original_default:
+                cleanup_failed = not cleanup(
+                    ["security", "default-keychain", "-d", "user", "-s", original_default]
+                ) or cleanup_failed
+            if created_keychain:
+                cleanup_failed = not cleanup(
+                    ["security", "delete-keychain", str(keychain)]
+                ) or cleanup_failed
+        finally:
             try:
-                unchanged = (
-                    hashlib.sha256(
-                        _read_regular_at(
-                            profile_directory_descriptor, installed_profile_name
-                        )
-                    ).digest()
-                    == installed_profile_digest
-                )
-                if unchanged:
-                    os.unlink(installed_profile_name, dir_fd=profile_directory_descriptor)
-                else:
-                    cleanup_failed = True
+                installed_profile.close()
             except (CredentialError, OSError):
-                cleanup_failed = True
-        if profile_directory_descriptor is not None:
-            try:
-                os.close(profile_directory_descriptor)
-            except OSError:
                 cleanup_failed = True
         if cleanup_failed:
             raise CredentialError("local Apple signing material could not be completely cleaned up")
+
+    cancellation = _ProfileCancellation(
+        CredentialError, "local signing cancellation handlers could not be restored",
+    )
+    scope = _ProfileCleanup(cancellation, cleanup_signing, owns_cancellation=True)
+    try:
+        with scope:
+            cancellation.install()
+            cancellation.activate()
+            with cancellation.deferred():
+                installed_profile.enter_context(_temporary_profile_installation(
+                    supplied, profile_uuid, home or Path.home(), cancellation=cancellation,
+                ))
+            default_result = require(
+                ["security", "default-keychain", "-d", "user"],
+                "inspect the default keychain",
+            )
+            original_default = default_result.stdout.strip().strip('"')
+            if not original_default:
+                raise CredentialError("the current default keychain could not be identified")
+            list_result = require(
+                ["security", "list-keychains", "-d", "user"],
+                "inspect the keychain search list",
+            )
+            original_keychains = [
+                quoted or bare
+                for quoted, bare in re.findall(
+                    r'"([^"\r\n]+)"|([^\s"]+)', list_result.stdout
+                )
+            ]
+            with cancellation.deferred():
+                require(
+                    ["security", "create-keychain", "-p", keychain_password, str(keychain)],
+                    "create an ephemeral keychain",
+                )
+                created_keychain = True
+            require(
+                ["security", "set-keychain-settings", "-lut", "21600", str(keychain)],
+                "configure the ephemeral keychain",
+            )
+            require(
+                ["security", "unlock-keychain", "-p", keychain_password, str(keychain)],
+                "unlock the ephemeral keychain",
+            )
+            extract(
+                ["-clcerts", "-nokeys", "-out", str(certificate)],
+                "extract the Apple distribution certificate",
+            )
+            extract(
+                ["-nocerts", "-nodes", "-out", str(private_key)],
+                "extract the Apple distribution private key",
+            )
+            extract(
+                ["-cacerts", "-nokeys", "-out", str(chain_certificates)],
+                "extract the Apple distribution certificate chain",
+            )
+            private_key.chmod(0o600)
+            require(
+                [
+                    "security",
+                    "import",
+                    str(private_key),
+                    "-k",
+                    str(keychain),
+                    "-T",
+                    "/usr/bin/codesign",
+                    "-T",
+                    "/usr/bin/security",
+                ],
+                "import the Apple distribution identity",
+            )
+            require(
+                [
+                    "security",
+                    "import",
+                    str(certificate),
+                    "-k",
+                    str(keychain),
+                    "-T",
+                    "/usr/bin/codesign",
+                    "-T",
+                    "/usr/bin/security",
+                ],
+                "import the Apple distribution certificate",
+            )
+            if (
+                chain_certificates.is_file()
+                and b"-----BEGIN CERTIFICATE-----" in chain_certificates.read_bytes()
+            ):
+                require(
+                    [
+                        "security",
+                        "import",
+                        str(chain_certificates),
+                        "-k",
+                        str(keychain),
+                        "-T",
+                        "/usr/bin/codesign",
+                        "-T",
+                        "/usr/bin/security",
+                    ],
+                    "import the Apple distribution certificate chain",
+                )
+            require(
+                [
+                    "security",
+                    "set-key-partition-list",
+                    "-S",
+                    "apple-tool:,apple:,codesign:",
+                    "-s",
+                    "-k",
+                    keychain_password,
+                    str(keychain),
+                ],
+                "authorize codesign to use the ephemeral keychain",
+            )
+            with cancellation.deferred():
+                require(
+                    ["security", "list-keychains", "-d", "user", "-s", str(keychain)],
+                    "activate the ephemeral keychain",
+                )
+                changed_keychain_search = True
+            with cancellation.deferred():
+                require(
+                    ["security", "default-keychain", "-d", "user", "-s", str(keychain)],
+                    "select the ephemeral keychain",
+                )
+                changed_default = True
+
+            yield {"MOBILE_RELEASE_IOS_PROFILE_SPECIFIER": profile_uuid}
+    finally:
+        scope.__exit__(*exc_info())
 
 
 def _fingerprint_from_text(text: str) -> str | None:
@@ -1329,7 +1462,8 @@ def _validate_p8(
 def _validate_apple_signing_material(
     config: ReleaseConfig, values: Mapping[str, str], directory: Path
 ) -> list[Finding]:
-    import plistlib
+    from .ios import _profile_validity
+    from .ios_profiles import load_authenticated_profile
 
     p12 = _materialize(
         values,
@@ -1359,6 +1493,15 @@ def _validate_apple_signing_material(
             )
         )
         return findings
+    try:
+        payload = load_authenticated_profile(profile)
+        _profile_validity(payload)
+    except ValidationError:
+        return [Finding(
+            "credential-material.apple-profile", Status.INVALID,
+            "Apple profile issuer, modern signed content or current validity could not be verified; "
+            "use an Apple-issued profile and supported macOS tooling.", category="credentials",
+        )]
     env = scrub_credential_capabilities(os.environ)
     env.update(values)
     certificate = directory / "distribution-certificate.pem"
@@ -1485,31 +1628,6 @@ def _validate_apple_signing_material(
             category="credentials",
         )
     )
-    if shutil.which("security") is None:
-        findings.append(
-            Finding(
-                "credential-material.apple-profile",
-                Status.FAIL,
-                "Provisioning-profile cryptographic validation requires macOS security tooling.",
-                category="credentials",
-            )
-        )
-        return findings
-    decoded = _run_private(["security", "cms", "-D", "-i", str(profile)], environ=env)
-    if decoded.returncode:
-        findings.append(
-            Finding(
-                "credential-material.apple-profile",
-                Status.INVALID,
-                "Apple provisioning profile CMS signature/format is invalid.",
-                category="credentials",
-            )
-        )
-        return findings
-    try:
-        payload = plistlib.loads(decoded.stdout.encode("utf-8"))
-    except plistlib.InvalidFileException:
-        payload = None
     ios = config.section("ios")
     if not isinstance(payload, dict):
         valid = False
@@ -1518,8 +1636,9 @@ def _validate_apple_signing_material(
         teams = payload.get("TeamIdentifier", [])
         expiration = payload.get("ExpirationDate")
         valid = (
-            entitlements.get("application-identifier") == f"{ios.get('teamId')}.{ios.get('bundleId')}"
-            and ios.get("teamId") in teams
+            isinstance(entitlements, dict)
+            and entitlements.get("application-identifier") == f"{ios.get('teamId')}.{ios.get('bundleId')}"
+            and type(teams) is list and teams == [ios.get("teamId")]
             and entitlements.get("get-task-allow") is False
             and entitlements.get("beta-reports-active") is True
             and not payload.get("ProvisionedDevices")
@@ -1548,7 +1667,7 @@ def _validate_apple_signing_material(
         Finding(
             "credential-material.apple-profile",
             Status.PASS if valid else Status.INVALID,
-            "Apple profile matches the team, bundle, signer, distribution policy, and expiry."
+            "Apple-issued profile matches the team, bundle, signer, distribution policy, and validity."
             if valid
             else "Apple profile does not match the approved team/bundle/signer/distribution policy.",
             category="credentials",

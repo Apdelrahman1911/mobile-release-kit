@@ -1,6 +1,12 @@
 # Sanitized fixtures
 
-Every identifier, repository, workflow run, Store build, certificate digest, profile UUID, timestamp, and artifact digest in this directory is synthetic test data. Fixtures must use `example` identities and repeated/fixed hexadecimal values; never derive them from a consuming repository, CI log, private release folder, or Store response.
+Except for the explicitly documented public Apple authority certificates in
+`apple-profile-authority/`, every identifier, repository, workflow run, Store build,
+certificate digest, profile UUID, timestamp and artifact digest here is synthetic.
+Consumer fixtures must use `example` identities and repeated/fixed hexadecimal
+values; never derive them from a consuming repository, CI log, private release
+folder or Store response. Public CA fixtures are not private credentials or
+runtime trust anchors; their sources/hashes and exact purpose are documented.
 
 Fixtures intentionally contain no signed binary, credential, tester identity, reviewer contact,
 private URL, or real product metadata. Tests needing binary structure must generate bounded

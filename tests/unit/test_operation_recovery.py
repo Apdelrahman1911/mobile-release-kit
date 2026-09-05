@@ -632,13 +632,21 @@ class IosOperationRecoveryTests(unittest.TestCase):
         modernize_ipa_fixture(self.root / "app.ipa")
         native = NativeProfileSeam()
         native.claims["Reader.app"] = {**signed_entitlements(), "com.apple.developer.associated-domains": ["applinks:fictional.example"]}
-        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.subprocess.run", side_effect=native), patch("mobile_release.cli.prepare_store_operation") as prepare, patch("mobile_release.cli.execute_store_operation") as mutate:
+        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.subprocess.run", side_effect=native), patch("mobile_release.ios_profiles.authenticate_cms", side_effect=native.authenticate_cms), patch("mobile_release.cli.prepare_store_operation") as prepare, patch("mobile_release.cli.execute_store_operation") as mutate:
             with self.assertRaisesRegex(ValidationError, "final candidate artifact validation failed"):
                 self.invoke("prepare-operation")
         prepare.assert_not_called()
         mutate.assert_not_called()
         self.assertFalse(self.intent_path.exists())
         self.assertTrue(any("--entitlements" in argv for argv, _ in native.calls))
+
+    def test_profile_issuer_rejection_stops_fresh_intent_before_any_store_access(self) -> None:
+        native = NativeProfileSeam()
+        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.subprocess.run", side_effect=native), patch("mobile_release.ios_profiles.authenticate_cms", side_effect=ValidationError("fixed Apple issuer rejection")) as authentication, patch("mobile_release.cli.prepare_store_operation") as prepare, patch("mobile_release.cli.execute_store_operation") as mutate:
+            with self.assertRaisesRegex(ValidationError, "final candidate artifact validation failed"):
+                self.invoke("prepare-operation")
+        authentication.assert_called_once(); prepare.assert_not_called(); mutate.assert_not_called()
+        self.assertFalse(self.intent_path.exists())
 
     def test_malformed_generic_resource_plist_stops_fresh_intent_before_signing_or_store(self) -> None:
         resource = "Resources/Extra/Info.plist"
@@ -666,7 +674,7 @@ class IosOperationRecoveryTests(unittest.TestCase):
         raw_path = self.output / "raw-store-receipt.json"
         raw_path.write_text(json.dumps(original_raw))
         original_bytes = raw_path.read_bytes()
-        with patch("mobile_release.cli.authenticate_operation_intent", return_value=intent) as authenticate, patch("mobile_release.cli.validate_ipa_current_signing", side_effect=AssertionError("raw completion must not reinterpret expired signing")), patch("mobile_release.cli.ipa_signing_evidence", side_effect=AssertionError("raw completion must reuse original signer evidence")), patch("mobile_release.ios._utc_now", return_value=datetime(2030, 1, 1, tzinfo=timezone.utc)), patch("mobile_release.stores._run_store_lane", side_effect=AssertionError("raw completion must be Store-free")):
+        with patch("mobile_release.cli.authenticate_operation_intent", return_value=intent) as authenticate, patch("mobile_release.cli.validate_ipa_current_signing", side_effect=AssertionError("raw completion must not reinterpret expired signing")), patch("mobile_release.ios.ipa_signing_evidence", side_effect=AssertionError("historical completion must not extract profiles")), patch("mobile_release.ios_profiles.authenticate_cms", side_effect=AssertionError("historical completion must not reauthenticate profiles")), patch("mobile_release.cli.ipa_signing_evidence", side_effect=AssertionError("raw completion must reuse original signer evidence")), patch("mobile_release.ios._utc_now", return_value=datetime(2030, 1, 1, tzinfo=timezone.utc)), patch("mobile_release.stores._run_store_lane", side_effect=AssertionError("raw completion must be Store-free")):
             self.assertEqual(self.invoke("execute-store", attempt=2), 0)
         authenticate.assert_called_once()
         manifest = json.loads((self.output / "candidate-manifest.json").read_text())

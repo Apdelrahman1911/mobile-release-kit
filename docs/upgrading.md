@@ -122,6 +122,22 @@ Do not repin or reseal an existing independently validated candidate into this s
 Resolve an in-flight operation using its original pin and retained bytes/owner review. Never
 rebuild, re-sign, or substitute symbols/archive as recovery for the original candidate.
 
+### Authenticated Apple profiles
+
+New iOS candidates require signature verification of both CMS layers and the
+native production Apple provisioning-profile issuer policy under bundled pinned
+roots. Modern attached definite DER/SHA-256-or-stronger profiles are required;
+legacy-only, unsigned, unsupported or wrong-purpose profiles fail without a
+bypass. Run the required macOS native and installed-wheel checks and the consumer
+owner's protected current Distribution archive/export rehearsal before activation.
+See [profile authority](ios-profile-authority.md) for exact policy/offline limits.
+
+No evidence/schema version changes are introduced by this gate. Existing accepted
+candidates remain bound to their original validation/toolkit and exact bytes;
+finish/reconcile them under that pin rather than repinning, resealing or re-signing.
+The separate local-signing concurrency blocker QA-003 must also be resolved before
+claiming complete production readiness.
+
 ## Rollback
 
 Before any Store mutation, reverting the consumer SHA/configuration is an ordinary source change.

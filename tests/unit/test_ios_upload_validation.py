@@ -104,11 +104,20 @@ class IosCurrentUploadTests(unittest.TestCase):
         self.native.side_effect = validate_ipa_current_signing
         native = NativeProfileSeam()
         native.claims["Reader.app"] = {**signed_entitlements(), "com.apple.developer.associated-domains": ["applinks:fictional.example"]}
-        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.subprocess.run", side_effect=native):
+        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.subprocess.run", side_effect=native), patch("mobile_release.ios_profiles.authenticate_cms", side_effect=native.authenticate_cms):
             with self.assertRaisesRegex(ValidationError, "new IPA upload is ineligible.*not authorized"):
                 self.validate()
         self.signer.assert_not_called()
         self.assertTrue(any("--entitlements" in argv for argv, _ in native.calls))
+        self.assertFalse(any("--extract-certificates" in argv for argv, _ in native.calls))
+
+    def test_issuer_authentication_failure_never_authorizes_a_new_transporter_send(self) -> None:
+        self.native.side_effect = validate_ipa_current_signing
+        native = NativeProfileSeam()
+        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.subprocess.run", side_effect=native), patch("mobile_release.ios_profiles.authenticate_cms", side_effect=ValidationError("fixed Apple issuer rejection")):
+            with self.assertRaisesRegex(ValidationError, "new IPA upload is ineligible.*Apple issuer rejection"):
+                self.validate()
+        self.signer.assert_not_called()
         self.assertFalse(any("--extract-certificates" in argv for argv, _ in native.calls))
 
     def test_malformed_primary_plist_stops_current_upload_before_native_inspection(self) -> None:

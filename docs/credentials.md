@@ -146,9 +146,10 @@ The Store API key is distinct from the Apple distribution certificate and provis
 - The provisioning profile authorizes the Store application identity, Team, entitlements, and distribution method.
 
 Possession of one is not evidence that another is correct. The toolkit checks
-API access, final signatures and complete profile-content relationships separately.
-Apple profile issuer authentication remains an open production blocker (QA-002);
-CMS decoding is not proof of Apple authority. See [entitlement validation](ios-entitlements.md).
+API access, final signatures, complete profile-content relationships and Apple
+profile issuer authority separately. Both CMS layers require real signatures and
+the native production iOS provisioning policy under pinned Apple roots; decoding
+alone is insufficient. See [profile authority](ios-profile-authority.md).
 
 ### Private review-state commitments
 
@@ -194,7 +195,7 @@ Signed final-artifact validation checks:
 
 - the final AAB signature and configured public upload-certificate fingerprint;
 - the exported application signature/nested code and configured Apple distribution fingerprint;
-- embedded profile Bundle ID, Team, distribution type, validity interval, complete
+- Apple issuance of both signed CMS layers, embedded profile Bundle ID, Team, distribution type, validity interval, complete
   typed entitlement grants and certificate membership, correlated with modern DER content;
 - exact artifact identities and committed version/build values.
 
@@ -215,8 +216,13 @@ it cannot use that old validation to authorize a new upload. See [Recovery](reco
 
 Every code architecture must have consistent signed claims, Team and signer.
 Nested apps/extensions use their own profiles; profileless code cannot borrow
-an enclosing app's grants. These checks do not yet prove Apple issued the decoded
-profile (QA-002); see the supported formats and rules in [iOS entitlements](ios-entitlements.md).
+an enclosing app's grants. Profile issuance verification is read-only/offline;
+profile dates and application certificate dates still need to be current for new
+uploads. See [iOS entitlements](ios-entitlements.md) and
+[profile authority](ios-profile-authority.md), including the separate pending
+QA-003 local-signing concurrency and QA-004 outer materialization-cleanup
+corrections. Do not overlap local signing contexts. Inner signing/profile cleanup
+alone does not prove decoded scratch removal or client-file restoration.
 
 Online preflight proves that the configured Google or Apple API credential can authenticate and see the intended Store application. Provider authentication is the authority for API-key suitability; a Base64 format check is not.
 
@@ -231,5 +237,15 @@ After signing, it verifies the final AAB/IPA independently and records only publ
 - Disable shell tracing around all credential operations.
 - Never upload credential directories, raw command output containing secrets, or private review/tester data as artifacts.
 - Reports may state that a named item exists or is invalid, never its value.
+
+The profile/signing/authentication owners protect default main-thread signal
+cleanup entry and resource handoff; cleanup is attempted once, not retried after
+an ambiguous descriptor close. Cancellation cannot turn a cleanup failure into
+success. Custom handlers, worker-thread cancellation and hard termination retain
+host semantics. **QA-004 remains open:** cancellation at outer build-input scratch
+or client-target restoration can leave material behind. Verify the exact owned
+paths and original client configuration before retrying; do not delete broad
+temporary-directory patterns or another task's state. These are unresolved
+blockers, not accepted exceptions to the cleanup requirements above.
 
 Secret rotation and IAM/account provisioning remain external administrator tasks. Run `credentials` and signing/online preflight after any rotation before the next candidate.

@@ -16,7 +16,7 @@ from mobile_release.config import ReleaseVersion
 from mobile_release.errors import ValidationError
 from mobile_release.inspection import InspectionDeadline
 from mobile_release.inspection import MAX_INSPECTION_SECONDS
-from mobile_release.ios import _codesign_entitlements, _codesign_leaf_fingerprint, _profile_details, validate_ipa_current_signing
+from mobile_release.ios import _codesign_entitlements, _codesign_leaf_fingerprint, _profile_details, ipa_signing_evidence, validate_ipa_current_signing
 from mobile_release.ios_der import decode_der_dictionary
 from mobile_release.ios_entitlements import (
     correlate_profile, load_plist_dictionary, typed_value, validate_profile_entitlements,
@@ -390,6 +390,7 @@ class SignedEntitlementInventoryTests(unittest.TestCase):
         self.stack.enter_context(patch("mobile_release.ios.sys.platform", "darwin"))
         self.stack.enter_context(patch("mobile_release.ios.shutil.which", return_value="/fictional/native/tool"))
         self.stack.enter_context(patch("mobile_release.ios.subprocess.run", side_effect=self.native))
+        self.stack.enter_context(patch("mobile_release.ios_profiles.authenticate_cms", side_effect=self.native.authenticate_cms))
         self.install_profiles()
 
     def install_profiles(self):
@@ -422,6 +423,19 @@ class SignedEntitlementInventoryTests(unittest.TestCase):
         self.assertNotIn("Widget", names, "exact declared app executable is already inspected through its bundle")
         self.assertNotIn("Reader", names)
         self.assertTrue(all(not path.exists() for path in self.native.extracted))
+
+    def test_issuer_rejection_in_either_bundle_stops_current_validation_and_public_evidence(self):
+        for relative in ("", "PlugIns/Widget.appex"):
+            rejected = (self.exported / relative / "embedded.mobileprovision").read_bytes()
+            def authenticate(raw, *, deadline):
+                if raw == rejected:
+                    raise ValidationError("fixed Apple issuer rejection")
+                return self.native.authenticate_cms(raw, deadline=deadline)
+            with self.subTest(bundle=relative), patch("mobile_release.ios_profiles.authenticate_cms", side_effect=authenticate):
+                self.assert_rejected("Apple issuer rejection")
+        with patch("mobile_release.ios_profiles.authenticate_cms", side_effect=ValidationError("fixed Apple issuer rejection")):
+            with self.assertRaisesRegex(ValidationError, "Apple issuer rejection"):
+                ipa_signing_evidence(self.paths["ios-ipa"])
 
     def test_main_and_extension_app_only_claims_fail_not_parent_profile_adoption(self):
         for name in ("Reader.app", "Widget.appex"):
@@ -517,13 +531,11 @@ class SignedEntitlementInventoryTests(unittest.TestCase):
             with self.subTest(entitlements=bundle), patch("mobile_release.ios.subprocess.run", side_effect=malformed):
                 self.assert_rejected("XML plist")
 
-    def test_actual_profile_decode_uses_private_temporary_der_and_removes_it(self):
+    def test_profile_content_reader_authenticates_exact_outer_and_inner_bytes(self):
         location = self.exported / "embedded.mobileprovision"
         result = _profile_details(location)
         self.assertEqual(result["Entitlements"], profile()["Entitlements"])
-        native_paths = [Path(argv[-1]) for argv, _ in self.native.calls if argv[0] == "security"]
-        self.assertEqual(native_paths[0], location)
-        self.assertFalse(native_paths[1].exists())
+        self.assertEqual(self.native.cms_calls, [location.read_bytes(), plistlib.loads(location.read_bytes())["DER-Encoded-Profile"]])
         self.assertTrue(location.is_file())
 
     def test_all_new_native_profile_slice_calls_receive_no_credentials_or_runtime_injection(self):
@@ -535,7 +547,7 @@ class SignedEntitlementInventoryTests(unittest.TestCase):
         with patch.dict(os.environ, {**canaries, "PATH": "/fictional/native"}, clear=True):
             findings, interval = self.validate()
         self.assertIsNotNone(interval, findings)
-        self.assertTrue(any(argv[0] == "security" for argv, _ in self.native.calls))
+        self.assertTrue(self.native.cms_calls)
         self.assertTrue(any("--architecture" in argv for argv, _ in self.native.calls))
         for argv, kwargs in self.native.calls:
             with self.subTest(operation=argv[0]):

@@ -30,7 +30,7 @@ from mobile_release.ios import (
 from mobile_release.reporting import FAILING_STATUSES
 
 from .ios_artifact_helpers import native_image
-from .ios_entitlement_helpers import der_entitlements, modern_profile_bytes
+from .ios_entitlement_helpers import NativeProfileSeam, der_entitlements, modern_profile_bytes
 
 
 class IosArtifactTests(unittest.TestCase):
@@ -422,6 +422,7 @@ class IosArtifactTests(unittest.TestCase):
                 ipa = root / "Reader.ipa"
                 extracted_leaf_paths = {}
                 native_calls = []
+                cms_seam = NativeProfileSeam()
                 with zipfile.ZipFile(ipa, "w") as archive:
                     for bundle, bundle_id in (
                         ("Payload/Reader.app", "com.example.reader"),
@@ -454,7 +455,7 @@ class IosArtifactTests(unittest.TestCase):
                     native_calls.append(argv)
                     self.assertFalse(set(secret_names) & kwargs["env"].keys())
                     if argv[0] == "security":
-                        return types.SimpleNamespace(returncode=0, stdout=Path(argv[-1]).read_bytes(), stderr=b"")
+                        raise AssertionError("decode-only CMS is not profile authority")
                     if "--entitlements" in argv:
                         bundle_id = "com.example.reader.widget" if ".appex" in argv[-1] else "com.example.reader"
                         value = self._signed_entitlements(**{"application-identifier": f"ABCDE12345.{bundle_id}"})
@@ -490,6 +491,7 @@ class IosArtifactTests(unittest.TestCase):
                 stack.enter_context(patch("mobile_release.ios.shutil.which", return_value="/usr/bin/tool"))
                 stack.enter_context(patch("mobile_release.ios._utc_now", return_value=now))
                 stack.enter_context(patch("mobile_release.ios.subprocess.run", side_effect=native))
+                stack.enter_context(patch("mobile_release.ios_profiles.authenticate_cms", side_effect=cms_seam.authenticate_cms))
                 findings, interval = validate_ipa_current_signing(
                     ipa, expected_bundle_id="com.example.reader", expected_team_id="ABCDE12345",
                     expected_fingerprint=fingerprint, release=ReleaseVersion("1.2.3", 42),
@@ -500,7 +502,7 @@ class IosArtifactTests(unittest.TestCase):
                     inspected = set(extracted_leaf_paths.values())
                     for suffix in ("/Reader.app", "/Reader", "/Widget.appex", "/Widget", "/ReaderKit.framework", "/ReaderKit"):
                         self.assertTrue(any(path.endswith(suffix) for path in inspected), suffix)
-                    self.assertEqual(sum(argv[0] == "security" for argv in native_calls), 4)
+                    self.assertEqual(len(cms_seam.cms_calls), 4)
                 else:
                     self.assertIsNone(interval)
                     self.assertTrue(any(item.status in FAILING_STATUSES for item in findings), defect)

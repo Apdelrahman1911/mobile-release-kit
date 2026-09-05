@@ -24,11 +24,17 @@ All notable changes to Mobile Release Kit are documented here. The project follo
 
 ### Fixed
 
+- Authenticate both provisioning-profile CMS signatures and the exact production
+  Apple iOS profile issuer under pinned public roots, with offline native policy,
+  isolated bounded workers, cancellation containment and exact-byte no-clobber
+  local installation. Add required credential-free macOS/installed-wheel gates;
+  retain original accepted-candidate recovery. Local signing concurrency remains
+  separately tracked as QA-003, not fixed by atomic installation alone.
 - Compare every iOS signed entitlement with its own modern DER profile grants using
   strict typed subsets and capability-specific wildcards. Inspect every native slice,
   reject profileless nested claims, malformed/duplicate encodings and stale certificate
-  outputs; retain historical accepted-build recovery. Apple profile issuer authentication
-  remains the separate open production blocker QA-002; CMS decoding alone is not authority.
+  outputs; retain historical accepted-build recovery. Independent Apple profile
+  issuer authentication is an additional gate; content comparison alone is not authority.
 - Validate complete original binary plist structure before conversion; reject unsupported
   integer/date precision and overlong XML references, and preserve real signed zero in
   archive/IPA resource comparisons without rewriting artifacts.
