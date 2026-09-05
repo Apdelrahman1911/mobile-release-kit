@@ -200,6 +200,12 @@ authorization; exact artifact hashes remain authoritative during recovery. Expor
 re-signing but not stripping/thinning. See [iOS artifact correspondence](docs/ios-artifacts.md),
 including the separate outstanding nested-symbol completeness requirement and native rehearsal.
 
+All iOS signed entitlements are compared with their own bundle's modern DER profile
+grants across every native architecture; profileless code cannot borrow a parent's
+grants. [Entitlement validation](docs/ios-entitlements.md) documents the rules and the
+separate unresolved Apple profile issuer-authentication blocker (QA-002). Content
+comparison alone is not cryptographic profile authorization or production readiness.
+
 Each candidate hashes a deterministic platform-scoped metadata archive: Android includes only
 `android/**`; iOS includes `ios/**`, `review/**`, and `testflight/**`. An unrelated platform's
 metadata cannot invalidate promotion of the selected candidate.

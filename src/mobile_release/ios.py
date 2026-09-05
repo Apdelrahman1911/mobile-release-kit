@@ -201,12 +201,15 @@ def _validated_ipa_entries(path: Path, *, deadline: InspectionDeadline | None = 
 
 
 def _profile_details(path: Path, *, deadline: InspectionDeadline | None = None) -> dict[str, Any] | None:
-    # Keep plist support lazy so Android-only/Linux use does not import the
-    # platform XML parser at process start.
-    import plistlib
-
     if sys.platform != "darwin" or not shutil.which("security"):
         return None
+    from .ios_der import decode_der_dictionary
+    from .ios_entitlements import MAX_PLIST_BYTES, correlate_profile, load_plist_dictionary
+
+    deadline = deadline if deadline is not None else InspectionDeadline()
+    deadline.check()
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_PLIST_BYTES:
+        raise ValidationError("embedded provisioning profile must be a bounded regular file")
     result = _run_native(
         ["security", "cms", "-D", "-i", str(path)],
         deadline=deadline,
@@ -218,13 +221,70 @@ def _profile_details(path: Path, *, deadline: InspectionDeadline | None = None) 
     )
     if result.returncode:
         raise ValidationError("security could not decode the embedded provisioning profile")
-    try:
-        value = plistlib.loads(result.stdout)
-    except plistlib.InvalidFileException as error:
-        raise ValidationError("embedded provisioning profile is not a valid plist") from error
-    if not isinstance(value, dict):
-        raise ValidationError("embedded provisioning profile has an invalid structure")
-    return value
+    outer = load_plist_dictionary(result.stdout, deadline=deadline)
+    encoded = outer.get("DER-Encoded-Profile")
+    if type(encoded) is not bytes or not 0 < len(encoded) <= MAX_PLIST_BYTES:
+        raise ValidationError("modern iOS profile requires its authoritative DER-Encoded-Profile; legacy-only profiles are unsupported")
+    with tempfile.TemporaryDirectory(prefix="mobile-release-profile-der-") as directory:
+        inner = Path(directory) / "profile.cms"
+        inner.write_bytes(encoded)
+        inner.chmod(0o600)
+        result = _run_native(
+            ["security", "cms", "-D", "-i", str(inner)], deadline=deadline,
+            env=_validation_environment(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=30, check=False,
+        )
+        if result.returncode:
+            raise ValidationError("security could not decode the authoritative DER provisioning profile")
+        authoritative = decode_der_dictionary(result.stdout, profile=True, deadline=deadline)
+    # CMS decoding is not Apple issuer authentication. That independently
+    # confirmed authority blocker is tracked as QA-002; comparison alone must
+    # not be advertised as cryptographic profile authorization.
+    return correlate_profile(outer, authoritative, deadline=deadline)
+
+
+def _code_executable(code_path: Path, *, deadline: InspectionDeadline) -> Path | None:
+    """Identify an exact bundle executable, never borrow a neighboring profile."""
+    from .ios_entitlements import MAX_PLIST_BYTES, load_plist_dictionary
+
+    deadline.check()
+    if code_path.is_symlink():
+        raise ValidationError("signed code must not be a symbolic link")
+    if code_path.is_file():
+        return code_path
+    if not code_path.is_dir():
+        raise ValidationError("signed code object is missing or is not a regular file/bundle")
+    info_path = code_path / "Info.plist"
+    executable_required = code_path.suffix.lower() in {".app", ".appex", ".framework", ".xpc"}
+    if not info_path.exists() and not info_path.is_symlink() and not executable_required:
+        return None  # Non-executable signed resources still get empty-claim checks.
+    if info_path.is_symlink() or not info_path.is_file() or info_path.stat().st_size > MAX_PLIST_BYTES:
+        raise ValidationError("signed bundle Info.plist must be a bounded regular file")
+    info = load_plist_dictionary(info_path.read_bytes(), deadline=deadline)
+    executable = info.get("CFBundleExecutable")
+    if executable is None and not executable_required:
+        return None
+    if (type(executable) is not str or not executable or executable in {".", ".."}
+            or any(char in executable for char in "/\\:")
+            or any(ord(char) < 32 or ord(char) == 127 for char in executable)):
+        raise ValidationError("signed bundle executable must be a safe local basename")
+    path = code_path / executable
+    if path.is_symlink() or not path.is_file():
+        raise ValidationError("signed bundle's declared executable is missing or unsafe")
+    return path
+
+
+def _code_architectures(code_path: Path, *, deadline: InspectionDeadline) -> tuple[str | None, ...]:
+    from .macho import inspect_macho
+
+    executable = _code_executable(code_path, deadline=deadline)
+    if executable is None:
+        return (None,)
+    return tuple(f"{item.cpu},{item.subtype}" for item in inspect_macho(executable, deadline=deadline))
+
+
+def _architecture_options(architecture: str | None) -> list[str]:
+    return ["--architecture", architecture] if architecture is not None else []
 
 
 def _codesign_fingerprint(
@@ -237,7 +297,7 @@ def _codesign_fingerprint(
     if sys.platform != "darwin" or not shutil.which("codesign") or not shutil.which("openssl"):
         return None
     verify = _run_native(
-        ["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app_path)],
+        ["codesign", "--verify", "--all-architectures", "--deep", "--strict", "--verbose=2", str(app_path)],
         deadline=deadline,
         env=_validation_environment(),
         stdout=subprocess.PIPE,
@@ -280,8 +340,28 @@ def _codesign_leaf_fingerprint(
     _validity_intervals: list[SigningValidityInterval] | None = None,
     deadline: InspectionDeadline | None = None,
 ) -> str:
+    deadline = deadline if deadline is not None else InspectionDeadline()
+    fingerprints = []
+    # Fresh private names for every object AND slice: successful extraction
+    # without a leaf cannot reuse a stale certificate from another invocation.
+    with tempfile.TemporaryDirectory(prefix="mobile-release-leaf-", dir=prefix.parent) as directory:
+        for index, architecture in enumerate(_code_architectures(code_path, deadline=deadline)):
+            fingerprints.append(_codesign_slice_fingerprint(
+                code_path, Path(directory) / f"slice-{index}-", architecture=architecture,
+                _validity_intervals=_validity_intervals, deadline=deadline,
+            ))
+    if len(set(fingerprints)) != 1:
+        raise ValidationError("signed code architectures do not share the same leaf signer")
+    return fingerprints[0]
+
+
+def _codesign_slice_fingerprint(
+    code_path: Path, prefix: Path, *, architecture: str | None,
+    _validity_intervals: list[SigningValidityInterval] | None,
+    deadline: InspectionDeadline,
+) -> str:
     extract = _run_native(
-        ["codesign", "-d", "--extract-certificates", str(prefix), str(code_path)],
+        ["codesign", "-d", *_architecture_options(architecture), "--extract-certificates", str(prefix), str(code_path)],
         deadline=deadline,
         env=_validation_environment(),
         stdout=subprocess.PIPE,
@@ -290,7 +370,8 @@ def _codesign_leaf_fingerprint(
         check=False,
     )
     certificate = prefix.parent / f"{prefix.name}0"
-    if extract.returncode or certificate.is_symlink() or not certificate.is_file():
+    if (extract.returncode or certificate.is_symlink() or not certificate.is_file()
+            or not 0 < certificate.stat().st_size <= 1024 * 1024):
         raise ValidationError("codesign could not extract the leaf signing certificate")
     fingerprint = _run_native(
         [
@@ -346,6 +427,7 @@ def _nested_codesign_identities(
 ) -> list[tuple[Path, str, str]] | None:
     if sys.platform != "darwin" or not shutil.which("codesign") or not shutil.which("openssl"):
         return None
+    deadline = deadline if deadline is not None else InspectionDeadline()
     def is_macho(path: Path) -> bool:
         if path.is_symlink() or not path.is_file():
             return False
@@ -376,12 +458,15 @@ def _nested_codesign_identities(
     nested = sorted(nested_candidates, key=lambda item: item.as_posix())
     if len(nested) > MAX_NESTED_CODE_ITEMS:
         raise ValidationError("IPA contains too many nested signed-code components")
+    profiled_bundles = [app_path] + [path for path in nested if path.is_dir() and path.suffix.lower() in {".app", ".appex"}]
+    profiled_executables = {_code_executable(path, deadline=deadline) for path in profiled_bundles}
     result: list[tuple[Path, str, str]] = []
     for index, code_path in enumerate(nested):
         requirement = _run_native(
             [
                 "codesign",
                 "--verify",
+                "--all-architectures",
                 "--strict",
                 "--verbose=2",
                 "--test-requirement",
@@ -399,26 +484,27 @@ def _nested_codesign_identities(
             raise ValidationError(
                 f"nested code does not satisfy its designated requirement: {code_path.name}"
             )
-        details = _run_native(
-            ["codesign", "-d", "--verbose=4", str(code_path)],
-            deadline=deadline,
-            env=_validation_environment(),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=30,
-            check=False,
-        )
-        if details.returncode:
-            raise ValidationError(f"codesign could not inspect nested code: {code_path.name}")
-        match = re.search(r"(?m)^TeamIdentifier=([A-Z0-9]{10})$", details.stderr + details.stdout)
-        if not match:
-            raise ValidationError(f"nested code lacks a TeamIdentifier: {code_path.name}")
+        teams = []
+        for architecture in _code_architectures(code_path, deadline=deadline):
+            details = _run_native(
+                ["codesign", "-d", *_architecture_options(architecture), "--verbose=4", str(code_path)],
+                deadline=deadline, env=_validation_environment(), text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False,
+            )
+            if details.returncode:
+                raise ValidationError("codesign could not inspect a nested code architecture")
+            matches = re.findall(r"(?m)^TeamIdentifier=(.*)$", details.stderr + details.stdout)
+            if len(matches) != 1 or not re.fullmatch(r"[A-Z0-9]{10}", matches[0]):
+                raise ValidationError("nested code architecture lacks a unique valid TeamIdentifier")
+            teams.append(matches[0])
+        if len(set(teams)) != 1:
+            raise ValidationError("nested code architectures do not share one TeamIdentifier")
+        team = teams[0]
         fingerprint = _codesign_leaf_fingerprint(
             code_path, temporary / f"nested-signer-{index}-",
             _validity_intervals=_validity_intervals, deadline=deadline,
         )
-        if code_path.suffix.lower() in {".app", ".appex"}:
+        if code_path.is_dir() and code_path.suffix.lower() in {".app", ".appex"}:
             entitlements = _codesign_entitlements(code_path, deadline=deadline)
             if entitlements is None:
                 raise ValidationError(
@@ -427,37 +513,48 @@ def _nested_codesign_identities(
             _validate_nested_bundle_security(
                 code_path,
                 entitlements=entitlements,
-                team_id=match.group(1),
+                team_id=team,
                 signer_fingerprint=fingerprint,
                 _validity_intervals=_validity_intervals,
                 deadline=deadline,
             )
-        result.append((code_path, match.group(1), fingerprint))
+        elif code_path not in profiled_executables:
+            entitlements = _codesign_entitlements(code_path, deadline=deadline)
+            if entitlements is None or entitlements:
+                raise ValidationError(
+                    "profileless nested code has signed entitlement claims; frameworks, libraries, "
+                    "helpers and unsupported executable bundles cannot borrow an app's profile"
+                )
+        result.append((code_path, team, fingerprint))
     return result
 
 
 def _codesign_entitlements(app_path: Path, *, deadline: InspectionDeadline | None = None) -> dict[str, Any] | None:
     if sys.platform != "darwin" or not shutil.which("codesign"):
         return None
-    import plistlib
+    from .ios_der import decode_der_dictionary
+    from .ios_entitlements import load_plist_dictionary, typed_value
 
-    result = _run_native(
-        ["codesign", "-d", "--entitlements", ":-", "--xml", str(app_path)],
-        deadline=deadline,
-        env=_validation_environment(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=30,
-        check=False,
-    )
-    if result.returncode:
-        raise ValidationError("codesign could not inspect the application's signed entitlements")
-    try:
-        payload = plistlib.loads(result.stdout)
-    except plistlib.InvalidFileException as error:
-        raise ValidationError("application signed entitlements are not a valid plist") from error
-    if not isinstance(payload, dict):
-        raise ValidationError("application signed entitlements have an invalid structure")
+    deadline = deadline if deadline is not None else InspectionDeadline()
+    payload = None
+    for architecture in _code_architectures(app_path, deadline=deadline):
+        representations = []
+        for encoding, decode in (("--der", decode_der_dictionary), ("--xml", load_plist_dictionary)):
+            result = _run_native(
+                ["codesign", "-d", *_architecture_options(architecture), "--entitlements", "-", encoding, str(app_path)],
+                deadline=deadline, env=_validation_environment(), stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, timeout=30, check=False,
+            )
+            if result.returncode:
+                raise ValidationError("codesign could not inspect a signed entitlement architecture")
+            representations.append(decode(result.stdout, deadline=deadline) if result.stdout else {})
+        # --xml can render DER rather than the legacy XML signature slot. This
+        # compares native decoder views; it is not independent legacy-slot proof.
+        if typed_value(representations[0], deadline=deadline) != typed_value(representations[1], deadline=deadline):
+            raise ValidationError("signed entitlement DER/XML views disagree or modern DER is missing")
+        if payload is not None and typed_value(payload, deadline=deadline) != typed_value(representations[0], deadline=deadline):
+            raise ValidationError("signed entitlements differ between code architectures")
+        payload = representations[0]
     return payload
 
 
@@ -485,22 +582,6 @@ def _utc_datetime(value: datetime) -> datetime:
         raise ValidationError("profile date must represent a real UTC datetime") from error
 
 
-def _validate_release_entitlement_environments(
-    application: dict[str, Any], profile: dict[str, Any]
-) -> None:
-    expected_values = {
-        "aps-environment": "production",
-        "com.apple.developer.icloud-container-environment": "Production",
-    }
-    for key, expected in expected_values.items():
-        app_present = key in application
-        profile_present = key in profile
-        if app_present != profile_present:
-            raise ValidationError(f"signed app/profile entitlement presence differs for {key}")
-        if app_present and (application[key] != expected or profile[key] != expected):
-            raise ValidationError(f"signed app/profile {key} must use the production environment")
-
-
 def _validate_nested_bundle_security(
     code_path: Path,
     *,
@@ -512,7 +593,7 @@ def _validate_nested_bundle_security(
 ) -> None:
     """Bind a nested app/extension to its signer, profile, team, and release entitlements."""
 
-    import plistlib
+    from .ios_entitlements import load_plist_dictionary, validate_profile_entitlements
 
     info_path = code_path / "Info.plist"
     try:
@@ -522,8 +603,8 @@ def _validate_nested_bundle_security(
             or info_path.stat().st_size > 2 * 1024 * 1024
         ):
             raise OSError("unsafe nested Info.plist")
-        info = plistlib.loads(info_path.read_bytes())
-    except (OSError, plistlib.InvalidFileException) as error:
+        info = load_plist_dictionary(info_path.read_bytes(), deadline=deadline)
+    except OSError as error:
         raise ValidationError(
             f"nested application Info.plist is missing or invalid: {code_path.name}"
         ) from error
@@ -535,7 +616,7 @@ def _validate_nested_bundle_security(
         or not isinstance(application_identifier, str)
         or application_identifier != f"{team_id}.{bundle_id}"
         or entitlements.get("com.apple.developer.team-identifier") != team_id
-        or entitlements.get("get-task-allow") is True
+        or ("get-task-allow" in entitlements and entitlements["get-task-allow"] is not False)
     ):
         raise ValidationError(
             f"nested application entitlements do not match its signing team: {code_path.name}"
@@ -567,7 +648,7 @@ def _validate_nested_bundle_security(
         raise ValidationError(
             f"nested provisioning profile does not authorize the final signer: {code_path.name}"
         )
-    _validate_release_entitlement_environments(entitlements, profile_entitlements)
+    validate_profile_entitlements(entitlements, profile_entitlements, deadline=deadline)
     if _validity_intervals is not None:
         _validity_intervals.append(interval)
 
@@ -609,7 +690,7 @@ def _validate_ipa(
     _validity_intervals: list[SigningValidityInterval] | None = None,
     deadline: InspectionDeadline | None = None,
 ) -> list[Finding]:
-    import plistlib
+    from .ios_entitlements import MAX_PLIST_BYTES, load_plist_dictionary, validate_profile_entitlements
 
     findings: list[Finding] = []
     deadline = deadline if deadline is not None else InspectionDeadline()
@@ -626,10 +707,9 @@ def _validate_ipa(
         if len(plist_entries) != 1:
             raise ValidationError(f"IPA must contain exactly one application; found {len(plist_entries)}")
         app_prefix = plist_entries[0].filename.removesuffix("Info.plist")
-        try:
-            info = plistlib.loads(archive.read(plist_entries[0]))
-        except plistlib.InvalidFileException as error:
-            raise ValidationError("IPA Info.plist is invalid") from error
+        if plist_entries[0].file_size > MAX_PLIST_BYTES:
+            raise ValidationError("IPA Info.plist exceeds its bound")
+        info = load_plist_dictionary(archive.read(plist_entries[0]), deadline=deadline)
         expectations = {
             "CFBundleIdentifier": expected_bundle_id,
             "CFBundleShortVersionString": release.name,
@@ -688,7 +768,7 @@ def _validate_ipa(
                 teams = profile.get("TeamIdentifier", [])
                 if app_identifier != f"{expected_team_id}.{expected_bundle_id}":
                     raise ValidationError("profile application-identifier does not match team and bundle")
-                if expected_team_id not in teams:
+                if type(teams) is not list or teams != [expected_team_id]:
                     raise ValidationError("profile TeamIdentifier does not match configuration")
                 if entitlements.get("get-task-allow") is not False:
                     raise ValidationError("profile permits debugger attachment")
@@ -723,21 +803,22 @@ def _validate_ipa(
                 entitlements.get("application-identifier")
                 != f"{expected_team_id}.{expected_bundle_id}"
                 or entitlements.get("com.apple.developer.team-identifier") != expected_team_id
-                or entitlements.get("get-task-allow") is True
+                or ("get-task-allow" in entitlements and entitlements["get-task-allow"] is not False)
             ):
                 raise ValidationError(
                     "application signed entitlements do not match the approved team/bundle release policy"
                 )
             else:
                 if profile is not None:
-                    _validate_release_entitlement_environments(
-                        entitlements, profile.get("Entitlements", {})
+                    validate_profile_entitlements(
+                        entitlements, profile.get("Entitlements", {}), deadline=deadline,
                     )
                 findings.append(
                     Finding(
                         "ios.ipa.entitlements",
-                        Status.PASS,
-                        "Signed application entitlements satisfy bounded generic release checks.",
+                        Status.PASS if profile is not None else (Status.FAIL if require_tools else Status.SKIP),
+                        "All signed application entitlements fit the authoritative profile-content allowlist."
+                        if profile is not None else "Complete entitlement comparison requires the embedded profile.",
                         category="ios-artifact",
                     )
                 )

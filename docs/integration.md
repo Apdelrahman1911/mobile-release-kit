@@ -211,6 +211,14 @@ project-owned signing-preparation step for those additional profiles and export 
 project is otherwise unsupported by the shared profile inventory. Final nested-code validation
 still checks the exported artifact; it does not discover or install the missing profiles.
 
+Every signed entitlement must fit its own bundle's modern DER profile grants on
+every native architecture. Profileless frameworks/libraries/helpers must not claim
+entitlements; no parent-profile fallback exists. Missing DER, unsupported grant
+expressions and inconsistent slices fail before a fresh Store intent or upload.
+See [iOS entitlement rules](ios-entitlements.md), including the separate unresolved
+Apple profile issuer-authentication blocker (QA-002); do not activate production
+based solely on these content comparisons.
+
 The toolkit supports `ios.symbols.policy: retain`: it checks every present archive dSYM against
 the IPA/archive native identity set (requiring primary-app symbols), retains
 them with the candidate, and never contacts Crashlytics or another third party. Automated symbol

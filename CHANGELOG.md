@@ -24,6 +24,14 @@ All notable changes to Mobile Release Kit are documented here. The project follo
 
 ### Fixed
 
+- Compare every iOS signed entitlement with its own modern DER profile grants using
+  strict typed subsets and capability-specific wildcards. Inspect every native slice,
+  reject profileless nested claims, malformed/duplicate encodings and stale certificate
+  outputs; retain historical accepted-build recovery. Apple profile issuer authentication
+  remains the separate open production blocker QA-002; CMS decoding alone is not authority.
+- Validate complete original binary plist structure before conversion; reject unsupported
+  integer/date precision and overlong XML references, and preserve real signed zero in
+  archive/IPA resource comparisons without rewriting artifacts.
 - Make `init --apply` recoverable across all configuration, caller, metadata and ignore writes,
   including forced replacements. Stage complete output before installation, restore original
   inodes on precommit rollback, serialize cooperating commands, reject path aliases, and preserve

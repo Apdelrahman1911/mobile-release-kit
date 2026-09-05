@@ -59,6 +59,18 @@ Apple:
 
 If the workflow fails after credential import, verify temporary keychains/profiles/decoded files were removed before retrying.
 
+### Signed entitlement or modern profile comparison fails
+
+- Check each app/extension's own profile grants, not only its parent's capabilities.
+- Use a modern profile with `DER-Encoded-Profile`; outer/inner entitlement,
+  certificate, identity and validity fields must agree. Do not strip DER to bypass a check.
+- Inspect every native architecture and remove accidental entitlement claims from
+  profileless frameworks/helpers. App groups are exact grants, not arbitrary wildcards.
+- Correct capability/profile settings before a new candidate; never re-sign an
+  accepted candidate to finish its original evidence. See [entitlement rules](ios-entitlements.md).
+- A content-comparison PASS is not Apple issuer verification: QA-002 remains an
+  open production blocker, not something an operator confirmation can waive.
+
 ## dSYM or Crashlytics failure
 
 - Use the dSYM from the exact archived candidate.

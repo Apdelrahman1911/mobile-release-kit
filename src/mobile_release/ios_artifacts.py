@@ -6,9 +6,7 @@ replace) native signing validation and authenticated whole-artifact provenance.
 from __future__ import annotations
 
 import hashlib
-import math
 import os
-import plistlib
 import stat
 import struct
 import tempfile
@@ -17,14 +15,13 @@ import zipfile
 import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator, Mapping
-from xml.parsers.expat import ExpatError
 
 from .config import ReleaseVersion
 from .errors import ValidationError
 from .inspection import InspectionDeadline
+from .ios_entitlements import load_plist_dictionary, typed_value
 from .macho import MACHO_MAGICS, MachOSlice, inspect_macho
 
 MAX_FILES = 100_000
@@ -421,43 +418,17 @@ def safe_extract_zip(path: Path, destination: Path, *, deadline: InspectionDeadl
         raise ValidationError("iOS artifact ZIP could not be extracted safely") from error
 
 
-class _UniqueDict(dict):
-    def __setitem__(self, key: Any, value: Any) -> None:
-        _require(isinstance(key, str) and key not in self, "plist has a non-string or duplicate key")
-        super().__setitem__(key, value)
-
-
 def typed_plist(path: Path, *, deadline: InspectionDeadline | None = None) -> Any:
-    """Reject duplicate keys in XML *and* binary plists and preserve value types."""
+    """Use the same complete bounded dictionary decoder as signed iOS policy."""
     deadline = deadline if deadline is not None else InspectionDeadline()
     deadline.check()
     try:
         _require(path.is_file() and not path.is_symlink() and path.stat().st_size <= MAX_PLIST_BYTES,
                  "Info.plist must be a bounded regular file")
         data = path.read_bytes()
-        if data.startswith(b"bplist00"):
-            _require(len(data) >= 40 and int.from_bytes(data[-24:-16], "big") <= MAX_FILES,
-                     "binary plist object count exceeds its bound")
-        value = plistlib.loads(data, dict_type=_UniqueDict)
-        deadline.check()
-        remaining = MAX_FILES
-
-        def convert(item: Any, depth: int = 0) -> Any:
-            nonlocal remaining
-            deadline.check()
-            remaining -= 1
-            _require(depth <= MAX_DEPTH and remaining >= 0, "plist complexity exceeds its bound")
-            if isinstance(item, dict):
-                return ("dict", tuple((key, convert(val, depth + 1)) for key, val in sorted(item.items())))
-            if type(item) is list:
-                return ("list", tuple(convert(val, depth + 1) for val in item))
-            _require(type(item) in {str, bytes, int, bool, float, datetime}, "plist contains an unsupported value type")
-            _require(type(item) is not float or math.isfinite(item), "plist contains a nonfinite number")
-            return (type(item).__name__, item)
-
-        _require(isinstance(value, dict), "Info.plist root must be a dictionary")
-        return convert(value)
-    except (OSError, ValueError, TypeError, OverflowError, RecursionError, plistlib.InvalidFileException, ExpatError) as error:
+        value = load_plist_dictionary(data, deadline=deadline)
+        return typed_value(value, deadline=deadline)
+    except OSError as error:
         raise ValidationError("iOS artifact Info.plist is malformed or exceeds its bounds") from error
 
 
