@@ -42,9 +42,12 @@ or Store mutation path.
 For Android, each Google job confines the exact generated ADC path to runner-scoped directories,
 rejects symlinks and non-files, restricts it to mode `0600`, validates it, and removes it. The build
 job runs on a fresh runner after the non-publishing online gate, so Gradle and project checks cannot inherit ADC
-state. The later Store job downloads the fixed same-run handoff, revalidates its checksum and final
-signature, authenticates, uploads, reads back, then removes ADC before attestation or retained-artifact
-upload.
+state. The later Store job validates the original handoff, obtains preparation credentials for
+read-only Store inspection, and removes ADC before attesting and durably uploading its intent.
+It then obtains separate execution credentials, uploads/reconciles, reads back, and removes ADC
+before diagnostics, final attestation, and final-artifact upload. The handoff and intent are retained
+for 90 days. Deleting ADC removes that file, not the job's OIDC authority: no application-owned code
+may run anywhere in a Store/OIDC job, including cleanup and evidence steps.
 
 For iOS, the build job receives P12/profile signing material but no P8. Online and upload steps receive
 the P8 only in their own step environment and never receive the P12/profile. No job that can invoke
@@ -69,6 +72,8 @@ Required iOS items:
 - `MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE`
 - `MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME` when `ios.review.demoAccountRequired` is true
 - `MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD` when `ios.review.demoAccountRequired` is true
+- `MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64` (secret; exactly 32 decoded bytes)
+- `MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION` (variable; `[A-Za-z0-9_.-]{1,64}`)
 
 This environment must not contain a keystore, P12, provisioning profile, or Firebase client file.
 
@@ -84,6 +89,8 @@ The environment contains the same generic WIF/ASC names because environment scop
 - `MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE`
 - `MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME` when `ios.review.demoAccountRequired` is true
 - `MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD` when `ios.review.demoAccountRequired` is true
+- `MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64`
+- `MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION`
 
 Production contains no build-signing assets.
 
@@ -97,7 +104,7 @@ these step bindings make the external-input surface reviewable.
 
 ## Google authentication
 
-GitHub CI uses OIDC/Workload Identity Federation. Exported service-account JSON keys are not supported for CI in version 1.
+GitHub CI uses OIDC/Workload Identity Federation. Exported service-account JSON keys are not supported for CI.
 
 The GitHub authentication action writes a short-lived `external_account` ADC file. The pinned
 Fastlane/Supply version dispatches that JSON type to Google external-account credentials; the
@@ -111,7 +118,7 @@ exactly `github-hosted`. This is defense in depth after scheduling, not proof th
 never delivered to an eligible malicious runner. Before creating secrets or activating a caller, a
 repository or organization administrator must verify runner inventory and policy so no self-hosted
 runner can match the pinned `ubuntu-24.04` or `macos-26` labels, and must preserve that invariant.
-Version 0.1 does not configure or select a trusted custom runner group.
+The toolkit does not configure or select a trusted custom runner group.
 
 The trust policy should bind at least:
 
@@ -139,6 +146,20 @@ The Store API key is distinct from the Apple distribution certificate and provis
 - The provisioning profile authorizes the Store application identity, Team, entitlements, and distribution method.
 
 All three relationships are checked; possession of one is not evidence that another is correct.
+
+### Private review-state commitments
+
+iOS external testing and production additionally require a dedicated, randomly generated 256-bit
+HMAC key and its version. Provision it through the environment's secret-management process; never
+derive it from the P8, a password, or review-contact fields. Only preparation/execution steps receive
+it. Intents and receipts retain domain-separated HMAC commitments to before/target private review
+state, never the values themselves. This lets recovery reject changed inputs without publishing
+guessable hashes of email addresses or demo credentials.
+
+Keep each incomplete operation's original key **and version** available throughout the 90-day
+retention window. Changing either is not an evidence migration: restore the original protected
+configuration to reconcile that operation. Completed authenticated final reuse needs neither the
+key nor Store credentials. Key generation, rotation and retention are administrator responsibilities.
 
 ## Local credential file
 
@@ -172,6 +193,21 @@ Signed final-artifact validation checks:
 - the exported application signature/nested code and configured Apple distribution fingerprint;
 - embedded profile Bundle ID, Team, distribution type, expiry, production entitlements, and certificate relationship established by the signed export;
 - exact artifact identities and committed version/build values.
+
+Fresh Android preparation and every new AAB send require the pinned bundletool,
+Java 21 `jarsigner` signature checks (including expiry warnings), and the configured
+public upload-certificate fingerprint from `keytool`. Historical recovery instead
+authenticates the original intent and exact bytes before reconciling an accepted
+bundle or completing evidence; a later signing warning is not a reason to rebuild
+or re-sign it. Current-upload validation runs in an isolated, credential-free child.
+Only the public bundletool path and Java runtime context cross that boundary, not
+Store access, signing secrets or Java/Python runtime-injection variables.
+
+Fresh iOS preparation validates every inspected profile's creation/expiry dates and actual signing
+leaf-certificate validity. A new Transporter upload repeats current validation immediately before
+dispatch, including explicit same-byte upload retries. Reconciliation of an already accepted build
+can use the original authenticated validation and exact original hashes after signing assets expire;
+it cannot use that old validation to authorize a new upload. See [Recovery](recovery.md).
 
 Online preflight proves that the configured Google or Apple API credential can authenticate and see the intended Store application. Provider authentication is the authority for API-key suitability; a Base64 format check is not.
 

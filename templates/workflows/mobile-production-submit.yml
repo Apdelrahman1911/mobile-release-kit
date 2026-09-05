@@ -1,5 +1,4 @@
 name: Mobile production submission
-
 on:
   workflow_dispatch:
     inputs:
@@ -8,26 +7,54 @@ on:
         required: true
         type: choice
         options:
-          - android
-          - ios
+        - android
+        - ios
       candidate_run_id:
-        description: Successful candidate workflow run ID
-        required: true
+        description: Common candidate evidence run; leave blank for per-platform or preserved recovery inputs.
+        required: false
+        default: ''
         type: string
       external_run_id:
-        description: Successful external-testing workflow run ID
-        required: true
+        description: Common external evidence run; leave blank for per-platform or preserved recovery inputs.
+        required: false
+        default: ''
         type: string
       confirmation:
         description: production-submit:<platform>:<version>:<build>
         required: true
         type: string
-
+      recovery_run_id:
+        description: Run holding the original intent or selected complete final; never replaces authorization.
+        required: false
+        default: ''
+        type: string
+      recovery_confirmation:
+        description: Exact additional iOS recovery confirmation, only when requested by reconciliation.
+        required: false
+        default: ''
+        type: string
+      candidate_android_run_id:
+        description: android candidate evidence run; cannot conflict with a common run.
+        required: false
+        default: ''
+        type: string
+      candidate_ios_run_id:
+        description: ios candidate evidence run; cannot conflict with a common run.
+        required: false
+        default: ''
+        type: string
+      external_android_run_id:
+        description: android external evidence run; cannot conflict with a common run.
+        required: false
+        default: ''
+        type: string
+      external_ios_run_id:
+        description: ios external evidence run; cannot conflict with a common run.
+        required: false
+        default: ''
+        type: string
 permissions: {}
-
 jobs:
-  # The called jobs select mobile-production; credentials must be scoped there.
-  # This caller intentionally forwards no repository/organization secrets.
   production-submit:
     permissions:
       actions: read
@@ -43,3 +70,9 @@ jobs:
       candidate_run_id: ${{ inputs.candidate_run_id }}
       external_run_id: ${{ inputs.external_run_id }}
       confirmation: ${{ inputs.confirmation }}
+      recovery_run_id: ${{ inputs.recovery_run_id }}
+      recovery_confirmation: ${{ inputs.recovery_confirmation }}
+      candidate_android_run_id: ${{ inputs.candidate_android_run_id }}
+      candidate_ios_run_id: ${{ inputs.candidate_ios_run_id }}
+      external_android_run_id: ${{ inputs.external_android_run_id }}
+      external_ios_run_id: ${{ inputs.external_ios_run_id }}

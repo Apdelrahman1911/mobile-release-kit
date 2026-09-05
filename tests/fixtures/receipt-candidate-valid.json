@@ -1,9 +1,9 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "stage": "candidate",
-  "candidateManifestSha256": "0df7de6f898b62a761ed7b7d086ad9362ee6416c6f147fc2516cb315e3dae928",
+  "candidateManifestSha256": "177b5f3e92b3b02b99489bb6e7a6aaca183b16c371218715f79872e1597e8c16",
   "tooling": {
-    "version": "0.1.0",
+    "version": "0.2.0",
     "commit": "1111111111111111111111111111111111111111"
   },
   "repository": {
@@ -31,27 +31,60 @@
     "state": "available-to-testers",
     "observedAt": "2026-01-01T00:00:00Z"
   },
-  "createdBy": {
-    "workflow": "mobile-candidate",
-    "runId": "1000000000",
-    "attempt": 1
-  },
   "createdAt": "2026-01-01T00:00:00Z",
   "outcome": "mutated",
   "storeState": {
-    "canonicalization": "mrk-play-track-state-v1",
+    "canonicalization": "mrk-play-track-state-v2",
     "mode": "mutation",
-    "mutationEditId": "mutation-edit-1",
-    "readbackEditId": "readback-edit-1",
-    "destinationBeforeSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "destinationExpectedSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "destinationCommittedSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "unrelatedBeforeSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-    "unrelatedCommittedSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-    "targetReleaseSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    "mutationEditId": "mutation-edit",
+    "readbackEditId": "readback-edit",
+    "destinationBeforeSha256": "ada011349b750526e1d4a7ac17913384d14fea9c0d67f2c49e4ddb7ad801475d",
+    "destinationExpectedSha256": "0c2ae4a70510eb9e1db11f922c983bdd5fb28116b46b602614db017dd361f85d",
+    "destinationCommittedSha256": "0c2ae4a70510eb9e1db11f922c983bdd5fb28116b46b602614db017dd361f85d",
+    "unrelatedBeforeSha256": "d29df4c391084898c9e1235849f1114ed9b174a335a72299a80fa7d1a2822a36",
+    "unrelatedCommittedSha256": "d29df4c391084898c9e1235849f1114ed9b174a335a72299a80fa7d1a2822a36",
+    "targetReleaseSha256": "6f2ad47688bd1cee19c3929489f3840095ded8f373fa0cf2a7a8a3b286ccb0cf"
+  },
+  "documentType": "store-receipt",
+  "operationIntentSha256": "24b9829c7ee58f579ec82f16cc469d5b27641054baece581bec588cb370f8b29",
+  "authorizedBy": {
+    "workflow": "Mobile candidate",
+    "callerPath": ".github/workflows/mobile-candidate.yml",
+    "reusableRepository": "example/mobile-release-kit",
+    "reusablePath": ".github/workflows/reusable-candidate.yml",
+    "reusableCommit": "1111111111111111111111111111111111111111",
+    "runId": "1000000000",
+    "attempt": 1,
+    "headSha": "2222222222222222222222222222222222222222",
+    "ref": "refs/heads/main",
+    "event": "workflow_dispatch"
+  },
+  "executedBy": {
+    "workflow": "Mobile candidate",
+    "callerPath": ".github/workflows/mobile-candidate.yml",
+    "reusableRepository": "example/mobile-release-kit",
+    "reusablePath": ".github/workflows/reusable-candidate.yml",
+    "reusableCommit": "1111111111111111111111111111111111111111",
+    "runId": "1000000000",
+    "attempt": 1,
+    "headSha": "2222222222222222222222222222222222222222",
+    "ref": "refs/heads/main",
+    "event": "workflow_dispatch"
+  },
+  "producedBy": {
+    "workflow": "Mobile candidate",
+    "callerPath": ".github/workflows/mobile-candidate.yml",
+    "reusableRepository": "example/mobile-release-kit",
+    "reusablePath": ".github/workflows/reusable-candidate.yml",
+    "reusableCommit": "1111111111111111111111111111111111111111",
+    "runId": "1000000000",
+    "attempt": 1,
+    "headSha": "2222222222222222222222222222222222222222",
+    "ref": "refs/heads/main",
+    "event": "workflow_dispatch"
   },
   "integrity": {
     "algorithm": "sha256",
-    "sha256": "de767e4f4506b8bb0fcdb3ad39b2aa55a3cec931a3ec7fc9f33650e46065e6ea"
+    "sha256": "2633c2a44967b6cc6900f3f88831d383b0b5b1f43d0876d6f8b7b4fcdda53018"
   }
 }

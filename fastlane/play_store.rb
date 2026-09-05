@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "digest"
+require "bigdecimal"
 require "fileutils"
 require "json"
 require "time"
@@ -11,10 +12,10 @@ require_relative "release_support"
 
 module MobileReleaseKit
   # Supply 2.235.0 replaces Track.releases when it uploads or promotes a build.
-  # This adapter retains Supply's binary/metadata implementations, but owns the
-  # edit lifecycle so every API-visible release is preserved and verified.
+  # This adapter retains Supply's metadata implementation and Publisher's upload
+  # protocol, but owns the edit lifecycle and singleton, current-validated AAB send.
   class PreservingSupplyUploader < Supply::Uploader
-    CANONICALIZATION = "mrk-play-track-state-v1"
+    CANONICALIZATION = "mrk-play-track-state-v2"
     EXPECTED_TRACK_RELEASE_WRITERS = %i[
       country_targeting=
       in_app_update_priority=
@@ -26,6 +27,9 @@ module MobileReleaseKit
     ].freeze
     COMMIT_REVIEW_BEHAVIOR = "ERROR_IF_IN_REVIEW"
     COMMIT_CHANGES_NOT_SENT_FOR_REVIEW = false
+    MAX_JOURNAL_BYTES = 2 * 1024 * 1024
+    MAX_JOURNAL_HISTORY = 256
+    DISPATCH_PHASES = %w[mutation-dispatched mapping-recovery-dispatched].freeze
     AMBIGUOUS_COMMIT_ERRORS = [
       Google::Apis::TransmissionError,
       Google::Apis::RequestTimeOutError,
@@ -35,13 +39,61 @@ module MobileReleaseKit
     attr_reader :outcome, :state_evidence
 
     def self.configuration(options)
-      FastlaneCore::Configuration.create(Supply::Options.available_options, options)
+      unless options[:skip_upload_aab] == true || (options[:aab].is_a?(String) && !options[:aab].empty?)
+        raise ContractError, "New Play uploads require an explicit AAB path, not Supply discovery defaults"
+      end
+      # Never discover a binary from the toolkit working directory or adopt
+      # ambient SUPPLY_* path defaults. Only pinned caller options select files.
+      paths = { apk: nil, apk_paths: nil, aab: nil, aab_paths: nil }
+      available = Supply::Options.available_options.map do |item|
+        next item unless paths.key?(item.key)
+
+        # Supply memoizes cwd-derived defaults. Explicit nil does not disable
+        # Fastlane's default verification or environment/default fallback. Work
+        # on clones so other Supply users retain their original option contract.
+        item.dup.tap do |copy|
+          copy.default_value = nil
+          copy.default_value_dynamic = false
+          copy.env_name = nil
+          copy.env_names = []
+        end
+      end
+      FastlaneCore::Configuration.create(available, paths.merge(options))
     end
 
-    def self.run(options:, journal_path:)
+    def self.run(
+      options:,
+      journal_path:,
+      before_mutation_guard: nil,
+      after_mutation_guard: nil,
+      metadata_languages: nil,
+      intent_sha256: nil,
+      expected_bundle_sha256: nil,
+      expected_bundle: nil,
+      bundle_validation: nil
+    )
       Supply.config = configuration(options)
-      uploader = new(journal_path: journal_path)
+      uploader = new(
+        journal_path: journal_path,
+        before_mutation_guard: before_mutation_guard,
+        after_mutation_guard: after_mutation_guard,
+        metadata_languages: metadata_languages,
+        intent_sha256: intent_sha256,
+        expected_bundle_sha256: expected_bundle_sha256,
+        expected_bundle: expected_bundle,
+        bundle_validation: bundle_validation,
+      )
       uploader.perform_upload
+      uploader
+    end
+
+    def self.replay_mapping(options:, journal_path:, target_guard:, intent_sha256:)
+      Supply.config = configuration(options)
+      uploader = new(
+        journal_path: journal_path, before_mutation_guard: target_guard,
+        after_mutation_guard: target_guard, intent_sha256: intent_sha256,
+      )
+      uploader.perform_mapping_recovery
       uploader
     end
 
@@ -91,7 +143,22 @@ module MobileReleaseKit
     end
 
     def self.normalize_release(release)
-      value = deep_sort(release)
+      raise ContractError, "Google Play release must be an object" unless release.is_a?(Hash)
+
+      # The API omits unset fields even when an SDK object serializes an explicit
+      # nil after a setter. Those two observations mean the same Store state.
+      value = deep_sort(release).reject { |_key, item| item.nil? }
+      value.delete("releaseNotes") if value["releaseNotes"] == []
+      # JSON floats do not have a cross-language canonical representation.
+      # Evidence uses a lossless decimal spelling of the API's JSON number;
+      # original Track/TrackRelease objects are retained for the actual write.
+      if value.key?("userFraction") && !value["userFraction"].nil?
+        fraction = BigDecimal(value.fetch("userFraction").to_s)
+        unless fraction.finite? && fraction.positive? && fraction < 1
+          raise ContractError, "Google Play rollout fraction is invalid"
+        end
+        value["userFraction"] = fraction.to_s("F").sub(/0+\z/, "")
+      end
       if value.key?("versionCodes")
         value["versionCodes"] = Array(value["versionCodes"]).map(&:to_s).sort
       end
@@ -105,6 +172,8 @@ module MobileReleaseKit
         targeting["countries"] = Array(targeting["countries"]).map(&:to_s).sort
       end
       deep_sort(value)
+    rescue ArgumentError, TypeError
+      raise ContractError, "Google Play returned an invalid release value"
     end
 
     def self.deep_sort(value)
@@ -129,7 +198,62 @@ module MobileReleaseKit
       Digest::SHA256.hexdigest("#{CANONICALIZATION}:#{domain}:#{canonical_json(value)}")
     end
 
-    def initialize(journal_path:, client: nil)
+    def self.read_journal_history(path, intent_sha256:, package_name:)
+      path = File.expand_path(path)
+      return nil unless File.exist?(path) || File.symlink?(path)
+
+      unless !File.symlink?(path) && File.file?(path) && File.realpath(path) == path
+        raise ContractError, "Play operation journal must be a regular non-symlink file"
+      end
+      raw = File.open(path, File::RDONLY | File::NOFOLLOW) do |file|
+        raise ContractError, "Play operation journal must be a regular file" unless file.stat.file?
+        file.read(MAX_JOURNAL_BYTES + 1) || +""
+      end
+      raise ContractError, "Play operation journal exceeds its diagnostic bound" if raw.bytesize > MAX_JOURNAL_BYTES
+
+      document = MobileReleaseKit.strict_json(raw.force_encoding(Encoding::UTF_8), label: "Play operation journal")
+      unless document.is_a?(Hash) && document["schemaVersion"] == 1 &&
+             document["kind"] == "google-play-track-state-journal" && document["canonicalization"] == CANONICALIZATION &&
+             document["packageName"] == package_name &&
+             (intent_sha256.nil? ? !document.key?("operationIntentSha256") : document["operationIntentSha256"] == intent_sha256)
+        raise ContractError, "Play operation journal belongs to another intent, application or format"
+      end
+      history = document["history"]
+      unless history.is_a?(Array) && history.length <= 10_000 && history.all? do |row|
+        row.is_a?(Hash) && (row.keys - %w[phase observedAt failureClass failureRole]).empty? &&
+          row["phase"].is_a?(String) && row["phase"].match?(/\A[a-z][a-z0-9-]{0,99}\z/) &&
+          row["observedAt"].is_a?(String) && row["observedAt"].match?(/\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\z/) &&
+          (!row.key?("failureClass") || (row["failureClass"].is_a?(String) && row["failureClass"].match?(/\A[A-Za-z_][A-Za-z0-9_:]{0,199}\z/))) &&
+          (!row.key?("failureRole") || %w[commit reconciliation terminal].include?(row["failureRole"]))
+      end
+        raise ContractError, "Play operation journal history is invalid"
+      end
+      history
+    rescue SystemCallError, IOError
+      raise ContractError, "Play operation journal could not be read safely"
+    end
+
+    def self.compact_journal_history(history)
+      return history if history.length <= MAX_JOURNAL_HISTORY
+
+      # Dispatch signals are monotonic, even after hundreds of failed later
+      # invocations. They are local ambiguity signals, never Store/auth proof.
+      retained = DISPATCH_PHASES.filter_map { |phase| history.index { |row| row["phase"] == phase } }
+      start = history.length - (MAX_JOURNAL_HISTORY - retained.length)
+      (retained + (start...history.length).to_a).uniq.sort.map { |index| history.fetch(index) }
+    end
+
+    def initialize(
+      journal_path:,
+      client: nil,
+      before_mutation_guard: nil,
+      after_mutation_guard: nil,
+      metadata_languages: nil,
+      intent_sha256: nil,
+      expected_bundle_sha256: nil,
+      expected_bundle: nil,
+      bundle_validation: nil
+    )
       super()
       self.class.assert_dependency_contract!
       @journal_path = File.expand_path(journal_path)
@@ -140,10 +264,19 @@ module MobileReleaseKit
       @readback_edit_id = nil
       @outcome = nil
       @primary_error = nil
-      @journal_history = []
+      @before_mutation_guard = before_mutation_guard
+      @after_mutation_guard = after_mutation_guard
+      @metadata_languages = metadata_languages
+      @intent_sha256 = intent_sha256
+      @expected_bundle_sha256 = expected_bundle_sha256
+      @expected_bundle = expected_bundle
+      @bundle_validation = bundle_validation
       @commit_failure_class = nil
       @reconciliation_failure_class = nil
       @terminal_failure_class = nil
+      @journal_history = self.class.read_journal_history(
+        @journal_path, intent_sha256: @intent_sha256, package_name: Supply.config[:package_name].to_s,
+      )
     end
 
     # Mirrors the small, pinned Supply orchestration deliberately. Unlike
@@ -160,11 +293,17 @@ module MobileReleaseKit
       reject_unsafe_supply_options!
       client.begin_edit(package_name: Supply.config[:package_name])
       @mutation_edit_id = client.current_edit.id.to_s
+      precondition = @before_mutation_guard&.call(client)
 
-      version_codes = []
-      version_codes.concat(upload_apks) unless Supply.config[:skip_upload_apk]
-      version_codes.concat(upload_bundles) unless Supply.config[:skip_upload_aab]
+      version_codes = reusable_bundle_version_codes(precondition)
+      if !Supply.config[:skip_upload_aab] && version_codes.empty?
+        version_codes = upload_validated_bundle
+      end
       validate_uploaded_version_codes!(version_codes) unless version_codes.empty?
+      # Do not mint this invocation's prior-execution marker before the final
+      # pre-upload read. Foreign matching state appearing during validation is
+      # not recovery authority. Reuse/promotion still journals before mutation.
+      persist_journal("mutation-dispatched")
       upload_mapping(version_codes)
 
       if !version_codes.empty?
@@ -180,6 +319,7 @@ module MobileReleaseKit
       target_track = Supply.config[:track_promote_to] || Supply.config[:track]
       perform_upload_meta(version_codes, target_track)
       verify_guard_before_commit!
+      @after_mutation_guard&.call(client)
       client.validate_current_edit!
       persist_journal("validated-before-commit")
       if Supply.config[:validate_only]
@@ -198,6 +338,45 @@ module MobileReleaseKit
       @primary_error = e
       @terminal_failure_class = e.class.name
       persist_journal("failed", failure_class: e.class.name, failure_role: "terminal") rescue nil
+      raise
+    ensure
+      abort_active_edit_without_masking
+    end
+
+    # Publisher has no mapping digest readback. Even when the track is already
+    # final, recovery must replay the authenticated bytes in a fresh edit and
+    # receive a successful commit response. Track-only readback cannot prove an
+    # ambiguous mapping commit; another recovery can safely replay the same file.
+    def perform_mapping_recovery
+      verify_config!
+      reject_unsafe_supply_options!
+      raise ContractError, "Mapping recovery requires exactly one mapping" unless Supply.config[:mapping] && !Supply.config[:mapping_paths]
+      client.begin_edit(package_name: Supply.config[:package_name])
+      @mutation_edit_id = client.current_edit.id.to_s
+      @before_mutation_guard&.call(client)
+      persist_journal("mapping-recovery-dispatched")
+      upload_mapping([Supply.config[:version_code].to_i])
+      @after_mutation_guard&.call(client)
+      client.validate_current_edit!
+      options = Google::Apis::RequestOptions.new
+      options.retries = 0
+      client.client.commit_edit(
+        client.current_package_name, client.current_edit.id,
+        changes_in_review_behavior: COMMIT_REVIEW_BEHAVIOR,
+        changes_not_sent_for_review: COMMIT_CHANGES_NOT_SENT_FOR_REVIEW,
+        options: options,
+      )
+      clear_active_edit_handle!
+      client.begin_edit(package_name: Supply.config[:package_name])
+      @readback_edit_id = client.current_edit.id.to_s
+      @after_mutation_guard&.call(client)
+      @outcome = "reconciled"
+      persist_journal("mapping-replayed-and-committed")
+      self
+    rescue Exception => e # rubocop:disable Lint/RescueException -- preserve cancellation without blind replay
+      @primary_error = e
+      @terminal_failure_class = e.class.name
+      persist_journal("mapping-recovery-failed", failure_class: e.class.name, failure_role: "terminal") rescue nil
       raise
     ensure
       abort_active_edit_without_masking
@@ -255,7 +434,88 @@ module MobileReleaseKit
 
     private
 
+    def all_languages
+      # Supply otherwise scans every directory, including locales not authorized
+      # by configuration or the pre-mutation metadata target.
+      @metadata_languages || super
+    end
+
+    def reusable_bundle_version_codes(precondition)
+      return [] if Supply.config[:skip_upload_aab]
+
+      unless precondition.is_a?(Hash) && precondition[:phase] == :before && precondition[:bundles].is_a?(Array)
+        raise ContractError, "AAB reuse/upload requires a complete classified Store precondition"
+      end
+      expected_code = Supply.config[:version_code].to_i
+      # Consume the SAME full observation whose before/target/authority checks
+      # passed. A separate bundle read must not introduce newly visible foreign
+      # state after those checks and silently authorize its reuse.
+      matches = precondition.fetch(:bundles).select { |bundle| bundle.fetch("versionCode") == expected_code }
+      return [] if matches.empty?
+      raise ContractError, "Google Play returned duplicate bundles for the target version code" unless matches.length == 1
+      raise ContractError, "Operation intent does not bind the candidate AAB digest" unless @expected_bundle_sha256
+      unless matches.first.fetch("sha256") == @expected_bundle_sha256
+        raise ContractError, "Existing Google Play bundle digest differs from the operation intent"
+      end
+
+      persist_journal("reusing-exact-bundle")
+      [expected_code]
+    end
+
+    def upload_validated_bundle
+      unless @bundle_validation.respond_to?(:call) && @before_mutation_guard.respond_to?(:call)
+        raise ContractError, "Every new AAB upload requires current validation and a full Store precondition guard"
+      end
+      aab = final_bundle_path!
+      @bundle_validation.call(aab)
+      # Slow validation may span unrelated Store changes or edit invalidation.
+      # Never silently replace this edit or adopt a first-invocation appearance.
+      precondition = @before_mutation_guard.call(client)
+      existing = reusable_bundle_version_codes(precondition)
+      return existing unless existing.empty?
+
+      options = Google::Apis::RequestOptions.new
+      options.retries = 0
+      persist_journal("mutation-dispatched")
+      aab = final_bundle_path!
+      result = client.client.upload_edit_bundle(
+        client.current_package_name, client.current_edit.id,
+        upload_source: aab, content_type: "application/octet-stream",
+        ack_bundle_installation_warning: Supply.config[:ack_bundle_installation_warning],
+        options: options,
+      )
+      # Own the logical request rather than inherited Supply upload_bundle or
+      # call_google_api retry loops. SDK same-session resumable transfers/auth
+      # refresh are still used; failure never dispatches another logical upload.
+      codes = [result.version_code]
+      validate_uploaded_version_codes!(codes)
+      codes
+    end
+
+    def final_bundle_path!
+      path = Supply.config[:aab]
+      unless @expected_bundle.is_a?(Hash) && @expected_bundle["logicalName"] == "android-aab" &&
+             @expected_bundle["size"].is_a?(Integer) && @expected_bundle["size"].positive? &&
+             @expected_bundle["sha256"].is_a?(String) && @expected_bundle["sha256"].match?(/\A[0-9a-f]{64}\z/) &&
+             @expected_bundle["sha256"] == @expected_bundle_sha256 &&
+             path.is_a?(String) && path.start_with?(File::SEPARATOR) && !path.match?(/[\x00-\x1f\x7f]/) &&
+             File.file?(path) && !File.symlink?(path) && File.realpath(path) == path &&
+             File.basename(path) == @expected_bundle["fileName"] && File.size(path) == @expected_bundle["size"] &&
+             Digest::SHA256.file(path).hexdigest == @expected_bundle_sha256
+        raise ContractError, "New AAB upload requires the exact regular original intent-bound bundle"
+      end
+      path
+    rescue SystemCallError
+      raise ContractError, "New AAB upload requires the exact regular original intent-bound bundle"
+    end
+
     def reject_unsafe_supply_options!
+      unless Supply.config[:skip_upload_apk] == true && !Supply.config[:apk] && !Supply.config[:apk_paths] && !Supply.config[:aab_paths]
+        raise ContractError, "Guarded Play adapter only supports an explicit singleton AAB, never APKs or batch uploads"
+      end
+      unless Supply.config[:skip_upload_aab] == true || (Supply.config[:aab].is_a?(String) && !Supply.config[:aab].empty? && !Supply.config[:track_promote_to])
+        raise ContractError, "New Play uploads require one explicit AAB path and no promotion options"
+      end
       if Supply.config[:version_codes_to_retain]&.any?
         FastlaneCore::UI.user_error!("Guarded Play adapter does not accept version_codes_to_retain")
       end
@@ -271,9 +531,10 @@ module MobileReleaseKit
     end
 
     def validate_uploaded_version_codes!(version_codes)
-      actual = version_codes.map(&:to_i)
-      expected = [Supply.config[:version_code].to_i]
-      FastlaneCore::UI.user_error!("Google Play upload returned an unexpected version code") unless actual == expected
+      expected = Supply.config[:version_code].to_i.to_s
+      unless version_codes.length == 1 && (version_codes.first.is_a?(Integer) || version_codes.first.is_a?(String)) && version_codes.first.to_s == expected
+        FastlaneCore::UI.user_error!("Google Play upload returned an unexpected version code")
+      end
     end
 
     def update_track(version_codes)
@@ -537,6 +798,7 @@ module MobileReleaseKit
       end
       verify_source_transition!(source) if @guard[:source_name]
       @outcome = "reconciled" if reconciled
+      @after_mutation_guard&.call(client)
       build_state_evidence!(destination, source, mode: "mutation")
       persist_journal("committed-and-read-back")
     ensure
@@ -600,7 +862,7 @@ module MobileReleaseKit
       FastlaneCore::UI.important("Could not delete the uncommitted Google Play edit; original failure preserved")
     end
 
-    def journal_document(phase, observed_at:)
+    def journal_document(phase, observed_at:, history:)
       document = {
         "schemaVersion" => 1,
         "kind" => "google-play-track-state-journal",
@@ -608,8 +870,9 @@ module MobileReleaseKit
         "phase" => phase,
         "packageName" => Supply.config[:package_name].to_s,
         "observedAt" => observed_at,
-        "history" => @journal_history,
+        "history" => history,
       }
+      document["operationIntentSha256"] = @intent_sha256 if @intent_sha256
       document["mutationEditId"] = @mutation_edit_id if @mutation_edit_id
       document["readbackEditId"] = @readback_edit_id if @readback_edit_id
       document["outcome"] = @outcome if @outcome
@@ -646,19 +909,29 @@ module MobileReleaseKit
       history_entry = { "phase" => phase, "observedAt" => observed_at }
       history_entry["failureClass"] = failure_class if failure_class
       history_entry["failureRole"] = failure_role if failure_role
-      @journal_history << history_entry
       path = @journal_path
-      raise ContractError, "Play state journal path must not be a symlink" if File.symlink?(path)
+      previous = self.class.read_journal_history(
+        path, intent_sha256: @intent_sha256, package_name: Supply.config[:package_name].to_s,
+      )
+      # Workflows serialize mutations and have one local journal writer. Never
+      # erase a previously loaded dispatch signal if the file disappears or is
+      # replaced/truncated while this invocation is validating or reading Store.
+      unless previous == @journal_history
+        raise ContractError, "Play operation journal changed during this invocation; preserve it and reconcile in a new invocation"
+      end
+      history = self.class.compact_journal_history(Array(previous) + [history_entry])
+      contents = JSON.pretty_generate(journal_document(phase, observed_at: observed_at, history: history)) + "\n"
+      raise ContractError, "Play operation journal exceeds its diagnostic bound" if contents.bytesize > MAX_JOURNAL_BYTES
 
       FileUtils.mkdir_p(File.dirname(path), mode: 0o700)
       temporary = "#{path}.tmp-#{Process.pid}-#{Thread.current.object_id}"
       File.open(temporary, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
-        file.write(JSON.pretty_generate(journal_document(phase, observed_at: observed_at)))
-        file.write("\n")
+        file.write(contents)
         file.flush
         file.fsync
       end
       File.rename(temporary, path)
+      @journal_history = history
       begin
         File.open(File.dirname(path), File::RDONLY) { |directory| directory.fsync }
       rescue Errno::EINVAL, Errno::ENOTSUP

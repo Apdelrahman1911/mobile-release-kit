@@ -1,0 +1,192 @@
+{
+  "documentType": "store-operation-intent",
+  "schemaVersion": 1,
+  "stage": "production-submit",
+  "platform": "android",
+  "tooling": {
+    "version": "0.2.0",
+    "commit": "1111111111111111111111111111111111111111"
+  },
+  "repository": {
+    "fullName": "example/mobile-app",
+    "id": "100000000"
+  },
+  "candidateSource": {
+    "commit": "2222222222222222222222222222222222222222",
+    "tree": "3333333333333333333333333333333333333333",
+    "ref": "refs/heads/main"
+  },
+  "operationSource": {
+    "commit": "2222222222222222222222222222222222222222",
+    "tree": "3333333333333333333333333333333333333333",
+    "ref": "refs/heads/main"
+  },
+  "authorizedBy": {
+    "workflow": "Mobile production-submit",
+    "callerPath": ".github/workflows/mobile-production-submit.yml",
+    "reusableRepository": "example/mobile-release-kit",
+    "reusablePath": ".github/workflows/reusable-production-submit.yml",
+    "reusableCommit": "1111111111111111111111111111111111111111",
+    "runId": "1000000002",
+    "attempt": 1,
+    "headSha": "2222222222222222222222222222222222222222",
+    "ref": "refs/heads/main",
+    "event": "workflow_dispatch"
+  },
+  "confirmation": "production-submit:android:1.2.3:42",
+  "application": {
+    "id": "com.example.reader"
+  },
+  "version": {
+    "marketing": "1.2.3",
+    "build": 42
+  },
+  "destination": {
+    "channel": "production",
+    "releaseStatus": "draft"
+  },
+  "configuration": {
+    "path": "release/mobile-release.json",
+    "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "metadataSha256": "5555555555555555555555555555555555555555555555555555555555555555"
+  },
+  "artifacts": [
+    {
+      "logicalName": "android-aab",
+      "platform": "android",
+      "kind": "aab",
+      "fileName": "reader-1.2.3-42.aab",
+      "size": 12345678,
+      "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "architectures": [
+        "arm64-v8a",
+        "x86_64"
+      ]
+    },
+    {
+      "logicalName": "store-metadata",
+      "platform": "shared",
+      "kind": "metadata",
+      "fileName": "store-metadata-1.2.3-42.zip",
+      "size": 34567,
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "architectures": []
+    },
+    {
+      "logicalName": "validation-report",
+      "platform": "shared",
+      "kind": "validation-report",
+      "fileName": "validation-report-1.2.3-42.json",
+      "size": 2345,
+      "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "architectures": []
+    }
+  ],
+  "signing": [
+    {
+      "platform": "android",
+      "kind": "android-upload",
+      "certificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "predecessors": {
+    "candidateManifestSha256": "177b5f3e92b3b02b99489bb6e7a6aaca183b16c371218715f79872e1597e8c16",
+    "candidateReceiptSha256": "2633c2a44967b6cc6900f3f88831d383b0b5b1f43d0876d6f8b7b4fcdda53018",
+    "externalReceiptSha256": "4376dc2dd0c38957a5971a4e3ff3c3cda7879b5ddcb424230ac1c829408805e5"
+  },
+  "storePrecondition": {
+    "schemaVersion": 1,
+    "documentType": "store-precondition",
+    "operation": "android_production_draft",
+    "platform": "android",
+    "appIdentity": "com.example.reader",
+    "marketingVersion": "1.2.3",
+    "buildNumber": 42,
+    "observedAt": "2026-01-01T00:00:00Z",
+    "snapshot": {
+      "canonicalization": "mrk-play-operation-v1",
+      "destinationTrack": "production",
+      "destinationState": {
+        "canonicalization": "mrk-play-track-state-v2",
+        "track": "production",
+        "releases": []
+      },
+      "sourceTrack": "closed-testing",
+      "sourceState": {
+        "canonicalization": "mrk-play-track-state-v2",
+        "track": "closed-testing",
+        "releases": [
+          {
+            "name": "1.2.3",
+            "status": "completed",
+            "versionCodes": [
+              "42"
+            ]
+          }
+        ]
+      },
+      "bundles": [
+        {
+          "versionCode": 42,
+          "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+        }
+      ],
+      "targetPresent": false,
+      "targetRelease": {
+        "name": "1.2.3",
+        "status": "draft",
+        "versionCodes": [
+          "42"
+        ]
+      },
+      "destinationTargetState": {
+        "canonicalization": "mrk-play-track-state-v2",
+        "track": "production",
+        "releases": [
+          {
+            "name": "1.2.3",
+            "status": "draft",
+            "versionCodes": [
+              "42"
+            ]
+          }
+        ]
+      },
+      "sourceAllowedStates": [
+        {
+          "canonicalization": "mrk-play-track-state-v2",
+          "track": "closed-testing",
+          "releases": [
+            {
+              "name": "1.2.3",
+              "status": "completed",
+              "versionCodes": [
+                "42"
+              ]
+            }
+          ]
+        },
+        {
+          "canonicalization": "mrk-play-track-state-v2",
+          "track": "closed-testing",
+          "releases": []
+        }
+      ],
+      "metadataBefore": {
+        "listings": [],
+        "images": [],
+        "observedImageIds": []
+      },
+      "metadataTarget": {
+        "listings": [],
+        "images": []
+      }
+    }
+  },
+  "privateStateCommitments": {},
+  "createdAt": "2026-01-01T00:00:00Z",
+  "integrity": {
+    "algorithm": "sha256",
+    "sha256": "9db63ff0329fd43bfc9398195d42d2d982df4f784a9914b1ff13dc16bffc1d50"
+  }
+}

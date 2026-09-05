@@ -74,7 +74,7 @@ shadowing the pinned tooling checkout. Every reusable job aborts its steps unles
 `runner.environment` reports `github-hosted`, but this first-step guard is not a server-side runner
 selector. Before activation, a repository or organization administrator must verify that no
 self-hosted runner is eligible for the pinned `ubuntu-24.04` or `macos-26` labels and preserve that
-runner policy. Version 0.1 does not configure a trusted custom runner group; merely copying hosted
+runner policy. The toolkit does not configure a trusted custom runner group; merely copying hosted
 labels onto a self-hosted runner is unsupported and may expose the job before its guard aborts.
 
 ## 2. Establish one version source
@@ -93,7 +93,10 @@ Android-only release. When iOS is enabled, App Store compatibility narrows this 
 numeric components with no suffix. Build numbers are canonical positive base-10 integers from 1 to
 2,100,000,000; signs, whitespace, zero, and leading zeroes are rejected.
 
-The file is reviewed source. CI never edits it, derives a replacement from a workflow run, or asks a Store to allocate a value. Online preflight rejects a value already consumed by either enabled Store.
+The file is reviewed source. CI never edits it, derives a replacement from a workflow run, or asks a
+Store to allocate a value. Fresh-candidate online preflight rejects a consumed value. Recovery of
+an interrupted original operation follows its authenticated intent instead of rerunning that
+uniqueness gate or allocating another build number.
 
 ## 3. Preview discovery
 
@@ -183,21 +186,21 @@ It may permit unsigned Release assembly for `preflight --offline`, but it must f
 
 The Xcode Archive action remains Release and uses the application’s existing manual-signing configuration. The shared candidate workflow installs the configured P12/profile into an ephemeral keychain and passes explicit signing/export settings. The archive and exported IPA are validated independently.
 
-The v0.1 shared credential contract owns exactly one provisioning profile and maps export options
+The shared credential contract owns exactly one provisioning profile and maps export options
 only for the configured main application Bundle ID. If an archive contains an extension, watch app,
 or another target with its own Bundle ID/profile, the application must provide a bounded
 project-owned signing-preparation step for those additional profiles and export mappings. Such a
-project is otherwise unsupported by the shared v0.1 profile inventory. Final nested-code validation
+project is otherwise unsupported by the shared profile inventory. Final nested-code validation
 still checks the exported artifact; it does not discover or install the missing profiles.
 
-Version 0.1 supports `ios.symbols.policy: retain`: it verifies the exact archive dSYMs, retains
+The toolkit supports `ios.symbols.policy: retain`: it verifies the exact archive dSYMs, retains
 them with the candidate, and never contacts Crashlytics or another third party. Automated symbol
 upload is intentionally not part of the shared pipeline. `required` is a fail-closed activation
 sentinel: its argv is syntax-checked but never executed, and signing preflight blocks until a
 separately guarded candidate-stage integration exists. Do not select `required` expecting an
 implicit local or CI upload.
 
-Version 0.1 runs every Apple job on the versioned `macos-26` runner and selects Xcode 26.3 build
+Native Apple jobs use the versioned `macos-26` runner and select Xcode 26.3 build
 17C529 explicitly. The job fails before project work if that compiler is absent or different. A
 consumer must prove compatibility with this baseline during shadow integration; compiler changes
 are shared-tool upgrades, not ambient `macos-latest` changes.
@@ -246,7 +249,7 @@ not invalidate a valid candidate.
 
 Mechanical validation cannot establish that screenshots are honest or that privacy/content declarations are legally correct. Record those checks in the application’s release documentation and Store console.
 
-Version 0.1 validates PNG/JPEG headers and positive image dimensions, not Apple/Google
+Metadata preflight validates PNG/JPEG headers and positive image dimensions, not Apple/Google
 device-specific screenshot sizes, color profiles, screenshot counts, or locale/device coverage. It
 also validates that `*_url.txt` contains one absolute credential-free HTTPS URL, but does not make a
 network request to prove reachability, redirects, ownership, or page content. Store upload and a
@@ -284,12 +287,20 @@ mobile-release credentials --stage all
 
 Configure required reviewers for production. Configure Google WIF trust using the immutable GitHub repository ID and intended environment. Add a least-privileged App Store Connect API key. See [credentials.md](credentials.md).
 
-Candidate uses the same fixed environment across three capability-separated jobs per selected
+For iOS external testing and production, also provision the dedicated 32-byte private-state HMAC
+key and its version from the credential inventory. Retain the original key/version for incomplete
+operations; rotation must not strand their authenticated private-state commitments.
+
+Candidate first resolves any existing evidence in a read-only job without a Store environment.
+Fresh candidates use the same fixed environment across three capability-separated jobs per selected
 platform: a non-publishing Store/API gate, an application build/sign job, and a Store/evidence job. Depending
 on environment protection settings, GitHub may request approval at more than one of these job
 boundaries. That is intentional: the build job never has Store/OIDC authority, and the Store jobs
 never run application commands. The signed AAB/IPA crosses the boundary only as a fixed-name,
-checksum-bound artifact from the same workflow run and is independently revalidated before upload.
+checksum-bound artifact and is independently revalidated before upload. The Store job must persist
+an authenticated intent before mutation. Recovery retains the original intent, handoff and source;
+a complete final skips all Store/build work. These artifacts have 90-day retention, not an unlimited
+recovery guarantee.
 
 ## 9. Prove the project locally
 
@@ -317,3 +328,16 @@ For an existing application:
 7. Remove old release logic only after the replacement receipts and readback are accepted.
 
 Never migrate multiple applications by deleting their old workflows first.
+
+## 11. Rehearse recovery and preserve evidence references
+
+Use credential-free failure-injection tests or an explicitly authorized non-public canary to check
+failure after intent upload and after Store acceptance, but before final evidence upload. Confirm
+that recovery keeps the original bytes/version and does not overwrite unrelated Store state.
+Do not test failure handling by starting a public rollout.
+
+Keep per-platform evidence run/artifact outputs. Partial success may leave Android evidence in the
+original run and iOS evidence in a recovery run; use the platform-specific candidate/external run
+inputs instead of inventing one shared origin. A complete pending TestFlight receipt is immutable:
+use a new external dispatch after availability, not a rerun to rewrite it. Read [Recovery](recovery.md)
+for `recovery_run_id`, protected Apple ambiguity confirmations, retention and HMAC-key requirements.

@@ -1,388 +1,144 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import tempfile
 import unittest
-import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
 from mobile_release.config import load_config
-from mobile_release.discovery import GitContext
 from mobile_release.errors import ValidationError
 from mobile_release.provenance import (
-    artifact_records,
-    build_candidate_manifest,
-    build_receipt,
-    load_evidence,
-    seal,
-    validate_store_receipt,
-    validate_receipt_chain,
-    validate_evidence_document,
-    verify_sealed,
-    write_evidence,
+    build_receipt, load_evidence, seal, validate_store_receipt,
+    validate_receipt_chain, validate_evidence_document, verify_sealed, write_evidence,
 )
-
+from .evidence_helpers import build_lifecycle, fixture_chain, raw_receipt, workflow_environment
 from .helpers import android_config, ios_config, write_project
 
 
-def play_store_state(*, stage: str = "candidate", outcome: str = "mutated") -> dict:
-    observed = "a" * 64
-    state = {
-        "canonicalization": "mrk-play-track-state-v1",
-        "mode": "observation" if outcome == "already-present" else "mutation",
-        "readbackEditId": "readback-edit",
-        "destinationBeforeSha256": observed if outcome == "already-present" else "b" * 64,
-        "destinationExpectedSha256": observed,
-        "destinationCommittedSha256": observed,
-        "unrelatedBeforeSha256": "c" * 64,
-        "unrelatedCommittedSha256": "c" * 64,
-        "targetReleaseSha256": "d" * 64,
-    }
-    if outcome != "already-present":
-        state["mutationEditId"] = "mutation-edit"
-    if stage != "candidate":
-        state["sourceBeforeSha256"] = "e" * 64
-        state["sourceExpectedSha256"] = "e" * 64
-        state["sourceCommittedSha256"] = "e" * 64
-        state["sourceUnrelatedBeforeSha256"] = "f" * 64
-        state["sourceUnrelatedCommittedSha256"] = "f" * 64
-        state["sourceTargetTransition"] = "retained"
-    return state
+def chain_arguments(docs: dict) -> dict:
+    return {name: docs[name] for name in ("candidate_receipt", "external_receipt", "production_receipt", "candidate_intent", "external_intent", "production_intent")} | {"candidate_manifest": docs["candidate"]}
 
 
 class ProvenanceTests(unittest.TestCase):
-    def test_observation_only_android_external_receipt_cannot_authorize_production(self) -> None:
-        fixtures = Path(__file__).resolve().parents[1] / "fixtures"
-        candidate = json.loads((fixtures / "candidate-valid.json").read_text(encoding="utf-8"))
-        candidate_receipt = json.loads(
-            (fixtures / "receipt-candidate-valid.json").read_text(encoding="utf-8")
-        )
-        external = verify_sealed(
-            json.loads((fixtures / "receipt-external-valid.json").read_text(encoding="utf-8"))
-        )
-        external["outcome"] = "already-present"
-        state = external["storeState"]
-        state["mode"] = "observation"
-        state.pop("mutationEditId")
-        state["destinationBeforeSha256"] = state["destinationExpectedSha256"]
-        state["sourceTargetTransition"] = "already-deactivated"
-        observation = seal(external)
-
-        validate_receipt_chain(
-            candidate_manifest=candidate,
-            candidate_receipt=candidate_receipt,
-            external_receipt=observation,
-            platform="android",
-        )
-        with self.assertRaisesRegex(ValidationError, "observation-only"):
-            validate_receipt_chain(
-                candidate_manifest=candidate,
-                candidate_receipt=candidate_receipt,
-                external_receipt=observation,
-                platform="android",
-                require_production_eligible_external=True,
-            )
-
     def test_builder_round_trip_matches_committed_schema_shape(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            config = load_config(write_project(root, android_config()))
-            aab = root / "app.aab"
-            with zipfile.ZipFile(aab, "w") as archive:
-                archive.writestr("BundleConfig.pb", b"x")
-                archive.writestr("base/manifest/AndroidManifest.xml", b"x")
-                archive.writestr("base/dex/classes.dex", b"x")
-                archive.writestr("base/lib/arm64-v8a/libx.so", b"x")
-            metadata = root / "metadata.zip"
-            metadata.write_bytes(b"metadata")
-            validation_report = root / "validation-report.json"
-            validation_report.write_bytes(b"validation")
-            git = GitContext(
-                repository="example/mobile-app",
-                repository_id="100000000",
-                commit="2" * 40,
-                tree="3" * 40,
-                ref="refs/heads/main",
-                branch="main",
-                dirty=False,
-            )
-            raw = {
-                "schemaVersion": 2,
-                "operation": "android_internal_upload",
-                "platform": "android",
-                "appIdentity": "com.example.reader",
-                "marketingVersion": "1.2.3",
-                "buildNumber": 42,
-                "observedAt": "2026-01-01T00:00:00Z",
-                "result": "accepted",
-                "state": "available-to-testers",
-                "versionCode": 42,
-                "destinationTrack": "internal",
-                "releaseStatus": "completed",
-                "storeEditId": "readback-edit",
-                "storeState": play_store_state(),
-            }
-            release = config.release_version()
-            validated = validate_store_receipt(
-                raw, config=config, release=release, stage="candidate", platform="android"
-            )
-            environment = {
-                "MOBILE_RELEASE_TOOLING_SHA": "1" * 40,
-                "GITHUB_WORKFLOW": "Mobile candidate",
-                "GITHUB_RUN_ID": "1000000000",
-                "GITHUB_RUN_ATTEMPT": "1",
-                "SOURCE_DATE_EPOCH": "1767225600",
-            }
-            with patch.dict(os.environ, environment, clear=False):
-                manifest = build_candidate_manifest(
-                    config=config,
-                    release=release,
-                    git=git,
-                    platform="android",
-                    artifacts=artifact_records(
-                        [
-                            ("android-aab", aab),
-                            ("store-metadata", metadata),
-                            ("validation-report", validation_report),
-                        ]
-                    ),
-                    store_receipt=validated,
-                    metadata_sha256=__import__("hashlib").sha256(b"metadata").hexdigest(),
-                )
-                manifest_path = root / "candidate.json"
-                write_evidence(manifest_path, manifest)
-                loaded = load_evidence(manifest_path)
-                self.assertEqual(loaded["platforms"]["android"]["applicationId"], "com.example.reader")
-                self.assertEqual(loaded["artifacts"][0]["architectures"], ["arm64-v8a"])
-                without_report = verify_sealed(manifest)
-                without_report["artifacts"] = [
-                    item
-                    for item in without_report["artifacts"]
-                    if item["logicalName"] != "validation-report"
-                ]
-                with self.assertRaisesRegex(ValidationError, "validation report"):
-                    validate_evidence_document(seal(without_report))
-                opposite_platform = verify_sealed(manifest)
-                opposite_platform["artifacts"] = [*opposite_platform["artifacts"],
-                    {
-                        "logicalName": "ios-ipa",
-                        "platform": "ios",
-                        "kind": "ipa",
-                        "fileName": "foreign.ipa",
-                        "size": 1,
-                        "sha256": "f" * 64,
-                        "architectures": [],
-                    },
-                ]
-                with self.assertRaisesRegex(ValidationError, "unsupported or duplicated"):
-                    validate_evidence_document(seal(opposite_platform))
-                receipt = build_receipt(
-                    stage="candidate",
-                    platform="android",
-                    candidate_manifest=manifest,
-                    store_receipt=validated,
-                )
-                receipt_path = root / "receipt.json"
-                write_evidence(receipt_path, receipt)
-                self.assertEqual(load_evidence(receipt_path)["operation"], "uploaded")
-                validate_receipt_chain(
-                    candidate_manifest=manifest,
-                    candidate_receipt=receipt,
-                    platform="android",
-                )
-                external = build_receipt(
-                    stage="external-testing",
-                    platform="android",
-                    candidate_manifest=manifest,
-                    previous_receipt=receipt,
-                    store_receipt={
-                        "result": "accepted",
-                        "versionCode": 42,
-                        "destinationTrack": "closed-testing",
-                        "releaseStatus": "completed",
-                        "state": "available-to-testers",
-                        "observedAt": "2026-01-01T00:01:00Z",
-                        "closedTesterAssignmentVerified": True,
-                        "storeState": play_store_state(stage="external-testing"),
-                    },
-                )
-                production = build_receipt(
-                    stage="production-submit",
-                    platform="android",
-                    candidate_manifest=manifest,
-                    previous_receipt=external,
-                    store_receipt={
-                        "result": "accepted",
-                        "versionCode": 42,
-                        "destinationTrack": "production",
-                        "releaseStatus": "draft",
-                        "state": "draft",
-                        "observedAt": "2026-01-01T00:02:00Z",
-                        "storeState": play_store_state(stage="production-submit"),
-                    },
-                )
-                validate_receipt_chain(
-                    candidate_manifest=manifest,
-                    candidate_receipt=receipt,
-                    external_receipt=external,
-                    production_receipt=production,
-                    platform="android",
-                    config=config,
-                )
-                changed_production = verify_sealed(production)
-                changed_production["previousReceiptSha256"] = "f" * 64
-                with self.assertRaisesRegex(ValidationError, "external receipt"):
-                    validate_receipt_chain(
-                        candidate_manifest=manifest,
-                        candidate_receipt=receipt,
-                        external_receipt=external,
-                        production_receipt=seal(changed_production),
-                        platform="android",
-                        config=config,
-                    )
-                tampered = verify_sealed(receipt)
-                tampered["storeBuildId"] = "different-build"
-                with self.assertRaisesRegex(ValidationError, "storeBuildId"):
-                    validate_receipt_chain(
-                        candidate_manifest=manifest,
-                        candidate_receipt=seal(tampered),
-                        platform="android",
-                    )
+        for platform in ("android", "ios"):
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config = load_config(write_project(root, android_config() if platform == "android" else ios_config(), platform=platform))
+                docs = build_lifecycle(config, platform=platform)
+                validate_receipt_chain(**chain_arguments(docs), platform=platform, config=config)
+                path = root / "candidate.json"
+                write_evidence(path, docs["candidate"])
+                self.assertEqual(load_evidence(path), docs["candidate"])
+                self.assertEqual(docs["candidate"]["platforms"][platform]["applicationId"], "com.example.reader")
+                if platform == "android":
+                    self.assertEqual(docs["candidate"]["artifacts"][0]["architectures"], ["arm64-v8a"])
+                for role in ("authorizedBy", "executedBy", "producedBy"):
+                    self.assertEqual(docs["candidate"][role]["runId"], "1000000000")
+                self.assertNotIn("createdBy", docs["candidate"])
+                for field, expected in (("previousReceiptSha256", "external receipt"), ("storeBuildId", "Store build")):
+                    changed = verify_sealed(docs["production_receipt"])
+                    changed[field] = "f" * 64
+                    args = chain_arguments(docs) | {"production_receipt": seal(changed)}
+                    with self.assertRaises(ValidationError):
+                        validate_receipt_chain(**args, platform=platform, config=config)
 
-    def test_external_testflight_approved_readback_is_explicitly_allowed(self) -> None:
+    def test_candidate_requires_platform_scoped_artifacts_and_one_signer(self) -> None:
+        candidate = verify_sealed(fixture_chain()["candidate"])
+        for mutate in (
+            lambda value: value["artifacts"].pop(),
+            lambda value: value["artifacts"].append(copy.deepcopy(value["artifacts"][0])),
+            lambda value: value["signing"].append(copy.deepcopy(value["signing"][0])),
+            lambda value: value["artifacts"][0].update({"logicalName": "ios-ipa", "kind": "ipa", "platform": "ios"}),
+            lambda value: value["artifacts"][0].update({"architectures": [{}]}),
+        ):
+            changed = copy.deepcopy(candidate)
+            mutate(changed)
+            with self.assertRaises(ValidationError):
+                validate_evidence_document(seal(changed))
+
+    def test_observation_only_android_external_receipt_cannot_authorize_production(self) -> None:
+        docs = fixture_chain()
+        intent = verify_sealed(docs["external_intent"])
+        snapshot = intent["storePrecondition"]["snapshot"]
+        snapshot["destinationState"] = copy.deepcopy(snapshot["destinationTargetState"])
+        snapshot["targetPresent"] = True
+        observation_intent = seal(intent)
+        with patch.dict(os.environ, workflow_environment("external-testing")):
+            observation = build_receipt(stage="external-testing", platform="android", candidate_manifest=docs["candidate"], store_receipt=raw_receipt(observation_intent, result="already_present"), operation_intent=observation_intent, previous_receipt=docs["candidate_receipt"])
+        args = {"candidate_manifest": docs["candidate"], "candidate_receipt": docs["candidate_receipt"], "candidate_intent": docs["candidate_intent"], "external_receipt": observation, "external_intent": observation_intent, "platform": "android"}
+        validate_receipt_chain(**args)
+        with self.assertRaisesRegex(ValidationError, "observation-only"):
+            validate_receipt_chain(**args, require_production_eligible_external=True)
+
+    def test_external_testflight_approved_is_pending_not_production_authority(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            config = load_config(write_project(root, ios_config(), platform="ios"))
-            raw = {
-                "schemaVersion": 2,
-                "operation": "ios_testflight_external",
-                "platform": "ios",
-                "appIdentity": "com.example.reader",
-                "appStoreAppId": "1234567890",
-                "marketingVersion": "1.2.3",
-                "buildNumber": 42,
-                "buildResourceId": "build-resource-1",
-                "processingState": "VALID",
-                "externalGroup": "External Testers",
-                "betaReviewState": "APPROVED",
-                "observedAt": "2026-01-01T00:00:00Z",
-                "result": "accepted",
-                "state": "approved",
-            }
-            validated = validate_store_receipt(
-                raw,
-                config=config,
-                release=config.release_version(),
-                stage="external-testing",
-                platform="ios",
-            )
-            self.assertEqual(validated["state"], "approved")
+            config = load_config(write_project(Path(temporary), ios_config(), platform="ios"))
+            docs = build_lifecycle(config, platform="ios")
+            intent = docs["external_intent"]
+            raw = raw_receipt(intent)
+            raw["state"] = "approved"
+            with patch.dict(os.environ, workflow_environment("external-testing")):
+                validate_store_receipt(raw, config=config, release=config.release_version(), stage="external-testing", platform="ios", operation_intent=intent)
+                pending = build_receipt(stage="external-testing", platform="ios", candidate_manifest=docs["candidate"], previous_receipt=docs["candidate_receipt"], operation_intent=intent, store_receipt=raw)
+            args = {"candidate_manifest": docs["candidate"], "candidate_receipt": docs["candidate_receipt"], "candidate_intent": docs["candidate_intent"], "external_receipt": pending, "external_intent": intent, "platform": "ios"}
+            validate_receipt_chain(**args)
+            with self.assertRaisesRegex(ValidationError, "available-to-testers"):
+                validate_receipt_chain(**args, require_production_eligible_external=True)
 
     def test_tampering_and_unknown_store_state_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            config = load_config(write_project(root, android_config()))
-            raw = {
-                "schemaVersion": 2,
-                "operation": "android_internal_upload",
-                "platform": "android",
-                "appIdentity": "com.example.reader",
-                "marketingVersion": "1.2.3",
-                "buildNumber": 42,
-                "observedAt": "2026-01-01T00:00:00Z",
-                "result": "accepted",
-                "state": "UNKNOWN",
-                "versionCode": 42,
-                "destinationTrack": "internal",
-                "releaseStatus": "completed",
-                "storeEditId": "readback-edit",
-                "storeState": play_store_state(),
-            }
-            with self.assertRaisesRegex(ValidationError, "availability"):
-                validate_store_receipt(
-                    raw,
-                    config=config,
-                    release=config.release_version(),
-                    stage="candidate",
-                    platform="android",
-                )
+            config = load_config(write_project(Path(temporary), android_config()))
+            intent = fixture_chain()["candidate_intent"]
+            raw = raw_receipt(intent)
+            raw["state"] = "UNKNOWN"
+            with patch.dict(os.environ, workflow_environment()), self.assertRaisesRegex(ValidationError, "availability"):
+                validate_store_receipt(raw, config=config, release=config.release_version(), stage="candidate", platform="android", operation_intent=intent)
 
     def test_closed_play_external_receipt_requires_verified_tester_assignment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            config = load_config(write_project(root, android_config()))
-            raw = {
-                "schemaVersion": 2,
-                "operation": "android_external_promote",
-                "platform": "android",
-                "appIdentity": "com.example.reader",
-                "marketingVersion": "1.2.3",
-                "buildNumber": 42,
-                "observedAt": "2026-01-01T00:00:00Z",
-                "result": "accepted",
-                "state": "available-to-testers",
-                "versionCode": 42,
-                "sourceTrack": "internal",
-                "destinationTrack": "closed-testing",
-                "releaseStatus": "completed",
-                "storeEditId": "readback-edit",
-                "storeState": play_store_state(stage="external-testing"),
-            }
-            with self.assertRaisesRegex(ValidationError, "tester-group"):
-                validate_store_receipt(
-                    raw,
-                    config=config,
-                    release=config.release_version(),
-                    stage="external-testing",
-                    platform="android",
-                )
-            raw["closedTesterAssignmentVerified"] = True
-            validated = validate_store_receipt(
-                raw,
-                config=config,
-                release=config.release_version(),
-                stage="external-testing",
-                platform="android",
-            )
-            self.assertTrue(validated["closedTesterAssignmentVerified"])
+            config = load_config(write_project(Path(temporary), android_config()))
+            intent = fixture_chain()["external_intent"]
+            raw = raw_receipt(intent)
+            del raw["closedTesterAssignmentVerified"]
+            with patch.dict(os.environ, workflow_environment("external-testing")):
+                with self.assertRaisesRegex(ValidationError, "tester-group"):
+                    validate_store_receipt(raw, config=config, release=config.release_version(), stage="external-testing", platform="android", operation_intent=intent)
+                raw["closedTesterAssignmentVerified"] = True
+                self.assertTrue(validate_store_receipt(raw, config=config, release=config.release_version(), stage="external-testing", platform="android", operation_intent=intent)["closedTesterAssignmentVerified"])
 
     def test_play_source_transition_evidence_is_fail_closed(self) -> None:
-        fixtures = Path(__file__).resolve().parents[1] / "fixtures"
-        external = verify_sealed(
-            json.loads((fixtures / "receipt-external-valid.json").read_text(encoding="utf-8"))
-        )
+        external = verify_sealed(fixture_chain()["external_receipt"])
+        for field, value, message in (("sourceUnrelatedCommittedSha256", "1" * 64, "unrelated source"), ("sourceCommittedSha256", "2" * 64, "retained source"), ("sourceTargetTransition", "deactivated", "did not change")):
+            changed = copy.deepcopy(external)
+            changed["storeState"][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(ValidationError, message):
+                validate_evidence_document(seal(changed))
+        impossible = copy.deepcopy(external)
+        impossible["storeState"].update({"sourceTargetTransition": "deactivated", "sourceCommittedSha256": "2" * 64, "sourceExpectedSha256": "3" * 64})
+        with self.assertRaisesRegex(ValidationError, "outside the allowed transition"):
+            validate_evidence_document(seal(impossible))
 
-        invalid_cases = []
-        changed_unrelated = json.loads(json.dumps(external))
-        changed_unrelated["storeState"]["sourceUnrelatedCommittedSha256"] = "1" * 64
-        invalid_cases.append((changed_unrelated, "unrelated source"))
+    def test_integrity_only_matching_hashes_do_not_substitute_for_intent_state(self) -> None:
+        docs = fixture_chain()
+        payload = verify_sealed(docs["external_receipt"])
+        payload["storeState"]["destinationExpectedSha256"] = "0" * 64
+        payload["storeState"]["destinationCommittedSha256"] = "0" * 64
+        forged = seal(payload)
+        # Local equality and the SHA seal alone are deliberately not authenticity.
+        validate_evidence_document(forged)
+        with self.assertRaisesRegex(ValidationError, "authenticated intent"):
+            validate_receipt_chain(candidate_manifest=docs["candidate"], candidate_receipt=docs["candidate_receipt"], candidate_intent=docs["candidate_intent"], external_receipt=forged, external_intent=docs["external_intent"], platform="android")
 
-        retained_changed = json.loads(json.dumps(external))
-        retained_changed["storeState"]["sourceCommittedSha256"] = "2" * 64
-        invalid_cases.append((retained_changed, "retained source"))
-
-        false_deactivation = json.loads(json.dumps(external))
-        false_deactivation["storeState"]["sourceTargetTransition"] = "deactivated"
-        invalid_cases.append((false_deactivation, "did not change"))
-
-        impossible_expected = json.loads(json.dumps(external))
-        impossible_expected["storeState"]["sourceTargetTransition"] = "deactivated"
-        impossible_expected["storeState"]["sourceCommittedSha256"] = "2" * 64
-        impossible_expected["storeState"]["sourceExpectedSha256"] = "3" * 64
-        invalid_cases.append((impossible_expected, "outside the allowed transition"))
-
-        for payload, message in invalid_cases:
-            with self.subTest(message=message), self.assertRaisesRegex(ValidationError, message):
-                validate_evidence_document(seal(payload))
-
-        deactivated = json.loads(json.dumps(external))
-        state = deactivated["storeState"]
-        state["sourceTargetTransition"] = "deactivated"
-        state["sourceCommittedSha256"] = "2" * 64
-        state["sourceExpectedSha256"] = state["sourceCommittedSha256"]
-        validate_evidence_document(seal(deactivated))
+    def test_evidence_cannot_drop_or_swap_its_original_intent(self) -> None:
+        docs = fixture_chain()
+        with self.assertRaisesRegex(ValidationError, "exact authenticated operation intent"):
+            validate_receipt_chain(candidate_manifest=docs["candidate"], candidate_receipt=docs["candidate_receipt"], platform="android")
+        with self.assertRaisesRegex(ValidationError, "stage/platform"):
+            validate_receipt_chain(candidate_manifest=docs["candidate"], candidate_receipt=docs["candidate_receipt"], candidate_intent=docs["external_intent"], platform="android")
 
 
 if __name__ == "__main__":

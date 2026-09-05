@@ -37,7 +37,8 @@ Debug and Store identities must differ. Test tracks use the canonical Store iden
 - Check that Gradle and Xcode both read the configured file and keys.
 - Inspect effective Android manifest/AAB and Xcode archive/IPA values, not only source text.
 - Remove workflow-run, Store-derived, and hardcoded secondary build numbers.
-- Commit one new build number if any Store has consumed the current one.
+- For a genuinely new candidate, commit one new build number if a Store consumed the current one.
+  An interrupted original candidate instead needs intent-based recovery; do not change its version.
 
 CI never rewrites a version or chooses the next integer.
 
@@ -64,7 +65,7 @@ If the workflow fails after credential import, verify temporary keychains/profil
 - Compare executable and dSYM UUID sets.
 - Do not search an arbitrary DerivedData directory.
 - For `retain`, archive, validate, and retain the exact symbols without contacting Crashlytics.
-- Version 0.1 has no automated third-party symbol-upload stage. `required` is a fail-closed
+- There is no automated third-party symbol-upload stage. `required` is a fail-closed
   activation sentinel: its command is validated but never executed, so preflight blocks until a
   separately guarded candidate-stage integration is implemented.
 
@@ -86,7 +87,10 @@ a temporary edit that is deleted without commit; Apple inspection performs reads
 
 ## Upload timed out or returned an ambiguous error
 
-Do not rerun candidate upload immediately. Query the Store for the exact package/Bundle ID, marketing version, build number, and expected state. Resume only when exact identity can be proved. Otherwise commit a new build number.
+Do not run a fresh upload or change the build number to hide an ambiguous outcome. Preserve the
+original intent, handoff, raw readback, final evidence and diagnostics. Use the same pinned workflow
+to resolve/reconcile the original operation. The [recovery guide](recovery.md) describes which exact
+evidence is required and when a new protected `recovery_run_id` dispatch is appropriate.
 
 For Android, download the attempt-specific `mobile-release-play-state-android-*` diagnostic
 artifact before it expires. Check its ordered `history`, failure classifications,
@@ -95,23 +99,32 @@ mutation/readback edit IDs, and complete before/expected/observed track snapshot
 `commit-response-ambiguous` or `failed` requires explicit reconciliation and must not be treated as
 a receipt. Never edit or locally reseal evidence to manufacture success.
 
-If the candidate build job succeeded and the Store job failed before any possible upload, rerun only
-the failed Store job so it consumes the original one-day same-run handoff. Rerunning all jobs would
-compile a replacement binary and is not a valid continuation after an ambiguous mutation. If the
-handoff expired, create a new candidate/build number rather than pretending a rebuild is identical.
+If the build succeeded and preparation failed before mutation, prefer **Re-run failed jobs**. The
+90-day handoff's original trusted build digest and positive proof that every prior execute step was
+skipped after a pre-execution failure are required. Rerun-all does not authorize a rebuild. Missing,
+deleted or expired evidence is not proof that no Store write occurred: preserve what remains and
+resolve through the owner/Store rather than substituting another binary.
 
-External and production workflows may safely rerun when their candidate/previous receipt hashes and Store readback match.
+An authenticated complete final is returned unchanged with no Store access. Incomplete external
+or production operations reconcile their original intent resource by resource. A partial Apple
+version or review submission can resume only when exact before/target and preservation checks
+pass. An ambiguous absent Apple create requires a new inventory-bound protected confirmation,
+never an automatic POST retry. Apple candidate attribution/upload retry likewise requires the
+specific recovery confirmation described in [Recovery](recovery.md).
 
-For App Store production, a rerun adopts only an exact already-submitted manual-release version.
-If the intended version record exists without a selected build, automation cannot prove whether a
-prior metadata/submission attempt partially mutated it and refuses to call the submission action
-again. Inspect App Store Connect manually; use a new committed build when exact recovery is not
-possible.
+Profile/certificate expiry does not invalidate authenticated original validation for an already
+accepted iOS build. Every new upload, including a same-byte retry, still needs current validation;
+the toolkit never ignores a signing failure, rebuilds or re-signs during recovery.
 
-For iOS, a submitted/in-review/approved Beta Review receipt cannot authorize production. Wait until
-App Store Connect reports the exact assigned build as available to external testers, then rerun the
-external-testing workflow with the same candidate run ID to create a fresh attested receipt. It does
-not rebuild or re-upload the IPA.
+For iOS, a submitted/in-review/approved Beta Review receipt cannot authorize production. Once the
+exact assigned build is available to external testers, make a **new external-testing dispatch**
+with the same candidate references and no `recovery_run_id`. A rerun preserves the old final and
+cannot refresh it. Neither path rebuilds or re-uploads the IPA.
+
+If a local manifest/receipt write failed, retain the matching original intent and raw observation.
+The CLI never overwrites immutable evidence or falls back to a Store mutation when existing final
+evidence is invalid. If surviving partial output cannot be completed, use a new empty output
+directory with the **same intent and artifacts**; do not delete evidence to bypass the guard.
 
 ## Promotion selected the wrong destination
 
@@ -144,11 +157,11 @@ depth after scheduling; it does not stop a self-hosted runner carrying copied la
 the job. Have a repository or organization administrator remove that runner's eligibility for
 `ubuntu-24.04` and `macos-26` before activation or retry. An application-owned `mobile_release`
 package in the current directory is ignored by safe-path mode. Do not remove these guards to make a
-custom runner work; trusted custom runner groups are outside the supported v0.1 contract.
+custom runner work; trusted custom runner groups are outside the supported contract.
 
 ## Metadata rejected
 
-Version 0.1 checks required locale text, its known character limits, UTF-8/JSON validity,
+Metadata preflight checks required locale text, its known character limits, UTF-8/JSON validity,
 placeholders/secret patterns, absolute credential-free HTTPS URL syntax, allowed file suffixes and
 sizes, safe non-symlink paths, and PNG/JPEG headers with positive dimensions. It does not contact
 URLs or validate Store/device-specific screenshot dimensions, color profiles, screenshot counts, or

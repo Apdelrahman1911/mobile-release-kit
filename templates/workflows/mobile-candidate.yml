@@ -1,5 +1,4 @@
 name: Mobile internal candidate
-
 on:
   workflow_dispatch:
     inputs:
@@ -8,19 +7,25 @@ on:
         required: true
         type: choice
         options:
-          - android
-          - ios
-          - both
+        - android
+        - ios
+        - both
       confirmation:
         description: candidate:<platform>:<version>:<build>
         required: true
         type: string
-
+      recovery_run_id:
+        description: Run holding the original intent or selected complete final; never replaces authorization.
+        required: false
+        default: ''
+        type: string
+      recovery_confirmation:
+        description: Exact additional iOS recovery confirmation, only when requested by reconciliation.
+        required: false
+        default: ''
+        type: string
 permissions: {}
-
 jobs:
-  # The called jobs select mobile-candidate; credentials must be scoped there.
-  # This caller intentionally forwards no repository/organization secrets.
   candidate:
     permissions:
       actions: read
@@ -34,3 +39,5 @@ jobs:
       source_sha: ${{ github.sha }}
       platform: ${{ inputs.platform }}
       confirmation: ${{ inputs.confirmation }}
+      recovery_run_id: ${{ inputs.recovery_run_id }}
+      recovery_confirmation: ${{ inputs.recovery_confirmation }}

@@ -11,6 +11,7 @@ import tempfile
 import unicodedata
 import zipfile
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -18,7 +19,7 @@ from .config import ReleaseConfig, ReleaseVersion
 from .credentials import artifact_validation_environment
 from .discovery import discover_project, selected_ios_container, selected_ios_scheme
 from .errors import ValidationError
-from .reporting import Finding, Status
+from .reporting import FAILING_STATUSES, Finding, Status
 from .tooling import recreate_private_build_directory
 
 MAX_ENTRY_SIZE = 1024 * 1024 * 1024
@@ -48,6 +49,69 @@ PROFILE_UUID_RE = re.compile(
 )
 MAX_GENERATED_FILES = 100_000
 MAX_GENERATED_BYTES = 8 * 1024 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class SigningValidityInterval:
+    """Private result of current signing validation, never independent authority.
+
+    This is the intersection of the actual leaf certificates and embedded
+    provisioning profiles that were checked. It permits a cheap recheck after
+    the last Store read, not choosing an old date for a new upload.
+    """
+
+    lower_bound: datetime
+    upper_bound: datetime
+
+    def __post_init__(self) -> None:
+        for value in (self.lower_bound, self.upper_bound):
+            if not isinstance(value, datetime) or value.tzinfo != timezone.utc:
+                raise ValidationError("signing validity bounds must be UTC datetimes")
+        if self.lower_bound >= self.upper_bound:
+            raise ValidationError("signing validity interval is empty or reversed")
+
+    def require_current(self) -> None:
+        if not self.lower_bound <= _utc_now() < self.upper_bound:
+            raise ValidationError(
+                "IPA signing certificate or provisioning profile is not currently valid; "
+                "do not re-sign or rebuild this candidate to retry its original intent"
+            )
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _profile_validity(profile: dict[str, Any]) -> SigningValidityInterval:
+    creation = profile.get("CreationDate")
+    expiration = profile.get("ExpirationDate")
+    if not isinstance(creation, datetime) or not isinstance(expiration, datetime):
+        raise ValidationError("profile lacks valid CreationDate/ExpirationDate bounds")
+    interval = SigningValidityInterval(_utc_datetime(creation), _utc_datetime(expiration))
+    interval.require_current()
+    return interval
+
+
+def validate_preparation_signing_time(
+    interval: SigningValidityInterval, server_observed_at: str
+) -> None:
+    """Bind freshly validated dates to the preparer's real ASC observation.
+
+    The original attested preparer authenticates this observation. This helper
+    does not turn an HTTP Date header or an arbitrary old time into permission
+    to upload and is never a historical codesign verifier.
+    """
+
+    if not isinstance(server_observed_at, str) or not re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", server_observed_at
+    ):
+        raise ValidationError("preparation observation must be second-precision UTC RFC3339")
+    try:
+        observed = datetime.fromisoformat(server_observed_at.removesuffix("Z") + "+00:00")
+    except ValueError as error:
+        raise ValidationError("preparation observation must be a real UTC timestamp") from error
+    if not interval.lower_bound <= observed < interval.upper_bound:
+        raise ValidationError("preparation observation is outside the validated signing interval")
 
 
 def _validation_environment() -> dict[str, str]:
@@ -136,7 +200,12 @@ def _profile_details(path: Path) -> dict[str, Any] | None:
     return value
 
 
-def _codesign_fingerprint(app_path: Path, temporary: Path) -> str | None:
+def _codesign_fingerprint(
+    app_path: Path,
+    temporary: Path,
+    *,
+    _validity_intervals: list[SigningValidityInterval] | None = None,
+) -> str | None:
     if sys.platform != "darwin" or not shutil.which("codesign") or not shutil.which("openssl"):
         return None
     verify = subprocess.run(
@@ -149,10 +218,38 @@ def _codesign_fingerprint(app_path: Path, temporary: Path) -> str | None:
     )
     if verify.returncode:
         raise ValidationError("codesign rejected the exported application or nested code")
-    return _codesign_leaf_fingerprint(app_path, temporary / "signer")
+    return _codesign_leaf_fingerprint(
+        app_path, temporary / "signer", _validity_intervals=_validity_intervals
+    )
 
 
-def _codesign_leaf_fingerprint(code_path: Path, prefix: Path) -> str:
+def _openssl_certificate_date(value: str) -> datetime:
+    # OpenSSL's default certificate-date format is English/GMT. Do not let
+    # locale, offset guessing, omitted zones, or permissive date parsers choose
+    # a different interpretation of a certificate's actual validity bounds.
+    months = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+    match = re.fullmatch(
+        r"([A-Za-z]{3}) {1,2}([0-9]{1,2}) ([0-9]{2}):([0-9]{2}):([0-9]{2}) ([0-9]{4}) GMT",
+        value,
+    )
+    if match is None or match.group(1) not in months:
+        raise ValidationError("signing certificate date is not an unambiguous GMT datetime")
+    month, day, hour, minute, second, year = match.groups()
+    try:
+        return datetime(
+            int(year), months.index(month) + 1, int(day), int(hour), int(minute), int(second),
+            tzinfo=timezone.utc,
+        )
+    except ValueError as error:
+        raise ValidationError("signing certificate date is not a real UTC datetime") from error
+
+
+def _codesign_leaf_fingerprint(
+    code_path: Path,
+    prefix: Path,
+    *,
+    _validity_intervals: list[SigningValidityInterval] | None = None,
+) -> str:
     extract = subprocess.run(
         ["codesign", "-d", "--extract-certificates", str(prefix), str(code_path)],
         env=_validation_environment(),
@@ -162,7 +259,7 @@ def _codesign_leaf_fingerprint(code_path: Path, prefix: Path) -> str:
         check=False,
     )
     certificate = prefix.parent / f"{prefix.name}0"
-    if extract.returncode or not certificate.is_file():
+    if extract.returncode or certificate.is_symlink() or not certificate.is_file():
         raise ValidationError("codesign could not extract the leaf signing certificate")
     fingerprint = subprocess.run(
         [
@@ -175,6 +272,7 @@ def _codesign_leaf_fingerprint(code_path: Path, prefix: Path) -> str:
             "-noout",
             "-fingerprint",
             "-sha256",
+            "-dates",
         ],
         env=_validation_environment(),
         text=True,
@@ -185,14 +283,33 @@ def _codesign_leaf_fingerprint(code_path: Path, prefix: Path) -> str:
     )
     if fingerprint.returncode:
         raise ValidationError("openssl could not inspect the leaf signing certificate")
-    match = re.search(r"=([0-9A-Fa-f:]{64,95})", fingerprint.stdout)
-    if not match:
+    fingerprints = re.findall(
+        r"(?m)^(?:sha256|SHA256) Fingerprint=((?:[0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2}|[0-9A-Fa-f]{64})$",
+        fingerprint.stdout,
+    )
+    if len(fingerprints) != 1:
         raise ValidationError("signing certificate output lacks a SHA-256 fingerprint")
-    return match.group(1).replace(":", "").lower()
+    before = re.findall(r"(?m)^notBefore=(.*)$", fingerprint.stdout)
+    after = re.findall(r"(?m)^notAfter=(.*)$", fingerprint.stdout)
+    if len(before) != 1 or len(after) != 1:
+        raise ValidationError("signing certificate output lacks unique validity bounds")
+    interval = SigningValidityInterval(
+        _openssl_certificate_date(before[0]), _openssl_certificate_date(after[0])
+    )
+    # Default codesign verification can accept expired/postdated certificates.
+    # Native signature verification remains mandatory, but it is not this date
+    # check. Derive dates from the exact leaf extracted from the signed code.
+    interval.require_current()
+    if _validity_intervals is not None:
+        _validity_intervals.append(interval)
+    return fingerprints[0].replace(":", "").lower()
 
 
 def _nested_codesign_identities(
-    app_path: Path, temporary: Path
+    app_path: Path,
+    temporary: Path,
+    *,
+    _validity_intervals: list[SigningValidityInterval] | None = None,
 ) -> list[tuple[Path, str, str]] | None:
     if sys.platform != "darwin" or not shutil.which("codesign") or not shutil.which("openssl"):
         return None
@@ -261,7 +378,8 @@ def _nested_codesign_identities(
         if not match:
             raise ValidationError(f"nested code lacks a TeamIdentifier: {code_path.name}")
         fingerprint = _codesign_leaf_fingerprint(
-            code_path, temporary / f"nested-signer-{index}-"
+            code_path, temporary / f"nested-signer-{index}-",
+            _validity_intervals=_validity_intervals,
         )
         if code_path.suffix.lower() in {".app", ".appex"}:
             entitlements = _codesign_entitlements(code_path)
@@ -274,6 +392,7 @@ def _nested_codesign_identities(
                 entitlements=entitlements,
                 team_id=match.group(1),
                 signer_fingerprint=fingerprint,
+                _validity_intervals=_validity_intervals,
             )
         result.append((code_path, match.group(1), fingerprint))
     return result
@@ -313,11 +432,18 @@ def _profile_certificate_fingerprints(profile: dict[str, Any]) -> set[str]:
 
 
 def _utc_datetime(value: datetime) -> datetime:
-    return (
-        value.replace(tzinfo=timezone.utc)
-        if value.tzinfo is None
-        else value.astimezone(timezone.utc)
-    )
+    # plistlib uses naive datetimes for UTC by default. Explicit offset-aware
+    # values are normalized, never interpreted in the runner's local timezone.
+    try:
+        if value.tzinfo is not None and value.utcoffset() is None:
+            raise ValueError("timezone has no defined offset")
+        return (
+            value.replace(tzinfo=timezone.utc)
+            if value.tzinfo is None
+            else value.astimezone(timezone.utc)
+        )
+    except (ValueError, OverflowError, TypeError) as error:
+        raise ValidationError("profile date must represent a real UTC datetime") from error
 
 
 def _validate_release_entitlement_environments(
@@ -342,6 +468,7 @@ def _validate_nested_bundle_security(
     entitlements: dict[str, Any],
     team_id: str,
     signer_fingerprint: str,
+    _validity_intervals: list[SigningValidityInterval] | None = None,
 ) -> None:
     """Bind a nested app/extension to its signer, profile, team, and release entitlements."""
 
@@ -385,7 +512,7 @@ def _validate_nested_bundle_security(
         )
     profile_entitlements = profile.get("Entitlements")
     teams = profile.get("TeamIdentifier")
-    expiration = profile.get("ExpirationDate")
+    interval = _profile_validity(profile)
     if (
         not isinstance(profile_entitlements, dict)
         or profile_entitlements.get("application-identifier") != application_identifier
@@ -395,14 +522,14 @@ def _validate_nested_bundle_security(
         or team_id not in teams
         or profile.get("ProvisionedDevices")
         or profile.get("ProvisionsAllDevices")
-        or not isinstance(expiration, datetime)
-        or _utc_datetime(expiration) <= datetime.now(timezone.utc)
         or signer_fingerprint not in _profile_certificate_fingerprints(profile)
     ):
         raise ValidationError(
             f"nested provisioning profile does not authorize the final signer: {code_path.name}"
         )
     _validate_release_entitlement_environments(entitlements, profile_entitlements)
+    if _validity_intervals is not None:
+        _validity_intervals.append(interval)
 
 
 def _validate_generated_tree(
@@ -431,7 +558,7 @@ def _validate_generated_tree(
                     raise ValidationError(f"{label} exceeds its generated-size safety bound")
 
 
-def validate_ipa(
+def _validate_ipa(
     path: Path,
     *,
     expected_bundle_id: str,
@@ -439,6 +566,7 @@ def validate_ipa(
     expected_fingerprint: str | None,
     release: ReleaseVersion,
     require_tools: bool = False,
+    _validity_intervals: list[SigningValidityInterval] | None = None,
 ) -> list[Finding]:
     import plistlib
 
@@ -515,7 +643,6 @@ def validate_ipa(
                     raise ValidationError("profile entitlements have an invalid structure")
                 app_identifier = entitlements.get("application-identifier")
                 teams = profile.get("TeamIdentifier", [])
-                expiration = profile.get("ExpirationDate")
                 if app_identifier != f"{expected_team_id}.{expected_bundle_id}":
                     raise ValidationError("profile application-identifier does not match team and bundle")
                 if expected_team_id not in teams:
@@ -526,10 +653,9 @@ def validate_ipa(
                     raise ValidationError("profile is not enabled for App Store/TestFlight distribution")
                 if profile.get("ProvisionedDevices") or profile.get("ProvisionsAllDevices"):
                     raise ValidationError("profile is not an App Store distribution profile")
-                if not isinstance(expiration, datetime) or _utc_datetime(expiration) <= datetime.now(
-                    timezone.utc
-                ):
-                    raise ValidationError("profile is expired or lacks a valid expiration")
+                interval = _profile_validity(profile)
+                if _validity_intervals is not None:
+                    _validity_intervals.append(interval)
                 profile_fingerprints = _profile_certificate_fingerprints(profile)
                 findings.append(
                     Finding(
@@ -573,7 +699,9 @@ def validate_ipa(
                     )
                 )
 
-            fingerprint = _codesign_fingerprint(app_path, temporary)
+            fingerprint = _codesign_fingerprint(
+                app_path, temporary, _validity_intervals=_validity_intervals
+            )
             if fingerprint is None:
                 findings.append(
                     Finding(
@@ -590,7 +718,9 @@ def validate_ipa(
                     "IPA signer certificate is not authorized by the embedded provisioning profile"
                 )
             else:
-                nested_identities = _nested_codesign_identities(app_path, temporary)
+                nested_identities = _nested_codesign_identities(
+                    app_path, temporary, _validity_intervals=_validity_intervals
+                )
                 if nested_identities is None:
                     raise ValidationError(
                         "nested code identity inspection requires macOS codesign and openssl"
@@ -614,6 +744,67 @@ def validate_ipa(
     finally:
         archive.close()
     return findings
+
+
+def validate_ipa(
+    path: Path,
+    *,
+    expected_bundle_id: str,
+    expected_team_id: str,
+    expected_fingerprint: str | None,
+    release: ReleaseVersion,
+    require_tools: bool = False,
+) -> list[Finding]:
+    """Validate the final IPA against current-time signing/profile policy."""
+
+    return _validate_ipa(
+        path,
+        expected_bundle_id=expected_bundle_id,
+        expected_team_id=expected_team_id,
+        expected_fingerprint=expected_fingerprint,
+        release=release,
+        require_tools=require_tools,
+    )
+
+
+def validate_ipa_current_signing(
+    path: Path,
+    *,
+    expected_bundle_id: str,
+    expected_team_id: str,
+    expected_fingerprint: str | None,
+    release: ReleaseVersion,
+    require_tools: bool = True,
+) -> tuple[list[Finding], SigningValidityInterval | None]:
+    """Perform every IPA check and retain the intersection of validated dates.
+
+    No caller-selected validation time is accepted. Historical recovery instead
+    authenticates the original validation proof and exact immutable bytes.
+    """
+
+    intervals: list[SigningValidityInterval] = []
+    findings = _validate_ipa(
+        path,
+        expected_bundle_id=expected_bundle_id,
+        expected_team_id=expected_team_id,
+        expected_fingerprint=expected_fingerprint,
+        release=release,
+        require_tools=require_tools,
+        _validity_intervals=intervals,
+    )
+    if any(item.status in FAILING_STATUSES or item.status == Status.SKIP for item in findings):
+        return findings, None
+    try:
+        if len(intervals) < 2:
+            raise ValidationError("IPA lacks complete current profile/certificate validity evidence")
+        interval = SigningValidityInterval(
+            max(item.lower_bound for item in intervals), min(item.upper_bound for item in intervals)
+        )
+        interval.require_current()
+    except ValidationError as error:
+        findings.append(Finding("ios.ipa.validity", Status.FAIL, str(error), category="ios-artifact"))
+        return findings, None
+    return findings, interval
 
 
 def ipa_signing_evidence(path: Path) -> dict[str, str]:
@@ -649,20 +840,18 @@ def ipa_signing_evidence(path: Path) -> dict[str, str]:
         if signer_fingerprint is None:
             raise ValidationError("iOS signing evidence extraction requires codesign and openssl")
         profile_fingerprints = _profile_certificate_fingerprints(profile)
+        interval = _profile_validity(profile)
         if signer_fingerprint not in profile_fingerprints:
             raise ValidationError(
                 "IPA signer certificate is not authorized by the embedded provisioning profile"
             )
         teams = profile.get("TeamIdentifier", [])
-        expiration = profile.get("ExpirationDate")
         uuid = profile.get("UUID")
         entitlements = profile.get("Entitlements", {})
         if (
             len(teams) != 1
             or not isinstance(uuid, str)
             or not PROFILE_UUID_RE.fullmatch(uuid)
-            or not isinstance(expiration, datetime)
-            or _utc_datetime(expiration) <= datetime.now(timezone.utc)
             or not isinstance(entitlements, dict)
             or entitlements.get("get-task-allow") is not False
             or entitlements.get("beta-reports-active") is not True
@@ -676,7 +865,7 @@ def ipa_signing_evidence(path: Path) -> dict[str, str]:
             "certificateSha256": signer_fingerprint,
             "teamId": teams[0],
             "profileUuid": uuid,
-            "profileExpiresAt": _utc_datetime(expiration)
+            "profileExpiresAt": interval.upper_bound
             .replace(microsecond=0)
             .isoformat()
             .replace("+00:00", "Z"),
