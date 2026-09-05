@@ -303,6 +303,21 @@ def _canonicalize_aab_signature(path: Path) -> None:
         raise ValidationError("jarsigner could not canonicalize the final AAB signature")
 
 
+def validate_aab_structure(path: Path) -> list[str]:
+    """Validate the bounded bundle layout without imposing current upload policy.
+
+    Historical reuse additionally requires authenticated original validation and
+    exact intent-bound bytes; this structure check alone is never upload authority.
+    """
+    names = _validate_zip(path)
+    for prefix in ("base/manifest/", "base/dex/"):
+        if not any(name.startswith(prefix) for name in names):
+            raise ValidationError(f"AAB is missing required {prefix} content")
+    if "BundleConfig.pb" not in names:
+        raise ValidationError("AAB is missing BundleConfig.pb")
+    return names
+
+
 def validate_aab(
     path: Path,
     *,
@@ -314,13 +329,7 @@ def validate_aab(
 ) -> list[Finding]:
     findings: list[Finding] = []
     try:
-        names = _validate_zip(path)
-        required_prefixes = ("base/manifest/", "base/dex/")
-        for prefix in required_prefixes:
-            if not any(name.startswith(prefix) for name in names):
-                raise ValidationError(f"AAB is missing required {prefix} content")
-        if not any(name == "BundleConfig.pb" for name in names):
-            raise ValidationError("AAB is missing BundleConfig.pb")
+        names = validate_aab_structure(path)
         findings.append(
             Finding(
                 "android.aab.structure",

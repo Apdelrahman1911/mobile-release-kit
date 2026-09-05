@@ -11,6 +11,7 @@ GEMFILE = (ROOT / "Gemfile").read_text(encoding="utf-8")
 LOCKFILE = (ROOT / "Gemfile.lock").read_text(encoding="utf-8")
 RUNNER = (ROOT / "fastlane/run_lane.rb").read_text(encoding="utf-8")
 PLAY_STORE = (ROOT / "fastlane/play_store.rb").read_text(encoding="utf-8")
+APPLE_PRODUCTION = (ROOT / "fastlane/apple_production.rb").read_text(encoding="utf-8")
 
 
 class FastlaneContractTests(unittest.TestCase):
@@ -54,12 +55,16 @@ class FastlaneContractTests(unittest.TestCase):
     def test_testing_and_production_store_states_are_fail_closed(self) -> None:
         self.assertIn('track: "internal"', FASTFILE)
         self.assertIn('release_status: "completed"', FASTFILE)
-        self.assertIn('to: "production", status: "draft"', FASTFILE)
-        self.assertIn('automatic_release: false', FASTFILE)
-        self.assertIn('submit_for_review: true', FASTFILE)
+        production = FASTFILE.split("lane :android_production_draft do", 1)[1].split("\nend", 1)[0]
+        self.assertIn('to: "production"', production)
+        self.assertIn('status: "draft"', production)
+        self.assertIn('automaticRelease: false', FASTFILE)
+        self.assertIn('releaseType: "MANUAL"', APPLE_PRODUCTION)
+        self.assertIn('attributes: { submitted: true }', APPLE_PRODUCTION)
         self.assertIn("this workflow never releases publicly", FASTFILE)
         self.assertIn("Target version code already exists in the destination Play track", PLAY_STORE)
         self.assertNotIn("create_app_store_version_release_request", FASTFILE)
+        self.assertNotIn("create_app_store_version_release_request", APPLE_PRODUCTION)
 
     def test_candidate_uploads_no_store_listing_metadata(self) -> None:
         options = FASTFILE.split("def play_upload_options", 1)[1].split("\nend", 1)[0]
@@ -79,12 +84,19 @@ class FastlaneContractTests(unittest.TestCase):
 
     def test_external_testflight_requires_separate_what_to_test_metadata(self) -> None:
         lane = FASTFILE.split("lane :ios_testflight_external do", 1)[1].split("\nend", 1)[0]
-        self.assertIn(
-            'what_to_test = required_metadata_text("testflight/what-to-test.txt")',
-            lane,
-        )
-        self.assertIn("changelog: what_to_test", lane)
-        self.assertIn("beta_app_review_info: review_contact(beta: true)", lane)
+        snapshot = FASTFILE.split("def ios_external_snapshot(app)", 1)[1].split("\nend", 1)[0]
+        target = FASTFILE.split("def ios_external_localization_target(before)", 1)[1].split("\nend", 1)[0]
+        classifier = FASTFILE.split("def classify_ios_external!(intent_snapshot, current)", 1)[1].split("\nend", 1)[0]
+        # Actual byte/configured-scope/preservation behavior is exercised by
+        # the real Ruby lane/exporter tests; retain this path separation guard.
+        self.assertIn('"testflight/what-to-test.txt"', target)
+        self.assertIn("Pilot::BuildManager.sanitize_changelog(text.strip)", target)
+        self.assertIn("sha256: Digest::SHA256.hexdigest(raw)", target)
+        self.assertIn("ios_external_localization_target(before_localizations)", snapshot)
+        self.assertIn('ios_external_localization_target(before.fetch("localizations"))', classifier)
+        self.assertIn('before.fetch("whatToTestSha256") == target.fetch(:sha256)', classifier)
+        self.assertIn("target_beta_review_private_state", lane)
+        self.assertIn("patch_beta_app_review_detail", lane)
         self.assertIn(
             'notes_path = beta ? "review/ios-beta-notes.txt" : "review/ios-notes.txt"',
             FASTFILE,
@@ -93,20 +105,16 @@ class FastlaneContractTests(unittest.TestCase):
 
     def test_ios_production_rerun_is_readback_first_and_fail_closed(self) -> None:
         lane = FASTFILE.split("lane :ios_app_store_submit do", 1)[1].split("\nend", 1)[0]
-        self.assertLess(
-            lane.index("existing_app_store_submission(app, build)"),
-            lane.index("upload_to_app_store("),
-        )
-        self.assertIn('result = "already_present"', lane)
-        self.assertIn("require_exact_submitted_app_store_version(version, build)", lane)
-        self.assertIn("MobileReleaseKit.manual_app_store_release?(version)", FASTFILE)
-        self.assertIn("partial earlier submission cannot be distinguished", FASTFILE)
-        self.assertIn("references a different build; refusing production adoption", FASTFILE)
-        existing = FASTFILE.split("def existing_app_store_submission", 1)[1].split("\nend", 1)[0]
-        self.assertIn("unless version.build", existing)
-        self.assertNotIn("PREPARE_FOR_SUBMISSION", existing)
-        self.assertNotIn("READY_FOR_REVIEW", existing)
-        self.assertIn('automatic_release: false', lane)
+        self.assertLess(lane.index('require_operation_intent!("ios_app_store_submit", "ios")'), lane.index('.execute('))
+        self.assertIn("resuming: apple_prior_execution?", lane)
+        self.assertIn("create_guard: apple_create_guard", lane)
+        self.assertNotIn("upload_to_app_store", lane)
+        self.assertNotIn("deliver(", lane)
+        self.assertIn('version.fetch("releaseType") == "MANUAL"', APPLE_PRODUCTION)
+        self.assertIn('version.fetch("earliestReleaseDate").empty?', APPLE_PRODUCTION)
+        self.assertIn('version.fetch("buildId") == @build.fetch("id")', APPLE_PRODUCTION)
+        self.assertIn('return nil if status.fetch(:submitted)', APPLE_PRODUCTION)
+        self.assertIn('automaticRelease: false', lane)
         self.assertNotIn("create_app_store_version_release_request", lane)
 
     def test_store_dependencies_and_transitives_are_locked(self) -> None:

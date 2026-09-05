@@ -33,7 +33,14 @@ jobs:
           cache: pip
       - name: Install the local package
         run: python -m pip install '.[test]'
+      - name: Set up pinned Ruby dependencies
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: '3.3.12'
+          bundler-cache: true
       - name: Run Python and workflow contract tests
+        env:
+          MOBILE_RELEASE_REQUIRE_RUBY_CONTRACTS: '1'
         run: python -m unittest discover -s tests -v
       - name: Smoke-test the installed wheel outside the checkout
         run: |
@@ -64,7 +71,11 @@ jobs:
           test -f .github/workflows/mobile-production-submit.yml
           grep -Fx '.mobile-release/' .gitignore
           grep -F 'example/mobile-release-kit/.github/workflows/reusable-candidate.yml@1111111111111111111111111111111111111111' .github/workflows/mobile-candidate.yml
-          "$venv_dir/bin/python" -c 'from mobile_release.tooling import resolve_tooling_root; root = resolve_tooling_root(environ={}); assert root is not None; required = ("Gemfile", "Gemfile.lock", "fastlane/Fastfile", "fastlane/play_store.rb", "fastlane/release_support.rb", "fastlane/run_lane.rb", "schemas/project.schema.json", "schemas/candidate.schema.json", "schemas/receipt.schema.json", "templates/mobile-release.json", "templates/workflows/mobile-preflight.yml", "templates/workflows/mobile-candidate.yml", "templates/workflows/mobile-external-testing.yml", "templates/workflows/mobile-production-submit.yml"); assert all((root / path).is_file() for path in required)'
+          "$venv_dir/bin/python" -c 'from mobile_release.tooling import resolve_tooling_root, REQUIRED_TOOLING_FILES; root = resolve_tooling_root(environ={}); assert root is not None; required = ("Gemfile", "Gemfile.lock", "fastlane/Fastfile", "fastlane/play_store.rb", "fastlane/apple_store.rb", "fastlane/apple_production.rb", "fastlane/apple_asset_upload.rb", "fastlane/apple_create_retry.rb", "fastlane/ios_upload_validation.rb", "fastlane/android_upload_validation.rb", "fastlane/native_upload_validation.rb", "fastlane/release_support.rb", "fastlane/run_lane.rb", "schemas/project.schema.json", "schemas/candidate.schema.json", "schemas/receipt.schema.json", "schemas/store-operation-intent.schema.json", "templates/mobile-release.json", "templates/workflows/mobile-preflight.yml", "templates/workflows/mobile-candidate.yml", "templates/workflows/mobile-external-testing.yml", "templates/workflows/mobile-production-submit.yml"); assert set(required) <= set(REQUIRED_TOOLING_FILES); assert all((root / path).is_file() for path in REQUIRED_TOOLING_FILES)'
+          "$venv_dir/bin/python" -m mobile_release.workflow --help
+          "$venv_dir/bin/python" -m mobile_release.ios_upload_validation --help
+          "$venv_dir/bin/python" -m mobile_release.android_upload_validation --help
+          "$venv_dir/bin/python" -c 'from importlib.metadata import requires; assert all("extra ==" in item for item in (requires("mobile-release-kit") or []))'
       - name: Install pinned actionlint
         env:
           ACTIONLINT_VERSION: 1.7.12
@@ -85,15 +96,19 @@ jobs:
           actionlint -no-color
           -ignore 'property "workflow_(repository|sha|ref)" is not defined in object type'
           .github/workflows/*.yml templates/workflows/*.yml
-      - name: Set up pinned Ruby dependencies
-        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
-        with:
-          ruby-version: '3.3.12'
-          bundler-cache: true
       - name: Run credential-free Fastlane support tests
         run: |
           ruby -I. tests/workflow/test_fastlane_support.rb
           bundle exec ruby tests/workflow/test_play_store.rb
+          bundle exec ruby tests/workflow/test_play_lanes.rb
+          bundle exec ruby tests/workflow/test_apple_store.rb
+          bundle exec ruby tests/workflow/test_apple_lanes.rb
+          bundle exec ruby tests/workflow/test_apple_production.rb
+          bundle exec ruby tests/workflow/test_apple_production_lane.rb
+          bundle exec ruby tests/workflow/test_apple_asset_upload.rb
+          bundle exec ruby tests/workflow/test_ios_upload_validation.rb
+          bundle exec ruby tests/workflow/test_android_upload_validation.rb
+          ruby tests/workflow/test_native_upload_validation.rb
           ruby tests/workflow/test_workflow_yaml.rb
           bundle exec ruby tests/workflow/test_supply_wif.rb
       - name: Parse the shared Fastfile without credentials

@@ -56,6 +56,8 @@ ALLOWED_CREDENTIAL_NAMES = {
     "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME",
     "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME",
     "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE",
+    "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64",
+    "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION",
     "MOBILE_RELEASE_ASC_ISSUER_ID",
     "MOBILE_RELEASE_ASC_KEY_ID",
     "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64",
@@ -393,6 +395,24 @@ def _apple_review_requirements(stage: str, config: ReleaseConfig) -> list[Requir
             "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE",
         )
     ]
+    requirements.extend(
+        [
+            Requirement(
+                "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64",
+                "secret",
+                stage,
+                "ios",
+                reason="HMAC key binding private Apple review state to recoverable operations",
+            ),
+            Requirement(
+                "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION",
+                "variable",
+                stage,
+                "ios",
+                reason="Version of the retained private-state commitment key",
+            ),
+        ]
+    )
     if config.section("ios").get("review", {}).get("demoAccountRequired"):
         requirements.extend(
             [
@@ -626,6 +646,13 @@ def _material_size_limit(name: str) -> int:
 
 
 def _credential_format_error(name: str, value: str) -> str | None:
+    if name == "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64":
+        try:
+            decoded = base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError):
+            return "The commitment key must be canonical base64."
+        if len(decoded) != 32:
+            return "The commitment key must decode to exactly 32 bytes."
     patterns = {
         "MOBILE_RELEASE_ANDROID_KEY_ALIAS": r"[A-Za-z0-9_.-]{1,255}",
         "MOBILE_RELEASE_ASC_KEY_ID": r"[A-Z0-9]{10}",
@@ -640,6 +667,7 @@ def _credential_format_error(name: str, value: str) -> str | None:
         "MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT": (
             r"[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9-]+\.iam\.gserviceaccount\.com"
         ),
+        "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION": r"[A-Za-z0-9_.-]{1,64}",
     }
     pattern = patterns.get(name)
     if pattern and not re.fullmatch(pattern, value):

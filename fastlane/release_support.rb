@@ -1,7 +1,20 @@
 # frozen_string_literal: true
 
+require "base64"
+require "digest"
+require "json"
+require "openssl"
+
 module MobileReleaseKit
   class ContractError < StandardError; end
+
+  class DuplicateRejectingHash < Hash
+    def []=(key, value)
+      raise ContractError, "Duplicate JSON key: #{key}" if key?(key)
+
+      super
+    end
+  end
 
   COMMENT_PREFIXES = ["#", "//", ";"].freeze
 
@@ -26,6 +39,97 @@ module MobileReleaseKit
                  ""
                end
     release_type == "MANUAL" && earliest.empty?
+  end
+
+  def self.deep_sort(value)
+    case value
+    when Hash
+      value.keys.map(&:to_s).sort.each_with_object({}) do |key, result|
+        source = value.key?(key) ? key : value.keys.find { |candidate| candidate.to_s == key }
+        result[key] = deep_sort(value.fetch(source))
+      end
+    when Array
+      value.map { |item| deep_sort(item) }
+    when Float
+      raise ContractError, "Floating-point values are forbidden in operation evidence"
+    else
+      value
+    end
+  end
+
+  def self.canonical_json(value)
+    JSON.generate(deep_sort(value))
+  end
+
+  def self.strict_json(text, label: "JSON")
+    # DuplicateRejectingHash is a parser sentinel, not the state-machine's
+    # mutable value type. Retaining it through nested `dup` calls would reject
+    # legitimate before -> target field updates after loading a sealed intent.
+    # The pinned JSON parser optimizes Hash subclasses and may bypass []=;
+    # its explicit duplicate-key option is therefore required as well.
+    deep_sort(JSON.parse(text, object_class: DuplicateRejectingHash, allow_duplicate_key: false))
+  rescue JSON::ParserError, EncodingError => e
+    raise ContractError, "#{label} is invalid UTF-8 JSON: #{e.class}"
+  end
+
+  def self.operation_intent(root, path)
+    safe = safe_path(root, path)
+    unless File.file?(safe) && !File.symlink?(safe) && File.size(safe) <= 2 * 1024 * 1024
+      raise ContractError, "Operation intent must be a bounded regular file"
+    end
+    document = strict_json(File.read(safe, encoding: "UTF-8"), label: "Operation intent")
+    integrity = document["integrity"]
+    unless integrity.is_a?(Hash) && integrity.keys.sort == %w[algorithm sha256] &&
+           integrity["algorithm"] == "sha256" &&
+           integrity["sha256"].to_s.match?(/\A[a-f0-9]{64}\z/)
+      raise ContractError, "Operation intent integrity is invalid"
+    end
+    payload = document.reject { |key, _value| key == "integrity" }
+    actual = Digest::SHA256.hexdigest(canonical_json(payload))
+    raise ContractError, "Operation intent integrity mismatch" unless secure_equal(actual, integrity["sha256"])
+    unless payload["documentType"] == "store-operation-intent" && payload["schemaVersion"] == 1
+      raise ContractError, "Operation intent document type/schemaVersion is invalid"
+    end
+    [payload, integrity.fetch("sha256")]
+  end
+
+  def self.execution_authority(environ)
+    raw = required_environment(environ, "MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON", strip: true)
+    value = strict_json(raw, label: "Execution authority")
+    expected = %w[
+      attempt callerPath event headSha ref reusableCommit reusablePath
+      reusableRepository runId workflow
+    ]
+    raise ContractError, "Execution authority fields are invalid" unless value.keys.sort == expected.sort
+    value
+  end
+
+  def self.hmac_commitment(domain, value, environ)
+    key_text = required_environment(
+      environ,
+      "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64",
+      strip: false,
+    )
+    key = Base64.strict_decode64(key_text)
+    raise ContractError, "Operation commitment key must be exactly 32 bytes" unless key.bytesize == 32
+    unless domain.match?(/\A[a-z0-9-]{1,64}\z/)
+      raise ContractError, "Operation commitment domain is invalid"
+    end
+    OpenSSL::HMAC.hexdigest(
+      "SHA256",
+      key,
+      "mobile-release-kit:hmac:v1:#{domain}:#{canonical_json(value)}",
+    )
+  rescue ArgumentError
+    raise ContractError, "Operation commitment key must be canonical base64"
+  ensure
+    key&.replace("\0" * key.bytesize)
+  end
+
+  def self.secure_equal(left, right)
+    return false unless left.is_a?(String) && right.is_a?(String) && left.bytesize == right.bytesize
+
+    OpenSSL.fixed_length_secure_compare(left, right)
   end
 
   def self.safe_path(root, path, must_exist: true)

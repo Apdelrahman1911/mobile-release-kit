@@ -1,0 +1,3508 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mobile-release-kit:schema:store-operation-intent:1",
+  "title": "Mobile Release Kit pre-mutation Store operation intent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "documentType",
+    "schemaVersion",
+    "stage",
+    "platform",
+    "tooling",
+    "repository",
+    "candidateSource",
+    "operationSource",
+    "authorizedBy",
+    "confirmation",
+    "application",
+    "version",
+    "destination",
+    "configuration",
+    "artifacts",
+    "signing",
+    "predecessors",
+    "storePrecondition",
+    "privateStateCommitments",
+    "createdAt",
+    "integrity"
+  ],
+  "properties": {
+    "documentType": {
+      "const": "store-operation-intent"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "stage": {
+      "enum": [
+        "candidate",
+        "external-testing",
+        "production-submit"
+      ]
+    },
+    "platform": {
+      "enum": [
+        "android",
+        "ios"
+      ]
+    },
+    "tooling": {
+      "$ref": "#/$defs/tooling"
+    },
+    "repository": {
+      "$ref": "#/$defs/repository"
+    },
+    "candidateSource": {
+      "$ref": "#/$defs/source"
+    },
+    "operationSource": {
+      "$ref": "#/$defs/source"
+    },
+    "authorizedBy": {
+      "$ref": "#/$defs/workflowAuthority"
+    },
+    "confirmation": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "application": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 2
+    },
+    "version": {
+      "$ref": "#/$defs/version"
+    },
+    "destination": {
+      "type": "object",
+      "minProperties": 1
+    },
+    "configuration": {
+      "$ref": "#/$defs/configuration"
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/artifact"
+      },
+      "maxItems": 64,
+      "minItems": 3
+    },
+    "signing": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/signingIdentity"
+      },
+      "maxItems": 1,
+      "minItems": 1
+    },
+    "predecessors": {
+      "type": "object",
+      "maxProperties": 3
+    },
+    "storePrecondition": {
+      "$ref": "#/$defs/storePrecondition"
+    },
+    "privateStateCommitments": {
+      "type": "object",
+      "maxProperties": 3
+    },
+    "createdAt": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "integrity": {
+      "$ref": "#/$defs/integrity"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "sha256"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "sha256"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "gitObjectId": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{40}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "tooling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "commit"
+      ],
+      "properties": {
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
+        },
+        "commit": {
+          "$ref": "#/$defs/gitObjectId"
+        }
+      }
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fullName",
+        "id"
+      ],
+      "properties": {
+        "fullName": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commit",
+        "tree",
+        "ref"
+      ],
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/gitObjectId"
+        },
+        "tree": {
+          "$ref": "#/$defs/gitObjectId"
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    },
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "metadataSha256"
+      ],
+      "properties": {
+        "path": {
+          "const": "release/mobile-release.json"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "metadataSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "marketing",
+        "build"
+      ],
+      "properties": {
+        "marketing": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[0-9]+(?:\\.[0-9]+){1,3}(?:[-+][0-9A-Za-z.-]+)?$"
+        },
+        "build": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2100000000
+        }
+      }
+    },
+    "safeFileName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[^/\\\\]+$",
+      "not": {
+        "enum": [
+          ".",
+          ".."
+        ]
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "logicalName",
+        "platform",
+        "kind",
+        "fileName",
+        "size",
+        "sha256",
+        "architectures"
+      ],
+      "properties": {
+        "logicalName": {
+          "enum": [
+            "android-aab",
+            "android-mapping",
+            "android-native-symbols",
+            "ios-ipa",
+            "ios-archive",
+            "ios-dsyms",
+            "store-metadata",
+            "validation-report"
+          ]
+        },
+        "platform": {
+          "enum": [
+            "android",
+            "ios",
+            "shared"
+          ]
+        },
+        "kind": {
+          "enum": [
+            "aab",
+            "ipa",
+            "xcarchive",
+            "dsym",
+            "r8-mapping",
+            "native-symbols",
+            "metadata",
+            "validation-report"
+          ]
+        },
+        "fileName": {
+          "$ref": "#/$defs/safeFileName"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "architectures": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]+$"
+          }
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "logicalName": {
+              "const": "android-aab"
+            },
+            "platform": {
+              "const": "android"
+            },
+            "kind": {
+              "const": "aab"
+            }
+          }
+        },
+        {
+          "properties": {
+            "logicalName": {
+              "const": "android-mapping"
+            },
+            "platform": {
+              "const": "android"
+            },
+            "kind": {
+              "const": "r8-mapping"
+            }
+          }
+        },
+        {
+          "properties": {
+            "logicalName": {
+              "const": "android-native-symbols"
+            },
+            "platform": {
+              "const": "android"
+            },
+            "kind": {
+              "const": "native-symbols"
+            }
+          }
+        },
+        {
+          "properties": {
+            "logicalName": {
+              "const": "ios-ipa"
+            },
+            "platform": {
+              "const": "ios"
+            },
+            "kind": {
+              "const": "ipa"
+            }
+          }
+        },
+        {
+          "properties": {
+            "logicalName": {
+              "const": "ios-archive"
+            },
+            "platform": {
+              "const": "ios"
+            },
+            "kind": {
+              "const": "xcarchive"
+            }
+          }
+        },
+        {
+          "properties": {
+            "logicalName": {
+              "const": "ios-dsyms"
+            },
+            "platform": {
+              "const": "ios"
+            },
+            "kind": {
+              "const": "dsym"
+            }
+          }
+        },
+        {
+          "properties": {
+            "logicalName": {
+              "const": "store-metadata"
+            },
+            "platform": {
+              "const": "shared"
+            },
+            "kind": {
+              "const": "metadata"
+            }
+          }
+        },
+        {
+          "properties": {
+            "logicalName": {
+              "const": "validation-report"
+            },
+            "platform": {
+              "const": "shared"
+            },
+            "kind": {
+              "const": "validation-report"
+            }
+          }
+        }
+      ]
+    },
+    "signingIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "platform",
+        "kind",
+        "certificateSha256"
+      ],
+      "properties": {
+        "platform": {
+          "enum": [
+            "android",
+            "ios"
+          ]
+        },
+        "kind": {
+          "enum": [
+            "android-upload",
+            "apple-distribution"
+          ]
+        },
+        "certificateSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "teamId": {
+          "type": "string",
+          "pattern": "^[A-Z0-9]{10}$"
+        },
+        "profileUuid": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}$"
+        },
+        "profileExpiresAt": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "platform": {
+                "const": "ios"
+              }
+            },
+            "required": [
+              "platform"
+            ]
+          },
+          "then": {
+            "required": [
+              "teamId",
+              "profileUuid",
+              "profileExpiresAt"
+            ],
+            "properties": {
+              "kind": {
+                "const": "apple-distribution"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "kind": {
+                "const": "android-upload"
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "teamId"
+                  ]
+                },
+                {
+                  "required": [
+                    "profileUuid"
+                  ]
+                },
+                {
+                  "required": [
+                    "profileExpiresAt"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "workflowAuthority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workflow",
+        "callerPath",
+        "reusableRepository",
+        "reusablePath",
+        "reusableCommit",
+        "runId",
+        "attempt",
+        "headSha",
+        "ref",
+        "event"
+      ],
+      "properties": {
+        "workflow": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "callerPath": {
+          "type": "string",
+          "pattern": "^\\.github/workflows/[A-Za-z0-9_.-]+\\.ya?ml$",
+          "maxLength": 512
+        },
+        "reusableRepository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "reusablePath": {
+          "type": "string",
+          "pattern": "^\\.github/workflows/[A-Za-z0-9_.-]+\\.ya?ml$",
+          "maxLength": 512
+        },
+        "reusableCommit": {
+          "$ref": "#/$defs/gitObjectId"
+        },
+        "runId": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "headSha": {
+          "$ref": "#/$defs/gitObjectId"
+        },
+        "ref": {
+          "type": "string",
+          "pattern": "^refs/heads/.+$",
+          "maxLength": 512
+        },
+        "event": {
+          "const": "workflow_dispatch"
+        }
+      }
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[^\\u0000]*$"
+    },
+    "nullableId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "locale": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 35,
+      "pattern": "^[^\\u0000]*$"
+    },
+    "appleText": {
+      "type": "string",
+      "minLength": 0,
+      "maxLength": 65536,
+      "pattern": "^[^\\u0000]*$"
+    },
+    "boolOrNull": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "privatePair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "before",
+        "target"
+      ],
+      "properties": {
+        "before": {
+          "$ref": "#/$defs/sha256"
+        },
+        "target": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "privateInheritedPair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "before",
+        "target"
+      ],
+      "properties": {
+        "before": {
+          "$ref": "#/$defs/sha256"
+        },
+        "target": {
+          "$ref": "#/$defs/sha256"
+        },
+        "inherited": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "betaCommitments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "keyVersion",
+        "domains"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "hmac-sha256"
+        },
+        "keyVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+        },
+        "domains": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "beta-review"
+          ],
+          "properties": {
+            "beta-review": {
+              "$ref": "#/$defs/privatePair"
+            }
+          }
+        }
+      }
+    },
+    "appCommitments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "keyVersion",
+        "domains"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "hmac-sha256"
+        },
+        "keyVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+        },
+        "domains": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "app-review"
+          ],
+          "properties": {
+            "app-review": {
+              "$ref": "#/$defs/privateInheritedPair"
+            }
+          }
+        }
+      }
+    },
+    "playRelease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "versionCodes",
+        "status"
+      ],
+      "properties": {
+        "versionCodes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10000,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,9}$"
+          }
+        },
+        "status": {
+          "enum": [
+            "draft",
+            "inProgress",
+            "halted",
+            "completed"
+          ]
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 512,
+              "pattern": "^[^\\u0000]*$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "userFraction": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^0\\.[0-9]{0,323}[1-9]$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inAppUpdatePriority": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "releaseNotes": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "language",
+                  "text"
+                ],
+                "properties": {
+                  "language": {
+                    "$ref": "#/$defs/locale"
+                  },
+                  "text": {
+                    "$ref": "#/$defs/appleText"
+                  }
+                }
+              },
+              "maxItems": 250,
+              "minItems": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "countryTargeting": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [],
+              "properties": {
+                "countries": {
+                  "type": "array",
+                  "maxItems": 300,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[A-Z]{2}$"
+                  }
+                },
+                "includeRestOfWorld": {
+                  "type": "boolean"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "playTrack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonicalization",
+        "track",
+        "releases"
+      ],
+      "properties": {
+        "canonicalization": {
+          "const": "mrk-play-track-state-v2"
+        },
+        "track": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "releases": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/playRelease"
+          },
+          "maxItems": 10000,
+          "minItems": 0
+        }
+      }
+    },
+    "playBundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "versionCode",
+        "sha256"
+      ],
+      "properties": {
+        "versionCode": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2100000000
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "playImage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "language",
+        "type",
+        "order",
+        "sha256",
+        "size"
+      ],
+      "properties": {
+        "language": {
+          "$ref": "#/$defs/locale"
+        },
+        "type": {
+          "enum": [
+            "icon",
+            "featureGraphic",
+            "promoGraphic",
+            "tvBanner",
+            "phoneScreenshots",
+            "sevenInchScreenshots",
+            "tenInchScreenshots",
+            "tvScreenshots",
+            "wearScreenshots"
+          ]
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 49
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10485760
+        }
+      }
+    },
+    "playImageId": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "language",
+        "type",
+        "order",
+        "id"
+      ],
+      "properties": {
+        "language": {
+          "$ref": "#/$defs/locale"
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 49
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "playListing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "language",
+        "title",
+        "shortDescription",
+        "fullDescription",
+        "video"
+      ],
+      "properties": {
+        "language": {
+          "$ref": "#/$defs/locale"
+        },
+        "title": {
+          "$ref": "#/$defs/appleText"
+        },
+        "shortDescription": {
+          "$ref": "#/$defs/appleText"
+        },
+        "fullDescription": {
+          "$ref": "#/$defs/appleText"
+        },
+        "video": {
+          "$ref": "#/$defs/appleText"
+        }
+      }
+    },
+    "playMetadataBefore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "listings",
+        "images",
+        "observedImageIds"
+      ],
+      "properties": {
+        "listings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/playListing"
+          },
+          "maxItems": 250,
+          "minItems": 0
+        },
+        "images": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/playImage"
+          },
+          "maxItems": 500,
+          "minItems": 0
+        },
+        "observedImageIds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/playImageId"
+          },
+          "maxItems": 500,
+          "minItems": 0
+        }
+      }
+    },
+    "playMetadataTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "listings",
+        "images"
+      ],
+      "properties": {
+        "listings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/playListing"
+          },
+          "maxItems": 250,
+          "minItems": 0
+        },
+        "images": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/playImage"
+          },
+          "maxItems": 500,
+          "minItems": 0
+        }
+      }
+    },
+    "play-candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonicalization",
+        "destinationTrack",
+        "destinationState",
+        "sourceTrack",
+        "sourceState",
+        "bundles",
+        "targetPresent",
+        "targetRelease",
+        "destinationTargetState",
+        "sourceAllowedStates"
+      ],
+      "properties": {
+        "canonicalization": {
+          "const": "mrk-play-operation-v1"
+        },
+        "destinationTrack": {
+          "const": "internal"
+        },
+        "destinationState": {
+          "$ref": "#/$defs/playTrack"
+        },
+        "sourceTrack": {
+          "const": null
+        },
+        "sourceState": {
+          "const": null
+        },
+        "bundles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/playBundle"
+          },
+          "maxItems": 10000,
+          "minItems": 0
+        },
+        "targetPresent": {
+          "const": false
+        },
+        "targetRelease": {
+          "$ref": "#/$defs/playRelease"
+        },
+        "destinationTargetState": {
+          "$ref": "#/$defs/playTrack"
+        },
+        "sourceAllowedStates": {
+          "const": []
+        }
+      }
+    },
+    "play-external-testing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonicalization",
+        "destinationTrack",
+        "destinationState",
+        "sourceTrack",
+        "sourceState",
+        "bundles",
+        "targetPresent",
+        "targetRelease",
+        "destinationTargetState",
+        "sourceAllowedStates"
+      ],
+      "properties": {
+        "canonicalization": {
+          "const": "mrk-play-operation-v1"
+        },
+        "destinationTrack": {
+          "type": "string",
+          "not": {
+            "enum": [
+              "internal",
+              "production"
+            ]
+          }
+        },
+        "destinationState": {
+          "$ref": "#/$defs/playTrack"
+        },
+        "sourceTrack": {
+          "const": "internal"
+        },
+        "sourceState": {
+          "$ref": "#/$defs/playTrack"
+        },
+        "bundles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/playBundle"
+          },
+          "maxItems": 10000,
+          "minItems": 0
+        },
+        "targetPresent": {
+          "type": "boolean"
+        },
+        "targetRelease": {
+          "$ref": "#/$defs/playRelease"
+        },
+        "destinationTargetState": {
+          "$ref": "#/$defs/playTrack"
+        },
+        "sourceAllowedStates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/playTrack"
+          },
+          "maxItems": 2,
+          "minItems": 0
+        }
+      }
+    },
+    "play-production-submit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonicalization",
+        "destinationTrack",
+        "destinationState",
+        "sourceTrack",
+        "sourceState",
+        "bundles",
+        "targetPresent",
+        "targetRelease",
+        "destinationTargetState",
+        "sourceAllowedStates",
+        "metadataBefore",
+        "metadataTarget"
+      ],
+      "properties": {
+        "canonicalization": {
+          "const": "mrk-play-operation-v1"
+        },
+        "destinationTrack": {
+          "const": "production"
+        },
+        "destinationState": {
+          "$ref": "#/$defs/playTrack"
+        },
+        "sourceTrack": {
+          "type": "string",
+          "minLength": 1,
+          "not": {
+            "enum": [
+              "internal",
+              "production"
+            ]
+          }
+        },
+        "sourceState": {
+          "$ref": "#/$defs/playTrack"
+        },
+        "bundles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/playBundle"
+          },
+          "maxItems": 10000,
+          "minItems": 0
+        },
+        "targetPresent": {
+          "const": false
+        },
+        "targetRelease": {
+          "$ref": "#/$defs/playRelease"
+        },
+        "destinationTargetState": {
+          "$ref": "#/$defs/playTrack"
+        },
+        "sourceAllowedStates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/playTrack"
+          },
+          "maxItems": 2,
+          "minItems": 0
+        },
+        "metadataBefore": {
+          "$ref": "#/$defs/playMetadataBefore"
+        },
+        "metadataTarget": {
+          "$ref": "#/$defs/playMetadataTarget"
+        }
+      }
+    },
+    "appleBuild": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "appId",
+        "marketingVersion",
+        "buildNumber",
+        "processingState",
+        "uploadedDate",
+        "expirationDate",
+        "expired",
+        "usesNonExemptEncryption",
+        "autoNotifyEnabled"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "appId": {
+          "$ref": "#/$defs/id"
+        },
+        "marketingVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "buildNumber": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        },
+        "processingState": {
+          "const": "VALID"
+        },
+        "uploadedDate": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "expirationDate": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "expired": {
+          "const": false
+        },
+        "usesNonExemptEncryption": {
+          "$ref": "#/$defs/boolOrNull"
+        },
+        "autoNotifyEnabled": {
+          "$ref": "#/$defs/boolOrNull"
+        }
+      }
+    },
+    "betaLocalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "locale",
+        "whatsNew"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "locale": {
+          "$ref": "#/$defs/locale"
+        },
+        "whatsNew": {
+          "$ref": "#/$defs/appleText"
+        }
+      }
+    },
+    "betaTargetLocalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "locale",
+        "whatsNew"
+      ],
+      "properties": {
+        "locale": {
+          "$ref": "#/$defs/locale"
+        },
+        "whatsNew": {
+          "$ref": "#/$defs/appleText"
+        }
+      }
+    },
+    "appleExternal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "groupId",
+        "groupName",
+        "reviewDetailId",
+        "assigned",
+        "externalState",
+        "betaReviewState",
+        "usesNonExemptEncryption",
+        "autoNotifyEnabled",
+        "localizations",
+        "targetLocalizations",
+        "whatToTestSha256"
+      ],
+      "properties": {
+        "groupId": {
+          "$ref": "#/$defs/id"
+        },
+        "groupName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "reviewDetailId": {
+          "$ref": "#/$defs/id"
+        },
+        "assigned": {
+          "type": "boolean"
+        },
+        "externalState": {
+          "enum": [
+            "PROCESSING",
+            "MISSING_EXPORT_COMPLIANCE",
+            "IN_EXPORT_COMPLIANCE_REVIEW",
+            "READY_FOR_BETA_SUBMISSION",
+            "WAITING_FOR_BETA_REVIEW",
+            "IN_BETA_REVIEW",
+            "BETA_APPROVED",
+            "READY_FOR_BETA_TESTING",
+            "IN_BETA_TESTING"
+          ]
+        },
+        "betaReviewState": {
+          "enum": [
+            "NOT_SUBMITTED",
+            "WAITING_FOR_REVIEW",
+            "WAITING_FOR_BETA_REVIEW",
+            "SUBMITTED",
+            "IN_REVIEW",
+            "IN_BETA_REVIEW",
+            "BETA_APPROVED",
+            "APPROVED"
+          ]
+        },
+        "usesNonExemptEncryption": {
+          "$ref": "#/$defs/boolOrNull"
+        },
+        "autoNotifyEnabled": {
+          "$ref": "#/$defs/boolOrNull"
+        },
+        "localizations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/betaLocalization"
+          },
+          "maxItems": 100,
+          "minItems": 0
+        },
+        "targetLocalizations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/betaTargetLocalization"
+          },
+          "maxItems": 100,
+          "minItems": 1
+        },
+        "whatToTestSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "appleScreenshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "order",
+        "fileName",
+        "fileSize",
+        "sourceFileChecksum",
+        "deliveryState"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9
+        },
+        "fileName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "fileSize": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10485760
+        },
+        "sourceFileChecksum": {
+          "type": "string",
+          "pattern": "^(?:[a-f0-9]{32})?$"
+        },
+        "deliveryState": {
+          "enum": [
+            "AWAITING_UPLOAD",
+            "UPLOAD_COMPLETE",
+            "COMPLETE",
+            "FAILED"
+          ]
+        }
+      }
+    },
+    "appleScreenshotSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "displayType",
+        "screenshots"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "displayType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "screenshots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/appleScreenshot"
+          },
+          "maxItems": 10,
+          "minItems": 0
+        }
+      }
+    },
+    "appleVersionTargetLocalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "locale",
+        "description",
+        "keywords",
+        "marketingUrl",
+        "promotionalText",
+        "supportUrl",
+        "whatsNew"
+      ],
+      "properties": {
+        "locale": {
+          "$ref": "#/$defs/locale"
+        },
+        "description": {
+          "$ref": "#/$defs/appleText"
+        },
+        "keywords": {
+          "$ref": "#/$defs/appleText"
+        },
+        "marketingUrl": {
+          "$ref": "#/$defs/appleText"
+        },
+        "promotionalText": {
+          "$ref": "#/$defs/appleText"
+        },
+        "supportUrl": {
+          "$ref": "#/$defs/appleText"
+        },
+        "whatsNew": {
+          "$ref": "#/$defs/appleText"
+        }
+      }
+    },
+    "appleVersionLocalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "locale",
+        "description",
+        "keywords",
+        "marketingUrl",
+        "promotionalText",
+        "supportUrl",
+        "whatsNew",
+        "id",
+        "screenshotSets"
+      ],
+      "properties": {
+        "locale": {
+          "$ref": "#/$defs/locale"
+        },
+        "description": {
+          "$ref": "#/$defs/appleText"
+        },
+        "keywords": {
+          "$ref": "#/$defs/appleText"
+        },
+        "marketingUrl": {
+          "$ref": "#/$defs/appleText"
+        },
+        "promotionalText": {
+          "$ref": "#/$defs/appleText"
+        },
+        "supportUrl": {
+          "$ref": "#/$defs/appleText"
+        },
+        "whatsNew": {
+          "$ref": "#/$defs/appleText"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "screenshotSets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/appleScreenshotSet"
+          },
+          "maxItems": 100,
+          "minItems": 0
+        }
+      }
+    },
+    "appleInfoTargetLocalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "locale",
+        "name",
+        "subtitle",
+        "privacyPolicyUrl",
+        "privacyPolicyText",
+        "privacyChoicesUrl"
+      ],
+      "properties": {
+        "locale": {
+          "$ref": "#/$defs/locale"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "subtitle": {
+          "$ref": "#/$defs/appleText"
+        },
+        "privacyPolicyUrl": {
+          "$ref": "#/$defs/appleText"
+        },
+        "privacyPolicyText": {
+          "$ref": "#/$defs/appleText"
+        },
+        "privacyChoicesUrl": {
+          "$ref": "#/$defs/appleText"
+        }
+      }
+    },
+    "appleInfoLocalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "locale",
+        "name",
+        "subtitle",
+        "privacyPolicyUrl",
+        "privacyPolicyText",
+        "privacyChoicesUrl",
+        "id"
+      ],
+      "properties": {
+        "locale": {
+          "$ref": "#/$defs/locale"
+        },
+        "name": {
+          "$ref": "#/$defs/appleText"
+        },
+        "subtitle": {
+          "$ref": "#/$defs/appleText"
+        },
+        "privacyPolicyUrl": {
+          "$ref": "#/$defs/appleText"
+        },
+        "privacyPolicyText": {
+          "$ref": "#/$defs/appleText"
+        },
+        "privacyChoicesUrl": {
+          "$ref": "#/$defs/appleText"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "appleVersionSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "appId",
+        "platform",
+        "versionString",
+        "state",
+        "buildId",
+        "releaseType",
+        "earliestReleaseDate",
+        "copyright"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "appId": {
+          "$ref": "#/$defs/id"
+        },
+        "platform": {
+          "const": "IOS"
+        },
+        "versionString": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "state": {
+          "enum": [
+            "PREPARE_FOR_SUBMISSION",
+            "READY_FOR_REVIEW",
+            "WAITING_FOR_REVIEW",
+            "IN_REVIEW",
+            "ACCEPTED",
+            "PENDING_DEVELOPER_RELEASE",
+            "READY_FOR_SALE",
+            "READY_FOR_DISTRIBUTION",
+            "REPLACED_WITH_NEW_VERSION",
+            "REPLACED_WITH_NEW_INFO",
+            "REMOVED_FROM_SALE",
+            "DEVELOPER_REMOVED_FROM_SALE"
+          ]
+        },
+        "buildId": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "releaseType": {
+          "enum": [
+            "MANUAL",
+            "AFTER_APPROVAL",
+            "SCHEDULED"
+          ]
+        },
+        "earliestReleaseDate": {
+          "$ref": "#/$defs/appleText"
+        },
+        "copyright": {
+          "$ref": "#/$defs/appleText"
+        }
+      }
+    },
+    "appleVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "appId",
+        "platform",
+        "versionString",
+        "state",
+        "buildId",
+        "releaseType",
+        "earliestReleaseDate",
+        "copyright",
+        "localizations",
+        "privateDetailId",
+        "phasedRelease"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "appId": {
+          "$ref": "#/$defs/id"
+        },
+        "platform": {
+          "const": "IOS"
+        },
+        "versionString": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "state": {
+          "enum": [
+            "PREPARE_FOR_SUBMISSION",
+            "READY_FOR_REVIEW",
+            "WAITING_FOR_REVIEW",
+            "IN_REVIEW",
+            "ACCEPTED",
+            "PENDING_DEVELOPER_RELEASE",
+            "READY_FOR_SALE",
+            "READY_FOR_DISTRIBUTION",
+            "REPLACED_WITH_NEW_VERSION",
+            "REPLACED_WITH_NEW_INFO",
+            "REMOVED_FROM_SALE",
+            "DEVELOPER_REMOVED_FROM_SALE"
+          ]
+        },
+        "buildId": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "releaseType": {
+          "enum": [
+            "MANUAL",
+            "AFTER_APPROVAL",
+            "SCHEDULED"
+          ]
+        },
+        "earliestReleaseDate": {
+          "$ref": "#/$defs/appleText"
+        },
+        "copyright": {
+          "$ref": "#/$defs/appleText"
+        },
+        "localizations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/appleVersionLocalization"
+          },
+          "maxItems": 100,
+          "minItems": 0
+        },
+        "privateDetailId": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "phasedRelease": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "state"
+              ],
+              "properties": {
+                "id": {
+                  "$ref": "#/$defs/id"
+                },
+                "state": {
+                  "enum": [
+                    "INACTIVE",
+                    "ACTIVE",
+                    "PAUSED",
+                    "COMPLETE"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "appleCategories": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "primaryCategory",
+        "primarySubcategoryOne",
+        "primarySubcategoryTwo",
+        "secondaryCategory",
+        "secondarySubcategoryOne",
+        "secondarySubcategoryTwo"
+      ],
+      "properties": {
+        "primaryCategory": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "primarySubcategoryOne": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "primarySubcategoryTwo": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "secondaryCategory": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "secondarySubcategoryOne": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "secondarySubcategoryTwo": {
+          "$ref": "#/$defs/nullableId"
+        }
+      }
+    },
+    "appleAppInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "appId",
+        "state",
+        "categories",
+        "localizations"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "appId": {
+          "$ref": "#/$defs/id"
+        },
+        "state": {
+          "enum": [
+            "PREPARE_FOR_SUBMISSION",
+            "READY_FOR_REVIEW",
+            "WAITING_FOR_REVIEW",
+            "IN_REVIEW",
+            "ACCEPTED",
+            "PENDING_DEVELOPER_RELEASE",
+            "READY_FOR_SALE",
+            "READY_FOR_DISTRIBUTION",
+            "REPLACED_WITH_NEW_VERSION",
+            "REPLACED_WITH_NEW_INFO",
+            "REMOVED_FROM_SALE",
+            "DEVELOPER_REMOVED_FROM_SALE",
+            "PENDING_RELEASE"
+          ]
+        },
+        "categories": {
+          "$ref": "#/$defs/appleCategories"
+        },
+        "localizations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/appleInfoLocalization"
+          },
+          "maxItems": 100,
+          "minItems": 0
+        }
+      }
+    },
+    "appleReviewItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "state",
+        "resource"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "state": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "resource": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "enum": [
+                "appStoreVersions",
+                "appStoreVersionExperiments",
+                "appCustomProductPageVersions",
+                "appEvents"
+              ]
+            },
+            "id": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        }
+      }
+    },
+    "appleReviewSubmission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "state",
+        "platform",
+        "items"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "state": {
+          "enum": [
+            "READY_FOR_REVIEW",
+            "WAITING_FOR_REVIEW",
+            "IN_REVIEW",
+            "COMPLETING",
+            "COMPLETE",
+            "CANCELING",
+            "CANCELED",
+            "UNRESOLVED_ISSUES"
+          ]
+        },
+        "platform": {
+          "enum": [
+            "",
+            "IOS",
+            "MAC_OS",
+            "TV_OS",
+            "VISION_OS"
+          ]
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/appleReviewItem"
+          },
+          "maxItems": 10000,
+          "minItems": 0
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "platform": {
+                "const": ""
+              }
+            },
+            "required": [
+              "platform"
+            ]
+          },
+          "then": {
+            "properties": {
+              "state": {
+                "const": "COMPLETE"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "appleScreenshotTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "localPath",
+        "locale",
+        "displayType",
+        "fileName",
+        "fileSize",
+        "sha256",
+        "sourceFileChecksum"
+      ],
+      "properties": {
+        "localPath": {
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "^screenshots/[^/\\\\:.\\x00-\\x1f][^/\\\\:\\x00-\\x1f]*/(?:APP_(?:IPHONE|IPAD|WATCH)_[A-Z0-9_]+/)?[^/\\\\:\\x00-\\x1f]+\\.(?:png|jpg|jpeg)$"
+        },
+        "locale": {
+          "$ref": "#/$defs/locale"
+        },
+        "displayType": {
+          "type": "string",
+          "pattern": "^APP_(?:IPHONE|IPAD|WATCH)_[A-Z0-9_]+$"
+        },
+        "fileName": {
+          "type": "string",
+          "pattern": "^mrk-[a-f0-9]{32}-[a-f0-9]{64}\\.(?:png|jpg|jpeg)$"
+        },
+        "fileSize": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10485760
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sourceFileChecksum": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32}$"
+        }
+      }
+    },
+    "appleMetadataTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "appInfo",
+        "screenshots"
+      ],
+      "properties": {
+        "version": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "copyright",
+            "localizations"
+          ],
+          "properties": {
+            "copyright": {
+              "$ref": "#/$defs/appleText"
+            },
+            "localizations": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/appleVersionTargetLocalization"
+              },
+              "maxItems": 100,
+              "minItems": 0
+            }
+          }
+        },
+        "appInfo": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "categories",
+            "localizations"
+          ],
+          "properties": {
+            "categories": {
+              "$ref": "#/$defs/appleCategories"
+            },
+            "localizations": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/appleInfoTargetLocalization"
+              },
+              "maxItems": 100,
+              "minItems": 0
+            }
+          }
+        },
+        "screenshots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/appleScreenshotTarget"
+          },
+          "maxItems": 1000,
+          "minItems": 0
+        }
+      }
+    },
+    "apple-candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonicalization",
+        "appStoreAppId",
+        "serverObservedAt",
+        "build"
+      ],
+      "properties": {
+        "canonicalization": {
+          "const": "mrk-apple-operation-v1"
+        },
+        "appStoreAppId": {
+          "$ref": "#/$defs/id"
+        },
+        "serverObservedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "build": {
+          "const": null
+        }
+      }
+    },
+    "apple-external-testing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonicalization",
+        "appStoreAppId",
+        "serverObservedAt",
+        "build",
+        "external",
+        "privateStateCommitments"
+      ],
+      "properties": {
+        "canonicalization": {
+          "const": "mrk-apple-operation-v1"
+        },
+        "appStoreAppId": {
+          "$ref": "#/$defs/id"
+        },
+        "serverObservedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "build": {
+          "$ref": "#/$defs/appleBuild"
+        },
+        "external": {
+          "$ref": "#/$defs/appleExternal"
+        },
+        "privateStateCommitments": {
+          "$ref": "#/$defs/betaCommitments"
+        }
+      }
+    },
+    "apple-production-submit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonicalization",
+        "appStoreAppId",
+        "serverObservedAt",
+        "build",
+        "production",
+        "liveReference",
+        "appInfo",
+        "appInfoReference",
+        "unrelatedVersions",
+        "reviewSubmissions",
+        "operationNonce",
+        "metadataTarget",
+        "privateStateCommitments"
+      ],
+      "properties": {
+        "canonicalization": {
+          "const": "mrk-apple-operation-v1"
+        },
+        "appStoreAppId": {
+          "$ref": "#/$defs/id"
+        },
+        "serverObservedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "build": {
+          "$ref": "#/$defs/appleBuild"
+        },
+        "production": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/appleVersion"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "liveReference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/appleVersion"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "appInfo": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/appleAppInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "appInfoReference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/appleAppInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unrelatedVersions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/appleVersionSummary"
+          },
+          "maxItems": 10000,
+          "minItems": 0
+        },
+        "reviewSubmissions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/appleReviewSubmission"
+          },
+          "maxItems": 10000,
+          "minItems": 0
+        },
+        "operationNonce": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32}$"
+        },
+        "metadataTarget": {
+          "$ref": "#/$defs/appleMetadataTarget"
+        },
+        "privateStateCommitments": {
+          "$ref": "#/$defs/appCommitments"
+        }
+      }
+    },
+    "storePrecondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "documentType",
+        "operation",
+        "platform",
+        "appIdentity",
+        "marketingVersion",
+        "buildNumber",
+        "observedAt",
+        "snapshot"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "documentType": {
+          "const": "store-precondition"
+        },
+        "operation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "platform": {
+          "enum": [
+            "android",
+            "ios"
+          ]
+        },
+        "appIdentity": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "marketingVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "buildNumber": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2100000000
+        },
+        "observedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "snapshot": {
+          "type": "object"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "stage": {
+            "const": "candidate"
+          }
+        },
+        "required": [
+          "stage"
+        ]
+      },
+      "then": {
+        "properties": {
+          "predecessors": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [],
+            "properties": {}
+          },
+          "authorizedBy": {
+            "properties": {
+              "callerPath": {
+                "const": ".github/workflows/mobile-candidate.yml"
+              },
+              "reusablePath": {
+                "const": ".github/workflows/reusable-candidate.yml"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": {
+            "const": "candidate"
+          },
+          "platform": {
+            "const": "android"
+          }
+        },
+        "required": [
+          "stage",
+          "platform"
+        ]
+      },
+      "then": {
+        "properties": {
+          "application": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "pattern": "^[^\\u0000]*$"
+              }
+            }
+          },
+          "destination": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "channel",
+              "releaseStatus"
+            ],
+            "properties": {
+              "channel": {
+                "const": "internal"
+              },
+              "releaseStatus": {
+                "const": "completed"
+              }
+            }
+          },
+          "artifacts": {
+            "items": {
+              "properties": {
+                "logicalName": {
+                  "enum": [
+                    "android-aab",
+                    "android-mapping",
+                    "android-native-symbols",
+                    "store-metadata",
+                    "validation-report"
+                  ]
+                }
+              }
+            },
+            "allOf": [
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "android-aab"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "store-metadata"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "validation-report"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "android-native-symbols"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 0,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "android-mapping"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 0,
+                "maxContains": 1
+              }
+            ]
+          },
+          "signing": {
+            "items": {
+              "properties": {
+                "platform": {
+                  "const": "android"
+                }
+              }
+            }
+          },
+          "privateStateCommitments": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [],
+            "properties": {}
+          },
+          "storePrecondition": {
+            "properties": {
+              "operation": {
+                "const": "android_internal_upload"
+              },
+              "platform": {
+                "const": "android"
+              },
+              "snapshot": {
+                "$ref": "#/$defs/play-candidate"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": {
+            "const": "candidate"
+          },
+          "platform": {
+            "const": "ios"
+          }
+        },
+        "required": [
+          "stage",
+          "platform"
+        ]
+      },
+      "then": {
+        "properties": {
+          "application": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "storeAppId"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "pattern": "^[^\\u0000]*$"
+              },
+              "storeAppId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "pattern": "^[^\\u0000]*$"
+              }
+            }
+          },
+          "destination": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "channel"
+            ],
+            "properties": {
+              "channel": {
+                "const": "testflight-internal"
+              }
+            }
+          },
+          "artifacts": {
+            "items": {
+              "properties": {
+                "logicalName": {
+                  "enum": [
+                    "ios-ipa",
+                    "ios-archive",
+                    "ios-dsyms",
+                    "store-metadata",
+                    "validation-report"
+                  ]
+                }
+              }
+            },
+            "allOf": [
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "ios-ipa"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "store-metadata"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "validation-report"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "ios-archive"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 0,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "ios-dsyms"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 0,
+                "maxContains": 1
+              }
+            ]
+          },
+          "signing": {
+            "items": {
+              "properties": {
+                "platform": {
+                  "const": "ios"
+                }
+              }
+            }
+          },
+          "privateStateCommitments": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [],
+            "properties": {}
+          },
+          "storePrecondition": {
+            "properties": {
+              "operation": {
+                "const": "ios_testflight_internal"
+              },
+              "platform": {
+                "const": "ios"
+              },
+              "snapshot": {
+                "$ref": "#/$defs/apple-candidate"
+              }
+            }
+          },
+          "version": {
+            "properties": {
+              "marketing": {
+                "pattern": "^[0-9]+(?:\\.[0-9]+){1,2}$"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": {
+            "const": "external-testing"
+          }
+        },
+        "required": [
+          "stage"
+        ]
+      },
+      "then": {
+        "properties": {
+          "predecessors": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "candidateManifestSha256",
+              "candidateReceiptSha256"
+            ],
+            "properties": {
+              "candidateManifestSha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "candidateReceiptSha256": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          },
+          "authorizedBy": {
+            "properties": {
+              "callerPath": {
+                "const": ".github/workflows/mobile-external-testing.yml"
+              },
+              "reusablePath": {
+                "const": ".github/workflows/reusable-external-testing.yml"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": {
+            "const": "external-testing"
+          },
+          "platform": {
+            "const": "android"
+          }
+        },
+        "required": [
+          "stage",
+          "platform"
+        ]
+      },
+      "then": {
+        "properties": {
+          "application": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "pattern": "^[^\\u0000]*$"
+              }
+            }
+          },
+          "destination": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "channel",
+              "releaseStatus"
+            ],
+            "properties": {
+              "channel": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "not": {
+                  "enum": [
+                    "internal",
+                    "production"
+                  ]
+                }
+              },
+              "releaseStatus": {
+                "const": "completed"
+              }
+            }
+          },
+          "artifacts": {
+            "items": {
+              "properties": {
+                "logicalName": {
+                  "enum": [
+                    "android-aab",
+                    "android-mapping",
+                    "android-native-symbols",
+                    "store-metadata",
+                    "validation-report"
+                  ]
+                }
+              }
+            },
+            "allOf": [
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "android-aab"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "store-metadata"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "validation-report"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "android-native-symbols"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 0,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "android-mapping"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 0,
+                "maxContains": 1
+              }
+            ]
+          },
+          "signing": {
+            "items": {
+              "properties": {
+                "platform": {
+                  "const": "android"
+                }
+              }
+            }
+          },
+          "privateStateCommitments": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [],
+            "properties": {}
+          },
+          "storePrecondition": {
+            "properties": {
+              "operation": {
+                "const": "android_external_promote"
+              },
+              "platform": {
+                "const": "android"
+              },
+              "snapshot": {
+                "$ref": "#/$defs/play-external-testing"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": {
+            "const": "external-testing"
+          },
+          "platform": {
+            "const": "ios"
+          }
+        },
+        "required": [
+          "stage",
+          "platform"
+        ]
+      },
+      "then": {
+        "properties": {
+          "application": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "storeAppId"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "pattern": "^[^\\u0000]*$"
+              },
+              "storeAppId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "pattern": "^[^\\u0000]*$"
+              }
+            }
+          },
+          "destination": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "channel"
+            ],
+            "properties": {
+              "channel": {
+                "const": "testflight-external"
+              }
+            }
+          },
+          "artifacts": {
+            "items": {
+              "properties": {
+                "logicalName": {
+                  "enum": [
+                    "ios-ipa",
+                    "ios-archive",
+                    "ios-dsyms",
+                    "store-metadata",
+                    "validation-report"
+                  ]
+                }
+              }
+            },
+            "allOf": [
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "ios-ipa"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "store-metadata"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "validation-report"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "ios-archive"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 0,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "ios-dsyms"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 0,
+                "maxContains": 1
+              }
+            ]
+          },
+          "signing": {
+            "items": {
+              "properties": {
+                "platform": {
+                  "const": "ios"
+                }
+              }
+            }
+          },
+          "privateStateCommitments": {
+            "$ref": "#/$defs/betaCommitments"
+          },
+          "storePrecondition": {
+            "properties": {
+              "operation": {
+                "const": "ios_testflight_external"
+              },
+              "platform": {
+                "const": "ios"
+              },
+              "snapshot": {
+                "$ref": "#/$defs/apple-external-testing"
+              }
+            }
+          },
+          "version": {
+            "properties": {
+              "marketing": {
+                "pattern": "^[0-9]+(?:\\.[0-9]+){1,2}$"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": {
+            "const": "production-submit"
+          }
+        },
+        "required": [
+          "stage"
+        ]
+      },
+      "then": {
+        "properties": {
+          "predecessors": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "candidateManifestSha256",
+              "candidateReceiptSha256",
+              "externalReceiptSha256"
+            ],
+            "properties": {
+              "candidateManifestSha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "candidateReceiptSha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "externalReceiptSha256": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          },
+          "authorizedBy": {
+            "properties": {
+              "callerPath": {
+                "const": ".github/workflows/mobile-production-submit.yml"
+              },
+              "reusablePath": {
+                "const": ".github/workflows/reusable-production-submit.yml"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": {
+            "const": "production-submit"
+          },
+          "platform": {
+            "const": "android"
+          }
+        },
+        "required": [
+          "stage",
+          "platform"
+        ]
+      },
+      "then": {
+        "properties": {
+          "application": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "pattern": "^[^\\u0000]*$"
+              }
+            }
+          },
+          "destination": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "channel",
+              "releaseStatus"
+            ],
+            "properties": {
+              "channel": {
+                "const": "production"
+              },
+              "releaseStatus": {
+                "const": "draft"
+              }
+            }
+          },
+          "artifacts": {
+            "items": {
+              "properties": {
+                "logicalName": {
+                  "enum": [
+                    "android-aab",
+                    "android-mapping",
+                    "android-native-symbols",
+                    "store-metadata",
+                    "validation-report"
+                  ]
+                }
+              }
+            },
+            "allOf": [
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "android-aab"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "store-metadata"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "validation-report"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "android-native-symbols"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 0,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "android-mapping"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 0,
+                "maxContains": 1
+              }
+            ]
+          },
+          "signing": {
+            "items": {
+              "properties": {
+                "platform": {
+                  "const": "android"
+                }
+              }
+            }
+          },
+          "privateStateCommitments": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [],
+            "properties": {}
+          },
+          "storePrecondition": {
+            "properties": {
+              "operation": {
+                "const": "android_production_draft"
+              },
+              "platform": {
+                "const": "android"
+              },
+              "snapshot": {
+                "$ref": "#/$defs/play-production-submit"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": {
+            "const": "production-submit"
+          },
+          "platform": {
+            "const": "ios"
+          }
+        },
+        "required": [
+          "stage",
+          "platform"
+        ]
+      },
+      "then": {
+        "properties": {
+          "application": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "storeAppId"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "pattern": "^[^\\u0000]*$"
+              },
+              "storeAppId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "pattern": "^[^\\u0000]*$"
+              }
+            }
+          },
+          "destination": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "channel",
+              "automaticRelease"
+            ],
+            "properties": {
+              "channel": {
+                "const": "app-store-review"
+              },
+              "automaticRelease": {
+                "const": false
+              }
+            }
+          },
+          "artifacts": {
+            "items": {
+              "properties": {
+                "logicalName": {
+                  "enum": [
+                    "ios-ipa",
+                    "ios-archive",
+                    "ios-dsyms",
+                    "store-metadata",
+                    "validation-report"
+                  ]
+                }
+              }
+            },
+            "allOf": [
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "ios-ipa"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "store-metadata"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "validation-report"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "ios-archive"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 0,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "logicalName": {
+                      "const": "ios-dsyms"
+                    }
+                  },
+                  "required": [
+                    "logicalName"
+                  ]
+                },
+                "minContains": 0,
+                "maxContains": 1
+              }
+            ]
+          },
+          "signing": {
+            "items": {
+              "properties": {
+                "platform": {
+                  "const": "ios"
+                }
+              }
+            }
+          },
+          "privateStateCommitments": {
+            "$ref": "#/$defs/appCommitments"
+          },
+          "storePrecondition": {
+            "properties": {
+              "operation": {
+                "const": "ios_app_store_submit"
+              },
+              "platform": {
+                "const": "ios"
+              },
+              "snapshot": {
+                "$ref": "#/$defs/apple-production-submit"
+              }
+            }
+          },
+          "version": {
+            "properties": {
+              "marketing": {
+                "pattern": "^[0-9]+(?:\\.[0-9]+){1,2}$"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "privateStateCommitments": {
+            "properties": {
+              "domains": {
+                "properties": {
+                  "app-review": {
+                    "required": [
+                      "inherited"
+                    ]
+                  }
+                },
+                "required": [
+                  "app-review"
+                ]
+              }
+            },
+            "required": [
+              "domains"
+            ]
+          }
+        },
+        "required": [
+          "privateStateCommitments"
+        ]
+      },
+      "then": {
+        "properties": {
+          "platform": {
+            "const": "ios"
+          },
+          "stage": {
+            "const": "production-submit"
+          },
+          "storePrecondition": {
+            "properties": {
+              "snapshot": {
+                "properties": {
+                  "production": {
+                    "const": null
+                  },
+                  "liveReference": {
+                    "$ref": "#/$defs/appleVersion"
+                  }
+                },
+                "required": [
+                  "production",
+                  "liveReference"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

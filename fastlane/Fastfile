@@ -1,11 +1,19 @@
 require "base64"
 require "fileutils"
 require "json"
+require "net/http"
 require "time"
+require "uri"
 require "google/apis/androidpublisher_v3"
 require "googleauth"
+require "pilot"
 require_relative "release_support"
 require_relative "play_store"
+require_relative "apple_store"
+require_relative "apple_production"
+require_relative "apple_create_retry"
+require_relative "ios_upload_validation"
+require_relative "android_upload_validation"
 
 PLAY_SCOPE = "https://www.googleapis.com/auth/androidpublisher"
 IOS_PLATFORM = Spaceship::ConnectAPI::Platform::IOS
@@ -67,13 +75,105 @@ def metadata_root
   safe_app_path(config_value("metadata", "root"))
 end
 
-def write_receipt(operation:, platform:, identity:, result:, extra:)
+def store_mode
+  value = required_env("MOBILE_RELEASE_STORE_MODE")
+  UI.user_error!("Store mode must be prepare or execute") unless %w[prepare execute].include?(value)
+  value
+end
+
+def prepare_mode?
+  store_mode == "prepare"
+end
+
+def operation_intent
+  return @operation_intent if @operation_intent
+
+  payload, digest = MobileReleaseKit.operation_intent(
+    app_root,
+    required_env("MOBILE_RELEASE_OPERATION_INTENT_PATH"),
+  )
+  expected_operation = required_env("MOBILE_RELEASE_OPERATION")
+  unless payload["stage"].to_s != "" && payload["platform"] == required_env("MOBILE_RELEASE_PLATFORM")
+    UI.user_error!("Operation intent stage/platform is invalid")
+  end
+  precondition = payload["storePrecondition"]
+  unless precondition.is_a?(Hash) && precondition["operation"] == expected_operation
+    UI.user_error!("Operation intent Store precondition is invalid")
+  end
+  @operation_intent = { payload: payload, digest: digest }
+end
+
+def require_operation_intent!(operation, platform)
+  intent = operation_intent
+  payload = intent.fetch(:payload)
+  precondition = payload.fetch("storePrecondition")
+  version = release_version
+  unless precondition["operation"] == operation && payload["platform"] == platform &&
+         precondition["appIdentity"] == required_env("MOBILE_RELEASE_APP_IDENTITY") &&
+         precondition["marketingVersion"] == version.fetch(:marketing) &&
+         precondition["buildNumber"] == version.fetch(:build)
+    UI.user_error!("Operation intent does not match the requested Store operation")
+  end
+  candidate_artifacts = payload["stage"] == "candidate" ? payload.fetch("artifacts") : []
+  candidate_artifacts.each do |artifact|
+    environment = {
+      "android-aab" => "MOBILE_RELEASE_ANDROID_AAB_PATH",
+      "android-mapping" => "MOBILE_RELEASE_ANDROID_MAPPING_PATH",
+      "ios-ipa" => "MOBILE_RELEASE_IOS_IPA_PATH",
+    }[artifact["logicalName"]]
+    next unless environment
+
+    path_value = ENV[environment].to_s
+    UI.user_error!("Operation-intent artifact is missing from Store execution") if path_value.empty?
+    path = safe_app_path(path_value)
+    unless File.size(path) == artifact["size"] && Digest::SHA256.file(path).hexdigest == artifact["sha256"]
+      UI.user_error!("Store input artifact differs from the authenticated operation intent")
+    end
+  end
+  precondition.fetch("snapshot")
+end
+
+def atomic_store_document(contents, label:)
   path = safe_app_path(required_env("MOBILE_RELEASE_STORE_RECEIPT_PATH"), must_exist: false)
-  UI.user_error!("Refusing to overwrite a Store receipt") if File.exist?(path) || File.symlink?(path)
+  UI.user_error!("Refusing to overwrite #{label}") if File.exist?(path) || File.symlink?(path)
   FileUtils.mkdir_p(File.dirname(path), mode: 0o700)
+  temporary = "#{path}.tmp-#{Process.pid}"
+  File.open(temporary, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
+    file.write(JSON.pretty_generate(contents))
+    file.write("\n")
+    file.flush
+    file.fsync
+  end
+  # Link is an exclusive publication; a competing writer cannot be overwritten
+  # between the initial existence check and this final durable boundary.
+  File.link(temporary, path)
+ensure
+  FileUtils.rm_f(temporary) if defined?(temporary) && temporary
+end
+
+def write_precondition(operation:, platform:, identity:, snapshot:)
+  version = release_version
+  atomic_store_document(
+    {
+      schemaVersion: 1,
+      documentType: "store-precondition",
+      operation: operation,
+      platform: platform,
+      appIdentity: identity,
+      marketingVersion: version.fetch(:marketing),
+      buildNumber: version.fetch(:build),
+      observedAt: Time.now.utc.iso8601,
+      snapshot: snapshot,
+    },
+    label: "a Store precondition",
+  )
+end
+
+def write_receipt(operation:, platform:, identity:, result:, extra:)
+  intent = operation_intent
   version = release_version
   receipt = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     operation: operation,
     platform: platform,
     appIdentity: identity,
@@ -81,17 +181,11 @@ def write_receipt(operation:, platform:, identity:, result:, extra:)
     buildNumber: version.fetch(:build),
     observedAt: Time.now.utc.iso8601,
     result: result,
+    operationIntentSha256: intent.fetch(:digest),
+    authorizedBy: intent.fetch(:payload).fetch("authorizedBy"),
+    executedBy: MobileReleaseKit.execution_authority(ENV),
   }.merge(extra)
-  temporary = "#{path}.tmp-#{Process.pid}"
-  File.open(temporary, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
-    file.write(JSON.pretty_generate(receipt))
-    file.write("\n")
-    file.flush
-    file.fsync
-  end
-  File.rename(temporary, path)
-ensure
-  FileUtils.rm_f(temporary) if defined?(temporary) && temporary
+  atomic_store_document(receipt, label: "a Store receipt")
 end
 
 def play_service
@@ -160,6 +254,513 @@ def play_snapshot(track_name)
   end
 end
 
+def play_track_in_edit(service, package_name, edit_id, track_name)
+  track = service.get_edit_track(package_name, edit_id, track_name)
+  MobileReleaseKit::PreservingSupplyUploader.track_state(track, track_name)
+rescue Google::Apis::ClientError => e
+  raise unless e.status_code.to_i == 404
+
+  MobileReleaseKit::PreservingSupplyUploader.track_state(nil, track_name)
+end
+
+def play_bundle_inventory(service, package_name, edit_id)
+  bundles = Array(service.list_edit_bundles(package_name, edit_id).bundles)
+  UI.user_error!("Google Play returned too many bundles") if bundles.length > 10_000
+  values = bundles.map do |bundle|
+    sha256 = bundle.sha256.to_s.downcase
+    UI.user_error!("Google Play bundle has an invalid version code") unless bundle.version_code.to_s.match?(/\A[1-9][0-9]*\z/) && bundle.version_code.to_i <= 2_100_000_000
+    UI.user_error!("Google Play bundle is missing a SHA-256 digest") unless sha256.match?(/\A[a-f0-9]{64}\z/)
+    { "versionCode" => bundle.version_code.to_i, "sha256" => sha256 }
+  end
+  UI.user_error!("Google Play returned duplicate bundle version codes") unless values.map { |item| item["versionCode"] }.uniq.length == values.length
+  values.sort_by { |item| item["versionCode"] }
+end
+
+def bounded_play_image(url, expected_sha256)
+  limit = 10 * 1024 * 1024
+  allowed = lambda do |candidate|
+    candidate.is_a?(URI::HTTPS) && candidate.port == 443 &&
+      candidate.userinfo.nil? && candidate.fragment.nil? &&
+      candidate.to_s.bytesize <= 4096 && !candidate.path.empty? &&
+      %w[googleusercontent.com googleapis.com].any? do |suffix|
+        candidate.host.to_s.downcase == suffix || candidate.host.to_s.downcase.end_with?(".#{suffix}")
+      end
+  end
+  uri = URI.parse(url)
+  UI.user_error!("Google Play returned an unsafe image URL") unless allowed.call(uri)
+  # Google image URLs default to a transformed size. Bind the original bytes,
+  # not a thumbnail; preserve any query rather than appending to its value.
+  uri.path = "#{uri.path}=s0" unless uri.path.end_with?("=s0")
+  redirects = 0
+  deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 120
+  loop do
+    redirect = nil
+    result = nil
+    # No ambient proxy, credentials, automatic retries, or buffered whole body.
+    http = Net::HTTP.new(uri.host, uri.port, nil)
+    http.use_ssl = true
+    http.open_timeout = 15
+    http.read_timeout = 30
+    http.write_timeout = 30
+    http.max_retries = 0
+    http.start do |connection|
+      request = Net::HTTP::Get.new(uri.request_uri)
+      request["Accept-Encoding"] = "identity"
+      connection.request(request) do |response|
+        unless response.is_a?(Net::HTTPSuccess) || response.is_a?(Net::HTTPRedirection)
+          UI.user_error!("Google Play image download failed")
+        end
+        encoding = response["Content-Encoding"]
+        UI.user_error!("Google Play image response uses unsupported encoding") unless encoding.nil? || encoding == "identity"
+        length = response["Content-Length"]
+        if length && (!length.match?(/\A[0-9]+\z/) || length.to_i > limit)
+          UI.user_error!("Google Play image exceeds the 10 MiB verification limit")
+        end
+        digest = Digest::SHA256.new
+        size = 0
+        response.read_body do |chunk|
+          size += chunk.bytesize
+          UI.user_error!("Google Play image exceeds the 10 MiB verification limit") if size > limit
+          if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+            UI.user_error!("Google Play image verification exceeded its time limit")
+          end
+          digest.update(chunk)
+        end
+        if response.is_a?(Net::HTTPRedirection)
+          redirects += 1
+          UI.user_error!("Google Play image redirected too many times") if redirects > 3
+          location = response["Location"]
+          UI.user_error!("Google Play image redirect has no location") if location.to_s.empty?
+          redirect = URI.join(uri.to_s, location)
+          UI.user_error!("Google Play image redirect is unsafe") unless allowed.call(redirect)
+        else
+          UI.user_error!("Google Play image is empty") if size.zero?
+          actual = digest.hexdigest
+          UI.user_error!("Google Play image API/download checksums disagree") unless actual == expected_sha256
+          result = { "sha256" => actual, "size" => size }
+        end
+      end
+    end
+    return result if result
+
+    uri = redirect
+  end
+rescue URI::InvalidURIError, IOError, SystemCallError, Timeout::Error, OpenSSL::SSL::SSLError => e
+  UI.user_error!("Google Play image could not be verified: #{e.class}")
+end
+
+def play_metadata_observation(service, package_name, edit_id)
+  listings = Array(service.list_edit_listings(package_name, edit_id).listings)
+  UI.user_error!("Google Play returned too many listings") if listings.length > 250
+  normalized_listings = listings.map do |listing|
+    {
+      "language" => listing.language.to_s,
+      "title" => listing.title.to_s,
+      "shortDescription" => listing.short_description.to_s,
+      "fullDescription" => listing.full_description.to_s,
+      "video" => listing.video.to_s,
+    }
+  end.sort_by { |item| item["language"] }
+  UI.user_error!("Google Play returned duplicate listing locales") unless normalized_listings.map { |item| item["language"] }.uniq.length == normalized_listings.length
+  image_types = Supply::IMAGES_TYPES + Supply::SCREENSHOT_TYPES
+  images = []
+  image_ids = []
+  normalized_listings.each do |listing|
+    language = listing.fetch("language")
+    image_types.each do |image_type|
+      rows = Array(service.list_edit_images(package_name, edit_id, language, image_type).images)
+      UI.user_error!("Google Play returned too many images") if rows.length > 50 || images.length + rows.length > 500
+      content = rows.each_with_index.map do |row, order|
+        sha256 = row.sha256.to_s.downcase
+        UI.user_error!("Google Play image is missing a SHA-256 digest") unless sha256.match?(/\A[a-f0-9]{64}\z/)
+        id = row.id.to_s
+        UI.user_error!("Google Play image has an invalid resource ID") if id.empty? || id.bytesize > 255 || id.include?("\0")
+        verified = bounded_play_image(row.url.to_s, sha256)
+        image_ids << {
+          "language" => language,
+          "type" => image_type,
+          "order" => order,
+          "id" => row.id.to_s,
+        }
+        verified.merge("language" => language, "type" => image_type, "order" => order)
+      end
+      images.concat(content)
+    end
+  end
+  scoped_ids = image_ids.map { |row| [row["language"], row["type"], row["id"]] }
+  UI.user_error!("Google Play returned duplicate scoped image IDs") unless scoped_ids.uniq.length == scoped_ids.length
+  ordering = ->(row) { [row["language"], row["type"], row["order"]] }
+  { "listings" => normalized_listings, "images" => images.sort_by(&ordering), "observedImageIds" => image_ids.sort_by(&ordering) }
+end
+
+def local_play_metadata_target(before)
+  target = Marshal.load(Marshal.dump(before))
+  target.delete("observedImageIds")
+  root = File.join(metadata_root, "android")
+  configured = Array(config_value("metadata", "androidLocales"))
+  by_language = target.fetch("listings").to_h { |item| [item.fetch("language"), item] }
+  configured.each do |language|
+    listing = by_language[language] || {
+      "language" => language,
+      "title" => "",
+      "shortDescription" => "",
+      "fullDescription" => "",
+      "video" => "",
+    }
+    {
+      "title" => "title.txt",
+      "shortDescription" => "short_description.txt",
+      "fullDescription" => "full_description.txt",
+      "video" => "video.txt",
+    }.each do |field, filename|
+      path = File.join(root, language, filename)
+      listing[field] = File.read(path, encoding: "UTF-8") if File.file?(path)
+    end
+    by_language[language] = listing
+  end
+  target["listings"] = by_language.values.sort_by { |item| item["language"] }
+  images = target.fetch("images")
+  configured.each do |language|
+    Supply::IMAGES_TYPES.each do |image_type|
+      paths = Dir.glob(File.join(root, language, Supply::IMAGES_FOLDER_NAME, "#{image_type}.{png,jpg,jpeg}"), File::FNM_EXTGLOB | File::FNM_CASEFOLD).sort
+      UI.user_error!("Multiple Google Play single-image assets are ambiguous") if paths.length > 1
+      next if paths.empty?
+      local = { "language" => language, "type" => image_type, "order" => 0, "sha256" => Digest::SHA256.file(paths.first).hexdigest, "size" => File.size(paths.first) }
+      images.reject! { |item| item["language"] == language && item["type"] == image_type }
+      images << local
+    end
+    Supply::SCREENSHOT_TYPES.each do |image_type|
+      paths = Dir.glob(File.join(root, language, Supply::IMAGES_FOLDER_NAME, image_type, "*.{png,jpg,jpeg}"), File::FNM_EXTGLOB | File::FNM_CASEFOLD).sort
+      next if paths.empty?
+      images.reject! { |item| item["language"] == language && item["type"] == image_type }
+      paths.each_with_index do |path, order|
+        images << { "language" => language, "type" => image_type, "order" => order, "sha256" => Digest::SHA256.file(path).hexdigest, "size" => File.size(path) }
+      end
+    end
+  end
+  target["images"] = images.sort_by { |item| [item["language"], item["type"], item["order"]] }
+  target
+end
+
+def play_operation_snapshot(stage)
+  service = play_service
+  package_name = android_identity
+  edit = service.insert_edit(package_name, Google::Apis::AndroidpublisherV3::AppEdit.new)
+  begin
+    destination = { "candidate" => "internal", "external-testing" => android_external_track, "production-submit" => "production" }.fetch(stage)
+    source = { "external-testing" => "internal", "production-submit" => android_external_track }[stage]
+    destination_state = play_track_in_edit(service, package_name, edit.id, destination)
+    source_state = source && play_track_in_edit(service, package_name, edit.id, source)
+    bundles = play_bundle_inventory(service, package_name, edit.id)
+    code = release_version.fetch(:build)
+    target_present = destination_state.fetch("releases").any? { |release| Array(release["versionCodes"]).map(&:to_i).include?(code) }
+    if stage == "candidate" && (target_present || bundles.any? { |bundle| bundle["versionCode"] == code })
+      UI.user_error!("Version code #{code} already exists; refusing candidate adoption")
+    end
+    if stage == "production-submit" && target_present
+      UI.user_error!("Production draft already exists without an authenticated operation intent")
+    end
+    source_releases = source_state && source_state.fetch("releases").select do |release|
+      Array(release["versionCodes"]).map(&:to_i).include?(code)
+    end
+    target_releases = destination_state.fetch("releases").select do |release|
+      Array(release["versionCodes"]).map(&:to_i).include?(code)
+    end
+    if source && !(stage == "external-testing" && target_present && source_releases.empty?)
+      unless source_releases.length == 1 && source_releases.first["versionCodes"] == [code.to_s] && source_releases.first["status"] == "completed"
+        UI.user_error!("Source Play track must contain the exact completed singleton build once")
+      end
+    end
+    if target_present
+      unless stage == "external-testing" && target_releases.length == 1 &&
+             target_releases.first["versionCodes"] == [code.to_s] && target_releases.first["status"] == "completed"
+        UI.user_error!("Existing external Play target must contain the completed singleton build exactly once")
+      end
+    end
+    target_release = if target_present
+                       target_releases.first
+                     elsif stage == "candidate"
+                       { "name" => release_version.fetch(:marketing), "status" => "completed", "versionCodes" => [code.to_s] }
+                     else
+                       Marshal.load(Marshal.dump(source_releases.first)).merge(
+                         "status" => stage == "production-submit" ? "draft" : "completed",
+                         "userFraction" => nil,
+                         "versionCodes" => [code.to_s],
+                       )
+                     end
+    if stage == "production-submit"
+      notes = Array(config_value("metadata", "androidLocales")).map do |language|
+        exact = File.join(metadata_root, "android", language, "changelogs", "#{code}.txt")
+        fallback = File.join(metadata_root, "android", language, "changelogs", "default.txt")
+        path = File.file?(exact) ? exact : fallback
+        { "language" => language, "text" => File.file?(path) ? File.read(path, encoding: "UTF-8") : "" }
+      end
+      target_release["releaseNotes"] = notes unless notes.empty?
+    end
+    target_release = MobileReleaseKit::PreservingSupplyUploader.normalize_release(target_release)
+    destination_target = if target_present
+                           destination_state
+                         else
+                           destination_state.merge(
+                             "releases" => (destination_state.fetch("releases") + [target_release]).sort_by { |release| MobileReleaseKit.canonical_json(release) },
+                           )
+                         end
+    source_targets = source_state ? [source_state] : []
+    if source_state
+      without = source_state.merge(
+        "releases" => source_state.fetch("releases").reject { |release| Array(release["versionCodes"]).map(&:to_i).include?(code) },
+      )
+      source_targets << without unless without == source_state
+    end
+    snapshot = {
+      "canonicalization" => "mrk-play-operation-v1",
+      "destinationTrack" => destination,
+      "destinationState" => destination_state,
+      "sourceTrack" => source,
+      "sourceState" => source_state,
+      "bundles" => bundles,
+      "targetPresent" => target_present,
+      "targetRelease" => target_release,
+      "destinationTargetState" => destination_target,
+      "sourceAllowedStates" => source_targets,
+    }
+    if stage == "production-submit"
+      before = play_metadata_observation(service, package_name, edit.id)
+      snapshot["metadataBefore"] = before
+      snapshot["metadataTarget"] = local_play_metadata_target(before)
+    end
+    snapshot
+  ensure
+    service.delete_edit(package_name, edit.id) if edit&.id
+  end
+end
+
+def classify_play_intent_state(stage, intent_snapshot)
+  service = play_service
+  package_name = android_identity
+  edit = service.insert_edit(package_name, Google::Apis::AndroidpublisherV3::AppEdit.new)
+  begin
+    current = play_state_in_edit(service, package_name, edit.id, stage, intent_snapshot)
+    current[:readback_edit_id] = edit.id.to_s
+    classify_play_state!(stage, intent_snapshot, current)
+  ensure
+    service.delete_edit(package_name, edit.id) if edit&.id
+  end
+end
+
+def play_state_in_edit(service, package_name, edit_id, stage, intent_snapshot)
+  destination = play_track_in_edit(
+    service,
+    package_name,
+    edit_id,
+    intent_snapshot.fetch("destinationTrack"),
+  )
+  source = intent_snapshot["sourceTrack"] && play_track_in_edit(
+    service,
+    package_name,
+    edit_id,
+    intent_snapshot.fetch("sourceTrack"),
+  )
+  {
+    destination: destination,
+    source: source,
+    bundles: play_bundle_inventory(service, package_name, edit_id),
+    metadata: stage == "production-submit" ? play_metadata_observation(service, package_name, edit_id) : nil,
+  }
+end
+
+def expected_play_aab
+  operation_intent.fetch(:payload).fetch("artifacts").find do |item|
+    item["logicalName"] == "android-aab"
+  end || UI.user_error!("Operation intent does not bind the candidate AAB")
+end
+
+def require_play_bundle_inventory!(stage, intent_snapshot, bundles)
+  expected = expected_play_aab
+  code = release_version.fetch(:build)
+  matches = bundles.select { |bundle| bundle["versionCode"] == code }
+  UI.user_error!("Google Play returned duplicate bundles for the intended version code") if matches.length > 1
+  unless matches.empty? || matches.first["sha256"] == expected.fetch("sha256")
+    UI.user_error!("Google Play bundle digest differs from the authenticated candidate")
+  end
+
+  before = Array(intent_snapshot.fetch("bundles"))
+  allowed = before
+  if stage == "candidate" && before.none? { |bundle| bundle["versionCode"] == code }
+    allowed = (before + [{ "versionCode" => code, "sha256" => expected.fetch("sha256") }])
+              .sort_by { |bundle| bundle["versionCode"] }
+  end
+  unless bundles == before || bundles == allowed
+    UI.user_error!("Google Play bundle inventory changed outside the authorized operation")
+  end
+  matches
+end
+
+def classify_play_state!(stage, intent_snapshot, current)
+  destination = current.fetch(:destination)
+  source = current.fetch(:source)
+  metadata = current.fetch(:metadata)
+  matches = require_play_bundle_inventory!(stage, intent_snapshot, current.fetch(:bundles))
+
+  before_metadata = !metadata || metadata == intent_snapshot.fetch("metadataBefore")
+  before = destination == intent_snapshot.fetch("destinationState") &&
+           source == intent_snapshot["sourceState"] && before_metadata
+  if before
+    # A candidate upload may have persisted its exact bundle while its edit/track
+    # commit failed. Reusing that exact digest is safe; any other bundle delta was
+    # rejected above.
+    return current.merge(phase: :before, target_bundle_present: !matches.empty?)
+  end
+
+  target_metadata = !metadata || play_metadata_matches_target?(intent_snapshot, metadata)
+  source_target = if intent_snapshot["sourceTrack"]
+                    Array(intent_snapshot.fetch("sourceAllowedStates")).include?(source)
+                  else
+                    source.nil?
+                  end
+  target = destination == intent_snapshot.fetch("destinationTargetState") &&
+           source_target &&
+           target_metadata
+  if target
+    UI.user_error!("Recovered Play bundle is absent") unless matches.length == 1
+    return current.merge(phase: :target, target_bundle_present: true)
+  end
+  UI.user_error!("Google Play state differs from both the authenticated precondition and target")
+end
+
+def play_metadata_matches_target?(snapshot, actual)
+  target = snapshot.fetch("metadataTarget")
+  return false unless actual.reject { |key, _value| key == "observedImageIds" } == target
+
+  before = snapshot.fetch("metadataBefore")
+  groups = before.fetch("images").group_by { |image| [image["language"], image["type"]] }
+  targets = target.fetch("images").group_by { |image| [image["language"], image["type"]] }
+  untouched = groups.keys.select { |key| groups[key] == targets[key] }
+  before_ids = before.fetch("observedImageIds").select { |row| untouched.include?([row["language"], row["type"]]) }
+  after_ids = actual.fetch("observedImageIds").select { |row| untouched.include?([row["language"], row["type"]]) }
+  before_ids == after_ids
+end
+
+# A journal is a local prior-invocation signal, not authenticity or a claim that
+# THIS process dispatched. Adoption always additionally proves the complete
+# authenticated intent target and the Store bundle digest in a fresh edit.
+def play_prior_execution?
+  authorized = operation_intent.fetch(:payload).fetch("authorizedBy")
+  executed = MobileReleaseKit.execution_authority(ENV)
+  return true if authorized["runId"] != executed["runId"] || authorized["attempt"] != executed["attempt"]
+
+  history = MobileReleaseKit::PreservingSupplyUploader.read_journal_history(
+    play_state_journal_path, intent_sha256: operation_intent.fetch(:digest), package_name: android_identity,
+  )
+  Array(history).any? do |entry|
+    MobileReleaseKit::PreservingSupplyUploader::DISPATCH_PHASES.include?(entry.fetch("phase"))
+  end
+rescue MobileReleaseKit::ContractError => error
+  UI.user_error!(error.message)
+end
+
+def require_play_recovery_dispatch!
+  UI.user_error!("Google Play target appeared before this operation dispatched a mutation") unless play_prior_execution?
+end
+
+def replay_recovered_play_mapping!(intent_snapshot)
+  options = play_upload_options
+  return unless options[:mapping]
+
+  MobileReleaseKit::PreservingSupplyUploader.replay_mapping(
+    options: options, journal_path: play_state_journal_path,
+    intent_sha256: operation_intent.fetch(:digest),
+    target_guard: ->(client) { require_play_target_in_edit!(client, "candidate", intent_snapshot) },
+  )
+end
+
+def require_play_precondition_in_edit!(client, stage, intent_snapshot)
+  service = client.client
+  current = play_state_in_edit(
+    service,
+    client.current_package_name,
+    client.current_edit.id,
+    stage,
+    intent_snapshot,
+  )
+  classified = classify_play_state!(stage, intent_snapshot, current)
+  UI.user_error!("Google Play target appeared before mutation dispatch") unless classified.fetch(:phase) == :before
+  if stage == "candidate" && classified.fetch(:target_bundle_present)
+    require_play_recovery_dispatch!
+  end
+  classified
+end
+
+def require_play_target_in_edit!(client, stage, intent_snapshot)
+  current = play_state_in_edit(
+    client.client, client.current_package_name, client.current_edit.id, stage, intent_snapshot,
+  )
+  classified = classify_play_state!(stage, intent_snapshot, current)
+  UI.user_error!("Google Play edit did not reach the complete authenticated target") unless classified.fetch(:phase) == :target
+end
+
+def play_release_set_without_code(state, code)
+  state.fetch("releases").reject do |release|
+    Array(release.fetch("versionCodes", [])).map(&:to_i).include?(code)
+  end.sort_by { |release| MobileReleaseKit.canonical_json(release) }
+end
+
+def play_intent_state_evidence(stage, intent_snapshot, current, mode:, mutation_edit_id: nil)
+  code = release_version.fetch(:build)
+  destination_before = intent_snapshot.fetch("destinationState")
+  destination_expected = mode == "observation" ? destination_before : intent_snapshot.fetch("destinationTargetState")
+  destination = current.fetch(:destination)
+  target = destination.fetch("releases").select do |release|
+    Array(release.fetch("versionCodes", [])).map(&:to_i).include?(code)
+  end
+  UI.user_error!("Google Play target release is absent or ambiguous") unless target.length == 1
+  evidence = {
+    canonicalization: MobileReleaseKit::PreservingSupplyUploader::CANONICALIZATION,
+    mode: mode,
+    readbackEditId: current.fetch(:readback_edit_id),
+    destinationBeforeSha256: MobileReleaseKit::PreservingSupplyUploader.digest(destination_before),
+    destinationExpectedSha256: MobileReleaseKit::PreservingSupplyUploader.digest(destination_expected),
+    destinationCommittedSha256: MobileReleaseKit::PreservingSupplyUploader.digest(destination),
+    unrelatedBeforeSha256: MobileReleaseKit::PreservingSupplyUploader.digest(play_release_set_without_code(destination_before, code), domain: "release-set"),
+    unrelatedCommittedSha256: MobileReleaseKit::PreservingSupplyUploader.digest(play_release_set_without_code(destination, code), domain: "release-set"),
+    targetReleaseSha256: MobileReleaseKit::PreservingSupplyUploader.digest(target.first, domain: "release"),
+  }
+  evidence[:mutationEditId] = mutation_edit_id if mutation_edit_id
+  if intent_snapshot["sourceTrack"]
+    source_before = intent_snapshot.fetch("sourceState")
+    source = current.fetch(:source)
+    source_allowed = Array(intent_snapshot.fetch("sourceAllowedStates"))
+    UI.user_error!("Google Play source state is outside the authorized transition") unless source_allowed.include?(source)
+    retained = source == source_before
+    transition = if !retained
+                   "deactivated"
+                 elsif mode == "observation" && play_release_set_without_code(source, code) == source.fetch("releases")
+                   "already-deactivated"
+                 else
+                   "retained"
+                 end
+    evidence.merge!(
+      sourceBeforeSha256: MobileReleaseKit::PreservingSupplyUploader.digest(source_before),
+      sourceExpectedSha256: MobileReleaseKit::PreservingSupplyUploader.digest(source),
+      sourceCommittedSha256: MobileReleaseKit::PreservingSupplyUploader.digest(source),
+      sourceUnrelatedBeforeSha256: MobileReleaseKit::PreservingSupplyUploader.digest(play_release_set_without_code(source_before, code), domain: "release-set"),
+      sourceUnrelatedCommittedSha256: MobileReleaseKit::PreservingSupplyUploader.digest(play_release_set_without_code(source, code), domain: "release-set"),
+      sourceTargetTransition: transition,
+    )
+  end
+  if stage == "production-submit"
+    metadata_before = intent_snapshot.fetch("metadataBefore").reject { |key, _value| key == "observedImageIds" }
+    metadata_expected = intent_snapshot.fetch("metadataTarget")
+    metadata_observed = current.fetch(:metadata).reject { |key, _value| key == "observedImageIds" }
+    evidence.merge!(
+      metadataBeforeSha256: MobileReleaseKit::PreservingSupplyUploader.digest(metadata_before, domain: "metadata"),
+      metadataExpectedSha256: MobileReleaseKit::PreservingSupplyUploader.digest(metadata_expected, domain: "metadata"),
+      metadataCommittedSha256: MobileReleaseKit::PreservingSupplyUploader.digest(metadata_observed, domain: "metadata"),
+    )
+  end
+  evidence
+end
+
 def play_release(snapshot, version_code)
   releases = snapshot.fetch(:track).releases || []
   releases.find do |release|
@@ -181,10 +782,22 @@ def play_state_journal_path
   safe_app_path(required_env("MOBILE_RELEASE_PLAY_STATE_PATH"), must_exist: false)
 end
 
-def guarded_play_upload(options)
+def guarded_play_upload(options, stage:, intent_snapshot:)
+  expected = expected_play_aab
   MobileReleaseKit::PreservingSupplyUploader.run(
     options: options,
     journal_path: play_state_journal_path,
+    before_mutation_guard: lambda do |client|
+      require_play_precondition_in_edit!(client, stage, intent_snapshot)
+    end,
+    after_mutation_guard: lambda do |client|
+      require_play_target_in_edit!(client, stage, intent_snapshot)
+    end,
+    metadata_languages: stage == "production-submit" ? Array(config_value("metadata", "androidLocales")) : nil,
+    intent_sha256: operation_intent.fetch(:digest),
+    expected_bundle_sha256: expected.fetch("sha256"),
+    expected_bundle: expected,
+    bundle_validation: stage == "candidate" ? ->(aab) { validate_current_android_upload!(aab) } : nil,
   )
 rescue MobileReleaseKit::ContractError => e
   UI.user_error!(e.message)
@@ -194,10 +807,19 @@ def play_upload_options
   aab = safe_app_path(required_env("MOBILE_RELEASE_ANDROID_AAB_PATH"))
   mapping_value = ENV["MOBILE_RELEASE_ANDROID_MAPPING_PATH"].to_s.strip
   mapping = mapping_value.empty? ? nil : safe_app_path(mapping_value)
+  if mapping
+    bound = operation_intent.fetch(:payload).fetch("artifacts").find { |artifact| artifact["logicalName"] == "android-mapping" }
+    unless bound && bound["size"] == File.size(mapping) && bound["sha256"] == Digest::SHA256.file(mapping).hexdigest &&
+           (File.extname(bound.fetch("fileName")).downcase == ".zip") == (File.extname(mapping).downcase == ".zip")
+      UI.user_error!("Mapping bytes and deobfuscation type must match the authenticated intent")
+    end
+  end
   metadata = File.join(metadata_root, "android")
   options = {
     package_name: android_identity,
     aab: aab,
+    skip_upload_apk: true,
+    skip_upload_aab: false,
     track: "internal",
     release_status: "completed",
     version_name: release_version.fetch(:marketing),
@@ -237,13 +859,16 @@ def play_promotion_options(from:, to:, status:, upload_metadata: false)
     skip_upload_screenshots: !upload_metadata,
     changes_not_sent_for_review: false,
     rescue_changes_not_sent_for_review: false,
+    sync_image_upload: true,
     timeout: 600,
   }
 end
 
-def promote_play(from:, to:, status:, upload_metadata: false)
+def promote_play(from:, to:, status:, stage:, intent_snapshot:, upload_metadata: false)
   guarded_play_upload(
     play_promotion_options(from: from, to: to, status: status, upload_metadata: upload_metadata),
+    stage: stage,
+    intent_snapshot: intent_snapshot,
   )
 end
 
@@ -266,6 +891,9 @@ rescue MobileReleaseKit::ContractError => e
 end
 
 def asc_api_key
+  unless Spaceship::ConnectAPI::APIClient < MobileReleaseKit::AppleOperationTransport
+    Spaceship::ConnectAPI::APIClient.prepend(MobileReleaseKit::AppleOperationTransport)
+  end
   app_store_connect_api_key(
     key_id: required_env("MOBILE_RELEASE_ASC_KEY_ID"),
     issuer_id: required_env("MOBILE_RELEASE_ASC_ISSUER_ID"),
@@ -285,6 +913,32 @@ def ios_app_store_id
   config_value("ios", "appStoreAppId").to_s
 end
 
+def validate_current_ios_upload!(ipa)
+  MobileReleaseKit::IosUploadValidation.current!(
+    python: required_env("MOBILE_RELEASE_VALIDATION_PYTHON"),
+    module_root: required_env("MOBILE_RELEASE_VALIDATION_MODULE_ROOT"),
+    app_root: app_root, config_path: required_env("MOBILE_RELEASE_CONFIG_PATH"),
+    intent_path: required_env("MOBILE_RELEASE_OPERATION_INTENT_PATH"),
+    ipa_path: ipa, intent_sha256: operation_intent.fetch(:digest),
+    environment: ENV, tooling_directory: File.dirname(__FILE__),
+  )
+rescue MobileReleaseKit::ContractError => e
+  UI.user_error!(e.message)
+end
+
+def validate_current_android_upload!(aab)
+  MobileReleaseKit::AndroidUploadValidation.current!(
+    python: required_env("MOBILE_RELEASE_VALIDATION_PYTHON"),
+    module_root: required_env("MOBILE_RELEASE_VALIDATION_MODULE_ROOT"),
+    app_root: app_root, config_path: required_env("MOBILE_RELEASE_CONFIG_PATH"),
+    intent_path: required_env("MOBILE_RELEASE_OPERATION_INTENT_PATH"),
+    aab_path: aab, intent_sha256: operation_intent.fetch(:digest),
+    environment: ENV, tooling_directory: File.dirname(__FILE__),
+  )
+rescue MobileReleaseKit::ContractError => e
+  UI.user_error!(e.message)
+end
+
 def verified_ios_app
   app = Spaceship::ConnectAPI::App.find(ios_identity)
   UI.user_error!("App Store Connect has no app for #{ios_identity}") unless app
@@ -294,28 +948,177 @@ def verified_ios_app
 end
 
 def ios_build(app)
+  builds = ios_exact_builds(app)
+  UI.user_error!("The exact build is not visible in App Store Connect") if builds.empty?
+  builds.first
+end
+
+def ios_exact_builds(app)
   version = release_version
-  build = Spaceship::ConnectAPI::Build.all(
-    app_id: app.id,
-    version: version.fetch(:marketing),
-    build_number: version.fetch(:build).to_s,
-    platform: IOS_PLATFORM,
-    includes: "app,buildBetaDetail,preReleaseVersion,betaAppReviewSubmission",
-  ).first
-  UI.user_error!("The exact build is not visible in App Store Connect") unless build
-  build
+  builds = MobileReleaseKit::AppleStore.models(
+    Spaceship::ConnectAPI.get_builds(
+      filter: { app: app.id, "preReleaseVersion.version" => version.fetch(:marketing), version: version.fetch(:build).to_s },
+      includes: "app,buildBetaDetail,preReleaseVersion,betaAppReviewSubmission", limit: 200,
+    ), maximum: 100,
+  ).select do |build|
+    UI.user_error!("App Store Connect build is missing its platform identity") unless build.pre_release_version
+    build.pre_release_version.platform == IOS_PLATFORM
+  end
+  builds.each do |build|
+    unless build.app&.id.to_s == app.id.to_s && build.pre_release_version.version == version.fetch(:marketing) &&
+           build.version.to_s == version.fetch(:build).to_s
+      UI.user_error!("App Store Connect returned a build outside the exact identity filter")
+    end
+  end
+  UI.user_error!("App Store Connect returned duplicate exact builds") if builds.length > 1
+  builds
+end
+
+def asc_server_time(app)
+  response = Spaceship::ConnectAPI.get_app(app_id: app.id)
+  UI.user_error!("App Store Connect server-clock request failed") unless response.status.to_i.between?(200, 299)
+  value = response.headers["date"].to_s
+  parsed = Time.httpdate(value).utc
+  skew = (Time.now.utc - parsed).abs
+  UI.user_error!("App Store Connect server clock differs from the runner by more than five minutes") if skew > 300
+  parsed.iso8601
+rescue ArgumentError, NoMethodError => e
+  UI.user_error!("App Store Connect did not provide a valid server Date header: #{e.class}")
+end
+
+def normalized_ios_build(build)
+  return nil unless build
+
+  uploaded = Time.iso8601(build.uploaded_date.to_s).utc.iso8601
+  expiration = Time.iso8601(build.expiration_date.to_s).utc.iso8601
+  {
+    "id" => build.id.to_s,
+    "appId" => build.app&.id.to_s,
+    "marketingVersion" => build.pre_release_version&.version.to_s,
+    "buildNumber" => build.version.to_s,
+    "processingState" => build.processing_state.to_s.upcase,
+    "uploadedDate" => uploaded,
+    "expirationDate" => expiration,
+    "expired" => build.expired == true,
+    "usesNonExemptEncryption" => build.uses_non_exempt_encryption,
+    "autoNotifyEnabled" => build.build_beta_detail&.auto_notify_enabled,
+  }
+rescue ArgumentError
+  UI.user_error!("App Store Connect build timestamps are missing or invalid")
+end
+
+def masked_private_value?(value)
+  text = value.to_s
+  !text.empty? && (text.include?("•") || text.match?(/\A\*+\z/))
+end
+
+def beta_review_detail(app)
+  details = MobileReleaseKit::AppleStore.models(
+    Spaceship::ConnectAPI.get_beta_app_review_detail(filter: { app: app.id }),
+    maximum: 1,
+  )
+  UI.user_error!("App Store Connect returned duplicate Beta Review details") if details.length > 1
+  UI.user_error!("App Store Connect Beta Review detail is missing") if details.empty?
+  details.first
+end
+
+def beta_review_private_state(app)
+  detail = beta_review_detail(app)
+  values = {
+    "contactFirstName" => detail&.contact_first_name.to_s,
+    "contactLastName" => detail&.contact_last_name.to_s,
+    "contactEmail" => detail&.contact_email.to_s,
+    "contactPhone" => detail&.contact_phone.to_s,
+    "demoAccountRequired" => detail&.demo_account_required == true,
+    "demoAccountName" => detail&.demo_account_name.to_s,
+    "demoAccountPassword" => detail&.demo_account_password.to_s,
+    "notes" => detail&.notes.to_s,
+  }
+  UI.user_error!("App Store Connect masked private Beta Review state; recovery cannot prove equality") if values.values.any? { |value| masked_private_value?(value) }
+  values
+end
+
+def target_beta_review_private_state
+  contact = review_contact(beta: true)
+  {
+    "contactFirstName" => contact.fetch(:contact_first_name),
+    "contactLastName" => contact.fetch(:contact_last_name),
+    "contactEmail" => contact.fetch(:contact_email),
+    "contactPhone" => contact.fetch(:contact_phone),
+    "demoAccountRequired" => contact.fetch(:demo_account_required),
+    "demoAccountName" => contact.fetch(:demo_account_name, ""),
+    "demoAccountPassword" => contact.fetch(:demo_account_password, ""),
+    "notes" => contact.fetch(:notes),
+  }
+end
+
+def app_review_private_state(version)
+  detail = version&.fetch_app_store_review_detail
+  values = {
+    "contactFirstName" => detail&.contact_first_name.to_s,
+    "contactLastName" => detail&.contact_last_name.to_s,
+    "contactEmail" => detail&.contact_email.to_s,
+    "contactPhone" => detail&.contact_phone.to_s,
+    "demoAccountRequired" => detail&.demo_account_required == true,
+    "demoAccountName" => detail&.demo_account_name.to_s,
+    "demoAccountPassword" => detail&.demo_account_password.to_s,
+    "notes" => detail&.notes.to_s,
+  }
+  UI.user_error!("App Store Connect masked private App Review state; recovery cannot prove equality") if values.values.any? { |value| masked_private_value?(value) }
+  values
+end
+
+def target_app_review_private_state
+  contact = review_contact(beta: false)
+  demo_required = config_value("ios", "review", "demoAccountRequired") == true
+  {
+    "contactFirstName" => contact.fetch(:first_name),
+    "contactLastName" => contact.fetch(:last_name),
+    "contactEmail" => contact.fetch(:email_address),
+    "contactPhone" => contact.fetch(:phone_number),
+    "demoAccountRequired" => demo_required,
+    "demoAccountName" => contact.fetch(:demo_user),
+    "demoAccountPassword" => contact.fetch(:demo_password),
+    "notes" => contact.fetch(:notes),
+  }
+end
+
+def private_commitments(domain, before, target)
+  version = required_env("MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION")
+  {
+    "algorithm" => "hmac-sha256",
+    "keyVersion" => version,
+    "domains" => {
+      domain => {
+        "before" => MobileReleaseKit.hmac_commitment(domain, before, ENV),
+        "target" => MobileReleaseKit.hmac_commitment(domain, target, ENV),
+      },
+    },
+  }
+end
+
+def verify_private_commitment!(domain, current)
+  commitments = operation_intent.fetch(:payload).fetch("privateStateCommitments")
+  target = domain == "beta-review" ? target_beta_review_private_state : target_app_review_private_state
+  MobileReleaseKit::AppleStore.private_phase!(
+    commitments, domain, current: current, target: target, environ: ENV,
+  )
 end
 
 def ios_build_state(build)
   state = build.processing_state.to_s
   UI.user_error!("App Store Connect returned no build processing state") if state.empty?
   UI.user_error!("App Store Connect build processing state is #{state}, expected VALID") unless state.upcase == "VALID"
+  UI.user_error!("App Store Connect build is expired") if build.expired == true
+  UI.user_error!("App Store Connect build expiration time has passed") if Time.iso8601(normalized_ios_build(build).fetch("expirationDate")) <= Time.now.utc
   state
 end
 
 def existing_external_group(app)
   name = config_value("ios", "externalTestFlightGroup")
-  matching = app.get_beta_groups.select { |group| group.name == name }
+  matching = MobileReleaseKit::AppleStore.models(
+    Spaceship::ConnectAPI.get_beta_groups(filter: { app: app.id }, limit: 200),
+  ).select { |group| group.name == name }
   UI.user_error!("Configured TestFlight group does not exist") if matching.empty?
   UI.user_error!("Configured TestFlight group is internal") if matching.any?(&:is_internal_group)
   UI.user_error!("Configured TestFlight group name is ambiguous") unless matching.length == 1
@@ -388,22 +1191,481 @@ end
 
 def external_testflight_state(app, build)
   group = existing_external_group(app)
-  assigned = group.fetch_builds.any? { |candidate| candidate.id.to_s == build.id.to_s }
+  assigned = MobileReleaseKit::AppleStore.models(
+    Spaceship::ConnectAPI.get_builds_for_beta_group(group_id: group.id),
+  ).any? { |candidate| candidate.id.to_s == build.id.to_s }
   external_state = build.build_beta_detail&.external_build_state.to_s
   review_state = build.beta_app_review_submission&.beta_review_state.to_s
   {
     group: group,
+    group_id: group.id.to_s,
     assigned: assigned,
     external_state: external_state.empty? ? "UNKNOWN" : external_state,
     review_state: review_state.empty? ? "NOT_SUBMITTED" : review_state,
   }
 end
 
+def beta_localization_state(build)
+  values = beta_localizations(build).map do |localization|
+    { "id" => localization.id.to_s, "locale" => localization.locale.to_s, "whatsNew" => localization.whats_new.to_s }
+  end
+  UI.user_error!("App Store Connect returned duplicate Beta build locales") unless values.map { |item| item["locale"] }.uniq.length == values.length
+  values.sort_by { |item| item["locale"] }
+end
+
+def beta_localizations(build)
+  MobileReleaseKit::AppleStore.models(
+    Spaceship::ConnectAPI.get_beta_build_localizations(filter: { build: build.id }, limit: 200), maximum: 100,
+  )
+end
+
+def ios_candidate_snapshot(app)
+  builds = ios_exact_builds(app)
+  {
+    "canonicalization" => "mrk-apple-operation-v1",
+    "appStoreAppId" => app.id.to_s,
+    "serverObservedAt" => asc_server_time(app),
+    "build" => normalized_ios_build(builds.first),
+  }
+end
+
+def apple_state_journal_path
+  safe_app_path(required_env("MOBILE_RELEASE_APPLE_STATE_PATH"), must_exist: false)
+end
+
+def write_apple_state_journal(phase, extra = {})
+  path = apple_state_journal_path
+  UI.user_error!("Apple operation journal path must not be a symlink") if File.symlink?(path)
+  history = []
+  claims = []
+  if File.file?(path)
+    UI.user_error!("Apple operation journal exceeds the diagnostic bound") if File.size(path) > 16 * 1024 * 1024
+    prior = MobileReleaseKit.strict_json(File.read(path, encoding: "UTF-8"), label: "Apple operation journal")
+    unless prior["operationIntentSha256"] == operation_intent.fetch(:digest)
+      UI.user_error!("Existing Apple operation journal belongs to another intent")
+    end
+    history = Array(prior["history"])
+    claims = Array(prior["executionClaims"])
+    claims += history.filter_map { |entry| entry["executedBy"] if entry["phase"] == "execution-claimed" }
+  end
+  observed_at = Time.now.utc.iso8601
+  entry = { "phase" => phase, "observedAt" => observed_at }.merge(extra)
+  history << entry
+  claims << extra.fetch("executedBy") if phase == "execution-claimed"
+  claims = claims.uniq
+  UI.user_error!("Apple operation has too many local execution claims") if claims.length > 1_000
+  document = {
+    "schemaVersion" => 1,
+    "kind" => "app-store-operation-journal",
+    "operationIntentSha256" => operation_intent.fetch(:digest),
+    "operation" => required_env("MOBILE_RELEASE_OPERATION"),
+    "appIdentity" => ios_identity,
+    "marketingVersion" => release_version.fetch(:marketing),
+    "buildNumber" => release_version.fetch(:build),
+    "phase" => phase,
+    "observedAt" => observed_at,
+    "history" => history.last(256),
+    "executionClaims" => claims,
+  }
+  FileUtils.mkdir_p(File.dirname(path), mode: 0o700)
+  temporary = "#{path}.tmp-#{Process.pid}-#{Thread.current.object_id}"
+  File.open(temporary, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
+    file.write(JSON.pretty_generate(document))
+    file.write("\n")
+    file.flush
+    file.fsync
+  end
+  File.rename(temporary, path)
+ensure
+  FileUtils.rm_f(temporary) if defined?(temporary) && temporary
+end
+
+def poll_exact_ios_build(app, timeout: 3_600, allow_absent: false)
+  deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+  loop do
+    builds = ios_exact_builds(app)
+    unless builds.empty?
+      build = builds.first
+      state = build.processing_state.to_s.upcase
+      if %w[FAILED INVALID].include?(state) || build.expired == true
+        UI.user_error!("App Store Connect build is #{state.empty? ? 'expired' : state}; it cannot be recovered")
+      end
+      return build if %w[VALID PROCESSING].include?(state)
+      unless state == "PROCESSING"
+        UI.user_error!("App Store Connect build processing state is unsupported: #{state}")
+      end
+    end
+    if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+      return nil if allow_absent
+      UI.user_error!("Timed out waiting for the exact App Store Connect build; absence is not proof an upload failed")
+    end
+    sleep(30)
+  end
+end
+
+def require_intent_ios_build!(app, build, intent_snapshot, readback_server_time:)
+  normalized = normalized_ios_build(build)
+  expected = release_version
+  unless normalized.fetch("appId") == intent_snapshot.fetch("appStoreAppId") &&
+         normalized.fetch("marketingVersion") == expected.fetch(:marketing) &&
+         normalized.fetch("buildNumber") == expected.fetch(:build).to_s
+    UI.user_error!("App Store Connect build identity differs from the authenticated operation")
+  end
+  UI.user_error!("App Store Connect build is expired") if normalized.fetch("expired")
+  unless %w[VALID PROCESSING].include?(normalized.fetch("processingState"))
+    UI.user_error!("App Store Connect build has an unsafe processing state")
+  end
+  uploaded = Time.iso8601(normalized.fetch("uploadedDate"))
+  lower = Time.iso8601(intent_snapshot.fetch("serverObservedAt"))
+  upper = Time.iso8601(readback_server_time)
+  if Time.iso8601(normalized.fetch("expirationDate")) <= upper
+    UI.user_error!("App Store Connect build expiration time has passed")
+  end
+  unless uploaded >= lower && uploaded <= upper
+    UI.user_error!("App Store Connect build upload time is outside the authorized recovery window")
+  end
+  expected_encryption = uses_non_exempt_encryption
+  unless [nil, expected_encryption].include?(normalized["usesNonExemptEncryption"])
+    UI.user_error!("App Store Connect export-compliance state differs from configuration")
+  end
+  build
+rescue ArgumentError
+  UI.user_error!("App Store Connect build timestamps are invalid")
+end
+
+def apple_prior_execution?
+  authorized = operation_intent.fetch(:payload).fetch("authorizedBy")
+  current = MobileReleaseKit.execution_authority(ENV)
+  return true if authorized.fetch("runId") != current.fetch("runId") || authorized.fetch("attempt") != current.fetch("attempt")
+
+  path = apple_state_journal_path
+  return false unless File.exist?(path)
+  UI.user_error!("Apple operation journal is not a bounded regular file") if File.symlink?(path) || !File.file?(path) || File.size(path) > 16 * 1024 * 1024
+  journal = MobileReleaseKit.strict_json(File.read(path, encoding: "UTF-8"), label: "Apple operation journal")
+  UI.user_error!("Apple operation journal belongs to another intent") unless journal["operationIntentSha256"] == operation_intent.fetch(:digest)
+  # A new process cannot rely on an old journal as attribution proof. Even an
+  # intent with a dispatched-but-absent build needs explicit recovery approval.
+  !Array(journal["history"]).empty?
+end
+
+def require_ios_candidate_retry_confirmation!
+  ipa = operation_intent.fetch(:payload).fetch("artifacts").find { |item| item["logicalName"] == "ios-ipa" }
+  expected = "retry-ios-candidate-upload:#{operation_intent.fetch(:digest)}:#{ipa.fetch('sha256')}"
+  authorized = operation_intent.fetch(:payload).fetch("authorizedBy")
+  current = MobileReleaseKit.execution_authority(ENV)
+  unless ENV["MOBILE_RELEASE_RECOVERY_RUN_ID"] == authorized.fetch("runId") &&
+         current.fetch("runId") != authorized.fetch("runId") && current.fetch("attempt") == 1 &&
+         current.fetch("event") == "workflow_dispatch" && !apple_current_execution_claimed? &&
+         ENV["MOBILE_RELEASE_RECOVERY_CONFIRMATION"] == expected
+    UI.user_error!("A prior upload may still be processing. Do not rebuild. After independently confirming no upload was accepted, use a protected recovery dispatch with #{expected.inspect}")
+  end
+  write_apple_state_journal("execution-claimed", "executedBy" => current)
+end
+
+def apple_current_execution_claimed?
+  path = apple_state_journal_path
+  return false unless File.exist?(path)
+  UI.user_error!("Apple operation journal is not a bounded regular file") if File.symlink?(path) || !File.file?(path) || File.size(path) > 16 * 1024 * 1024
+  value = MobileReleaseKit.strict_json(File.read(path, encoding: "UTF-8"), label: "Apple operation journal")
+  UI.user_error!("Apple operation journal belongs to another intent") unless value["operationIntentSha256"] == operation_intent.fetch(:digest)
+  current = MobileReleaseKit.execution_authority(ENV)
+  Array(value["executionClaims"]).include?(current) || Array(value["history"]).any? do |entry|
+    entry["phase"] == "execution-claimed" && entry["executedBy"] == current
+  end
+end
+
+def apple_create_guard(stage, build)
+  MobileReleaseKit::AppleCreateRetry.new(
+    intent_sha256: operation_intent.fetch(:digest), stage: stage,
+    bundle_id: ios_identity, app_id: ios_app_store_id, version: release_version.fetch(:marketing),
+    build_number: release_version.fetch(:build), build_id: build.id.to_s,
+    authority: MobileReleaseKit.execution_authority(ENV),
+    authorized_by: operation_intent.fetch(:payload).fetch("authorizedBy"),
+    environment: ENV, journal: method(:write_apple_state_journal), prior_claim: apple_current_execution_claimed?,
+  )
+end
+
+def finish_ios_candidate!(app, build, snapshot)
+  original_id = build.id.to_s
+  previous = nil
+  current_build = build
+  read = lambda do
+    current_build = ios_build(app)
+    UI.user_error!("Candidate build resource changed during readback") unless current_build.id.to_s == original_id
+    require_intent_ios_build!(app, current_build, snapshot, readback_server_time: asc_server_time(app))
+    current = normalized_ios_build(current_build)
+    if previous
+      MobileReleaseKit::AppleStore.require_build!(previous, current, expected_encryption: uses_non_exempt_encryption, allow_processing: true)
+      if previous["autoNotifyEnabled"] == false && current["autoNotifyEnabled"] != false
+        UI.user_error!("Candidate automatic-notification state regressed")
+      end
+    end
+    previous = current
+    current
+  end
+  current = read.call
+  deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 3_600
+  loop do
+    details = current_build.build_beta_detail
+    internal = details&.internal_build_state.to_s
+    if current["processingState"] == "VALID" && current["usesNonExemptEncryption"].nil?
+      current = apple_mutate_once!(
+        "candidate-export-compliance", read: read,
+        complete: ->(state) { state["usesNonExemptEncryption"] == uses_non_exempt_encryption },
+      ) do
+        Spaceship::ConnectAPI.patch_builds(build_id: current_build.id, attributes: { usesNonExemptEncryption: uses_non_exempt_encryption })
+      end
+    elsif details && current["processingState"] == "VALID" && current["autoNotifyEnabled"] != false
+      current = apple_mutate_once!(
+        "candidate-disable-auto-notify", read: read, complete: ->(state) { state["autoNotifyEnabled"] == false },
+      ) do
+        Spaceship::ConnectAPI.patch_build_beta_details(build_beta_details_id: details.id, attributes: { autoNotifyEnabled: false })
+      end
+    elsif current["processingState"] == "VALID" && current["autoNotifyEnabled"] == false &&
+          current["usesNonExemptEncryption"] == uses_non_exempt_encryption &&
+          %w[READY_FOR_BETA_TESTING IN_BETA_TESTING].include?(internal)
+      return current_build
+    else
+      unless details.nil? || %w[PROCESSING MISSING_EXPORT_COMPLIANCE IN_EXPORT_COMPLIANCE_REVIEW READY_FOR_BETA_TESTING IN_BETA_TESTING].include?(internal)
+        UI.user_error!("Candidate internal TestFlight state is unsafe or unsupported")
+      end
+      UI.user_error!("Candidate processing is not complete; recover the original intent without rebuilding") if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+      sleep(15)
+      current = read.call
+    end
+  end
+end
+
+def require_ios_candidate_recovery_confirmation!(build)
+  recovery_run_id = ENV["MOBILE_RELEASE_RECOVERY_RUN_ID"].to_s
+  UI.user_error!("A visible iOS candidate can only be adopted by an explicit recovery dispatch") if recovery_run_id.empty?
+  expected = "recover-ios-candidate:#{operation_intent.fetch(:digest)}:#{build.id}"
+  unless ENV["MOBILE_RELEASE_RECOVERY_CONFIRMATION"].to_s == expected
+    UI.user_error!("iOS candidate recovery confirmation must exactly equal #{expected.inspect}")
+  end
+end
+
+def ios_external_localization_target(before)
+  path = MobileReleaseKit.safe_path(metadata_root, "testflight/what-to-test.txt")
+  unless File.file?(path) && !File.symlink?(path)
+    UI.user_error!("TestFlight what-to-test metadata must be a regular file")
+  end
+  # Read one bounded original byte string for both the digest and sanitized
+  # configured text. Even a raw edit erased by Pilot's sanitizer changes intent.
+  raw = File.binread(path, 64 * 1024 + 1)
+  text = raw.dup.force_encoding(Encoding::UTF_8)
+  unless raw.bytesize <= 64 * 1024 && text.valid_encoding? && !text.strip.empty? && text.strip.length <= 4_000
+    UI.user_error!("TestFlight what-to-test metadata must be bounded UTF-8 text of at most 4000 characters")
+  end
+  sanitized = Pilot::BuildManager.sanitize_changelog(text.strip)
+  target = before.to_h { |item| [item.fetch("locale"), item.slice("locale", "whatsNew")] }
+  config_value("metadata", "iosLocales").each do |locale|
+    target[locale] = { "locale" => locale, "whatsNew" => sanitized }
+  end
+  { localizations: target.values.sort_by { |item| item.fetch("locale") }, sha256: Digest::SHA256.hexdigest(raw) }
+end
+
+def ios_external_snapshot(app)
+  build = ios_build(app)
+  ios_build_state(build)
+  state = external_testflight_state(app, build)
+  before_localizations = beta_localization_state(build)
+  target = ios_external_localization_target(before_localizations)
+  before_private = beta_review_private_state(app)
+  target_private = target_beta_review_private_state
+  commitments = private_commitments("beta-review", before_private, target_private)
+  {
+    "canonicalization" => "mrk-apple-operation-v1",
+    "appStoreAppId" => app.id.to_s,
+    "serverObservedAt" => asc_server_time(app),
+    "build" => normalized_ios_build(build),
+    "external" => {
+      "groupId" => state.fetch(:group_id),
+      "groupName" => state.fetch(:group).name,
+      "reviewDetailId" => beta_review_detail(app).id.to_s,
+      "assigned" => state.fetch(:assigned),
+      "externalState" => state.fetch(:external_state),
+      "betaReviewState" => state.fetch(:review_state),
+      "usesNonExemptEncryption" => build.uses_non_exempt_encryption,
+      "autoNotifyEnabled" => build.build_beta_detail&.auto_notify_enabled,
+      "localizations" => before_localizations,
+      "targetLocalizations" => target.fetch(:localizations),
+      "whatToTestSha256" => target.fetch(:sha256),
+    },
+    "privateStateCommitments" => commitments,
+  }
+end
+
+def ios_external_current(app, build)
+  state = external_testflight_state(app, build)
+  {
+    "build" => normalized_ios_build(build),
+    "external" => {
+      "groupId" => state.fetch(:group_id),
+      "groupName" => state.fetch(:group).name,
+      "reviewDetailId" => beta_review_detail(app).id.to_s,
+      "assigned" => state.fetch(:assigned),
+      "externalState" => state.fetch(:external_state),
+      "betaReviewState" => state.fetch(:review_state),
+      "usesNonExemptEncryption" => build.uses_non_exempt_encryption,
+      "autoNotifyEnabled" => build.build_beta_detail&.auto_notify_enabled,
+      "localizations" => beta_localization_state(build),
+    },
+    "privatePhase" => verify_private_commitment!("beta-review", beta_review_private_state(app)),
+  }
+end
+
+def classify_ios_external!(intent_snapshot, current)
+  before = intent_snapshot.fetch("external")
+  value = current.fetch("external")
+  target = ios_external_localization_target(before.fetch("localizations"))
+  unless before.fetch("targetLocalizations") == target.fetch(:localizations) &&
+         before.fetch("whatToTestSha256") == target.fetch(:sha256)
+    UI.user_error!("TestFlight what-to-test metadata or configured locale target changed after authorization")
+  end
+  MobileReleaseKit::AppleStore.require_build!(
+    intent_snapshot.fetch("build"), current.fetch("build"),
+    expected_encryption: uses_non_exempt_encryption, allow_processing: true,
+  )
+  unless value.fetch("groupId") == before.fetch("groupId") &&
+         value.fetch("groupName") == before.fetch("groupName") &&
+         value.fetch("reviewDetailId") == before.fetch("reviewDetailId")
+    UI.user_error!("TestFlight external group changed after operation authorization")
+  end
+  if before.fetch("assigned") && !value.fetch("assigned")
+    UI.user_error!("TestFlight group assignment regressed after operation authorization")
+  end
+  localizations_final = MobileReleaseKit::AppleStore.localizations_phase!(
+    before.fetch("localizations"), before.fetch("targetLocalizations"),
+    value.fetch("localizations"), fields: ["whatsNew"],
+  )
+  expected_encryption = uses_non_exempt_encryption
+  unless [before["usesNonExemptEncryption"], expected_encryption].include?(value["usesNonExemptEncryption"])
+    UI.user_error!("TestFlight export-compliance state is unauthorized")
+  end
+  unless [before["autoNotifyEnabled"], false].include?(value["autoNotifyEnabled"])
+    UI.user_error!("TestFlight automatic-notification state changed after authorization")
+  end
+  states = MobileReleaseKit::AppleStore.external_transition!(before, value)
+  final_state = begin
+    normalized_external_state(
+      assigned: value.fetch("assigned"),
+      external_state: value.fetch("externalState"),
+      review_state: value.fetch("betaReviewState"),
+    )
+  rescue FastlaneCore::Interface::FastlaneError
+    nil
+  end
+  final = current.dig("build", "processingState") == "VALID" && value.fetch("assigned") &&
+          localizations_final && value["autoNotifyEnabled"] == false &&
+          value.fetch("usesNonExemptEncryption") == expected_encryption &&
+          current.fetch("privatePhase") == :target && !final_state.nil?
+  prepared_final = before.fetch("assigned") &&
+                   before.fetch("localizations").map { |item| item.slice("locale", "whatsNew") } == before.fetch("targetLocalizations") &&
+                   before.fetch("usesNonExemptEncryption") == expected_encryption &&
+                   before["autoNotifyEnabled"] == false &&
+                   operation_intent.fetch(:payload).dig("privateStateCommitments", "domains", "beta-review", "before") ==
+                     operation_intent.fetch(:payload).dig("privateStateCommitments", "domains", "beta-review", "target") &&
+                   !begin
+                     normalized_external_state(
+                       assigned: before.fetch("assigned"),
+                       external_state: before.fetch("externalState"),
+                       review_state: before.fetch("betaReviewState"),
+                     )
+                   rescue FastlaneCore::Interface::FastlaneError
+                     nil
+                   end.nil?
+  { final: final, prepared_final: prepared_final, normalized_state: final_state, states: states }
+end
+
+def beta_locale_locator(value)
+  { "locale" => value.fetch("locale"), "whatsNewSha256" => Digest::SHA256.hexdigest(value.fetch("whatsNew")) }
+end
+
+def ios_external_create_nodes(guard, snapshot, current)
+  build_id = current.fetch("build").fetch("id")
+  parent = guard.present("builds", build_id)
+  value = current.fetch("external")
+  nodes = snapshot.dig("external", "targetLocalizations").filter_map do |target|
+    next if value.fetch("localizations").any? { |item| item.fetch("locale") == target.fetch("locale") }
+    guard.node("betaBuildLocalizations", locator: beta_locale_locator(target), parent: parent, target: target)
+  end
+  states = classify_ios_external!(snapshot, current).fetch(:states)
+  if states.fetch(:review) == :absent && %i[processing compliance compliance_review ready].include?(states.fetch(:external))
+    nodes << guard.node("betaAppReviewSubmissions", locator: {}, parent: parent, target: { "buildId" => build_id })
+  end
+  unless value.fetch("assigned")
+    nodes << guard.node("betaGroupRelationships", locator: { "groupId" => value.fetch("groupId") }, parent: parent,
+                        target: { "buildId" => build_id, "groupId" => value.fetch("groupId") })
+  end
+  nodes
+end
+
+def ios_external_public_state(snapshot, current)
+  { "build" => current.fetch("build"), "external" => current.fetch("external"),
+    "privateStateCommitments" => snapshot.fetch("privateStateCommitments"),
+    "privatePhase" => current.fetch("privatePhase").to_s }
+end
+
+def observe_external_creates(guard, snapshot, current, build)
+  targets = snapshot.dig("external", "targetLocalizations").to_h { |item| [item.fetch("locale"), item] }
+  current.dig("external", "localizations").each do |locale|
+    target = targets.fetch(locale.fetch("locale"))
+    guard.observe!("betaBuildLocalizations", locator: beta_locale_locator(target), id: locale.fetch("id"))
+  end
+  if build.beta_app_review_submission
+    guard.observe!("betaAppReviewSubmissions", locator: {}, id: build.beta_app_review_submission.id.to_s)
+  end
+  if current.dig("external", "assigned")
+    id = current.dig("external", "groupId")
+    guard.observe!("betaGroupRelationships", locator: { "groupId" => id }, id: id)
+  end
+end
+
+def external_create_once(guard, type, locator:, build_id:)
+  guard.consume!(type, locator: locator, parent_id: build_id)
+  response = yield
+  if type != "betaGroupRelationships"
+    record = MobileReleaseKit::AppleStore.records(response, type: type, maximum: 1).first
+    UI.user_error!("Apple create response lacks its resource identity") unless record
+    guard.resolve!(type, locator, record.fetch("id"))
+  end
+  response
+end
+
+# Issue one API request, then read until its result is visible. In particular a
+# timeout/error never causes the request block to be called for a second time.
+def apple_mutate_once!(phase, read:, complete:, timeout: 300)
+  write_apple_state_journal("#{phase}-dispatched")
+  begin
+    yield
+  rescue MobileReleaseKit::AppleCreateRetry::Denied
+    raise
+  rescue Interrupt, SystemExit => error
+    write_apple_state_journal("cancelled", "failureClass" => error.class.name) rescue nil
+    raise
+  rescue StandardError => error
+    write_apple_state_journal("#{phase}-response-ambiguous", "failureClass" => error.class.name)
+  end
+  deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+  loop do
+    current = read.call
+    if complete.call(current)
+      write_apple_state_journal("#{phase}-read-back")
+      return current
+    end
+    if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+      UI.user_error!("Apple #{phase} is not yet proven complete; recover with the original operation intent")
+    end
+    sleep(5)
+  end
+end
+
 def normalized_external_state(state)
   external = state.fetch(:external_state).to_s.upcase.tr(" ", "_")
   review = state.fetch(:review_state).to_s.upcase.tr(" ", "_")
-  return "available-to-testers" if external == "IN_BETA_TESTING"
-  return "approved" if %w[BETA_APPROVED APPROVED].include?(review)
+  return "available-to-testers" if state.fetch(:assigned) && external == "IN_BETA_TESTING"
+  return "approved" if %w[BETA_APPROVED READY_FOR_BETA_TESTING].include?(external) || %w[BETA_APPROVED APPROVED].include?(review)
   return "in-review" if %w[IN_BETA_REVIEW IN_REVIEW].include?(external) || %w[IN_BETA_REVIEW IN_REVIEW].include?(review)
   if %w[WAITING_FOR_BETA_REVIEW WAITING_FOR_REVIEW SUBMITTED].include?(external) ||
      %w[WAITING_FOR_BETA_REVIEW WAITING_FOR_REVIEW SUBMITTED].include?(review)
@@ -427,23 +1689,47 @@ end
 desc "Upload one signed AAB to Play internal testing"
 lane :android_internal_upload do
   version_code = release_version.fetch(:build)
-  begin
-    existing = play_snapshot("internal")
-    used_bundle = existing.fetch(:bundles).any? { |bundle| bundle.version_code.to_i == version_code }
-    if used_bundle || play_release(existing, version_code)
-      UI.user_error!("Version code #{version_code} already exists; refusing candidate adoption")
-    end
-  rescue Google::Apis::ClientError => e
-    raise unless e.status_code.to_i == 404
+  if prepare_mode?
+    write_precondition(
+      operation: "android_internal_upload",
+      platform: "android",
+      identity: android_identity,
+      snapshot: play_operation_snapshot("candidate"),
+    )
+    next
   end
-
-  uploader = guarded_play_upload(play_upload_options)
-  state_evidence = uploader.state_evidence
+  intent_snapshot = require_operation_intent!("android_internal_upload", "android")
+  classified = classify_play_intent_state("candidate", intent_snapshot)
+  if classified.fetch(:phase) == :target
+    require_play_recovery_dispatch!
+    replay_recovered_play_mapping!(intent_snapshot)
+    classified = classify_play_intent_state("candidate", intent_snapshot)
+    result = "reconciled"
+    state_evidence = play_intent_state_evidence(
+      "candidate", intent_snapshot, classified, mode: "recovery",
+    )
+  else
+    uploader = guarded_play_upload(
+      play_upload_options,
+      stage: "candidate",
+      intent_snapshot: intent_snapshot,
+    )
+    classified = classify_play_intent_state("candidate", intent_snapshot)
+    UI.user_error!("Google Play candidate mutation did not reach its authenticated target") unless classified.fetch(:phase) == :target
+    result = uploader.outcome == "reconciled" ? "reconciled" : "accepted"
+    state_evidence = play_intent_state_evidence(
+      "candidate",
+      intent_snapshot,
+      classified,
+      mode: "mutation",
+      mutation_edit_id: uploader.state_evidence.fetch(:mutationEditId),
+    )
+  end
   write_receipt(
     operation: "android_internal_upload",
     platform: "android",
     identity: android_identity,
-    result: uploader.outcome == "reconciled" ? "reconciled" : "accepted",
+    result: result,
     extra: {
       versionCode: version_code,
       destinationTrack: "internal",
@@ -503,18 +1789,48 @@ lane :android_external_promote do
   UI.user_error!("External track cannot be internal or production") if %w[internal production].include?(destination)
   closed_testers_verified = verify_closed_track_testers(destination)
   version_code = release_version.fetch(:build)
-  uploader = observe_existing_play_release(
-    source: "internal",
-    destination: destination,
-    status: "completed",
-  )
-  uploader ||= promote_play(from: "internal", to: destination, status: "completed")
-  result = {
-    "mutated" => "accepted",
-    "reconciled" => "reconciled",
-    "already-present" => "already_present",
-  }.fetch(uploader.outcome)
-  state_evidence = uploader.state_evidence
+  if prepare_mode?
+    write_precondition(
+      operation: "android_external_promote",
+      platform: "android",
+      identity: android_identity,
+      snapshot: play_operation_snapshot("external-testing"),
+    )
+    next
+  end
+  intent_snapshot = require_operation_intent!("android_external_promote", "android")
+  classified = classify_play_intent_state("external-testing", intent_snapshot)
+  if intent_snapshot.fetch("targetPresent")
+    UI.user_error!("Pre-existing Play target changed after authorization") unless classified.fetch(:phase) == :before
+    result = "already_present"
+    state_evidence = play_intent_state_evidence(
+      "external-testing", intent_snapshot, classified, mode: "observation",
+    )
+  elsif classified.fetch(:phase) == :target
+    require_play_recovery_dispatch!
+    result = "reconciled"
+    state_evidence = play_intent_state_evidence(
+      "external-testing", intent_snapshot, classified, mode: "recovery",
+    )
+  else
+    uploader = promote_play(
+      from: "internal",
+      to: destination,
+      status: "completed",
+      stage: "external-testing",
+      intent_snapshot: intent_snapshot,
+    )
+    classified = classify_play_intent_state("external-testing", intent_snapshot)
+    UI.user_error!("Google Play external promotion did not reach its authenticated target") unless classified.fetch(:phase) == :target
+    result = uploader.outcome == "reconciled" ? "reconciled" : "accepted"
+    state_evidence = play_intent_state_evidence(
+      "external-testing",
+      intent_snapshot,
+      classified,
+      mode: "mutation",
+      mutation_edit_id: uploader.state_evidence.fetch(:mutationEditId),
+    )
+  end
   closed_testers_verified = verify_closed_track_testers(destination) if closed_android_external_track?
   extra = {
     versionCode: version_code,
@@ -539,13 +1855,48 @@ desc "Prepare the exact externally tested Play build as a non-served production 
 lane :android_production_draft do
   source = android_external_track
   version_code = release_version.fetch(:build)
-  uploader = promote_play(from: source, to: "production", status: "draft", upload_metadata: true)
-  state_evidence = uploader.state_evidence
+  if prepare_mode?
+    write_precondition(
+      operation: "android_production_draft",
+      platform: "android",
+      identity: android_identity,
+      snapshot: play_operation_snapshot("production-submit"),
+    )
+    next
+  end
+  intent_snapshot = require_operation_intent!("android_production_draft", "android")
+  classified = classify_play_intent_state("production-submit", intent_snapshot)
+  if classified.fetch(:phase) == :target
+    require_play_recovery_dispatch!
+    result = "reconciled"
+    state_evidence = play_intent_state_evidence(
+      "production-submit", intent_snapshot, classified, mode: "recovery",
+    )
+  else
+    uploader = promote_play(
+      from: source,
+      to: "production",
+      status: "draft",
+      stage: "production-submit",
+      intent_snapshot: intent_snapshot,
+      upload_metadata: true,
+    )
+    classified = classify_play_intent_state("production-submit", intent_snapshot)
+    UI.user_error!("Google Play production preparation did not reach its authenticated target") unless classified.fetch(:phase) == :target
+    result = uploader.outcome == "reconciled" ? "reconciled" : "accepted"
+    state_evidence = play_intent_state_evidence(
+      "production-submit",
+      intent_snapshot,
+      classified,
+      mode: "mutation",
+      mutation_edit_id: uploader.state_evidence.fetch(:mutationEditId),
+    )
+  end
   write_receipt(
     operation: "android_production_draft",
     platform: "android",
     identity: android_identity,
-    result: uploader.outcome == "reconciled" ? "reconciled" : "accepted",
+    result: result,
     extra: {
       versionCode: version_code,
       sourceTrack: source,
@@ -563,41 +1914,116 @@ lane :ios_testflight_internal do
   api_key = asc_api_key
   app = verified_ios_app
   version = release_version
-  existing = Spaceship::ConnectAPI::Build.all(
-    app_id: app.id,
-    version: version.fetch(:marketing),
-    build_number: version.fetch(:build).to_s,
-    platform: IOS_PLATFORM,
-  ).first
-  UI.user_error!("Build #{version.fetch(:build)} already exists; refusing candidate adoption") if existing
-  ipa = safe_app_path(required_env("MOBILE_RELEASE_IOS_IPA_PATH"))
-  upload_to_testflight(
-    api_key: api_key,
-    apple_id: ios_app_store_id,
-    app_identifier: ios_identity,
-    app_platform: "ios",
-    app_version: version.fetch(:marketing),
-    build_number: version.fetch(:build).to_s,
-    ipa: ipa,
-    distribute_external: false,
-    submit_beta_review: false,
-    notify_external_testers: false,
-    skip_waiting_for_build_processing: false,
-    wait_processing_interval: 30,
-    wait_processing_timeout_duration: 3_600,
-    uses_non_exempt_encryption: uses_non_exempt_encryption,
-    expire_previous_builds: false,
-  )
-  build = ios_build(app)
+  if prepare_mode?
+    snapshot = ios_candidate_snapshot(app)
+    UI.user_error!("Build #{version.fetch(:build)} already exists; refusing candidate adoption") if snapshot["build"]
+    write_precondition(
+      operation: "ios_testflight_internal",
+      platform: "ios",
+      identity: ios_identity,
+      snapshot: snapshot,
+    )
+    next
+  end
+  intent_snapshot = require_operation_intent!("ios_testflight_internal", "ios")
+  prior_execution = apple_prior_execution?
+  existing = ios_exact_builds(app)
+  build = existing.first
+  if prior_execution && build.nil?
+    # Cancellation can precede Store visibility. Timeout is never permission
+    # to submit the IPA a second time, even when the local journal is gone.
+    build = poll_exact_ios_build(app, timeout: 600, allow_absent: true)
+  end
+  if build
+    require_ios_candidate_recovery_confirmation!(build)
+    build = require_intent_ios_build!(
+      app,
+      build,
+      intent_snapshot,
+      readback_server_time: asc_server_time(app),
+    )
+    build = finish_ios_candidate!(app, build, intent_snapshot)
+    result = "operator_authorized_reconciliation"
+    write_apple_state_journal(
+      "operator-authorized-reconciliation",
+      "buildResourceId" => build.id.to_s,
+    )
+  else
+    require_ios_candidate_retry_confirmation! if prior_execution
+    ipa = safe_app_path(required_env("MOBILE_RELEASE_IOS_IPA_PATH"))
+    # Historical authenticated validation supports read-only reconciliation,
+    # never a new upload. Do the full current gate AFTER any absence polling
+    # and retry authorization, on exactly the original intent-bound bytes.
+    upload_validity = validate_current_ios_upload!(ipa)
+    # This is the final absence check immediately adjacent to the transporter
+    # dispatch. A build appearing here is not attributable to this process.
+    UI.user_error!("Build #{version.fetch(:build)} appeared before upload dispatch") unless ios_exact_builds(app).empty?
+    # The final Store read can itself cross certificate/profile expiration.
+    MobileReleaseKit::IosUploadValidation.require_current!(upload_validity)
+    write_apple_state_journal("mutation-dispatched")
+    # Persisting the single-use dispatch claim can also block on disk. Check
+    # again after that I/O, directly before Transporter; an expired interval
+    # cannot authorize a new upload even when this process consumed its claim.
+    MobileReleaseKit::IosUploadValidation.require_current!(upload_validity)
+    upload_error = nil
+    begin
+      upload_to_testflight(
+        api_key: api_key,
+        apple_id: ios_app_store_id,
+        app_identifier: ios_identity,
+        app_platform: "ios",
+        app_version: version.fetch(:marketing),
+        build_number: version.fetch(:build).to_s,
+        ipa: ipa,
+        distribute_external: false,
+        submit_beta_review: false,
+        notify_external_testers: false,
+        # Pilot returns directly after Transporter. All subsequent writes and
+        # readback belong to the scoped recoverable state machine below.
+        skip_waiting_for_build_processing: true,
+        skip_submission: true,
+        expire_previous_builds: false,
+      )
+    rescue Interrupt, SystemExit => e
+      write_apple_state_journal("cancelled", "failureClass" => e.class.name) rescue nil
+      raise
+    rescue StandardError => e
+      upload_error = e
+      write_apple_state_journal("upload-response-ambiguous", "failureClass" => e.class.name)
+    end
+    begin
+      build = poll_exact_ios_build(app, timeout: upload_error ? 600 : 3_600)
+      build = require_intent_ios_build!(
+        app,
+        build,
+        intent_snapshot,
+        readback_server_time: asc_server_time(app),
+      )
+      build = finish_ios_candidate!(app, build, intent_snapshot)
+    rescue StandardError => readback_error
+      write_apple_state_journal(
+        "reconciliation-failed",
+        "failureClass" => readback_error.class.name,
+      ) rescue nil
+      raise(upload_error || readback_error)
+    end
+    result = prior_execution ? "operator_authorized_retry" : (upload_error ? "reconciled" : "accepted")
+    write_apple_state_journal(
+      "committed-and-read-back",
+      "buildResourceId" => build.id.to_s,
+      "result" => result,
+    )
+  end
   write_receipt(
     operation: "ios_testflight_internal",
     platform: "ios",
     identity: ios_identity,
-    result: "accepted",
+    result: result,
     extra: {
       appStoreAppId: ios_app_store_id,
       buildResourceId: build.id.to_s,
       processingState: ios_build_state(build),
+      autoNotifyEnabled: build.build_beta_detail.auto_notify_enabled,
       state: "processed",
     },
   )
@@ -630,181 +2056,210 @@ end
 
 desc "Distribute the exact existing TestFlight build to an existing external group"
 lane :ios_testflight_external do
-  api_key = asc_api_key
+  asc_api_key
   app = verified_ios_app
-  build = ios_build(app)
-  what_to_test = required_metadata_text("testflight/what-to-test.txt")
-  state = external_testflight_state(app, build)
-  result = "already_present"
-  unless state.fetch(:assigned) && state.fetch(:review_state) != "NOT_SUBMITTED"
-    result = "accepted"
-    upload_to_testflight(
-      api_key: api_key,
-      apple_id: ios_app_store_id,
-      app_identifier: ios_identity,
-      app_platform: "ios",
-      app_version: release_version.fetch(:marketing),
-      build_number: release_version.fetch(:build).to_s,
-      distribute_only: true,
-      distribute_external: true,
-      groups: [state.fetch(:group).name],
-      submit_beta_review: true,
-      notify_external_testers: false,
-      skip_waiting_for_build_processing: false,
-      uses_non_exempt_encryption: uses_non_exempt_encryption,
-      expire_previous_builds: false,
-      reject_build_waiting_for_review: false,
-      beta_app_review_info: review_contact(beta: true),
-      changelog: what_to_test,
+  if prepare_mode?
+    write_precondition(
+      operation: "ios_testflight_external", platform: "ios", identity: ios_identity,
+      snapshot: ios_external_snapshot(app),
     )
+    next
+  end
+  intent_snapshot = require_operation_intent!("ios_testflight_external", "ios")
+  build = nil
+  previous = nil
+  create_guard = nil
+  read = lambda do
     build = ios_build(app)
-    state = external_testflight_state(app, build)
+    current = ios_external_current(app, build)
+    classify_ios_external!(intent_snapshot, current)
+    if previous
+      MobileReleaseKit::AppleStore.require_build!(previous.fetch("build"), current.fetch("build"), expected_encryption: uses_non_exempt_encryption, allow_processing: true)
+      if previous.dig("external", "autoNotifyEnabled") == false && current.dig("external", "autoNotifyEnabled") != false
+        UI.user_error!("TestFlight automatic notifications regressed during execution")
+      end
+      if previous.fetch("privatePhase") == :target && current.fetch("privatePhase") != :target
+        UI.user_error!("TestFlight private review state regressed during execution")
+      end
+      MobileReleaseKit::AppleStore.external_transition!(previous.fetch("external"), current.fetch("external"))
+      if previous.dig("external", "assigned") && !current.dig("external", "assigned")
+        UI.user_error!("TestFlight assignment regressed during execution")
+      end
+      MobileReleaseKit::AppleStore.localizations_phase!(
+        previous.dig("external", "localizations"),
+        intent_snapshot.dig("external", "targetLocalizations"),
+        current.dig("external", "localizations"), fields: ["whatsNew"],
+      )
+    end
+    observe_external_creates(create_guard, intent_snapshot, current, build) if create_guard
+    previous = current
+    current
   end
-  UI.user_error!("Exact build is not assigned to the configured external group") unless state.fetch(:assigned)
+  current = read.call
+  resuming = apple_prior_execution?
+  initial = classify_ios_external!(intent_snapshot, current)
+  unless resuming || initial.fetch(:prepared_final)
+    # Only server-driven review progress is allowed between authorization and
+    # first dispatch; a newly applied public/private change is not our write.
+    stable_fields = current.fetch("external").keys - %w[externalState betaReviewState]
+    unless current.fetch("build") == intent_snapshot.fetch("build") &&
+           current.fetch("external").slice(*stable_fields) == intent_snapshot.fetch("external").slice(*stable_fields) &&
+           (current.fetch("privatePhase") == :before ||
+             intent_snapshot.dig("privateStateCommitments", "domains", "beta-review", "before") == intent_snapshot.dig("privateStateCommitments", "domains", "beta-review", "target"))
+      UI.user_error!("TestFlight state changed between preparation and initial dispatch")
+    end
+  end
+  create_guard = apple_create_guard("external-testing", build)
+  observe_external_creates(create_guard, intent_snapshot, current, build)
+  absence_deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 60
+  while resuming && !classify_ios_external!(intent_snapshot, current).fetch(:final) &&
+        ios_external_create_nodes(create_guard, intent_snapshot, current).any? &&
+        Process.clock_gettime(Process::CLOCK_MONOTONIC) < absence_deadline
+    sleep(5)
+    current = read.call
+  end
+  create_guard.arm!(public_state: ios_external_public_state(intent_snapshot, current),
+                    nodes: ios_external_create_nodes(create_guard, intent_snapshot, current), resuming: resuming)
+  mutated = false
+  deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 1_800
+  until classify_ios_external!(intent_snapshot, current).fetch(:final)
+    action = nil
+    complete = nil
+    phase = nil
+    value = current.fetch("external")
+    if current.dig("build", "processingState") != "VALID"
+      # PROCESSING is an allowed asynchronous observation, never a write gate.
+    elsif value["usesNonExemptEncryption"].nil?
+      phase = "external-export-compliance"
+      action = lambda do
+        Spaceship::ConnectAPI.patch_builds(
+          build_id: build.id, attributes: { usesNonExemptEncryption: uses_non_exempt_encryption },
+        )
+      end
+      complete = ->(state) { state.dig("external", "usesNonExemptEncryption") == uses_non_exempt_encryption }
+    elsif value["autoNotifyEnabled"] != false
+      phase = "external-disable-auto-notify"
+      details = build.build_beta_detail
+      UI.user_error!("TestFlight buildBetaDetail is missing") unless details && !details.id.to_s.empty?
+      action = lambda do
+        Spaceship::ConnectAPI.patch_build_beta_details(
+          build_beta_details_id: details.id, attributes: { autoNotifyEnabled: false },
+        )
+      end
+      complete = ->(state) { state.dig("external", "autoNotifyEnabled") == false }
+    elsif current.fetch("privatePhase") != :target
+      phase = "external-review-details"
+      action = lambda do
+        Spaceship::ConnectAPI.patch_beta_app_review_detail(
+          app_id: value.fetch("reviewDetailId"), attributes: target_beta_review_private_state,
+        )
+      end
+      complete = ->(state) { state.fetch("privatePhase") == :target }
+    else
+      target_locale = intent_snapshot.dig("external", "targetLocalizations").find do |target|
+        !value.fetch("localizations").any? { |item| item.slice("locale", "whatsNew") == target }
+      end
+      if target_locale
+        phase = "external-what-to-test"
+        locales = beta_localizations(build)
+        matching = locales.select { |item| item.locale == target_locale.fetch("locale") }
+        UI.user_error!("Duplicate TestFlight build localization") if matching.length > 1
+        action = lambda do
+          if matching.empty?
+            external_create_once(create_guard, "betaBuildLocalizations", locator: beta_locale_locator(target_locale), build_id: build.id.to_s) do
+              Spaceship::ConnectAPI.post_beta_build_localizations(
+                build_id: build.id,
+                attributes: { locale: target_locale.fetch("locale"), whatsNew: target_locale.fetch("whatsNew") },
+              )
+            end
+          else
+            Spaceship::ConnectAPI.patch_beta_build_localizations(
+              localization_id: matching.first.id, attributes: { whatsNew: target_locale.fetch("whatsNew") },
+            )
+          end
+        end
+        complete = ->(state) { state.dig("external", "localizations").any? { |item| item.slice("locale", "whatsNew") == target_locale } }
+      elsif classify_ios_external!(intent_snapshot, current).dig(:states, :external) == :ready
+        phase = "external-beta-review"
+        action = lambda do
+          external_create_once(create_guard, "betaAppReviewSubmissions", locator: {}, build_id: build.id.to_s) { build.post_beta_app_review_submission }
+        end
+        complete = lambda do |state|
+          status = classify_ios_external!(intent_snapshot, state).fetch(:states)
+          status.fetch(:review) != :absent || %i[waiting review approved testing].include?(status.fetch(:external))
+        end
+      elsif !value.fetch("assigned")
+        phase = "external-group-assignment"
+        group = existing_external_group(app)
+        action = lambda do
+          external_create_once(create_guard, "betaGroupRelationships", locator: { "groupId" => group.id.to_s }, build_id: build.id.to_s) { build.add_beta_groups(beta_groups: [group]) }
+        end
+        complete = ->(state) { state.dig("external", "assigned") }
+      end
+    end
+    if action
+      # Re-read and validate all fields immediately before each narrowly scoped
+      # write. The operation closure never runs on a third-value/private drift.
+      before_dispatch = read.call
+      unless before_dispatch == current
+        current = before_dispatch
+        next
+      end
+      current = apple_mutate_once!(phase, read: read, complete: complete, &action)
+      mutated = true
+    else
+      UI.user_error!("TestFlight processing/review has not reached a supported receipt state; recover the original intent") if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+      sleep(15)
+      current = read.call
+    end
+  end
+  retry_evidence = create_guard.retry_evidence
+  result = retry_evidence ? "operator_authorized_retry" : (mutated ? "accepted" : (initial.fetch(:prepared_final) ? "already_present" : "reconciled"))
+  state = external_testflight_state(app, build)
+  write_apple_state_journal("committed-and-read-back", "buildResourceId" => build.id.to_s, "result" => result)
   write_receipt(
-    operation: "ios_testflight_external",
-    platform: "ios",
-    identity: ios_identity,
-    result: result,
+    operation: "ios_testflight_external", platform: "ios", identity: ios_identity, result: result,
     extra: {
-      appStoreAppId: ios_app_store_id,
-      buildResourceId: build.id.to_s,
-      processingState: ios_build_state(build),
-      externalGroup: state.fetch(:group).name,
-      betaReviewState: state.fetch(:review_state),
-      state: normalized_external_state(state),
-    },
+      appStoreAppId: ios_app_store_id, buildResourceId: build.id.to_s,
+      processingState: ios_build_state(build), externalGroup: state.fetch(:group).name,
+      autoNotifyEnabled: build.build_beta_detail.auto_notify_enabled,
+      betaReviewState: state.fetch(:review_state), state: normalized_external_state(state),
+    }.merge(retry_evidence ? { createRetry: retry_evidence } : {}),
   )
 end
 
-def matching_app_store_version(app)
-  includes = "appStoreVersionSubmission,build"
-  active = [
-    app.get_edit_app_store_version(platform: IOS_PLATFORM, includes: includes),
-    app.get_in_review_app_store_version(platform: IOS_PLATFORM, includes: includes),
-    app.get_pending_release_app_store_version(platform: IOS_PLATFORM, includes: includes),
-  ].compact.uniq { |candidate| candidate.id.to_s }
-  conflicting = active.reject do |candidate|
-    candidate.version_string.to_s == release_version.fetch(:marketing)
-  end
-  unless conflicting.empty?
-    UI.user_error!(
-      "Another App Store version is already editable, in review, or pending release; " \
-      "resolve it manually instead of repurposing it for this candidate",
-    )
-  end
-
-  candidates = app.get_app_store_versions(
-    filter: { platform: IOS_PLATFORM },
-    includes: includes,
-  ).select do |candidate|
-    candidate.version_string.to_s == release_version.fetch(:marketing)
-  end
-  UI.user_error!("App Store Connect returned duplicate records for the intended version") if candidates.length > 1
-  candidates.first
-end
-
-def app_store_submission_state(version)
-  state = version.app_store_state.to_s
-  state = version.app_version_state.to_s if state.empty?
-  UI.user_error!("Submitted App Store version has no review state") if state.empty?
-  state
-end
-
-def require_manual_app_store_release(version)
-  return if MobileReleaseKit.manual_app_store_release?(version)
-
-  UI.user_error!(
-    "App Store version is not proven to use manual release with no scheduled release date; " \
-    "resolve it in App Store Connect before continuing",
+def ios_production_adapter(app, build, create_guard: nil)
+  MobileReleaseKit::AppleProduction.new(
+    client: Spaceship::ConnectAPI, app_id: app.id.to_s, bundle_id: ios_identity,
+    version: release_version.fetch(:marketing), build: normalized_ios_build(build),
+    metadata_root: File.join(metadata_root, "ios"), locales: config_value("metadata", "iosLocales"),
+    private_target: target_app_review_private_state, environment: ENV,
+    read_build: -> { normalized_ios_build(ios_build(app)) }, journal: method(:write_apple_state_journal),
+    create_guard: create_guard,
   )
-end
-
-def require_exact_submitted_app_store_version(version, build)
-  UI.user_error!("Submitted App Store version is not visible during readback") unless version
-  attached = version.build
-  UI.user_error!(
-    "Existing App Store version has no build; refusing ambiguous production rerun. " \
-    "Inspect App Store Connect and use a new committed build if exact recovery is impossible",
-  ) unless attached
-  UI.user_error!(
-    "Existing App Store version references a different build; refusing production adoption. " \
-    "Resolve the version manually or create a new committed build",
-  ) unless attached.id.to_s == build.id.to_s
-  require_manual_app_store_release(version)
-  submission_state = app_store_submission_state(version)
-  normalized = normalized_submission_state(submission_state)
-  {
-    submission_state: submission_state,
-    normalized_state: normalized,
-  }
-end
-
-def existing_app_store_submission(app, build)
-  version = matching_app_store_version(app)
-  return nil unless version
-
-  unless version.build
-    UI.user_error!(
-      "Existing App Store version has no selected build; refusing a production rerun because " \
-      "a partial earlier submission cannot be distinguished from a clean record. Inspect it " \
-      "manually and use a new committed build if exact recovery is impossible",
-    )
-  end
-
-  readback = require_exact_submitted_app_store_version(version, build)
-  { version: version }.merge(readback)
 end
 
 desc "Submit the exact tested build for App Review without automatic public release"
 lane :ios_app_store_submit do
-  api_key = asc_api_key
+  asc_api_key
   app = verified_ios_app
   build = ios_build(app)
-  metadata = File.join(metadata_root, "ios")
-  screenshots = File.join(metadata, "screenshots")
-  UI.user_error!("Validated iOS Store metadata directory is missing") unless File.directory?(metadata)
-  existing = existing_app_store_submission(app, build)
-  if existing
-    result = "already_present"
-    submission_state = existing.fetch(:submission_state)
-    normalized_state = existing.fetch(:normalized_state)
-  else
-    result = "accepted"
-    upload_to_app_store(
-      api_key: api_key,
-      app_identifier: ios_identity,
-      app_version: release_version.fetch(:marketing),
-      build_number: release_version.fetch(:build).to_s,
-      metadata_path: metadata,
-      screenshots_path: screenshots,
-      app_review_information: review_contact(beta: false),
-      skip_binary_upload: true,
-      skip_metadata: false,
-      skip_screenshots: !File.directory?(screenshots),
-      submit_for_review: true,
-      automatic_release: false,
-      phased_release: false,
-      force: true,
-      precheck_include_in_app_purchases: false,
-    )
-    version = matching_app_store_version(app)
-    readback = require_exact_submitted_app_store_version(version, build)
-    submission_state = readback.fetch(:submission_state)
-    normalized_state = readback.fetch(:normalized_state)
+  ios_build_state(build)
+  if prepare_mode?
+    snapshot = ios_production_adapter(app, build).prepare(server_time: asc_server_time(app))
+    write_precondition(operation: "ios_app_store_submit", platform: "ios", identity: ios_identity, snapshot: snapshot)
+    next
   end
-  write_receipt(
-    operation: "ios_app_store_submit",
-    platform: "ios",
-    identity: ios_identity,
-    result: result,
-    extra: {
-      appStoreAppId: ios_app_store_id,
-      buildResourceId: build.id.to_s,
-      processingState: ios_build_state(build),
-      submissionState: submission_state,
-      automaticRelease: false,
-      state: normalized_state,
-    },
+  snapshot = require_operation_intent!("ios_app_store_submit", "ios")
+  result = ios_production_adapter(app, build, create_guard: apple_create_guard("production-submit", build)).execute(
+    snapshot, resuming: apple_prior_execution?,
   )
+  extra = {
+    appStoreAppId: ios_app_store_id, buildResourceId: build.id.to_s, processingState: ios_build_state(build),
+    appStoreVersionId: result.fetch(:version_id), reviewSubmissionId: result.fetch(:review_submission_id),
+    storeStateSha256: result.fetch(:store_state_sha256), submissionState: result.fetch(:submission_state),
+    automaticRelease: false, state: normalized_submission_state(result.fetch(:submission_state)),
+  }
+  extra[:createRetry] = result.fetch(:create_retry) if result[:create_retry]
+  write_receipt(operation: "ios_app_store_submit", platform: "ios", identity: ios_identity, result: result.fetch(:result), extra: extra)
 end

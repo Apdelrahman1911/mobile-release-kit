@@ -10,29 +10,51 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from . import __version__
-from .android import validate_aab
+from .android import validate_aab, validate_aab_structure
 from .config import ConfigurationError, default_config, load_config, write_json_exclusive
 from .credentials import credential_findings
 from .discovery import discover_project, git_context
 from .errors import MobileReleaseError, ValidationError
-from .ios import ipa_signing_evidence, validate_ipa
+from .ios import (
+    SigningValidityInterval, _validated_ipa_entries, ipa_signing_evidence,
+    validate_ipa_current_signing, validate_preparation_signing_time,
+)
 from .metadata import build_metadata_archive, metadata_findings
 from .preflight import doctor, preflight
 from .provenance import (
     artifact_records,
     build_candidate_manifest,
+    build_operation_intent,
     build_receipt,
+    copy_immutable_file,
+    load_candidate_manifest,
+    load_release_receipt,
     load_evidence,
+    load_operation_intent,
+    load_store_receipt,
     sha256_file,
     validate_receipt_chain,
     validate_evidence_context,
     validate_evidence_output_path,
+    validate_immutable_copy,
+    validate_operation_intent_context,
+    validate_candidate_intent_binding,
+    validate_candidate_raw_binding,
+    validate_receipt_raw_binding,
+    validate_store_receipt,
+    workflow_authority,
     verify_sealed,
     write_evidence,
 )
 from .reporting import FAILING_STATUSES, Finding, Report, Status
-from .stores import StoreRequest, execute_store_operation, guard_ci_mutation
+from .stores import (
+    StoreRequest,
+    execute_store_operation,
+    guard_ci_mutation,
+    prepare_store_operation,
+)
 from .tooling import resolve_tooling_root
+from .workflow import authenticate_operation_intent
 
 DEFAULT_CONFIG = "release/mobile-release.json"
 TOOLING_REPOSITORY_RE = re.compile(
@@ -145,12 +167,20 @@ def build_parser() -> argparse.ArgumentParser:
         _add_platform_argument(ci, allow_both=False, default="android")
         ci.add_argument("--output-dir", type=Path, required=True)
         ci.add_argument("--confirm", required=True)
-        ci.add_argument("--execute-store", action="store_true")
+        operation_mode = ci.add_mutually_exclusive_group()
+        operation_mode.add_argument("--prepare-operation", action="store_true")
+        operation_mode.add_argument("--validate-operation-intent", action="store_true")
+        operation_mode.add_argument("--execute-store", action="store_true")
+        ci.add_argument("--operation-intent", type=Path)
+        ci.add_argument("--recovery-run-id")
+        ci.add_argument("--recovery-confirmation")
         ci.add_argument("--store-receipt", type=Path)
         ci.add_argument("--artifact", action="append", default=[], metavar="NAME=PATH")
         ci.add_argument("--candidate-manifest", type=Path)
         ci.add_argument("--candidate-receipt", type=Path)
         ci.add_argument("--external-receipt", type=Path)
+        ci.add_argument("--candidate-operation-intent", type=Path)
+        ci.add_argument("--external-operation-intent", type=Path)
     return parser
 
 
@@ -448,7 +478,9 @@ def _status(args: argparse.Namespace) -> int:
     candidate_payload: dict[str, Any] | None = None
     if args.candidate_manifest:
         try:
-            candidate = load_evidence(args.candidate_manifest)
+            candidate = load_candidate_manifest(args.candidate_manifest)
+            candidate_intent = load_operation_intent(_evidence_intent_path(args.candidate_manifest, "candidate"))
+            validate_candidate_intent_binding(candidate, operation_intent=candidate_intent)
             candidate_payload = verify_sealed(candidate)
             version = config.release_version()
             if candidate_payload.get("version") != {
@@ -464,10 +496,11 @@ def _status(args: argparse.Namespace) -> int:
             candidate = None
             candidate_payload = None
     receipts: dict[tuple[str, str], dict[str, Any]] = {}
+    intents: dict[tuple[str, str], dict[str, Any]] = {}
     receipt_candidate_hashes: set[str] = set()
     for index, path in enumerate(args.receipt):
         try:
-            receipt = load_evidence(path)
+            receipt = load_release_receipt(path)
             payload = verify_sealed(receipt)
             key = (payload["platform"], payload["stage"])
             if key in receipts:
@@ -476,7 +509,9 @@ def _status(args: argparse.Namespace) -> int:
                 )
             if candidate and payload.get("candidateManifestSha256") != candidate["integrity"]["sha256"]:
                 raise ValidationError("receipt is not bound to the supplied candidate manifest")
+            intent = load_operation_intent(_evidence_intent_path(path, payload["stage"]))
             receipts[key] = receipt
+            intents[key] = intent
             receipt_candidate_hashes.add(payload["candidateManifestSha256"])
             report.add(
                 f"evidence.receipt.{index}", Status.PASS, f"Receipt integrity is valid: {path.name}", category="evidence"
@@ -517,6 +552,9 @@ def _status(args: argparse.Namespace) -> int:
                     production_receipt=receipts.get((platform, "production-submit")),
                     platform=platform,
                     config=config,
+                    candidate_intent=candidate_intent,
+                    external_intent=intents.get((platform, "external-testing")),
+                    production_intent=intents.get((platform, "production-submit")),
                 )
                 report.add(
                     "evidence.chain",
@@ -649,7 +687,122 @@ def _adjacent(path: Path, filename: str) -> Path:
     return path.absolute().parent / filename
 
 
+def _evidence_intent_path(evidence: Path, stage: str) -> Path:
+    """Accept local staging or the fixed final package, never choose a conflict."""
+
+    filename = f"{stage}-operation-intent.json"
+    adjacent = _adjacent(evidence, filename)
+    packaged = _adjacent(evidence, "operation") / filename
+    present = [path for path in (adjacent, packaged) if path.exists() or path.is_symlink()]
+    if len(present) > 1:
+        raise ValidationError("evidence has ambiguous adjacent and packaged operation intents")
+    if not present:
+        raise ValidationError(
+            f"evidence requires {filename} beside the document or in its operation/ directory"
+        )
+    return present[0]
+
+
+def _guard_partial_candidate_output(
+    *, output_dir: Path, intent_path: Path, raw_path: Path,
+    config: Any, release: Any, platform: str, recovery_run_id: str | None,
+) -> None:
+    """Reject incompatible partial evidence before writing anything beside it."""
+
+    manifest_path = output_dir / "candidate-manifest.json"
+    if not manifest_path.exists() or (output_dir / "candidate-receipt.json").exists():
+        return
+    try:
+        manifest = load_candidate_manifest(manifest_path)
+        intent = load_operation_intent(intent_path)
+        validate_candidate_intent_binding(manifest, operation_intent=intent)
+        if manifest["producedBy"] != workflow_authority("candidate"):
+            raise ValidationError("partial manifest belongs to another producer")
+        raw = validate_store_receipt(
+            load_store_receipt(raw_path), config=config, release=release,
+            stage="candidate", platform=platform, operation_intent=intent,
+            recovery_run_id=recovery_run_id,
+        )
+        validate_candidate_raw_binding(manifest, store_receipt=raw)
+    except ValidationError as error:
+        raise ValidationError(
+            "partial candidate evidence cannot be completed in this directory; "
+            "preserve it and use a new empty --output-dir with the SAME "
+            "--operation-intent and original artifacts to reconcile. "
+            "Do not rebuild or change the version/build."
+        ) from error
+
+
+def _guard_complete_output(
+    *, output_dir: Path, intent_path: Path, raw_path: Path,
+    config: Any, stage: str, platform: str,
+    candidate: Mapping[str, Any] | None = None,
+    candidate_receipt: Mapping[str, Any] | None = None,
+    external_receipt: Mapping[str, Any] | None = None,
+    candidate_intent: Mapping[str, Any] | None = None,
+    external_intent: Mapping[str, Any] | None = None,
+) -> None:
+    """Reject incompatible local finals before artifact checks or directory writes.
+
+    This is an integrity/chain check, not GitHub authentication. The protected
+    workflow resolver authenticates service artifacts; no local seal can replace
+    that boundary. A surviving final must never fall back to Store execution.
+    """
+
+    receipt_path = output_dir / f"{stage}-receipt.json"
+    if not receipt_path.exists() and not receipt_path.is_symlink():
+        return
+    try:
+        receipt = load_release_receipt(receipt_path)
+        intent = load_operation_intent(intent_path)
+        if stage == "candidate":
+            candidate = load_candidate_manifest(output_dir / "candidate-manifest.json")
+            candidate_receipt = receipt
+            candidate_intent = intent
+        elif stage == "external-testing":
+            external_receipt = receipt
+            external_intent = intent
+        if candidate is None:
+            raise ValidationError("existing final evidence lacks its candidate manifest")
+        validate_receipt_chain(
+            candidate_manifest=candidate,
+            candidate_receipt=candidate_receipt,
+            external_receipt=external_receipt,
+            production_receipt=receipt if stage == "production-submit" else None,
+            candidate_intent=candidate_intent,
+            external_intent=external_intent,
+            production_intent=intent if stage == "production-submit" else None,
+            platform=platform,
+            config=config,
+        )
+        validate_receipt_raw_binding(
+            receipt, store_receipt=load_store_receipt(raw_path),
+            operation_intent=intent, candidate_manifest=candidate,
+        )
+    except ValidationError as error:
+        raise ValidationError(
+            "existing final evidence is incomplete or incompatible; preserve this "
+            "directory and restore its exact original intent/raw receipt, or use "
+            "a new empty --output-dir with the SAME authenticated operation intent "
+            "and original artifacts. Do not rebuild or change the version/build."
+        ) from error
+
+
 def _ci(args: argparse.Namespace) -> int:
+    modes = [args.prepare_operation, args.validate_operation_intent, args.execute_store]
+    if sum(bool(value) for value in modes) != 1:
+        raise ValidationError(
+            "ci requires exactly one of --prepare-operation, "
+            "--validate-operation-intent, or --execute-store"
+        )
+    # Keep temporary metadata alive through validation and final publication.
+    # It must not appear beside incompatible surviving evidence as a side effect
+    # of a failed invocation.
+    with tempfile.TemporaryDirectory(prefix="mobile-release-intent-metadata-") as temporary:
+        return _ci_operation(args, metadata_directory=Path(temporary))
+
+
+def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path) -> int:
     config = load_config(args.config)
     platform = args.platform
     stage = args.ci_command
@@ -659,43 +812,142 @@ def _ci(args: argparse.Namespace) -> int:
     output_dir = _repository_path(config, args.output_dir, label="output directory")
     if output_dir.exists() and not output_dir.is_dir():
         raise ValidationError("CI output path must be a directory")
+    operation_intent_path = _repository_path(
+        config,
+        args.operation_intent or output_dir / f"{stage}-operation-intent.json",
+        label="Store operation intent",
+    )
     store_receipt_path = (
         _repository_path(config, args.store_receipt, label="Store receipt")
         if args.store_receipt
-        else None
+        else output_dir / "raw-store-receipt.json"
     )
     request = StoreRequest(
         stage=stage,
         platform=platform,
         confirmation=args.confirm,
         execute=args.execute_store,
+        prepare=args.prepare_operation,
         output_dir=output_dir,
         store_receipt=store_receipt_path,
+        store_precondition=output_dir / "store-precondition.json",
+        operation_intent=operation_intent_path,
+        recovery_run_id=args.recovery_run_id,
+        recovery_confirmation=args.recovery_confirmation,
     )
     guard_ci_mutation(request=request, config=config, release=release, git=source)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if stage == "candidate":
+        _guard_partial_candidate_output(
+            output_dir=output_dir, intent_path=operation_intent_path,
+            raw_path=store_receipt_path, config=config, release=release,
+            platform=platform, recovery_run_id=args.recovery_run_id,
+        )
+        _guard_complete_output(
+            output_dir=output_dir, intent_path=operation_intent_path,
+            raw_path=store_receipt_path, config=config, stage=stage, platform=platform,
+        )
+    authenticated_intent: dict[str, Any] | None = None
+    if stage == "candidate":
+        if operation_intent_path.exists():
+            # Original signing validation is reusable only through the actual
+            # original artifact/certificate/job proof, never a local seal, a
+            # caller-supplied date, or an environment flag. No Store authority
+            # is passed to the GitHub attestation verifier.
+            authenticated_intent = authenticate_operation_intent(
+                operation_intent_path, stage=stage, platform=platform,
+            )
+        elif not args.prepare_operation:
+            raise ValidationError("an authenticated --operation-intent is required")
+    candidate: dict[str, Any] | None = None
+    candidate_receipt: dict[str, Any] | None = None
+    external_receipt: dict[str, Any] | None = None
+    candidate_intent: dict[str, Any] | None = None
+    external_intent: dict[str, Any] | None = None
+    candidate_path: Path | None = None
+    if stage != "candidate":
+        if not args.candidate_manifest:
+            raise ValidationError(f"ci {stage} requires --candidate-manifest")
+        candidate_path = _repository_path(
+            config, args.candidate_manifest, label="candidate manifest", must_exist=True
+        )
+        candidate = load_candidate_manifest(candidate_path)
+        if stage == "external-testing" and (
+            candidate["source"]["commit"] != source.commit
+            or candidate["source"]["tree"] != source.tree
+        ):
+            raise ValidationError(
+                "external testing must check out the exact candidate source commit/tree; "
+                "recovery uses the original operation source, not the new dispatch head"
+            )
+        candidate_intent_path = _repository_path(config, args.candidate_operation_intent or _evidence_intent_path(candidate_path, "candidate"), label="candidate operation intent", must_exist=True)
+        candidate_intent = load_operation_intent(candidate_intent_path)
+        _candidate_context_matches(config, candidate, platform)
+        candidate_receipt_path = _repository_path(
+            config,
+            args.candidate_receipt or _adjacent(candidate_path, "candidate-receipt.json"),
+            label="candidate receipt",
+            must_exist=True,
+        )
+        candidate_receipt = load_release_receipt(candidate_receipt_path)
+        if stage == "production-submit":
+            if not args.external_receipt:
+                raise ValidationError("ci production-submit requires --external-receipt")
+            external_path = _repository_path(
+                config, args.external_receipt, label="external receipt", must_exist=True
+            )
+            external_receipt = load_release_receipt(external_path)
+            external_intent_path = _repository_path(config, args.external_operation_intent or _evidence_intent_path(external_path, "external-testing"), label="external operation intent", must_exist=True)
+            external_intent = load_operation_intent(external_intent_path)
+        validate_receipt_chain(
+            candidate_manifest=candidate,
+            candidate_receipt=candidate_receipt,
+            external_receipt=external_receipt,
+            platform=platform,
+            config=config,
+            require_production_eligible_external=stage == "production-submit",
+            candidate_intent=candidate_intent,
+            external_intent=external_intent,
+        )
+        _guard_complete_output(
+            output_dir=output_dir, intent_path=operation_intent_path,
+            raw_path=store_receipt_path, config=config, stage=stage, platform=platform,
+            candidate=candidate, candidate_receipt=candidate_receipt,
+            external_receipt=external_receipt, candidate_intent=candidate_intent,
+            external_intent=external_intent,
+        )
+
     artifacts = _parse_artifacts(args.artifact, config.root)
     for name, path in tuple(artifacts.items()):
         artifacts[name] = _repository_path(
             config, path, label=f"artifact {name}", must_exist=True
         )
-    _validate_ci_artifact_selection(
-        stage=stage, platform=platform, artifacts=artifacts
-    )
+    _validate_ci_artifact_selection(stage=stage, platform=platform, artifacts=artifacts)
     _set_artifact_environment(artifacts)
 
+    signing_evidence: Mapping[str, Any] | None = None
+    signing_validity: SigningValidityInterval | None = None
+    records: list[dict[str, Any]] = []
+    current_metadata = metadata_directory / "store-metadata.zip"
+    build_metadata_archive(
+        config.project_path(config.section("metadata").get("root", "release/store")),
+        current_metadata,
+        platform=platform,
+    )
+    metadata_hash = sha256_file(current_metadata)
     if stage == "candidate":
         primary = "android-aab" if platform == "android" else "ios-ipa"
-        if "store-metadata" not in artifacts:
-            metadata_archive = output_dir / "store-metadata.zip"
-            build_metadata_archive(
-                config.project_path(config.section("metadata").get("root", "release/store")),
-                metadata_archive,
-                platform=platform,
-            )
-            artifacts["store-metadata"] = metadata_archive
-            _set_artifact_environment(artifacts)
-        if platform == "android":
+        if authenticated_intent is not None:
+            # Original authenticated native validation plus exact artifact and
+            # configuration bindings supports recovery, not a new upload. The
+            # Store executor gates every actual new send with current policy.
+            if platform == "android":
+                validate_aab_structure(artifacts[primary])
+            else:
+                archive, _entries = _validated_ipa_entries(artifacts[primary])
+                archive.close()
+            findings = []
+            signing_evidence = dict(authenticated_intent["signing"][0])
+        elif platform == "android":
             findings = validate_aab(
                 artifacts[primary],
                 expected_application_id=config.section("android")["applicationId"],
@@ -705,7 +957,8 @@ def _ci(args: argparse.Namespace) -> int:
                 check_signer=True,
             )
         else:
-            findings = validate_ipa(
+            validated_ipa_sha256 = sha256_file(artifacts[primary])
+            findings, signing_validity = validate_ipa_current_signing(
                 artifacts[primary],
                 expected_bundle_id=config.section("ios")["bundleId"],
                 expected_team_id=config.section("ios")["teamId"],
@@ -715,92 +968,226 @@ def _ci(args: argparse.Namespace) -> int:
             )
         failed = [item.code for item in findings if item.status in FAILING_STATUSES]
         if failed:
-            raise ValidationError(f"final candidate artifact validation failed: {', '.join(failed)}")
+            raise ValidationError(
+                f"final candidate artifact validation failed: {', '.join(failed)}"
+            )
+        if platform == "ios" and authenticated_intent is None:
+            if signing_validity is None:
+                raise ValidationError("candidate lacks complete current signing validity evidence")
+            signing_evidence = ipa_signing_evidence(artifacts[primary])
+            if sha256_file(artifacts[primary]) != validated_ipa_sha256:
+                raise ValidationError("candidate IPA changed during signing validation")
+        artifacts["store-metadata"] = current_metadata
+        _set_artifact_environment(artifacts)
         records = artifact_records(artifacts.items())
-        metadata_hash = next(
-            item["sha256"] for item in records if item["logicalName"] == "store-metadata"
-        )
-        signing_evidence = (
-            ipa_signing_evidence(artifacts[primary]) if platform == "ios" else None
-        )
-        manifest_path = output_dir / "candidate-manifest.json"
-        receipt_path = output_dir / "candidate-receipt.json"
-        validate_evidence_context(source, stage="candidate")
-        validate_evidence_output_path(manifest_path)
-        validate_evidence_output_path(receipt_path)
-        store = execute_store_operation(config=config, release=release, request=request)
-        manifest = build_candidate_manifest(
+        if platform == "ios" and authenticated_intent is None and next(item["sha256"] for item in records if item["logicalName"] == "ios-ipa") != validated_ipa_sha256:
+            raise ValidationError("candidate IPA changed after signing validation")
+
+    validate_evidence_context(source, stage=stage)
+
+    if args.prepare_operation:
+        if args.recovery_run_id:
+            raise ValidationError("recovery runs cannot prepare a replacement operation intent")
+        if operation_intent_path.exists():
+            existing = authenticated_intent or load_operation_intent(operation_intent_path)
+            validate_operation_intent_context(
+                existing, config=config, release=release, git=source, stage=stage,
+                platform=platform, confirmation=args.confirm, metadata_sha256=metadata_hash,
+                artifacts=records, signing_evidence=signing_evidence,
+                candidate_manifest=candidate, candidate_receipt=candidate_receipt,
+                external_receipt=external_receipt,
+            )
+            print(json.dumps({"operationIntent": str(operation_intent_path), "sha256": existing["integrity"]["sha256"], "reused": True}))
+            return 0
+        validate_evidence_output_path(operation_intent_path)
+        if store_receipt_path.exists():
+            raise ValidationError(
+                "existing raw Store evidence requires its original operation intent; "
+                "preparation cannot replace an interrupted operation's authorization"
+            )
+        if stage == "candidate":
+            copy_immutable_file(current_metadata, output_dir / "store-metadata.zip")
+        precondition = prepare_store_operation(config=config, release=release, request=request)
+        if platform == "ios" and stage == "candidate":
+            assert signing_validity is not None
+            validate_preparation_signing_time(
+                signing_validity, precondition["snapshot"]["serverObservedAt"],
+            )
+        commitments = precondition.get("snapshot", {}).get("privateStateCommitments", {})
+        intent = build_operation_intent(
             config=config,
             release=release,
             git=source,
+            stage=stage,
             platform=platform,
-            artifacts=records,
-            store_receipt=store,
+            confirmation=args.confirm,
             metadata_sha256=metadata_hash,
+            store_precondition=precondition,
+            artifacts=records,
             signing_evidence=signing_evidence,
+            candidate_manifest=candidate,
+            candidate_receipt=candidate_receipt,
+            external_receipt=external_receipt,
+            private_state_commitments=commitments,
         )
-        write_evidence(manifest_path, manifest)
+        write_evidence(operation_intent_path, intent)
+        print(
+            json.dumps(
+                {
+                    "operationIntent": str(operation_intent_path),
+                    "sha256": intent["integrity"]["sha256"],
+                }
+            )
+        )
+        return 0
+
+    if not operation_intent_path.is_file():
+        raise ValidationError("an authenticated --operation-intent is required")
+    intent_document = authenticated_intent or load_operation_intent(operation_intent_path)
+    intent = validate_operation_intent_context(
+        intent_document,
+        config=config,
+        release=release,
+        git=source,
+        stage=stage,
+        platform=platform,
+        confirmation=args.confirm,
+        metadata_sha256=metadata_hash,
+        artifacts=records,
+        signing_evidence=signing_evidence,
+        candidate_manifest=candidate,
+        candidate_receipt=candidate_receipt,
+        external_receipt=external_receipt,
+        recovery_run_id=args.recovery_run_id,
+    )
+    if args.validate_operation_intent:
+        print(json.dumps({"operationIntent": str(operation_intent_path), "valid": True}))
+        return 0
+
+    if not (output_dir / f"{stage}-receipt.json").exists() and store_receipt_path.exists():
+        # A raw-only partial output is evidence too. Validate it before creating
+        # even the metadata/intent copies; an invalid observation is never a
+        # reason to replace the receipt or call the Store again.
+        validate_store_receipt(
+            load_store_receipt(store_receipt_path), config=config, release=release,
+            stage=stage, platform=platform, operation_intent=intent_document,
+            recovery_run_id=args.recovery_run_id,
+        )
+
+    if stage == "candidate":
+        manifest_path = output_dir / "candidate-manifest.json"
+        receipt_path = output_dir / "candidate-receipt.json"
+        if receipt_path.exists() and not manifest_path.exists():
+            raise ValidationError("candidate receipt exists without its candidate manifest")
+        manifest: dict[str, Any] | None = None
+        if manifest_path.exists():
+            manifest = load_candidate_manifest(manifest_path)
+            validate_candidate_intent_binding(manifest, operation_intent=intent_document)
+            payload = verify_sealed(manifest)
+            if payload.get("operationIntentSha256") != intent_document["integrity"]["sha256"]:
+                raise ValidationError("existing candidate manifest belongs to another operation intent")
+            if payload.get("artifacts") != records:
+                raise ValidationError("existing candidate manifest artifact set conflicts with intent")
+        if receipt_path.exists():
+            receipt = load_release_receipt(receipt_path)
+            validate_receipt_chain(
+                candidate_manifest=manifest,
+                candidate_receipt=receipt,
+                platform=platform,
+                config=config,
+                candidate_intent=intent_document,
+            )
+            if verify_sealed(receipt).get("operationIntentSha256") != intent_document["integrity"]["sha256"]:
+                raise ValidationError("existing candidate receipt belongs to another operation intent")
+            validate_receipt_raw_binding(
+                receipt, store_receipt=load_store_receipt(store_receipt_path),
+                operation_intent=intent_document, candidate_manifest=manifest,
+            )
+            print(json.dumps({"candidateManifest": str(manifest_path), "receipt": str(receipt_path), "reused": True}))
+            return 0
+        validate_evidence_output_path(receipt_path)
+        if manifest is None:
+            validate_evidence_output_path(manifest_path)
+        # Publish only after validating all surviving output/context bindings.
+        # Complete finals above are returned byte-for-byte without any copy.
+        validate_immutable_copy(current_metadata, output_dir / "store-metadata.zip")
+        validate_immutable_copy(operation_intent_path, output_dir / f"{stage}-operation-intent.json")
+        copy_immutable_file(current_metadata, output_dir / "store-metadata.zip")
+        copy_immutable_file(operation_intent_path, output_dir / f"{stage}-operation-intent.json")
+        store = execute_store_operation(
+            config=config, release=release, request=request, operation_intent=intent_document
+        )
+        if manifest is None:
+            manifest = build_candidate_manifest(
+                config=config,
+                release=release,
+                git=source,
+                platform=platform,
+                artifacts=records,
+                store_receipt=store,
+                metadata_sha256=metadata_hash,
+                operation_intent=intent_document,
+                signing_evidence=signing_evidence,
+            )
+            write_evidence(manifest_path, manifest)
         receipt = build_receipt(
             stage="candidate",
             platform=platform,
             candidate_manifest=manifest,
             store_receipt=store,
+            operation_intent=intent_document,
         )
         write_evidence(receipt_path, receipt)
         print(json.dumps({"candidateManifest": str(manifest_path), "receipt": str(receipt_path)}))
         return 0
 
-    if not args.candidate_manifest:
-        raise ValidationError(f"ci {stage} requires --candidate-manifest")
-    candidate_path = _repository_path(
-        config, args.candidate_manifest, label="candidate manifest", must_exist=True
-    )
-    candidate = load_evidence(candidate_path)
-    _candidate_context_matches(config, candidate, platform)
-    candidate_receipt_path = _repository_path(
-        config,
-        args.candidate_receipt or _adjacent(candidate_path, "candidate-receipt.json"),
-        label="candidate receipt",
-        must_exist=True,
-    )
-    candidate_receipt = load_evidence(candidate_receipt_path)
-    external_receipt: dict[str, Any] | None = None
-    if stage == "production-submit":
-        if not args.external_receipt:
-            raise ValidationError("ci production-submit requires --external-receipt")
-        external_path = _repository_path(
-            config, args.external_receipt, label="external receipt", must_exist=True
-        )
-        external_receipt = load_evidence(external_path)
-    validate_receipt_chain(
-        candidate_manifest=candidate,
-        candidate_receipt=candidate_receipt,
-        external_receipt=external_receipt,
-        platform=platform,
-        config=config,
-        require_production_eligible_external=stage == "production-submit",
-    )
+    assert candidate is not None and candidate_receipt is not None
     filename = (
         "external-testing-receipt.json"
         if stage == "external-testing"
         else "production-submit-receipt.json"
     )
     receipt_path = output_dir / filename
-    validate_evidence_context(source, stage=stage)
+    if receipt_path.exists():
+        existing = load_release_receipt(receipt_path)
+        if verify_sealed(existing).get("operationIntentSha256") != intent_document["integrity"]["sha256"]:
+            raise ValidationError("existing receipt belongs to another operation intent")
+        validate_receipt_chain(
+            candidate_manifest=candidate,
+            candidate_receipt=candidate_receipt,
+            external_receipt=existing if stage == "external-testing" else external_receipt,
+            production_receipt=existing if stage == "production-submit" else None,
+            platform=platform,
+            config=config,
+            candidate_intent=candidate_intent,
+            external_intent=intent_document if stage == "external-testing" else external_intent,
+            production_intent=intent_document if stage == "production-submit" else None,
+        )
+        validate_receipt_raw_binding(
+            existing, store_receipt=load_store_receipt(store_receipt_path),
+            operation_intent=intent_document, candidate_manifest=candidate,
+        )
+        print(json.dumps({"receipt": str(receipt_path), "reused": True}))
+        return 0
     validate_evidence_output_path(receipt_path)
-    store = execute_store_operation(config=config, release=release, request=request)
+    # The exact attested authorization travels with every new final artifact.
+    # Failure here still occurs before any Store mutation.
+    copy_immutable_file(operation_intent_path, output_dir / f"{stage}-operation-intent.json")
+    store = execute_store_operation(
+        config=config, release=release, request=request, operation_intent=intent_document
+    )
     predecessor = candidate_receipt if stage == "external-testing" else external_receipt
     receipt = build_receipt(
         stage=stage,
         platform=platform,
         candidate_manifest=candidate,
         store_receipt=store,
+        operation_intent=intent_document,
         previous_receipt=predecessor,
     )
     write_evidence(receipt_path, receipt)
     print(json.dumps({"receipt": str(receipt_path)}))
     return 0
-
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()

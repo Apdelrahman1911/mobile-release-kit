@@ -1,10 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:mobile-release-kit:schema:receipt:2",
+  "$id": "urn:mobile-release-kit:schema:receipt:3",
   "title": "Mobile Release Kit Store mutation receipt",
   "type": "object",
   "additionalProperties": false,
   "required": [
+    "executedBy",
+    "authorizedBy",
+    "operationIntentSha256",
+    "documentType",
     "schemaVersion",
     "stage",
     "candidateManifestSha256",
@@ -20,13 +24,13 @@
     "outcome",
     "destination",
     "readback",
-    "createdBy",
     "createdAt",
-    "integrity"
+    "integrity",
+    "producedBy"
   ],
   "properties": {
     "schemaVersion": {
-      "const": 2
+      "const": 3
     },
     "stage": {
       "enum": [
@@ -87,7 +91,10 @@
       "enum": [
         "mutated",
         "reconciled",
-        "already-present"
+        "already-present",
+        "operator-authorized-reconciliation",
+        "operator-authorized-retry",
+        "operator-authorized-create-retry"
       ]
     },
     "destination": {
@@ -99,14 +106,40 @@
     "storeState": {
       "$ref": "#/$defs/storeState"
     },
-    "createdBy": {
-      "$ref": "#/$defs/workflowRun"
-    },
     "createdAt": {
       "$ref": "#/$defs/timestamp"
     },
     "integrity": {
       "$ref": "#/$defs/integrity"
+    },
+    "documentType": {
+      "const": "store-receipt"
+    },
+    "operationIntentSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "authorizedBy": {
+      "$ref": "#/$defs/workflowAuthority"
+    },
+    "executedBy": {
+      "$ref": "#/$defs/workflowAuthority"
+    },
+    "producedBy": {
+      "$ref": "#/$defs/workflowAuthority"
+    },
+    "appStoreVersionId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]{1,255}$"
+    },
+    "reviewSubmissionId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]{1,255}$"
+    },
+    "storeStateSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "createRetry": {
+      "$ref": "#/$defs/createRetry"
     }
   },
   "allOf": [
@@ -282,8 +315,24 @@
               "sourceCommittedSha256",
               "sourceUnrelatedBeforeSha256",
               "sourceUnrelatedCommittedSha256",
-              "sourceTargetTransition"
+              "sourceTargetTransition",
+              "metadataBeforeSha256",
+              "metadataExpectedSha256",
+              "metadataCommittedSha256"
             ]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "storeState": {
+            "not": {
+              "anyOf": [
+                { "required": ["metadataBeforeSha256"] },
+                { "required": ["metadataExpectedSha256"] },
+                { "required": ["metadataCommittedSha256"] }
+              ]
+            }
           }
         }
       }
@@ -342,7 +391,9 @@
           "outcome": {
             "enum": [
               "mutated",
-              "already-present"
+              "reconciled",
+              "already-present",
+              "operator-authorized-create-retry"
             ]
           }
         }
@@ -495,7 +546,10 @@
           },
           "outcome": {
             "enum": [
-              "mutated"
+              "mutated",
+              "reconciled",
+              "operator-authorized-reconciliation",
+              "operator-authorized-retry"
             ]
           }
         }
@@ -631,7 +685,9 @@
           "outcome": {
             "enum": [
               "mutated",
-              "already-present"
+              "reconciled",
+              "already-present",
+              "operator-authorized-create-retry"
             ]
           }
         }
@@ -677,10 +733,7 @@
             "const": "android"
           },
           "outcome": {
-            "enum": [
-              "mutated",
-              "reconciled"
-            ]
+            "const": "mutated"
           }
         },
         "required": [
@@ -700,6 +753,298 @@
                   "retained",
                   "deactivated"
                 ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "ios"
+          },
+          "stage": {
+            "enum": [
+              "candidate",
+              "external-testing"
+            ]
+          }
+        },
+        "required": [
+          "platform",
+          "stage"
+        ]
+      },
+      "then": {
+        "properties": {
+          "readback": {
+            "required": [
+              "autoNotifyEnabled"
+            ]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "readback": {
+            "not": {
+              "required": [
+                "autoNotifyEnabled"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "android"
+          },
+          "outcome": {
+            "const": "reconciled"
+          }
+        },
+        "required": [
+          "platform",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "storeState": {
+            "properties": {
+              "mode": {
+                "enum": [
+                  "mutation",
+                  "recovery"
+                ]
+              },
+              "sourceTargetTransition": {
+                "enum": [
+                  "retained",
+                  "deactivated"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "ios"
+          },
+          "stage": {
+            "const": "production-submit"
+          }
+        },
+        "required": [
+          "platform",
+          "stage"
+        ]
+      },
+      "then": {
+        "required": [
+          "appStoreVersionId",
+          "reviewSubmissionId",
+          "storeStateSha256"
+        ]
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "appStoreVersionId"
+              ]
+            },
+            {
+              "required": [
+                "reviewSubmissionId"
+              ]
+            },
+            {
+              "required": [
+                "storeStateSha256"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "operator-authorized-create-retry"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "required": [
+          "createRetry"
+        ],
+        "properties": {
+          "platform": {
+            "const": "ios"
+          },
+          "stage": {
+            "enum": [
+              "external-testing",
+              "production-submit"
+            ]
+          }
+        }
+      },
+      "else": {
+        "not": {
+          "required": [
+            "createRetry"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": {
+            "const": "candidate"
+          }
+        },
+        "required": [
+          "stage"
+        ]
+      },
+      "then": {
+        "properties": {
+          "authorizedBy": {
+            "properties": {
+              "callerPath": {
+                "const": ".github/workflows/mobile-candidate.yml"
+              },
+              "reusablePath": {
+                "const": ".github/workflows/reusable-candidate.yml"
+              }
+            }
+          },
+          "executedBy": {
+            "properties": {
+              "callerPath": {
+                "const": ".github/workflows/mobile-candidate.yml"
+              },
+              "reusablePath": {
+                "const": ".github/workflows/reusable-candidate.yml"
+              }
+            }
+          },
+          "producedBy": {
+            "properties": {
+              "callerPath": {
+                "const": ".github/workflows/mobile-candidate.yml"
+              },
+              "reusablePath": {
+                "const": ".github/workflows/reusable-candidate.yml"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": {
+            "const": "external-testing"
+          }
+        },
+        "required": [
+          "stage"
+        ]
+      },
+      "then": {
+        "properties": {
+          "authorizedBy": {
+            "properties": {
+              "callerPath": {
+                "const": ".github/workflows/mobile-external-testing.yml"
+              },
+              "reusablePath": {
+                "const": ".github/workflows/reusable-external-testing.yml"
+              }
+            }
+          },
+          "executedBy": {
+            "properties": {
+              "callerPath": {
+                "const": ".github/workflows/mobile-external-testing.yml"
+              },
+              "reusablePath": {
+                "const": ".github/workflows/reusable-external-testing.yml"
+              }
+            }
+          },
+          "producedBy": {
+            "properties": {
+              "callerPath": {
+                "const": ".github/workflows/mobile-external-testing.yml"
+              },
+              "reusablePath": {
+                "const": ".github/workflows/reusable-external-testing.yml"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "stage": {
+            "const": "production-submit"
+          }
+        },
+        "required": [
+          "stage"
+        ]
+      },
+      "then": {
+        "properties": {
+          "authorizedBy": {
+            "properties": {
+              "callerPath": {
+                "const": ".github/workflows/mobile-production-submit.yml"
+              },
+              "reusablePath": {
+                "const": ".github/workflows/reusable-production-submit.yml"
+              }
+            }
+          },
+          "executedBy": {
+            "properties": {
+              "callerPath": {
+                "const": ".github/workflows/mobile-production-submit.yml"
+              },
+              "reusablePath": {
+                "const": ".github/workflows/reusable-production-submit.yml"
+              }
+            }
+          },
+          "producedBy": {
+            "properties": {
+              "callerPath": {
+                "const": ".github/workflows/mobile-production-submit.yml"
+              },
+              "reusablePath": {
+                "const": ".github/workflows/reusable-production-submit.yml"
               }
             }
           }
@@ -858,30 +1203,9 @@
         },
         "observedAt": {
           "$ref": "#/$defs/timestamp"
-        }
-      }
-    },
-    "workflowRun": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "workflow",
-        "runId",
-        "attempt"
-      ],
-      "properties": {
-        "workflow": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 255
         },
-        "runId": {
-          "type": "string",
-          "pattern": "^[1-9][0-9]*$"
-        },
-        "attempt": {
-          "type": "integer",
-          "minimum": 1
+        "autoNotifyEnabled": {
+          "const": false
         }
       }
     },
@@ -901,11 +1225,12 @@
       ],
       "properties": {
         "canonicalization": {
-          "const": "mrk-play-track-state-v1"
+          "const": "mrk-play-track-state-v2"
         },
         "mode": {
           "enum": [
             "mutation",
+            "recovery",
             "observation"
           ]
         },
@@ -958,6 +1283,15 @@
             "deactivated",
             "already-deactivated"
           ]
+        },
+        "metadataBeforeSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "metadataExpectedSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "metadataCommittedSha256": {
+          "$ref": "#/$defs/sha256"
         }
       },
       "allOf": [
@@ -1032,6 +1366,1035 @@
           }
         }
       ]
+    },
+    "workflowAuthority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workflow",
+        "callerPath",
+        "reusableRepository",
+        "reusablePath",
+        "reusableCommit",
+        "runId",
+        "attempt",
+        "headSha",
+        "ref",
+        "event"
+      ],
+      "properties": {
+        "workflow": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "callerPath": {
+          "type": "string",
+          "pattern": "^\\.github/workflows/[A-Za-z0-9_.-]+\\.ya?ml$",
+          "maxLength": 512
+        },
+        "reusableRepository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "reusablePath": {
+          "type": "string",
+          "pattern": "^\\.github/workflows/[A-Za-z0-9_.-]+\\.ya?ml$",
+          "maxLength": 512
+        },
+        "reusableCommit": {
+          "$ref": "#/$defs/gitObjectId"
+        },
+        "runId": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "headSha": {
+          "$ref": "#/$defs/gitObjectId"
+        },
+        "ref": {
+          "type": "string",
+          "pattern": "^refs/heads/.+$",
+          "maxLength": 512
+        },
+        "event": {
+          "const": "workflow_dispatch"
+        }
+      }
+    },
+    "retryId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]{1,255}$"
+    },
+    "retryCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "marketingVersion",
+        "buildNumber",
+        "storeBuildId"
+      ],
+      "properties": {
+        "marketingVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "buildNumber": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2100000000
+        },
+        "storeBuildId": {
+          "$ref": "#/$defs/retryId"
+        }
+      }
+    },
+    "retryApplication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bundleId",
+        "appStoreAppId"
+      ],
+      "properties": {
+        "bundleId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "appStoreAppId": {
+          "$ref": "#/$defs/retryId"
+        }
+      }
+    },
+    "retryScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "appStoreAppId",
+        "platform",
+        "marketingVersion",
+        "buildNumber",
+        "storeBuildId"
+      ],
+      "properties": {
+        "appStoreAppId": {
+          "$ref": "#/$defs/retryId"
+        },
+        "platform": {
+          "const": "IOS"
+        },
+        "marketingVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "buildNumber": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2100000000
+        },
+        "storeBuildId": {
+          "$ref": "#/$defs/retryId"
+        }
+      }
+    },
+    "retryParent": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "resourceType",
+            "id"
+          ],
+          "properties": {
+            "mode": {
+              "const": "present"
+            },
+            "resourceType": {
+              "enum": [
+                "appInfos",
+                "reviewSubmissions",
+                "appStoreVersionLocalizations",
+                "apps",
+                "builds",
+                "appStoreVersions",
+                "appScreenshotSets"
+              ]
+            },
+            "id": {
+              "$ref": "#/$defs/retryId"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "resourceType",
+            "logicalKeySha256"
+          ],
+          "properties": {
+            "mode": {
+              "const": "missing"
+            },
+            "resourceType": {
+              "enum": [
+                "appStoreVersions",
+                "appStoreVersionLocalizations",
+                "appInfoLocalizations",
+                "appScreenshotSets",
+                "appScreenshots",
+                "appStoreReviewDetails",
+                "reviewSubmissions",
+                "reviewSubmissionItems",
+                "betaBuildLocalizations",
+                "betaAppReviewSubmissions",
+                "betaGroupRelationships"
+              ]
+            },
+            "logicalKeySha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "resourceType",
+            "appStoreAppId",
+            "referenceSha256",
+            "versionKeySha256"
+          ],
+          "properties": {
+            "mode": {
+              "const": "automatic"
+            },
+            "resourceType": {
+              "const": "appInfos"
+            },
+            "appStoreAppId": {
+              "$ref": "#/$defs/retryId"
+            },
+            "referenceSha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "versionKeySha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        }
+      ]
+    },
+    "retryNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "logicalIdentity",
+        "logicalKeySha256",
+        "resourceType",
+        "method",
+        "endpointKind",
+        "parent",
+        "dependencies",
+        "targetSha256"
+      ],
+      "properties": {
+        "logicalIdentity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "resourceType",
+            "scope",
+            "locator"
+          ],
+          "properties": {
+            "resourceType": {
+              "enum": [
+                "appStoreVersions",
+                "appStoreVersionLocalizations",
+                "appInfoLocalizations",
+                "appScreenshotSets",
+                "appScreenshots",
+                "appStoreReviewDetails",
+                "reviewSubmissions",
+                "reviewSubmissionItems",
+                "betaBuildLocalizations",
+                "betaAppReviewSubmissions",
+                "betaGroupRelationships"
+              ]
+            },
+            "scope": {
+              "$ref": "#/$defs/retryScope"
+            },
+            "locator": {
+              "type": "object"
+            }
+          }
+        },
+        "logicalKeySha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "resourceType": {
+          "enum": [
+            "appStoreVersions",
+            "appStoreVersionLocalizations",
+            "appInfoLocalizations",
+            "appScreenshotSets",
+            "appScreenshots",
+            "appStoreReviewDetails",
+            "reviewSubmissions",
+            "reviewSubmissionItems",
+            "betaBuildLocalizations",
+            "betaAppReviewSubmissions",
+            "betaGroupRelationships"
+          ]
+        },
+        "method": {
+          "const": "POST"
+        },
+        "endpointKind": {
+          "enum": [
+            "appStoreVersions",
+            "appStoreVersionLocalizations",
+            "appInfoLocalizations",
+            "appScreenshotSets",
+            "appScreenshots",
+            "appStoreReviewDetails",
+            "reviewSubmissions",
+            "reviewSubmissionItems",
+            "betaBuildLocalizations",
+            "betaAppReviewSubmissions",
+            "betaGroupRelationships"
+          ]
+        },
+        "parent": {
+          "$ref": "#/$defs/retryParent"
+        },
+        "dependencies": {
+          "type": "array",
+          "maxItems": 2000,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/sha256"
+          }
+        },
+        "targetSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "resourceType": {
+                "const": "appStoreVersions"
+              }
+            },
+            "required": [
+              "resourceType"
+            ]
+          },
+          "then": {
+            "properties": {
+              "endpointKind": {
+                "const": "appStoreVersions"
+              },
+              "logicalIdentity": {
+                "properties": {
+                  "resourceType": {
+                    "const": "appStoreVersions"
+                  },
+                  "locator": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [],
+                    "properties": {}
+                  }
+                }
+              },
+              "parent": {
+                "properties": {
+                  "resourceType": {
+                    "const": "apps"
+                  },
+                  "mode": {
+                    "enum": [
+                      "present",
+                      "missing"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "resourceType": {
+                "const": "appStoreVersionLocalizations"
+              }
+            },
+            "required": [
+              "resourceType"
+            ]
+          },
+          "then": {
+            "properties": {
+              "endpointKind": {
+                "const": "appStoreVersionLocalizations"
+              },
+              "logicalIdentity": {
+                "properties": {
+                  "resourceType": {
+                    "const": "appStoreVersionLocalizations"
+                  },
+                  "locator": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "locale"
+                    ],
+                    "properties": {
+                      "locale": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 35,
+                        "pattern": "^[^\\u0000]*$"
+                      }
+                    }
+                  }
+                }
+              },
+              "parent": {
+                "properties": {
+                  "resourceType": {
+                    "const": "appStoreVersions"
+                  },
+                  "mode": {
+                    "enum": [
+                      "present",
+                      "missing"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "resourceType": {
+                "const": "appInfoLocalizations"
+              }
+            },
+            "required": [
+              "resourceType"
+            ]
+          },
+          "then": {
+            "properties": {
+              "endpointKind": {
+                "const": "appInfoLocalizations"
+              },
+              "logicalIdentity": {
+                "properties": {
+                  "resourceType": {
+                    "const": "appInfoLocalizations"
+                  },
+                  "locator": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "locale"
+                    ],
+                    "properties": {
+                      "locale": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 35,
+                        "pattern": "^[^\\u0000]*$"
+                      }
+                    }
+                  }
+                }
+              },
+              "parent": {
+                "properties": {
+                  "resourceType": {
+                    "const": "appInfos"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "resourceType": {
+                "const": "appScreenshotSets"
+              }
+            },
+            "required": [
+              "resourceType"
+            ]
+          },
+          "then": {
+            "properties": {
+              "endpointKind": {
+                "const": "appScreenshotSets"
+              },
+              "logicalIdentity": {
+                "properties": {
+                  "resourceType": {
+                    "const": "appScreenshotSets"
+                  },
+                  "locator": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "locale",
+                      "displayType"
+                    ],
+                    "properties": {
+                      "locale": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 35,
+                        "pattern": "^[^\\u0000]*$"
+                      },
+                      "displayType": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 100,
+                        "pattern": "^[^\\u0000]*$"
+                      }
+                    }
+                  }
+                }
+              },
+              "parent": {
+                "properties": {
+                  "resourceType": {
+                    "const": "appStoreVersionLocalizations"
+                  },
+                  "mode": {
+                    "enum": [
+                      "present",
+                      "missing"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "resourceType": {
+                "const": "appScreenshots"
+              }
+            },
+            "required": [
+              "resourceType"
+            ]
+          },
+          "then": {
+            "properties": {
+              "endpointKind": {
+                "const": "appScreenshots"
+              },
+              "logicalIdentity": {
+                "properties": {
+                  "resourceType": {
+                    "const": "appScreenshots"
+                  },
+                  "locator": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "locale",
+                      "displayType",
+                      "order",
+                      "fileName",
+                      "fileSize",
+                      "sha256",
+                      "sourceFileChecksum"
+                    ],
+                    "properties": {
+                      "locale": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 35,
+                        "pattern": "^[^\\u0000]*$"
+                      },
+                      "displayType": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 100,
+                        "pattern": "^[^\\u0000]*$"
+                      },
+                      "order": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9
+                      },
+                      "fileName": {
+                        "type": "string",
+                        "pattern": "^mrk-[a-f0-9]{32}-[a-f0-9]{64}\\.(?:png|jpg|jpeg)$"
+                      },
+                      "fileSize": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 10485760
+                      },
+                      "sha256": {
+                        "$ref": "#/$defs/sha256"
+                      },
+                      "sourceFileChecksum": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{32}$"
+                      }
+                    }
+                  }
+                }
+              },
+              "parent": {
+                "properties": {
+                  "resourceType": {
+                    "const": "appScreenshotSets"
+                  },
+                  "mode": {
+                    "enum": [
+                      "present",
+                      "missing"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "resourceType": {
+                "const": "appStoreReviewDetails"
+              }
+            },
+            "required": [
+              "resourceType"
+            ]
+          },
+          "then": {
+            "properties": {
+              "endpointKind": {
+                "const": "appStoreReviewDetails"
+              },
+              "logicalIdentity": {
+                "properties": {
+                  "resourceType": {
+                    "const": "appStoreReviewDetails"
+                  },
+                  "locator": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "domain",
+                      "keyVersion",
+                      "targetHmacSha256"
+                    ],
+                    "properties": {
+                      "domain": {
+                        "const": "app-review"
+                      },
+                      "keyVersion": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+                      },
+                      "targetHmacSha256": {
+                        "$ref": "#/$defs/sha256"
+                      }
+                    }
+                  }
+                }
+              },
+              "parent": {
+                "properties": {
+                  "resourceType": {
+                    "const": "appStoreVersions"
+                  },
+                  "mode": {
+                    "enum": [
+                      "present",
+                      "missing"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "resourceType": {
+                "const": "reviewSubmissions"
+              }
+            },
+            "required": [
+              "resourceType"
+            ]
+          },
+          "then": {
+            "properties": {
+              "endpointKind": {
+                "const": "reviewSubmissions"
+              },
+              "logicalIdentity": {
+                "properties": {
+                  "resourceType": {
+                    "const": "reviewSubmissions"
+                  },
+                  "locator": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [],
+                    "properties": {}
+                  }
+                }
+              },
+              "parent": {
+                "properties": {
+                  "resourceType": {
+                    "const": "apps"
+                  },
+                  "mode": {
+                    "enum": [
+                      "present",
+                      "missing"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "resourceType": {
+                "const": "reviewSubmissionItems"
+              }
+            },
+            "required": [
+              "resourceType"
+            ]
+          },
+          "then": {
+            "properties": {
+              "endpointKind": {
+                "const": "reviewSubmissionItems"
+              },
+              "logicalIdentity": {
+                "properties": {
+                  "resourceType": {
+                    "const": "reviewSubmissionItems"
+                  },
+                  "locator": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [],
+                    "properties": {}
+                  }
+                }
+              },
+              "parent": {
+                "properties": {
+                  "resourceType": {
+                    "const": "reviewSubmissions"
+                  },
+                  "mode": {
+                    "enum": [
+                      "present",
+                      "missing"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "resourceType": {
+                "const": "betaBuildLocalizations"
+              }
+            },
+            "required": [
+              "resourceType"
+            ]
+          },
+          "then": {
+            "properties": {
+              "endpointKind": {
+                "const": "betaBuildLocalizations"
+              },
+              "logicalIdentity": {
+                "properties": {
+                  "resourceType": {
+                    "const": "betaBuildLocalizations"
+                  },
+                  "locator": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "locale",
+                      "whatsNewSha256"
+                    ],
+                    "properties": {
+                      "locale": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 35,
+                        "pattern": "^[^\\u0000]*$"
+                      },
+                      "whatsNewSha256": {
+                        "$ref": "#/$defs/sha256"
+                      }
+                    }
+                  }
+                }
+              },
+              "parent": {
+                "properties": {
+                  "resourceType": {
+                    "const": "builds"
+                  },
+                  "mode": {
+                    "enum": [
+                      "present",
+                      "missing"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "resourceType": {
+                "const": "betaAppReviewSubmissions"
+              }
+            },
+            "required": [
+              "resourceType"
+            ]
+          },
+          "then": {
+            "properties": {
+              "endpointKind": {
+                "const": "betaAppReviewSubmissions"
+              },
+              "logicalIdentity": {
+                "properties": {
+                  "resourceType": {
+                    "const": "betaAppReviewSubmissions"
+                  },
+                  "locator": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [],
+                    "properties": {}
+                  }
+                }
+              },
+              "parent": {
+                "properties": {
+                  "resourceType": {
+                    "const": "builds"
+                  },
+                  "mode": {
+                    "enum": [
+                      "present",
+                      "missing"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "resourceType": {
+                "const": "betaGroupRelationships"
+              }
+            },
+            "required": [
+              "resourceType"
+            ]
+          },
+          "then": {
+            "properties": {
+              "endpointKind": {
+                "const": "betaGroupRelationships"
+              },
+              "logicalIdentity": {
+                "properties": {
+                  "resourceType": {
+                    "const": "betaGroupRelationships"
+                  },
+                  "locator": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "groupId"
+                    ],
+                    "properties": {
+                      "groupId": {
+                        "$ref": "#/$defs/retryId"
+                      }
+                    }
+                  }
+                }
+              },
+              "parent": {
+                "properties": {
+                  "resourceType": {
+                    "const": "builds"
+                  },
+                  "mode": {
+                    "enum": [
+                      "present",
+                      "missing"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "retryInventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "documentType",
+        "schemaVersion",
+        "operationIntentSha256",
+        "stage",
+        "platform",
+        "application",
+        "candidate",
+        "publicStateSha256",
+        "creates"
+      ],
+      "properties": {
+        "documentType": {
+          "const": "ios-create-retry-inventory"
+        },
+        "schemaVersion": {
+          "const": 1
+        },
+        "operationIntentSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "stage": {
+          "enum": [
+            "external-testing",
+            "production-submit"
+          ]
+        },
+        "platform": {
+          "const": "ios"
+        },
+        "application": {
+          "$ref": "#/$defs/retryApplication"
+        },
+        "candidate": {
+          "$ref": "#/$defs/retryCandidate"
+        },
+        "publicStateSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "creates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/retryNode"
+          },
+          "maxItems": 2000,
+          "minItems": 0
+        }
+      }
+    },
+    "createRetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "inventorySha256",
+        "inventory",
+        "executedBy",
+        "usedCreates"
+      ],
+      "properties": {
+        "mode": {
+          "const": "operator-authorized-create-retry"
+        },
+        "inventorySha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "inventory": {
+          "$ref": "#/$defs/retryInventory"
+        },
+        "executedBy": {
+          "$ref": "#/$defs/workflowAuthority"
+        },
+        "usedCreates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "logicalKeySha256",
+              "resourceId"
+            ],
+            "properties": {
+              "logicalKeySha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "resourceId": {
+                "$ref": "#/$defs/retryId"
+              }
+            }
+          },
+          "maxItems": 2000,
+          "minItems": 1
+        }
+      }
     }
   }
 }

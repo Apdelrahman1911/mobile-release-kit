@@ -13,6 +13,7 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
+from mobile_release import __version__
 from mobile_release.cli import (
     _candidate_context_matches,
     _init,
@@ -42,10 +43,11 @@ from mobile_release.preflight import (
     _xcode_toolchain_finding,
     preflight,
 )
-from mobile_release.provenance import sha256_file
+from mobile_release.provenance import sha256_file, write_evidence
 from mobile_release.reporting import FAILING_STATUSES, Finding, Report, Status
 from mobile_release.stores import (
     StoreRequest,
+    _store_environment,
     _validate_online_readback,
     execute_store_operation,
     guard_ci_mutation,
@@ -54,6 +56,7 @@ from mobile_release.stores import (
 from mobile_release.tooling import REQUIRED_TOOLING_FILES, resolve_tooling_root
 
 from .helpers import android_config, ios_config, write_project
+from .evidence_helpers import build_lifecycle, raw_receipt, workflow_environment
 
 
 class CliBuildTests(unittest.TestCase):
@@ -202,7 +205,7 @@ class CliBuildTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertEqual(completed.stdout.strip(), "mobile-release 0.2.0")
+            self.assertEqual(completed.stdout.strip(), f"mobile-release {__version__}")
             self.assertFalse(marker.exists())
 
     def test_init_preflights_sha_and_every_destination_before_writing(self) -> None:
@@ -967,9 +970,11 @@ class CliBuildTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 if not path.exists():
                     path.write_text("# installed fixture\n", encoding="utf-8")
+            intent = build_lifecycle(config)["candidate_intent"]
+            intent_path = root / "store-operation-intent.json"
+            write_evidence(intent_path, intent)
             receipt_path = root / "raw-store-receipt.json"
-            aab = root / "candidate.aab"
-            aab.write_bytes(b"candidate")
+            aab = root / "app.aab"
             (root / "fastlane").mkdir()
             (root / "fastlane/Appfile").write_text("raise 'consumer config loaded'\n")
             (root / "fastlane/Pluginfile").write_text("raise 'consumer plugin loaded'\n")
@@ -990,38 +995,7 @@ class CliBuildTests(unittest.TestCase):
                 captured.extend(argv)
                 captured_environment.update(kwargs["env"])
                 captured_cwd = Path(kwargs["cwd"])
-                receipt_path.write_text(
-                    json.dumps(
-                        {
-                            "schemaVersion": 2,
-                            "operation": "android_internal_upload",
-                            "platform": "android",
-                            "appIdentity": "com.example.reader",
-                            "marketingVersion": "1.2.3",
-                            "buildNumber": 42,
-                            "observedAt": "2026-01-01T00:00:00Z",
-                            "result": "accepted",
-                            "state": "available-to-testers",
-                            "versionCode": 42,
-                            "destinationTrack": "internal",
-                            "releaseStatus": "completed",
-                            "storeEditId": "readback-edit",
-                            "storeState": {
-                                "canonicalization": "mrk-play-track-state-v1",
-                                "mode": "mutation",
-                                "mutationEditId": "mutation-edit",
-                                "readbackEditId": "readback-edit",
-                                "destinationBeforeSha256": "a" * 64,
-                                "destinationExpectedSha256": "b" * 64,
-                                "destinationCommittedSha256": "b" * 64,
-                                "unrelatedBeforeSha256": "c" * 64,
-                                "unrelatedCommittedSha256": "c" * 64,
-                                "targetReleaseSha256": "d" * 64,
-                            },
-                        }
-                    ),
-                    encoding="utf-8",
-                )
+                receipt_path.write_text(json.dumps(raw_receipt(intent)), encoding="utf-8")
                 return type("Completed", (), {"returncode": 0})()
 
             request = StoreRequest(
@@ -1031,15 +1005,26 @@ class CliBuildTests(unittest.TestCase):
                 execute=True,
                 output_dir=root,
                 store_receipt=receipt_path,
+                operation_intent=intent_path,
             )
             with patch.dict(
                 os.environ,
                 {
+                    **workflow_environment(),
                     "MOBILE_RELEASE_TOOLING_ROOT": str(tooling),
                     "MOBILE_RELEASE_ANDROID_AAB_PATH": str(aab),
                     "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD": "must-not-leak",
                     "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64": "must-not-leak",
                     "AWS_SECRET_ACCESS_KEY": "must-not-leak",
+                    "MOBILE_RELEASE_VALIDATION_PYTHON": "/attacker/bin/python",
+                    "MOBILE_RELEASE_VALIDATION_MODULE_ROOT": "/attacker/toolkit",
+                    "MOBILE_RELEASE_BUNDLETOOL_JAR": "/public/pinned-bundletool.jar",
+                    "JAVA_HOME": "/public/jdk-21",
+                    "JAVA_TOOL_OPTIONS": "-agentlib:must-not-run",
+                    "_JAVA_OPTIONS": "-agentlib:must-not-run",
+                    "JDK_JAVA_OPTIONS": "-agentlib:must-not-run",
+                    "PYTHONPATH": "/attacker/application-code",
+                    "RUBYOPT": "-r/attacker/application-code.rb",
                 },
                 clear=False,
             ), patch("mobile_release.stores.shutil.which", return_value="/usr/bin/tool"), patch(
@@ -1049,14 +1034,16 @@ class CliBuildTests(unittest.TestCase):
                     config=config,
                     release=config.release_version(),
                     request=request,
+                    operation_intent=intent,
                 )
                 preserved = receipt_path.read_bytes()
-                with self.assertRaisesRegex(StoreOperationError, "never overwritten"):
-                    execute_store_operation(
-                        config=config,
-                        release=config.release_version(),
-                        request=request,
-                    )
+                reused = execute_store_operation(
+                    config=config,
+                    release=config.release_version(),
+                    request=request,
+                    operation_intent=intent,
+                )
+                self.assertEqual(reused, raw_receipt(intent))
                 self.assertEqual(receipt_path.read_bytes(), preserved)
             self.assertEqual(captured[:3], ["bundle", "exec", "ruby"])
             self.assertEqual(captured[3], str((tooling / "fastlane/run_lane.rb").resolve()))
@@ -1076,6 +1063,42 @@ class CliBuildTests(unittest.TestCase):
             self.assertNotIn("MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD", captured_environment)
             self.assertNotIn("MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64", captured_environment)
             self.assertNotIn("AWS_SECRET_ACCESS_KEY", captured_environment)
+            self.assertNotIn("PYTHONPATH", captured_environment)
+            self.assertNotIn("RUBYOPT", captured_environment)
+            for name in ("JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS"):
+                self.assertNotIn(name, captured_environment)
+            self.assertEqual(captured_environment["MOBILE_RELEASE_BUNDLETOOL_JAR"], "/public/pinned-bundletool.jar")
+            self.assertEqual(captured_environment["JAVA_HOME"], "/public/jdk-21")
+            self.assertEqual(captured_environment["MOBILE_RELEASE_VALIDATION_PYTHON"], str(Path(sys.executable).absolute()))
+            self.assertEqual(captured_environment["MOBILE_RELEASE_VALIDATION_MODULE_ROOT"], str(Path(sys.modules["mobile_release.stores"].__file__).resolve().parent.parent))
+
+    def test_android_native_tool_context_is_not_transferred_to_other_store_operations(self) -> None:
+        for platform, factory in (("android", android_config), ("ios", ios_config)):
+            for stage in ("candidate", "external-testing", "production-submit"):
+                with self.subTest(platform=platform, stage=stage), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    config = load_config(write_project(root, factory()))
+                    request = StoreRequest(
+                        stage=stage, platform=platform, confirmation="not-executed",
+                        execute=False, output_dir=root,
+                    )
+                    source = {
+                        **workflow_environment(stage),
+                        "MOBILE_RELEASE_BUNDLETOOL_JAR": "/public/pinned-bundletool.jar",
+                        "JAVA_HOME": "/public/jdk-21",
+                        "JAVA_TOOL_OPTIONS": "-agentlib:must-not-run",
+                        "_JAVA_OPTIONS": "-agentlib:must-not-run",
+                        "JDK_JAVA_OPTIONS": "-agentlib:must-not-run",
+                    }
+                    with patch.dict(os.environ, source, clear=True):
+                        actual = _store_environment(config, config.release_version(), request, root / "raw.json", root / "tooling")
+                    for name in ("MOBILE_RELEASE_BUNDLETOOL_JAR", "JAVA_HOME"):
+                        if (platform, stage) == ("android", "candidate"):
+                            self.assertEqual(actual[name], source[name])
+                        else:
+                            self.assertNotIn(name, actual)
+                    for name in ("JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS"):
+                        self.assertNotIn(name, actual)
 
     def test_store_adapter_fails_before_lane_when_pinned_bundle_is_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1099,12 +1122,16 @@ class CliBuildTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 if not path.exists():
                     path.write_text("# installed fixture\n", encoding="utf-8")
+            intent = build_lifecycle(config)["candidate_intent"]
+            intent_path = root / "store-operation-intent.json"
+            write_evidence(intent_path, intent)
             request = StoreRequest(
                 stage="candidate",
                 platform="android",
                 confirmation="candidate:android:1.2.3:42",
                 execute=True,
                 output_dir=root,
+                operation_intent=intent_path,
             )
             def missing_bundle(argv: list[str], **_kwargs: object) -> object:
                 if argv[:2] == ["ruby", "-e"]:
@@ -1125,6 +1152,7 @@ class CliBuildTests(unittest.TestCase):
                         config=config,
                         release=config.release_version(),
                         request=request,
+                        operation_intent=intent,
                     )
             self.assertEqual(run.call_args_list[-1].args[0], ["bundle", "check"])
             self.assertEqual(run.call_count, 3)

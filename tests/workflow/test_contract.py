@@ -11,6 +11,8 @@ from pathlib import Path
 
 from mobile_release.stores import _play_state_journal_path
 
+from .workflow_harness import load_workflow, step_by_id
+
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -53,6 +55,7 @@ ENVIRONMENT_SECRETS = {
         "MOBILE_RELEASE_PROJECT_READ_TOKEN",
     },
     "external-testing": {
+        "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64",
         "MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD",
         "MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME",
         "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL",
@@ -62,6 +65,7 @@ ENVIRONMENT_SECRETS = {
         "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64",
     },
     "production-submit": {
+        "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64",
         "MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD",
         "MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME",
         "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL",
@@ -262,34 +266,19 @@ class ReusableWorkflowContractTests(unittest.TestCase):
             self.assertIn(packaged, text)
 
     def test_android_play_state_journals_are_retained_after_credential_cleanup(self) -> None:
-        expected = {
-            "candidate": (
-                "android-internal.json",
-                "Remove candidate-upload Google Play credentials",
-                "Retain Android candidate Play state journal",
-            ),
-            "external-testing": (
-                "android-external.json",
-                "Remove external-testing Google Play credentials",
-                "Retain Android external-testing Play state journal",
-            ),
-            "production-submit": (
-                "android-production-draft.json",
-                "Remove production Google Play credentials",
-                "Retain Android production Play state journal",
-            ),
-        }
-        for workflow, (receipt, cleanup, retain) in expected.items():
-            job = "android_store" if workflow == "candidate" else "android"
-            android = job_block(read(REUSABLE[workflow]), job)
+        for workflow, receipt in (("candidate", "android-internal.json"), ("external-testing", "android-external.json"), ("production-submit", "android-production-draft.json")):
+            job = load_workflow(REUSABLE[workflow])["jobs"]["android_store" if workflow == "candidate" else "android"]
+            cleanup = step_by_id(job, "google_execute_cleanup")
             journal = _play_state_journal_path(Path(receipt)).name
+            retained = [step for step in job["steps"] if step.get("with", {}).get("path") == f"app/.mobile-release/store/{journal}"]
             with self.subTest(workflow=workflow):
-                self.assertNotIn("MOBILE_RELEASE_PLAY_STATE_PATH:", android)
-                self.assertIn(f"hashFiles('app/.mobile-release/store/{journal}')", android)
-                self.assertIn(f"path: app/.mobile-release/store/{journal}", android)
-                self.assertIn("if: ${{ always()", android)
-                self.assertLess(android.index(cleanup), android.index(retain))
-                self.assertIn("include-hidden-files: true", android[android.index(retain) :])
+                self.assertEqual(1, len(retained))
+                step = retained[0]
+                self.assertLess(job["steps"].index(cleanup), job["steps"].index(step))
+                self.assertIn("steps.google_execute_cleanup.outcome == 'success'", step["if"])
+                self.assertIn("always()", step["if"])
+                self.assertIn(f"hashFiles('app/.mobile-release/store/{journal}')", step["if"])
+                self.assertIs(step["with"]["include-hidden-files"], True)
 
     def test_reusable_workflows_execute_exact_checkout_without_package_install(self) -> None:
         forbidden = (
@@ -338,60 +327,42 @@ class ReusableWorkflowContractTests(unittest.TestCase):
         for name in PROMOTION_ONLY:
             text = read(REUSABLE[name])
             with self.subTest(workflow=name):
-                self.assertIn("candidate-evidence", text)
+                self.assertIn("mobile_release.workflow", text)
+                self.assertIn("--candidate-run-id", text)
+                self.assertIn(".mobile-release/input/candidate/candidate-manifest.json", text)
                 self.assertNotIn("candidate-binaries", text)
                 self.assertNotIn("app-release.aab", text)
                 self.assertNotIn("app.ipa", text)
 
     def test_prior_evidence_attestations_bind_workflow_and_tooling_digest(self) -> None:
-        expected_signers = {
-            "external-testing": ("reusable-candidate.yml",),
-            "production-submit": ("reusable-candidate.yml", "reusable-external-testing.yml"),
-        }
-        for name, signers in expected_signers.items():
+        helper = read(ROOT / "src/mobile_release/workflow.py")
+        for flag in ("--signer-workflow", "--signer-digest", "--source-digest", "--source-ref", "--deny-self-hosted-runners"):
+            self.assertIn(flag, helper)
+        for name in PROMOTION_ONLY:
+            for platform in ("android", "ios"):
+                job = load_workflow(REUSABLE[name])["jobs"][platform]
+                resolve = step_by_id(job, "resolve")
+                self.assertIn("python -P -m mobile_release.workflow", resolve["run"])
+                self.assertLess(job["steps"].index(resolve), job["steps"].index(step_by_id(job, "prepare")))
+                self.assertEqual("${{ github.token }}", resolve["env"]["GH_TOKEN"])
+
+    def test_predecessors_use_authenticated_producer_attempts_not_run_success(self) -> None:
+        helper = read(ROOT / "src/mobile_release/workflow.py")
+        self.assertIn("/attempts/{attempt}", helper)
+        self.assertIn("/attempts/{authority['attempt']}/jobs", helper)
+        self.assertIn("runInvocationURI", helper)
+        self.assertIn('type(job.get("run_attempt")) is int', helper)
+        self.assertIn('job["run_attempt"] == authority["attempt"]', helper)
+        self.assertIn('result.get("event") == "workflow_dispatch"', helper)
+        self.assertIn('result.get("path") == authority["callerPath"]', helper)
+        for name in PROMOTION_ONLY:
             text = read(REUSABLE[name])
-            with self.subTest(workflow=name):
-                self.assertIn("--signer-digest", text)
-                self.assertIn("--source-digest", text)
-                self.assertIn("--deny-self-hosted-runners", text)
-                for signer in signers:
-                    self.assertIn(
-                        f'$MOBILE_RELEASE_TOOLING_REPOSITORY/.github/workflows/{signer}',
-                        text,
-                    )
-
-    def test_predecessor_runs_must_be_exact_successful_manual_callers(self) -> None:
-        external = read(REUSABLE["external-testing"])
-        production = read(REUSABLE["production-submit"])
-        self.assertEqual(2, external.count('gh api --method GET "repos/$GITHUB_REPOSITORY/actions/runs/$MOBILE_RELEASE_CANDIDATE_RUN_ID"'))
-        self.assertEqual(2, external.count('[[ "$(jq -er .createdBy.runId "$candidate")" == "$MOBILE_RELEASE_CANDIDATE_RUN_ID" ]]'))
-        self.assertEqual(2, external.count('candidate_attempt="$(jq -er .createdBy.attempt "$candidate")"'))
-        self.assertEqual(2, external.count('[[ "$candidate_commit" =~ ^[0-9A-Fa-f]{40}$ ]]'))
-        self.assertEqual(2, external.count('[[ "$candidate_tree" =~ ^[0-9A-Fa-f]{40}$ ]]'))
-        self.assertEqual(2, external.count('[[ "$candidate_attempt" =~ ^[1-9][0-9]*$ ]]'))
-        self.assertEqual(2, external.count('--argjson attempt "$candidate_attempt"'))
-        self.assertEqual(2, external.count('.run_attempt == $attempt'))
-        self.assertEqual(2, external.count('.path == ".github/workflows/mobile-candidate.yml"'))
-        self.assertEqual(2, external.count('.event == "workflow_dispatch"'))
-        self.assertEqual(2, external.count('.conclusion == "success"'))
-        self.assertEqual(2, external.count('.repository.full_name == $repository'))
-
-        self.assertEqual(2, production.count('[[ "$(jq -er .createdBy.runId "$candidate")" == "$MOBILE_RELEASE_CANDIDATE_RUN_ID" ]]'))
-        self.assertEqual(2, production.count('[[ "$(jq -er .createdBy.runId "$external")" == "$MOBILE_RELEASE_EXTERNAL_RUN_ID" ]]'))
-        self.assertEqual(2, production.count('candidate_attempt="$(jq -er .createdBy.attempt "$candidate")"'))
-        self.assertEqual(2, production.count('external_attempt="$(jq -er .createdBy.attempt "$external")"'))
-        self.assertEqual(2, production.count('[[ "$candidate_commit" =~ ^[0-9A-Fa-f]{40}$ ]]'))
-        self.assertEqual(2, production.count('[[ "$candidate_tree" =~ ^[0-9A-Fa-f]{40}$ ]]'))
-        self.assertEqual(2, production.count('[[ "$candidate_attempt" =~ ^[1-9][0-9]*$ ]]'))
-        self.assertEqual(2, production.count('[[ "$external_attempt" =~ ^[1-9][0-9]*$ ]]'))
-        self.assertEqual(2, production.count('--argjson attempt "$candidate_attempt"'))
-        self.assertEqual(2, production.count('--argjson attempt "$external_attempt"'))
-        self.assertEqual(4, production.count('.run_attempt == $attempt'))
-        self.assertEqual(2, production.count('.path == ".github/workflows/mobile-candidate.yml"'))
-        self.assertEqual(2, production.count('.path == ".github/workflows/mobile-external-testing.yml"'))
-        self.assertEqual(4, production.count('.event == "workflow_dispatch"'))
-        self.assertEqual(4, production.count('.conclusion == "success"'))
-        self.assertEqual(4, production.count('.head_sha == $head'))
+            self.assertNotIn('.conclusion == "success"', text)
+            self.assertNotIn('.run_attempt == $attempt', text)
+            for platform in ("android", "ios"):
+                self.assertIn(f"inputs.candidate_{platform}_run_id", text)
+        # Behavioral fake-API cases cover job/attempt/certificate mismatches;
+        # the workflows must reach that helper rather than inline jq guesses.
 
     def test_release_evidence_uses_the_audited_provenance_action(self) -> None:
         expected = (
@@ -404,20 +375,17 @@ class ReusableWorkflowContractTests(unittest.TestCase):
                 self.assertIn(expected, text)
                 self.assertNotIn("uses: actions/attest@", text)
 
-    def test_production_accepts_ancestor_or_related_same_tree_rebase(self) -> None:
-        text = read(REUSABLE["production-submit"])
-        ancestor_gate = (
-            'git merge-base --is-ancestor "$candidate_commit" '
-            '"$MOBILE_RELEASE_SOURCE_SHA"'
-        )
-        related_history_gate = (
-            'git merge-base "$candidate_commit" "$MOBILE_RELEASE_SOURCE_SHA" >/dev/null'
-        )
-        same_tree_gate = '[[ "$candidate_tree" == "$(git rev-parse \'HEAD^{tree}\')" ]]'
-        self.assertEqual(2, text.count(ancestor_gate))
-        self.assertEqual(2, text.count(related_history_gate))
-        self.assertEqual(2, text.count(same_tree_gate))
-        self.assertEqual(2, text.count(f"if ! {ancestor_gate}; then"))
+    def test_production_resolves_original_source_before_staging_or_store_execution(self) -> None:
+        for platform in ("android", "ios"):
+            job = load_workflow(REUSABLE["production-submit"])["jobs"][platform]
+            checkout = next(step for step in job["steps"] if step.get("with", {}).get("path") == "app")
+            self.assertEqual("${{ steps.resolve.outputs.source_sha }}", checkout["with"]["ref"])
+            self.assertEqual(0, checkout["with"]["fetch-depth"])
+            stage = next(step for step in job["steps"] if "mobile_release.workflow stage" in step.get("run", ""))
+            self.assertIn('git -C app rev-parse HEAD', stage["run"])
+            self.assertIn("git -C app rev-parse 'HEAD^{tree}'", stage["run"])
+            self.assertLess(job["steps"].index(stage), job["steps"].index(step_by_id(job, "prepare")))
+            self.assertNotIn("GITHUB_SHA=", read(REUSABLE["production-submit"]))
 
     def test_candidate_uses_verified_bundletool_and_one_ephemeral_ios_signing_owner(self) -> None:
         text = read(REUSABLE["candidate"])
@@ -427,42 +395,34 @@ class ReusableWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("security import", text)
         self.assertNotIn("security create-keychain", text)
         self.assertNotIn("base64 --decode", text)
-        self.assertEqual(1, text.count("--signing\n          --run-builds\n          --platform ios"))
-        credentials = read(CREDENTIAL_SOURCE)
-        self.assertIn("def _temporary_apple_signing_environment", credentials)
+        build = load_workflow(REUSABLE["candidate"])["jobs"]["ios_build"]
+        signing = [step for step in build["steps"] if "--signing" in step.get("run", "")]
+        self.assertEqual(1, len(signing))
+        self.assertIn("--run-builds", signing[0]["run"])
+        self.assertIn("--platform ios", signing[0]["run"])
+        self.assertIn("def _temporary_apple_signing_environment", read(CREDENTIAL_SOURCE))
 
     def test_actual_consumer_toolchains_are_pinned(self) -> None:
         for name, path in REUSABLE.items():
             text = read(path)
-            if "  ios:" in text:
-                with self.subTest(workflow=name, tool="xcode"):
-                    self.assertIn("runs-on: macos-26", text)
-                    self.assertIn(
-                        "DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer",
-                        text,
-                    )
-                    self.assertIn('== "Xcode 26.3"', text)
-                    self.assertIn('== "Build version 17C529"', text)
-
-        for name in ("preflight", "candidate"):
-            text = read(REUSABLE[name])
-            with self.subTest(workflow=name, tool="java"):
-                self.assertGreaterEqual(text.count("java-version: '21'"), 2)
-            with self.subTest(workflow=name, tool="xcodegen"):
+            document = load_workflow(path)
+            for key, job in document["jobs"].items():
+                if job["runs-on"] == "macos-26":
+                    with self.subTest(workflow=name, job=key, tool="xcode"):
+                        self.assertEqual("/Applications/Xcode_26.3.app/Contents/Developer", job["env"]["DEVELOPER_DIR"])
+                        scripts = "\n".join(step.get("run", "") for step in job["steps"])
+                        self.assertIn('== "Xcode 26.3"', scripts)
+                        self.assertIn('== "Build version 17C529"', scripts)
+            if name in ("preflight", "candidate"):
                 self.assertIn("XCODEGEN_VERSION: 2.45.4", text)
-                self.assertIn(
-                    "090ec29491aad50aec10631bf6e62253fed733c50f3aab0f5ffc86bc170bdbef",
-                    text,
-                )
-                self.assertIn("shasum -a 256 --check --status", text)
-
+                self.assertIn("090ec29491aad50aec10631bf6e62253fed733c50f3aab0f5ffc86bc170bdbef", text)
+                java = [step["with"]["java-version"] for job in document["jobs"].values() for step in job["steps"] if "actions/setup-java@" in step.get("uses", "")]
+                self.assertGreaterEqual(len(java), 2)
+                self.assertEqual({"21"}, set(java))
         for path in (*REUSABLE.values(), SHARED_CI):
-            text = read(path)
-            if "ruby/setup-ruby@" in text:
-                with self.subTest(workflow=path.name, tool="ruby"):
-                    pins = re.findall(r"(?m)^\s*ruby-version:\s*'([^']+)'", text)
-                    self.assertTrue(pins)
-                    self.assertEqual({"3.3.12"}, set(pins))
+            ruby = [step["with"]["ruby-version"] for job in load_workflow(path)["jobs"].values() for step in job["steps"] if "ruby/setup-ruby@" in step.get("uses", "")]
+            if ruby:
+                self.assertEqual({"3.3.12"}, set(ruby))
 
     def test_android_project_build_cannot_inherit_google_play_adc(self) -> None:
         text = read(REUSABLE["candidate"])
@@ -471,91 +431,44 @@ class ReusableWorkflowContractTests(unittest.TestCase):
         store = job_block(text, "android_store")
         self.assertIn("Authenticate to Google Play for non-publishing online gate", online)
         self.assertIn("Remove online-gate Google Play credentials", online)
-        self.assertIn("needs: android_online", text)
-        self.assertIn("needs: android_build", text)
+        jobs = load_workflow(REUSABLE["candidate"])["jobs"]
+        self.assertIn("android_online", jobs["android_build"]["needs"])
+        self.assertIn("android_build", jobs["android_store"]["needs"])
         self.assertIn("Build, sign, and validate Android candidate without Store authority", build)
-        self.assertNotIn("id-token: write", build)
-        self.assertNotIn("google-github-actions/auth@", build)
-        self.assertNotIn("GOOGLE_APPLICATION_CREDENTIALS", build)
-        self.assertNotIn("MOBILE_RELEASE_GOOGLE_WIF_PROVIDER", build)
-        self.assertNotIn("--execute-store", build)
-        self.assertIn("Authenticate to Google Play for candidate upload only", store)
-        self.assertIn("Revalidate, upload once, and read back the Android candidate", store)
+        for token in ("id-token: write", "google-github-actions/auth@", "GOOGLE_APPLICATION_CREDENTIALS", "MOBILE_RELEASE_GOOGLE_WIF_PROVIDER", "--execute-store"):
+            self.assertNotIn(token, build)
+        self.assertIn("Authenticate to Google Play for execute", store)
+        self.assertIn("--execute-store", store)
         self.assertNotIn("--run-builds", store)
         self.assertNotIn("./gradlew", store)
         self.assertIn("cache-disabled: true", text)
 
     def test_google_adc_is_removed_before_non_store_postprocessing(self) -> None:
-        expectations = {
-            "candidate": (
-                "Revalidate, upload once, and read back the Android candidate",
-                "Remove candidate-upload Google Play credentials",
-                "Attest Android candidate manifest",
-                "google_upload_auth",
-            ),
-            "external-testing": (
-                "Promote exact Android build and emit evidence",
-                "Remove external-testing Google Play credentials",
-                "Attest Android external-testing receipt",
-                "google_external_auth",
-            ),
-            "production-submit": (
-                "Prepare exact Android build as production draft",
-                "Remove production Google Play credentials",
-                "Attest Android production-draft receipt",
-                "google_production_auth",
-            ),
-        }
-        for workflow, (mutation, cleanup, attestation, auth_id) in expectations.items():
-            text = read(REUSABLE[workflow])
-            with self.subTest(workflow=workflow):
-                self.assertLess(text.index(mutation), text.index(cleanup))
-                self.assertLess(text.index(cleanup), text.index(attestation))
-                body = text[text.index(cleanup) : text.index(attestation)]
-                self.assertIn(f"steps.{auth_id}.outputs.credentials_file_path", body)
-                self.assertIn(f"steps.{auth_id}.outcome == 'success'", body)
-                self.assertIn('rm -f -- "$MOBILE_RELEASE_GOOGLE_ADC_PATH"', body)
-                self.assertIn("GOOGLE_APPLICATION_CREDENTIALS", body)
+        for stage in MUTATING:
+            job = load_workflow(REUSABLE[stage])["jobs"]["android_store" if stage == "candidate" else "android"]
+            for phase, consumer in (("prepare", "prepare"), ("execute", "execute")):
+                with self.subTest(workflow=stage, phase=phase):
+                    cleanup = step_by_id(job, f"google_{phase}_cleanup")
+                    self.assertLess(job["steps"].index(step_by_id(job, consumer)), job["steps"].index(cleanup))
+                    self.assertIn("always()", cleanup["if"])
+                    self.assertIn(f"steps.google_{phase}_auth.outputs.credentials_file_path", cleanup["if"])
+                    self.assertIn('rm -f -- "$MOBILE_RELEASE_GOOGLE_ADC_PATH"', cleanup["run"])
+                    self.assertIn('[[ ! -e "$MOBILE_RELEASE_GOOGLE_ADC_PATH" && ! -L "$MOBILE_RELEASE_GOOGLE_ADC_PATH" ]]', cleanup["run"])
 
     def test_every_generated_google_adc_is_restricted_before_use(self) -> None:
-        expectations = {
-            "candidate-online": (
-                job_block(read(REUSABLE["candidate"]), "android_online"),
-                "google_online_auth",
-                "Restrict online-gate Google credential file",
-                "Check Android Store state without running application commands",
-            ),
-            "candidate-upload": (
-                job_block(read(REUSABLE["candidate"]), "android_store"),
-                "google_upload_auth",
-                "Restrict candidate-upload Google credential file",
-                "Revalidate, upload once, and read back the Android candidate",
-            ),
-            "external-testing": (
-                job_block(read(REUSABLE["external-testing"]), "android"),
-                "google_external_auth",
-                "Restrict external-testing Google credential file",
-                "Promote exact Android build and emit evidence",
-            ),
-            "production": (
-                job_block(read(REUSABLE["production-submit"]), "android"),
-                "google_production_auth",
-                "Restrict production Google credential file",
-                "Prepare exact Android build as production draft",
-            ),
-        }
-        for name, (body, auth_id, restriction, consumer) in expectations.items():
-            with self.subTest(name=name):
-                self.assertLess(body.index(restriction), body.index(consumer))
-                restricted = body[body.index(restriction) : body.index(consumer)]
-                self.assertIn(
-                    f"steps.{auth_id}.outputs.credentials_file_path", restricted
-                )
-                self.assertIn('[[ -f "$MOBILE_RELEASE_GOOGLE_ADC_PATH"', restricted)
-                self.assertIn('! -L "$MOBILE_RELEASE_GOOGLE_ADC_PATH"', restricted)
-                self.assertIn('chmod 600 -- "$MOBILE_RELEASE_GOOGLE_ADC_PATH"', restricted)
-                self.assertIn("stat -c '%a'", restricted)
-                self.assertIn('"$GITHUB_WORKSPACE"/*|"$RUNNER_TEMP"/*', restricted)
+        jobs = [(load_workflow(REUSABLE[stage])["jobs"]["android_store" if stage == "candidate" else "android"], ("prepare", "execute")) for stage in MUTATING]
+        jobs.append((load_workflow(REUSABLE["candidate"])["jobs"]["android_online"], ("online",)))
+        for job, phases in jobs:
+            for phase in phases:
+                auth = step_by_id(job, f"google_{phase}_auth")
+                consumer = next(step for step in job["steps"] if ("--online" in step.get("run", "") if phase == "online" else step.get("id") == phase))
+                between = job["steps"][job["steps"].index(auth) + 1 : job["steps"].index(consumer)]
+                restrictions = [step for step in between if 'chmod 600 -- "$MOBILE_RELEASE_GOOGLE_ADC_PATH"' in step.get("run", "")]
+                self.assertEqual(1, len(restrictions))
+                restricted = restrictions[0]
+                self.assertIn(f"steps.google_{phase}_auth.outputs.credentials_file_path", restricted["env"]["MOBILE_RELEASE_GOOGLE_ADC_PATH"])
+                for fragment in ('[[ -f "$MOBILE_RELEASE_GOOGLE_ADC_PATH"', '! -L "$MOBILE_RELEASE_GOOGLE_ADC_PATH"', "stat -c '%a'", '"$GITHUB_WORKSPACE"/*|"$RUNNER_TEMP"/*'):
+                    self.assertIn(fragment, restricted["run"])
 
     def test_candidate_store_credentials_cannot_reenter_project_code(self) -> None:
         candidate = read(REUSABLE["candidate"])
@@ -615,31 +528,20 @@ class ReusableWorkflowContractTests(unittest.TestCase):
     def test_candidate_handoff_is_fixed_checksum_bound_and_revalidated(self) -> None:
         candidate = read(REUSABLE["candidate"])
         for platform, primary in (("android", "app-release.aab"), ("ios", "app.ipa")):
-            build = job_block(candidate, f"{platform}_build")
-            store = job_block(candidate, f"{platform}_store")
+            build = load_workflow(REUSABLE["candidate"])["jobs"][f"{platform}_build"]
+            store = load_workflow(REUSABLE["candidate"])["jobs"][f"{platform}_store"]
             with self.subTest(platform=platform):
-                self.assertIn(f"mobile-release-candidate-handoff-{platform}", build)
-                self.assertIn(f"mobile-release-candidate-handoff-{platform}", store)
-                self.assertIn("retention-days: 1", build)
-                self.assertIn("artifact-digest", build)
-                self.assertIn("MOBILE_RELEASE_HANDOFF_DIGEST", store)
-                self.assertIn(
-                    '[[ "$MOBILE_RELEASE_HANDOFF_DIGEST" =~ ^[0-9a-f]{64}$ ]]',
-                    store,
-                )
-                self.assertIn("Verify same-run", store)
-                self.assertIn(
-                    'actions/runs/$GITHUB_RUN_ID/artifacts?name=$MOBILE_RELEASE_HANDOFF_NAME',
-                    store,
-                )
-                self.assertIn(".artifacts[0].digest == $digest", store)
-                self.assertIn('"sha256:$MOBILE_RELEASE_HANDOFF_DIGEST"', store)
-                self.assertIn("SHA256SUMS", build)
-                self.assertIn("SHA256SUMS", store)
-                self.assertIn(primary, build)
-                self.assertIn(primary, store)
-                self.assertLess(store.index("Verify exact handoff bytes"), store.index("Authenticate") if "Authenticate" in store else store.index("Revalidate, upload"))
-                self.assertIn("python -P -m mobile_release ci candidate", store)
+                handoff = step_by_id(build, "upload_handoff")
+                self.assertEqual(f"mobile-release-candidate-handoff-{platform}", handoff["with"]["name"])
+                self.assertEqual(90, handoff["with"]["retention-days"])
+                self.assertIn("artifact-digest", build["outputs"]["handoff_digest"])
+                resolve = step_by_id(store, "resolve")
+                self.assertEqual("${{ needs." + platform + "_build.outputs.handoff_digest }}", resolve["env"]["MOBILE_RELEASE_HANDOFF_DIGEST"])
+                self.assertIn("--handoff-digest", resolve["run"])
+                self.assertIn('[[ "$MOBILE_RELEASE_HANDOFF_DIGEST" =~ ^[0-9a-f]{64}$ ]]', resolve["run"])
+                self.assertIn("SHA256SUMS", job_block(candidate, f"{platform}_build"))
+                self.assertIn(primary, step_by_id(store, "prepare")["run"])
+                self.assertIn("--execute-store", step_by_id(store, "execute")["run"])
 
     def test_tooling_commit_is_rechecked_in_each_store_authenticated_python_step(self) -> None:
         jobs = (
@@ -758,62 +660,30 @@ class ReusableWorkflowContractTests(unittest.TestCase):
                 self.assertEqual(app_checkouts, text.count('find "$output" -mindepth 1 -print -quit'))
 
     def test_candidate_retains_exact_manifest_bound_metadata_and_validation_report(self) -> None:
-        text = read(REUSABLE["candidate"])
-        self.assertIn(
-            "--artifact validation-report=.mobile-release/artifacts/android/validation-report.json",
-            text,
-        )
-        self.assertIn(
-            "--artifact validation-report=.mobile-release/artifacts/ios/validation-report.json",
-            text,
-        )
         for platform in ("android", "ios"):
-            with self.subTest(platform=platform):
-                self.assertIn(
-                    f"cp .mobile-release/staging/candidate/{platform}/store-metadata.zip "
-                    f".mobile-release/artifacts/{platform}/store-metadata.zip",
-                    text,
-                )
-                self.assertIn(
-                    f".mobile-release/artifacts/{platform}/validation-report.json",
-                    text,
-                )
-        self.assertEqual(2, text.count("select(.logicalName == \"store-metadata\")"))
-        self.assertEqual(1, text.count("name: mobile-release-candidate-binaries-android"))
+            job = load_workflow(REUSABLE["candidate"])["jobs"][f"{platform}_store"]
+            for identifier in ("prepare", "execute"):
+                self.assertIn(f"--artifact validation-report=.mobile-release/artifacts/{platform}/validation-report.json", step_by_id(job, identifier)["run"])
+            intent = step_by_id(job, "upload_intent")
+            self.assertEqual("app/.mobile-release/operation", intent["with"]["path"])
+            final = step_by_id(job, "upload_final")
+            self.assertEqual(f"app/.mobile-release/package/candidate/{platform}", final["with"]["path"])
+        helper = read(ROOT / "src/mobile_release/workflow.py")
+        self.assertIn("store-metadata.zip", helper)
+        self.assertNotIn("candidate-binaries", read(REUSABLE["candidate"]))
 
     def test_every_new_receipt_is_chain_validated_before_attestation(self) -> None:
-        candidate = read(REUSABLE["candidate"])
-        self.assertEqual(2, candidate.count("python -P -m mobile_release status"))
-        self.assertIn(
-            "--receipt .mobile-release/staging/candidate/android/candidate-receipt.json",
-            candidate,
-        )
-        self.assertIn(
-            "--receipt .mobile-release/staging/candidate/ios/candidate-receipt.json",
-            candidate,
-        )
-
-        external = read(REUSABLE["external-testing"])
-        self.assertEqual(2, external.count("python -P -m mobile_release status"))
-        self.assertEqual(
-            2,
-            external.count(
-                "--receipt .mobile-release/input/candidate/candidate-receipt.json"
-            ),
-        )
-        self.assertIn("status-external-android.json", external)
-        self.assertIn("status-external-ios.json", external)
-
-        production = read(REUSABLE["production-submit"])
-        self.assertEqual(2, production.count("python -P -m mobile_release status"))
-        self.assertEqual(
-            2,
-            production.count(
-                "--receipt .mobile-release/input/external-testing/external-testing-receipt.json"
-            ),
-        )
-        self.assertIn("status-production-android.json", production)
-        self.assertIn("status-production-ios.json", production)
+        for stage in MUTATING:
+            for platform in ("android", "ios"):
+                job = load_workflow(REUSABLE[stage])["jobs"][platform + ("_store" if stage == "candidate" else "")]
+                package = step_by_id(job, "package")
+                attest = next(step for step in job["steps"] if step["name"] == "Attest complete final evidence and authenticated inventory")
+                self.assertIn("mobile_release.workflow package-final", package["run"])
+                self.assertIn(f"--evidence-dir app/.mobile-release/staging/{stage}/{platform}", package["run"])
+                self.assertLess(job["steps"].index(package), job["steps"].index(attest))
+                self.assertIn(f"/{stage}-receipt.json", attest["with"]["subject-path"])
+                self.assertIn("/workflow-provenance.json", attest["with"]["subject-path"])
+                self.assertIn("/store-receipt.json", attest["with"]["subject-path"])
 
     def test_local_bundletool_pin_matches_candidate_workflow(self) -> None:
         workflow = read(REUSABLE["candidate"])
@@ -835,10 +705,11 @@ class ReusableWorkflowContractTests(unittest.TestCase):
         self.assertNotRegex(text, r"(?i)(release_status|track_promote_release_status)\s*[:=]\s*completed")
 
     def test_expected_receipt_directories_are_explicit(self) -> None:
-        for name in MUTATING:
-            expected = f".mobile-release/receipts/{name}"
-            with self.subTest(workflow=name):
-                self.assertIn(expected, read(REUSABLE[name]))
+        for stage in MUTATING:
+            for platform in ("android", "ios"):
+                text = read(REUSABLE[stage])
+                self.assertIn(f".mobile-release/staging/{stage}/{platform}", text)
+                self.assertIn(f".mobile-release/package/{stage}/{platform}", text)
 
 
 class CallerTemplateContractTests(unittest.TestCase):

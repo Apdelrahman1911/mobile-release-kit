@@ -24,6 +24,20 @@ class FastlaneReleaseSupportTest < Minitest::Test
     )
   end
 
+  def test_strict_json_rejects_duplicate_input_but_returns_plain_nested_values
+    ["{\"a\":1,\"a\":2}", "{\"nested\":[{\"a\":1,\"a\":2}]}"].each do |text|
+      assert_raises(MobileReleaseKit::ContractError) { MobileReleaseKit.strict_json(text) }
+    end
+    value = MobileReleaseKit.strict_json('{"nested":[{"category":"before"}]}')
+    assert_instance_of Hash, value
+    assert_instance_of Hash, value.fetch("nested").first
+    copy = value.fetch("nested").first.dup
+    copy["category"] = "target"
+    assert_equal "target", copy.fetch("category")
+    assert_equal "before", value.fetch("nested").first.fetch("category")
+    assert_raises(MobileReleaseKit::ContractError) { MobileReleaseKit.strict_json('{"fraction":0.5}') }
+  end
+
   def test_safe_path_rejects_symlink_escape_for_reads_and_outputs
     Dir.mktmpdir("mobile-release-root") do |root|
       Dir.mktmpdir("mobile-release-outside") do |outside|

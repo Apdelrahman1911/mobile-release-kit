@@ -4,14 +4,32 @@ All notable changes to Mobile Release Kit are documented here. The project follo
 
 ## Unreleased
 
+### Added
+
+- v0.3 two-phase Store operations: strict immutable intents are attested and retained before
+  mutation; final evidence retains original authorization, raw readback, predecessor proofs and
+  actual producer run/attempt/job inventories. Candidate schema v2, receipt schema v3 and intent
+  schema v1 intentionally reject earlier evidence rather than silently migrating it.
+- Read-only recovery resolution, 90-day original handoffs/intents, explicit `recovery_run_id`, and
+  per-platform evidence references for partial Android/iOS success. Complete authenticated finals
+  are reused unchanged without Store access, binary retention, new attestations or replacement
+  uploads. Incomplete operations never rebuild, re-sign or allocate new versions.
+- Resource-granular Google Play and Apple reconciliation, private-review HMAC commitments,
+  bounded Apple asset handling and explicit new operator grants for ambiguous uploads/creates.
+  Before/target/readback checks preserve unrelated Store state and the manual-public-release boundary.
+- Current iOS upload eligibility immediately before every Transporter dispatch; authenticated
+  original validation remains usable to reconcile already accepted builds after signing expiry.
+- Credential-free actual-lane cross-language contracts, failure-injection and workflow lifecycle
+  tests, plus recovery/credential/upgrade documentation.
+
 ### Fixed
 
 - Replace Supply's destructive one-release Google Play track writes with a guarded adapter that
   preserves every unrelated release, validates the complete source/destination state before
   commit, commits once without transport retries, and verifies the exact committed state through a
   fresh edit while allowing only Play's documented target-only source deactivation.
-- Introduce Store receipt schema v2 with explicit mutation/reconciliation/observation outcomes and
-  checksum-bound Play track-state relationships. Receipt v1 is no longer accepted by v0.2 tooling.
+- Bind Store receipts to explicit mutation/reconciliation/observation outcomes and complete
+  Play track-state relationships; v0.3 also binds original operation authority and raw observations.
 - Retain a private per-attempt Play state journal after Google credentials are removed so an
   ambiguous or post-commit failure can be investigated without exposing credentials or binaries.
 

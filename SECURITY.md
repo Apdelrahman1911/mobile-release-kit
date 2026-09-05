@@ -27,14 +27,26 @@ The final public-release decision is intentionally outside automation.
 - Apple P8, P12, profile, and Android keystore material are scoped to jobs that need them.
 - Promotion/production jobs never receive build-signing assets.
 - Candidate application build jobs have neither Store credentials nor `id-token: write`; Store/OIDC jobs never invoke application build, prepare, or project-check commands.
-- Signed build output crosses to a fresh Store runner only through a fixed-name same-run artifact.
-  The Store job compares the build job's upload receipt digest with the current-run artifact API
-  record, the pinned download action recalculates and verifies that service digest, and the workflow
-  then checks file hashes, safe layout, final identity, and signature before mutation.
+- Signed build output crosses to a fresh Store runner through an immutable fixed-name handoff.
+  Original preparation verifies its trusted build-output/service digest, safe layout, file hashes,
+  final identity and signing. Recovery additionally requires the original attested intent's complete
+  artifact binding; artifact names and adjacent checksums alone cannot authorize Store access.
+- Historical Android recovery retains authenticated original signing/identity evidence rather than
+  requiring an accepted build to remain eligible for a new upload. Every actual new AAB send repeats
+  current pinned native validation in a credential-free child, full Store-state classification and a
+  final exact-byte check. It cannot fall back to APK/batch/default discovery or a retrying Supply
+  upload. The owned request disables logical retries without replacing Google's resumable protocol.
 - Expected public certificate fingerprints are reviewed application policy.
 - Local files live outside the repository with restrictive permissions.
 - Temporary credentials are created after cleanup handlers and removed on every exit path.
 - Secret values and private identities are not logged, summarized, cached, attested, or uploaded as artifacts.
+- Store jobs remove preparation ADC files before intent attestation/upload, then separately acquire
+  execution credentials and remove them before diagnostics/final actions. Apple P8/review/HMAC values
+  are step-scoped. Deleting an ADC file is not revoking the Store job's OIDC capability: all pinned
+  Actions in an `id-token: write` job remain within that privileged trusted-computing boundary.
+- Private Apple review equality uses domain-separated HMAC-SHA256 under a dedicated protected
+  256-bit key. Neither private values nor guessable plain hashes enter evidence. Retain its original
+  key version for recovery; rotation is an explicit owner responsibility.
 
 ## Supply-chain rules
 
@@ -46,15 +58,29 @@ The final public-release decision is intentionally outside automation.
   eligible malicious runner never received a job payload or secrets.
 - Before activation, a repository or organization administrator must verify and preserve runner
   policy/inventory so no self-hosted runner can match the pinned `ubuntu-24.04` or `macos-26`
-  labels. Trusted custom runner groups are outside the v0.1 contract.
+  labels. Trusted custom runner groups are outside the shared contract.
 - Workflow Python calls use safe-path mode and `python -P`, preventing an application package in the current directory from shadowing the pinned release module.
 - Runtime dependencies are locked and upgraded through reviewed pull requests.
 - Store jobs use exact Ruby 3.3.12 and the Bundler 4.0.16/Gem checksums recorded by the lockfile.
-- A candidate records repository ID, commit, Git tree, configuration/metadata hashes, final artifact hashes, public signers, Store build IDs, and workflow run/attempt.
+- A candidate records repository ID, commit, Git tree, configuration/metadata hashes, final artifact hashes, public signers, Store build IDs, and original authorization/actual execution/final producer identities.
 - Promotion never rebuilds.
 - Reruns fail closed when source, bytes, signer, Store identity, or receipts disagree.
-- Promotion accepts only completed successful fixed-path workflow-dispatch runs from the current
-  application repository whose head SHA matches the candidate evidence.
+- Before mutation, an attested immutable intent must already exist as a retained service artifact.
+  Every final package retains the original intent proof and complete predecessor chain.
+- Promotion authenticates fixed-path workflow-dispatch producers in the current application
+  repository at their exact run attempt/job and pinned reusable workflow. It does not equate the
+  producer with the latest attempt, nor reject a completed platform solely because another job
+  failed. Application source, operation checkout, and current recovery dispatch are distinct claims.
+- Workflow sidecars authenticate the complete payload inventory, including raw receipts. GitHub's
+  service artifact API does not independently identify the uploader job. ZIP digest, producer
+  attestation, exact job interval, immutable service selection, and complete chain are all checked;
+  none alone is equivalent to the full authority proof.
+- Complete final evidence is reused without reissue. Incomplete operations reconcile only under
+  original intent and exact bytes. No missing-artifact fallback rebuild, overwrite, or silent Store
+  adoption is allowed. See [recovery limitations](docs/recovery.md).
+- Apple candidate reconciliation may require explicit owner attribution because Apple supplies no
+  uploaded IPA digest. Later-process absence cannot authorize another create/upload request.
+  Recovery is not a generic exactly-once network guarantee and never enables public release.
 
 ## Supported versions
 

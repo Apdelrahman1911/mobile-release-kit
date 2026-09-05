@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping
 
@@ -19,8 +21,18 @@ from .credentials import (
 from .discovery import GitContext
 from .errors import MutationGuardError, StoreOperationError, ValidationError
 from .reporting import Finding, Status
-from .provenance import _reject_duplicate_pairs, load_store_receipt, validate_store_receipt
-from .tooling import resolve_tooling_root
+from .provenance import (
+    _reject_duplicate_pairs,
+    load_store_receipt,
+    load_operation_intent,
+    validate_operation_intent,
+    validate_store_precondition,
+    validate_store_receipt,
+    validate_create_retry_inventory,
+    canonical_sha256,
+    workflow_authority,
+)
+from .tooling import _complete_tooling_root, resolve_tooling_root
 
 LANES = {
     ("candidate", "android"): "android_internal_upload",
@@ -100,6 +112,11 @@ class StoreRequest:
     execute: bool
     output_dir: Path
     store_receipt: Path | None = None
+    store_precondition: Path | None = None
+    prepare: bool = False
+    operation_intent: Path | None = None
+    recovery_run_id: str | None = None
+    recovery_confirmation: str | None = None
 
 
 def expected_confirmation(stage: str, platform: str, release: ReleaseVersion) -> str:
@@ -131,7 +148,13 @@ def guard_ci_mutation(
         raise MutationGuardError(f"Store operation requires the {expected_environment} environment")
     if not git.repository or not git.repository_id or not git.commit or not git.tree or not git.ref:
         raise MutationGuardError("immutable GitHub repository/source identity is incomplete")
-    if env.get("GITHUB_SHA") != git.commit:
+    if request.recovery_run_id:
+        if not re.fullmatch(r"[1-9][0-9]*", request.recovery_run_id):
+            raise MutationGuardError("recovery_run_id must be a positive workflow run ID")
+        dispatch_sha = env.get("MOBILE_RELEASE_DISPATCH_SHA") or env.get("GITHUB_SHA")
+        if not dispatch_sha or not re.fullmatch(r"[0-9A-Fa-f]{40}", dispatch_sha):
+            raise MutationGuardError("recovery requires the immutable dispatch head SHA")
+    elif env.get("GITHUB_SHA") != git.commit:
         raise MutationGuardError("GITHUB_SHA does not exactly match the checked-out Git commit")
     if git.dirty is not False:
         raise MutationGuardError("Store operation requires a provably clean worktree")
@@ -184,9 +207,34 @@ def _store_environment(
             "MOBILE_RELEASE_CONFIG_PATH": str(config.path),
             "MOBILE_RELEASE_APP_ROOT": str(config.root),
             "BUNDLE_GEMFILE": str(tooling_root / "Gemfile"),
+            "MOBILE_RELEASE_STORE_MODE": "prepare" if request.prepare else "execute",
+            # Selected by the pinned installed CLI, never a caller-controlled
+            # environment command. Fastlane invokes only the toolkit's isolated
+            # current-upload validator through this interpreter.
+            "MOBILE_RELEASE_VALIDATION_PYTHON": str(Path(sys.executable).absolute()),
+            "MOBILE_RELEASE_VALIDATION_MODULE_ROOT": str(Path(__file__).resolve().parent.parent),
         }
     )
+    if request.operation_intent:
+        intent_path = _repository_path(config, request.operation_intent, "operation intent path")
+        if not request.prepare and not intent_path.is_file():
+            raise StoreOperationError("operation intent must be a regular repository file")
+        env["MOBILE_RELEASE_OPERATION_INTENT_PATH"] = str(intent_path)
+    if request.recovery_run_id:
+        env["MOBILE_RELEASE_RECOVERY_RUN_ID"] = request.recovery_run_id
+    if request.recovery_confirmation:
+        env["MOBILE_RELEASE_RECOVERY_CONFIRMATION"] = request.recovery_confirmation
+    authority = workflow_authority(request.stage)
+    env["MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON"] = json.dumps(
+        authority, sort_keys=True, separators=(",", ":")
+    )
     if request.platform == "android":
+        if request.stage == "candidate":
+            # Public validation inputs only. Missing/stale tools must block a
+            # NEW upload in the isolated helper, not historical reconciliation.
+            for name in ("MOBILE_RELEASE_BUNDLETOOL_JAR", "JAVA_HOME"):
+                if source_environment.get(name):
+                    env[name] = source_environment[name]
         track = {
             "candidate": "internal",
             "external-testing": platform_config.get("externalTrack", {}).get("name", ""),
@@ -197,6 +245,9 @@ def _store_environment(
         journal_path = _repository_path(config, journal_path, "Play state journal path")
         env["MOBILE_RELEASE_PLAY_STATE_PATH"] = str(journal_path)
     else:
+        journal_path = receipt_path.with_name(f"{receipt_path.stem}-apple-state.json")
+        journal_path = _repository_path(config, journal_path, "Apple state journal path")
+        env["MOBILE_RELEASE_APPLE_STATE_PATH"] = str(journal_path)
         env["MOBILE_RELEASE_ASC_APP_ID"] = str(platform_config.get("appStoreAppId", ""))
         env["MOBILE_RELEASE_TESTFLIGHT_EXTERNAL_GROUP"] = str(
             platform_config.get("externalTestFlightGroup", "")
@@ -269,62 +320,133 @@ def _require_fastlane_bundle(tooling_root: Path) -> None:
         )
 
 
+def _run_store_lane(
+    *,
+    config: ReleaseConfig,
+    release: ReleaseVersion,
+    request: StoreRequest,
+) -> Path:
+    lane = LANES[(request.stage, request.platform)]
+    receipt_path = (
+        request.store_precondition or request.output_dir / "store-precondition.json"
+        if request.prepare
+        else request.store_receipt
+        or Path(
+            os.environ.get(
+                "MOBILE_RELEASE_STORE_RECEIPT_PATH", request.output_dir / "raw-store-receipt.json"
+            )
+        )
+    )
+    receipt_path = _repository_path(config, receipt_path, "Store receipt path")
+    tooling_root = resolve_tooling_root()
+    if tooling_root is None:
+        raise StoreOperationError(
+            "shared Fastlane assets are unavailable; install the complete pinned distribution "
+            "or set MOBILE_RELEASE_TOOLING_ROOT"
+        )
+    runner = tooling_root / "fastlane/run_lane.rb"
+    if not _complete_tooling_root(tooling_root):
+        raise StoreOperationError("pinned shared Fastlane/Gem bundle is incomplete")
+    _require_fastlane_bundle(tooling_root)
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    if receipt_path.exists() or receipt_path.is_symlink():
+        raise StoreOperationError(
+            "Store output path already exists; authoritative state is never overwritten"
+        )
+    command = ["bundle", "exec", "ruby", str(runner), lane]
+    try:
+        with tempfile.TemporaryDirectory(prefix="mobile-release-store-run-") as temporary:
+            runner_directory = Path(temporary)
+            runner_directory.chmod(0o700)
+            completed = subprocess.run(
+                command,
+                cwd=runner_directory,
+                env=_store_environment(config, release, request, receipt_path, tooling_root),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=60 * 60,
+                check=False,
+            )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise StoreOperationError(f"Store lane failed or timed out: {lane}") from error
+    if completed.returncode:
+        raise StoreOperationError(f"Store lane failed with exit {completed.returncode}: {lane}")
+    return receipt_path
+
+
+def prepare_store_operation(
+    *, config: ReleaseConfig, release: ReleaseVersion, request: StoreRequest
+) -> dict[str, object]:
+    if not request.prepare or request.execute:
+        raise StoreOperationError("Store preparation requires prepare-only mode")
+    initial_path = _repository_path(config, request.store_precondition or request.output_dir / "store-precondition.json", "Store precondition path")
+    if initial_path.exists():
+        # A raw precondition has no source/authority binding until sealed into
+        # an intent. Preserve this diagnostic but capture fresh read-only state
+        # instead of signing stale state under potentially changed inputs.
+        validate_store_precondition(load_store_receipt(initial_path), stage=request.stage, platform=request.platform)
+        request = replace(request, store_precondition=initial_path.with_name(f"store-precondition-{secrets.token_hex(16)}.json"))
+    receipt_path = _run_store_lane(config=config, release=release, request=request)
+    if not receipt_path.is_file():
+        raise StoreOperationError(
+            "Store preparation did not produce authoritative readback at "
+            "MOBILE_RELEASE_STORE_RECEIPT_PATH"
+        )
+    raw = load_store_receipt(receipt_path)
+    return validate_store_precondition(raw, stage=request.stage, platform=request.platform)
+
+
 def execute_store_operation(
     *,
     config: ReleaseConfig,
     release: ReleaseVersion,
     request: StoreRequest,
+    operation_intent: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    lane = LANES[(request.stage, request.platform)]
+    if not request.execute or request.prepare:
+        raise StoreOperationError("Store execution requires execute-only mode")
+    if operation_intent is None:
+        raise StoreOperationError("Store execution requires an authenticated operation intent")
+    validate_operation_intent(operation_intent)
+    if request.operation_intent is None:
+        raise StoreOperationError("Store execution requires the original operation-intent file")
+    intent_path = _repository_path(config, request.operation_intent, "operation intent path")
+    if load_operation_intent(intent_path) != operation_intent:
+        raise StoreOperationError("operation-intent file differs from the validated authorization")
     receipt_path = request.store_receipt or Path(
         os.environ.get(
             "MOBILE_RELEASE_STORE_RECEIPT_PATH", request.output_dir / "raw-store-receipt.json"
         )
     )
     receipt_path = _repository_path(config, receipt_path, "Store receipt path")
-    if request.execute:
-        tooling_root = resolve_tooling_root()
-        if tooling_root is None:
-            raise StoreOperationError(
-                "shared Fastlane assets are unavailable; install the complete pinned distribution "
-                "or set MOBILE_RELEASE_TOOLING_ROOT"
-            )
-        fastfile = tooling_root / "fastlane/Fastfile"
-        play_store = tooling_root / "fastlane/play_store.rb"
-        runner = tooling_root / "fastlane/run_lane.rb"
-        support = tooling_root / "fastlane/release_support.rb"
-        gemfile = tooling_root / "Gemfile"
-        lockfile = tooling_root / "Gemfile.lock"
-        tooling_files = (fastfile, play_store, runner, support, gemfile, lockfile)
-        if any(path.is_symlink() or not path.is_file() for path in tooling_files):
-            raise StoreOperationError("pinned shared Fastlane/Gem bundle is incomplete")
-        _require_fastlane_bundle(tooling_root)
-        receipt_path.parent.mkdir(parents=True, exist_ok=True)
-        if receipt_path.exists() or receipt_path.is_symlink():
-            raise StoreOperationError(
-                "Store receipt path already exists; authoritative readback is never overwritten"
-            )
-        command = ["bundle", "exec", "ruby", str(runner), lane]
+    if not receipt_path.exists():
         try:
-            with tempfile.TemporaryDirectory(prefix="mobile-release-store-run-") as temporary:
-                runner_directory = Path(temporary)
-                runner_directory.chmod(0o700)
-                completed = subprocess.run(
-                    command,
-                    cwd=runner_directory,
-                    env=_store_environment(
-                        config, release, request, receipt_path, tooling_root
-                    ),
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=60 * 60,
-                    check=False,
-                )
-        except (FileNotFoundError, subprocess.TimeoutExpired) as error:
-            raise StoreOperationError(f"Store lane failed or timed out: {lane}") from error
-        if completed.returncode:
-            raise StoreOperationError(f"Store lane failed with exit {completed.returncode}: {lane}")
-    if not receipt_path.is_file():
+            _run_store_lane(config=config, release=release, request=request)
+        except StoreOperationError as error:
+            # Never echo Fastlane stderr: it may contain private API bodies.
+            # A strictly validated public inventory is safe/actionable instead.
+            if request.platform == "ios":
+                journal = receipt_path.with_name(f"{receipt_path.stem}-apple-state.json")
+                if journal.is_file() and not journal.is_symlink():
+                    try:
+                        diagnostic = load_store_receipt(journal)
+                        history = diagnostic.get("history", [])
+                        if isinstance(history, list):
+                            for event in reversed(history[-256:]):
+                                if isinstance(event, dict) and "createRetryInventory" in event:
+                                    inventory = validate_create_retry_inventory(event["createRetryInventory"], operation_intent=operation_intent)
+                                    confirmation = f"retry-ios-operation-creates:{operation_intent['integrity']['sha256']}:{canonical_sha256(inventory)}"
+                                    raise StoreOperationError(
+                                        "Apple create outcome is ambiguous. Retain the original intent/artifacts; "
+                                        "independently resolve whether prior requests were accepted, then use a NEW "
+                                        "protected first-attempt recovery dispatch with --recovery-run-id "
+                                        f"{operation_intent['authorizedBy']['runId']} --recovery-confirmation {confirmation}. "
+                                        "Repeated absence alone is not proof of rejection."
+                                    ) from error
+                    except ValidationError:
+                        pass
+            raise
+    if not receipt_path.is_file() or receipt_path.is_symlink():
         raise StoreOperationError(
             "Store operation did not produce authoritative readback at "
             "MOBILE_RELEASE_STORE_RECEIPT_PATH"
@@ -336,6 +458,8 @@ def execute_store_operation(
         release=release,
         stage=request.stage,
         platform=request.platform,
+        operation_intent=operation_intent,
+        recovery_run_id=request.recovery_run_id,
     )
 
 
@@ -356,16 +480,9 @@ def online_preflight_findings(
                 category="store-access",
             )
         ]
-    fastfile = tooling_root / "fastlane/Fastfile"
-    play_store = tooling_root / "fastlane/play_store.rb"
     runner = tooling_root / "fastlane/run_lane.rb"
-    support = tooling_root / "fastlane/release_support.rb"
     gemfile = tooling_root / "Gemfile"
-    lockfile = tooling_root / "Gemfile.lock"
-    if any(
-        path.is_symlink() or not path.is_file()
-        for path in (fastfile, play_store, runner, support, gemfile, lockfile)
-    ):
+    if not _complete_tooling_root(tooling_root):
         return [
             Finding(
                 "store.online.fastfile",

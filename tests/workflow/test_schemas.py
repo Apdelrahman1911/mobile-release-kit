@@ -5,6 +5,9 @@ import json
 import unittest
 from pathlib import Path
 
+from mobile_release.errors import ValidationError
+from mobile_release.provenance import seal, validate_evidence_document
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMAS = ROOT / "schemas"
@@ -42,8 +45,9 @@ class JsonFileTests(unittest.TestCase):
     def test_schemas_are_strict_at_the_root(self) -> None:
         expected_ids = {
             "project.schema.json": "urn:mobile-release-kit:schema:project:1",
-            "candidate.schema.json": "urn:mobile-release-kit:schema:candidate:1",
-            "receipt.schema.json": "urn:mobile-release-kit:schema:receipt:2",
+            "candidate.schema.json": "urn:mobile-release-kit:schema:candidate:2",
+            "receipt.schema.json": "urn:mobile-release-kit:schema:receipt:3",
+            "store-operation-intent.schema.json": "urn:mobile-release-kit:schema:store-operation-intent:1",
         }
         for path in SCHEMAS.glob("*.json"):
             schema = json.loads(path.read_text(encoding="utf-8"))
@@ -51,7 +55,7 @@ class JsonFileTests(unittest.TestCase):
                 self.assertEqual(schema["$schema"], "https://json-schema.org/draft/2020-12/schema")
                 self.assertEqual(schema["$id"], expected_ids[path.name])
                 self.assertIs(schema.get("additionalProperties"), False)
-                expected_version = 2 if path.name == "receipt.schema.json" else 1
+                expected_version = {"candidate.schema.json": 2, "receipt.schema.json": 3}.get(path.name, 1)
                 self.assertEqual(
                     schema["properties"]["schemaVersion"], {"const": expected_version}
                 )
@@ -110,6 +114,9 @@ class JsonFileTests(unittest.TestCase):
             ("receipt.schema.json", "receipt-candidate-valid.json"),
             ("receipt.schema.json", "receipt-external-valid.json"),
             ("receipt.schema.json", "receipt-production-valid.json"),
+            ("store-operation-intent.schema.json", "intent-candidate-valid.json"),
+            ("store-operation-intent.schema.json", "intent-external-valid.json"),
+            ("store-operation-intent.schema.json", "intent-production-valid.json"),
         )
         checker = jsonschema.FormatChecker()
         for schema_name, fixture_name in pairs:
@@ -118,6 +125,30 @@ class JsonFileTests(unittest.TestCase):
             validator = jsonschema.Draft202012Validator(schema, format_checker=checker)
             with self.subTest(fixture=fixture_name):
                 validator.validate(instance)
+
+    @unittest.skipIf(jsonschema is None, "jsonschema is not installed")
+    def test_play_metadata_receipt_fields_are_production_only_in_schema_and_runtime(self) -> None:
+        schema = json.loads((SCHEMAS / "receipt.schema.json").read_text(encoding="utf-8"))
+        validator = jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker())
+        fields = ("metadataBeforeSha256", "metadataExpectedSha256", "metadataCommittedSha256")
+        for stage in ("candidate", "external", "production"):
+            original = json.loads((FIXTURES / f"receipt-{stage}-valid.json").read_text(encoding="utf-8"))
+            validator.validate(original)
+            validate_evidence_document(original)
+            for changed in (*((field,) for field in fields), fields):
+                with self.subTest(stage=stage, changed=changed):
+                    instance = json.loads(json.dumps(original))
+                    del instance["integrity"]
+                    for field in changed:
+                        if stage == "production":
+                            del instance["storeState"][field]
+                        else:
+                            instance["storeState"][field] = "a" * 64
+                    # Re-seal so rejection proves field scope, not stale integrity.
+                    instance = seal(instance)
+                    self.assertFalse(validator.is_valid(instance))
+                    with self.assertRaisesRegex(ValidationError, "receipt.storeState fields differ"):
+                        validate_evidence_document(instance)
 
     @unittest.skipIf(jsonschema is None, "jsonschema is not installed")
     def test_project_schema_rejects_unknown_keys_and_placeholder_approval(self) -> None:
@@ -259,8 +290,8 @@ class JsonFileTests(unittest.TestCase):
                 (("tooling", "commit"), "a" * 64),
                 (("repository", "id"), "0"),
                 (("repository", "id"), "01"),
-                (("createdBy", "runId"), "0"),
-                (("createdBy", "runId"), "01"),
+                (("producedBy", "runId"), "0"),
+                (("producedBy", "runId"), "01"),
                 (("createdAt",), "2026-01-01T00:00:00.000Z"),
                 (("createdAt",), "2026-01-01T00:00:00+00:00"),
                 (("version", "marketing"), "release-1"),
@@ -344,10 +375,10 @@ class JsonFileTests(unittest.TestCase):
             (candidate, candidate_validator, ("schemaVersion",)),
             (candidate, candidate_validator, ("version", "build")),
             (candidate, candidate_validator, ("artifacts", 0, "size")),
-            (candidate, candidate_validator, ("createdBy", "attempt")),
+            (candidate, candidate_validator, ("producedBy", "attempt")),
             (receipt, receipt_validator, ("schemaVersion",)),
             (receipt, receipt_validator, ("version", "build")),
-            (receipt, receipt_validator, ("createdBy", "attempt")),
+            (receipt, receipt_validator, ("producedBy", "attempt")),
         ):
             instance = json.loads(json.dumps(document))
             target = instance
@@ -411,6 +442,7 @@ class JsonFileTests(unittest.TestCase):
                 "channel": "testflight-internal",
                 "state": "processed",
                 "observedAt": "2026-01-01T00:00:00Z",
+                "autoNotifyEnabled": False,
             }
         ]
         self.assertTrue(candidate_validator.is_valid(ios_candidate))
@@ -444,6 +476,7 @@ class JsonFileTests(unittest.TestCase):
                 "readback": {
                     "state": "processed",
                     "observedAt": "2026-01-01T00:00:00Z",
+                    "autoNotifyEnabled": False,
                 },
             }
         )
@@ -478,6 +511,7 @@ class JsonFileTests(unittest.TestCase):
             }
         )
         del external["storeState"]
+        external["readback"]["autoNotifyEnabled"] = False
         for state in (
             "available-to-testers",
             "submitted-for-review",
@@ -519,6 +553,9 @@ class JsonFileTests(unittest.TestCase):
                 "provider": "app-store-connect",
                 "storeBuildId": "example-build-42",
                 "operation": "submitted",
+                "appStoreVersionId": "version-resource-id",
+                "reviewSubmissionId": "review-resource-id",
+                "storeStateSha256": "a" * 64,
                 "destination": {
                     "channel": "app-store-review",
                     "automaticRelease": False,

@@ -11,7 +11,9 @@ Consumers deliberately pin a known-good full commit SHA. Updating a tag or `main
 - Major releases may change workflow/configuration contracts or safety behavior.
 - Pilot releases remain `0.x`; treat every documented breaking `0.x` change explicitly.
 
-Each release publishes a changelog, source archive, Python distribution artifacts, and SHA-256 checksums. Verify the release and record its full commit SHA.
+Review the changelog and record the full source commit. Repository CI verifies wheel construction
+and installation; it does not publish a release, package index upload, or checksum/signature assets.
+Verify any separately distributed assets through their actual publisher's provenance before use.
 
 ## Consumer update process
 
@@ -61,20 +63,35 @@ The shared repository’s CI never uses real consumer credentials.
 Unknown fields are rejected so an old tool cannot silently ignore new security policy. When `schemaVersion` changes:
 
 - install the new CLI first;
-- run its explicit migration preview;
-- review the complete JSON diff;
+- compare the new schemas and migration notes; there is no automatic evidence-migration command;
+- review the complete configuration/caller JSON and YAML diff;
 - update application configuration and workflow SHAs in the same pull request;
 - regenerate new candidate evidence after the upgrade.
 
-Old manifests and receipts remain immutable historical evidence. Do not rewrite them to a new schema. Promotions require a tool version that understands the exact recorded schema; if retained evidence is no longer supported or has expired, create a new candidate.
+Old manifests and receipts remain immutable historical evidence. Do not rewrite them to a new
+schema. Promotions and incomplete-operation recovery require the exact original pinned toolkit.
+Resolve any ambiguous previous Store writes before deciding to create a separate new candidate;
+changing a build number does not reconcile an earlier mutation.
 
-### v0.2 receipt migration
+### v0.3 durable-operation migration
 
-Candidate manifests remain schema v1. Raw Store receipts and sealed lifecycle receipts are schema
-v2 and add an explicit `outcome`; Android receipts also bind guarded before/expected/readback track
-state. v0.2 intentionally rejects receipt v1. Finish an existing v0.1 candidate with its exact
-pinned v0.1 tooling, or allocate a new committed build number and create a v0.2 candidate. Do not
-translate or reseal old evidence.
+Configuration remains schema v1. Candidate manifests are schema v2, raw/sealed Store receipts are
+schema v3, and operation intents and workflow producer inventories are schema v1. These contracts
+are intentionally not compatible with older evidence: old receipts cannot authorize a new intent,
+and a checksum-only local conversion cannot manufacture pre-mutation authority.
+
+Before switching, finish/reconcile in-flight operations with their exact original tooling or
+explicitly resolve them with the owner/Store. Then create a distinct candidate under the new pin.
+Update all caller templates as well as both SHA references: new recovery and per-platform evidence
+inputs/outputs, permissions, intent retention and actual-producer verification are coordinated
+contracts. Do not splice a new reusable workflow into an old evidence chain.
+
+iOS external/production environments now need
+`MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64` (32 decoded bytes) and
+`MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION`. Retain the original key/version for incomplete
+operations. Rehearse post-mutation failure and same-candidate recovery before activation; see
+[Recovery](recovery.md). Completed finals are reused unchanged, including pending TestFlight
+observations. Record later availability with a new external dispatch, never by resealing old bytes.
 
 ## Rollback
 
@@ -83,6 +100,7 @@ Before any Store mutation, reverting the consumer SHA/configuration is an ordina
 After an internal upload, do not silently switch tool versions while continuing the same candidate. Either:
 
 - use the exact original pinned tool and matching receipts to finish/read status; or
-- commit a new build number and create a new candidate with the chosen tool version.
+- after resolving the previous operation's Store state, commit a new build number and explicitly
+  create a separate candidate with the chosen tool version.
 
 Never move an immutable tag, replace a release asset, edit a receipt, or claim two different binaries are one candidate.

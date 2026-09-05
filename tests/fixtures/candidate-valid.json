@@ -1,7 +1,7 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "tooling": {
-    "version": "0.1.0",
+    "version": "0.2.0",
     "commit": "1111111111111111111111111111111111111111"
   },
   "repository": {
@@ -35,7 +35,10 @@
       "fileName": "reader-1.2.3-42.aab",
       "size": 12345678,
       "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
-      "architectures": ["arm64-v8a", "x86_64"]
+      "architectures": [
+        "arm64-v8a",
+        "x86_64"
+      ]
     },
     {
       "logicalName": "store-metadata",
@@ -75,14 +78,47 @@
       "observedAt": "2026-01-01T00:00:00Z"
     }
   ],
-  "createdBy": {
-    "workflow": "mobile-candidate",
-    "runId": "1000000000",
-    "attempt": 1
-  },
   "createdAt": "2026-01-01T00:00:00Z",
+  "documentType": "candidate-manifest",
+  "operationIntentSha256": "24b9829c7ee58f579ec82f16cc469d5b27641054baece581bec588cb370f8b29",
+  "authorizedBy": {
+    "workflow": "Mobile candidate",
+    "callerPath": ".github/workflows/mobile-candidate.yml",
+    "reusableRepository": "example/mobile-release-kit",
+    "reusablePath": ".github/workflows/reusable-candidate.yml",
+    "reusableCommit": "1111111111111111111111111111111111111111",
+    "runId": "1000000000",
+    "attempt": 1,
+    "headSha": "2222222222222222222222222222222222222222",
+    "ref": "refs/heads/main",
+    "event": "workflow_dispatch"
+  },
+  "executedBy": {
+    "workflow": "Mobile candidate",
+    "callerPath": ".github/workflows/mobile-candidate.yml",
+    "reusableRepository": "example/mobile-release-kit",
+    "reusablePath": ".github/workflows/reusable-candidate.yml",
+    "reusableCommit": "1111111111111111111111111111111111111111",
+    "runId": "1000000000",
+    "attempt": 1,
+    "headSha": "2222222222222222222222222222222222222222",
+    "ref": "refs/heads/main",
+    "event": "workflow_dispatch"
+  },
+  "producedBy": {
+    "workflow": "Mobile candidate",
+    "callerPath": ".github/workflows/mobile-candidate.yml",
+    "reusableRepository": "example/mobile-release-kit",
+    "reusablePath": ".github/workflows/reusable-candidate.yml",
+    "reusableCommit": "1111111111111111111111111111111111111111",
+    "runId": "1000000000",
+    "attempt": 1,
+    "headSha": "2222222222222222222222222222222222222222",
+    "ref": "refs/heads/main",
+    "event": "workflow_dispatch"
+  },
   "integrity": {
     "algorithm": "sha256",
-    "sha256": "0df7de6f898b62a761ed7b7d086ad9362ee6416c6f147fc2516cb315e3dae928"
+    "sha256": "177b5f3e92b3b02b99489bb6e7a6aaca183b16c371218715f79872e1597e8c16"
   }
 }

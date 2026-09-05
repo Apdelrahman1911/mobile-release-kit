@@ -9,7 +9,7 @@ It does **not** make an application public. Android automation stops at a non-se
 - `mobile-release`, a Python CLI for discovery, configuration, credential inventory, preflight, artifact validation, metadata validation, and evidence.
 - Four reusable GitHub Actions workflows for preflight, candidate upload, external testing, and production submission.
 - Pinned Fastlane code used only for Google Play and App Store Connect operations.
-- Strict JSON Schemas for application configuration, immutable candidate manifests, and Store receipts.
+- Strict JSON contracts for configuration, immutable operation intents, candidate manifests, Store receipts, and authenticated workflow inventories.
 
 An application keeps its Gradle and Xcode source, signing integration, product metadata, privacy/legal decisions, and bounded application-specific checks. It normally adds one `release/mobile-release.json` file and four short workflow callers.
 
@@ -21,6 +21,7 @@ The release authority chain is:
 reviewed commit and Git tree
   -> one committed marketing version and build number
   -> signed final AAB / IPA
+  -> durable attested operation intent and retained original artifacts
   -> immutable candidate manifest and artifact hashes
   -> exact Google Play / App Store Connect build IDs
   -> protected external-testing promotion
@@ -34,14 +35,14 @@ The non-negotiable rules are:
 2. CI never allocates or silently changes a version/build number.
 3. Candidate is the only stage that builds or uploads a binary, but its application-build jobs and Store/OIDC jobs are separate runners with disjoint credentials.
 4. External testing and production consume receipts; they do not compile, sign, or upload a replacement binary.
-5. Every Store mutation is read back and recorded.
+5. Every Store mutation requires durable authorization first and authoritative readback afterward; interrupted evidence creation is recoverable from the original intent.
 6. Production is a separate manual, protected, single-platform operation.
 7. No workflow turns a release public automatically.
 8. Legal, privacy, content-rating, agreement, pricing, availability, tester-membership, and launch decisions remain human responsibilities.
 
 ## Supported projects
 
-Version 0.1 targets:
+Version 0.3 targets:
 
 - Android applications built with a Gradle wrapper and an Android application plugin.
 - iOS applications archived and exported with Xcode, including KMP applications.
@@ -50,10 +51,10 @@ Version 0.1 targets:
 - Google Play CI access through GitHub OIDC/Workload Identity Federation.
 - App Store Connect API access through a P8 key.
 
-The v0.1 Apple credential contract installs one provisioning profile and maps export options for the
+The shared Apple credential contract installs one provisioning profile and maps export options for the
 main application Bundle ID. An app with extensions, watch targets, or other separately provisioned
 bundle IDs must keep its additional profile installation/export preparation in a bounded,
-project-owned signing step; it is not supported by the shared profile inventory in v0.1. Nested-code
+project-owned signing step; it is not supported by the shared profile inventory. Nested-code
 validation still inspects the signed output, but does not provision those extra targets.
 
 Desktop distribution, non-Gradle Android builds, non-Xcode Apple builds, certificate creation, account/IAM provisioning, and automatic public rollout are intentionally outside this repository.
@@ -145,7 +146,7 @@ Commands produce a concise human report and can emit machine-readable JSON. Secr
 
 Metadata preflight checks required locale files, UTF-8/JSON structure, known text limits,
 credential-free HTTPS URL syntax, placeholders/secret patterns, bounded safe paths/files, and valid
-PNG/JPEG headers with positive dimensions. Version 0.1 does not contact those URLs or enforce
+PNG/JPEG headers with positive dimensions. Local metadata validation does not contact those URLs or enforce
 Store/device-specific screenshot dimensions, color profiles, counts, or visual truth; those remain
 Store and human review gates.
 
@@ -156,37 +157,51 @@ to local preflight with an explicit read-only credential or the protected candid
 Every reusable job aborts its steps unless `runner.environment` reports `github-hosted`. This is a
 defense-in-depth runtime check, not a server-side scheduling control: before activation, a
 repository or organization administrator must verify that no self-hosted runner is eligible for the
-pinned `ubuntu-24.04` or `macos-26` labels. Version 0.1 does not configure trusted runner groups.
+pinned `ubuntu-24.04` or `macos-26` labels. The toolkit does not configure trusted runner groups.
 All workflow CLI calls use Python safe-path mode, so an application-owned `mobile_release` package
 cannot shadow the pinned tooling checkout.
 
 ## Evidence paths
 
-CI writes per-platform release evidence beneath `.mobile-release/`. Linux and macOS candidate jobs never race to edit one aggregate manifest:
+CI writes per-platform release evidence beneath `.mobile-release/`. Linux and macOS jobs never race to edit one aggregate manifest. Each final artifact contains:
 
 ```text
-.mobile-release/
-├── manifests/
-│   └── candidate/<platform>.json
-└── receipts/
-    ├── candidate/<platform>.json
-    ├── external-testing/<platform>.json
-    └── production-submit/<platform>.json
+.mobile-release/package/<stage>/<platform>/
+├── operation/                  # Original intent, producer proof, metadata/predecessors
+├── candidate-manifest.json     # Candidate only
+├── <stage>-receipt.json
+├── store-receipt.json          # Exact raw Store readback
+└── workflow-provenance.json    # Attested complete inventory and actual producer job
 ```
 
-Candidate build jobs upload a fixed-name, one-day same-run handoff containing the signed binary,
-validation report, optional symbols, and `SHA256SUMS`. A separate Store job downloads it, validates
-that the upload receipt digest exactly matches the current-run fixed-name artifact API record, lets
-the pinned download action recalculate and verify that service digest, validates the file checksums,
-independently revalidates the final signature and identity, and only then uploads. It writes fixed
-evidence under
-`.mobile-release/staging/<stage>/<platform>/` and normalizes it into the paths above. These files are
-workflow artifacts, not files to commit. Signed binaries and symbol archives remain private GitHub
-Actions artifacts with bounded retention.
+Candidate build jobs upload a fixed-name, 90-day handoff containing the signed binary, archive,
+validation report, optional symbols, and `SHA256SUMS`. Before any original upload, a separate Store
+job verifies the trusted build-output/service digest, safe layout, hashes, identity, and signing;
+it then attests the exact binary and persists its operation intent. On recovery, the authenticated
+original intent binds the retained handoff instead of relying on a new build-job output.
+The read-only helper verifies GitHub attestations against the actual producer attempt/job and
+pinned workflow, not the latest run attempt or overall success flag. These are private workflow
+artifacts, not source files or public release assets.
 
 Each candidate hashes a deterministic platform-scoped metadata archive: Android includes only
 `android/**`; iOS includes `ios/**`, `review/**`, and `testflight/**`. An unrelated platform's
 metadata cannot invalidate promotion of the selected candidate.
+
+## Recovery and partial success
+
+An incomplete operation resumes from its original attested intent and original bytes, including
+after Store success but manifest, attestation, or final-artifact failure. A complete final artifact
+is reused unchanged without Store access, binaries, rebuilding, or reissuing evidence. Android and
+iOS can return different evidence run IDs; promotion inputs support those per-platform origins.
+For older runs, use an explicit protected `recovery_run_id` dispatch with the same pinned tooling.
+
+Apple exposes no IPA digest and does not guarantee idempotent resource creation. Ambiguous uploads
+or missing creates may therefore require an exact, new operator recovery confirmation after
+independent resolution; continued absence alone never authorizes another request. Existing accepted
+builds can reconcile after signing assets expire using their authenticated original validation;
+every new Transporter upload must still pass current signing/profile checks. See
+[Recovery](docs/recovery.md) for required artifacts, immutable receipt reuse, safe retry cases,
+HMAC-key retention, and fail-closed limitations. Recovery never makes a release public.
 
 ## Development
 
@@ -194,9 +209,18 @@ Run the repository tests without credentials:
 
 ```bash
 python3 -m pip install -e '.[test]'
-python3 -m unittest discover -s tests
+python3 -m unittest discover -s tests -v
+bundle install
 bundle exec ruby tests/workflow/test_play_store.rb
+ruby tests/workflow/test_workflow_yaml.rb
+bundle exec ruby tests/workflow/test_play_lanes.rb
 ruby -I. tests/workflow/test_fastlane_support.rb
+bundle exec ruby tests/workflow/test_apple_store.rb
+bundle exec ruby tests/workflow/test_apple_lanes.rb
+bundle exec ruby tests/workflow/test_apple_production.rb
+bundle exec ruby tests/workflow/test_apple_production_lane.rb
+bundle exec ruby tests/workflow/test_apple_asset_upload.rb
+bundle exec ruby tests/workflow/test_ios_upload_validation.rb
 bundle exec ruby tests/workflow/test_supply_wif.rb
 bundle exec ruby fastlane/run_lane.rb --validate
 ```
@@ -213,6 +237,7 @@ No shared-repository test uses a consumer credential or a real application/accou
 - [Integration](docs/integration.md)
 - [Credential and secret contract](docs/credentials.md)
 - [Release lifecycle](docs/lifecycle.md)
+- [Recovery and resumability](docs/recovery.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Upgrading pinned consumers](docs/upgrading.md)
 - [Security policy](SECURITY.md)

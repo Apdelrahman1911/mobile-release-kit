@@ -13,14 +13,6 @@ module MobileReleaseKit
   class PlayStoreHarness < PreservingSupplyUploader
     attr_accessor :metadata_hook
 
-    def upload_apks
-      []
-    end
-
-    def upload_bundles
-      Supply.config[:skip_upload_aab] ? [] : [Supply.config[:version_code]]
-    end
-
     def upload_mapping(_version_codes); end
 
     def perform_upload_meta(_version_codes, _track_name)
@@ -66,6 +58,19 @@ class FakePlayClient
     self.current_package_name = package_name
     @pending = clone_tracks(@committed)
     @events << [:begin, current_edit.id]
+  end
+
+  def list_edit_bundles(_package_name, _edit_id)
+    AndroidPublisher::BundlesListResponse.new(bundles: [])
+  end
+
+  def upload_edit_bundle(package_name, edit_id, upload_source:, content_type:, ack_bundle_installation_warning:, options:)
+    raise "unexpected upload scope" unless package_name == current_package_name && edit_id == current_edit.id
+    raise "upload request retries enabled" unless options.retries == 0
+    raise "unexpected bundle content type" unless content_type == "application/octet-stream"
+    raise "missing bundle input" unless File.file?(upload_source)
+    @events << [:upload_bundle, edit_id, ack_bundle_installation_warning]
+    AndroidPublisher::Bundle.new(version_code: Supply.config[:version_code])
   end
 
   def tracks(*names)
@@ -156,7 +161,7 @@ end
 
 class PreservingSupplyUploaderTests < Minitest::Test
   def setup
-    @temporary = Dir.mktmpdir("mrk-play-test-")
+    @temporary = File.realpath(Dir.mktmpdir("mrk-play-test-"))
     @key = File.join(@temporary, "adc.json")
     @aab = File.join(@temporary, "candidate.aab")
     @journal = File.join(@temporary, "play-state.json")
@@ -220,9 +225,13 @@ class PreservingSupplyUploaderTests < Minitest::Test
     )
   end
 
-  def run_uploader(options, client, hook: nil)
+  def run_uploader(options, client, hook: nil, validation: ->(_path) {})
     Supply.config = MobileReleaseKit::PreservingSupplyUploader.configuration(options)
-    uploader = MobileReleaseKit::PlayStoreHarness.new(journal_path: @journal, client: client)
+    record = { "logicalName" => "android-aab", "fileName" => File.basename(@aab), "size" => File.size(@aab), "sha256" => Digest::SHA256.file(@aab).hexdigest }
+    uploader = MobileReleaseKit::PlayStoreHarness.new(
+      journal_path: @journal, client: client, expected_bundle_sha256: record.fetch("sha256"), expected_bundle: record,
+      before_mutation_guard: ->(_client) { { phase: :before, bundles: [] } }, bundle_validation: validation,
+    )
     uploader.metadata_hook = hook
     FastlaneCore::PrintTable.stub(:print_values, nil) { uploader.perform_upload }
     uploader
@@ -235,6 +244,233 @@ class PreservingSupplyUploaderTests < Minitest::Test
       release(12, status: "halted", fraction: 0.5),
       release(13, status: "draft"),
     ]
+  end
+
+  def test_apk_batch_implicit_default_and_missing_current_gate_cannot_dispatch_an_upload
+    apk = File.join(@temporary, "other.apk")
+    File.write(apk, "synthetic APK must never be sent")
+    variants = [
+      candidate_options(skip_upload_apk: false),
+      candidate_options(aab: nil, apk: apk),
+      candidate_options(aab: nil, apk_paths: [apk]),
+      candidate_options(aab: nil, aab_paths: [@aab]),
+      candidate_options(aab: nil, aab_paths: [@aab, @aab]),
+      candidate_options.reject { |key, _| key == :aab },
+    ]
+    variants.each do |options|
+      client = FakePlayClient.new("internal" => track("internal", unrelated_releases))
+      Dir.chdir(@temporary) do
+        assert_raises(MobileReleaseKit::ContractError, FastlaneCore::Interface::FastlaneError) { run_uploader(options, client) }
+      end
+      assert_empty client.updates
+      refute client.events.any? { |row| row.first == :upload_bundle }
+    end
+    Supply.config = MobileReleaseKit::PreservingSupplyUploader.configuration(candidate_options)
+    client = FakePlayClient.new("internal" => track("internal", unrelated_releases))
+    uploader = MobileReleaseKit::PlayStoreHarness.new(
+      journal_path: @journal, client: client, before_mutation_guard: ->(_) { { phase: :before, bundles: [] } },
+    )
+    FastlaneCore::PrintTable.stub(:print_values, nil) do
+      error = assert_raises(MobileReleaseKit::ContractError) { uploader.perform_upload }
+      assert_includes error.message, "Every new AAB upload requires current validation"
+    end
+    assert_empty client.updates
+    refute client.events.any? { |row| row.first == :upload_bundle }
+  end
+
+  def test_malformed_returned_bundle_version_cannot_reach_track_update_or_commit
+    [nil, 201, "200trailing", "0200", 200.0, true].each do |code|
+      client = FakePlayClient.new("internal" => track("internal", unrelated_releases))
+      client.define_singleton_method(:upload_edit_bundle) do |*args, **keywords|
+        super(*args, **keywords).tap { |bundle| bundle.version_code = code }
+      end
+      assert_raises(FastlaneCore::Interface::FastlaneError) { run_uploader(candidate_options, client) }
+      assert_equal 1, client.events.count { |row| row.first == :upload_bundle }
+      assert_empty client.updates
+      assert_empty client.commits
+    end
+  end
+
+  def test_configuration_ignores_discovered_and_environment_binary_defaults_without_mutating_supply
+    File.write(File.join(@temporary, "other.apk"), "synthetic APK must never be selected")
+    File.write(File.join(@temporary, "other.aab"), "synthetic AAB must never be selected")
+    # Exercise the real pinned factory, with an independent class-level cache.
+    # Its relative defaults are now invalid in the caller's working directory.
+    discovered = Dir.chdir(@temporary) { Class.new(Supply::Options).available_options }
+    keys = %i[apk apk_paths aab aab_paths]
+    original = discovered.select { |item| keys.include?(item.key) }.to_h do |item|
+      [item.key, [item.default_value, item.default_value_dynamic, item.env_name, item.env_names.dup]]
+    end
+    assert_equal "other.apk", original.fetch(:apk).first
+    assert_equal "other.aab", original.fetch(:aab).first
+    environment = {
+      "SUPPLY_APK" => File.join(@temporary, "other.apk"),
+      "SUPPLY_APK_PATHS" => File.join(@temporary, "other.apk"),
+      "SUPPLY_AAB" => File.join(@temporary, "other.aab"),
+      "SUPPLY_AAB_PATHS" => File.join(@temporary, "other.aab"),
+    }
+    previous = environment.to_h { |name, _| [name, ENV[name]] }
+    ENV.update(environment)
+    Supply::Options.stub(:available_options, discovered) do
+      config = MobileReleaseKit::PreservingSupplyUploader.configuration(candidate_options)
+      assert_equal @aab, config[:aab]
+      %i[apk apk_paths aab_paths].each { |key| assert_nil config[key] }
+      client = FakePlayClient.new("internal" => track("internal", unrelated_releases))
+      run_uploader(candidate_options, client)
+      assert_equal 1, client.events.count { |row| row.first == :upload_bundle }
+
+      promotion = MobileReleaseKit::PreservingSupplyUploader.configuration(promotion_options)
+      keys.each { |key| assert_nil promotion[key] }
+      assert_raises(MobileReleaseKit::ContractError) do
+        MobileReleaseKit::PreservingSupplyUploader.configuration(candidate_options.reject { |key, _| key == :aab })
+      end
+      keys.each do |key|
+        item = discovered.find { |option| option.key == key }
+        assert_equal original.fetch(key), [item.default_value, item.default_value_dynamic, item.env_name, item.env_names]
+        refute_same item, config.available_options.find { |option| option.key == key }
+      end
+    end
+  ensure
+    previous&.each { |name, value| value ? ENV[name] = value : ENV.delete(name) }
+  end
+
+  def test_malformed_or_wrong_scope_journals_are_preserved_and_rejected_before_store_entry
+    run_uploader(candidate_options, FakePlayClient.new("internal" => track("internal", unrelated_releases)))
+    original = JSON.parse(File.read(@journal))
+    malformed = [
+      "", "{", JSON.generate(original).sub('"schemaVersion":1', '"schemaVersion":1,"schemaVersion":1'),
+      JSON.generate(original.merge("schemaVersion" => "1")),
+      JSON.generate(original.merge("kind" => "another-journal")),
+      JSON.generate(original.merge("canonicalization" => "other-format")),
+      JSON.generate(original.merge("packageName" => "com.example.other")),
+      JSON.generate(original.merge("operationIntentSha256" => "b" * 64)),
+      JSON.generate(original.merge("history" => {})),
+      JSON.generate(original.merge("history" => [nil])),
+      JSON.generate(original.merge("history" => [{ "phase" => true, "observedAt" => "2026-01-01T00:00:00Z" }])),
+      JSON.generate(original.merge("history" => [{ "phase" => "mutation-dispatched", "observedAt" => 42 }])),
+      JSON.generate(original.merge("history" => [original.fetch("history").first.merge("extra" => true)])),
+      JSON.generate(original.merge("history" => [original.fetch("history").first.merge("failureClass" => [])])),
+      JSON.generate(original.merge("history" => [original.fetch("history").first.merge("failureRole" => true)])),
+      JSON.generate(original.merge("history" => [original.fetch("history").first] * 10_001)),
+      " " * (MobileReleaseKit::PreservingSupplyUploader::MAX_JOURNAL_BYTES + 1),
+    ]
+    malformed.each do |bytes|
+      File.binwrite(@journal, bytes)
+      client = FakePlayClient.new("internal" => track("internal", unrelated_releases))
+      assert_raises(MobileReleaseKit::ContractError) { run_uploader(candidate_options, client) }
+      assert_empty client.events, "invalid prior history reached a Store edit"
+      assert_equal bytes, File.binread(@journal), "invalid history was overwritten"
+    end
+    File.write(@journal, JSON.generate(original.merge("operationIntentSha256" => "a" * 64)))
+    assert_raises(MobileReleaseKit::ContractError) do
+      MobileReleaseKit::PreservingSupplyUploader.new(journal_path: @journal, intent_sha256: "b" * 64)
+    end
+    assert_equal "a" * 64, JSON.parse(File.read(@journal)).fetch("operationIntentSha256")
+  end
+
+  def test_symlink_and_nonregular_journal_cannot_be_read_or_replaced
+    original = File.join(@temporary, "original-journal.json")
+    File.write(original, "original bytes must remain unchanged")
+    File.symlink(original, @journal)
+    client = FakePlayClient.new("internal" => track("internal", unrelated_releases))
+    assert_raises(MobileReleaseKit::ContractError) { run_uploader(candidate_options, client) }
+    assert_empty client.events
+    assert File.symlink?(@journal)
+    assert_equal "original bytes must remain unchanged", File.read(original)
+    File.delete(@journal)
+    File.symlink(File.join(@temporary, "absent.json"), @journal)
+    assert_raises(MobileReleaseKit::ContractError) { run_uploader(candidate_options, client) }
+    assert File.symlink?(@journal)
+    File.delete(@journal)
+    Dir.mkdir(@journal)
+    assert_raises(MobileReleaseKit::ContractError) { run_uploader(candidate_options, client) }
+    assert File.directory?(@journal)
+    assert_empty client.events
+  end
+
+  def test_missing_or_changed_loaded_journal_never_resets_a_consumed_marker
+    run_uploader(candidate_options, FakePlayClient.new("internal" => track("internal", unrelated_releases)))
+    original = File.binread(@journal)
+    erased_history = JSON.generate(JSON.parse(original).merge("history" => []))
+    [nil, "{", erased_history].each do |replacement|
+      File.binwrite(@journal, original)
+      client = FakePlayClient.new("internal" => track("internal", unrelated_releases))
+      validation = lambda do |_|
+        replacement ? File.binwrite(@journal, replacement) : File.delete(@journal)
+      end
+      assert_raises(MobileReleaseKit::ContractError) { run_uploader(candidate_options, client, validation: validation) }
+      refute client.events.any? { |row| row.first == :upload_bundle }
+      assert_empty client.updates
+      assert_empty client.commits
+      replacement ? assert_equal(replacement, File.binread(@journal)) : refute(File.exist?(@journal))
+    end
+  end
+
+  def test_journal_compaction_preserves_first_dispatch_signals_and_recent_failures_across_invocations
+    Supply.config = MobileReleaseKit::PreservingSupplyUploader.configuration(candidate_options)
+    uploader = MobileReleaseKit::PreservingSupplyUploader.new(journal_path: @journal, intent_sha256: "a" * 64)
+    uploader.send(:persist_journal, "mutation-dispatched")
+    uploader.send(:persist_journal, "mapping-recovery-dispatched")
+    first = JSON.parse(File.read(@journal)).fetch("history")
+    350.times do |index|
+      later = MobileReleaseKit::PreservingSupplyUploader.new(journal_path: @journal, intent_sha256: "a" * 64)
+      later.send(:persist_journal, "failed-#{index}", failure_class: "IOError", failure_role: "terminal")
+    end
+    history = JSON.parse(File.read(@journal)).fetch("history")
+    assert_equal 256, history.length
+    assert_equal first, history.first(2)
+    assert_equal ["failed-348", "failed-349"], history.last(2).map { |row| row.fetch("phase") }
+    assert_equal 1, history.count { |row| row["phase"] == "mutation-dispatched" }
+    assert_equal 1, history.count { |row| row["phase"] == "mapping-recovery-dispatched" }
+    assert_operator File.size(@journal), :<=, MobileReleaseKit::PreservingSupplyUploader::MAX_JOURNAL_BYTES
+  end
+
+  def test_valid_older_history_compacts_only_on_write_and_cannot_invent_dispatch_authority
+    Supply.config = MobileReleaseKit::PreservingSupplyUploader.configuration(candidate_options)
+    uploader = MobileReleaseKit::PreservingSupplyUploader.new(journal_path: @journal, intent_sha256: "a" * 64)
+    uploader.send(:persist_journal, "failed")
+    older = JSON.parse(File.read(@journal))
+    older["history"] = 400.times.map { |index| { "phase" => "failed-#{index}", "observedAt" => "2026-01-01T00:00:00Z" } }
+    bytes = JSON.generate(older)
+    File.write(@journal, bytes)
+    later = MobileReleaseKit::PreservingSupplyUploader.new(journal_path: @journal, intent_sha256: "a" * 64)
+    assert_equal bytes, File.read(@journal), "reading historical diagnostics must not rewrite them"
+    later.send(:persist_journal, "cancelled", failure_class: "Interrupt", failure_role: "terminal")
+    history = JSON.parse(File.read(@journal)).fetch("history")
+    assert_equal 256, history.length
+    assert_equal "cancelled", history.last.fetch("phase")
+    refute history.any? { |row| MobileReleaseKit::PreservingSupplyUploader::DISPATCH_PHASES.include?(row.fetch("phase")) }
+  end
+
+  def test_owned_request_uses_real_sdk_resumable_transport_without_retrying_ambiguous_start_or_body
+    %i[success lost_start lost_body].each do |mode|
+      http = SyntheticResumableHTTP.new(mode)
+      service = AndroidPublisher::AndroidPublisherService.new
+      commands = []
+      service.define_singleton_method(:execute_or_queue_command) do |command, &_block|
+        commands << command
+        command.execute(http)
+      end
+      client = FakePlayClient.new("internal" => track("internal", unrelated_releases))
+      client.define_singleton_method(:upload_edit_bundle) do |*args, **keywords|
+        super(*args, **keywords)
+        service.upload_edit_bundle(*args, **keywords)
+      end
+      if mode == :success
+        run_uploader(candidate_options, client)
+        assert_equal ["start", "upload, finalize"], http.requests.map(&:first)
+        assert_equal File.binread(@aab), http.content
+      else
+        assert_raises(Google::Apis::ServerError, Google::Apis::TransmissionError) { run_uploader(candidate_options, client) }
+        assert_empty client.updates
+        assert_empty client.commits
+        assert_equal(mode == :lost_start ? ["start"] : ["start", "upload, finalize"], http.requests.map(&:first))
+      end
+      assert_equal 1, commands.length, "ambiguous transport must not construct another logical upload"
+      assert_instance_of Google::Apis::Core::ResumableUploadCommand, commands.first
+      assert_equal 0, commands.first.options.retries
+      assert_equal 1, http.requests.count { |name, _| name == "start" }
+    end
   end
 
   def test_candidate_preserves_every_unrelated_release_and_commits_with_fail_closed_policy
@@ -670,6 +906,30 @@ class PreservingSupplyUploaderTests < Minitest::Test
     assert_empty client.commits
   end
 
+  def test_track_v2_canonicalizes_unset_fields_without_changing_original_objects
+    with_nil = AndroidPublisher::TrackRelease.new(
+      name: "test", status: "completed", version_codes: [200], user_fraction: nil,
+      release_notes: [], in_app_update_priority: nil,
+    )
+    omitted = AndroidPublisher::TrackRelease.new(name: "test", status: "completed", version_codes: [200])
+    assert_equal MobileReleaseKit::PreservingSupplyUploader.track_state(track("internal", [omitted]), "internal"),
+                 MobileReleaseKit::PreservingSupplyUploader.track_state(track("internal", [with_nil]), "internal")
+    assert with_nil.to_json.include?("userFraction"), "canonicalization must not mutate actual SDK write objects"
+    numeric = release(10, status: "inProgress", fraction: 0.25)
+    state = MobileReleaseKit::PreservingSupplyUploader.track_state(track("internal", [numeric]), "internal")
+    assert_equal "0.25", state.fetch("releases").first.fetch("userFraction")
+    assert_equal 0.25, numeric.user_fraction
+    assert_equal "mrk-play-track-state-v2", state.fetch("canonicalization")
+  end
+
+  def test_track_v2_rejects_invalid_rollout_values
+    [0, 1, -0.2, 2, "NaN", "Infinity", "not-decimal"].each do |value|
+      assert_raises(MobileReleaseKit::ContractError) do
+        MobileReleaseKit::PreservingSupplyUploader.normalize_release("versionCodes" => [200], "status" => "inProgress", "userFraction" => value)
+      end
+    end
+  end
+
   def test_dependency_fields_and_unsupported_options_fail_closed
     MobileReleaseKit::PreservingSupplyUploader.assert_dependency_contract!
     client = FakePlayClient.new("internal" => track("internal", unrelated_releases))
@@ -679,5 +939,42 @@ class PreservingSupplyUploaderTests < Minitest::Test
     assert_match(/does not accept rollout/, error.message)
     assert_empty client.updates
     assert_empty client.commits
+  end
+end
+
+# No HTTP connection exists here: exercise the pinned SDK's real prepare,
+# request construction, state transitions, retry loop and response decoding.
+class SyntheticResumableHTTP
+  Reply = Struct.new(:status_code, :header, :body)
+  attr_reader :requests, :content
+
+  def initialize(mode)
+    @mode, @requests = mode, []
+  end
+
+  def response(state, body = "{}")
+    headers = Hash.new { |_hash, _key| [] }
+    headers["Content-Type"] = ["application/json"]
+    headers["X-Goog-Upload-Status"] = [state]
+    headers["X-Goog-Upload-URL"] = ["https://upload.example.test/session/original"]
+    headers["X-Goog-Upload-Size-Received"] = ["0"]
+    Reply.new(200, headers, body)
+  end
+
+  def request(method, url, **options)
+    raise "not a resumable start" unless method == "POST" && options.fetch(:header).fetch("X-Goog-Upload-Command") == "start"
+    @requests << ["start", url]
+    raise Errno::ECONNRESET, "synthetic start response loss" if @mode == :lost_start
+    response("active")
+  end
+
+  def post(url, **options)
+    raise "not the original upload session" unless url == "https://upload.example.test/session/original"
+    command = options.fetch(:header).fetch("X-Goog-Upload-Command")
+    raise "unexpected synthetic protocol command" unless command == "upload, finalize"
+    @requests << [command, url]
+    @content = options.fetch(:body).read
+    raise Errno::ECONNRESET, "synthetic accepted-body response loss" if @mode == :lost_body
+    response("final", '{"versionCode":200}')
   end
 end
