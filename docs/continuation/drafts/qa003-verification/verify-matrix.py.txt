@@ -1,0 +1,121 @@
+"""Frozen QA-003 gate integration; each actual source/wheel shard stays bounded."""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+EVIDENCE = Path(__file__).resolve().parent
+PYTHON = ROOT / ".mobile-release/remediation/MRK-002/venv/bin/python"
+RUNNER = ROOT / "tests/workflow/run_local_signing_matrix.py"
+OWNER = EVIDENCE / "final-matrix-owner.json"
+sys.path.insert(0, str(ROOT / "tests"))
+from workflow import local_signing_matrix_contract as contract
+from workflow.run_local_signing_matrix import operating_system
+
+
+def write(path, value):
+    with path.open("x") as output:
+        json.dump(value, output, indent=2, sort_keys=True)
+        output.write("\n")
+
+
+def source_frozen():
+    subprocess.run([str(PYTHON), str(EVIDENCE / "freeze.py"), "--check"], check=True, timeout=30)
+    return json.loads((EVIDENCE / "final-freeze.json").read_bytes())
+
+
+def load_owner(frozen):
+    record = json.loads(OWNER.read_bytes())
+    temporary = Path(record["path"])
+    assert temporary.is_absolute() and not temporary.is_relative_to(ROOT) and not temporary.is_symlink()
+    current = temporary.stat()
+    assert {"device": current.st_dev, "inode": current.st_ino} == record["identity"]
+    assert (temporary / "owner.json").read_bytes() == contract.canonical(record)
+    assert record["tree"] == frozen["proposedTree"]
+    assert record["packageSha256"] == contract.digest(contract.package_manifest(ROOT / "src/mobile_release"))
+    assert record["definitionsSha256"] == contract.digest(contract.definitions_manifest(ROOT))
+    assert record["wheelSha256"] == hashlib.sha256(Path(record["wheel"]).read_bytes()).hexdigest()
+    return record, temporary
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    modes = parser.add_mutually_exclusive_group(required=True)
+    modes.add_argument("--prepare", action="store_true")
+    modes.add_argument("--shard", type=int, choices=range(contract.SHARDS))
+    modes.add_argument("--reconcile", action="store_true")
+    modes.add_argument("--cleanup", action="store_true")
+    args = parser.parse_args()
+    frozen = source_frozen()
+    assert os.environ.get("GITHUB_ACTIONS") != "true", "local final gates cannot impersonate hosted CI"
+    if args.prepare:
+        assert not OWNER.exists(), "preserve previous verification evidence; do not overwrite an owned environment"
+        wheel = EVIDENCE / "wheels/mobile_release_kit-0.3.0-py3-none-any.whl"
+        assert wheel.is_file()
+        temporary = Path(tempfile.mkdtemp(prefix="mrk-qa003-final-matrix-")).resolve()
+        details = temporary.stat()
+        record = {"path": str(temporary), "identity": {"device": details.st_dev, "inode": details.st_ino},
+                  "tree": frozen["proposedTree"], "wheel": str(wheel),
+                  "wheelSha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
+                  "packageSha256": contract.digest(contract.package_manifest(ROOT / "src/mobile_release")),
+                  "definitionsSha256": contract.digest(contract.definitions_manifest(ROOT))}
+        (temporary / "owner.json").write_bytes(contract.canonical(record))
+        write(OWNER, record)  # Persist our exact disposable path BEFORE installation.
+        subprocess.run([str(PYTHON), "-m", "venv", str(temporary / "venv")], check=True, timeout=60)
+        subprocess.run([str(temporary / "venv/bin/python"), "-m", "pip", "install", "--no-deps", str(wheel)], check=True, timeout=120)
+        subprocess.run([str(temporary / "venv/bin/python"), "-m", "pip", "check"], check=True, timeout=30)
+        (EVIDENCE / "final-matrix").mkdir()
+        (EVIDENCE / "final-matrix-proofs").mkdir()
+        print("PASS: fresh outside-checkout wheel prepared; no matrix execution claimed")
+        return
+    record, temporary = load_owner(frozen)
+    if args.shard is not None:
+        output = EVIDENCE / "final-matrix" / f"shard-{args.shard:02d}"
+        subprocess.run([str(PYTHON), "-I", "-B", str(RUNNER), "--shard", str(args.shard),
+                        "--wheel-python", str(temporary / "venv/bin/python"), "--output", str(output)], check=True, timeout=890)
+        proof = contract.read_proof(output / "proof.json")
+        scope = contract.scope_from_environment(os.environ, operating_system(), producer=True)
+        name = contract.artifact_name(scope, args.shard)
+        contract.validate_proof(proof, name, scope, record["packageSha256"], record["definitionsSha256"])
+        destination = EVIDENCE / "final-matrix-proofs" / name
+        destination.mkdir()
+        with (destination / "proof.json").open("xb") as output_file:
+            output_file.write((output / "proof.json").read_bytes())
+        source_frozen()
+        return
+    if args.reconcile:
+        subprocess.run([str(PYTHON), "-I", "-B", str(RUNNER), "--reduce", str(EVIDENCE / "final-matrix-proofs"),
+                        "--local-reduction", "--output", str(EVIDENCE / "final-matrix-complete.json")], check=True, timeout=120)
+        return
+    assert args.cleanup
+    result = json.loads((EVIDENCE / "final-matrix-complete.json").read_bytes())
+    assert result["status"] == "complete" and result["packageSha256"] == record["packageSha256"]
+    assert result["definitionsSha256"] == record["definitionsSha256"]
+    # All exact worker-absence proofs were obtained while their identities were
+    # owned. Do not signal/reinterpret possibly recycled historical numeric PIDs.
+    for shard in range(contract.SHARDS):
+        path = EVIDENCE / "final-matrix" / f"shard-{shard:02d}"
+        for mode in ("source", "wheel"):
+            observation = json.loads((path / mode / "matrix-result.json").read_bytes())
+            assert observation["allExactChildrenReapedAndGroupsAbsent"] is True
+            assert observation["allCasePathsRemoved"] is True
+            assert not (path / mode / "case").exists() and not (path / mode / "inventory").exists()
+    assert {path.name for path in temporary.iterdir()} == {"owner.json", "venv"}
+    shutil.rmtree(temporary / "venv")
+    (temporary / "owner.json").unlink()
+    temporary.rmdir()
+    write(EVIDENCE / "final-matrix-cleanup.json", {"removedOwnedPath": str(temporary), "wheelAndEvidencePreserved": True,
+                                                  "tree": frozen["proposedTree"], "stalePidSignals": 0})
+    print("PASS: exact disposable matrix installation removed; all wheel/evidence/source retained")
+
+
+if __name__ == "__main__":
+    main()

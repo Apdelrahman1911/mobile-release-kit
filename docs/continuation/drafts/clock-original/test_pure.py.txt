@@ -1,0 +1,3059 @@
+"""Credential-free, child-denied regression tests. Not native experiment evidence."""
+
+from __future__ import annotations
+
+import ast
+import copy
+import errno
+import hashlib
+import os
+from pathlib import Path
+import signal
+import sys
+import types
+import unittest
+from unittest import mock
+import ctypes
+import fcntl
+import io
+import socket
+import subprocess
+import select
+import time
+from contextlib import ExitStack
+
+BASE = Path(__file__).absolute().parent
+NATIVE_ATTEMPTS = []
+REAL_MONOTONIC = time.monotonic
+PURE_STARTED = REAL_MONOTONIC()
+PURE_DEADLINE = PURE_STARTED + 60.0
+
+
+class NativeBoundaryViolation(BaseException):
+    pass
+
+
+def denied(label):
+    def veto(*_args, **_kwargs):
+        NATIVE_ATTEMPTS.append(label)
+        raise NativeBoundaryViolation(label)
+    return veto
+
+
+def preparation_bound():
+    if REAL_MONOTONIC() >= PURE_DEADLINE:
+        raise NativeBoundaryViolation("original-pure-60s-cutoff")
+    if NATIVE_ATTEMPTS:
+        raise NativeBoundaryViolation("forbidden-attempt-retained")
+
+
+# Native boundaries are replaced BEFORE any helper definitions are loaded.
+# Individual tests may replace a veto only with a fictional interface, never
+# retain/pass through a real operation. No synthetic real child/signal is used.
+for _target, _names in (
+    (os, ("fork", "forkpty", "posix_spawn", "posix_spawnp", "execv", "execve", "execvp", "execvpe",
+          "execl", "execle", "execlp", "execlpe", "system", "popen", "kill", "killpg", "wait", "waitpid", "waitid",
+          "getpid", "getppid", "getpgid", "getpgrp", "getsid", "getuid", "uname", "setsid", "setpgid", "pipe", "pipe2", "dup", "dup2",
+          "open", "close", "fstat", "read", "write", "fsync", "fdopen", "set_inheritable", "set_blocking", "fpathconf", "_exit")),
+    (subprocess, ("Popen", "run", "call", "check_call", "check_output", "getoutput", "getstatusoutput")),
+    (select, ("select",)),
+    (signal, ("signal", "getsignal", "pthread_sigmask", "sigpending", "raise_signal", "alarm", "setitimer", "pthread_kill")),
+    (fcntl, ("fcntl", "ioctl", "flock", "lockf")),
+    (socket, ("socket", "create_connection", "getaddrinfo")),
+    (ctypes, ("CDLL", "PyDLL")),
+):
+    for _name in _names:
+        if hasattr(_target, _name):
+            setattr(_target, _name, denied(_target.__name__ + "." + _name))
+
+
+def native_audit(event, _args):
+    if event in {"subprocess.Popen", "os.fork", "os.forkpty", "os.exec", "os.posix_spawn", "os.kill", "os.killpg",
+                 "os.system", "ctypes.dlopen", "socket.__new__", "socket.connect", "socket.bind"}:
+        denied("audit:" + event)()
+
+
+sys.addaudithook(native_audit)
+
+
+class BoundedOutput:
+    retained = 0
+
+    def __init__(self, stream):
+        self.stream = stream
+
+    def write(self, text):
+        preparation_bound()
+        amount = len(text.encode("utf-8"))
+        if type(self).retained + amount > 2 * 1024 * 1024:
+            raise NativeBoundaryViolation("combined-pure-output-cap")
+        type(self).retained += amount
+        result = self.stream.write(text)
+        preparation_bound()
+        return result
+
+    def flush(self):
+        return self.stream.flush()
+
+
+sys.stdout, sys.stderr = BoundedOutput(sys.stdout), BoundedOutput(sys.stderr)
+
+
+def definitions(name):
+    path = BASE / (name + ".py")
+    parsed = ast.parse(path.read_bytes(), str(path))
+    allowed = (ast.Import, ast.ImportFrom, ast.Assign, ast.AnnAssign, ast.FunctionDef, ast.ClassDef)
+    parsed.body = [node for node in parsed.body if isinstance(node, allowed)]
+    module = types.ModuleType(name)
+    module.__file__ = str(path)
+    sys.modules[name] = module
+    exec(compile(parsed, str(path), "exec"), module.__dict__)
+    return module
+
+
+C = definitions("contract")
+R = definitions("runtime")
+V = definitions("reconcile")
+S = definitions("sender")
+D = definitions("controller")
+P = definitions("python_relay")
+A = definitions("canary")
+BASH_SOURCE = (BASE / "bash_relay.sh").read_text()
+
+
+def admission(c, actor, ident):
+    # Fixture is an explicit synthetic retained record, not a call to its issuer.
+    return dict(version=1, actor=actor, identity=copy.deepcopy(ident), contextSha256=hashlib.sha256(C.dumps(c)).hexdigest(),
+                admittedAt=101.0, work=c["work"], disposition=c["disposition"], outer=c["outer"],
+                controlRole="C" if actor == "sender" and C.ROUTES[c["row"]].loss else "stdin",
+                controlEof=False, controlFailed=None, cancelled=False)
+
+
+def capture(data):
+    return dict(eof=True, observedBytes=len(data), retainedBytes=len(data), sha256=hashlib.sha256(data).hexdigest(),
+                failed=None, raw=data.decode())
+
+
+def record(c, role, owner, pid, group, argv, raw=b"", *, exit_code=0, terminal=False, omit_raw=False):
+    status = -exit_code if exit_code < 0 else exit_code << 8
+    value = dict(role=role, owner=owner, pid=pid, group=group, status=status, exitCode=exit_code,
+                 authorized=False, terminal=terminal, unknown=False, closed=[True, True, True],
+                 waits=[dict(pid=0, status=0, count=1), dict(pid=pid, status=status)], argv=argv,
+                 stdout=capture(raw), stderr=capture(b""))
+    if omit_raw:
+        value["stdout"].pop("raw")
+        value["stderr"].pop("raw")
+    return value
+
+
+def context(row):
+    route = C.ROUTES[row]
+    scratch = str(BASE / "execution-r1" / (row + "-inputs"))
+    return dict(row=row, nonce="a" * 32, rootPid=100, uid=501, start=100.0, work=130.0, disposition=140.0,
+                outer=280.0, scratch=scratch, markerSha256="b" * 64,
+                policySha256=hashlib.sha256(C.policy(Path(scratch) / "marker", route.fenced)).hexdigest(),
+                scripts={name: "c" * 64 for name in C.SCRIPTS},
+                external=dict(pid=101, group=101, parent=100, uid=501),
+                channels=dict(c=31, r=34, cIdentity=[5, 6, 4096, 0], rIdentity=[5, 7, 4096, 1]) if route.loss else None)
+
+
+def attempt(c, actor, token, owner, method="Popen"):
+    session = c["row"] == "python-new-session" and actor == "python-relay"
+    fds = [31, 34] if c["channels"] and ((actor == "root" and token == "route") or actor == "ruby-relay") else []
+    return dict(token=token, argv=C.fixed_argv(c, actor, token, owner), acquisitions=1,
+                execs=2 if token in {"route", "hop"} else 1, before=101.0, method=method,
+                session=session, group=not session, passFds=fds, query=False)
+
+
+def fixture(row):
+    c, route = context(row), C.ROUTES[row]
+    root_ident = dict(pid=100, parent=99, group=100, session=80, uid=501)
+    frames, seq = [], {}
+
+    def emit(actor, pid, kind, data, channel=None):
+        key = actor, pid
+        seq[key] = seq.get(key, 0) + 1
+        frame = C.envelope(c, actor, pid, seq[key], kind, copy.deepcopy(data))
+        stream = channel or ("outside.stdout" if actor == "outside" else
+                             "independent" if route.loss and actor == "sender" else "route.stdout")
+        frames.append(dict(stream=stream, frame=frame))
+        return frame
+
+    readable = dict(readable=True, matches=True, errno=None)
+    denied = dict(readable=False, matches=False, errno=errno.EACCES)
+    outside_ready = dict(identity=dict(pid=101, parent=100, group=101, session=80, uid=501), marker=readable, counter=0)
+    outside_ready["entry"] = admission(dict(c, external=None, channels=None), "outside", outside_ready["identity"])
+    emit("outside", 101, "ready", outside_ready)
+    sender_pid, sender_parent, ruby_pid = 201, 100, None
+    multi = row in {"multi-hop", "no-fence-multi-hop"}
+    token = "hop" if multi else "sender"
+    if route.entry == "python_relay.py":
+        parent_identity = dict(pid=201, parent=100, group=201, session=80, uid=501)
+        emit("python-relay", 201, "ready", dict(identity=parent_identity,
+                                               python="3.11.14 (synthetic)", channels=None,
+                                               entry=admission(c, "python-relay", parent_identity)))
+        emit("python-relay", 201, "attempt", attempt(c, "python-relay", token, 201))
+        hop_pid = 301 if multi else 401
+        emit("python-relay", 201, "acquired", dict(pid=hop_pid, token=token, method="Popen", passFds=[], session=row == "python-new-session"))
+        sender_pid, sender_parent = hop_pid, 201
+        if multi:
+            ruby_pid = hop_pid
+            emit("bash", 301, "exec", dict(parent=201, bashVersion="3.2.57(1)-release", target="ruby_relay.rb", chargedBy="python-relay:hop",
+                                         transition="precharged-exec-only-trampoline", clockSample=None))
+    elif route.entry == "ruby_relay.rb":
+        ruby_pid = 201
+    method = {"ruby-spawn": "Process.spawn", "ruby-fork-exec": "fork/exec", "parent-exit": "Open3-no-block"}.get(row, "Open3-block")
+    if ruby_pid is not None:
+        ruby_ident = dict(pid=ruby_pid, parent=201 if multi else 100, group=ruby_pid, session=80, uid=501)
+        emit("ruby-relay", ruby_pid, "ready", dict(identity=ruby_ident, ruby="ruby 3.3.12 (synthetic)",
+                                                  open3Path=C.OPEN3, channels=c["channels"], method=method,
+                                                  entry=admission(c, "ruby-relay", ruby_ident)))
+        emit("ruby-relay", ruby_pid, "attempt", attempt(c, "ruby-relay", "sender", ruby_pid, method))
+        sender_pid, sender_parent = 401, ruby_pid
+        emit("ruby-relay", ruby_pid, "acquired", dict(pid=sender_pid, identity=ruby_ident, method=method,
+                passFds=c["channels"], inheritedCopiesClosed=True,
+                waiterOwnership="Open3-detached-no-signal-authority" if method.startswith("Open3") else "sole-Process.waitpid2"))
+        if row == "ruby-fork-exec":
+            emit("ruby-fork", sender_pid, "exec", dict(parent=ruby_pid, target="sender.py", chargedBy="ruby-relay:sender"))
+    sender_session = sender_pid if row == "python-new-session" else 80
+    sender_ident = dict(pid=sender_pid, parent=sender_parent, group=sender_pid, session=sender_session, uid=501)
+    emit("sender", sender_pid, "ready", dict(identity=sender_ident, channels=c["channels"], python="3.11.14 (synthetic)", singleThreaded=True,
+                                            entry=admission(c, "sender", sender_ident)))
+    empty_ruby_stream = dict(eof=True, failed=None, bytes=0, sha256=hashlib.sha256(b"").hexdigest())
+    if route.loss:
+        emit("sender", sender_pid, "loss-ready", dict(identity=sender_ident, ordinaryStreamsClosed=True, lowFdReplacement=True, channels=c["channels"]))
+        loss = dict(pid=sender_pid, streams=[empty_ruby_stream, empty_ruby_stream], inheritedCopiesClosed=True, senderWait=None, method=method)
+        emit("ruby-relay", ruby_pid, "loss-ready", loss)
+        if route.loss == "exit":
+            emit("ruby-relay", ruby_pid, "loss-exit", dict(normalExit=0, noBlock=True, senderWait=None, streams=loss["streams"]))
+        emit("sender", sender_pid, "parent-changed", dict(before=sender_parent, after=1))
+    queries = [dict(kind=kind, signal=0, target=target, returned=not route.fenced, errno=errno.EPERM if route.fenced else None)
+               for kind, target in (("pid", 101), ("pgid", -101))]
+    for query in queries:
+        emit("sender", sender_pid, "query", query)
+    emit("sender", sender_pid, "attempt", attempt(c, "sender", "inside", sender_pid))
+    signals = []
+    for index, operation in enumerate(("usr1-pid", "usr1-group", "kill-group")):
+        value = dict(operation=operation, owner=sender_pid, pid=501, target=501 if index == 0 else -501,
+                     signal=9 if index == 2 else 30, priorWait=[0, 0], returned=True, errno=None,
+                     authorizedAt=105.0 + index, seen=[], ackCounter=index + 1 if index < 2 else None)
+        signals.append(value)
+        emit("sender", sender_pid, "signal", value)
+    inside_identity = dict(pid=501, parent=sender_pid, group=501, session=sender_session, uid=501)
+    inside_raw = b"".join(C.dumps(C.envelope(c, "inside", 501, i + 1, "ready" if i == 0 else "pong",
+                         dict(identity=inside_identity, marker=denied, counter=i,
+                              entry=admission(c, "inside", inside_identity)))) for i in range(3))
+    inside = record(c, "inside", sender_pid, 501, 501, C.fixed_argv(c, "sender", "inside", sender_pid), inside_raw, exit_code=-9, terminal=True)
+    final = dict(primary=None, cleanupErrors=[], signals=signals, queries=queries, marker=denied, child=inside,
+                 parentChange=dict(before=sender_parent, after=1) if route.loss else None, unknown=False, flags=[], controlEof=False,
+                 ownedAttempts=1, lowFdReplacement=bool(route.loss), isolationAccepted=route.fenced,
+                 terminal=dict(mode=C.LOSS_TERMINAL_MODE, resultChannel="R", controlClosed=True,
+                               ordinaryClosed=[True, True, True], resultEof="required-root-observation", senderExitStatus="not-waitable-by-root") if route.loss else None)
+    final_frame = emit("sender", sender_pid, "final", final)
+    if route.loss:
+        final_raw = C.dumps(final_frame)
+        emit("sender", sender_pid, "terminal-commit", dict(finalSha256=hashlib.sha256(final_raw).hexdigest(),
+                                                          finalSequence=final_frame["sequence"], finalBytes=len(final_raw)))
+
+    def lines_for(actors):
+        return b"".join(C.dumps(v["frame"]) for v in frames if v["stream"] == "route.stdout" and v["frame"]["actor"] in actors)
+
+    if ruby_pid is not None and not route.loss:
+        child_raw = lines_for({"sender", "ruby-fork"})
+        emit("ruby-relay", ruby_pid, "final", dict(primary=None, cleanupErrors=[], childPid=sender_pid,
+             status=dict(pid=sender_pid, raw=0, exitCode=0, signaled=False, signal=None, success=True),
+             streams=[dict(eof=True, failed=None, bytes=len(child_raw), sha256=hashlib.sha256(child_raw).hexdigest()), empty_ruby_stream],
+             method=method, blockEnsureReturned=method == "Open3-block", actualDetachedJoin=method == "Open3-block", unknown=False, flags=[]))
+    if route.entry == "python_relay.py":
+        child_raw = lines_for({"bash", "ruby-relay", "ruby-fork", "sender"})
+        child_record = record(c, "relay", 201, 301 if multi else sender_pid, None,
+                              C.fixed_argv(c, "python-relay", token, 201), child_raw, omit_raw=True)
+        emit("python-relay", 201, "final", dict(primary=None, cleanupErrors=[], child=child_record,
+             forwarded=dict(stdout=len(child_raw), stderr=0), actualDirectWait=True, unknown=False, flags=[]))
+    emit("outside", 101, "pong", outside_ready)
+    emit("outside", 101, "end", dict(outside_ready, reason="private-control-eof", primary=None, flags=[]))
+    outside_c = dict(c, external=None, channels=None)
+    outside_raw = b"".join(C.dumps(v["frame"]) for v in frames if v["stream"] == "outside.stdout")
+    route_raw = b"".join(C.dumps(v["frame"]) for v in frames if v["stream"] == "route.stdout")
+    records = [record(outside_c, "outside", 100, 101, 101, C.fixed_argv(outside_c, "root", "outside", 100), outside_raw),
+               record(c, "relay", 100, 201, 201, C.fixed_argv(c, "root", "route", 100), route_raw,
+                      exit_code=-9 if route.loss == "kill" else 0, terminal=route.loss == "kill")]
+    attempts = [attempt(outside_c, "root", "outside", 100), attempt(c, "root", "route", 100)]
+    independent, absent, root_signals = None, None, []
+    observations = []
+    if route.loss:
+        independent = capture(b"".join(C.dumps(v["frame"]) for v in frames if v["stream"] == "independent"))
+        absent = True
+        argv = [C.PS, "-p", str(sender_pid), "-o", "pid=,ppid=,pgid=,stat="]
+        records.append(record(c, "query-child", 100, 601, None, argv, exit_code=1))
+        window = dict(admitted=109.0, work=111.0, disposition=116.0)
+        records[-1]["query"] = dict(window=window, queriedSenderPid=sender_pid, returnedAt=109.1,
+                                    statusObservedAt=109.2, firstCompleteAt=109.3, dispositionObservedAt=109.4,
+                                    primary=None, cleanupErrors=[], captureErrors=[], closeAttempts=[False, True, True],
+                                    closeErrors=[], custodyKnown=False, disposalSignals=[])
+        attempts.append(dict(token="query-1", argv=argv, acquisitions=1, execs=1, before=109.0,
+                             method="Popen", session=False, group=False, passFds=[], query=True, queryWindow=window.copy()))
+        observations.append(dict(queriedSenderPid=sender_pid, queryChild=copy.deepcopy(records[-1]), attempted=109.0,
+                                 workDeadline=111.0, disposalDeadline=116.0, primary=None, timeout=False, disposalSignal=None,
+                                 observation=dict(absent=True, waitForSender=None, method="ps-empty-selection-exit1"), cleanupErrors=[]))
+        if route.loss == "kill":
+            root_signals = [dict(operation="kill-relay", owner=100, pid=201, target=201, signal=9, priorWait=[0, 0],
+                                 returned=True, errno=None, authorizedAt=104.0, seen=[], ackCounter=None)]
+    return [c, root_ident, records, attempts, frames, independent, absent, root_signals, observations]
+
+
+class PureContracts(unittest.TestCase):
+    def test_matrix_and_entry_argv_against_independent_literals(self):
+        expected = [("direct", 3, 4), ("python-child", 4, 5), ("python-new-session", 4, 5),
+                    ("ruby-spawn", 4, 5), ("ruby-fork-exec", 4, 5), ("ruby-open3", 4, 5),
+                    ("multi-hop", 5, 7), ("parent-exit", 4, 5), ("parent-kill", 4, 5),
+                    ("no-fence-direct", 3, 4), ("no-fence-multi-hop", 5, 7)]
+        self.assertEqual([(r.name, r.acquisitions, r.execs) for r in C.ROWS], expected)
+        self.assertEqual((sum(r[1] for r in expected), sum(r[2] for r in expected)), (44, 57))
+        c = context("direct")
+        self.assertEqual(C.fixed_argv(c, "root", "route", 100),
+                         ["/usr/bin/sandbox-exec", "-f", str(BASE / "execution-r1/direct-inputs/policy.sb"),
+                          "/ORIGINAL_REPOSITORY/.mobile-release/remediation/MRK-002/venv/bin/python",
+                          "-I", "-B", str(BASE / "sender.py"), C.dumps(c).decode().strip()])
+
+    def test_all_fixed_route_success_structures(self):
+        for row in C.ROWS:
+            with self.subTest(row=row.name):
+                args = fixture(row.name)
+                value = V.reconcile(*args)
+                self.assertEqual(value["acquisitions"], row.acquisitions + bool(row.loss))
+                self.assertIs(value["isolationAccepted"], row.fenced)
+
+    def test_every_route_rejects_frame_binding_and_actual_capture_substitution(self):
+        for row in C.ROWS:
+            for change in (lambda a: a[4][0]["frame"].update(nonce="d" * 32),
+                           lambda a: a[4][0]["frame"].update(extra=True),
+                           lambda a: a[2][1]["stdout"].update(eof=False),
+                           lambda a: a[2][1].update(authorized=True),
+                           lambda a: a[2][1].update(waits=[]),
+                           lambda a: a[3][1].update(execs=1),
+                           lambda a: a[3][1]["argv"].__setitem__(0, "/bin/sh"),
+                           lambda a: a[3][0].update(acquisitions=True)):
+                with self.subTest(row=row.name, mutation=change):
+                    args = fixture(row.name)
+                    change(args)
+                    with self.assertRaises(C.Failure):
+                        V.reconcile(*args)
+
+    def test_loss_terminal_conjunction_is_not_a_footer_or_exit_claim(self):
+        for values in ((True, True, False), (True, False, True), (False, True, True), (1, True, True), (True, True, None)):
+            with self.subTest(values=values), self.assertRaises(C.Failure):
+                V.final_transport(*values)
+
+    def test_loss_routes_reject_retained_writer_and_query_role_substitution(self):
+        for name in ("parent-exit", "parent-kill"):
+            for change in (lambda a: a[5].update(eof=False), lambda a: a.__setitem__(6, False),
+                           lambda a: a[2][2].update(role="relay"),
+                           lambda a: a[3][2]["argv"].__setitem__(2, "101"),
+                           lambda a: a[2][2].update(pid=401),
+                           lambda a: a[3][2].update(before=138.0),
+                           lambda a: a[2][2]["stderr"].update(raw="error", observedBytes=5, retainedBytes=5,
+                                                                           sha256=hashlib.sha256(b"error").hexdigest())):
+                with self.subTest(row=name, mutation=change):
+                    args = fixture(name)
+                    change(args)
+                    with self.assertRaises(C.Failure):
+                        V.reconcile(*args)
+
+    def test_malformed_json_duplicate_overflow_nonfinite_and_nested_unknown(self):
+        for raw in (b'{"x":1,"x":2}', b'{"x":NaN}', b'{"x":Infinity}', b'{"x":1e99999}', b"[" * 30 + b"0" + b"]" * 30):
+            with self.subTest(raw=raw), self.assertRaises(C.Failure):
+                C.loads(raw)
+        c = context("direct")
+        for mutate in (lambda v: v.update(extra=True), lambda v: v.update(rootPid=True),
+                       lambda v: v.update(work=v["work"] + 1), lambda v: v.update(row=[]),
+                       lambda v: v["scripts"].update(unknown="a" * 64)):
+            bad = copy.deepcopy(c)
+            mutate(bad)
+            with self.assertRaises(C.Failure):
+                C.validate_context(bad)
+
+    def test_no_fence_controls_cannot_satisfy_positive_isolation(self):
+        for name in ("no-fence-direct", "no-fence-multi-hop"):
+            args = fixture(name)
+            final = next(v["frame"]["data"] for v in args[4] if v["frame"]["actor"] == "sender" and v["frame"]["kind"] == "final")
+            final["isolationAccepted"] = True
+            with self.assertRaises(C.Failure):
+                C.validate_sender_result(final, C.ROUTES[name], 201 if name.endswith("direct") else 401)
+
+    def test_original_full_interval_count_and_byte_reserves(self):
+        route, c = C.ROWS[0], context("parent-exit")
+        for now, cutoff, acquisitions, execs in ((101.0, 140.0, 0, 0), (100.0, 140.0, 63, 0),
+                                                (100.0, 140.0, 0, 95), (float("nan"), 200.0, 0, 0)):
+            with self.assertRaises(C.Failure):
+                C.admit_row(now, cutoff, acquisitions, execs, route)
+        for now, count, acquisitions, execs, available in ((134.0, 0, 0, 0, 2 * C.STREAM_CAP),
+                (110.0, 3, 0, 0, 2 * C.STREAM_CAP), (110.0, 0, 64, 0, 2 * C.STREAM_CAP),
+                (110.0, 0, 0, 96, 2 * C.STREAM_CAP), (110.0, 0, 0, 0, C.STREAM_CAP)):
+            with self.assertRaises(C.Failure):
+                C.admit_query(now, c, count, acquisitions, execs, available)
+        C.admit_row(100.0, 140.0, 0, 0, route)
+        C.admit_query(133.0, c, 0, 0, 0, 2 * C.STREAM_CAP)
+
+    def test_ps_empty_selection_is_distinct_from_zombie_error_and_reuse(self):
+        expected = dict(pid=401, parent=1, group=401)
+        self.assertTrue(C.query_result(b"", b"", 1, expected)["absent"])
+        for state in (b"S", b"Z", b"SE", b"R<+", b"S>", b"Ss"):
+            self.assertFalse(C.query_result(b"401 1 401 " + state + b"\n", b"", 0, expected)["absent"])
+        for out, err, rc in ((b"", b"", 0), (b"", b"failure", 1), (b"", b"", 2),
+                             (b"401 2 401 S\n", b"", 0), (b"401 1 401 bogus\n", b"", 0),
+                             (b"401 1 401 S\n401 1 401 S\n", b"", 0)):
+            with self.assertRaises(C.Failure):
+                C.query_result(out, err, rc, expected)
+
+    def test_frame_sequence_wrong_nonce_and_incomplete_eof(self):
+        c = context("direct")
+        frame = C.envelope(c, "sender", 201, 1, "ready", {})
+        sequences = {}
+        C.validate_frame(frame, c, sequences)
+        with self.assertRaises(C.Failure):
+            C.validate_frame(frame, c, sequences)
+        reader = object.__new__(R.Reader)
+        reader.pending, reader.eof = bytearray(b'{"x":1'), True
+        with self.assertRaises(C.Failure):
+            reader.frames()
+
+    def test_child_wait_and_full_entire_terminal_types_fail_closed(self):
+        args = fixture("parent-exit")
+        original = next(v["frame"]["data"] for v in args[4] if v["frame"]["actor"] == "sender" and v["frame"]["kind"] == "final")
+        for mutate in (lambda v: v["child"].update(waits=[]),
+                       lambda v: v.update(ownedAttempts=True),
+                       lambda v: v["terminal"].update(controlClosed=1),
+                       lambda v: v["terminal"].update(ordinaryClosed=[True, 1, True]),
+                       lambda v: v["queries"][0].update(errno=True),
+                       lambda v: v["signals"][0].update(priorWait=[False, 0]),
+                       lambda v: v.update(cleanupErrors=[{"type": "OSError", "message": "C close failed"}])):
+            value = copy.deepcopy(original)
+            mutate(value)
+            with self.assertRaises(C.Failure):
+                C.validate_sender_result(value, C.ROUTES["parent-exit"], 401)
+
+    def test_wrong_script_or_policy_hash_rejected_before_any_native(self):
+        c = context("direct")
+        info = types.SimpleNamespace(st_mode=stat_mode_fifo())
+        import stat
+        info.st_mode = stat.S_IFREG | 0o600
+        for target in ("contract.py", "policy.sb"):
+            def hashed(path):
+                if Path(path).name == target:
+                    return "f" * 64
+                return c["policySha256"] if Path(path).name == "policy.sb" else c["scripts"][Path(path).name]
+            with mock.patch.object(Path, "exists", return_value=False), mock.patch.object(Path, "lstat", return_value=info), \
+                 mock.patch.object(R, "digest", side_effect=hashed), mock.patch.object(R, "now", return_value=110.0), \
+                 self.assertRaises(C.Failure):
+                R.read_context(C.dumps(c).decode())
+
+    def test_independent_channel_direction_identity_and_route_mismatches(self):
+        for mutate in (lambda v: v["channels"].update(c=0),
+                       lambda v: v["channels"].update(r=v["channels"]["c"]),
+                       lambda v: v["channels"].update(extra=1),
+                       lambda v: v["channels"].update(cIdentity=[5, 6, 4096, "0"]),
+                       lambda v: v.update(row="direct", scratch=str(BASE / "execution-r1/direct-inputs"),
+                            policySha256=hashlib.sha256(C.policy(BASE / "execution-r1/direct-inputs/marker", True)).hexdigest())):
+            c = context("parent-exit")
+            mutate(c)
+            with self.assertRaises(C.Failure):
+                C.validate_context(c)
+
+    def test_reader_overflow_is_not_eof_or_reusable_capacity(self):
+        reader = object.__new__(R.Reader)
+        reader.fd, reader.budget = 99, R.CaptureBudget()
+        reader.raw, reader.pending, reader.eof, reader.failed, reader.observed = bytearray(b"x" * 8), bytearray(), False, None, 8
+        with mock.patch.object(R, "STREAM_CAP", 8), mock.patch.object(R.os, "read", return_value=b"!") as read:
+            with self.assertRaises(C.Failure):
+                reader.read()
+        read.assert_called_once_with(99, 1)
+        self.assertFalse(reader.eof)
+        self.assertTrue(reader.budget.exceeded)
+        self.assertIsNotNone(reader.failed)
+
+
+class OwnershipDispatch(unittest.TestCase):
+    def test_fixed_spawn_guards_reject_program_and_descriptor_substitution(self):
+        c = context("direct")
+        c["external"] = None
+        registry = R.Registry(c, types.SimpleNamespace(check=lambda: None), "root")
+        argv = C.fixed_argv(c, "root", "outside", 100)
+        for supplied, fds in ((["/bin/sh", *argv[1:]], ()), (argv, (31,)), ([*argv, "extra"], ())):
+            with mock.patch.object(R.os, "getpid", return_value=100), mock.patch.object(R, "now", return_value=110.0), \
+                 mock.patch.object(R.subprocess, "Popen") as launch:
+                with self.assertRaises(C.Failure):
+                    registry.acquire(R.OutsideChild, "outside", supplied, group=True, pass_fds=fds)
+                launch.assert_not_called()
+
+    def owned(self, kind=R.InsideChild):
+        c = context("parent-exit" if kind is R.QueryChild else "direct")
+        c["rootPid"] = 10
+        registry = types.SimpleNamespace(c=c, cancel=types.SimpleNamespace(check=lambda: None, seen=[]),
+                                         check=lambda: None, children=[])
+        with mock.patch.object(R.os, "getpid", return_value=100):
+            child = kind(registry, C.QueryWindow.original(107.0, c), 401) if kind is R.QueryChild else kind(registry)
+        registry.children.append(child)
+        child.handle = types.SimpleNamespace(pid=200, returncode=None)
+        child.pid = child.group = 200
+        child.authorized = child.custody_known = True
+        return child
+
+    def invoke(self, child, operation, wait=(0, 0), *, at=110.0, fail_wait=False):
+        calls = []
+
+        def waited(pid, flags):
+            self.assertIs(child.authorized, False)
+            self.assertEqual((pid, flags), (200, os.WNOHANG))
+            if fail_wait:
+                raise ChildProcessError(errno.ECHILD, "synthetic missing child")
+            return wait
+
+        def sent(target, sig):
+            if sig == signal.SIGKILL:
+                self.assertIs(child.authorized, False)
+                self.assertIs(child.terminal, True)
+            calls.append((target, sig))
+
+        with mock.patch.object(R.os, "getpid", return_value=100), mock.patch.object(R.os, "getpgrp", return_value=100), \
+             mock.patch.object(R.os, "waitpid", side_effect=waited), mock.patch.object(R.os, "kill", side_effect=sent), \
+             mock.patch.object(R.signal, "pthread_sigmask", return_value=set()), mock.patch.object(R, "now", return_value=at):
+            result = R.signal_owned(child, operation)
+        return result, calls
+
+    def test_real_guard_dispatch_reserves_and_revokes_before_terminal(self):
+        child = self.owned()
+        result, calls = self.invoke(child, "kill-group")
+        self.assertEqual(calls, [(-200, signal.SIGKILL)])
+        self.assertEqual(result["priorWait"], [0, 0])
+        with self.assertRaises(C.Failure):
+            self.invoke(child, "kill-group")
+
+    def test_reaped_unknown_unregistered_and_wrong_owners_never_dispatch(self):
+        for mutate in (lambda v: setattr(v, "authorized", False), lambda v: setattr(v, "owner", 99),
+                       lambda v: v.registry.children.clear(), lambda v: setattr(v, "terminal", True),
+                       lambda v: setattr(v, "group", 100)):
+            child = self.owned()
+            mutate(child)
+            with self.assertRaises(C.Failure):
+                self.invoke(child, "kill-group")
+        child = self.owned()
+        with self.assertRaises(C.Failure):
+            self.invoke(child, "kill-group", wait=(200, 0))
+        self.assertFalse(child.authorized)
+        child = self.owned()
+        with self.assertRaises(ChildProcessError):
+            self.invoke(child, "kill-group", fail_wait=True)
+        self.assertTrue(child.unknown)
+        self.assertFalse(child.authorized)
+
+    def test_query_child_and_queried_pid_cannot_swap_roles(self):
+        child = self.owned(R.QueryChild)
+        with self.assertRaises(C.Failure):
+            self.invoke(child, "kill-group")
+        with self.assertRaises(C.Failure):
+            self.invoke(child, "kill-query", at=108.0)
+        _, calls = self.invoke(child, "kill-query", at=110.0)
+        self.assertEqual(calls, [(200, signal.SIGKILL)])
+        with self.assertRaises(C.Failure):
+            R.signal_owned(C.ExternalReference(401, 401, 10, 501), "kill-query")
+        with self.assertRaises(C.Failure):
+            self.invoke(self.owned(R.QueryChild), "kill-query", wait=(200, 0))
+        with self.assertRaises(ChildProcessError):
+            self.invoke(self.owned(R.QueryChild), "kill-query", fail_wait=True)
+
+    def test_external_reference_has_only_two_zero_syscalls(self):
+        c = context("direct")
+        calls = []
+        with mock.patch.object(R.os, "getpid", return_value=201), mock.patch.object(R.os, "getpgrp", return_value=201), \
+             mock.patch.object(R.os, "kill", side_effect=lambda target, number: calls.append((target, number))):
+            results = R.query_external(C.ExternalReference(**c["external"]), c, lambda: None)
+        self.assertEqual(calls, [(101, 0), (-101, 0)])
+        self.assertTrue(all(v["returned"] for v in results))
+
+
+class TerminalProtocol(unittest.TestCase):
+    def test_cancelled_query_uses_original_timeout_and_only_actual_query_handle(self):
+        world = FictionalWorld()
+        world.on_return = lambda: setattr(world.cancel, "cancelled", True)
+        with world:
+            row = world.row()
+            with self.assertRaises(C.Failure):
+                row.observe_orphan_once(0, {"parentChange": {"after": 1}})
+            self.assertEqual(world.signals, [(601, signal.SIGKILL)])
+            self.assertEqual(row.observations[0]["primary"]["code"], "fictional-cancellation")
+            self.assertEqual(row.observations[0]["queryChild"]["query"]["window"],
+                             {"admitted": 109.0, "work": 111.0, "disposition": 116.0})
+            self.assertIs(row.registry.children[-1].handle, world.handle)
+            self.assertEqual(world.wait_statuses[-1], (601, 9))
+            self.assertTrue(all(stream.close_calls == 1 for stream in world.streams))
+            self.assertEqual((row.owner.acquisition_reserved, row.owner.exec_reserved), (45, 58))
+
+    def test_partial_query_acquisition_is_disposed_and_original_error_retained(self):
+        # Actual acquire/publish/adopt/dispose methods, not cleanup=True mocks.
+        for location in ("identity-out", "identity-err", "reader-out", "reader-err"):
+            with self.subTest(location=location):
+                world = FictionalWorld(adoption_fault=location)
+                with world:
+                    row = world.row()
+                    with self.assertRaises(C.Failure):
+                        row.observe_orphan_once(0, {"parentChange": {"after": 1}})
+                    observed = row.registry.children[-1]
+                    self.assertIs(observed.handle, world.handle)
+                    self.assertEqual(world.signals, [(601, signal.SIGKILL)])
+                    self.assertEqual(observed.window, C.QueryWindow(109.0, 111.0, 116.0))
+                    self.assertEqual(row.observations[0]["primary"]["message"], "fictional-" + location)
+                    self.assertEqual(observed.status, 9)
+                    self.assertTrue(all(v.close_calls == 1 for v in world.streams))
+                    self.assertEqual(len(row.observations), 1)
+
+    def test_closefd_false_requires_actual_descriptor_close(self):
+        info = types.SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat_mode_fifo(), st_rdev=0)
+        wrapper = types.SimpleNamespace(fileno=lambda: 1, close=lambda: None)
+        errors, closed = [], []
+        with mock.patch.object(S.os, "fstat", return_value=info), mock.patch.object(S.os, "close", side_effect=closed.append):
+            self.assertTrue(S.close_standard(wrapper, 1, errors))
+        self.assertEqual(closed, [1])
+        self.assertEqual(errors, [])
+
+    def test_closefd_true_no_double_close_and_errors_retained(self):
+        info = types.SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat_mode_fifo(), st_rdev=0)
+        wrapper = types.SimpleNamespace(fileno=lambda: 1, close=lambda: None)
+        errors = []
+        with mock.patch.object(S.os, "fstat", side_effect=[info, OSError(errno.EBADF, "closed")]), \
+             mock.patch.object(S.os, "close") as close:
+            self.assertTrue(S.close_standard(wrapper, 1, errors))
+            close.assert_not_called()
+        wrapper.close = mock.Mock(side_effect=OSError(errno.EIO, "synthetic stream-close failure"))
+        with mock.patch.object(S.os, "fstat", return_value=info), mock.patch.object(S.os, "close"):
+            self.assertFalse(S.close_standard(wrapper, 1, errors))
+        self.assertEqual(len(errors), 1)
+
+    def test_final_write_failure_cannot_publish_second_frame_or_run_finalizers(self):
+        # Retain the old obligation but use actual raw publisher AND consumers,
+        # not a fake emitter or a local exit argument as the success oracle.
+        for name in ("parent-exit", "parent-kill"):
+            for fault, code in (("none", 0), ("none", 1), ("provisional-partial-error", 0), ("commit-error", 0)):
+                with self.subTest(route=name, fault=fault, code=code), LossPublicationIO(name, fault) as world:
+                    raw = world.publish(code=code)
+                    accepted = fault == "none" and code == 0
+                    self.assertEqual(world.exits, [0 if accepted else 1])
+                    self.assertEqual(world.checks_after_commit, 0)
+                    self.assertLessEqual(len(world.commit_attempts), 1)
+                    prove_root_loss(self, world, raw, accepted=accepted)
+
+
+def stat_mode_fifo():
+    import stat
+    return stat.S_IFIFO | 0o600
+
+
+class FictionalCancellation:
+    def __init__(self):
+        self.cancelled, self.seen, self.restore_calls = False, [], 0
+        self.on_restore = None
+
+    def check(self):
+        preparation_bound()
+        C.need(not self.cancelled, "fictional-cancellation")
+
+    def restore(self):
+        preparation_bound()
+        self.restore_calls += 1
+        if self.on_restore:
+            return self.on_restore()
+        return []
+
+
+class FictionalStream:
+    def __init__(self, world, fd):
+        self.world, self.fd, self.closed, self.close_calls = world, fd, False, 0
+
+    def fileno(self):
+        preparation_bound()
+        return self.fd
+
+    def close(self):
+        preparation_bound()
+        self.close_calls += 1
+        self.world.events.append(("close", self.fd))
+        if self.fd in self.world.close_faults:
+            raise RuntimeError("fictional-close-" + str(self.fd))
+        self.closed = True
+
+
+class MemoryEvidence:
+    """The storage interface is fictional; real serialization still runs."""
+    def __init__(self, hook=None):
+        self.bytes, self.records, self.raw, self.calls, self.hook = 0, {}, {}, [], hook
+
+    def write(self, name, value):
+        preparation_bound()
+        self.calls.append(name)
+        raw = value if type(value) is bytes else C.dumps(value)
+        if self.hook:
+            self.hook(name, value)
+        self.raw[name] = raw
+        self.bytes += len(raw)
+        self.records[name] = dict(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+
+
+class FictionalWorld:
+    """Closed fake interfaces around the ACTUAL Row/Registry/Child/Reader code.
+
+    No retained callable below forwards to an OS process/descriptor/query API.
+    Actual monotonic preparation measurement remains separate from this clock.
+    """
+    def __init__(self, *, adoption_fault=None, immediate_exit=False):
+        self.at, self.cancel, self.adoption_fault = 109.0, FictionalCancellation(), adoption_fault
+        self.owner_pid, self.query_pid = 100, 601
+        self.streams = [FictionalStream(self, 701), FictionalStream(self, 702)]
+        self.handle = types.SimpleNamespace(pid=601, stdin=None, stdout=self.streams[0],
+                                            stderr=self.streams[1], returncode=None)
+        self.events, self.signals, self.wait_statuses, self.launches = [], [], [], []
+        self.wait_calls, self.metadata_calls, self.block_calls = 0, {}, {}
+        self.killed, self.immediate_exit, self.return_error = False, immediate_exit, None
+        self.on_return, self.on_wait, self.on_select, self.on_read = None, None, None, None
+        self.close_faults, self.read_sequences, self.replaced = set(), {}, set()
+        self.directions = {}
+        self._stack = ExitStack()
+
+    def clock(self):
+        preparation_bound()
+        return self.at
+
+    def advance(self, seconds):
+        preparation_bound()
+        self.at += seconds
+
+    def stat(self, fd):
+        preparation_bound()
+        self.metadata_calls[fd] = self.metadata_calls.get(fd, 0) + 1
+        name = "identity-out" if fd == 701 else "identity-err"
+        if self.adoption_fault == name and self.metadata_calls[fd] == 1:
+            raise RuntimeError("fictional-" + name)
+        if any(v.fd == fd and v.closed for v in self.streams):
+            raise OSError(errno.EBADF, "fictional-closed")
+        return types.SimpleNamespace(st_dev=5, st_ino=fd + (9000 if fd in self.replaced else 1000),
+                                     st_mode=stat_mode_fifo(), st_rdev=0, st_uid=501,
+                                     st_nlink=1, st_size=0, st_mtime_ns=1, st_ctime_ns=1)
+
+    def flags(self, fd, operation, *_args):
+        preparation_bound()
+        C.need(operation == fcntl.F_GETFL, "fictional-fcntl-operation")
+        return self.directions.get(fd, os.O_RDONLY)
+
+    def set_blocking(self, fd, value):
+        preparation_bound()
+        self.block_calls[fd] = self.block_calls.get(fd, 0) + 1
+        if fd in (701, 702):
+            name = "reader-out" if fd == 701 else "reader-err"
+            if self.adoption_fault == name and self.block_calls[fd] == 1:
+                raise RuntimeError("fictional-" + name)
+
+    def read(self, fd, amount):
+        preparation_bound()
+        self.events.append(("read", fd))
+        if self.on_read:
+            self.on_read(fd, amount)
+        if self.read_sequences.get(fd):
+            value = self.read_sequences[fd].pop(0)
+            if isinstance(value, BaseException):
+                raise value
+            if len(value) > amount:
+                self.read_sequences[fd].insert(0, value[amount:])
+                value = value[:amount]
+            return value
+        if fd in (701, 702) and (self.killed or self.immediate_exit):
+            return b""
+        raise BlockingIOError(errno.EAGAIN, "fictional-would-block")
+
+    def select(self, readers, writers, errors, timeout):
+        preparation_bound()
+        C.need(type(timeout) in (int, float) and 0 <= timeout <= 0.02, "fictional-select-bound")
+        if self.on_select:
+            result = self.on_select(readers, writers, errors, timeout)
+            if result is not None:
+                return result
+        self.advance(timeout)
+        return (list(readers), list(writers), [])
+
+    def popen(self, argv, **options):
+        preparation_bound()
+        self.launches.append((copy.deepcopy(argv), dict(options)))
+        self.events.append(("popen", self.query_pid))
+        if self.return_error is not None:
+            raise self.return_error
+        if self.on_return:
+            self.on_return()
+        return self.handle
+
+    def wait(self, pid, flags):
+        preparation_bound()
+        C.need(pid == self.query_pid and flags == os.WNOHANG, "fictional-wait-bound")
+        self.wait_calls += 1
+        self.events.append(("wait", pid))
+        value = None if self.on_wait is None else self.on_wait(pid, flags)
+        if value is None:
+            value = (pid, 9) if self.killed else ((pid, 256) if self.immediate_exit else (0, 0))
+        self.wait_statuses.append(value)
+        return value
+
+    def kill(self, pid, number):
+        preparation_bound()
+        C.need((pid, number) == (self.query_pid, signal.SIGKILL), "fictional-query-only-kill")
+        self.signals.append((pid, number))
+        self.events.append(("signal", pid))
+        self.killed = True
+
+    def __enter__(self):
+        for module in (R, D, S, P, A):
+            self._stack.enter_context(mock.patch.object(module, "now", side_effect=self.clock))
+        for name, value in (("getpid", lambda: self.owner_pid), ("getppid", lambda: 99),
+                            ("getpgrp", lambda: self.owner_pid), ("getsid", lambda _pid: 80),
+                            ("getuid", lambda: 501), ("fstat", self.stat), ("read", self.read),
+                            ("set_blocking", self.set_blocking), ("waitpid", self.wait), ("kill", self.kill)):
+            self._stack.enter_context(mock.patch.object(os, name, side_effect=value))
+        self._stack.enter_context(mock.patch.object(fcntl, "fcntl", side_effect=self.flags))
+        self._stack.enter_context(mock.patch.object(select, "select", side_effect=self.select))
+        self._stack.enter_context(mock.patch.object(subprocess, "Popen", side_effect=self.popen))
+        self._stack.enter_context(mock.patch.object(subprocess, "_active", []))
+        self._stack.enter_context(mock.patch.object(signal, "pthread_sigmask", side_effect=lambda *_: set()))
+        self._stack.enter_context(mock.patch.object(signal, "sigpending", side_effect=lambda: set()))
+        return self
+
+    def __exit__(self, *_args):
+        self._stack.close()
+
+    def row(self, row_name="parent-exit"):
+        owner = types.SimpleNamespace(cancel=self.cancel, cutoff=280.0, capture=R.CaptureBudget(),
+                                      acquisition_reserved=44, exec_reserved=57, evidence=MemoryEvidence(),
+                                      identity=dict(pid=100, parent=99, group=100, session=80, uid=501))
+        owner.completion = lambda: (self.cancel.check(), R.remaining(owner.cutoff))
+        result = D.Row(owner, C.ROUTES[row_name])
+        result.c = context(row_name)
+        result.scratch = Path(result.c["scratch"])
+        result.registry = R.Registry(result.c, self.cancel, "root", budget=owner.capture)
+        result.sender_pid = 401
+        result.subtree = "awaiting-absence"
+        return result
+
+    def query(self):
+        row = self.row()
+        child = row.registry.pending_query(C.QueryWindow.original(109.0, row.c), 401)
+        row.registry.acquire(R.QueryChild, "query-1", [C.PS, "-p", "401", "-o", "pid=,ppid=,pgid=,stat="],
+                             query=True, slot=child)
+        return row, child
+
+
+def refresh_captures(args):
+    """Reserialize independent bytes so semantic negatives cannot rely on stale hashes.
+
+    The fictional inside payload remains independent. Inner relay forwarding
+    metadata is recomputed from the explicitly retained frame sequence outward.
+    """
+    frames = args[4]
+    route = C.ROUTES[args[0]["row"]]
+    if route.entry == "ruby_relay.rb" or "multi-hop" in route.name:
+        raw = b"".join(C.dumps(v["frame"]) for v in frames
+                       if v["stream"] == "route.stdout" and v["frame"]["actor"] in {"sender", "ruby-fork"})
+        for value in frames:
+            frame = value["frame"]
+            if frame["actor"] == "ruby-relay" and frame["kind"] in {"final", "loss-ready", "loss-exit"}:
+                frame["data"]["streams"][0].update(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+    if route.entry == "python_relay.py":
+        raw = b"".join(C.dumps(v["frame"]) for v in frames
+                       if v["stream"] == "route.stdout" and v["frame"]["actor"] != "python-relay")
+        for value in frames:
+            frame = value["frame"]
+            if frame["actor"] == "python-relay" and frame["kind"] == "final":
+                frame["data"]["child"]["stdout"].update(observedBytes=len(raw), retainedBytes=len(raw),
+                                                         sha256=hashlib.sha256(raw).hexdigest())
+                frame["data"]["forwarded"]["stdout"] = len(raw)
+    for index, label in ((0, "outside.stdout"), (1, "route.stdout")):
+        raw = b"".join(C.dumps(v["frame"]) for v in frames if v["stream"] == label)
+        args[2][index]["stdout"] = capture(raw)
+    if route.loss:
+        finals = [v["frame"] for v in frames if v["frame"]["actor"] == "sender" and v["frame"]["kind"] == "final"]
+        commits = [v["frame"] for v in frames if v["frame"]["actor"] == "sender" and v["frame"]["kind"] == "terminal-commit"]
+        if len(finals) == len(commits) == 1:
+            final_raw = C.dumps(finals[0])
+            commits[0]["data"] = dict(finalSha256=hashlib.sha256(final_raw).hexdigest(),
+                                      finalSequence=finals[0]["sequence"], finalBytes=len(final_raw))
+        args[5] = capture(b"".join(C.dumps(v["frame"]) for v in frames if v["stream"] == "independent"))
+    return args
+
+
+def sender_final(args):
+    return next(v["frame"]["data"] for v in args[4]
+                if v["frame"]["actor"] == "sender" and v["frame"]["kind"] == "final")
+
+
+class OriginalQueryWindow(unittest.TestCase):
+    def test_actual_timely_observer_reconciles_with_original_route(self):
+        with FictionalWorld(immediate_exit=True) as world:
+            row = world.row()
+            observed = row.observe_orphan_once(0, {"parentChange": {"after": 1}})
+            self.assertTrue(observed["absent"])
+            self.assertEqual(world.signals, [])
+            actual = row.registry.children[-1]
+            self.assertIs(actual.handle, world.handle)
+            self.assertEqual(actual.status, 256)
+            self.assertEqual(actual.close_attempted, [False, True, True])
+            args = fixture("parent-exit")
+            args[2][2], args[3][2], args[8][0] = actual.record(), row.registry.attempts[0], row.observations[0]
+            self.assertEqual(V.reconcile(*args)["subtreeDisposition"], "resolved")
+            with self.assertRaises(C.Failure):
+                row.observe_orphan_once(1, {"parentChange": {"after": 1}})
+            self.assertEqual(len(world.launches), 1)  # No query after actual absence.
+
+    def test_late_successful_wait_and_eof_is_retained_but_never_success(self):
+        with FictionalWorld(immediate_exit=True) as world:
+            world.on_wait = lambda *_: (setattr(world, "at", 111.0) or (601, 256))
+            row = world.row()
+            with self.assertRaises(C.Failure):
+                row.observe_orphan_once(0, {"parentChange": {"after": 1}})
+            child = row.registry.children[-1]
+            self.assertEqual((child.status, child.status_observed, child.first_complete), (256, 111.0, 111.0))
+            self.assertEqual(child.primary["code"], "deadline")
+            self.assertTrue(row.observations[0]["timeout"])
+            self.assertTrue(all(child.closed))
+            self.assertEqual(world.signals, [])
+            with self.assertRaises(C.Failure):
+                row.observe_orphan_once(1, {"parentChange": {"after": 1}})
+            self.assertEqual(len(world.launches), 1)
+
+    def test_late_popen_return_keeps_actual_handle_and_original_disposition(self):
+        for returned in (111.0, 117.0):
+            with self.subTest(returned=returned), FictionalWorld() as world:
+                world.on_return = lambda: setattr(world, "at", returned)
+                row = world.row()
+                with self.assertRaises(C.Failure):
+                    row.observe_orphan_once(0, {"parentChange": {"after": 1}})
+                child = row.registry.children[-1]
+                self.assertIs(child.handle, world.handle)
+                self.assertEqual(child.returned_at, returned)
+                self.assertEqual(child.window.record(), {"admitted": 109.0, "work": 111.0, "disposition": 116.0})
+                self.assertEqual(world.signals, [(601, signal.SIGKILL)] if returned == 111.0 else [])
+                if returned == 117.0:
+                    self.assertEqual(world.wait_calls, 0)
+                    self.assertIsNone(child.status)
+                self.assertTrue(all(v.close_calls == 1 for v in world.streams))
+
+    def test_original_early_once_and_late_kill_boundaries(self):
+        for at, allowed in ((110.0, False), (111.0, True), (116.0, False), (117.0, False)):
+            with self.subTest(at=at), FictionalWorld() as world:
+                row, child = world.query()
+                world.at = at
+                if allowed:
+                    result = R.signal_owned(child, "kill-query")
+                    self.assertTrue(result["returned"])
+                    self.assertEqual(world.signals, [(601, signal.SIGKILL)])
+                    with self.assertRaises(C.Failure):
+                        R.signal_owned(child, "kill-query")
+                else:
+                    with self.assertRaises(C.Failure):
+                        R.signal_owned(child, "kill-query")
+                    self.assertEqual(world.wait_calls, 0)
+                    self.assertEqual(world.signals, [])
+
+    def test_wait_cutoff_jump_and_lost_custody_veto_every_signal(self):
+        for fault in ("jump", "reaped", "echild", "foreign", "unregistered", "unknown"):
+            with self.subTest(fault=fault), FictionalWorld() as world:
+                row, child = world.query()
+                world.at = 111.0
+                if fault == "jump":
+                    world.on_wait = lambda *_: (setattr(world, "at", 117.0) or (0, 0))
+                elif fault == "reaped":
+                    world.on_wait = lambda *_: (601, 256)
+                elif fault == "echild":
+                    def missing(*_):
+                        raise ChildProcessError(errno.ECHILD, "fictional-sole-wait-lost")
+                    world.on_wait = missing
+                elif fault == "foreign":
+                    child.owner = 999
+                elif fault == "unregistered":
+                    row.registry.children.clear()
+                else:
+                    child.unknown = True
+                with self.assertRaises((C.Failure, ChildProcessError)):
+                    R.signal_owned(child, "kill-query")
+                self.assertEqual(world.signals, [])
+                if fault == "jump":
+                    calls = world.wait_calls
+                    row.registry.dispose_query(child)
+                    self.assertEqual(world.wait_calls, calls)
+                    self.assertTrue(child.unknown)
+                if fault == "reaped":
+                    self.assertEqual(child.status, 256)
+                    self.assertFalse(child.custody_known)
+
+    def test_no_returned_handle_never_acquires_wait_or_signal_custody(self):
+        with FictionalWorld() as world:
+            world.return_error = RuntimeError("fictional-before-handle-return")
+            row = world.row()
+            with self.assertRaises(C.Failure):
+                row.observe_orphan_once(0, {"parentChange": {"after": 1}})
+            child = row.registry.children[-1]
+            self.assertIsNone(child.handle)
+            self.assertTrue(child.unknown)
+            self.assertEqual((world.wait_calls, world.signals), (0, []))
+            self.assertEqual([v.close_calls for v in world.streams], [0, 0])
+            self.assertEqual(len(row.registry.attempts), 1)
+            self.assertEqual(row.observations[0]["primary"]["message"], "fictional-before-handle-return")
+
+    def test_primary_and_secondary_read_select_wait_close_errors_survive(self):
+        for secondary in ("read", "select", "wait", "close"):
+            with self.subTest(secondary=secondary), FictionalWorld() as world:
+                world.read_sequences[701] = [OSError(errno.EIO, "fictional-first-read")]
+                if secondary == "read":
+                    world.read_sequences[702] = [OSError(errno.EIO, "fictional-secondary-read")]
+                elif secondary == "select":
+                    calls = []
+                    def selected(*_args):
+                        if not calls:
+                            calls.append(True)
+                            raise RuntimeError("fictional-secondary-select")
+                    world.on_select = selected
+                elif secondary == "wait":
+                    def waited(*_args):
+                        raise ChildProcessError(errno.ECHILD, "fictional-secondary-wait")
+                    world.on_wait = waited
+                else:
+                    world.close_faults = {701, 702}
+                row = world.row()
+                with self.assertRaises(C.Failure):
+                    row.observe_orphan_once(0, {"parentChange": {"after": 1}})
+                item = row.observations[0]
+                self.assertIn("fictional-first-read", item["primary"]["message"])
+                self.assertTrue(any(secondary in v.get("message", "") for v in item["cleanupErrors"]))
+                self.assertIs(row.registry.children[-1].handle, world.handle)
+                self.assertEqual([s.close_calls for s in world.streams], [1, 1])
+                if secondary == "wait":
+                    self.assertEqual(world.signals, [])
+                    self.assertTrue(item["queryChild"]["unknown"])
+                else:
+                    self.assertEqual(world.signals, [(601, signal.SIGKILL)])
+                    self.assertEqual(item["queryChild"]["status"], 9)
+                with self.assertRaises(C.Failure):
+                    row.observe_orphan_once(1, {"parentChange": {"after": 1}})
+                self.assertEqual(len(row.observations), 1)
+
+    def test_query_window_mutations_reject_in_full_reconciler(self):
+        mutations = (
+            lambda t: t["window"].update(work=130.0, disposition=140.0),
+            lambda t: t["window"].update(admitted=108.0),
+            lambda t: t["window"].update(disposition=117.0),
+            lambda t: t.update(returnedAt=111.0),
+            lambda t: t.update(statusObservedAt=111.0, firstCompleteAt=111.0),
+            lambda t: t.update(firstCompleteAt=111.0),
+            lambda t: t.update(dispositionObservedAt=116.0),
+            lambda t: t.update(queriedSenderPid=101),
+            lambda t: t.update(custodyKnown=True),
+            lambda t: t.update(closeAttempts=[False, True, False]),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                args = fixture("parent-exit")
+                mutation(args[2][2]["query"])
+                args[8][0]["queryChild"] = copy.deepcopy(args[2][2])
+                with self.assertRaises(C.Failure):
+                    V.reconcile(*args)
+
+    def test_late_eof_completion_and_returned_invalid_pid_never_mint_success(self):
+        with FictionalWorld(immediate_exit=True) as world:
+            def delayed(fd, _amount):
+                if fd == 702:
+                    world.at = 111.0
+            world.on_read = delayed
+            row = world.row()
+            with self.assertRaises(C.Failure):
+                row.observe_orphan_once(0, {"parentChange": {"after": 1}})
+            child = row.registry.children[-1]
+            self.assertEqual((child.status_observed, child.first_complete), (111.0, 111.0))
+            self.assertEqual(child.status, 256)
+            self.assertEqual(world.signals, [])
+        for invalid in (1, 100, True):
+            with self.subTest(invalid=invalid), FictionalWorld() as world:
+                world.handle.pid = invalid
+                row = world.row()
+                with self.assertRaises(C.Failure):
+                    row.observe_orphan_once(0, {"parentChange": {"after": 1}})
+                child = row.registry.children[-1]
+                self.assertIs(child.handle, world.handle)
+                self.assertFalse(child.custody_known)
+                self.assertEqual((world.wait_calls, world.signals), (0, []))
+                self.assertEqual([v.close_calls for v in world.streams], [1, 1])
+
+    def test_nonterminal_or_malformed_wait_is_retained_without_authority_or_serialization_failure(self):
+        for returned in ((601, (int(signal.SIGSTOP) << 8) | 0x7f), (0, 1), (999, 0), (True, 0)):
+            with self.subTest(returned=returned), FictionalWorld() as world:
+                row, child = world.query()
+                world.at = 111.0
+                world.on_wait = lambda *_args: returned
+                with self.assertRaises(C.Failure):
+                    R.signal_owned(child, "kill-query")
+                self.assertEqual(world.signals, [])
+                self.assertTrue(child.unknown)
+                self.assertFalse(child.custody_known)
+                self.assertIsNone(child.status)
+                retained = child.record()
+                self.assertEqual(retained["waits"][-1]["error"]["facts"]["returnedStatus"], returned[1])
+                self.assertTrue(C.dumps(retained))
+                row.registry.dispose_query(child)
+                self.assertEqual(world.wait_calls, 1)
+
+    def test_capture_setup_failure_prohibits_later_registry_acquisition(self):
+        with FictionalWorld(adoption_fault="reader-err") as world:
+            row = world.row()
+            first = row.registry.pending_query(C.QueryWindow.original(109.0, row.c), 401)
+            argv = [C.PS, "-p", "401", "-o", "pid=,ppid=,pgid=,stat="]
+            with self.assertRaises(RuntimeError):
+                row.registry.acquire(R.QueryChild, "query-1", argv, query=True, slot=first)
+            self.assertTrue(first.custody_known)
+            second = row.registry.pending_query(C.QueryWindow.original(109.0, row.c), 401)
+            with self.assertRaises(C.Failure):
+                row.registry.acquire(R.QueryChild, "query-2", argv, query=True, slot=second)
+            self.assertEqual(len(world.launches), 1)
+            self.assertEqual(len(row.registry.attempts), 1)
+            self.assertIsNone(second.handle)
+            row.registry.dispose_query(first)
+            self.assertEqual(world.signals, [(601, signal.SIGKILL)])
+            self.assertEqual([v.close_calls for v in world.streams], [1, 1])
+
+
+class DispatchCheckpoints(unittest.TestCase):
+    def change(self, world, kind, control_fd=81):
+        if kind == "cancel":
+            world.cancel.cancelled = True
+        elif kind == "expired":
+            world.at = 130.0
+        else:
+            world.read_sequences[control_fd] = [b""]
+
+    def test_actual_registry_spends_attempt_but_rejects_post_emit_dispatch(self):
+        for fault in ("cancel", "expired", "eof"):
+            with self.subTest(fault=fault), FictionalWorld() as world:
+                c = dict(context("direct"), external=None)
+                control = R.Reader(81)
+                emitter = types.SimpleNamespace(emit=lambda *_: self.change(world, fault))
+                registry = R.Registry(c, world.cancel, "root", emitter=emitter, control=control)
+                with self.assertRaises(C.Failure):
+                    registry.acquire(R.OutsideChild, "outside", C.fixed_argv(c, "root", "outside", 100), group=True)
+                self.assertEqual(len(registry.attempts), 1)
+                self.assertEqual((registry.attempts[0]["acquisitions"], registry.attempts[0]["execs"]), (1, 1))
+                self.assertEqual(world.launches, [])
+                self.assertTrue(registry.children[0].attempted)
+                self.assertIsNone(registry.children[0].handle)
+                if fault == "eof":
+                    self.assertTrue(control.eof)  # Actual zero-byte fake-backed Reader.read.
+
+    def test_both_external_zero_probes_observe_separate_current_checkpoints(self):
+        for fault in ("cancel", "expired", "eof"):
+            with self.subTest(fault=fault), FictionalWorld() as world:
+                world.owner_pid = 201
+                c, calls = context("direct"), []
+                control = R.Reader(81)
+                guard = R.WorkGuard(c, world.cancel, control)
+                def probe(target, number):
+                    self.assertEqual(number, 0)
+                    calls.append((target, number))
+                    self.change(world, fault)
+                with mock.patch.object(os, "kill", side_effect=probe), self.assertRaises(C.Failure):
+                    R.query_external(C.ExternalReference(**c["external"]), c, guard.check)
+                self.assertEqual(calls, [(101, 0)])
+                self.assertEqual(world.launches, [])
+        self.assertEqual(list(__import__("inspect").signature(R.query_external).parameters), ["ref", "c", "checkpoint"])
+
+    def test_work_write_rechecks_after_backpressured_select(self):
+        for fault in ("cancel", "expired", "eof"):
+            with self.subTest(fault=fault), FictionalWorld() as world:
+                control = R.Reader(81)
+                guard = R.WorkGuard(context("direct"), world.cancel, control)
+                def selected(readers, writers, errors, timeout):
+                    self.change(world, fault)
+                    return readers, writers, errors
+                world.on_select = selected
+                with mock.patch.object(os, "write", return_value=1) as write, self.assertRaises(C.Failure):
+                    R.write_bytes(82, b"x", 130.0, guard.check)
+                write.assert_not_called()
+                self.assertEqual(world.launches, [])
+
+    def test_disposition_write_is_not_work_and_never_renews_endpoint(self):
+        with FictionalWorld() as world:
+            world.cancel.cancelled = True
+            world.at = 131.0
+            control = R.Reader(81)
+            guard = R.WorkGuard(context("direct"), world.cancel, control)
+            with mock.patch.object(os, "write", side_effect=lambda _fd, raw: len(raw)) as write:
+                R.write_bytes(82, b"retained-owned-cleanup", 140.0, guard.disposition)
+                count = write.call_count
+                world.at = 140.0
+                with self.assertRaises(C.Failure):
+                    R.write_bytes(82, b"late", 140.0, guard.disposition)
+                self.assertEqual(write.call_count, count)
+            self.assertFalse(control.eof)
+            with self.assertRaises(C.Failure):
+                guard.completion()
+
+    def test_ordinary_signal_rechecks_cancel_time_control_after_actual_wait(self):
+        for fault in ("cancel", "expired", "eof"):
+            with self.subTest(fault=fault), FictionalWorld() as world:
+                world.owner_pid = 201
+                c, control = context("direct"), R.Reader(81)
+                registry = R.Registry(c, world.cancel, "sender", control=control)
+                child = R.InsideChild(registry)
+                registry.children.append(child)
+                child.publish(world.handle)
+                child.group = child.pid
+                def waited(*_args):
+                    self.change(world, fault)
+                    return (0, 0)
+                world.on_wait = waited
+                with self.assertRaises(C.Failure):
+                    R.signal_owned(child, "kill-group")
+                self.assertEqual(world.signals, [])
+                self.assertEqual(world.wait_calls, 1)
+
+
+class CapableEntry(unittest.TestCase):
+    def test_actual_entry_preserves_buffered_commands_and_original_clock(self):
+        for row_name, actor in (("direct", "sender"), ("parent-exit", "sender"),
+                                ("python-child", "python-relay"), ("direct", "inside")):
+            with self.subTest(row=row_name, actor=actor), FictionalWorld() as world:
+                world.owner_pid = 201
+                c = context(row_name)
+                control = R.Reader(81)
+                world.read_sequences[81] = [C.command(c, "release" if C.ROUTES[row_name].loss else "start")]
+                guard = R.WorkGuard(c, world.cancel, control)
+                entry = guard.entry(actor)
+                self.assertEqual(entry["identity"]["pid"], 201)
+                self.assertEqual(entry["admittedAt"], 109.0)
+                self.assertEqual(entry["contextSha256"], hashlib.sha256(C.dumps(c)).hexdigest())
+                self.assertEqual(bytes(control.pending), C.command(c, "release" if C.ROUTES[row_name].loss else "start"))
+                world.at = 130.0
+                with self.assertRaises(C.Failure):
+                    guard.entry(actor)
+                self.assertEqual(world.launches, [])
+
+    def test_script_or_policy_io_cannot_spend_free_entry_time(self):
+        for fault in ("cancel", "expired"):
+            with self.subTest(fault=fault), FictionalWorld() as world:
+                c = context("direct")
+                def hashed(path):
+                    if Path(path).name == "policy.sb":
+                        if fault == "cancel":
+                            world.cancel.cancelled = True
+                        else:
+                            world.at = 130.0
+                        return c["policySha256"]
+                    return c["scripts"][Path(path).name]
+                with mock.patch.object(Path, "exists", return_value=False), \
+                     mock.patch.object(Path, "lstat", return_value=types.SimpleNamespace(st_mode=0o100600)), \
+                     mock.patch.object(R, "digest", side_effect=hashed), self.assertRaises(C.Failure):
+                    R.read_context(C.dumps(c).decode(), world.cancel)
+                self.assertEqual(world.launches, [])
+
+    def test_entry_forgery_semantics_reject_on_every_fixed_route(self):
+        mutations = (lambda e: e.update(admittedAt=130.0), lambda e: e.update(admittedAt=99.0),
+                     lambda e: e.update(contextSha256="d" * 64), lambda e: e.update(controlEof=True),
+                     lambda e: e.update(controlFailed={"code": "injected"}), lambda e: e.update(cancelled=True),
+                     lambda e: e.update(version=True), lambda e: e.update(work=131.0),
+                     lambda e: e["identity"].update(parent=999), lambda e: e.update(controlRole="invented"))
+        for route in C.ROWS:
+            for mutation in mutations:
+                with self.subTest(route=route.name, mutation=mutation):
+                    args = fixture(route.name)
+                    ready = next(v["frame"]["data"] for v in args[4]
+                                 if v["frame"]["actor"] == "sender" and v["frame"]["kind"] == "ready")
+                    mutation(ready["entry"])
+                    refresh_captures(args)
+                    with self.assertRaises(C.Failure):
+                        V.reconcile(*args)
+
+    def test_nested_inside_entry_and_bash_claim_are_independently_reconciled(self):
+        args = fixture("multi-hop")
+        inside = sender_final(args)["child"]["stdout"]
+        nested = [C.loads(line) for line in inside["raw"].encode().splitlines()]
+        nested[0]["data"]["entry"]["admittedAt"] = 140.0
+        sender_final(args)["child"]["stdout"] = capture(b"".join(C.dumps(v) for v in nested))
+        refresh_captures(args)
+        with self.assertRaises(C.Failure):
+            V.reconcile(*args)
+        for key, value in (("clockSample", 109.0), ("transition", "locally-deadline-checked")):
+            args = fixture("multi-hop")
+            frame = next(v["frame"] for v in args[4] if v["frame"]["actor"] == "bash")
+            frame["data"][key] = value
+            refresh_captures(args)
+            with self.assertRaises(C.Failure):
+                V.reconcile(*args)
+        self.assertIn("precharged-exec-only-trampoline", BASH_SOURCE)
+        self.assertIn('"clockSample":null', BASH_SOURCE)
+        self.assertIn("exec /opt/homebrew/Cellar/ruby@3.3/3.3.12/bin/ruby", BASH_SOURCE)
+        self.assertEqual((len(C.ROWS), sum(v.acquisitions for v in C.ROWS), sum(v.execs for v in C.ROWS)), (11, 44, 57))
+
+
+class FreshDescriptorCustody(unittest.TestCase):
+    def test_each_fresh_endpoint_metadata_and_flag_fault_keeps_both_closes(self):
+        for endpoint in (81, 82):
+            for stage in ("flag", "stat", "flags"):
+                with self.subTest(endpoint=endpoint, stage=stage), FictionalWorld() as world:
+                    endpoints, injected, closed = D.Endpoints(), [], []
+                    def fault(fd, which):
+                        if fd == endpoint and stage == which and not injected:
+                            injected.append((fd, which))
+                            raise RuntimeError("fictional-endpoint-" + which)
+                    def stat(fd):
+                        fault(fd, "stat")
+                        return world.stat(fd)
+                    def flags(fd, _operation):
+                        fault(fd, "flags")
+                        return os.O_RDONLY if fd == 81 else os.O_WRONLY
+                    with mock.patch.object(os, "pipe", return_value=(81, 82)) as pipe, \
+                         mock.patch.object(os, "set_inheritable", side_effect=lambda fd, _flag: fault(fd, "flag")), \
+                         mock.patch.object(os, "fstat", side_effect=stat), \
+                         mock.patch.object(fcntl, "fcntl", side_effect=flags), \
+                         mock.patch.object(os, "close", side_effect=closed.append):
+                        with self.assertRaises(RuntimeError):
+                            endpoints.pipe("read", "write")
+                        self.assertEqual([v["fd"] for v in endpoints.entries], [81, 82])
+                        for role in ("read", "write"):
+                            endpoints.close(role)
+                        with self.assertRaises(C.Failure):
+                            endpoints.pipe("read-again", "write-again")
+                        self.assertEqual(pipe.call_count, 1)
+                    self.assertEqual(closed, [81, 82])
+                    self.assertTrue(all(v["closeAttempted"] and v["closed"] for v in endpoints.entries))
+                    self.assertEqual(world.launches, [])
+
+    def test_endpoint_substitution_and_ambiguous_close_cannot_be_retried(self):
+        for fault in ("substitute", "close"):
+            with self.subTest(fault=fault), FictionalWorld() as world:
+                endpoints, closed = D.Endpoints(), []
+                def close(fd):
+                    closed.append(fd)
+                    if fd == 81 and fault == "close":
+                        raise RuntimeError("fictional-close-may-have-consumed-fd")
+                with mock.patch.object(os, "pipe", return_value=(81, 82)), \
+                     mock.patch.object(os, "set_inheritable", return_value=None), \
+                     mock.patch.object(fcntl, "fcntl", side_effect=lambda fd, _op: os.O_RDONLY if fd == 81 else os.O_WRONLY), \
+                     mock.patch.object(os, "close", side_effect=close):
+                    endpoints.pipe("read", "write")
+                    if fault == "substitute":
+                        world.replaced.add(81)
+                    with self.assertRaises((C.Failure, RuntimeError)):
+                        endpoints.close("read")
+                    endpoints.close("write")
+                    with self.assertRaises(C.Failure):
+                        endpoints.close("read")
+                    with self.assertRaises(C.Failure):
+                        endpoints.pipe("another-read", "another-write")
+                self.assertEqual(closed, [82] if fault == "substitute" else [81, 82])
+                self.assertIsNotNone(endpoints.entries[0]["closeError"])
+
+    def test_input_fstat_write_fsync_and_close_failures_retain_pending_file(self):
+        info = types.SimpleNamespace(st_dev=5, st_ino=1091, st_mode=0o100600, st_uid=501)
+        for stage in ("fstat", "write", "fsync", "close", "substitute", "write-plus-close"):
+            with self.subTest(stage=stage), FictionalWorld() as world:
+                row, stats, closes = world.row("direct"), [], []
+                def stat(fd):
+                    self.assertEqual(fd, 91)
+                    stats.append(fd)
+                    if stage == "fstat" and len(stats) == 1:
+                        raise RuntimeError("fictional-input-fstat")
+                    if stage == "substitute" and len(stats) > 1:
+                        return types.SimpleNamespace(**dict(vars(info), st_ino=99999))
+                    return info
+                def write(fd, raw):
+                    self.assertEqual(fd, 91)
+                    if stage in {"write", "write-plus-close"}:
+                        raise RuntimeError("fictional-input-write")
+                    return len(raw)
+                def fsync(fd):
+                    self.assertEqual(fd, 91)
+                    if stage == "fsync":
+                        raise RuntimeError("fictional-input-fsync")
+                def close(fd):
+                    closes.append(fd)
+                    if stage in {"close", "write-plus-close"}:
+                        raise RuntimeError("fictional-input-close")
+                with mock.patch.object(os, "open", return_value=91) as opened, \
+                     mock.patch.object(os, "fstat", side_effect=stat), mock.patch.object(os, "write", side_effect=write), \
+                     mock.patch.object(os, "fsync", side_effect=fsync), mock.patch.object(os, "close", side_effect=close):
+                    with self.assertRaises((RuntimeError, C.Failure)) as raised:
+                        row.input("pending", b"fixed fictional input")
+                    self.assertIn("pending", row.owned_files)
+                    entry = row.owned_files["pending"]
+                    self.assertTrue(entry["closeAttempted"])
+                    self.assertEqual(closes, [] if stage == "substitute" else [91])
+                    self.assertFalse(entry["complete"] and entry["closed"])
+                    if stage == "fstat":
+                        self.assertIsNone(entry["identity"])
+                        self.assertTrue(entry["closed"])
+                    if stage == "write-plus-close":
+                        self.assertEqual(str(raised.exception), "fictional-input-write")
+                        self.assertEqual(entry["primary"]["message"], "fictional-input-write")
+                        self.assertEqual(entry["closeError"]["message"], "fictional-input-close")
+                    with self.assertRaises(C.Failure):
+                        row.input("later", b"must not acquire")
+                    self.assertEqual(opened.call_count, 1)
+                row.clean, row.unknown = True, False
+                with mock.patch.object(os, "listdir", return_value=["pending", "home", "tmp"]), \
+                     mock.patch.object(Path, "lstat", return_value=info), mock.patch.object(Path, "unlink") as unlink, \
+                     mock.patch.object(Path, "rmdir") as rmdir, self.assertRaises(C.Failure):
+                    row.archive_and_remove_scratch()
+                unlink.assert_not_called()
+                rmdir.assert_not_called()
+
+    def test_child_stream_identity_substitution_cannot_close_replacement(self):
+        with FictionalWorld() as world:
+            row, child = world.query()
+            world.replaced.add(701)
+            row.registry.close_known(child, (1, 2))
+            self.assertEqual([v.close_calls for v in world.streams], [0, 1])
+            self.assertEqual(child.close_errors[0]["code"], "close-custody")
+            row.registry.close_known(child, (1, 2))
+            self.assertEqual([v.close_calls for v in world.streams], [0, 1])
+
+
+class IndependentSubtreeProof(unittest.TestCase):
+    def test_actual_cleanup_requires_genuine_complete_independent_eof(self):
+        for condition in ("open", "failed", "partial", "complete"):
+            with self.subTest(condition=condition), FictionalWorld(immediate_exit=True) as world:
+                registry = R.Registry(context("direct"), world.cancel, "root")
+                child = R.OutsideChild(registry)
+                registry.children.append(child)
+                child.publish(world.handle)
+                child.adopt(world.handle, None)
+                child.status, child.custody_known, child.authorized = 0, False, False
+                reader = R.Reader(81)
+                if condition == "failed":
+                    world.read_sequences[81] = [OSError(errno.EIO, "fictional-independent-read")]
+                elif condition == "partial":
+                    world.read_sequences[81] = [b'{"partial":', b""]
+                elif condition == "complete":
+                    world.read_sequences[81] = [b'{"complete":true}\n', b""]
+                clean = registry.cleanup(extra_readers=(reader,))
+                self.assertIs(clean, condition == "complete")
+                self.assertFalse(child.unknown)
+                self.assertEqual([v.close_calls for v in world.streams], [1, 1])
+                if condition == "open":
+                    self.assertFalse(reader.eof)
+                    endpoints = D.Endpoints()
+                    endpoints.entries.append(dict(fd=81, role="r-read-root", direction=os.O_RDONLY,
+                                                  identity=reader.identity, closed=False, closeAttempted=False, closeError=None))
+                    with mock.patch.object(os, "close", return_value=None):
+                        endpoints.close("r-read-root")
+                    self.assertFalse(reader.eof)
+                if condition == "partial":
+                    self.assertTrue(reader.eof)
+                    with self.assertRaises(C.Failure):
+                        reader.frames()
+
+    def test_direct_children_reaped_never_erases_unknown_subtree(self):
+        with FictionalWorld() as world:
+            for route in ("direct", "parent-exit", "parent-kill"):
+                for state in ("unresolved", "awaiting-absence"):
+                    row = world.row(route)
+                    row.clean, row.subtree = True, state
+                    row.update_unknown()
+                    self.assertTrue(row.unknown, (route, state))
+                row.subtree = "resolved"
+                row.update_unknown()
+                self.assertFalse(row.unknown)
+
+    def preproof_row(self, world, args):
+        row = world.row(args[0]["row"])
+        row.c, row.owner.identity, row.frames = args[0], args[1], args[4]
+        row.registry.children = [types.SimpleNamespace(record=lambda value=v: copy.deepcopy(value)) for v in args[2][:2]]
+        row.registry.attempts = args[3][:2]
+        row.channels.reader = types.SimpleNamespace(record=lambda: copy.deepcopy(args[5]))
+        row.root_signals = args[7]
+        row.clean, row.subtree = True, "unresolved"
+        row.update_unknown()
+        return row
+
+    def test_malicious_complete_capture_rejected_before_any_query(self):
+        def duplicate(args):
+            args[4].append(copy.deepcopy(next(v for v in args[4]
+                                             if v["frame"]["actor"] == "sender" and v["frame"]["kind"] == "final")))
+            counts = {}
+            for item in args[4]:
+                frame = item["frame"]
+                key = frame["actor"], frame["pid"]
+                counts[key] = counts.get(key, 0) + 1
+                frame["sequence"] = counts[key]
+        mutations = (
+            lambda a: sender_final(a)["child"].update(waits=[]),
+            lambda a: sender_final(a)["child"].update(status=0, exitCode=0),
+            lambda a: sender_final(a)["terminal"].update(resultChannel="stdout"),
+            lambda a: sender_final(a)["terminal"].update(ordinaryClosed=[True, False, True]),
+            lambda a: sender_final(a)["terminal"].update(controlClosed=False),
+            lambda a: sender_final(a)["parentChange"].update(before=999),
+            lambda a: sender_final(a).update(signals=[]),
+            lambda a: sender_final(a)["signals"][1].update(priorWait=[601, 0]),
+            lambda a: a[2][1].update(waits=[]),
+            lambda a: a[4].__setitem__(slice(None), [v for v in a[4]
+                                                   if not (v["frame"]["actor"] == "sender" and v["frame"]["kind"] == "final")]),
+            duplicate,
+        )
+        for route in ("parent-exit", "parent-kill"):
+            for mutation in mutations:
+                with self.subTest(route=route, mutation=mutation), FictionalWorld() as world:
+                    args = fixture(route)
+                    mutation(args)
+                    refresh_captures(args)
+                    row = self.preproof_row(world, args)
+                    with mock.patch.object(row, "observe_orphan_once") as observer, self.assertRaises(C.Failure):
+                        row.query_orphan()
+                    observer.assert_not_called()
+                    self.assertEqual(world.launches, [])
+                    self.assertEqual(row.subtree, "unresolved")
+                    self.assertTrue(row.unknown)
+
+    def test_complete_preproof_admits_first_observer_without_circular_absence(self):
+        with FictionalWorld() as world:
+            row = self.preproof_row(world, fixture("parent-exit"))
+            def absent(count, _sender):
+                self.assertEqual(count, 0)
+                self.assertEqual(row.subtree, "awaiting-absence")
+                self.assertTrue(row.unknown)
+                return {"absent": True}
+            with mock.patch.object(row, "observe_orphan_once", side_effect=absent) as observer:
+                row.query_orphan()
+            observer.assert_called_once()
+            self.assertEqual(row.subtree, "resolved")
+            self.assertFalse(row.unknown)
+
+
+def completed_actual_row(world):
+    """Actual owner/read/close/run methods, initialized from a synthetic terminal chain."""
+    args = fixture("direct")
+    row = world.row("direct")
+    row.c, row.owner.identity, row.registry.c = args[0], args[1], args[0]
+    row.subtree, row.sender_pid = "unresolved", 201
+    row.registry.attempts = args[3]
+    for index, (cls, value) in enumerate(zip((R.OutsideChild, R.RelayChild), args[2])):
+        streams = [FictionalStream(world, 800 + index * 10 + offset) for offset in range(3)]
+        world.streams.extend(streams)
+        world.directions[streams[0].fd] = os.O_WRONLY
+        handle = types.SimpleNamespace(pid=value["pid"], stdin=streams[0], stdout=streams[1], stderr=streams[2], returncode=0)
+        child = cls(row.registry)
+        row.registry.children.append(child)
+        child.publish(handle)
+        child.adopt(handle, row.owner.capture)
+        child.argv, child.group = value["argv"], value["group"]
+        child.status, child.custody_known, child.authorized = 0, False, False
+        child.waits = copy.deepcopy(value["waits"])
+        for reader, label in ((child.out, "stdout"), (child.err, "stderr")):
+            raw = value[label]["raw"].encode()
+            world.read_sequences[reader.fd] = ([raw] if raw else []) + [b""]
+            while not reader.eof:
+                preparation_bound()
+                reader.read()
+        if index == 0:
+            row.outside = child
+        else:
+            row.relay = child
+    return row
+
+
+class SelectorFiles:
+    """Fictional NAMED leaves only; all authority parsing/consumers stay real.
+
+    The copied controls supply original filenames/shape, never access to their
+    source/index payloads. Hash pins are independently recomputed for fictional
+    content. Tests also check the unmodified actual control bytes separately.
+    No selected pathname is ever opened by this fixture; unlisted reads fail.
+    """
+    def __init__(self, world):
+        self.world, self.stack = world, ExitStack()
+        self.snapshot = C.loads((BASE / "selector-control-snapshots/SNAPSHOT.json").read_bytes(), file_record=True)
+        self.baseline = C.loads((BASE / "selector-control-snapshots/BASELINE.json").read_bytes(), file_record=True)
+        self.files, self.modes, self.reads, self.on_read = {}, {}, [], None
+        self.evidence, self.evidence_constructions = MemoryEvidence(), 0
+        self.control_paths = tuple(row[0] for row in D.SELECTOR_CONTROLS)
+        for prefix, rows in ((D.SOURCE, self.snapshot["files"]), (D.ROOT, self.baseline["rootUserFiles"])):
+            for name, row in rows.items():
+                path = str(prefix / name)
+                payload = ("fictional selected bytes only: " + path + "\n").encode()
+                self.files[path] = payload
+                self.modes[path] = D.stat.S_IFREG | (0o700 if row["executable"] else 0o600)
+                row["sha256"] = hashlib.sha256(payload).hexdigest()
+        self.agents_sha = hashlib.sha256(self.files[str(D.ROOT / "AGENTS.md")]).hexdigest()
+        self.snapshot["userAgentsSha256"] = self.baseline["rootAgentalSha256"] = self.agents_sha
+        indexes = []
+        for name, path, _sha in D.INDEX_ROWS:
+            payload = ("fictional fixed index: " + name + "\n").encode()
+            self.files[path] = payload
+            sha = hashlib.sha256(payload).hexdigest()
+            self.baseline["indexBindings"][name] = dict(path=path, sha256=sha)
+            indexes.append((name, path, sha))
+        self.index_rows = tuple(indexes)
+        self.selected_paths = frozenset(self.files)
+        self.script_payloads = {name: ("fictional code: " + name).encode() for name in C.SCRIPTS}
+        self.files.update({str(BASE / name): raw for name, raw in self.script_payloads.items()})
+        self.extra_reference = str(D.QA / "zz-fictional-approved-reference.txt")
+        self.files[self.extra_reference] = b"fictional final reference barrier\n"
+        self.seal()
+        self.allowed_paths = frozenset(self.files)
+
+    def seal(self, *, snapshot_raw=None, baseline_raw=None, bind_snapshot=True):
+        """Freeze fictional pins BEFORE entry; this is not a runtime rebaseline."""
+        first = C.dumps(self.snapshot) if snapshot_raw is None else snapshot_raw
+        if bind_snapshot and type(self.baseline.get("bindings")) is dict:
+            self.baseline["bindings"]["implementation-r6/SNAPSHOT.json"] = hashlib.sha256(first).hexdigest()
+        second = C.dumps(self.baseline) if baseline_raw is None else baseline_raw
+        self.controls = tuple((path, len(raw), hashlib.sha256(raw).hexdigest())
+                              for path, raw in zip(self.control_paths, (first, second)))
+        self.files.update(dict(zip(self.control_paths, (first, second))))
+        self.references = {path: dict(bytes=size, sha256=sha) for path, size, sha in self.controls}
+        extra = self.files[self.extra_reference]
+        self.references[self.extra_reference] = dict(bytes=len(extra), sha256=hashlib.sha256(extra).hexdigest())
+        self.bind_references()
+
+    def bind_references(self, *, raw=None):
+        references = C.dumps(self.references) if raw is None else raw
+        self.files[str(BASE / "REFERENCE-BINDINGS.json")] = references
+        self.approval = dict(decision="APPROVED_SINGLE_INHERITANCE_FEASIBILITY_EXECUTION", planSha256=C.PLAN_SHA,
+                             scripts={name: hashlib.sha256(raw).hexdigest() for name, raw in self.script_payloads.items()},
+                             matrixSha256=C.matrix_hash(), referenceBindingsSha256=hashlib.sha256(references).hexdigest())
+        self.files[str(D.APPROVAL)] = C.dumps(self.approval)
+
+    def read(self, path, cap=2 * 1024 * 1024):
+        preparation_bound()
+        name = str(path)
+        self.reads.append(name)
+        if name not in self.files:
+            if name in self.allowed_paths:
+                raise FileNotFoundError(errno.ENOENT, "fictional-missing-named-input", name)
+            raise AssertionError("unlisted fictional input read: " + name)
+        value = self.files[name]
+        C.need(type(value) is bytes and len(value) <= cap, "fictional-regular-byte-cap")
+        if self.on_read:
+            self.on_read(name)
+        return value
+
+    def lstat(self, path):
+        preparation_bound()
+        name = str(path)
+        if name not in self.modes:
+            raise AssertionError("unlisted fictional leaf metadata: " + name)
+        return types.SimpleNamespace(st_mode=self.modes[name])
+
+    def evidence_factory(self):
+        self.evidence_constructions += 1
+        self.evidence_read_count = len(self.reads)
+        return self.evidence
+
+    def __enter__(self):
+        for key, value in (("SELECTOR_CONTROLS", self.controls), ("INDEX_ROWS", self.index_rows),
+                           ("AGENTS_SHA", self.agents_sha), ("TOOL_HASHES", {})):
+            self.stack.enter_context(mock.patch.object(D, key, value))
+        self.stack.enter_context(mock.patch.object(D, "regular_bytes", side_effect=self.read))
+        self.stack.enter_context(mock.patch.object(Path, "lstat", lambda path: self.lstat(path)))
+        self.stack.enter_context(mock.patch.object(D, "Cancellation", return_value=self.world.cancel))
+        self.stack.enter_context(mock.patch.object(D, "Evidence", side_effect=self.evidence_factory))
+        self.stack.enter_context(mock.patch.object(os.path, "lexists", return_value=False))
+        self.stack.enter_context(mock.patch.object(sys, "platform", "darwin"))
+        self.stack.enter_context(mock.patch.object(os, "uname", return_value=types.SimpleNamespace(
+            sysname="fictional", release="1", version="1", machine="fixture")))
+        return self
+
+    def __exit__(self, *_args):
+        self.stack.close()
+
+    def selected_reads(self):
+        return [name for name in self.reads if name in self.selected_paths]
+
+
+class TerminalFinalization(unittest.TestCase):
+    def test_preparation_binds_reference_inventory_to_independent_code_decision(self):
+        for binding in ("exact", "missing", "substituted"):
+            with self.subTest(binding=binding), FictionalWorld() as world:
+                files = SelectorFiles(world)
+                if binding == "missing":
+                    files.approval.pop("referenceBindingsSha256")
+                elif binding == "substituted":
+                    files.approval["referenceBindingsSha256"] = "0" * 64
+                files.files[str(D.APPROVAL)] = C.dumps(files.approval)
+                with files:
+                    controller = D.Controller(100.0)
+                    if binding == "exact":
+                        controller.prepare()
+                        self.assertEqual(controller.before["files"], {"qa006": 152, "root": 174})
+                        self.assertEqual(set(files.selected_reads()), files.selected_paths)
+                        self.assertEqual(files.evidence_constructions, 1)
+                    else:
+                        with self.assertRaises(C.Failure):
+                            controller.prepare()
+                        self.assertEqual(files.selected_reads(), [])
+                        self.assertEqual(files.evidence_constructions, 0)
+                self.assertEqual((world.launches, world.signals, world.wait_calls), ([], [], 0))
+
+    def test_actual_row_run_rechecks_after_reconciliation_and_channel_finalization(self):
+        for boundary in ("baseline", "reconcile-time", "reconcile-cancel", "channels-time", "channels-cancel"):
+            with self.subTest(boundary=boundary), FictionalWorld() as world:
+                row = completed_actual_row(world)
+                original_reconcile, original_channels = D.reconcile, row.finish_channels
+                def advance(label):
+                    if boundary.startswith(label):
+                        if boundary.endswith("time"):
+                            world.at = 140.0
+                        else:
+                            world.cancel.cancelled = True
+                def reconcile(*args):
+                    value = original_reconcile(*args)
+                    advance("reconcile")
+                    return value
+                def channels():
+                    original_channels()
+                    advance("channels")
+                with mock.patch.object(row, "prepare", return_value=None), \
+                     mock.patch.object(row, "start", return_value=None), \
+                     mock.patch.object(D, "reconcile", side_effect=reconcile), \
+                     mock.patch.object(row, "finish_channels", side_effect=channels):
+                    result = row.run()
+                self.assertIs(result, boundary == "baseline")
+                self.assertIsNotNone(row.proof)
+                if boundary != "baseline":
+                    self.assertIsNotNone(row.primary)
+                self.assertTrue(all(all(child.closed) for child in row.registry.children))
+                self.assertEqual((world.launches, world.signals, world.wait_calls), ([], [], 0))
+
+    def controller(self, world, files=None):
+        controller = D.Controller(100.0)
+        if files is not None:
+            controller.prepare()  # Real authority, preservation and preparation.
+        else:
+            # Only early-failure tests use this path and cannot enter final preservation.
+            controller.cancel, controller.evidence = world.cancel, MemoryEvidence()
+        return controller
+
+    def test_actual_controller_run_rechecks_preservation_result_and_manifest_work(self):
+        for boundary in ("baseline", "preservation-time", "preservation-cancel", "RESULT.json-time",
+                         "RESULT.json-cancel", "MANIFEST.json-time", "MANIFEST.json-cancel"):
+            with self.subTest(boundary=boundary), FictionalWorld() as world, SelectorFiles(world) as files:
+                controller = self.controller(world, files)
+                files.reads.clear()
+                def change(label):
+                    if boundary.startswith(label):
+                        if boundary.endswith("time"):
+                            world.at = controller.cutoff
+                        else:
+                            world.cancel.cancelled = True
+                def read(name):
+                    # The last original AGENTS check is after every selected file/index.
+                    if name == str(D.ROOT / "AGENTS.md") and files.reads.count(name) == 2:
+                        change("preservation")
+                files.on_read = read
+                controller.evidence.hook = lambda name, _value: change(name)
+                with mock.patch.object(D, "ROWS", ()):
+                    result = controller.run()
+                self.assertEqual(result, 0 if boundary == "baseline" else 1)
+                self.assertTrue(C.loads(controller.evidence.raw["RESULT.json"], file_record=True)["provisional"])
+                self.assertIn("MANIFEST.json", controller.evidence.calls)
+                if boundary != "baseline":
+                    self.assertIsNotNone(controller.primary)
+                self.assertEqual((world.launches, world.signals, world.wait_calls), ([], [], 0))
+
+    def test_controller_first_error_survives_two_final_write_errors(self):
+        with FictionalWorld() as world, SelectorFiles(world) as files:
+            controller = self.controller(world, files)
+            source_path = str(D.SOURCE / controller.selectors.source_rows[0][0])
+            files.files[source_path] += b"fictional-drift"
+            controller.evidence.calls.clear()
+            def broken_write(name, _value):
+                raise RuntimeError("fictional-secondary-" + name)
+            controller.evidence.hook = broken_write
+            with mock.patch.object(D, "ROWS", ()):
+                self.assertEqual(controller.run(), 1)
+            self.assertEqual(controller.primary["code"], "source-preservation-drift")
+            self.assertEqual([v["message"] for v in controller.errors],
+                             ["fictional-secondary-RESULT.json", "fictional-secondary-MANIFEST.json"])
+            self.assertEqual(controller.evidence.calls, ["RESULT.json", "MANIFEST.json"])
+
+    def test_actual_evidence_write_retains_partial_and_independent_close_errors(self):
+        for stage in ("open", "write", "fsync", "close", "write-close", "fsync-close"):
+            with self.subTest(stage=stage), FictionalWorld():
+                evidence = object.__new__(D.Evidence)
+                evidence.path, evidence.bytes, evidence.records = BASE / "fictional-evidence-only", 0, {}
+                closed = []
+                def opened(*_args):
+                    if stage == "open":
+                        raise RuntimeError("fictional-open")
+                    return 91
+                def write(fd, raw):
+                    self.assertEqual(fd, 91)
+                    if stage.startswith("write"):
+                        raise RuntimeError("fictional-write")
+                    return len(raw)
+                def synced(fd):
+                    self.assertEqual(fd, 91)
+                    if stage.startswith("fsync"):
+                        raise RuntimeError("fictional-fsync")
+                def close(fd):
+                    closed.append(fd)
+                    if stage.endswith("close"):
+                        raise RuntimeError("fictional-close")
+                with mock.patch.object(os, "open", side_effect=opened), mock.patch.object(os, "write", side_effect=write), \
+                     mock.patch.object(os, "fsync", side_effect=synced), mock.patch.object(os, "close", side_effect=close), \
+                     self.assertRaises(RuntimeError) as raised:
+                    evidence.write("RESULT.json", {"provisional": True})
+                retained = evidence.records["RESULT.json"]
+                self.assertTrue(retained["incomplete"])
+                self.assertEqual(closed, [] if stage == "open" else [91])
+                if "-close" in stage:
+                    self.assertEqual(str(raised.exception), "fictional-" + stage.split("-")[0])
+                    self.assertEqual(retained["closeError"]["message"], "fictional-close")
+                    self.assertEqual(retained["primary"]["message"], str(raised.exception))
+                self.assertGreater(evidence.bytes, 0)
+
+    def test_actual_main_returns_failure_after_terminal_output_and_restoration(self):
+        for boundary in ("baseline", "stdout-time", "stdout-cancel", "stdout-error", "restore-time", "restore-error"):
+            with self.subTest(boundary=boundary), FictionalWorld() as world, SelectorFiles(world) as files:
+                created, printed, actual_class = [], [], D.Controller
+                def constructed(started):
+                    controller = actual_class(started)
+                    created.append(controller)
+                    return controller
+                def printed_result(*args, **kwargs):
+                    printed.append((args, kwargs))
+                    if boundary == "stdout-time":
+                        world.at = created[0].cutoff
+                    elif boundary == "stdout-cancel":
+                        world.cancel.cancelled = True
+                    elif boundary == "stdout-error":
+                        raise RuntimeError("fictional-terminal-output")
+                def restored():
+                    if boundary == "restore-time":
+                        world.at = created[0].cutoff
+                    return [{"code": "fictional-restoration"}] if boundary == "restore-error" else []
+                world.cancel.on_restore = restored
+                with mock.patch.object(D, "Controller", side_effect=constructed), mock.patch.object(D, "ROWS", ()), \
+                     mock.patch.object(D, "print", side_effect=printed_result, create=True), \
+                     mock.patch.object(sys, "argv", [str(BASE / "controller.py"), "--execute-reviewed"]):
+                    result = D.main()
+                self.assertEqual(result, 0 if boundary == "baseline" else 1)
+                self.assertEqual(world.cancel.restore_calls, 1)
+                self.assertEqual(len(printed), 1)
+                controller = created[0]
+                self.assertEqual(controller.started, 109.0)
+                self.assertEqual(controller.cutoff, 289.0)
+                self.assertEqual("FINALIZATION-FAILURE.json" in controller.evidence.raw, boundary != "baseline")
+                self.assertEqual(files.evidence_constructions, 1)
+                self.assertEqual((world.launches, world.signals, world.wait_calls), ([], [], 0))
+
+    def test_owned_handler_restorations_are_independent_and_do_not_overwrite_foreign(self):
+        cancellation = object.__new__(R.Cancellation)
+        cancellation.original = {signal.SIGINT: 1, signal.SIGTERM: 2, signal.SIGCHLD: 0}
+        cancellation.installed = {signal.SIGINT: "our-int", signal.SIGTERM: "our-term", signal.SIGCHLD: "our-chld"}
+        cancellation.restore_errors = []
+        changed, calls = dict(cancellation.installed), []
+        changed[signal.SIGCHLD] = "foreign-handler"
+        def restore(sig, value):
+            calls.append((sig, value))
+            if sig == signal.SIGINT:
+                raise RuntimeError("fictional-int-restore")
+        with mock.patch.object(signal, "getsignal", side_effect=changed.__getitem__), \
+             mock.patch.object(signal, "signal", side_effect=restore):
+            errors = cancellation.restore()
+            self.assertEqual(cancellation.restore(), errors)
+        self.assertEqual(calls, [(signal.SIGINT, 1), (signal.SIGTERM, 2)])
+        self.assertEqual(len(errors), 2)
+        self.assertEqual(errors[1]["code"], "handler-custody-changed")
+
+    def test_actual_scratch_preservation_failure_cannot_delete_remaining_inputs(self):
+        for fault in ("baseline", "late-archive", "cancel-archive", "failed-archive"):
+            with self.subTest(fault=fault), FictionalWorld() as world:
+                row = world.row("direct")
+                row.clean, row.unknown, row.subtree = True, False, "resolved"
+                payload = b"fictional already-disposed input"
+                file_info = types.SimpleNamespace(st_dev=5, st_ino=1001, st_mode=0o100600, st_uid=501)
+                directories = {name: types.SimpleNamespace(st_dev=5, st_ino=2000 + i, st_mode=0o40700, st_uid=501)
+                               for i, name in enumerate(("", "home", "tmp"))}
+                row.owned_directories = directories
+                row.owned_files = {"marker": dict(fd=91, identity=file_info, sha256=hashlib.sha256(payload).hexdigest(),
+                                                  bytes=len(payload), complete=True, closed=True, primary=None,
+                                                  closeError=None, closeAttempted=True)}
+                def stat(path):
+                    if path == row.scratch / "marker":
+                        return file_info
+                    return directories["" if path == row.scratch else path.name]
+                def archived(_name, _value):
+                    if fault == "late-archive":
+                        world.at = row.owner.cutoff
+                    elif fault == "cancel-archive":
+                        world.cancel.cancelled = True
+                    elif fault == "failed-archive":
+                        raise RuntimeError("fictional-archive-write")
+                row.owner.evidence.hook = archived
+                with mock.patch.object(os, "listdir", side_effect=lambda path: ["marker", "home", "tmp"] if path == row.scratch else []), \
+                     mock.patch.object(Path, "lstat", autospec=True, side_effect=stat), \
+                     mock.patch.object(D, "regular_bytes", return_value=payload), \
+                     mock.patch.object(Path, "unlink") as unlink, mock.patch.object(Path, "rmdir") as rmdir:
+                    if fault == "baseline":
+                        row.archive_and_remove_scratch()
+                        self.assertEqual((unlink.call_count, rmdir.call_count), (1, 3))
+                    else:
+                        with self.assertRaises((C.Failure, RuntimeError)):
+                            row.archive_and_remove_scratch()
+                        unlink.assert_not_called()
+                        rmdir.assert_not_called()
+                self.assertEqual(len(row.owned_files), 1)
+                self.assertEqual(world.launches, [])
+
+    def test_scratch_disposition_receipt_failure_stops_later_rows(self):
+        with FictionalWorld() as world:
+            controller = self.controller(world)
+            row = types.SimpleNamespace(primary=None, unknown=False, outside=None, relay=None,
+                                        channels=types.SimpleNamespace(reader=None),
+                                        proof={"acquisitions": 3, "execs": 4}, scratch=BASE / "fictional-archived",
+                                        owned_files={"marker": {}}, absent=None, run=lambda: True,
+                                        record=lambda: {"fictionalDisposedRow": True}, archive_and_remove_scratch=lambda: None)
+            def recorded(name, _value):
+                if name.endswith(".scratch-disposition.json"):
+                    raise RuntimeError("fictional-scratch-disposition-receipt")
+            controller.evidence.hook = recorded
+            with mock.patch.object(D, "Row", return_value=row) as factory:
+                self.assertEqual(controller.run(), 1)
+            self.assertEqual(factory.call_count, 1)
+            self.assertEqual(controller.results[0]["status"], "FAIL_SCRATCH_DISPOSITION")
+            self.assertTrue(all(v["status"] == "UNEXECUTED" for v in controller.results[1:]))
+            self.assertEqual(controller.primary["message"], "fictional-scratch-disposition-receipt")
+
+
+class FictionalOutput:
+    def __init__(self, on_frame=None):
+        self.pending, self.frames, self.on_frame = {}, [], on_frame
+
+    def write(self, fd, raw):
+        preparation_bound()
+        data = bytes(raw)
+        value = self.pending.setdefault(fd, bytearray())
+        value.extend(data)
+        while b"\n" in value:
+            line, _, tail = value.partition(b"\n")
+            value[:] = tail
+            frame = C.loads(bytes(line))
+            self.frames.append((fd, frame))
+            if self.on_frame:
+                self.on_frame(fd, frame)
+        return len(data)
+
+
+def configure_ordinary_child(world):
+    writer = FictionalStream(world, 703)
+    world.streams.append(writer)
+    world.handle.stdin = writer
+    world.directions[703] = os.O_WRONLY
+
+
+def sender_main_fixture(world, *, final_hook=None, marker_hook=None, probe_hook=None):
+    """Real sender.main, Registry, Reader, guard, cleanup and output with fake OS leaves."""
+    world.owner_pid = 201
+    c = context("direct")
+    configure_ordinary_child(world)
+    inside_identity = dict(pid=601, parent=201, group=601, session=80, uid=501)
+    world.read_sequences[0] = [C.command(c, "start")]
+    world.read_sequences[701] = [C.dumps(C.envelope(c, "inside", 601, n + 1, "ready" if n == 0 else "pong",
+                                             dict(identity=inside_identity, counter=n,
+                                                  marker=dict(readable=False, matches=False, errno=errno.EACCES),
+                                                  entry=admission(c, "inside", inside_identity)))) for n in range(3)]
+    world.read_sequences[702] = [b""]
+    calls = []
+    def kill(target, number):
+        preparation_bound()
+        calls.append((target, number))
+        if number == 0:
+            C.need(target in (101, -101), "fictional-external-zero-target")
+            if probe_hook:
+                probe_hook(target, number)
+            raise OSError(errno.EPERM, "fictional-sandbox-denial")
+        C.need((target, number) in {(601, signal.SIGUSR1), (-601, signal.SIGUSR1), (-601, signal.SIGKILL)},
+               "fictional-inside-signal-target")
+        if number == signal.SIGKILL:
+            world.killed = True
+    def marked(_context):
+        if marker_hook:
+            marker_hook()
+        return dict(readable=False, matches=False, errno=errno.EACCES)
+    def written(_fd, frame):
+        if frame.get("actor") == "sender" and frame.get("kind") == "final" and final_hook:
+            final_hook()
+    output = FictionalOutput(written)
+    with mock.patch.object(S, "Cancellation", return_value=world.cancel), \
+         mock.patch.object(S, "read_context", return_value=c), mock.patch.object(S, "marker", side_effect=marked), \
+         mock.patch.object(os, "getppid", return_value=100), mock.patch.object(os, "getpgid", return_value=601), \
+         mock.patch.object(os, "kill", side_effect=kill), mock.patch.object(os, "write", side_effect=output.write), \
+         mock.patch.object(sys, "argv", [str(BASE / "sender.py"), C.dumps(c).decode().strip()]):
+        result = S.main()
+    return result, calls, output
+
+
+class WorkerTerminalGates(unittest.TestCase):
+    def test_actual_sender_main_final_output_and_completion_cannot_publish_success(self):
+        for fault in ("baseline", "cancel", "expired"):
+            with self.subTest(fault=fault), FictionalWorld() as world:
+                def final():
+                    if fault == "cancel":
+                        world.cancel.cancelled = True
+                    elif fault == "expired":
+                        world.at = 140.0
+                result, calls, output = sender_main_fixture(world, final_hook=final)
+                self.assertEqual(result, 0 if fault == "baseline" else 1)
+                self.assertEqual(calls, [(101, 0), (-101, 0), (601, signal.SIGUSR1), (-601, signal.SIGUSR1), (-601, signal.SIGKILL)])
+                finals = [frame for _fd, frame in output.frames if frame.get("actor") == "sender" and frame.get("kind") == "final"]
+                self.assertEqual(len(finals), 1)
+                self.assertIsNone(finals[0]["data"]["primary"])
+                self.assertEqual(finals[0]["data"]["child"]["status"], 9)
+                self.assertEqual([v.close_calls for v in world.streams], [1, 1, 1])
+                self.assertEqual(world.cancel.restore_calls, 1)
+
+    def test_marker_io_and_second_probe_cannot_admit_later_work(self):
+        for boundary in ("marker", "first-probe"):
+            for fault in ("cancel", "expired", "eof"):
+                with self.subTest(boundary=boundary, fault=fault), FictionalWorld() as world:
+                    def event(*_args):
+                        if fault == "cancel":
+                            world.cancel.cancelled = True
+                        elif fault == "expired":
+                            world.at = 130.0
+                        else:
+                            world.read_sequences[0] = [b""]
+                    result, calls, _output = sender_main_fixture(world, marker_hook=event if boundary == "marker" else None,
+                                                                 probe_hook=event if boundary == "first-probe" else None)
+                    self.assertEqual(result, 1)
+                    self.assertEqual(calls, [] if boundary == "marker" else [(101, 0)])
+                    self.assertEqual(world.launches, [])
+
+    def test_actual_python_relay_main_finalization_with_real_cleanup_methods(self):
+        for fault in ("baseline", "cancel", "expired"):
+            with self.subTest(fault=fault), FictionalWorld() as world:
+                world.owner_pid = 201
+                c = context("python-child")
+                configure_ordinary_child(world)
+                world.read_sequences[701] = [C.dumps(C.envelope(c, "sender", 601, 1, "ready", {"fictional": True})), b""]
+                world.read_sequences[702] = [b""]
+                world.on_wait = lambda *_args: (601, 0)
+                def written(_fd, frame):
+                    if frame.get("actor") == "python-relay" and frame.get("kind") == "final":
+                        if fault == "cancel":
+                            world.cancel.cancelled = True
+                        elif fault == "expired":
+                            world.at = 140.0
+                output = FictionalOutput(written)
+                with mock.patch.object(P, "Cancellation", return_value=world.cancel), \
+                     mock.patch.object(P, "read_context", return_value=c), \
+                     mock.patch.object(os, "write", side_effect=output.write), \
+                     mock.patch.object(sys, "argv", [str(BASE / "python_relay.py"), C.dumps(c).decode().strip()]):
+                    result = P.main()
+                self.assertEqual(result, 0 if fault == "baseline" else 1)
+                self.assertEqual(world.wait_calls, 1)
+                self.assertEqual(len(world.launches), 1)
+                self.assertEqual(world.signals, [])
+                self.assertEqual([v.close_calls for v in world.streams], [1, 1, 1])
+                self.assertEqual(world.cancel.restore_calls, 1)
+                final = next(v for _fd, v in output.frames if v.get("actor") == "python-relay" and v.get("kind") == "final")
+                self.assertIsNone(final["data"]["primary"])
+
+    def test_actual_canary_main_end_and_handler_finalization(self):
+        for fault in ("baseline", "cancel", "expired"):
+            with self.subTest(fault=fault), FictionalWorld() as world:
+                world.owner_pid = 101
+                c = dict(context("direct"), external=None, channels=None)
+                handlers = {signal.SIGUSR1: signal.SIG_DFL}
+                def install(sig, handler):
+                    old = handlers[sig]
+                    handlers[sig] = handler
+                    return old
+                def written(_fd, frame):
+                    if frame.get("kind") == "ready":
+                        # The final ready-write checkpoint still sees open control;
+                        # the canary's next actual read receives EOF.
+                        world.read_sequences[0] = [BlockingIOError(errno.EAGAIN, "fictional-open"), b""]
+                    elif frame.get("kind") == "end":
+                        if fault == "cancel":
+                            world.cancel.cancelled = True
+                        elif fault == "expired":
+                            world.at = 140.0
+                output = FictionalOutput(written)
+                with mock.patch.object(A, "Cancellation", return_value=world.cancel), \
+                     mock.patch.object(A, "read_context", return_value=c), \
+                     mock.patch.object(A, "marker", return_value=dict(readable=True, matches=True, errno=None)), \
+                     mock.patch.object(os, "getppid", return_value=100), \
+                     mock.patch.object(os, "write", side_effect=output.write), \
+                     mock.patch.object(signal, "signal", side_effect=install), \
+                     mock.patch.object(signal, "getsignal", side_effect=handlers.__getitem__), \
+                     mock.patch.object(sys, "argv", [str(BASE / "canary.py"), C.dumps(c).decode().strip(), "outside", "100"]):
+                    result = A.main()
+                self.assertEqual(result, 0 if fault == "baseline" else 1)
+                self.assertEqual(handlers, {signal.SIGUSR1: signal.SIG_DFL})
+                self.assertEqual(world.cancel.restore_calls, 1)
+                self.assertEqual((world.launches, world.signals, world.wait_calls), ([], [], 0))
+                final = next(v for _fd, v in output.frames if v.get("kind") == "end")
+                self.assertEqual(final["data"]["reason"], "private-control-eof")
+
+    def test_loss_terminal_gate_failure_retains_one_frame_and_failure_only_exit(self):
+        for name in ("parent-exit", "parent-kill"):
+            for fault in ("cancel-after-final", "deadline-after-final"):
+                with self.subTest(route=name, fault=fault), LossPublicationIO(name, fault) as world:
+                    raw = world.publish()
+                    finals = [C.loads(line) for line in raw.splitlines() if C.loads(line)["kind"] == "final"]
+                    self.assertEqual(len(finals), 1)
+                    self.assertEqual(world.exits, [1])
+                    self.assertEqual(world.commit_attempts, [])
+                    prove_root_loss(self, world, raw, accepted=False)
+
+
+class FictionalOwnExit(BaseException):
+    def __init__(self, code):
+        self.code = code
+
+
+class LossPublicationIO(FictionalWorld):
+    """Real producer/encoder/pipe-write control flow, fictional syscall leaves.
+
+    The root and sender have SEPARATE cancellation flags. Captured bytes are fed
+    unchanged to real Reader/pump/cleanup/preproof/QueryChild/reconcile consumers.
+    No fake claims a full atomic commit was written on an error/short return.
+    Unsupported short/odd atomic returns are defensive-contract cases only.
+    """
+    def __init__(self, row_name, fault="none"):
+        super().__init__(immediate_exit=True)
+        self.args, self.fault = fixture(row_name), fault
+        self.sender_cancel = FictionalCancellation()
+        self.sender_checks, self.checks_after_commit = 0, 0
+        self.result_raw, self.write_attempts, self.commit_attempts, self.exits = bytearray(), [], [], []
+        self.pipe_queries, self.completed_final, self.committed = [], False, False
+        self.armed, self.nonblocking, self.provisional_attempts = False, False, 0
+        self.setter_calls, self.terminal_selects = 0, 0
+        self.select_eagain_seen = False
+        self._loss_stack = ExitStack()
+
+    def sender_checkpoint(self):
+        preparation_bound()
+        self.sender_checks += 1
+        if self.committed:
+            self.checks_after_commit += 1
+        self.sender_cancel.check()
+
+    def stat(self, fd):
+        if fd in (34, 81):
+            if self.armed and fd == 34 and self.fault == "custody-error":
+                raise OSError(errno.EIO, "fictional-result-fstat")
+            inode = 99 if self.armed and (self.fault == "wrong-custody"
+                       or self.fault == "commit-custody" and self.completed_final) else 7
+            return types.SimpleNamespace(st_dev=5, st_ino=inode, st_mode=stat_mode_fifo(), st_rdev=0,
+                                         st_uid=501, st_nlink=1, st_size=0, st_mtime_ns=1, st_ctime_ns=1)
+        return super().stat(fd)
+
+    def flags(self, fd, operation, *_args):
+        if fd == 34:
+            preparation_bound()
+            C.need(operation == fcntl.F_GETFL, "fictional-result-fcntl")
+            if self.armed and self.fault == "flags-error":
+                raise OSError(errno.EIO, "fictional-result-fcntl")
+            direction = os.O_RDONLY if self.armed and self.fault == "wrong-direction" else os.O_WRONLY
+            blocked = self.armed and (self.fault == "missing-nonblocking"
+                                     or self.fault == "commit-blocking" and self.completed_final)
+            return direction | (os.O_NONBLOCK if self.nonblocking and not blocked else 0)
+        return super().flags(fd, operation)
+
+    def set_blocking(self, fd, value):
+        if fd == 34:
+            preparation_bound()
+            self.setter_calls += 1
+            C.need(value is False, "fictional-result-nonblocking-setting")
+            if self.armed and self.fault == "set-blocking-error":
+                raise OSError(errno.EIO, "fictional-set-blocking")
+            self.nonblocking = True
+            return
+        return super().set_blocking(fd, value)
+
+    def pipe_buf(self, fd, name):
+        preparation_bound()
+        self.pipe_queries.append((fd, name))
+        C.need((fd, name) == (34, "PC_PIPE_BUF"), "fictional-pipebuf-owned-fd-only")
+        if self.fault == "pipebuf-error":
+            raise OSError(errno.EINVAL, "fictional-pipebuf-unsupported")
+        if self.fault == "admission-pipebuf-eagain" and self.completed_final and len(self.pipe_queries) == 3:
+            raise BlockingIOError(errno.EAGAIN, "fictional-metadata-is-not-commit-write")
+        values = {"pipebuf-small": 511, "pipebuf-bool": True, "pipebuf-string": "512", "pipebuf-negative": -1,
+                  "per-fd-pipebuf": 511}
+        return values.get(self.fault, 512)
+
+    def select(self, readers, writers, errors, timeout):
+        if self.armed and writers == [34]:
+            self.terminal_selects += 1
+            if self.fault in {"cancel-select", "cancel-backpressure"} and self.provisional_attempts == 0:
+                self.sender_cancel.cancelled = True
+                return readers, [] if self.fault == "cancel-backpressure" else writers, errors
+            if self.fault == "cancel-commit-select" and self.completed_final:
+                self.sender_cancel.cancelled = True
+                return readers, writers, errors
+            if self.fault == "commit-select-eagain" and self.completed_final and not self.select_eagain_seen:
+                self.select_eagain_seen = True
+                raise BlockingIOError(errno.EAGAIN, "fictional-select-is-not-commit-write")
+        return super().select(readers, writers, errors, timeout)
+
+    def write_result(self, fd, raw):
+        preparation_bound()
+        C.need(fd == 34, "fictional-result-write-owned-fd-only")
+        data = bytes(raw)
+        is_commit = data.endswith(b"\n") and data.startswith(b'{"actor":"sender","data":{"finalBytes":')
+        self.write_attempts.append((is_commit, data))
+        if not self.armed:
+            self.result_raw.extend(data)
+            return len(data)
+        if is_commit:
+            self.commit_attempts.append(data)
+            if self.fault in {"commit-eagain", "cancel-commit-eagain", "deadline-commit-eagain"} and len(self.commit_attempts) == 1:
+                if self.fault == "cancel-commit-eagain":
+                    self.sender_cancel.cancelled = True
+                elif self.fault == "deadline-commit-eagain":
+                    self.at = self.args[0]["disposition"]
+                raise BlockingIOError(errno.EAGAIN, "fictional-zero-byte-backpressure")
+            if self.fault == "commit-eagain-partial":
+                self.result_raw.extend(data[:1])
+                raise BlockingIOError(errno.EAGAIN, "fictional-unsupported-reported-partial", 1)
+            if self.fault == "commit-error":
+                raise OSError(errno.EIO, "fictional-no-commit-write")
+            if self.fault == "commit-eintr":
+                raise InterruptedError(errno.EINTR, "fictional-returned-EINTR-no-user-retry")
+            if self.fault == "commit-short":
+                self.result_raw.extend(data[:7])
+                return 7
+            if self.fault in {"commit-zero", "commit-bool", "commit-string", "commit-overcount"}:
+                return {"commit-zero": 0, "commit-bool": True, "commit-string": "whole",
+                        "commit-overcount": len(data) + 1}[self.fault]
+            # Cancellation during a successfully ADMITTED whole API invocation
+            # is intentionally irreversible. No internal kernel retry is tested.
+            if self.fault == "cancel-admitted-commit":
+                self.sender_cancel.cancelled = True
+            if self.fault == "root-cancel-commit":
+                self.cancel.cancelled = True
+            if self.fault == "root-cutoff-commit":
+                self.at = self.args[0]["outer"]
+            self.result_raw.extend(data)
+            self.committed = True
+            return len(data)
+        self.provisional_attempts += 1
+        if self.fault == "provisional-error" or self.fault == "provisional-partial-error" and self.provisional_attempts > 1:
+            raise OSError(errno.EIO, "fictional-partial-final-write")
+        if self.fault in {"provisional-zero", "provisional-bool", "provisional-string", "provisional-overcount"}:
+            return {"provisional-zero": 0, "provisional-bool": True, "provisional-string": "whole",
+                    "provisional-overcount": len(data) + 1}[self.fault]
+        if self.fault == "provisional-partial-error":
+            self.result_raw.extend(data[:7])
+            return 7
+        if self.fault == "provisional-short-success" and self.provisional_attempts == 1:
+            self.result_raw.extend(data[:7])
+            return 7
+        self.result_raw.extend(data)
+        if self.fault == "cancel-between-chunks" and self.provisional_attempts == 1:
+            self.sender_cancel.cancelled = True
+        if data.endswith(b"\n"):
+            self.completed_final = True
+            if self.fault == "cancel-after-final":
+                self.sender_cancel.cancelled = True
+            if self.fault == "deadline-after-final":
+                self.at = self.args[0]["disposition"]
+        return len(data)
+
+    def own_exit(self, code):
+        self.exits.append(code)
+        raise FictionalOwnExit(code)
+
+    def __enter__(self):
+        super().__enter__()
+        self._loss_stack.enter_context(mock.patch.object(os, "write", side_effect=self.write_result))
+        self._loss_stack.enter_context(mock.patch.object(os, "fpathconf", side_effect=self.pipe_buf))
+        self._loss_stack.enter_context(mock.patch.object(os, "_exit", side_effect=self.own_exit))
+        return self
+
+    def __exit__(self, *args):
+        self._loss_stack.close()
+        super().__exit__(*args)
+
+    def publish(self, *, code=0, legacy=None, value_change=None):
+        self.owner_pid = 401
+        c = self.args[0]
+        guard = R.WorkGuard(c, types.SimpleNamespace(check=self.sender_checkpoint))
+        emitter = R.Emitter(c, "sender", 34, guard=guard)
+        # Use the real Emitter even for the pre-terminal prefix. The subsequent
+        # expected frames are obtained by Reader decoding actual retained bytes.
+        for item in self.args[4]:
+            frame = item["frame"]
+            if item["stream"] == "independent" and frame["kind"] not in {"final", "terminal-commit"}:
+                emitter.emit(frame["kind"], frame["data"])
+        value = copy.deepcopy(sender_final(self.args))
+        if value_change:
+            value_change(value)
+        if legacy:
+            value["terminal"]["mode"] = "kernel-close-on-immediate-exit"
+        self.armed = True
+        if self.fault == "cancel-before-final":
+            self.sender_cancel.cancelled = True
+        try:
+            if legacy:
+                legacy["publish_loss"](emitter, value, code, guard.completion)
+            else:
+                S.publish_loss(emitter, value, code)
+        except FictionalOwnExit:
+            pass
+        else:
+            raise AssertionError("loss publisher returned instead of immediate own exit")
+        self.owner_pid = 100
+        C.need(len(self.exits) == 1, "fictional-one-own-exit")
+        return bytes(self.result_raw)
+
+
+def root_loss_row(world, raw, *, eof=True, read_error=False, args=None):
+    """No mocked root consumer. Real typed children, captures, cleanup and pump."""
+    args = copy.deepcopy(world.args if args is None else args)
+    row = world.row(args[0]["row"])
+    row.c, row.registry.c, row.owner.identity = args[0], args[0], args[1]
+    row.owner.acquisition_reserved, row.owner.exec_reserved = row.route.acquisitions, row.route.execs
+    row.root_signals, row.sender_pid, row.subtree = args[7], 401, "unresolved"
+    row.registry.attempts = args[3][:2]
+    for index, (cls, value) in enumerate(zip((R.OutsideChild, R.RelayChild), args[2][:2])):
+        streams = [FictionalStream(world, 900 + index * 10 + offset) for offset in range(3)]
+        world.streams.extend(streams)
+        world.directions[streams[0].fd] = os.O_WRONLY
+        handle = types.SimpleNamespace(pid=value["pid"], stdin=streams[0], stdout=streams[1], stderr=streams[2],
+                                       returncode=value["exitCode"])
+        child = cls(row.registry)
+        row.registry.children.append(child)
+        child.publish(handle)
+        child.adopt(handle, row.owner.capture)
+        child.argv, child.group = value["argv"], value["group"]
+        child.status, child.terminal = value["status"], value["terminal"]
+        child.custody_known, child.authorized, child.waits = False, False, copy.deepcopy(value["waits"])
+        for reader, label in ((child.out, "stdout"), (child.err, "stderr")):
+            data = value[label]["raw"].encode()
+            world.read_sequences[reader.fd] = ([data] if data else []) + [b""]
+        if index == 0:
+            row.outside = child
+        else:
+            row.relay = child
+    reader = R.Reader(81, row.owner.capture)
+    world.read_sequences[81] = [raw] + ([OSError(errno.EIO, "fictional-R-read-failure")] if read_error else [b""] if eof else [])
+    row.channels.reader = reader
+    row.channels.entries.append(dict(fd=81, role="r-read-root", direction=os.O_RDONLY, identity=reader.identity,
+                                      closed=False, closeAttempted=False, closeError=None))
+    row.cleanup()  # Real Reader zero-byte EOF, never a parent-side close inference.
+    return row
+
+
+def row_reconcile_args(row):
+    return [row.c, row.owner.identity, [child.record() for child in row.registry.children],
+            row.registry.attempts, row.frames, row.channels.reader.record(), row.absent,
+            row.root_signals, row.observations]
+
+
+def prove_root_loss(test, world, raw, *, accepted, eof=True, read_error=False, old=None, args=None):
+    row = root_loss_row(world, raw, eof=eof, read_error=read_error, args=args)
+    entry_counts = row.owner.acquisition_reserved, row.owner.exec_reserved
+    if accepted:
+        # The only old-consumer replacement is the explicit, separately labelled
+        # historical mutant control. All corrected paths use the actual functions.
+        with ExitStack() as stack:
+            if old:
+                stack.enter_context(mock.patch.object(D, "route_terminal", old["route_terminal"]))
+            preproof = row.terminal_preproof()
+            test.assertEqual(preproof["subtreeDisposition"], "awaiting-absence")
+            test.assertTrue(row.unknown)
+            test.assertEqual(world.launches, [])
+            row.query_orphan()
+        proof = (old["reconcile"] if old else V.reconcile)(*row_reconcile_args(row))
+        test.assertEqual(proof["subtreeDisposition"], "resolved")
+        test.assertEqual(proof["senderExitStatus"], "not-waitable-by-root")
+        test.assertEqual((row.owner.acquisition_reserved, row.owner.exec_reserved),
+                         (entry_counts[0] + 1, entry_counts[1] + 1))
+        test.assertEqual(len(world.launches), 1)
+        test.assertEqual(world.wait_statuses, [(601, 256)])
+        test.assertIs(row.registry.children[-1].handle, world.handle)
+        test.assertTrue(all(row.registry.children[-1].closed))
+        test.assertFalse(row.unknown)
+    else:
+        with test.assertRaises(C.Failure):
+            row.terminal_preproof()
+        with test.assertRaises(C.Failure):
+            row.query_orphan()
+        with test.assertRaises((C.Failure, ValueError)):
+            V.reconcile(*row_reconcile_args(row))
+        test.assertEqual((row.owner.acquisition_reserved, row.owner.exec_reserved), entry_counts)
+        test.assertEqual(world.launches, [])
+        test.assertEqual(world.wait_statuses, [])
+        test.assertEqual(row.observations, [])
+        test.assertTrue(row.unknown)
+        # Exercise the actual deletion admission guard: no successful scratch
+        # disposal can follow a failed/missing final/commit/EOF/absence proof.
+        with test.assertRaises(C.Failure):
+            row.archive_and_remove_scratch()
+    test.assertEqual(world.signals, [])
+    return row
+
+
+class LossCommitRegression(unittest.TestCase):
+    def test_actual_producer_raw_eof_query_and_reconcile_success_both_routes(self):
+        for name in ("parent-exit", "parent-kill"):
+            with self.subTest(route=name), LossPublicationIO(name) as world:
+                raw = world.publish()
+                self.assertEqual(world.exits, [0])
+                self.assertEqual(len(world.commit_attempts), 1)
+                self.assertLessEqual(len(world.commit_attempts[0]), 512)
+                self.assertTrue(world.commit_attempts[0].endswith(b"\n"))
+                self.assertTrue(world.pipe_queries)
+                self.assertTrue(all(call == (34, "PC_PIPE_BUF") for call in world.pipe_queries))
+                self.assertEqual(world.checks_after_commit, 0)
+                row = prove_root_loss(self, world, raw, accepted=True)
+                self.assertTrue(V.reconcile(*row_reconcile_args(row))["terminalCommitted"])
+                self.assertEqual(bytes(row.channels.reader.raw), raw)
+
+    def test_cancellation_before_commit_cannot_admit_query_or_cleanup(self):
+        faults = ("cancel-before-final", "cancel-select", "cancel-backpressure", "cancel-between-chunks",
+                  "cancel-after-final", "cancel-commit-select", "cancel-commit-eagain")
+        for name in ("parent-exit", "parent-kill"):
+            for fault in faults:
+                with self.subTest(route=name, fault=fault), LossPublicationIO(name, fault) as world:
+                    raw = world.publish()
+                    self.assertEqual(world.exits, [1])
+                    self.assertFalse(world.committed)
+                    self.assertLessEqual(len(world.commit_attempts), 1)
+                    prove_root_loss(self, world, raw, accepted=False)
+
+    def test_full_admitted_atomic_commit_is_irreversible_but_not_an_orphan_wait(self):
+        for name in ("parent-exit", "parent-kill"):
+            with self.subTest(route=name), LossPublicationIO(name, "cancel-admitted-commit") as world:
+                raw = world.publish()
+                self.assertTrue(world.sender_cancel.cancelled)
+                self.assertEqual(world.exits, [0])
+                self.assertEqual(world.checks_after_commit, 0)
+                self.assertEqual(len(world.commit_attempts), 1)
+                prove_root_loss(self, world, raw, accepted=True)
+
+    def test_zero_byte_eagain_retries_only_with_the_same_complete_commit_and_budget(self):
+        for name in ("parent-exit", "parent-kill"):
+            with self.subTest(route=name), LossPublicationIO(name, "commit-eagain") as world:
+                raw = world.publish()
+                self.assertEqual(world.exits, [0])
+                self.assertEqual(len(world.commit_attempts), 2)
+                self.assertEqual(world.commit_attempts[0], world.commit_attempts[1])
+                self.assertEqual((world.args[0]["work"], world.args[0]["disposition"], world.args[0]["outer"]), (130.0, 140.0, 280.0))
+                prove_root_loss(self, world, raw, accepted=True)
+
+    def test_sender_and_root_original_deadlines_and_independent_root_cancellation(self):
+        for name in ("parent-exit", "parent-kill"):
+            for fault in ("deadline-after-final", "deadline-commit-eagain", "root-cancel-commit", "root-cutoff-commit"):
+                with self.subTest(route=name, fault=fault), LossPublicationIO(name, fault) as world:
+                    raw = world.publish()
+                    self.assertEqual(world.exits, [0 if fault.startswith("root-") else 1])
+                    prove_root_loss(self, world, raw, accepted=False)
+
+    def test_pipe_custody_actual_nonblocking_and_same_fd_atomic_capacity(self):
+        faults = ("set-blocking-error", "custody-error", "flags-error", "wrong-custody", "wrong-direction",
+                  "missing-nonblocking", "commit-custody", "commit-blocking", "pipebuf-error", "pipebuf-small",
+                  "pipebuf-bool", "pipebuf-string", "pipebuf-negative", "per-fd-pipebuf")
+        for name in ("parent-exit", "parent-kill"):
+            for fault in faults:
+                with self.subTest(route=name, fault=fault), LossPublicationIO(name, fault) as world:
+                    raw = world.publish()
+                    self.assertEqual(world.exits, [1])
+                    self.assertEqual(world.commit_attempts, [])
+                    self.assertTrue(all(call == (34, "PC_PIPE_BUF") for call in world.pipe_queries))
+                    prove_root_loss(self, world, raw, accepted=False)
+
+    def test_provisional_and_atomic_write_errors_never_retry_or_forge_completed_bytes(self):
+        faults = ("provisional-zero", "provisional-bool", "provisional-string", "provisional-overcount",
+                  "provisional-error", "provisional-partial-error", "commit-zero", "commit-short", "commit-error",
+                  "commit-eintr", "commit-bool", "commit-string", "commit-overcount", "commit-eagain-partial")
+        for name in ("parent-exit", "parent-kill"):
+            for fault in faults:
+                with self.subTest(route=name, fault=fault), LossPublicationIO(name, fault) as world:
+                    raw = world.publish()
+                    self.assertEqual(world.exits, [1])
+                    self.assertEqual(len(world.commit_attempts), 1 if fault.startswith("commit-") else 0)
+                    self.assertFalse(world.committed)
+                    prove_root_loss(self, world, raw, accepted=False)
+
+    def test_nonwrite_eagain_does_not_authorize_a_commit_retry(self):
+        for name in ("parent-exit", "parent-kill"):
+            for fault in ("commit-select-eagain", "admission-pipebuf-eagain"):
+                with self.subTest(route=name, fault=fault), LossPublicationIO(name, fault) as world:
+                    raw = world.publish()
+                    self.assertEqual(world.exits, [1])
+                    self.assertEqual(world.commit_attempts, [])
+                    prove_root_loss(self, world, raw, accepted=False)
+
+    def test_primary_secondary_unknown_and_exit_proposal_cannot_produce_commit(self):
+        changes = (lambda v: v.update(primary={"code": "failed-work"}),
+                   lambda v: v.update(cleanupErrors=[{"code": "failed-close"}]),
+                   lambda v: v.update(unknown=True), lambda v: v.update(flags=[15]),
+                   lambda v: v["terminal"].update(controlClosed=False),
+                   lambda v: v["terminal"].update(ordinaryClosed=[True, False, True]))
+        for name in ("parent-exit", "parent-kill"):
+            for index, change in enumerate(changes):
+                with self.subTest(route=name, mutation=index), LossPublicationIO(name) as world:
+                    raw = world.publish(value_change=change)
+                    self.assertEqual((world.exits, world.commit_attempts), ([1], []))
+                    prove_root_loss(self, world, raw, accepted=False)
+            with self.subTest(route=name, exit_proposal=1), LossPublicationIO(name) as world:
+                raw = world.publish(code=1)
+                self.assertEqual((world.exits, world.commit_attempts), ([1], []))
+                prove_root_loss(self, world, raw, accepted=False)
+
+    def test_complete_commit_still_requires_actual_independent_eof_and_reader_success(self):
+        for name in ("parent-exit", "parent-kill"):
+            for condition in ("open", "error"):
+                with self.subTest(route=name, condition=condition), LossPublicationIO(name) as world:
+                    raw = world.publish()
+                    self.assertEqual(world.exits, [0])
+                    prove_root_loss(self, world, raw, accepted=False, eof=condition != "open", read_error=condition == "error")
+
+    def test_old_publication_mutant_falsely_passes_old_cross_owner_contract_but_not_corrected_one(self):
+        source = (BASE / "legacy-r3-r3-snippets.txt").read_bytes()
+        parsed = ast.parse(source, "frozen-old-publication-mutant")
+        self.assertTrue(all(isinstance(node, ast.FunctionDef) for node in parsed.body))
+        legacy = dict(vars(C), **{key: value for key, value in vars(V).items() if key not in vars(C)})
+        legacy["os"] = os
+        exec(compile(parsed, "frozen-old-publication-mutant", "exec"), legacy)
+        for name in ("parent-exit", "parent-kill"):
+            with self.subTest(route=name), LossPublicationIO(name, "cancel-after-final") as world:
+                raw = world.publish(legacy=legacy)
+                self.assertEqual(world.exits, [1])
+                self.assertTrue(world.completed_final)
+                self.assertEqual(world.commit_attempts, [])
+                prove_root_loss(self, world, raw, accepted=True, old=legacy)
+            # Exact same bytes and complete old work; no current consumer is mocked.
+            with LossPublicationIO(name) as corrected_world:
+                prove_root_loss(self, corrected_world, raw, accepted=False)
+
+
+class TerminalRawRegression(unittest.TestCase):
+    def test_final_and_commit_serialization_cancellation_deadline_and_oversize_precede_writes(self):
+        actual_encode = R.Emitter.encode
+        for name in ("parent-exit", "parent-kill"):
+            for target, fault in (("final", "cancel"), ("final", "cutoff"), ("terminal-commit", "cancel"),
+                                  ("terminal-commit", "cutoff"), ("terminal-commit", "oversize")):
+                with self.subTest(route=name, frame=target, fault=fault), LossPublicationIO(name) as world:
+                    encodings = []
+                    def encoded(emitter, kind, value):
+                        if world.armed:
+                            encodings.append(kind)
+                        if world.armed and kind == target and fault == "oversize":
+                            # Defensive size boundary, not a fake successful OS write.
+                            value = dict(value, finalBytes=10 ** 240)
+                        raw = actual_encode(emitter, kind, value)
+                        if world.armed and kind == target:
+                            if fault == "cancel":
+                                world.sender_cancel.cancelled = True
+                            elif fault == "cutoff":
+                                world.at = world.args[0]["disposition"]
+                            else:
+                                self.assertGreater(len(raw), 512)
+                        return raw
+                    with mock.patch.object(R.Emitter, "encode", encoded):
+                        raw = world.publish()
+                    self.assertEqual(world.exits, [1])
+                    self.assertEqual((world.provisional_attempts, world.commit_attempts), (0, []))
+                    self.assertEqual(encodings, ["final"] if target == "final" else ["final", "terminal-commit"])
+                    prove_root_loss(self, world, raw, accepted=False)
+
+    def test_partial_provisional_success_still_uses_full_single_atomic_commit(self):
+        for name in ("parent-exit", "parent-kill"):
+            with self.subTest(route=name), LossPublicationIO(name, "provisional-short-success") as world:
+                raw = world.publish()
+                self.assertEqual(world.exits, [0])
+                self.assertGreater(world.provisional_attempts, 1)
+                self.assertEqual(len(world.commit_attempts), 1)
+                prove_root_loss(self, world, raw, accepted=True)
+
+    def test_mutated_terminal_protocol_rejects_before_observer_or_scratch_admission(self):
+        cases = ("missing", "duplicate", "reversed", "old-mode", "digest", "length", "final-sequence", "sequence",
+                 "length-bool", "sequence-bool", "digest-type", "extra-data", "missing-data", "wrong-row", "nonce-replay",
+                 "wrong-pid", "wrong-work", "wrong-disposition", "wrong-outer", "wrong-channel", "trailing",
+                 "noncanonical-final", "noncanonical-commit", "crlf-commit", "truncated", "raw-over512")
+        for name in ("parent-exit", "parent-kill"):
+            for case in cases:
+                with self.subTest(route=name, case=case), LossPublicationIO(name) as world:
+                    original = world.publish()
+                    lines = original.splitlines(keepends=True)
+                    events = [C.loads(line) for line in lines]
+                    final, commit = events[-2:]
+                    args = None
+                    if case == "missing":
+                        events.pop()
+                    elif case == "duplicate":
+                        events.append(dict(copy.deepcopy(commit), sequence=commit["sequence"] + 1))
+                    elif case == "reversed":
+                        events[-2:] = [commit, final]
+                        commit["sequence"], final["sequence"] = final["sequence"], commit["sequence"]
+                        commit["data"]["finalSequence"] = final["sequence"]
+                    elif case == "old-mode":
+                        final["data"]["terminal"]["mode"] = "kernel-close-on-immediate-exit"
+                        final_bytes = C.dumps(final)
+                        commit["data"].update(finalSha256=hashlib.sha256(final_bytes).hexdigest(), finalBytes=len(final_bytes))
+                    elif case in {"digest", "length", "final-sequence", "length-bool", "sequence-bool", "digest-type", "raw-over512"}:
+                        key, value = {"digest": ("finalSha256", "0" * 64), "length": ("finalBytes", len(lines[-2]) + 1),
+                                      "final-sequence": ("finalSequence", final["sequence"] - 1),
+                                      "length-bool": ("finalBytes", True), "sequence-bool": ("finalSequence", True),
+                                      "digest-type": ("finalSha256", 1), "raw-over512": ("finalBytes", 10 ** 240)}[case]
+                        commit["data"][key] = value
+                    elif case == "sequence":
+                        commit["sequence"] += 1
+                    elif case == "extra-data":
+                        commit["data"]["extra"] = True
+                    elif case == "missing-data":
+                        del commit["data"]["finalBytes"]
+                    elif case in {"wrong-row", "nonce-replay", "wrong-pid", "wrong-work", "wrong-disposition", "wrong-outer"}:
+                        key, value = {"wrong-row": ("row", "parent-kill" if name == "parent-exit" else "parent-exit"),
+                                      "nonce-replay": ("nonce", "b" * 32), "wrong-pid": ("pid", 402),
+                                      "wrong-work": ("work", 131.0), "wrong-disposition": ("disposition", 141.0),
+                                      "wrong-outer": ("outer", 281.0)}[case]
+                        commit[key] = value
+                    elif case == "trailing":
+                        events.append(dict(copy.deepcopy(commit), sequence=commit["sequence"] + 1,
+                                           kind="query", data=copy.deepcopy(final["data"]["queries"][0])))
+                    raw = b"".join(C.dumps(frame) for frame in events)
+                    if case == "wrong-channel":
+                        args = copy.deepcopy(world.args)
+                        args[2][1]["stdout"] = capture(args[2][1]["stdout"]["raw"].encode() + lines[-1])
+                        raw = b"".join(lines[:-1])
+                    elif case == "noncanonical-final":
+                        altered = b" " + lines[-2]
+                        commit["data"].update(finalSha256=hashlib.sha256(altered).hexdigest(), finalBytes=len(altered))
+                        raw = b"".join(lines[:-2]) + altered + C.dumps(commit)
+                    elif case == "noncanonical-commit":
+                        raw = b"".join(lines[:-1]) + b" " + lines[-1]
+                    elif case == "crlf-commit":
+                        raw = original[:-1] + b"\r\n"
+                    elif case == "truncated":
+                        raw = original[:-1]
+                    row = prove_root_loss(self, world, raw, accepted=False, args=args)
+                    if case == "raw-over512":
+                        self.assertGreater(len(C.dumps(commit)), 512)
+                        self.assertTrue(row.clean)
+                        with self.assertRaises(C.Failure) as caught:
+                            row.terminal_preproof()
+                        self.assertEqual(caught.exception.code, "terminal-commit-raw-byte-bound")
+
+    def test_valid_commit_is_not_absence_and_incorrect_actual_query_cannot_resolve_subtree(self):
+        for name in ("parent-exit", "parent-kill"):
+            for condition in ("missing", "wrong-pid", "wrong-parent", "wrong-group", "bad-status", "stderr"):
+                with self.subTest(route=name, condition=condition), LossPublicationIO(name) as world:
+                    row = root_loss_row(world, world.publish())
+                    counts = row.owner.acquisition_reserved, row.owner.exec_reserved
+                    self.assertTrue(row.terminal_preproof()["terminalCommitted"])
+                    if condition != "missing":
+                        if condition == "bad-status":
+                            world.on_wait = lambda pid, _flags: (pid, 2 << 8)
+                        elif condition == "stderr":
+                            world.read_sequences[702] = [b"fictional-error\n", b""]
+                        else:
+                            payload = {"wrong-pid": b"402 1 401 S\n", "wrong-parent": b"401 2 401 S\n",
+                                       "wrong-group": b"401 1 402 S\n"}[condition]
+                            world.read_sequences[701] = [payload, b""]
+                            world.on_wait = lambda pid, _flags: (pid, 0)
+                        with self.assertRaises(C.Failure):
+                            row.query_orphan()
+                    with self.assertRaises(C.Failure):
+                        V.reconcile(*row_reconcile_args(row))
+                    self.assertTrue(row.unknown)
+                    self.assertIsNone(row.absent)
+                    charged = 0 if condition == "missing" else 1
+                    self.assertEqual((row.owner.acquisition_reserved, row.owner.exec_reserved),
+                                     (counts[0] + charged, counts[1] + charged))
+                    self.assertEqual(len(world.launches), charged)
+                    self.assertEqual(world.signals, [])
+                    with self.assertRaises(C.Failure):
+                        row.archive_and_remove_scratch()
+
+    def test_forged_absence_or_incomplete_observation_rejects_against_actual_query_record(self):
+        for name in ("parent-exit", "parent-kill"):
+            with self.subTest(route=name), LossPublicationIO(name) as world:
+                row = prove_root_loss(self, world, world.publish(), accepted=True)
+                for change in (lambda a: a.__setitem__(6, None), lambda a: a.__setitem__(6, False),
+                               lambda a: a.__setitem__(8, []),
+                               lambda a: a[8][0]["observation"].update(absent=False),
+                               lambda a: a[8][0].update(queriedSenderPid=402),
+                               lambda a: a[2][-1]["query"].update(queriedSenderPid=402)):
+                    args = copy.deepcopy(row_reconcile_args(row))
+                    change(args)
+                    with self.assertRaises(C.Failure):
+                        V.reconcile(*args)
+                self.assertEqual((len(world.launches), world.wait_calls, world.signals), (1, 1, []))
+
+    def test_ordinary_routes_reject_commit_and_keep_real_parent_status_contract(self):
+        for route in C.ROWS:
+            if route.loss:
+                continue
+            with self.subTest(route=route.name):
+                original = fixture(route.name)
+                self.assertEqual(V.reconcile(*original)["senderExitStatus"], "actual-owner-wait")
+                final = next(item["frame"] for item in original[4]
+                             if item["frame"]["actor"] == "sender" and item["frame"]["kind"] == "final")
+                commit = C.envelope(original[0], "sender", final["pid"], final["sequence"] + 1,
+                                    "terminal-commit", dict(finalSha256=hashlib.sha256(C.dumps(final)).hexdigest(),
+                                                            finalBytes=len(C.dumps(final)), finalSequence=final["sequence"]))
+                changed = copy.deepcopy(original)
+                changed[4].append(dict(stream="route.stdout", frame=commit))
+                refresh_captures(changed)
+                with self.assertRaises(C.Failure):
+                    V.reconcile(*changed)
+                changed = copy.deepcopy(original)
+                changed[2][1]["status"], changed[2][1]["exitCode"] = 256, 1
+                changed[2][1]["waits"][-1]["status"] = 256
+                with self.assertRaises(C.Failure):
+                    V.reconcile(*changed)
+
+
+class IndependentEntryPaths(unittest.TestCase):
+    # The expectation is the APPROVED PLAN literal, not BASE derived from code
+    # under test. Ruby/Bash remain unexecuted by this Python/static regression.
+    EXPECTED_BASE = "/ORIGINAL_REPOSITORY/.mobile-release/remediation/QA-006/sandbox-inheritance-r3-r4"
+    EXPECTED_PYTHON = "/ORIGINAL_REPOSITORY/.mobile-release/remediation/MRK-002/venv/bin/python"
+    EXPECTED_RUBY = "/opt/homebrew/Cellar/ruby@3.3/3.3.12/bin/ruby"
+    ENTRIES = (("direct", "sender.py"), ("python-child", "python_relay.py"),
+               ("python-new-session", "python_relay.py"), ("ruby-spawn", "ruby_relay.rb"),
+               ("ruby-fork-exec", "ruby_relay.rb"), ("ruby-open3", "ruby_relay.rb"),
+               ("multi-hop", "python_relay.py"), ("parent-exit", "ruby_relay.rb"),
+               ("parent-kill", "ruby_relay.rb"), ("no-fence-direct", "sender.py"),
+               ("no-fence-multi-hop", "python_relay.py"))
+    RUBY_ROWS = ("ruby-spawn", "ruby-fork-exec", "ruby-open3", "multi-hop", "no-fence-multi-hop", "parent-exit", "parent-kill")
+
+    def binding_text(self, ruby_source, bash_source):
+        bases = [line.split('"')[1] for line in ruby_source.splitlines() if line.startswith("  BASE = ")]
+        pythons = [line.split('"')[1] for line in ruby_source.splitlines() if line.startswith("  PYTHON = ")]
+        rows = [line for line in ruby_source.splitlines() if line.startswith("  ROWS = ")]
+        self.assertEqual(bases, [self.EXPECTED_BASE])
+        self.assertEqual(pythons, [self.EXPECTED_PYTHON])
+        self.assertEqual(rows, ["  ROWS = %w[" + " ".join(self.RUBY_ROWS) + "].freeze"])
+        self.assertIn('      InheritanceRelay.need(@c["scratch"] == "#{BASE}/execution-r1/#{@c[\'row\']}-inputs", "context-scratch")', ruby_source)
+        self.assertIn('        path = "#{BASE}/#{name}"', ruby_source)
+        self.assertIn('      @argv = [PYTHON, "-I", "-B", "#{BASE}/sender.py", JSON.generate(@c)]', ruby_source)
+        execs = [line for line in bash_source.splitlines() if line.startswith("exec ")]
+        self.assertEqual(execs, ["exec " + self.EXPECTED_RUBY + " --disable-gems " + self.EXPECTED_BASE + '/ruby_relay.rb "$1"'])
+        for name in self.RUBY_ROWS:
+            c = context(name)
+            self.assertEqual(c["scratch"], self.EXPECTED_BASE + "/execution-r1/" + name + "-inputs")
+            # These exact inspected interpolation sites + bound constants are a
+            # static cross-language path proof, not a Ruby initializer execution.
+            self.assertEqual(bases[0] + "/execution-r1/" + c["row"] + "-inputs", c["scratch"])
+            expected = [self.EXPECTED_PYTHON, "-I", "-B", self.EXPECTED_BASE + "/sender.py", C.dumps(c).decode().strip()]
+            self.assertEqual(C.fixed_argv(c, "ruby-relay", "sender", 301 if "multi-hop" in name else 201), expected)
+            self.assertEqual([pythons[0], "-I", "-B", bases[0] + "/sender.py"], expected[:-1])
+        return len(self.RUBY_ROWS)
+
+    def test_all_eleven_route_entries_and_every_constructed_hop_match_independent_plan_literals(self):
+        self.assertEqual([(route.name, route.entry) for route in C.ROWS], list(self.ENTRIES))
+        self.assertEqual(str(C.BASE), self.EXPECTED_BASE)
+        self.assertEqual((C.PYTHON, C.RUBY), (self.EXPECTED_PYTHON, self.EXPECTED_RUBY))
+        for name, entry in self.ENTRIES:
+            with self.subTest(route=name):
+                c = context(name)
+                serialized = C.dumps(c).decode().strip()
+                policy = self.EXPECTED_BASE + "/execution-r1/" + name + "-inputs/policy.sb"
+                program = ([self.EXPECTED_RUBY, "--disable-gems"] if entry.endswith(".rb") else
+                           [self.EXPECTED_PYTHON, "-I", "-B"])
+                expected = ["/usr/bin/sandbox-exec", "-f", policy, *program, self.EXPECTED_BASE + "/" + entry, serialized]
+                self.assertEqual(C.fixed_argv(c, "root", "route", 100), expected)
+                outside = dict(c, external=None, channels=None)
+                self.assertEqual(C.fixed_argv(outside, "root", "outside", 100),
+                                 [self.EXPECTED_PYTHON, "-I", "-B", self.EXPECTED_BASE + "/canary.py",
+                                  C.dumps(outside).decode().strip(), "outside", "100"])
+                sender_pid = 201 if name in {"direct", "no-fence-direct"} else 401
+                self.assertEqual(C.fixed_argv(c, "sender", "inside", sender_pid),
+                                 [self.EXPECTED_PYTHON, "-I", "-B", self.EXPECTED_BASE + "/canary.py",
+                                  serialized, "inside", str(sender_pid)])
+                if name in {"multi-hop", "no-fence-multi-hop"}:
+                    self.assertEqual(C.fixed_argv(c, "python-relay", "hop", 201),
+                                     ["/bin/bash", "--noprofile", "--norc", self.EXPECTED_BASE + "/bash_relay.sh",
+                                      serialized, "a" * 32, name, "130.0", "140.0", "280.0"])
+                elif entry == "python_relay.py":
+                    self.assertEqual(C.fixed_argv(c, "python-relay", "sender", 201),
+                                     [self.EXPECTED_PYTHON, "-I", "-B", self.EXPECTED_BASE + "/sender.py", serialized])
+        ruby_source = (BASE / "ruby_relay.rb").read_text()
+        self.assertEqual(self.binding_text(ruby_source, BASH_SOURCE), 7)
+
+    def test_old_ruby_base_and_old_bash_exec_literals_each_independently_fail(self):
+        ruby_source = (BASE / "ruby_relay.rb").read_text()
+        old = self.EXPECTED_BASE[:-1] + "3"
+        self.assertEqual(ruby_source.count(self.EXPECTED_BASE), 1)
+        self.assertEqual(BASH_SOURCE.count(self.EXPECTED_BASE), 1)
+        for component in ("ruby", "bash"):
+            with self.subTest(component=component):
+                mutant_ruby = ruby_source.replace(self.EXPECTED_BASE, old, 1) if component == "ruby" else ruby_source
+                mutant_bash = BASH_SOURCE.replace(self.EXPECTED_BASE, old, 1) if component == "bash" else BASH_SOURCE
+                with self.assertRaises(AssertionError):
+                    self.binding_text(mutant_ruby, mutant_bash)
+
+
+class SelectorRegression(unittest.TestCase):
+    def rejected_prepare(self, world, files, *, schema=False):
+        with files:
+            controller = D.Controller(100.0)
+            with self.assertRaises((C.Failure, FileNotFoundError)) as caught:
+                controller.prepare()
+            if schema:
+                self.assertIsInstance(caught.exception, C.Failure)
+                self.assertNotIn(caught.exception.code, {"reference-drift", "selector-buffer-binding",
+                                                        "selector-reference-binding", "fictional-regular-byte-cap"})
+            self.assertEqual(files.selected_reads(), [])
+            self.assertEqual(files.evidence_constructions, 0)
+            self.assertIsNone(controller.evidence)
+            self.assertEqual((controller.acquisition_reserved, controller.exec_reserved), (0, 0))
+            self.assertEqual((world.launches, world.signals, world.wait_calls), ([], [], 0))
+
+    def test_actual_pinned_control_bytes_parse_without_following_any_selected_leaf(self):
+        buffers = {path: (BASE / "selector-control-snapshots" / Path(path).name).read_bytes()
+                   for path, _size, _sha in D.SELECTOR_CONTROLS}
+        with mock.patch.object(D, "regular_bytes", side_effect=AssertionError("selected read forbidden")) as read:
+            authority = D.selector_authority(buffers)
+            read.assert_not_called()
+        self.assertEqual((len(authority.source_rows), len(authority.root_rows), len(authority.index_rows)), (152, 174, 2))
+        self.assertEqual(authority.agents_sha256, "7a520b569d674ad637be886c400f88d38c294b36f925595ca1f3b479526757eb")
+        self.assertEqual(authority.controls[0][2], "abb6503fe36d442b229ed294a423e6fdabd507a49d4c2628d399c2544fa2226a")
+        self.assertEqual(authority.controls[1][2], "9afd73ab899717857ecb8ccbac3be16d00fab3ef15836c965a686a473b69d691")
+        self.assertNotIn("AGENTS.md", {row[0] for row in authority.source_rows})
+
+    def test_real_preparation_all_reference_barrier_and_final_record_exact_scope(self):
+        with FictionalWorld() as world, SelectorFiles(world) as files:
+            controller = D.Controller(100.0)
+            controller.prepare()
+            first_selected = min(files.reads.index(path) for path in files.selected_paths)
+            self.assertTrue(all(files.reads.index(path) < first_selected for path in files.references))
+            self.assertEqual(set(files.selected_reads()), files.selected_paths)
+            self.assertEqual(len(files.selected_reads()), 329)  # 152+174+2+separate AGENTS.
+            self.assertEqual(files.evidence_read_count, len(files.reads))
+            self.assertEqual(controller.before["selectors"], controller.selectors.record())
+            self.assertEqual(controller.before["files"], {"qa006": 152, "root": 174})
+            files.reads.clear()
+            with mock.patch.object(D, "ROWS", ()):
+                self.assertEqual(controller.run(), 0)
+            self.assertEqual(files.reads[:2], list(files.control_paths))
+            self.assertEqual(set(files.selected_reads()), files.selected_paths)
+            baseline = C.loads(files.evidence.raw["BASELINE.json"], file_record=True)
+            result = C.loads(files.evidence.raw["RESULT.json"], file_record=True)
+            self.assertEqual(baseline["preservation"]["selectors"], result["selectorAuthority"])
+            self.assertEqual((world.launches, world.signals, world.wait_calls), ([], [], 0))
+
+    def test_fixed_approval_reference_and_control_tampering_fails_before_any_selected_read(self):
+        for index in (0, 1):
+            for fault in ("missing", "substituted", "tampered", "reference-omitted", "reference-rebound", "reference-type"):
+                with self.subTest(control=index, fault=fault), FictionalWorld() as world:
+                    files = SelectorFiles(world)
+                    path = files.control_paths[index]
+                    if fault == "missing":
+                        del files.files[path]
+                    elif fault == "substituted":
+                        files.files[path] = files.files[files.control_paths[1 - index]]
+                    elif fault == "tampered":
+                        files.files[path] = b" " + files.files[path][1:]
+                    else:
+                        if fault == "reference-omitted":
+                            del files.references[path]
+                        elif fault == "reference-rebound":
+                            files.references[path]["sha256"] = "0" * 64
+                        else:
+                            files.references[path]["bytes"] = True
+                        files.bind_references()  # Even approval over a bad inventory cannot bypass mandatory pins.
+                    self.rejected_prepare(world, files)
+        with FictionalWorld() as world:
+            files = SelectorFiles(world)
+            files.files[files.extra_reference] = b"different final reference\n"
+            self.rejected_prepare(world, files)
+
+    def test_hash_bound_control_schema_inventory_path_index_and_identity_adversaries(self):
+        def rename(rows, replacement):
+            original = next(name for name in rows if name != "AGENTS.md")
+            rows[replacement] = rows.pop(original)
+        changes = [
+            ("snapshot-extra", lambda f: f.snapshot.update(extra=True)),
+            ("snapshot-missing", lambda f: f.snapshot.pop("updatedAt")),
+            ("baseline-extra", lambda f: f.baseline.update(extra=True)),
+            ("baseline-missing", lambda f: f.baseline.pop("reviewer")),
+            ("source-empty", lambda f: f.snapshot.update(files={})),
+            ("source-count", lambda f: f.snapshot["files"].pop(next(iter(f.snapshot["files"])))),
+            ("source-list", lambda f: f.snapshot.update(files=[])),
+            ("root-empty", lambda f: f.baseline.update(rootUserFiles={})),
+            ("root-count", lambda f: f.baseline["rootUserFiles"].pop(next(iter(f.baseline["rootUserFiles"])))),
+            ("root-list", lambda f: f.baseline.update(rootUserFiles=[])),
+            ("sha-type", lambda f: next(iter(f.snapshot["files"].values())).update(sha256=1)),
+            ("sha-shape", lambda f: next(iter(f.snapshot["files"].values())).update(sha256="A" * 64)),
+            ("mode-type", lambda f: next(iter(f.snapshot["files"].values())).update(executable=1)),
+            ("row-extra", lambda f: next(iter(f.snapshot["files"].values())).update(extra=True)),
+            ("root-mode-type", lambda f: next(iter(f.baseline["rootUserFiles"].values())).update(executable="false")),
+            ("indexes-empty", lambda f: f.baseline.update(indexBindings={})),
+            ("indexes-missing", lambda f: f.baseline["indexBindings"].pop("source")),
+            ("indexes-extra", lambda f: f.baseline["indexBindings"].update(extra={})),
+            ("index-path", lambda f: f.baseline["indexBindings"]["root"].update(path="/fictional/not-authorized/index")),
+            ("index-digest", lambda f: f.baseline["indexBindings"]["source"].update(sha256="0" * 64)),
+            ("index-extra", lambda f: f.baseline["indexBindings"]["source"].update(extra=True)),
+            ("index-list", lambda f: f.baseline.update(indexBindings=[])),
+            ("agents-snapshot", lambda f: f.snapshot.update(userAgentsSha256="0" * 64)),
+            ("agents-baseline", lambda f: f.baseline.update(rootAgentalSha256="0" * 64)),
+            ("agents-row", lambda f: f.baseline["rootUserFiles"]["AGENTS.md"].update(sha256="0" * 64)),
+            ("agents-source-row", lambda f: rename(f.snapshot["files"], "AGENTS.md")),
+            ("source-path", lambda f: f.baseline.update(source="/fictional/different-source")),
+            ("head", lambda f: f.snapshot.update(head="0" * 40)),
+            ("tree", lambda f: f.baseline.update(tree="0" * 40)),
+            ("computed-tree", lambda f: f.baseline.update(computedTree="0" * 40)),
+            ("branch", lambda f: f.baseline.update(branch="unapproved")),
+            ("count-bool", lambda f: f.baseline.update(firstPartyFiles=True)),
+            ("changed-paths", lambda f: f.snapshot.update(changedPaths=[])),
+            ("r6-changed-paths", lambda f: f.baseline.update(r6ChangedPaths=[])),
+            ("plan-binding", lambda f: f.snapshot.update(planSha256="0" * 64)),
+            ("baseline-bindings", lambda f: f.baseline["bindings"].update(extra="0" * 64)),
+            ("metadata-type", lambda f: f.baseline.update(reviewer=[])),
+            ("assurance-type", lambda f: f.baseline.update(allFilesystemHashesModesMatched=1)),
+            ("git-result-type", lambda f: f.baseline["gitTreeObjectLookup"].update(exitCode=True)),
+        ]
+        for unsafe in ("../escape", "/absolute", "a/../b", "a//b", "./a", "a\\b", "a\nname", "a\x7fname", ""):
+            for inventory in ("source", "root"):
+                changes.append((inventory + "-unsafe-" + repr(unsafe),
+                                lambda f, n=unsafe, inv=inventory: rename(
+                                    f.snapshot["files"] if inv == "source" else f.baseline["rootUserFiles"], n)))
+        for label, change in changes:
+            with self.subTest(mutation=label), FictionalWorld() as world:
+                files = SelectorFiles(world)
+                change(files)
+                files.seal()
+                self.rejected_prepare(world, files, schema=True)
+
+    def test_hash_bound_duplicate_json_keys_and_malformed_reference_rows(self):
+        for index in (0, 1):
+            with self.subTest(control=index), FictionalWorld() as world:
+                files = SelectorFiles(world)
+                value = files.snapshot if index == 0 else files.baseline
+                raw = C.dumps(value)[:-2] + b',"head":"' + D.SELECTOR_HEAD.encode() + b'"}\n'
+                files.seal(**({"snapshot_raw": raw} if index == 0 else {"baseline_raw": raw}))
+                self.rejected_prepare(world, files, schema=True)
+        for mutation in ("relative", "parent", "row-extra", "size-type", "digest-type", "duplicate"):
+            with self.subTest(reference=mutation), FictionalWorld() as world:
+                files = SelectorFiles(world)
+                row = files.references[files.extra_reference]
+                if mutation in {"relative", "parent"}:
+                    files.references["relative" if mutation == "relative" else "/fictional/../escape"] = files.references.pop(files.extra_reference)
+                elif mutation == "row-extra":
+                    row["extra"] = True
+                elif mutation == "size-type":
+                    row["bytes"] = True
+                elif mutation == "digest-type":
+                    row["sha256"] = 1
+                raw = C.dumps(files.references)
+                if mutation == "duplicate":
+                    key = C.dumps(files.extra_reference).strip()
+                    raw = raw[:-2] + b"," + key + b":" + C.dumps(row).strip() + b"}\n"
+                files.bind_references(raw=raw)
+                self.rejected_prepare(world, files, schema=True)
+
+    def test_immutable_authority_reuses_original_rows_and_final_selector_drift_rejects_before_reads(self):
+        for phase in ("mutable-dicts-only", "before-final", "after-final-verification"):
+            with self.subTest(phase=phase), FictionalWorld() as world, SelectorFiles(world) as files:
+                controller = D.Controller(100.0)
+                controller.prepare()
+                authority = controller.selectors
+                with self.assertRaises(AttributeError):
+                    authority.source_rows = ()
+                with self.assertRaises(TypeError):
+                    authority.source_rows[0][0] = "replaced"
+                files.snapshot["files"].clear()
+                files.baseline["indexBindings"]["root"]["path"] = "/fictional/unapproved-index"
+                files.reads.clear()
+                if phase == "before-final":
+                    files.files[files.control_paths[0]] = b"{}\n"
+                if phase == "after-final-verification":
+                    def after_read(name):
+                        if name == files.control_paths[1]:
+                            files.files[files.control_paths[0]] = b"{}\n"
+                            files.files[files.control_paths[1]] = b"{}\n"
+                    files.on_read = after_read
+                if phase == "before-final":
+                    with self.assertRaises(C.Failure):
+                        controller.final_preservation()
+                    self.assertEqual(files.selected_reads(), [])
+                else:
+                    self.assertEqual(controller.final_preservation(), controller.before)
+                    self.assertIs(controller.selectors, authority)
+                    self.assertEqual(set(files.selected_reads()), files.selected_paths)
+                    self.assertNotIn("/fictional/unapproved-index", files.reads)
+                self.assertEqual((world.launches, world.signals, world.wait_calls), ([], [], 0))
+
+    def test_original_selected_source_index_modes_and_agents_drift_cannot_rebaseline(self):
+        for target in ("source", "root", "index-source", "index-root", "mode", "agents"):
+            with self.subTest(target=target), FictionalWorld() as world, SelectorFiles(world) as files:
+                controller = D.Controller(100.0)
+                controller.prepare()
+                authority = controller.selectors
+                if target.startswith("index-"):
+                    path = next(row[1] for row in authority.index_rows if row[0] == target[6:])
+                elif target == "agents":
+                    path = str(D.ROOT / "AGENTS.md")
+                else:
+                    rows = authority.root_rows if target == "root" else authority.source_rows
+                    path = str((D.ROOT if target == "root" else D.SOURCE) / rows[0][0])
+                if target == "mode":
+                    files.modes[path] ^= 0o100
+                else:
+                    files.files[path] += b"fictional-drift"
+                with self.assertRaises(C.Failure):
+                    controller.final_preservation()
+                self.assertIs(controller.selectors, authority)
+                self.assertEqual((world.launches, world.signals, world.wait_calls), ([], [], 0))
+
+    def test_preparation_and_final_reference_checks_keep_original_cancellation_and_cutoff(self):
+        for phase in ("preparation", "final"):
+            for fault in ("cancel", "cutoff"):
+                with self.subTest(phase=phase, fault=fault), FictionalWorld() as world, SelectorFiles(world) as files:
+                    controller = D.Controller(100.0)
+                    if phase == "final":
+                        controller.prepare()
+                        files.reads.clear()
+                    def crossed(name):
+                        if name == (files.extra_reference if phase == "preparation" else files.control_paths[1]):
+                            if fault == "cancel":
+                                world.cancel.cancelled = True
+                            else:
+                                world.at = 280.0
+                    files.on_read = crossed
+                    with self.assertRaises(C.Failure):
+                        controller.prepare() if phase == "preparation" else controller.final_preservation()
+                    self.assertEqual(controller.cutoff, 280.0)
+                    self.assertEqual(files.selected_reads(), [])
+                    self.assertEqual(files.evidence_constructions, 0 if phase == "preparation" else 1)
+                    self.assertEqual((world.launches, world.signals, world.wait_calls), ([], [], 0))
+
+
+class BoundedResult(unittest.TextTestResult):
+    def startTest(self, test):
+        preparation_bound()
+        super().startTest(test)
+
+    def stopTest(self, test):
+        super().stopTest(test)
+        preparation_bound()
+
+    def addSubTest(self, test, subtest, err):
+        preparation_bound()
+        super().addSubTest(test, subtest, err)
+
+
+def pure_main():
+    preparation_bound()
+    suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
+    result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2, resultclass=BoundedResult).run(suite)
+    preparation_bound()
+    print(C.dumps(dict(schemaVersion=1, method="actual owner methods with fictional interfaces only",
+                       methods=result.testsRun, failures=len(result.failures), errors=len(result.errors),
+                       nativeAttempts=NATIVE_ATTEMPTS, elapsed=REAL_MONOTONIC() - PURE_STARTED,
+                       provisional=True, actualOuterExit=None, completionRequiresOuterReceipt=True)).decode(), end="", flush=True)
+    preparation_bound()
+    return 0 if result.wasSuccessful() and not NATIVE_ATTEMPTS else 1
+
+
+if __name__ == "__main__":
+    # An outer tool receipt is mandatory; this footer/ordinary own exit is not
+    # authorization of an inheritance route or any runtime/native operation.
+    raise SystemExit(pure_main())

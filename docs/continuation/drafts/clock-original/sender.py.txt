@@ -1,0 +1,327 @@
+"""Final inherited sender: zero outside probes, real signals only to its own child."""
+
+import sys
+import types
+from pathlib import Path
+
+for _name in ("contract", "runtime"):
+    _path = Path(__file__).absolute().parent / (_name + ".py")
+    _module = types.ModuleType(_name)
+    _module.__file__ = str(_path)
+    sys.modules[_name] = _module
+    exec(compile(_path.read_bytes(), str(_path), "exec"), _module.__dict__)
+
+import errno
+import hashlib
+import os
+import select
+import stat
+
+from contract import (BASE, ExternalReference, LOSS_TERMINAL_MODE, PYTHON, ROUTES, TERMINAL_COMMIT_CAP, command, dumps,
+                      exact_command, failure, marker_ok, need, validate_frame, validate_sender_result)
+from runtime import (Cancellation, Emitter, InsideChild, Reader, Registry, WorkGuard, atomic_terminal_commit, fd_identity,
+                     identity, marker, now, query_external, read_context, remaining,
+                      signal_owned, terminal_pipe, write_bytes)
+
+
+def close_standard(stream, fd, errors, slot=None):
+    """CPython standard FileIO may have closefd=False; close the actual endpoint."""
+    if slot is None:
+        slot = dict(attempted=False, closed=False, fresh=False)
+    if slot["closed"]:
+        return True
+    if slot["attempted"]:
+        errors.append(dict(code="ambiguous-standard-close-not-retryable", fd=fd))
+        return False
+    slot["attempted"] = True
+    try:
+        if stream is None and slot["fresh"]:
+            os.close(fd)  # Fresh dup2 published before a failed fdopen.
+            slot["closed"] = True
+            return True
+        before = os.fstat(fd)
+        binding = (before.st_dev, before.st_ino, stat.S_IFMT(before.st_mode), before.st_rdev)
+        need(stream is not None and stream.fileno() == fd, "standard-stream-custody")
+        stream.close()
+    except BaseException as exc:
+        errors.append(failure(exc))
+        return False  # A possibly consumed fd cannot authorize a second raw close.
+    try:
+        current = os.fstat(fd)
+    except OSError as exc:
+        if exc.errno == errno.EBADF:
+            slot["closed"] = True
+            return True  # Actual closed descriptor, not an assumption about closefd.
+        errors.append(failure(exc))
+        return False
+    try:
+        need((current.st_dev, current.st_ino, stat.S_IFMT(current.st_mode), current.st_rdev) == binding,
+             "standard-descriptor-substituted")
+        os.close(fd)
+        slot["closed"] = True
+        return True
+    except BaseException as exc:
+        errors.append(failure(exc))
+        return False
+
+
+def publish_loss(emitter, value, exit_code):
+    """An uncommitted final is never success; root must observe the atomic commit.
+
+    All fallible preparation and cancellation checks precede commitment. The
+    atomic primitive immediately exits on either outcome and does not return.
+    No orphan exit status is inferred from any of these transmitted bytes.
+    """
+    terminate = os._exit
+    try:
+        need(type(exit_code) is int and exit_code == 0, "loss-failed-work-not-committable")
+        c, guard = emitter.c, emitter.guard
+        guard.completion()
+        need(emitter.actor == "sender" and ROUTES[c["row"]].loss is not None
+             and c["channels"] is not None and emitter.fd == c["channels"]["r"], "loss-publisher-binding")
+        validate_sender_result(value, ROUTES[c["row"]], os.getpid())
+        expected_identity = tuple(c["channels"]["rIdentity"])
+        cutoff = min(c["disposition"], c["outer"])
+        final_raw = emitter.encode("final", value)
+        final_sequence = emitter.sequence
+        guard.completion()
+        commit_raw = emitter.encode("terminal-commit", dict(finalSha256=hashlib.sha256(final_raw).hexdigest(),
+                                    finalSequence=final_sequence, finalBytes=len(final_raw)))
+        need(len(commit_raw) <= TERMINAL_COMMIT_CAP, "terminal-commit-byte-bound")
+        guard.completion()
+        os.set_blocking(emitter.fd, False)
+        terminal_pipe(emitter.fd, expected_identity)
+        guard.completion()
+        # This real multipart write MUST see cancellation, unlike ordinary
+        # best-effort disposition/error evidence. Its success is still provisional.
+        write_bytes(emitter.fd, final_raw, cutoff, guard.completion)
+    except BaseException:
+        terminate(1)
+    atomic_terminal_commit(emitter.fd, commit_raw, expected_identity, cutoff, guard.completion)
+
+
+def main():
+    cancel = Cancellation()
+    need(len(sys.argv) == 2, "sender-argv")
+    c = read_context(sys.argv[1], cancel)
+    route = ROUTES[c["row"]]
+    need(c["external"] is not None and bool(c["channels"]) == bool(route.loss), "sender-context-complete")
+    channels = c["channels"]
+    control_fd, result_fd = (channels["c"], channels["r"]) if channels else (0, 1)
+    control = Reader(control_fd)
+    guard = WorkGuard(c, cancel, control)
+    emitter = Emitter(c, "sender", result_fd, guard=guard)
+    registry = Registry(c, cancel, "sender", emitter, control=control)
+    initial = identity()
+    initial_parent = initial["parent"]
+    child = None
+    primary, cleanup_errors, queries, signals = None, [], [], []
+    activation, parent_change, low_fd_replacement = None, None, False
+    child_events, child_sequences = [], {}
+    isolated, final_written = False, False
+    null_fd, null_identity = None, None
+    null_close_attempted = False
+    standard_slots = [dict(attempted=False, closed=False, fresh=False) for _ in range(3)]
+    standard_streams = [sys.stdin, sys.stdout, sys.stderr]
+    control_closed, ordinary_closed = False, [False, False, False]
+
+    def check():
+        registry.check()
+
+    def no_command_check():
+        check()
+        need(not control.pending, "unsolicited-sender-command")
+
+    def receive(kinds):
+        raw = control.take_line(c["work"], guard.check)
+        return exact_command(raw, c, kinds)
+
+    def child_event(kind):
+        while True:
+            no_command_check()
+            child.out.read()
+            child.err.read()
+            need(not child.out.failed and not child.err.failed, "inside-stream-failure")
+            values = child.out.frames()
+            for value in values:
+                validate_frame(value, c, child_sequences)
+                need(value["actor"] == "inside" and value["pid"] == child.pid, "inside-event-identity")
+                child_events.append(value)
+            matches = [value for value in values if value["kind"] == kind]
+            if matches:
+                need(len(matches) == 1 and len(values) == 1, "inside-unexpected-frames")
+                return matches[0]["data"]
+            need(not child.out.eof, "inside-premature-eof")
+            select.select([r.fd for r in (child.out, child.err) if not r.eof], [], [], min(0.02, remaining(c["work"])))
+
+    try:
+        if channels:
+            need(fd_identity(control_fd, os.O_RDONLY) == channels["cIdentity"]
+                 and fd_identity(result_fd, os.O_WRONLY) == channels["rIdentity"], "sender-channel-identity")
+            os.set_inheritable(control_fd, False)
+            os.set_inheritable(result_fd, False)
+        entry = guard.entry("sender")
+        emitter.emit("ready", dict(identity=initial, channels=channels,
+                                   python=sys.version, singleThreaded=True, entry=entry))
+        if route.loss:
+            receive({"handoff"})
+            # Reserve /dev/null first, then close the old stream wrappers and
+            # replace fd1/fd2 explicitly. closefd=False cannot retain pipe writers.
+            null_fd = os.open(os.devnull, os.O_WRONLY | os.O_CLOEXEC)
+            null_identity = os.fstat(null_fd)
+            need(null_fd > 2 and stat.S_ISCHR(null_identity.st_mode), "loss-null-custody")
+            sys.stdout.flush()
+            sys.stderr.flush()
+            original_closed = [close_standard(standard_streams[fd], fd, cleanup_errors, standard_slots[fd]) for fd in (1, 2)]
+            need(all(original_closed) and not cleanup_errors, "loss-original-stream-close")
+            for fd in (1, 2):
+                os.dup2(null_fd, fd, inheritable=False)
+                standard_slots[fd] = dict(attempted=False, closed=False, fresh=True)
+                standard_streams[fd] = None
+                wrapper = os.fdopen(fd, "w", closefd=True)
+                standard_streams[fd] = wrapper
+                if fd == 1:
+                    sys.stdout = wrapper
+                else:
+                    sys.stderr = wrapper
+            null_close_attempted = True
+            os.close(null_fd)
+            null_fd = None
+            low_fd_replacement = True
+            emitter.emit("loss-ready", dict(identity=identity(), ordinaryStreamsClosed=True,
+                                            lowFdReplacement=True, channels=channels))
+            receive({"release"})
+            while os.getppid() == initial_parent:
+                no_command_check()
+                select.select([control_fd], [], [], min(0.01, remaining(c["work"])))
+            parent_change = {"before": initial_parent, "after": os.getppid()}
+            emitter.emit("parent-changed", parent_change)
+        else:
+            receive({"start"})
+        no_command_check()
+        activation = marker(c)
+        marker_ok(activation, False)
+        reference = ExternalReference(**c["external"])
+        queries = query_external(reference, c, no_command_check)
+        for query in queries:
+            emitter.emit("query", query)
+        isolated = all(q["returned"] is False and q["errno"] == errno.EPERM for q in queries)
+        if route.fenced:
+            need(isolated, "inherited-fence-not-observed", queries=queries)
+        else:
+            need(all(q["returned"] is True and q["errno"] is None for q in queries), "no-fence-control-invalid")
+            need(not isolated, "no-fence-not-rejected")
+        no_command_check()
+        argv = [PYTHON, "-I", "-B", str(BASE / "canary.py"), dumps(c).decode().strip(), "inside", str(os.getpid())]
+        child = registry.acquire(InsideChild, "inside", argv, group=True)
+        # No C/R/root-control endpoints can cross this pass_fds=() acquisition.
+        ready = child_event("ready")
+        need(set(ready) == {"identity", "marker", "counter", "entry"} and ready["counter"] == 0, "inside-readiness")
+        actual = ready["identity"]
+        need(actual["pid"] == child.pid and actual["parent"] == os.getpid() and actual["group"] == child.pid
+             and actual["uid"] == c["uid"] and os.getpgid(child.pid) == child.pid, "inside-direct-private-group")
+        child.group = child.pid
+        marker_ok(ready["marker"], False)
+        for operation, counter in (("usr1-pid", 1), ("usr1-group", 2)):
+            no_command_check()
+            sent = signal_owned(child, operation)
+            signals.append(sent)
+            need(sent["returned"], "inside-signal-failed")
+            # Ping responses may precede Python's flag callback; bounded repeated
+            # pings observe the same real counter, never send another USR1.
+            while True:
+                no_command_check()
+                write_bytes(child.handle.stdin.fileno(), command(c, "ping"), c["work"], no_command_check)
+                response = child_event("pong")
+                marker_ok(response["marker"], False)
+                need(response["identity"] == actual and response["counter"] in {counter - 1, counter},
+                     "inside-signal-response")
+                if response["counter"] == counter:
+                    sent["ackCounter"] = counter
+                    break
+            emitter.emit("signal", sent)
+        no_command_check()
+        sent = signal_owned(child, "kill-group")
+        signals.append(sent)
+        emitter.emit("signal", sent)
+        need(sent["returned"], "inside-terminal-signal-failed")
+    except BaseException as exc:
+        primary = failure(exc)
+    finally:
+        clean = False
+        try:
+            clean = registry.cleanup()
+        except BaseException as exc:
+            cleanup_errors.append(failure(exc))
+        cleanup_errors.extend(registry.errors)
+    # All local cleanup precedes provisional/commit publication. Root cannot
+    # wait this orphan; a complete final alone does not attest terminal success.
+    terminal = None
+    if channels:
+        if null_fd is not None and not null_close_attempted:
+            try:
+                null_close_attempted = True
+                if null_identity is not None:
+                    current = os.fstat(null_fd)
+                    need(current.st_dev == null_identity.st_dev and current.st_ino == null_identity.st_ino
+                         and current.st_rdev == null_identity.st_rdev, "loss-null-close-custody")
+                os.close(null_fd)
+                null_fd = None
+            except BaseException as exc:
+                cleanup_errors.append(failure(exc))
+        try:
+            control.read()
+            need(not control.eof and not control.failed and not control.pending, "terminal-root-control")
+        except BaseException as exc:
+            cleanup_errors.append(failure(exc))
+        try:
+            need(fd_identity(control_fd, os.O_RDONLY) == channels["cIdentity"], "loss-control-close-custody")
+            os.close(control_fd)
+            control_closed = control.closed = True
+        except BaseException as exc:
+            cleanup_errors.append(failure(exc))
+        for index, stream in enumerate(standard_streams):
+            try:
+                ordinary_closed[index] = close_standard(stream, index, cleanup_errors, standard_slots[index])
+            except BaseException as exc:
+                cleanup_errors.append(failure(exc))
+        try:
+            need(fd_identity(result_fd, os.O_WRONLY) == channels["rIdentity"], "terminal-result-custody")
+            cancel.check()
+            guard.completion()
+        except BaseException as exc:
+            cleanup_errors.append(failure(exc))
+        terminal = dict(mode=LOSS_TERMINAL_MODE, resultChannel="R",
+                        controlClosed=control_closed, ordinaryClosed=ordinary_closed,
+                        resultEof="required-root-observation", senderExitStatus="not-waitable-by-root")
+    else:
+        try:
+            guard.completion()
+        except BaseException as exc:
+            cleanup_errors.append(failure(exc))
+    value = dict(primary=primary, cleanupErrors=cleanup_errors, signals=signals, queries=queries,
+                 marker=activation, child=None if child is None else child.record(), parentChange=parent_change,
+                 unknown=not clean, flags=list(cancel.seen), controlEof=control.eof,
+                 ownedAttempts=len(registry.attempts), lowFdReplacement=low_fd_replacement,
+                 isolationAccepted=isolated, terminal=terminal)
+    exit_code = 0 if primary is None and clean and not cleanup_errors and not cancel.seen else 1
+    if channels:
+        # A committed final + real R EOF + bounded absence is required at root.
+        # After the admitted full atomic write the only next call is own exit0;
+        # no later cancellation check can create an invisible contradictory exit.
+        publish_loss(emitter, value, exit_code)
+    try:
+        emitter.emit("final", value, cleanup=True)
+        final_written = True
+    except BaseException:
+        exit_code = 1
+    cleanup_errors.extend(cancel.restore())
+    try:
+        guard.completion()
+    except BaseException as exc:
+        cleanup_errors.append(failure(exc))
+    return exit_code if final_written and not cleanup_errors else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

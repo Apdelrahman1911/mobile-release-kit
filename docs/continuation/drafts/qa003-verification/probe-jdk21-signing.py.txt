@@ -1,0 +1,54 @@
+"""Disposable real-JDK signing-policy evidence; not an Android production build."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import zipfile
+
+from mobile_release.android import _signer_fingerprint, _verify_jar_signature
+from mobile_release.credentials import artifact_validation_environment
+from mobile_release.errors import ValidationError
+
+evidence = Path(__file__).resolve().parent
+environment = artifact_validation_environment(os.environ)
+environment["MRK_SYNTHETIC_PASSWORD"] = "disposable-test-password"
+version = subprocess.run(["java", "-version"], env=environment, text=True, capture_output=True, check=True)
+print(version.stdout + version.stderr, end="")
+assert 'version "21.' in version.stdout + version.stderr
+results = []
+with tempfile.TemporaryDirectory(prefix="mrk-jdk21-disposable-") as directory:
+    root = Path(directory).resolve()
+    for name, start, days, expected in (
+        ("outside-warning-window", "-1d", "209", True),
+        ("inside-warning-window", "-1d", "178", False),
+        ("expired", "-400d", "200", False),
+        ("not-yet-valid", "+1d", "365", False),
+    ):
+        keystore, jar = root / f"{name}.p12", root / f"{name}.jar"
+        with zipfile.ZipFile(jar, "w") as archive:
+            archive.writestr("content.txt", b"Non-executable synthetic signing-policy fixture.")
+        for command in (
+            ["keytool", "-genkeypair", "-alias", "synthetic", "-keyalg", "RSA", "-keysize", "2048",
+             "-sigalg", "SHA256withRSA", "-dname", "CN=MRK Disposable Test", "-startdate", start,
+             "-validity", days, "-storetype", "PKCS12", "-keystore", str(keystore),
+             "-storepass:env", "MRK_SYNTHETIC_PASSWORD", "-keypass:env", "MRK_SYNTHETIC_PASSWORD"],
+            ["jarsigner", "-keystore", str(keystore), "-storepass:env", "MRK_SYNTHETIC_PASSWORD",
+             "-keypass:env", "MRK_SYNTHETIC_PASSWORD", str(jar), "synthetic"],
+        ):
+            result = subprocess.run(command, env=environment, text=True, capture_output=True, timeout=120)
+            assert result.returncode == 0, (name, command[0], result.stderr)
+        result = subprocess.run(["jarsigner", "-verify", "-strict", str(jar)], env=environment,
+                                text=True, capture_output=True, timeout=120)
+        (evidence / f"jdk21-{name}.log").write_text(result.stdout + result.stderr)
+        try:
+            accepted = _verify_jar_signature(jar)
+        except ValidationError:
+            accepted = False
+        fingerprint = _signer_fingerprint(jar)
+        assert isinstance(fingerprint, str) and len(fingerprint) == 64
+        assert accepted == expected, (name, accepted, expected)
+        results.append({"scenario": name, "expectedAccepted": expected,
+                        "actualAccepted": accepted, "jarsignerExit": result.returncode})
+print(json.dumps({"results": results, "privateKeysAndJarsRemoved": not root.exists(),
+                  "scope": "actual Java21 signature-policy parsing only; no full AAB, Gradle, or Store work"}, indent=2))

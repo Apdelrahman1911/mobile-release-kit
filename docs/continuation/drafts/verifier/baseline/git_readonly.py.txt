@@ -1,0 +1,587 @@
+"""Typed loose SHA-1 forest and native reads in exclusively owned Git views.
+
+Real source Git storage is only read with no-follow descriptors. Native Git is
+never pointed at it. This intentionally rejects packs, alternate storage,
+unsupported indices/modes and unresolved source prerequisites without repair.
+"""
+from pathlib import Path
+import hashlib
+import os
+import re
+import struct
+import zlib
+
+from action_io import (CHUNK, LIMITS, ancestry, assert_owned, create_owned, delete_inventory,
+                       digest, exists, identity, inventory, mkdir_new, names, read_file,
+                       write_bytes_new, write_new, participating, participating_generator, participating_method)
+from native_reader import BatchFrames, run
+
+OID = re.compile(r'[0-9a-f]{40}', re.ASCII)
+EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+FIXED_CONFIG = b'[core]\n\trepositoryformatversion = 0\n\tbare = true\n'
+FIXED_HEAD = b'ref: refs/heads/mrk-owned-unborn\n'
+CONTROL_DIRS = ('refs', 'refs/heads', 'refs/tags', 'objects', 'objects/info', 'objects/pack',
+                'home', 'xdg', 'hooks', 'exec', 'tmp')
+GIT_POLICY = {
+    'schemaVersion': 1, 'storage': 'loose-SHA1-typed-tree-blob-forest-only',
+    'leaf': 'CONFIG.gitLeaf:absolute-reviewed-leaf',
+    'prefix': ['{leaf}', '--no-pager', '--no-replace-objects', '--git-dir={ownedView}'],
+    'config': [('core.bare', 'true'), ('core.hooksPath', '{ownedView}/hooks'),
+               ('core.attributesFile', '/dev/null'), ('core.excludesFile', '/dev/null'),
+               ('core.fsmonitor', 'false'), ('core.untrackedCache', 'false'),
+               ('core.preloadIndex', 'false'), ('core.multiPackIndex', 'false'),
+               ('core.commitGraph', 'false'), ('gc.auto', '0'), ('maintenance.auto', 'false'),
+               ('protocol.allow', 'never'), ('color.ui', 'false'), ('core.pager', 'false'),
+               ('diff.renames', 'false'),
+               ('core.whitespace', 'blank-at-eol,blank-at-eof,space-before-tab,tabwidth=8')],
+    'environment': {'LC_ALL': 'C', 'LANG': 'C', 'HOME': '{ownedView}/home',
+                    'XDG_CONFIG_HOME': '{ownedView}/xdg', 'TMPDIR': '{ownedView}/tmp',
+                    'PATH': '{ownedView}/exec', 'GIT_EXEC_PATH': '{ownedView}/exec',
+                    'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_SYSTEM': '/dev/null',
+                    'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_ATTR_NOSYSTEM': '1',
+                    'GIT_NO_REPLACE_OBJECTS': '1', 'GIT_NO_LAZY_FETCH': '1',
+                    'GIT_OPTIONAL_LOCKS': '0', 'GIT_TERMINAL_PROMPT': '0',
+                    'GIT_ALLOW_PROTOCOL': '', 'GIT_ATTR_SOURCE': EMPTY_TREE},
+    'builtins': {'stages': ['ls-files', '--stage', '--sparse', '-z'],
+                 'flags': ['ls-files', '-v', '--sparse', '-z'],
+                 'names': ['ls-files', '--cached', '--others', '--exclude-per-directory=.gitignore', '--exclude=/.git', '-z'],
+                 'cat': ['cat-file', '--batch'],
+                 'hash': ['hash-object', '-t', 'tree', '--no-filters', '--stdin'],
+                 'diff': ['diff', '--check', '--no-ext-diff', '--no-textconv', '--no-renames', '--no-color', '{base}', '{proposed}', '--'],
+                 'version': ['--version']},
+    'placeholders': {'{leaf}': 'bound effective executable', '{ownedView}': 'exclusive actual view root',
+                     '{base}': 'typed materialized root OID', '{proposed}': 'typed materialized root OID'},
+}
+
+# JSON contract uses arrays, not transient Python tuples.
+GIT_POLICY['config'] = [list(pair) for pair in GIT_POLICY['config']]
+
+
+@participating
+def oid_for(kind, body, *, ctx):
+    ctx.require(kind in ('tree', 'blob', 'commit') and len(body) <= LIMITS[kind], 'object body limit/type')
+    framed = f'{kind} {len(body)}'.encode('ascii')+b'\0'
+    one, two = hashlib.sha1(framed), hashlib.sha256()
+    for start in range(0, len(body), CHUNK):
+        ctx.check()
+        block = body[start:start+CHUNK]
+        ctx.bytes(len(block), kind, hashing=True)
+        one.update(block)
+        two.update(block)
+    return one.hexdigest(), two.hexdigest()
+
+
+@participating
+def loose(path, oid, *, ctx):
+    ctx.require(isinstance(oid, str) and OID.fullmatch(oid) is not None, 'invalid raw object ID')
+    decompressor = zlib.decompressobj()
+    header, chunks, kind, declared, total = bytearray(), [], None, None, 0
+    sha1, sha256 = hashlib.sha1(), hashlib.sha256()
+    def consume(raw):
+        nonlocal kind, declared, total
+        ctx.check()
+        ctx.bytes(len(raw), 'blob')
+        rest = raw
+        if kind is None:
+            zero = raw.find(b'\0')
+            prefix = raw if zero < 0 else raw[:zero+1]
+            header.extend(prefix)
+            ctx.require(len(header) <= LIMITS['header'], 'loose header too large')
+            if zero < 0:
+                return
+            match = re.fullmatch(rb'(blob|tree|commit) (0|[1-9][0-9]*)\0', bytes(header))
+            ctx.require(match is not None, 'invalid canonical loose header')
+            kind, declared = match[1].decode('ascii'), int(match[2])
+            ctx.require(declared <= LIMITS[kind], 'loose declared body exceeds role cap')
+            sha1.update(header)
+            rest = raw[zero+1:]
+        total += len(rest)
+        ctx.require(total <= declared, 'loose object has extra body')
+        ctx.bytes(len(rest), kind, hashing=True)
+        sha1.update(rest)
+        sha256.update(rest)
+        chunks.append(rest)
+    def compressed(block):
+        ctx.require(not decompressor.eof, 'trailing compressed stream')
+        while block:
+            ctx.check()
+            data = decompressor.decompress(block, CHUNK if kind is not None else LIMITS['header']-len(header)+1)
+            consume(data)
+            ctx.require(not decompressor.unused_data, 'extra zlib stream/trailing data')
+            block = decompressor.unconsumed_tail
+    binding = read_file(path, ctx=ctx, role='compressed', sink=compressed)
+    ctx.require(decompressor.eof and kind is not None and total == declared and sha1.hexdigest() == oid,
+                'loose truncation/OID/length mismatch')
+    ctx.check()
+    body = b''.join(chunks)
+    return {'oid': oid, 'type': kind, 'bytes': total, 'sha256': sha256.hexdigest()}, body, binding
+
+
+@participating
+def tree_entries(body, *, ctx):
+    ctx.require(len(body) <= LIMITS['tree'], 'tree size exceeded')
+    entries, offset, previous, seen = [], 0, None, set()
+    while offset < len(body):
+        ctx.check()
+        ctx.charge('references', 1)
+        space, zero = body.find(b' ', offset), body.find(b'\0', offset)
+        ctx.require(offset < space < zero and zero+21 <= len(body), 'malformed tree framing')
+        mode, name = body[offset:space], body[space+1:zero]
+        ctx.require(mode in (b'40000', b'100644', b'100755'), 'unsupported tree mode (symlink/gitlink forbidden)')
+        ctx.require(name and len(name) <= LIMITS['component'] and name not in (b'.', b'..')
+                    and b'/' not in name and b'\0' not in name and name not in seen, 'invalid/duplicate tree name')
+        ctx.require(os.fsencode(os.fsdecode(name)) == name, 'tree name does not round trip')
+        order = name+(b'/' if mode == b'40000' else b'')
+        ctx.require(previous is None or previous < order, 'noncanonical Git tree ordering')
+        seen.add(name)
+        previous = order
+        entries.append((mode.decode('ascii'), name, body[zero+1:zero+21].hex()))
+        offset = zero+21
+    return entries
+
+
+class Forest:
+    def __init__(self, ctx, objects=None):
+        self.ctx, self.objects = ctx, {}
+        if objects:
+            for record, body in objects:
+                self.add(record['type'], body, expected=record['oid'])
+
+    @participating_method
+    def add(self, kind, body, *, expected=None):
+        oid, sha256 = oid_for(kind, body, ctx=self.ctx)
+        self.ctx.require(expected is None or oid == expected, 'object ID not expected')
+        record = {'oid': oid, 'type': kind, 'bytes': len(body), 'sha256': sha256}
+        if oid in self.objects:
+            self.ctx.require(self.objects[oid] == (record, body), 'object collision/type substitution')
+        else:
+            self.ctx.charge('objects', 1)
+            self.ctx.charge('forestBytes', len(body))
+            self.objects[oid] = (record, body)
+        return oid
+
+    @participating_method
+    def manifest(self):
+        return {oid: record for oid, (record, _body) in sorted(self.objects.items())}
+
+    @participating_method
+    def traverse(self, root, *, load=None, source_paths=False):
+        files, visited = {}, set()
+        def walk(oid, expected, prefix, active, depth):
+            self.ctx.check()
+            self.ctx.require(depth <= LIMITS['gitDepth'] and oid not in active, 'tree depth/cycle exceeded')
+            if oid not in self.objects:
+                self.ctx.require(load is not None, 'required object missing')
+                record, body = load(oid)
+                self.ctx.require(record['type'] == expected, 'wrong typed child object')
+                self.add(record['type'], body, expected=oid)
+            record, body = self.objects[oid]
+            self.ctx.require(record['type'] == expected, 'wrong typed forest edge')
+            visited.add(oid)
+            if expected == 'blob':
+                return
+            for mode, name, child in tree_entries(body, ctx=self.ctx):
+                rel = prefix+name
+                self.ctx.require(len(rel) <= LIMITS['gitPath'], 'tree path too long')
+                kind = 'tree' if mode == '40000' else 'blob'
+                if source_paths:
+                    from source_inventory import exclusion, name_excluded
+                    path = os.fsdecode(rel)
+                    self.ctx.require(not name_excluded(path) and exclusion(path, directory_entry=kind == 'tree') is None,
+                                     'tracked tree intersects fixed source exclusion before child payload read')
+                walk(child, kind, rel+b'/' if kind == 'tree' else rel, active|{oid}, depth+1)
+                if kind == 'blob':
+                    self.ctx.require(len(files) < LIMITS['names'], 'source names exceeded')
+                    files[os.fsdecode(rel)] = {'mode': mode, 'oid': child}
+        walk(root, 'tree', b'', set(), 0)
+        return files, visited
+
+
+def _record(path, *, ctx):
+    value = read_file(path, ctx=ctx, role='locator', retain=True)
+    data = value.pop('data')
+    return data, value
+
+
+def _local_path(parent, raw, *, ctx):
+    ctx.require(raw and b'\0' not in raw and b'\n' not in raw and b'\r' not in raw, 'invalid Git locator')
+    target = Path(os.fsdecode(raw))
+    # commondir legitimately contains ../..; normalized traversal still forbids
+    # every symlink through the separately validated complete target ancestry.
+    target = Path(os.path.normpath(str(target if target.is_absolute() else parent/target)))
+    ancestry(target, ctx=ctx)
+    return target
+
+
+@participating
+def parse_index(data, base, *, ctx):
+    ctx.require(len(data) <= LIMITS['index'] and len(data) >= 32 and data[:4] == b'DIRC', 'invalid index header')
+    version, count = struct.unpack('>II', data[4:12])
+    ctx.require(version in (2, 3) and count <= LIMITS['names'], 'unsupported index version/count')
+    checksum = hashlib.sha1()
+    for start in range(0, len(data)-20, CHUNK):
+        ctx.check()
+        chunk = memoryview(data)[start:min(start+CHUNK, len(data)-20)]
+        ctx.bytes(len(chunk), 'index', hashing=True)
+        checksum.update(chunk)
+    ctx.require(checksum.digest() == data[-20:], 'index checksum mismatch')
+    rows, offset = {}, 12
+    for _ in range(count):
+        ctx.check()
+        start = offset
+        ctx.require(offset+62 <= len(data)-20, 'short index entry')
+        mode = struct.unpack('>I', data[offset+24:offset+28])[0]
+        oid = data[offset+40:offset+60].hex()
+        flags = struct.unpack('>H', data[offset+60:offset+62])[0]
+        ctx.require(flags & 0xf000 == 0 and mode in (0o100644, 0o100755), 'staged/sparse/assume/extended index entry')
+        zero = data.find(b'\0', offset+62)
+        ctx.require(zero >= offset+62 and zero < len(data)-20, 'index name missing delimiter')
+        raw = data[offset+62:zero]
+        ctx.require(raw and len(raw) <= LIMITS['gitPath'] and (flags & 0xfff) == min(len(raw), 0xfff), 'index name length mismatch')
+        name = os.fsdecode(raw)
+        ctx.require(name not in rows and not name.startswith('/') and '..' not in Path(name).parts
+                    and '/'.join(Path(name).parts) == name and all(len(os.fsencode(part)) <= LIMITS['component'] for part in Path(name).parts),
+                    'unsafe/duplicate index name')
+        rows[name] = {'mode': format(mode, 'o'), 'oid': oid}
+        offset = start+((zero-start+1+7)//8)*8
+        ctx.require(offset <= len(data)-20 and not any(data[zero:offset]), 'nonzero/truncated index padding')
+    while offset < len(data)-20:
+        ctx.require(offset+8 <= len(data)-20, 'short index extension')
+        name, size = data[offset:offset+4], struct.unpack('>I', data[offset+4:offset+8])[0]
+        # Only the optional inert tree cache; split/sparse/fsmonitor/untracked or
+        # unknown extensions are not supported or repaired in this reader.
+        ctx.require(name == b'TREE' and offset+8+size <= len(data)-20, 'unsupported index extension')
+        offset += 8+size
+    ctx.require(rows == base, 'index differs from independently parsed HEAD tree')
+    return {'version': version, 'count': count, 'extensions': 'TREE-only', 'entries': rows}
+
+
+@participating
+def raw_source(root, *, branch, expected_gitdir, expected_common, ctx, detached=False):
+    root, expected_gitdir, expected_common = map(Path, (root, expected_gitdir, expected_common))
+    ancestry(root, ctx=ctx)
+    controls = {}
+    dot = root/'.git'
+    dot_type = identity(dot, ctx=ctx)['type']
+    import stat
+    if dot_type == stat.S_IFDIR:
+        ctx.require(expected_gitdir == expected_common == dot, 'unexpected primary gitdir')
+        gitdir, common, layout = dot, dot, 'directory'
+    else:
+        data, controls[str(dot)] = _record(dot, ctx=ctx)
+        ctx.require(data.startswith(b'gitdir: ') and data.endswith(b'\n') and data.count(b'\n') == 1, 'invalid .git locator')
+        gitdir = _local_path(root, data[8:-1], ctx=ctx)
+        ctx.require(gitdir == expected_gitdir, 'gitdir locator escaped binding')
+        data, controls[str(gitdir/'commondir')] = _record(gitdir/'commondir', ctx=ctx)
+        ctx.require(data.endswith(b'\n') and data.count(b'\n') == 1, 'invalid commondir')
+        common = _local_path(gitdir, data[:-1], ctx=ctx)
+        ctx.require(common == expected_common, 'common object store escaped binding')
+        data, controls[str(gitdir/'gitdir')] = _record(gitdir/'gitdir', ctx=ctx)
+        ctx.require(data == os.fsencode(str(dot))+b'\n', 'worktree backpointer mismatch')
+        layout = 'linked-worktree'
+    for path in (gitdir, common, common/'objects', common/'objects/pack', common/'objects/info'):
+        ancestry(path, ctx=ctx)
+    ctx.require(not names(common/'objects/pack', ctx=ctx) and not names(common/'objects/info', ctx=ctx),
+                'packed/alternate/promisor source storage unsupported')
+    for path in (common/'reftable', gitdir/'reftable'):
+        ctx.require(not exists(path, ctx=ctx), 'reftable unsupported')
+    data, controls[str(gitdir/'HEAD')] = _record(gitdir/'HEAD', ctx=ctx)
+    if detached:
+        ctx.require(OID.fullmatch(data.decode('ascii').rstrip('\n')) is not None and data.count(b'\n') == 1
+                    and data.endswith(b'\n') and branch == '', 'invalid declared detached fixture')
+        head = data[:-1].decode('ascii')
+    else:
+        ctx.require(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]*', branch) is not None and '..' not in branch
+                    and not branch.endswith('/') and '@{' not in branch, 'invalid configured local branch')
+        ctx.require(data == f'ref: refs/heads/{branch}\n'.encode('ascii'), 'unexpected HEAD indirection')
+        ref = common/'refs/heads'/branch
+        raw, controls[str(ref)] = _record(ref, ctx=ctx)
+        ctx.require(len(raw) == 41 and raw.endswith(b'\n') and OID.fullmatch(raw[:-1].decode('ascii')), 'invalid loose branch ref')
+        head = raw[:-1].decode('ascii')
+    object_bindings, graph = {}, Forest(ctx)
+    def load(oid):
+        record, body, binding = loose(common/'objects'/oid[:2]/oid[2:], oid, ctx=ctx)
+        object_bindings[oid] = binding
+        return record, body
+    anchor, commit = load(head)
+    ctx.require(anchor['type'] == 'commit', 'raw HEAD is not commit')
+    headers = commit.split(b'\n\n', 1)[0].splitlines()
+    ctx.require(headers and re.fullmatch(rb'tree [0-9a-f]{40}', headers[0])
+                and sum(line.startswith(b'tree ') for line in headers) == 1, 'missing/duplicate/malformed raw commit tree')
+    base_root = headers[0][5:].decode('ascii')
+    base, _ = graph.traverse(base_root, load=load, source_paths=True)
+    index_path = gitdir/'index'
+    if exists(index_path, ctx=ctx):
+        index_binding = read_file(index_path, ctx=ctx, role='index', retain=True)
+        index = index_binding.pop('data')
+        index_format = parse_index(index, base, ctx=ctx)
+    else:
+        ctx.require(not base and base_root == EMPTY_TREE, 'missing nonempty source index')
+        index, index_binding, index_format = None, {'absent': True, 'path': str(index_path)}, {'emptyFixture': True}
+    stable = {'root': str(root), 'rootIdentity': identity(root, ctx=ctx), 'layout': layout,
+              'gitdir': str(gitdir), 'common': str(common), 'head': head, 'branch': branch,
+              'controls': controls, 'index': index_binding, 'indexFormat': index_format,
+              'anchor': anchor, 'baseRoot': base_root, 'looseObjects': object_bindings,
+              'baseForest': graph.manifest(), 'conditions': {'emptyPack': True, 'emptyInfo': True,
+              'looseBranchOnly': not detached, 'noExternalIndex': True, 'objectFormat': 'sha1'},
+              'gitAncestries': {str(path): ancestry(path, ctx=ctx) for path in (gitdir, common, common/'objects', common/'objects/pack', common/'objects/info')}}
+    raw = {'stable': stable, 'graph': graph, 'anchorBytes': commit, 'indexBytes': index, 'baseFiles': base}
+    recheck_raw(raw, ctx=ctx)
+    return raw
+
+
+@participating
+def recheck_raw(raw, *, ctx):
+    stable = raw['stable']
+    for path, expected in stable['gitAncestries'].items():
+        ctx.require(ancestry(path, ctx=ctx) == expected, 'Git source ancestry changed')
+    common = Path(stable['common'])
+    ctx.require(not names(common/'objects/pack', ctx=ctx) and not names(common/'objects/info', ctx=ctx), 'source storage changed')
+    for path, value in stable['controls'].items():
+        ctx.require(read_file(path, ctx=ctx, role='locator') == value, 'Git source control changed')
+    index = stable['index']
+    if index.get('absent'):
+        ctx.require(not exists(index['path'], ctx=ctx), 'source index appeared')
+    else:
+        ctx.require(read_file(index['path'], ctx=ctx, role='index') == index, 'source index changed')
+    for value in stable['looseObjects'].values():
+        ctx.require(read_file(value['path'], ctx=ctx, role='compressed') == value, 'source loose object changed')
+
+
+@participating_generator
+def _compressed_blocks(kind, body, *, ctx):
+    compressor = zlib.compressobj()
+    for block in [f'{kind} {len(body)}'.encode('ascii')+b'\0']:
+        ctx.check()
+        yield compressor.compress(block)
+    for start in range(0, len(body), CHUNK):
+        ctx.check()
+        block = body[start:start+CHUNK]
+        ctx.bytes(len(block), kind)
+        yield compressor.compress(block)
+    ctx.check()
+    yield compressor.flush()
+
+
+@participating
+def materialize(root, graph, *, ctx):
+    for oid, (record, body) in sorted(graph.objects.items()):
+        parent = Path(root)/'objects'/oid[:2]
+        if not exists(parent, ctx=ctx):
+            mkdir_new(parent, ctx=ctx)
+        write_bytes_new(parent/oid[2:], _compressed_blocks(record['type'], body, ctx=ctx), ctx=ctx, role='compressed')
+
+
+@participating
+def create_view(root, marker, graph, *, tree, ctx, index=None, anchor=None, universe=None, control_bodies=None):
+    ctx.charge('views', 1)
+    ctx.require(not any(not row.get('removed') for row in ctx.views), 'another metadata view is active')
+    owner = create_owned(root, marker, tree, 'exclusive nonwriting Git view; no real source storage', ctx=ctx)
+    row = {'owner': owner, 'marker': str(marker), 'markerReference': read_file(marker, ctx=ctx, role='record'), 'removed': False}
+    ctx.views.append(row)
+    for name in CONTROL_DIRS:
+        mkdir_new(Path(root)/name, ctx=ctx)
+    write_bytes_new(Path(root)/'config', [FIXED_CONFIG], ctx=ctx, role='locator')
+    write_bytes_new(Path(root)/'HEAD', [FIXED_HEAD], ctx=ctx, role='locator')
+    if EMPTY_TREE not in graph.objects:
+        graph.add('tree', b'', expected=EMPTY_TREE)
+    if anchor is not None:
+        graph.add('commit', anchor)
+    materialize(root, graph, ctx=ctx)
+    if index is not None:
+        write_bytes_new(Path(root)/'index', [index], ctx=ctx, role='index')
+    if universe is not None:
+        from source_inventory import materialize_mirror
+        row['mirror'] = materialize_mirror(root, universe, control_bodies, ctx=ctx)
+    row['initialInventory'] = validate_view(owner, graph, ctx=ctx, with_index=index is not None,
+                                          universe=universe, mirror=row.get('mirror'))
+    return owner, row
+
+
+@participating
+def validate_view(owner, graph, *, ctx, with_index=False, expected_inventory=None, universe=None, mirror=None):
+    root = assert_owned(owner, ctx=ctx)
+    expected = set(CONTROL_DIRS)|{'config', 'HEAD'}|({'index'} if with_index else set())
+    expected |= {'objects/'+oid[:2] for oid in graph.objects}
+    expected |= {'objects/'+oid[:2]+'/'+oid[2:] for oid in graph.objects}
+    ctx.require((universe is None) == (mirror is None), 'incomplete mirror derivation')
+    if universe is not None:
+        from source_inventory import validate_mirror
+        expected |= {'worktree'} | {'worktree/' + name for name in universe['entries']}
+    entries = inventory(owner, ctx=ctx, allowed_names=expected, file_roles=view_roles(expected),
+                        expected_entries=expected_inventory)
+    if universe is not None:
+        validate_mirror(mirror, universe, entries, view_root=root, ctx=ctx)
+    ctx.require(set(entries) == expected, 'unknown/missing Git view scaffolding/object/index')
+    ctx.require(read_file(root/'config', ctx=ctx, role='locator', retain=True)['data'] == FIXED_CONFIG
+                and read_file(root/'HEAD', ctx=ctx, role='locator', retain=True)['data'] == FIXED_HEAD, 'Git view config/HEAD changed')
+    stored = sum(row.get('bytes', 0) for name, row in entries.items() if name.startswith('objects/'))
+    ctx.require(stored <= LIMITS['storedForest'], 'stored loose forest size exceeded')
+    for oid, (record, body) in graph.objects.items():
+        actual, copied, _binding = loose(root/'objects'/oid[:2]/oid[2:], oid, ctx=ctx)
+        ctx.require(actual == record and copied == body, 'owned loose object readback mismatch')
+    if expected_inventory is not None:
+        ctx.require(entries == expected_inventory, 'owned Git inventory identity/content drift')
+    return entries
+
+
+def view_roles(names):
+    """Every known metadata/mirror file uses its narrow actual read role."""
+    return {name: 'locator' if name in {'config', 'HEAD'} else 'index' if name == 'index' else
+            'compressed' if name.startswith('objects/') else 'source' if Path(name).name == '.gitignore' else 'record'
+            for name in names}
+
+
+def git_environment(root):
+    return {key: value.replace('{ownedView}', str(root)) for key, value in GIT_POLICY['environment'].items()}
+
+
+@participating
+def leaf_binding(leaf, *, ctx):
+    leaf = Path(leaf)
+    ctx.require(leaf.is_absolute() and str(leaf.resolve()) == str(leaf), 'Git leaf must be canonical, not launcher/symlink')
+    value = read_file(leaf, ctx=ctx, role='tool', hardlinks=True)
+    ctx.require(value['identity']['mode'] & 0o111, 'Git leaf not executable')
+    return value
+
+
+@participating
+def git_call(owner, leaf, builtin, *, ctx, worktree=None, input_data=b'', graph=None, base=None, proposed=None):
+    root = assert_owned(owner, ctx=ctx)
+    ctx.require(builtin in GIT_POLICY['builtins'], 'unallowed Git builtin')
+    ctx.require((worktree is not None) == (builtin in ('stages', 'flags', 'names')), 'Git worktree policy mismatch')
+    if worktree is not None:
+        ctx.require(Path(worktree) == root/'worktree' and not root.is_relative_to(Path(worktree)),
+                    'native selection accepts only the current owned data-only mirror')
+    before = leaf_binding(leaf, ctx=ctx)
+    command, env = git_invocation(root, leaf, builtin, worktree=worktree, base=base, proposed=proposed)
+    frames = BatchFrames([row for row in graph.manifest().values()], ctx=ctx) if builtin == 'cat' else None
+    stdout, stderr, record = run(command, cwd=root, environment=env, ctx=ctx,
+                                  input_data=input_data, frames=frames,
+                                  stdout_limit=LIMITS['catStdout'] if frames is not None else LIMITS['stdout'])
+    record['gitPolicy'] = {'builtin': builtin, 'ownerNonce': owner['nonce'], 'tool': before}
+    ctx.require(leaf_binding(leaf, ctx=ctx) == before, 'effective Git leaf changed during invocation')
+    return stdout, record
+
+
+def git_invocation(root, leaf, builtin, *, worktree=None, base=None, proposed=None):
+    """Exact typed policy construction, also used to validate retained commands."""
+    env = git_environment(root)
+    command = [str(leaf), '--no-pager', '--no-replace-objects', '--git-dir='+str(root)]
+    for key, value in GIT_POLICY['config']:
+        command.extend(['-c', key+'='+value.replace('{ownedView}', str(root))])
+    if worktree is not None:
+        command.extend(['--work-tree='+str(worktree), '-c', 'core.bare=false'])
+    args = GIT_POLICY['builtins'][builtin]
+    if builtin == 'diff':
+        if not (OID.fullmatch(base or '') and OID.fullmatch(proposed or '')):
+            raise ValueError('invalid native diff roots')
+        args = [arg.replace('{base}', base).replace('{proposed}', proposed) for arg in args]
+    command.extend(args)
+    return command, env
+
+
+@participating
+def consume_forest(owner, graph, base, proposed, leaf, *, ctx):
+    before = validate_view(owner, graph, ctx=ctx)
+    _stdout, batch = git_call(owner, leaf, 'cat', ctx=ctx, graph=graph)
+    hashes = []
+    for root in (base, proposed, EMPTY_TREE):
+        record, body = graph.objects[root]
+        ctx.require(record['type'] == 'tree', 'non-tree native root')
+        out, native = git_call(owner, leaf, 'hash', ctx=ctx, input_data=body)
+        ctx.require(out == (root+'\n').encode('ascii'), 'native root hash mismatch')
+        hashes.append({'oid': root, 'native': native})
+    out, diff = git_call(owner, leaf, 'diff', ctx=ctx, base=base, proposed=proposed)
+    ctx.require(not out, 'unexpected whitespace diff output')
+    validate_view(owner, graph, ctx=ctx, expected_inventory=before)
+    return {'status': 'PASS', 'batch': batch, 'rootHashes': hashes, 'diff': diff, 'inventory': before}
+
+
+@participating
+def source_files(root, raw, owner, leaf, *, ctx, accepted, universe):
+    base = raw['baseFiles']
+    mirror = Path(owner['path'])/'worktree'
+    out, _ = git_call(owner, leaf, 'stages', ctx=ctx, worktree=mirror)
+    stages = {}
+    for row in out.split(b'\0')[:-1]:
+        ctx.check()
+        match = re.fullmatch(rb'(100644|100755) ([0-9a-f]{40}) 0\t([^\0]+)', row)
+        ctx.require(match is not None, 'native sparse/staged/invalid copied index')
+        name = os.fsdecode(match[3])
+        ctx.require(name not in stages, 'duplicate native index entry')
+        stages[name] = {'mode': match[1].decode(), 'oid': match[2].decode()}
+    ctx.require((not out or out.endswith(b'\0')) and stages == base, 'copied native index does not match raw HEAD')
+    flags, _ = git_call(owner, leaf, 'flags', ctx=ctx, worktree=mirror)
+    rows = flags.split(b'\0')[:-1]
+    ctx.require((not flags or flags.endswith(b'\0')) and len(rows) == len(base)
+                and all(row.startswith(b'H ') for row in rows)
+                and {os.fsdecode(row[2:]) for row in rows} == set(base), 'copied index skip/assume flags or inventory mismatch')
+    out, _ = git_call(owner, leaf, 'names', ctx=ctx, worktree=mirror)
+    ctx.require(not out or out.endswith(b'\0'), 'native source inventory framing')
+    all_names = [os.fsdecode(row) for row in out.split(b'\0')[:-1]]
+    ctx.require(len(all_names) <= LIMITS['names'] and len(set(all_names)) == len(all_names), 'native source inventory count/duplicates')
+    ctx.require(set(all_names)-{'AGENTS.md'} == set(accepted), 'native selected-name set differs from independent acceptance; no source payload read')
+    files, physical = {}, {}
+    for name in sorted(set(all_names)-{'AGENTS.md'}):
+        ctx.check()
+        path = Path(name)
+        ctx.require(name and not path.is_absolute() and '..' not in path.parts and '/'.join(path.parts) == name
+                    and len(os.fsencode(name)) <= LIMITS['gitPath'] and len(path.parts) <= LIMITS['gitDepth']
+                    and all(len(os.fsencode(part)) <= LIMITS['component'] for part in path.parts), 'invalid source name')
+        if not exists(Path(root)/name, ctx=ctx):
+            ctx.require(name in base, 'untracked source disappeared during inventory')
+            files[name], physical[name] = {'deleted': True}, {'deleted': True, 'path': str(Path(root)/name)}
+            continue
+        bound = read_file(Path(root)/name, ctx=ctx, role='source')
+        ctx.require(name in universe['entries'] and bound['identity'] == universe['entries'][name]['identity'],
+                    'selected source substituted after structural discovery')
+        files[name] = {'sha256': bound['sha256'], 'executable': bool(bound['identity']['mode'] & 0o100)}
+        physical[name] = bound
+        ctx.require(files[name] == accepted[name], 'selected source differs from accepted bytes/mode')
+    return files, physical
+
+
+@participating
+def proposed_tree(root, files, *, ctx, graph=None):
+    graph = graph or Forest(ctx)
+    node = {}
+    for name, value in files.items():
+        ctx.check()
+        if value.get('deleted'):
+            continue
+        bound = read_file(Path(root)/name, ctx=ctx, role='source', retain=True)
+        ctx.require(bound['sha256'] == value['sha256'] and bool(bound['identity']['mode'] & 0o100) == value['executable'], 'proposed source bytes/mode changed')
+        oid = graph.add('blob', bound['data'])
+        parent = node
+        parts = Path(name).parts
+        for part in parts[:-1]:
+            parent = parent.setdefault(os.fsencode(part), {})
+            ctx.require(isinstance(parent, dict), 'source path collides with file')
+        name_bytes = os.fsencode(parts[-1])
+        ctx.require(name_bytes not in parent, 'duplicate source tree entry')
+        parent[name_bytes] = ('100755' if value['executable'] else '100644', oid)
+    def encode(tree, depth):
+        ctx.require(depth <= LIMITS['gitDepth'], 'proposed tree depth exceeded')
+        rows = []
+        for name, value in tree.items():
+            ctx.check()
+            directory = isinstance(value, dict)
+            mode, oid = ('40000', encode(value, depth+1)) if directory else value
+            rows.append((name+(b'/' if directory else b''), mode.encode()+b' '+name+b'\0'+bytes.fromhex(oid)))
+        ctx.check()
+        body = b''.join(row for _, row in sorted(rows))
+        return graph.add('tree', body)
+    root_oid = encode(node, 0)
+    graph.traverse(root_oid)
+    return root_oid, graph
+
+
+@participating
+def remove_view(owner, view_record, entries, *, ctx):
+    ctx.require(all(row['ownership'] == 'reaped' and row['status'] == 'PASS' for row in ctx.native),
+                'native failure/unknown prevents view deletion')
+    delete_inventory(owner, entries, ctx=ctx, file_roles=view_roles(entries))
+    ctx.check()
+    view_record['removed'] = True
+    view_record['cleanup'] = {'status': 'PASS', 'removedEntries': len(entries)+1}

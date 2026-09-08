@@ -1,0 +1,1306 @@
+"""Preparation-only adversarial verifier proofs; never a first-party gate result.
+
+Each case owns new fixture paths/real children and retains its actual result.
+Only numeric-query text and explicit source/acceptance/routing setup are synthetic.
+Classification, readback, native completion, prior-worker checks and deletion
+are the real helper code. No Store/signing/QA-007 capture path is invoked.
+"""
+from pathlib import Path
+from contextlib import contextmanager
+import ast
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import shutil
+import signal
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+import zlib
+from unittest.mock import patch
+
+EVIDENCE = Path(__file__).absolute().parent
+if EVIDENCE.resolve() != EVIDENCE or Path(__file__).is_symlink() or not sys.flags.safe_path:
+    raise RuntimeError('Use trusted regular helper path with Python -P/-I')
+sys.path.insert(0, str(EVIDENCE))
+import action_io as io
+import bindings
+import frozen_diff
+import git_readonly as git
+import native_reader as nr
+import owned_outputs as owned
+import process_gate as pg
+import source_inventory as discovery
+
+# Exact tiny credential-free fixture, never first-party product execution. The
+# installed ensurepip backend is checked as 79.0.1 before any producer; no
+# dependency resolution, network, build isolation or reused fixture venv.
+SYNTHETIC_PACKAGE = {
+    '.gitignore': b'build/\n*.egg-info/\n__pycache__/\nAGENTS.md\n.mobile-release/\n',
+    'README.md': b'# Synthetic verifier producer\nNot the Mobile Release Kit implementation.\n',
+    'LICENSE': b'MIT\nSynthetic fixture only.\n',
+    'Gemfile': b'# Synthetic packaged data; never Bundler input\n',
+    'src/mobile_release/__init__.py': b'FIXTURE = "R4-R2 genuine setuptools producer"\n',
+    'src/mobile_release/cli.py': b'def main():\n    print("SYNTHETIC fixture console; not product validation")\n    return 0\n',
+    'pyproject.toml': b'''[build-system]
+requires = ["setuptools==79.0.1"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "mobile-release-kit"
+version = "0.3.0"
+description = "Synthetic R4-R2 verifier producer, not first-party toolkit"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = []
+[project.optional-dependencies]
+test = ["packaging==24.2", "typing-extensions==4.16.0; python_version < '3.13'"]
+[project.scripts]
+mobile-release = "mobile_release.cli:main"
+[tool.setuptools]
+package-dir = {"" = "src"}
+[tool.setuptools.packages.find]
+where = ["src"]
+[tool.setuptools.data-files]
+"share/mobile-release-kit" = ["Gemfile"]
+''',
+}
+
+# These proof-fixture guards do not change any action/native/graph limit.
+# All cases run sequentially. The manifest reserves this space before each
+# fresh fixture; historical failed fixtures are never reclaimed by this driver.
+PROOF_FREE_FLOOR = 4 * 1024**3
+PROOF_FIXTURE_HEADROOM = 512 * 1024**2
+
+
+def proof_space(root, *, before):
+    usage = shutil.disk_usage(root)
+    if type(usage.free) is not int or usage.free < 0 or type(before) is not bool:
+        raise RuntimeError('invalid proof disk observation')
+    reserve = PROOF_FIXTURE_HEADROOM if before else 0
+    return {'freeBytes': usage.free, 'floorBytes': PROOF_FREE_FLOOR,
+            'reservedFixtureBytes': reserve,
+            'sufficient': usage.free >= PROOF_FREE_FLOOR + reserve,
+            'scope': 'cooperative filesystem free-space observation; no cleanup authority'}
+
+
+def synthetic_wheel_command(config, evidence):
+    """Declared fixture routing only; actual pip and all consumers unchanged."""
+    return [config['python'], '-I', '-B', '-u', '-m', 'pip', 'wheel', '--no-deps', '--no-index',
+            '--no-build-isolation', '--wheel-dir', str(Path(evidence)/'wheels'), config['source']]
+
+
+def summary_only(ctx):
+    # Full actual native records are retained by each case/immutable observation;
+    # avoid duplicating their bounded raw pipe contents in aggregate summaries.
+    value=ctx.summary()
+    value['native']=[{'pid':r['pid'],'ownership':r['ownership'],'status':r['status'],
+                      'recordSha256':hashlib.sha256(json.dumps(r,sort_keys=True).encode()).hexdigest()}
+                     for r in ctx.native]
+    return value
+
+
+class Proofs:
+    def __init__(self, evidence):
+        self.evidence = Path(evidence)
+        self.root = self.evidence/('verifier-proof-'+os.urandom(12).hex())
+        self.root.mkdir(mode=0o700)
+        self.results, self.children, self.signals = [], [], []
+        self.resource_blocked = None
+        self.real_popen, self.real_kill, self.real_killpg = subprocess.Popen, os.kill, os.killpg
+        self.python = sys.executable
+        self.leaf = '/Applications/Xcode.app/Contents/Developer/usr/bin/git'
+        with io.action('proof-owner') as ctx:
+            self.owner = {'path': str(self.root), 'identity': io.identity(self.root, ctx=ctx),
+                          'parentAncestry': io.ancestry(self.root.parent, ctx=ctx),
+                          'nonce': os.urandom(24).hex(), 'tree': '0'*40, 'purpose': 'verifier synthetic retained proof evidence'}
+            io.write_new(self.evidence/(self.root.name+'-OWNER.json'), self.owner, ctx=ctx)
+
+    def case(self, name, callback):
+        if self.resource_blocked is not None:
+            raise RuntimeError('proof resource stop is terminal; no further case acquisition')
+        area = self.root/name
+        area.mkdir(mode=0o700)
+        before_children, before_signals = len(self.children), len(self.signals)
+        started = time.monotonic()
+        disk_before, disk_after = None, None
+        try:
+            disk_before = proof_space(self.root, before=True)
+            if not disk_before['sufficient']:
+                self.resource_blocked = 'free space below 4GiB plus declared fixture headroom'
+                raise RuntimeError(self.resource_blocked)
+            result = callback(area)
+            row = {'case': name, 'status': 'PASS', 'result': result}
+        except BaseException as error:
+            if disk_before is None:
+                self.resource_blocked = 'pre-fixture disk observation failed: ' + type(error).__name__
+            row = {'case': name, 'status': 'FAIL', 'errorType': type(error).__name__,
+                    'error': str(error), 'traceback': traceback.format_exc()}
+        unresolved = []
+        for child in self.children[before_children:]:
+            if child.returncode is None:
+                try:
+                    child.wait(timeout=3)
+                except BaseException as error:
+                    unresolved.append({'pid': child.pid, 'errorType': type(error).__name__})
+        if unresolved:
+            row.update(status='FAIL', unresolvedActualChildren=unresolved,
+                       nextCases='BLOCKED; no new native acquisition or guessed-PID signaling')
+            self.resource_blocked = 'actual child unresolved'
+        try:
+            disk_after = proof_space(self.root, before=False)
+            if not disk_after['sufficient']:
+                self.resource_blocked = 'free space below retained 4GiB floor'
+        except BaseException as error:
+            self.resource_blocked = 'disk observation failed: ' + type(error).__name__
+        if self.resource_blocked is not None:
+            row.update(status='FAIL', nextCases='BLOCKED; ' + self.resource_blocked)
+        row.update(seconds=time.monotonic()-started, directChildren=len(self.children)-before_children,
+                   signalRequests=self.signals[before_signals:],
+                   diskBefore=disk_before, diskAfter=disk_after)
+        self.results.append(row)
+        with io.action('record-proof-'+name) as ctx:
+            io.write_new(area/'RESULT.json', row, ctx=ctx)
+        print(row['status'], name, flush=True)
+        if self.resource_blocked is not None:
+            raise RuntimeError(self.resource_blocked + '; stop further cases')
+        return row
+
+    @contextmanager
+    def track(self):
+        suite = self
+        class Child(self.real_popen):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                suite.children.append(self)
+        def stop(pid, number):
+            matches = [child for child in self.children if child.pid == pid and child.returncode is None]
+            if pid == os.getpid():
+                return self.real_kill(pid, number)  # explicit fixture cancellation, never foreign process
+            assert len(matches) == 1, 'VETO unowned/reaped direct signal'
+            self.signals.append({'pid': pid, 'signal': number, 'kind': 'direct', 'reserved': True})
+            return self.real_kill(pid, number)
+        def group(pid, number):
+            matches = [child for child in self.children if child.pid == pid and child.returncode is None]
+            assert len(matches) == 1, 'VETO historical/unowned group signal'
+            self.signals.append({'pid': pid, 'signal': number, 'kind': 'reserved-outer-query', 'reserved': True})
+            return self.real_killpg(pid, number)
+        with patch.object(subprocess, 'Popen', Child), patch.object(os, 'kill', stop), patch.object(os, 'killpg', group):
+            yield
+
+    def query(self, code, *, seconds=2, cap=pg.PS_BYTES):
+        with patch.object(pg, 'PS_COMMAND', [self.python, '-I', '-B', '-u', '-c', code]):
+            record, rows = pg.numeric_snapshot(seconds=seconds, byte_limit=cap)
+        assert record['ownership'] == 'reaped', record
+        return record, rows
+
+    def state(self, area, state, expected):
+        query, rows = self.query(f"print('12341 1 12340 {os.getuid()} {state}')")
+        if expected == 'MALFORMED':
+            assert rows is None and query['status'] == 'UNKNOWN'
+            return {'query': query, 'rows': rows}
+        assert rows is not None and query['status'] == 'PARSED'
+        value = pg.classify_group(rows, group=12340, uid=os.getuid())
+        assert value['status'] == expected, value
+        return {'query': query, 'classification': value}
+
+    def query_bad(self, area, code, *, seconds=2, cap=pg.PS_BYTES):
+        query, rows = self.query(code, seconds=seconds, cap=cap)
+        assert rows is None and query['status'] == 'UNKNOWN'
+        return query
+
+    def state_transition(self, area, mode):
+        counter = area/'counter'
+        counter.write_text('0')
+        code = f"import pathlib,time;p=pathlib.Path({str(counter)!r});n=int(p.read_text());p.write_text(str(n+1));"
+        code += "time.sleep(0.10);" if mode == 'late' else ''
+        state = "'?'" if mode == 'persistent' else "('?' if n == 0 else 'Zs')"
+        code += f"print('12341 1 12340 {os.getuid()} '+{state})"
+        with patch.object(pg, 'PS_COMMAND', [self.python, '-I', '-B', '-u', '-c', code]):
+            result = pg._group_completion(12340, os.getuid(), allowance=0.08 if mode == 'late' else 0.6)
+        assert result['status'] == ('CLEAR' if mode == 'transition' else 'UNKNOWN'), result
+        assert not result['signalsAuthorized']
+        return result
+
+    def native(self, area, code, *, expected=True, stdout=nr.LIMITS['stdout'], stderr=nr.LIMITS['stderr'], seconds=2, input_data=b'', frames=None):
+        ctx = None
+        try:
+            with io.action('native-proof', seconds=min(5, max(seconds+0.5, 1))) as ctx:
+                if frames is not None:
+                    frames = nr.BatchFrames(frames, ctx=ctx)
+                out, err, record = nr.run([self.python, '-I', '-B', '-u', '-c', code], cwd=area,
+                                           environment={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'}, ctx=ctx,
+                                           stdout_limit=stdout, stderr_limit=stderr, seconds=seconds,
+                                           input_data=input_data, frames=frames, allow_stderr=expected)
+            assert expected, 'dangerous native case accepted'
+            return {'record': record, 'outBytes': len(out), 'errBytes': len(err), 'action': summary_only(ctx)}
+        except nr.NativeFailure as error:
+            assert not expected, str(error)
+            assert error.record['ownership'] == 'reaped', error.record
+            assert not error.record['signalAuthority']
+            return {'rejected': str(error), 'record': error.record, 'action': summary_only(ctx)}
+
+    def frame(self, area, variant):
+        body = b'synthetic body\n'
+        oid = hashlib.sha1(b'blob '+str(len(body)).encode()+b'\0'+body).hexdigest()
+        record = {'oid': oid, 'type': 'blob', 'bytes': len(body), 'sha256': hashlib.sha256(body).hexdigest()}
+        header = f'{oid} blob {len(body)}\n'.encode()
+        output = header+body+b'\n'
+        code_tail = ''
+        if variant == 'header-long': output = b'x'*97
+        if variant == 'wrong-oid': output = b'0'*40+output[40:]
+        if variant == 'wrong-type': output = output.replace(b' blob ', b' tree ', 1)
+        if variant == 'large-size': output = header.replace(str(len(body)).encode(), b'999999999')
+        if variant == 'noncanonical-size': output = header.replace(str(len(body)).encode(), b'0'+str(len(body)).encode())
+        if variant == 'short': output = output[:-4]
+        if variant == 'delimiter': output = output[:-1]+b'x'
+        if variant == 'extra': output += b'x'
+        if variant == 'nonzero': code_tail = ';raise SystemExit(7)'
+        if variant == 'stderr': code_tail = ";os.write(2,b'diagnostic')"
+        code = f"import os;os.read(0,41);os.write(1,{output!r})"+code_tail
+        return self.native(area, code, expected=variant == 'valid', frames=[record])
+
+    def fs(self, area, mode):
+        path = area/'value'
+        if mode.startswith('json-'):
+            data = {'duplicate': b'{"x":1,"x":2}', 'constant': b'{"x":NaN}',
+                    'depth': b'['*65+b'0'+b']'*65, 'string': b'"'+b'x'*(io.LIMITS['jsonString']+1)+b'"',
+                    'bytes': b' '*(io.LIMITS['record']+1), 'tokens': b'['+b'0,'*270000+b'0]',
+                    'valid': b'{"valid":[1,true,null,"ok"]}'}[mode[5:]]
+            path.write_bytes(data)
+            ctx = None
+            try:
+                with io.action('json-proof') as ctx:
+                    value = io.read_json(path, ctx=ctx)
+                assert mode == 'json-valid', 'bad JSON accepted'
+                return {'parsed': value, 'counts': ctx.counts}
+            except (RuntimeError, ValueError):
+                assert mode != 'json-valid'
+                return {'rejected': True, 'counts': ctx.counts}
+        if mode in ('at-limit','over-limit','tool-large'):
+            size = io.LIMITS['blob']+(1 if mode == 'over-limit' else 1024 if mode == 'tool-large' else 0)
+            with path.open('xb') as stream:
+                for _ in range(size//io.CHUNK): stream.write(b'x'*io.CHUNK)
+                stream.write(b'x'*(size%io.CHUNK))
+            ctx = None
+            try:
+                with io.action('digest-proof') as ctx:
+                    value=io.digest(path, ctx=ctx, role='tool' if mode == 'tool-large' else 'source')
+                assert mode!='over-limit'; return {'sha256':value,'counts':ctx.counts}
+            except RuntimeError:
+                assert mode=='over-limit'; return {'rejected':True,'counts':ctx.counts}
+        if mode in ('expired','pending-cancel','cumulative'):
+            path.write_bytes(b'real-data')
+            try:
+                with io.action('budget-proof',seconds=0.025 if mode=='expired' else 5) as ctx:
+                    if mode=='expired':time.sleep(0.035)
+                    if mode=='pending-cancel':ctx.pending.signal=signal.SIGTERM
+                    if mode=='cumulative':ctx.counts['allBytes']=io.LIMITS['allBytes']-12
+                    io.digest(path,ctx=ctx,role='source')
+            except RuntimeError:return {'rejected':True,'counts':ctx.counts,'failure':ctx.failure}
+            raise AssertionError('exhausted/cancelled action performed ordinary work')
+        raise AssertionError('unknown fs scenario')
+
+    def deletion(self, area, variant):
+        with io.action('deletion-setup') as ctx:
+            owner=io.create_owned(area/'owned',area/'OWNER.json','0'*40,'synthetic deletion proof',ctx=ctx)
+            for name in ('a','b','c'):(area/'owned'/name).write_bytes(b'SYNTHETIC '+name.encode())
+            before=io.inventory(owner,ctx=ctx)
+        flag=pg.Interrupted();ctx=None
+        real_unlink=os.unlink
+        calls=[]
+        def remove(name,*args,**kwargs):
+            result=real_unlink(name,*args,**kwargs);calls.append(name)
+            if len(calls)==1 and variant=='cancel-partial':flag.signal=signal.SIGTERM
+            if len(calls)==1 and variant=='replace-partial':
+                (area/'owned'/'a').rename(area/'preserved-a')
+                (area/'owned'/'a').write_bytes(b'FOREIGN SUBSTITUTION')
+            return result
+        if variant=='cancel-before':flag.signal=signal.SIGINT
+        if variant=='extra-before':(area/'owned'/'unknown').write_bytes(b'FOREIGN')
+        try:
+            with io.action('deletion-proof',pending=flag,seconds=10) as ctx:
+                with patch.object(os,'unlink',remove):io.delete_inventory(owner,before,ctx=ctx)
+            assert variant=='positive'
+            return {'removed':len(ctx.removals),'rootGone':not (area/'owned').exists()}
+        except RuntimeError:
+            assert variant!='positive'
+            if variant in ('cancel-before','extra-before'):assert not calls
+            if variant=='replace-partial':assert (area/'owned'/'a').read_bytes()==b'FOREIGN SUBSTITUTION'
+            assert (area/'owned').exists()
+            return {'failure':ctx.failure,'removals':ctx.removals,'calls':calls,'retained':sorted(p.name for p in (area/'owned').iterdir())}
+
+    def repo(self, area, contents=None):
+        root=area/'source';root.mkdir(mode=0o700)
+        contents={'alpha.txt':b'clean base\n','nested/file.txt':b'nested\n','.gitignore':b'.mobile-release/\nAGENTS.md\n'} if contents is None else contents
+        for name,body in contents.items():
+            p=root/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(body)
+        dot=root/'.git';dot.mkdir(mode=0o700)
+        for rel in ('objects','objects/info','objects/pack','refs','refs/heads'):(dot/rel).mkdir(mode=0o700)
+        with io.action('fixture-git-setup') as ctx:
+            files={name:{'sha256':hashlib.sha256(body).hexdigest(),'executable':False} for name,body in contents.items()}
+            tree,forest=git.proposed_tree(root,files,ctx=ctx)
+            commit=f'tree {tree}\nauthor Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\nSynthetic fixture\n'.encode()
+            head=forest.add('commit',commit)
+            git.materialize(dot,forest,ctx=ctx)
+        (dot/'HEAD').write_text('ref: refs/heads/fixture\n');(dot/'refs/heads/fixture').write_text(head+'\n')
+        (dot/'config').write_text('[core]\n repositoryformatversion = 0\n bare = false\n')
+        rows=[]
+        for name,value in sorted(files.items()):
+            body=contents[name];oid=hashlib.sha1(b'blob '+str(len(body)).encode()+b'\0'+body).digest();raw=os.fsencode(name)
+            fixed=struct.pack('>10I',0,0,0,0,0,0,0o100644,os.getuid(),0,len(body))+oid+struct.pack('>H',len(raw))
+            row=fixed+raw+b'\0';row+=b'\0'*((-len(row))%8);rows.append(row)
+        data=b'DIRC'+struct.pack('>II',2,len(rows))+b''.join(rows)
+        (dot/'index').write_bytes(data+hashlib.sha1(data).digest())
+        return root,head,tree,files
+
+    def graph(self, area, variant):
+        root,head,base,files=self.repo(area)
+        if variant=='modified':(root/'alpha.txt').write_text('modified clean\n')
+        elif variant=='deleted':(root/'alpha.txt').unlink()
+        elif variant=='untracked':(root/'added.txt').write_text('new clean\n')
+        elif variant=='executable':(root/'alpha.txt').chmod(0o755)
+        elif variant=='empty-file':(root/'empty.txt').write_bytes(b'')
+        elif variant=='nested':(root/'nested/deeper').mkdir();(root/'nested/deeper/new.txt').write_text('new\n')
+        elif variant.startswith('whitespace'):
+            target=root/('new.txt' if 'new' in variant else 'alpha.txt')
+            target.write_text('bad trailing \n' if 'blank-eof' not in variant else 'value\n\n')
+        elif variant=='hostile-attributes':
+            (root/'.gitattributes').write_text('* -whitespace diff=missing textconv=missing\n')
+            (root/'alpha.txt').write_text('bad trailing \n')
+            (root/'.git/config').write_text('[include]\n path = /nonexistent/mrk-config\n[core]\n fsmonitor = /nonexistent/mrk-helper\n whitespace = -blank-at-eol\n[diff "missing"]\n command = /nonexistent/mrk-diff\n textconv = /nonexistent/mrk-textconv\n')
+        before={str(p.relative_to(root/'.git')):hashlib.sha256(p.read_bytes()).hexdigest() for p in (root/'.git').rglob('*') if p.is_file()}
+        ctx=None
+        try:
+            with io.action('real-git-proof') as ctx:
+                raw=git.raw_source(root,branch='fixture',expected_gitdir=root/'.git',expected_common=root/'.git',ctx=ctx)
+                graph=raw['graph']
+                approved=dict(files)
+                for name in (set(files) | {'added.txt','empty.txt','nested/deeper/new.txt','new.txt','.gitattributes'}):
+                    if (root/name).exists():
+                        body=io.read_file(root/name,ctx=ctx,role='source')
+                        approved[name]={'sha256':body['sha256'],'executable':bool(body['identity']['mode']&0o100)}
+                    elif name in files:approved[name]={'deleted':True}
+                accepted={'role':'execution','structuralDirectories':sorted({str(p) for n in approved for p in Path(n).parents if str(p)!='.'}),
+                          'additionalControls':{},'agents':None}
+                universe,bodies=discovery.discover(root,raw['baseFiles'],accepted,approved,ctx=ctx)
+                owner,view=git.create_view(area/'view',area/'OWNER.json',graph,tree=base,ctx=ctx,index=raw['indexBytes'],anchor=raw['anchorBytes'],
+                                           universe=universe,control_bodies=bodies)
+                logical,physical=git.source_files(root,raw,owner,self.leaf,ctx=ctx,accepted=approved,universe=universe)
+                entries=git.validate_view(owner,graph,ctx=ctx,with_index=True,expected_inventory=view['initialInventory'],universe=universe,mirror=view['mirror'])
+                git.remove_view(owner,view,entries,ctx=ctx)
+                # Fresh final forest contains no commit anchor or copied index.
+                forest=git.Forest(ctx)
+                for oid,(record,body) in graph.objects.items():
+                    if record['type']!='commit':forest.add(record['type'],body,expected=oid)
+                proposed,forest=git.proposed_tree(root,logical,ctx=ctx,graph=forest)
+                owner,view=git.create_view(area/'diff',area/'DIFF-OWNER.json',forest,tree=proposed,ctx=ctx)
+                native=git.consume_forest(owner,forest,base,proposed,self.leaf,ctx=ctx)
+                git.remove_view(owner,view,native['inventory'],ctx=ctx)
+                git.recheck_raw(raw,ctx=ctx)
+                assert not variant.startswith('whitespace') and variant!='hostile-attributes','whitespace suppression accepted'
+                result={'base':base,'proposed':proposed,'files':logical,'native':native,'action':summary_only(ctx)}
+        except nr.NativeFailure as error:
+            assert variant.startswith('whitespace') or variant=='hostile-attributes',str(error)
+            result={'expectedWhitespaceFailure':error.record,'action':summary_only(ctx)}
+        after={str(p.relative_to(root/'.git')):hashlib.sha256(p.read_bytes()).hexdigest() for p in (root/'.git').rglob('*') if p.is_file()}
+        assert before==after,'real fixture Git store/index/ref changed'
+        return result
+
+    def clone_actual_repo(self, area, original):
+        """Fixture copies of actual tracked/included bytes, never real Git writes."""
+        with io.action('actual-source-applicability-copy') as ctx:
+            config=io.read_json(self.evidence/'CONFIG.json',ctx=ctx)
+            ctx.check()
+            temporary=Path(tempfile.mkdtemp(prefix='.mrk-qa006-verifier-r3-',dir=str(Path(config['owner']).parent)))
+            ctx.check()
+            assert not any(temporary.is_relative_to(Path(root)) for root in config['gitLayouts'])
+            temporary_owner={'path':str(temporary),'identity':io.identity(temporary,ctx=ctx),
+                             'parentAncestry':io.ancestry(temporary.parent,ctx=ctx),'nonce':os.urandom(24).hex(),
+                             'tree':config['expectedSourceHead'],'purpose':'actual-source preparation tmp outside both repositories; actual mkdtemp reservation'}
+            io.write_new(area/'PREPARATION-TMP-OWNER.json',temporary_owner,ctx=ctx)
+            layout=config['gitLayouts'][original]
+            raw=git.raw_source(original,branch=layout['branch'],expected_gitdir=layout['gitdir'],expected_common=layout['common'],ctx=ctx)
+            acceptance,original_logical=discovery.load_acceptance(self.evidence,config,ctx=ctx)
+            # This input is never executed. Excluded live-source caches remain
+            # untouched; the fresh execution clone contains accepted files only.
+            accepted={**acceptance['record']['roots'][original],'role':'preservation'}
+            universe,bodies=discovery.discover(original,raw['baseFiles'],accepted,original_logical[original]['files'],ctx=ctx)
+            owner,view=git.create_view(temporary/'clone-view',area/'CLONE-VIEW-OWNER.json',raw['graph'],tree=raw['stable']['baseRoot'],
+                                     index=raw['indexBytes'],anchor=raw['anchorBytes'],ctx=ctx,universe=universe,control_bodies=bodies)
+            files,physical=git.source_files(original,raw,owner,self.leaf,ctx=ctx,accepted=original_logical[original]['files'],universe=universe)
+            entries=git.validate_view(owner,raw['graph'],with_index=raw['indexBytes'] is not None,ctx=ctx,expected_inventory=view['initialInventory'],
+                                      universe=universe,mirror=view['mirror'])
+            git.remove_view(owner,view,entries,ctx=ctx)
+            assert not io.inventory(temporary_owner,ctx=ctx)
+            io.delete_inventory(temporary_owner,{},ctx=ctx)
+            io.write_new(area/'PREPARATION-TMP-CLEANUP.json',{'status':'PASS','removed':str(temporary),'owner':temporary_owner,
+                         'metadataChildObservation':view,'actualKnownChildren':[r['pid'] for r in ctx.native],
+                         'allActualKnownChildrenReaped':all(r['ownership']=='reaped' for r in ctx.native)},ctx=ctx)
+            proposed,_=git.proposed_tree(original,files,ctx=ctx)
+            git.recheck_raw(raw,ctx=ctx)
+            root=area/'source';root.mkdir(mode=0o700)
+            for name,row in physical.items():
+                if row.get('deleted'):continue
+                target=root/name;target.parent.mkdir(parents=True,exist_ok=True)
+                value=io.read_file(row['path'],ctx=ctx,role='source',retain=True)
+                assert {k:v for k,v in value.items() if k!='data'}==row
+                io.write_bytes_new(target,[value['data']],ctx=ctx,role='source');target.chmod(row['identity']['mode'])
+            dot=root/'.git';dot.mkdir(mode=0o700)
+            for rel in ('objects','objects/info','objects/pack','refs','refs/heads'):(dot/rel).mkdir(mode=0o700)
+            git.materialize(dot,raw['graph'],ctx=ctx)
+            (dot/'HEAD').write_text('ref: refs/heads/fixture\n');(dot/'refs/heads/fixture').write_text(raw['stable']['head']+'\n')
+            if raw['indexBytes'] is not None:(dot/'index').write_bytes(raw['indexBytes'])
+            (dot/'config').write_text('[core]\n repositoryformatversion = 0\n bare = false\n')
+            io.write_new(area/'ACTUAL-SOURCE-COPY.json',{'scope':'actual source applicability; copy not acceptance','original':original,
+                          'originalPhysical':physical,'originalRaw':raw['stable'],'proposedTree':proposed,'action':summary_only(ctx)},ctx=ctx)
+        return root,raw['stable']['head'],proposed,files
+
+    def full_fixture(self, area, *, route=False, fault=None, actual=False, contents=None):
+        """Explicit synthetic source/acceptance/workspace, genuine isolated venv.
+
+        No final namespace is touched. These fixture-only acceptance statements
+        name fictional content, not actual independent repository acceptance.
+        """
+        parent=area/'owner';parent.mkdir(mode=0o700)
+        configured=json.loads((self.evidence/'CONFIG.json').read_text())
+        root,head,tree,files=self.clone_actual_repo(parent,configured['source']) if actual else self.repo(parent,contents)
+        wrapper=area/'user-repository';wrapper.mkdir(mode=0o700)
+        user,user_head,user_tree,user_files=self.clone_actual_repo(wrapper,configured['rootUserWorktree']) if actual else self.repo(wrapper)
+        (user/'AGENTS.md').write_text('Synthetic fixture instructions; never user AGENTS.\n')
+        (user/'.mobile-release/remediation/QA-003-final-r4').mkdir(parents=True)
+        tmp=parent/'final-tmp-r1';tmp.mkdir(mode=0o700)
+        review=area/'review';review.mkdir(mode=0o700)
+        evidence=review/'evidence';evidence.mkdir(mode=0o700)
+        for name in bindings.HELPERS|bindings.STATIC_RECORDS:
+            shutil.copy2(self.evidence/name,evidence/name)
+        if route:
+            # The only executable setup seam. Child result, worker observation,
+            # freeze/graph/ownership/inventory/delete consumers remain unchanged.
+            (evidence/'gate_list.py').write_text('''from pathlib import Path
+def commands(config,evidence,frozen,*,ctx):
+    ctx.require(config['scope'].startswith('SYNTHETIC PREPARATION'), 'fixture routing only')
+    p=[config['python'],'-I','-B','-u'];evidence=Path(evidence)
+    return [(name,[*p,'-c','pass'],'command') for name in ('fixture-one','fixture-two','fixture-three')]+[
+        ('prepare-frozen-diff',[*p,str(evidence/'frozen_diff.py'),'--prepare'],'command'),
+        ('diff-check',[*p,str(evidence/'frozen_diff.py'),'--check'],'command'),
+        ('cleanup-frozen-diff',[*p,str(evidence/'frozen_diff.py'),'--cleanup'],'command')]
+''')
+            if fault is not None:
+                text=(evidence/'gate_list.py').read_text()
+                slot='--prepare' if fault.startswith('prepare-') else '--cleanup' if fault.startswith('cleanup-') else '--check'
+                target="str(evidence/'frozen_diff.py'),'"+slot+"'"
+                replacement=repr(str(area/'lifecycle-fault.txt'))+","+repr(slot)
+                assert text.count(target)==1
+                (evidence/'gate_list.py').write_text(text.replace(target,replacement))
+        with io.action('fixture-venv-setup') as ctx:
+            out,err,record=nr.run([self.python,'-I','-B','-m','venv',str(parent/'venv')],cwd=area,
+                                   environment={'PATH':'/usr/bin:/bin','LC_ALL':'C','PYTHONDONTWRITEBYTECODE':'1'},ctx=ctx)
+        with io.action('fixture-authority-setup') as ctx:
+            config=io.read_json(self.evidence/'CONFIG.json',ctx=ctx)
+            config.update(owner=str(parent),source=str(root),rootUserWorktree=str(user),tmp=str(tmp),
+                          python=str(parent/'venv/bin/python'),expectedSourceHead=head,expectedBranch='fixture',
+                          path=str(parent/'venv/bin')+':'+config['path'],
+                          sourceUserAgentsSha256=io.digest(user/'AGENTS.md',ctx=ctx,role='source'),
+                          scope='SYNTHETIC PREPARATION SETUP ONLY; no actual review/acceptance/delivery',
+                          gitLayouts={str(root):{'gitdir':str(root/'.git'),'common':str(root/'.git'),'branch':'fixture'},
+                                      str(user):{'gitdir':str(user/'.git'),'common':str(user/'.git'),'branch':'fixture'}})
+            # Replace copied static fixture inputs, not the real helper config.
+            (evidence/'CONFIG.json').unlink();io.write_new(evidence/'CONFIG.json',config,ctx=ctx)
+            workspace={'purpose':'SYNTHETIC fixture only','baseCommit':head,'parent':str(parent),
+                       'parentDevice':parent.stat().st_dev,'parentInode':parent.stat().st_ino,
+                       'worktree':str(root),'tmp':str(tmp),'rootWorktree':str(user),'nonce':os.urandom(24).hex(),
+                       'sourceDevice':root.stat().st_dev,'sourceInode':root.stat().st_ino,'sourceStatus':'',
+                       'rootUserAgentsSha256':config['sourceUserAgentsSha256']}
+            io.write_new(review/'WORKSPACE.json',workspace,ctx=ctx)
+            for name in ('FINAL-TMP-OWNER.json','OWNERSHIP-BASELINE.json'):(evidence/name).unlink()
+            io.write_new(evidence/'FINAL-TMP-OWNER.json',{'path':str(tmp),'device':tmp.stat().st_dev,'inode':tmp.stat().st_ino,
+                         'purpose':'SYNTHETIC fixture temporary owner','createdUtc':'fixture-only'},ctx=ctx)
+            io.write_new(evidence/'OWNERSHIP-BASELINE.json',{'purpose':'SYNTHETIC owner baseline',
+                         'ancestries':{str(p):io.ancestry(p,ctx=ctx) for p in (parent,root,user,tmp,evidence)}},ctx=ctx)
+            logical={'head':head,'branch':'fixture','files':files}
+            io.write_new(review/'implementation-snapshot.json',logical,ctx=ctx)
+            io.write_new(user/'.mobile-release/remediation/QA-003-final-r4/final-freeze.json',
+                         {'head':user_head,'branch':'fixture','files':user_files},ctx=ctx)
+            proposed={'schemaVersion':1,'policyVersion':discovery.POLICY_VERSION,'classification':discovery.CLASSIFICATION,'roots':{}}
+            for source,snapshot,selected,role in ((root,review/'implementation-snapshot.json',files,'execution'),
+                       (user,user/'.mobile-release/remediation/QA-003-final-r4/final-freeze.json',user_files,'preservation')):
+                proposed['roots'][str(source)]={'role':role,'snapshot':io.read_file(snapshot,ctx=ctx,role='record'),
+                      'structuralDirectories':sorted({str(p) for n in selected for p in Path(n).parents if str(p)!='.'}),
+                      'additionalControls':{},'agents':io.read_file(user/'AGENTS.md',ctx=ctx,role='source') if role=='preservation' else None}
+            (evidence/'DISCOVERY-ACCEPTANCE.json').unlink()
+            io.write_new(evidence/'DISCOVERY-ACCEPTANCE.json',proposed,ctx=ctx)
+            (review/'implementation-review.md').write_text('SYNTHETIC SETUP. NOT ACTUAL IMPLEMENTATION ACCEPTANCE.\n')
+            (review/'verifier-review.md').write_text('SYNTHETIC SETUP. NOT ACTUAL VERIFIER ACCEPTANCE.\n')
+            io.write_new(evidence/'ACCEPTED-IMPLEMENTATION.json',{'status':'APPROVED_IMPLEMENTATION_ONLY','tree':tree,
+                         'reportPath':str(review/'implementation-review.md'),'reportSha256':io.digest(review/'implementation-review.md',ctx=ctx,role='record'),
+                         'snapshotPath':str(review/'implementation-snapshot.json'),'snapshotSha256':io.digest(review/'implementation-snapshot.json',ctx=ctx,role='record')},ctx=ctx)
+            io.write_new(evidence/'ACCEPTED-VERIFIER.json',{'status':'APPROVED_VERIFIER_ONLY','helpers':bindings.helper_snapshot(evidence,ctx=ctx),
+                         'reportPath':str(review/'verifier-review.md'),'reportSha256':io.digest(review/'verifier-review.md',ctx=ctx,role='record')},ctx=ctx)
+        return evidence,config,{'head':head,'branch':'fixture','files':files,'proposedTree':tree}
+
+    def reroute_fixture(self, evidence, route):
+        """Explicit fixture routing only; all authority/producer consumers real."""
+        source = ('from pathlib import Path\n'
+                  'def commands(config,evidence,frozen,*,ctx):\n'
+                  '    ctx.require(config["scope"].startswith("SYNTHETIC PREPARATION"), "fixture-only route")\n'
+                  '    return ' + repr(route) + '\n')
+        (evidence/'gate_list.py').write_text(source)
+        with io.action('rebind-synthetic-route-not-product-approval') as ctx:
+            approval=io.read_json(evidence/'ACCEPTED-VERIFIER.json',ctx=ctx)
+            approval['helpers']=bindings.helper_snapshot(evidence,ctx=ctx)
+            (evidence/'ACCEPTED-VERIFIER.json').unlink()
+            io.write_new(evidence/'ACCEPTED-VERIFIER.json',approval,ctx=ctx)
+
+    def freeze_fixture(self, evidence):
+        with io.action('genuine-synthetic-source-freeze') as ctx:
+            current=bindings.collect(evidence,ctx=ctx)
+            io.write_new(evidence/'final-freeze.json',{'schemaVersion':1,'stable':current['stable'],
+                         'stableSha256':current['stableSha256'],'creationObservation':current['observation']},ctx=ctx)
+        return current['stable']
+
+    def controller_fixture(self, evidence, config, frozen, route, *, controller=None):
+        import gate_list
+        scope={}
+        exec(compile((evidence/'gate_list.py').read_text(),str(evidence/'gate_list.py'),'exec'),scope)
+        if controller is None:
+            spec=importlib.util.spec_from_file_location('genuine_fixture_controller_'+os.urandom(4).hex(),self.evidence/'verify-all.py')
+            controller=importlib.util.module_from_spec(spec);spec.loader.exec_module(controller)
+        with patch.object(gate_list,'commands',scope['commands']):
+            return controller.run_gates(evidence,config,frozen,route)
+
+    def raw_graph(self, area, variant):
+        root,head,tree,files=self.repo(area,{} if variant=='empty-head' else None)
+        dot=root/'.git';gitdir=dot;common=dot
+        def put(kind,body):
+            framed=kind.encode()+b' '+str(len(body)).encode()+b'\0'+body
+            oid=hashlib.sha1(framed).hexdigest();path=common/'objects'/oid[:2]/oid[2:]
+            path.parent.mkdir(exist_ok=True);path.write_bytes(zlib.compress(framed));return oid
+        def point_tree(body):
+            oid=put('tree',body)
+            commit=put('commit',f'tree {oid}\nauthor Fixture <fixture@example.invalid> 1 +0000\n\nfixture\n'.encode())
+            (common/'refs/heads/fixture').write_text(commit+'\n')
+        sample=next(name for name in files if name!='.gitignore') if files else None
+        blob=hashlib.sha1(b'blob '+str(len((root/sample).read_bytes())).encode()+b'\0'+(root/sample).read_bytes()).hexdigest() if sample else None
+        object_path=dot/'objects'/blob[:2]/blob[2:] if blob else None
+        if variant=='head-blob':(dot/'refs/heads/fixture').write_text(blob+'\n')
+        elif variant in ('commit-missing-tree','commit-duplicate-tree'):
+            body=b'author Fixture <fixture@example.invalid> 1 +0000\n\nfixture\n' if variant=='commit-missing-tree' else f'tree {tree}\ntree {tree}\n\nfixture\n'.encode()
+            (dot/'refs/heads/fixture').write_text(put('commit',body)+'\n')
+        elif variant=='missing-object':object_path.unlink()
+        elif variant=='corrupt-object':object_path.write_bytes(b'not zlib')
+        elif variant=='zlib-tail':object_path.write_bytes(object_path.read_bytes()+b'tail')
+        elif variant=='zlib-extra-stream':object_path.write_bytes(object_path.read_bytes()+zlib.compress(b'blob 0\0'))
+        elif variant=='zlib-truncated':object_path.write_bytes(object_path.read_bytes()[:-1])
+        elif variant in ('header','declared-too-large','extra-body'):
+            framed={'header':b'x'*97,'declared-too-large':b'blob 8388609\0','extra-body':b'blob 1\0xy'}[variant]
+            object_path.write_bytes(zlib.compress(framed))
+        elif variant=='object-symlink':
+            saved=area/'saved-object';object_path.rename(saved);object_path.symlink_to(saved)
+        elif variant=='object-hardlink':
+            saved=area/'saved-object';object_path.rename(saved);os.link(saved,object_path)
+        elif variant in ('tree-symlink','tree-gitlink','tree-mode','tree-duplicate','tree-unsorted','tree-wrong-type','tree-dot','tree-path'):
+            suffix=bytes.fromhex(blob)
+            rows={'tree-symlink':b'120000 bad\0'+suffix,'tree-gitlink':b'160000 bad\0'+suffix,
+                  'tree-mode':b'100664 bad\0'+suffix,'tree-duplicate':(b'100644 same\0'+suffix)*2,
+                  'tree-unsorted':b'100644 z\0'+suffix+b'100644 a\0'+suffix,
+                  'tree-wrong-type':b'40000 child\0'+suffix,'tree-dot':b'100644 ..\0'+suffix,
+                  'tree-path':b'100644 a/b\0'+suffix}
+            point_tree(rows[variant])
+        elif variant in ('pack','alternate','promisor'):
+            path=dot/('objects/info/alternates' if variant=='alternate' else 'objects/pack/fixture.'+('promisor' if variant=='promisor' else 'pack'))
+            path.write_text('/nonexistent/synthetic-only\n')
+        elif variant=='missing-index':(dot/'index').unlink()
+        elif variant.startswith('index-'):
+            data=bytearray((dot/'index').read_bytes()[:-20])
+            if variant=='index-stage':data[12+60:12+62]=struct.pack('>H',0x1000|len('.gitignore'))
+            elif variant=='index-assume':data[12+60:12+62]=struct.pack('>H',0x8000|len('.gitignore'))
+            elif variant=='index-sparse':data[12+24:12+28]=struct.pack('>I',0o40000)
+            elif variant=='index-split':data.extend(b'link'+struct.pack('>I',0))
+            elif variant=='index-version':data[4:8]=struct.pack('>I',4)
+            elif variant=='index-oid':data[12+40:12+60]=b'\x01'*20
+            checksum=hashlib.sha1(data).digest() if variant!='index-checksum' else b'\0'*20
+            (dot/'index').write_bytes(data+checksum)
+        elif variant=='ref-symlink':
+            target=area/'ref';(dot/'refs/heads/fixture').rename(target);(dot/'refs/heads/fixture').symlink_to(target)
+        elif variant=='head-indirection':(dot/'HEAD').write_text('ref: refs/heads/another\n')
+        elif variant=='packed-only-ref':(dot/'refs/heads/fixture').unlink();(dot/'packed-refs').write_text(head+' refs/heads/fixture\n')
+        elif variant=='reftable':(dot/'reftable').mkdir()
+        elif variant in ('linked-valid','linked-commondir','linked-backpointer','linked-symlink'):
+            common=area/'common.git';dot.rename(common)
+            gitdir=common/'worktrees/fixture';gitdir.mkdir(parents=True)
+            (gitdir/'HEAD').write_bytes((common/'HEAD').read_bytes());(gitdir/'index').write_bytes((common/'index').read_bytes())
+            (gitdir/'commondir').write_text('../..\n')
+            (gitdir/'gitdir').write_text(str(dot)+'\n')
+            dot.write_text('gitdir: '+str(gitdir)+'\n')
+            if variant=='linked-commondir':(gitdir/'commondir').write_text('/nonexistent/not-allowed\n')
+            if variant=='linked-backpointer':(gitdir/'gitdir').write_text('/nonexistent/foreign/.git\n')
+            if variant=='linked-symlink':
+                saved=area/'saved-commondir';(gitdir/'commondir').rename(saved);(gitdir/'commondir').symlink_to(saved)
+        ctx=None
+        try:
+            with io.action('raw-graph-proof') as ctx:
+                raw=git.raw_source(root,branch='fixture',expected_gitdir=gitdir,expected_common=common,ctx=ctx)
+                assert variant in ('empty-head','linked-valid'),variant+' unexpectedly accepted'
+            return {'status':'valid','raw':raw['stable'],'action':summary_only(ctx)}
+        except (RuntimeError,OSError,ValueError,zlib.error) as error:
+            assert variant not in ('empty-head','linked-valid'),str(error)
+            assert not ctx.native,'unsupported source reached native Git'
+            return {'rejected':type(error).__name__,'message':str(error),'nativeLaunches':0,'action':summary_only(ctx)}
+
+    def collection(self, area):
+        evidence,config,logical=self.full_fixture(area)
+        receipts=[];values=[];actions=[]
+        for index in range(2):
+            with io.action('actual-collect-'+str(index)) as ctx:
+                result=bindings.collect(evidence,ctx=ctx)
+                values.append(result['stable']);receipts.append(result['observation']);actions.append(summary_only(ctx))
+        assert values[0]==values[1]
+        assert receipts[0]!=receipts[1]
+        with io.action('synthetic-freeze-envelope-setup') as ctx:
+            envelope={'schemaVersion':1,'stable':values[0],'stableSha256':io.canonical_digest(values[0],ctx=ctx),
+                      'creationObservation':receipts[0]}
+            io.write_new(evidence/'final-freeze.json',envelope,ctx=ctx)
+        for index in range(2):
+            with io.action('actual-check-frozen-'+str(index)) as ctx:
+                result=bindings.check_frozen(evidence,ctx=ctx,observations=receipts)
+                assert result==values[0]
+                actions.append(summary_only(ctx))
+        with io.action('collection-proof-readback') as ctx:
+            for reference in receipts:
+                assert io.read_file(reference['path'],ctx=ctx,role='record')==reference
+            assert len({r['sha256'] for r in receipts})==4
+            assert not io.names(config['tmp'],ctx=ctx)
+        return {'syntheticSetupOnly':True,'stableEqual':True,'receipts':receipts,'actions':actions,
+                'fixtureEvidence':str(evidence),'finalTmpEmpty':True}
+
+    def native_fault(self, area, variant):
+        actual_popen=subprocess.Popen
+        real_read=os.read
+        acquired=[]
+        ctx=None
+        class Child(actual_popen):
+            def __init__(child,*args,**kwargs):
+                if variant=='unknown-no-child':raise RuntimeError('synthetic acquisition without child')
+                super().__init__(*args,**kwargs)
+                acquired.append(child)
+                child.injected=False
+                if variant=='unknown-hidden-child':raise RuntimeError('synthetic publication fault after actual child')
+                if variant=='cancel-acquire':os.kill(os.getpid(),signal.SIGINT)
+            def poll(child):
+                value=super().poll()
+                if value is not None and not child.injected:
+                    child.injected=True
+                    if variant=='unknown-reap':raise RuntimeError('synthetic reap publication fault')
+                    if variant=='cancel-reap':os.kill(os.getpid(),signal.SIGINT)
+                    if variant=='late-reap':time.sleep(0.07)
+                return value
+        def read(fd,count):
+            value=real_read(fd,count)
+            if acquired and fd in (acquired[-1].stdout.fileno(),acquired[-1].stderr.fileno()) and value:
+                if variant=='cancel-read':os.kill(os.getpid(),signal.SIGTERM)
+                if variant=='read-error':raise OSError('synthetic actual-read error')
+            return value
+        code='import os;os.write(1,b"ready");os.read(0,1)' if variant in ('unknown-hidden-child','cancel-acquire','cancel-read','read-error') else 'pass'
+        try:
+            with patch.object(subprocess,'Popen',Child),patch.object(os,'read',read):
+                with io.action('native-fault-proof') as ctx:
+                    nr.run([self.python,'-I','-B','-u','-c',code],cwd=area,
+                           environment={'PATH':'/usr/bin:/bin','LC_ALL':'C'},ctx=ctx,
+                           seconds=0.05 if variant=='late-reap' else 2)
+            raise AssertionError('native fault was accepted')
+        except nr.NativeFailure as error:
+            value=error.record
+            if variant.startswith('unknown'):
+                assert value['ownership']=='unknown' and not value['stopSignalSent'] and not value['signalAuthority']
+            else:
+                assert value['ownership']=='reaped' and not value['signalAuthority']
+                if variant in ('cancel-reap','late-reap'):assert not value['stopSignalSent']
+            return {'record':value,'action':summary_only(ctx),'fixtureHandles':[p.pid for p in acquired]}
+        finally:
+            # Independent fixture authority retained before injected publication
+            # fault. EOF/actual returned handles, never guessed PIDs/groups.
+            for child in acquired:
+                for stream in (child.stdin,child.stdout,child.stderr):
+                    if stream is not None and not stream.closed:stream.close()
+                if child.returncode is None:child.wait(timeout=3)
+
+    def lifecycle(self, area, variant):
+        fault=None if variant in ('positive','actual-source') else variant
+        evidence,config,logical=self.full_fixture(area,route=True,fault=fault,actual=variant=='actual-source')
+        script=area/'lifecycle-fault.txt'
+        if fault is not None:
+            script.write_text(f'''import os,sys,json,signal
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0,{str(evidence)!r})
+import action_io as io,frozen_diff as diff
+evidence=Path({str(evidence)!r});variant={variant!r};mode=sys.argv[1]
+if variant.startswith('prepare-'):
+ original=io.write_bytes_new
+ def write(path,blocks,**kwargs):
+  value=original(path,blocks,**kwargs)
+  path=Path(path)
+  if variant=='prepare-object-cancel' and 'final-frozen-diff-r1/objects/' in str(path):os.kill(os.getpid(),signal.SIGINT)
+  return value
+ diff.write_bytes_new=write
+ import git_readonly
+ git_readonly.write_bytes_new=write
+ with io.action('actual-faulted-prepare') as ctx:
+  diff.prepare(evidence,ctx=ctx)
+  if variant=='prepare-seal-cancel':os.kill(os.getpid(),signal.SIGTERM)
+  elif variant=='prepare-return-nonzero':raise SystemExit(7)
+else:
+ ledger=json.loads((evidence/'final-verification.json').read_text());prior=ledger['gates'][3]
+ seal=json.loads((evidence/'FROZEN-DIFF-SEAL.json').read_text())
+ if variant.startswith('completion-'):
+  field=variant[11:]
+  if field=='missing':prior.pop('preparedEvidence')
+  elif field=='failed':prior['status']='FAIL'
+  elif field=='running':prior['status']='RUNNING'
+  elif field=='unreaped':prior['ownership']='unknown'
+  elif field=='nonzero':prior['exitCode']=7
+  elif field=='late':prior['timedOut']=True
+  elif field=='cancel':prior['cancelSignal']=15
+  elif field=='wrong-slot':ledger['gates'][2],ledger['gates'][3]=ledger['gates'][3],ledger['gates'][2]
+  elif field=='log':(evidence/prior['log']).write_text('changed actual prepare log')
+  elif field=='binding':prior['preparedEvidence']['seal']['sha256']='0'*64
+  (evidence/'final-verification.json').write_text(json.dumps(ledger))
+  (evidence/'injected-completion.json').write_text(json.dumps(ledger))
+  (evidence/'actual-controller.exit').write_text('0\\n')  # cannot replace completion
+ elif variant.startswith('store-'):
+  root=Path(seal['owner']['path']);oid=next(iter(seal['objects']));path=root/'objects'/oid[:2]/oid[2:]
+  if variant=='store-missing':path.unlink()
+  elif variant=='store-corrupt':path.write_bytes(b'corrupt')
+  elif variant=='store-extra':(root/'objects/pack/foreign.pack').write_bytes(b'not a pack')
+  elif variant=='store-index':(root/'index').write_bytes(b'not an index')
+  elif variant=='store-owner':
+   owner=json.loads((evidence/'FROZEN-DIFF-OWNER.json').read_text());owner['nonce']='a'*48
+   (evidence/'FROZEN-DIFF-OWNER.json').write_text(json.dumps(owner))
+  elif variant=='store-symlink':
+   saved=root.parent/'saved-frozen-diff';root.rename(saved);root.symlink_to(saved,target_is_directory=True)
+ with io.action('actual-lifecycle-consumer') as ctx:
+  (diff.cleanup if mode=='--cleanup' else diff.check)(evidence,ctx=ctx)
+''')
+        with io.action('fixture-create-freeze-envelope') as ctx:
+            result=bindings.collect(evidence,ctx=ctx)
+            envelope={'schemaVersion':1,'stable':result['stable'],'stableSha256':io.canonical_digest(result['stable'],ctx=ctx),
+                      'creationObservation':result['observation']}
+            io.write_new(evidence/'final-freeze.json',envelope,ctx=ctx)
+        route_module={};exec(compile((evidence/'gate_list.py').read_text(),str(evidence/'gate_list.py'),'exec'),route_module)
+        with io.action('fixture-routing-setup') as ctx:
+            route=route_module['commands'](config,evidence,result['stable'],ctx=ctx)
+        spec=importlib.util.spec_from_file_location('lifecycle_controller_'+os.urandom(4).hex(),self.evidence/'verify-all.py')
+        controller=importlib.util.module_from_spec(spec);spec.loader.exec_module(controller)
+        assert not (evidence/'actual-controller.exit').exists()
+        code=self.controller_fixture(evidence,config,result['stable'],route,controller=controller)
+        with io.action('lifecycle-readback') as ctx:
+            ledger=io.read_json(evidence/'final-verification.json',ctx=ctx)
+            positive=variant in ('positive','actual-source')
+            assert (code==0)==positive,(variant,code)
+            if positive:
+                assert not io.exists(evidence/'actual-controller.exit',ctx=ctx),'future wrapper exit manufactured'
+                assert not io.exists(Path(config['owner'])/'final-frozen-diff-r1',ctx=ctx)
+                assert io.exists(evidence/'FROZEN-DIFF-CLEANUP.json',ctx=ctx)
+                assert ledger['gates'][3]['preparedEvidence']['seal']['sha256']==io.digest(evidence/'FROZEN-DIFF-SEAL.json',ctx=ctx,role='record')
+            elif variant.startswith('prepare-'):
+                assert ledger['gates'][3]['status']=='FAIL'
+                assert all(row['status']=='BLOCKED' for row in ledger['gates'][4:]),'failed prepare dispatched later gate'
+                assert 'preparedEvidence' not in ledger['gates'][3]
+            else:
+                assert ledger['gates'][3]['status']=='PASS' and ledger['gates'][4]['status']=='FAIL'
+                assert ledger['gates'][5]['status']=='BLOCKED'
+        return {'actualExit':code,'ledger':ledger,'positive':variant in ('positive','actual-source'),
+                'fixtureEvidence':str(evidence),'scope':'actual small6-gate preparation route, NOT full45 verification',
+                'futureGlobalExitAbsentDuringPositive':variant in ('positive','actual-source'),
+                'routingSha256':hashlib.sha256((evidence/'gate_list.py').read_bytes()).hexdigest()}
+
+    def worker_delete(self, area, variant):
+        """Real run_gates -> logs -> query -> classifier -> prior_workers -> delete."""
+        evidence,config,_logical=self.full_fixture(area)
+        tree=_logical['proposedTree']
+        with io.action('worker-fixture-owned-output') as ctx:
+            owner=io.create_owned(area/'owned',evidence/'OWNER.json',tree,'synthetic worker cleanup proof',ctx=ctx)
+            (area/'owned/data').write_bytes(b'ONLY OUR DISPOSABLE DATA')
+            before=io.inventory(owner,ctx=ctx)
+        script=area/'worker-consumer.txt'
+        command=[self.python,'-I','-B','-u',str(script)]
+        route=[('actual-predecessor',[self.python,'-I','-B','-u','-c','pass'],'command'),('synthetic-cleanup',command,'command')]
+        self.reroute_fixture(evidence,route)
+        frozen=self.freeze_fixture(evidence)
+        # Genuine full frozen authority; only numeric text and routing are synthetic.
+        script.write_text(f'''import sys,json,os
+from pathlib import Path
+sys.path.insert(0,{str(evidence)!r})
+import action_io as io,owned_outputs as owned,process_gate as pg,gate_list
+evidence=Path({str(evidence)!r});variant={variant!r}
+ledger=json.loads((evidence/'final-verification.json').read_text());prior=ledger['gates'][0]
+if variant.startswith('ledger-'):
+ field=variant[7:]
+ if field=='log':(evidence/prior['log']).write_text('TAMPERED ACTUAL LOG')
+ elif field=='route':ledger['gates'][0]['command']=['/nonexistent/fixture-only']
+ elif field=='status':prior['status']='FAIL'
+ elif field=='unreaped':prior['ownership']='unknown'
+ elif field=='cancel':prior['cancelSignal']=15
+ elif field=='timeout':prior['timedOut']=True
+ elif field=='nonzero':prior['exitCode']=7
+ elif field=='protocol':prior['protocolResult']={{'protocol':'command','status':'FAIL'}}
+ elif field=='error':prior['errorType']='InjectedError'
+ elif field=='group':prior['groupProof']['status']='UNKNOWN'
+ (evidence/'final-verification.json').write_text(json.dumps(ledger))
+state={{'target-indeterminate':'?Es','unrelated-indeterminate':'?Es','malformed':'ZE','stopped':'Zs','live':'S'}}.get(variant,'S')
+target=prior['pid'] if variant in ('target-indeterminate','malformed','stopped','live','foreign','reused') else prior['pid']+200000
+pid=prior['pid'] if variant=='reused' else prior['pid']+100000
+uid=prior['uid']+(1 if variant=='foreign' else 0)
+text=f'{{pid}} 1 {{target}} {{uid}} {{state}}\\n'
+pg.PS_COMMAND=[sys.executable,'-I','-B','-u','-c','import os;os.write(1,'+repr(text.encode())+')']
+with io.action('actual-prior-worker-deletion') as ctx:
+ workers=owned.prior_workers(evidence,'synthetic-cleanup',ctx=ctx)
+ owner=io.read_json(evidence/'OWNER.json',ctx=ctx)
+ entries=io.inventory(owner,ctx=ctx)
+ io.write_new(evidence/'worker-readback.json',workers,ctx=ctx)
+ io.delete_inventory(owner,entries,ctx=ctx)
+print('PASS actual worker-to-deletion consumer')
+''')
+        spec=importlib.util.spec_from_file_location('proof_controller_'+os.urandom(4).hex(),self.evidence/'verify-all.py')
+        controller=importlib.util.module_from_spec(spec);spec.loader.exec_module(controller)
+        code=self.controller_fixture(evidence,config,frozen,route,controller=controller)
+        positive=variant in ('positive','unrelated-indeterminate','stopped')
+        assert (code==0)==positive,(variant,code)
+        with io.action('worker-proof-readback') as ctx:
+            if positive:
+                assert not io.exists(area/'owned',ctx=ctx)
+                workers=io.read_json(evidence/'worker-readback.json',ctx=ctx)
+                assert workers['status']=='CLEAR' and workers['signalsAuthorized'] is False
+            else:
+                assert io.inventory(owner,ctx=ctx)==before,'cleanup denial changed any owned data'
+                workers=None
+            ledger=io.read_json(evidence/'final-verification.json',ctx=ctx)
+        return {'actualExit':code,'positive':positive,'workers':workers,'ledger':ledger,
+                'setupSeams':['synthetic source/acceptance/config','explicit two-gate route','numeric query text'],
+                'dangerousConsumers':'actual classifier/observe_groups/prior_workers/inventory/delete_inventory',
+                'scriptSha256':hashlib.sha256(script.read_bytes()).hexdigest()}
+
+    def ledger_case(self, area, variant):
+        evidence,config,_logical=self.full_fixture(area)
+        route=[('synthetic-one',[self.python,'-I','-B','-u','-c','pass'],'command')]
+        self.reroute_fixture(evidence,route)
+        frozen=self.freeze_fixture(evidence)
+        spec=importlib.util.spec_from_file_location('ledger_controller_'+os.urandom(4).hex(),self.evidence/'verify-all.py')
+        controller=importlib.util.module_from_spec(spec);spec.loader.exec_module(controller)
+        actual_execute,actual_save=controller.execute,controller.save
+        def cancelled_execute(*args,**kwargs):
+            result=actual_execute(*args,**kwargs);os.kill(os.getpid(),signal.SIGINT);return result
+        def cancelled_save(path,value,*,ctx):
+            actual_save(path,value,ctx=ctx)
+            if value['status']=='PASS_ALL_APPLICABLE_LOCAL_GATES':os.kill(os.getpid(),signal.SIGINT)
+        @contextmanager
+        def late_flag():
+            with pg.cancellation_flag() as flag:
+                yield flag
+                os.kill(os.getpid(),signal.SIGINT)
+        if variant=='log-collision':(evidence/'final-synthetic-one.log').write_text('DO NOT OVERWRITE\n')
+        if variant=='storage':(evidence/'final-verification.pending').mkdir()
+        contexts={'last-return':patch.object(controller,'execute',cancelled_execute),
+                  'final-save':patch.object(controller,'save',cancelled_save),
+                  'restoration':patch.object(controller,'cancellation_flag',late_flag)}
+        @contextmanager
+        def unchanged():yield
+        with contexts.get(variant,unchanged()):code=self.controller_fixture(evidence,config,frozen,route,controller=controller)
+        assert (code==0)==(variant=='positive')
+        with io.action('ledger-proof-readback') as ctx:
+            ledger=io.read_json(evidence/'final-verification.json',ctx=ctx) if io.exists(evidence/'final-verification.json',ctx=ctx) else None
+            failure=io.read_json(evidence/'final-accounting-failure.json',ctx=ctx) if io.exists(evidence/'final-accounting-failure.json',ctx=ctx) else None
+            if variant=='positive':assert ledger['status']=='PASS_ALL_APPLICABLE_LOCAL_GATES' and failure is None
+            elif variant=='restoration':assert ledger['status']=='PASS_ALL_APPLICABLE_LOCAL_GATES' and code==1
+            else:assert failure['status']=='FAIL'
+            if variant=='log-collision':
+                assert (evidence/'final-synthetic-one.log').read_text()=='DO NOT OVERWRITE\n'
+                assert ledger['gates'][0]['ownership']=='unstarted'
+        return {'actualExit':code,'ledger':ledger,'failure':failure,
+                'interpretation':'actual failure overrides PASS/RUNNING partial ledger; failed accounting gets no renewed action budget'}
+
+    def bounded_fs(self, area, variant):
+        path=area/'value';path.write_bytes(b'a'*io.CHUNK*2)
+        real_read,real_write,real_fsync=os.read,os.write,os.fsync
+        reads,writes=[],[];ctx=None;read_once=False
+        def read(fd,count):
+            nonlocal read_once
+            reads.append(count);value=real_read(fd,count)
+            if value and not read_once:
+                read_once=True
+                if variant=='growing':
+                    with path.open('ab') as out:out.write(b'x')
+                if variant=='slow-read':time.sleep(0.05)
+            return value
+        def write(fd,data):writes.append(len(data));return real_write(fd,data)
+        def fsync(fd):
+            real_fsync(fd)
+            if variant=='slow-fsync':time.sleep(0.05)
+        if variant=='growing':
+            with path.open('wb') as out:
+                for _ in range(io.LIMITS['blob']//io.CHUNK):out.write(b'a'*io.CHUNK)
+        if variant in ('fanout','inventory'):
+            if variant=='fanout':
+                for i in range(io.LIMITS['fanout']+1):(area/('n'+str(i))).touch()
+            else:
+                for d in range(9):
+                    folder=area/('d'+str(d));folder.mkdir()
+                    for i in range(3700):(folder/('n'+str(i))).touch()
+        if variant in ('cumulative-payload','cumulative-global'):
+            with path.open('wb') as out:
+                for _ in range(io.LIMITS['blob']//io.CHUNK):out.write(b'a'*io.CHUNK)
+        positive=variant=='chunks'
+        try:
+            with patch.object(os,'read',read),patch.object(os,'write',write),patch.object(os,'fsync',fsync):
+                with io.action('bounded-fs-'+variant,seconds=0.03 if variant in ('slow-read','slow-fsync','failure-exhausted') else io.LIMITS['seconds']) as ctx:
+                    if variant=='chunks':
+                        digest=io.digest(path,ctx=ctx,role='source')
+                        io.write_bytes_new(area/'written',[b'b'*io.CHUNK*3],ctx=ctx,role='source')
+                        assert digest==hashlib.sha256(b'a'*io.CHUNK*2).hexdigest()
+                    elif variant in ('growing','slow-read'):io.digest(path,ctx=ctx,role='source')
+                    elif variant=='slow-fsync':io.write_new(area/'complete-looking.json',{'status':'synthetic-looking-output'},ctx=ctx)
+                    elif variant=='fanout':io.names(area,ctx=ctx)
+                    elif variant=='inventory':
+                        owner={'path':str(area),'identity':io.identity(area,ctx=ctx),'parentAncestry':io.ancestry(area.parent,ctx=ctx),
+                               'nonce':os.urandom(24).hex(),'tree':'0'*40,'purpose':'owned synthetic inventory limit'}
+                        io.inventory(owner,ctx=ctx)
+                    elif variant=='visited':
+                        for _ in range(io.LIMITS['visited']+1):io.names(area,ctx=ctx)
+                    elif variant in ('cumulative-payload','cumulative-global'):
+                        for _ in range(514):io.digest(path,ctx=ctx,role='source' if variant=='cumulative-payload' else 'other')
+                    elif variant in ('failure-remaining','failure-exhausted'):
+                        ctx.pending.signal=signal.SIGTERM
+                        if variant=='failure-exhausted':
+                            # Actual elapsed original cutoff, no virtual clock.
+                            time.sleep(0.04)
+                        io.write_failure(area/'FAILURE.json',ctx=ctx,phase='synthetic failure only',error=RuntimeError('fixture'))
+                        assert variant=='failure-remaining'
+                        try:io.write_new(area/'forbidden-success.json',{'status':'PASS'},ctx=ctx)
+                        except RuntimeError:pass
+                        else:raise AssertionError('cancelled action wrote ordinary success')
+            assert positive,'negative bounded I/O case accepted'
+        except (RuntimeError,OSError) as error:
+            assert not positive,str(error)
+        assert all(n<=io.CHUNK for n in reads+writes),'actual syscall request exceeded64KiB'
+        if variant=='failure-remaining':assert (area/'FAILURE.json').exists() and not (area/'forbidden-success.json').exists()
+        if variant=='failure-exhausted':assert not (area/'FAILURE.json').exists()
+        return {'positive':positive,'counts':ctx.counts,'failure':ctx.failure,
+                'readRequests':len(reads),'writeRequests':len(writes),'maxRead':max(reads,default=0),'maxWrite':max(writes,default=0),
+                'completeLookingOutput':(area/'complete-looking.json').exists()}
+
+    def wrapper(self, area, variant):
+        script=(self.evidence/'run-once.sh').read_text()
+        if variant=='tee':
+            fake=area/'tee-fixture';fake.write_text('#!/bin/sh\nexit 1\n');fake.chmod(0o700)
+            script=script.replace('/usr/bin/tee /dev/fd/3',str(fake)+' /dev/fd/3')
+        (area/'run-once.sh').write_text(script)
+        for name in ('final-freeze.json','ACCEPTED-IMPLEMENTATION.json','ACCEPTED-VERIFIER.json'):(area/name).write_text('{}\n')
+        (area/'verify-all.py').write_text("print('PASS-looking fixture; actual wrapper return remains authority')\nraise SystemExit(7)\n")
+        if variant=='log':(area/'final-controller.log').write_text('PRESERVE')
+        if variant=='exit-storage':(area/'actual-controller.exit').mkdir()
+        try:
+            with io.action('wrapper-fixture') as ctx:
+                nr.run(['/bin/bash',str(area/'run-once.sh')],cwd=area,environment={'PATH':'/usr/bin:/bin'},ctx=ctx)
+        except nr.NativeFailure as error:record=error.record
+        else:raise AssertionError('failed wrapper succeeded')
+        expected={'tail':7,'tee':93,'log':92,'exit-storage':94}[variant]
+        assert record['exitCode']==expected,record
+        if variant=='tail':assert (area/'actual-controller.exit').read_text()=='7\n'
+        if variant=='log':assert (area/'final-controller.log').read_text()=='PRESERVE'
+        # Actual second dispatch cannot overwrite the first attempt's output.
+        second=None
+        try:
+            with io.action('wrapper-second-dispatch') as ctx:
+                nr.run(['/bin/bash',str(area/'run-once.sh')],cwd=area,environment={'PATH':'/usr/bin:/bin'},ctx=ctx)
+        except nr.NativeFailure as error:second=error.record
+        assert second['exitCode']==91
+        return {'first':record,'second':second,'wrapperSha256':hashlib.sha256(script.encode()).hexdigest(),
+                'setupSeam':'stub controller intentionally exits7; tee variant substitutes only an owned failing fixture'}
+
+    def native_io_fault(self, area, variant):
+        actual_popen=subprocess.Popen;real_write=os.write
+        real_selector=nr.selectors.DefaultSelector
+        acquired=[];injected=[];ctx=None
+        class CloseFault:
+            def __init__(self,stream):self.stream=stream
+            def __getattr__(self,name):return getattr(self.stream,name)
+            def close(self):
+                self.stream.close()
+                if variant=='close' and not injected:
+                    injected.append('close-after-actual-close');raise OSError('synthetic close publication failure')
+        class Child(actual_popen):
+            def __init__(child,*args,**kwargs):
+                super().__init__(*args,**kwargs);acquired.append(child)
+                if variant=='close':child.stdin=CloseFault(child.stdin)
+        class Selector(real_selector):
+            def select(self,*args,**kwargs):
+                value=super().select(*args,**kwargs)
+                if variant=='selector' and not injected:
+                    injected.append('actual-selector-return');raise OSError('synthetic selector failure')
+                return value
+            def close(self):
+                super().close()
+                if variant=='selector-close' and not injected:
+                    injected.append('actual-selector-close');raise OSError('synthetic selector close failure')
+        def write(fd,data):
+            value=real_write(fd,data)
+            if variant=='write' and acquired and not injected and fd==acquired[-1].stdin.fileno():
+                injected.append('actual-stdin-write');raise OSError('synthetic write result failure')
+            return value
+        code='import os;os.read(0,1);os.write(1,b"reply")'
+        try:
+            with patch.object(subprocess,'Popen',Child),patch.object(nr.selectors,'DefaultSelector',Selector),patch.object(os,'write',write):
+                with io.action('actual-native-io-fault') as ctx:
+                    nr.run([self.python,'-I','-B','-u','-c',code],cwd=area,environment={'PATH':'/usr/bin:/bin'},ctx=ctx,input_data=b'x')
+        except nr.NativeFailure as error:
+            assert error.record['ownership']=='reaped' and error.record['status']=='FAIL' and not error.record['signalAuthority']
+            assert injected
+            return {'record':error.record,'injection':injected,'action':summary_only(ctx)}
+        finally:
+            for child in acquired:
+                for stream in (child.stdin,child.stdout,child.stderr):
+                    if stream is not None and not stream.closed:stream.close()
+                if child.returncode is None:child.wait(timeout=3)
+        raise AssertionError('actual I/O failure was accepted')
+
+    def outer_git_stop(self, area):
+        readfd,writefd=os.pipe();actual_popen=subprocess.Popen;command_path=area/'owned-outer.txt'
+        command_path.write_text(f'''import os,sys,json
+from pathlib import Path
+sys.path.insert(0,{str(self.evidence)!r})
+import action_io as io,git_readonly as git,native_reader as nr
+with io.action('owned-outer-native-proof') as ctx:
+ graph=git.Forest(ctx);empty=graph.add('tree',b'')
+ owner,view=git.create_view(Path({str(area/'view')!r}),Path({str(area/'VIEW-OWNER.json')!r}),graph,tree=empty,ctx=ctx)
+ real=nr.subprocess.Popen
+ class Child(real):
+  def __init__(self,*a,**k):
+   super().__init__(*a,**k)
+   os.write({writefd},(json.dumps({{'innerPid':self.pid,'innerGroup':os.getpgid(self.pid),'outerPid':os.getpid(),'outerGroup':os.getpgrp()}})+'\\n').encode())
+ nr.subprocess.Popen=Child
+ # Held first request only. All process/group observations remain actual.
+ nr.BatchFrames.next_request=lambda self:None
+ git.git_call(owner,{self.leaf!r},'cat',graph=graph,ctx=ctx)
+''')
+        command=[self.python,'-I','-B','-u',str(command_path)]
+        class Outer(actual_popen):
+            def __init__(child,argv,*a,**k):
+                if argv==command:k['pass_fds']=(writefd,)
+                super().__init__(argv,*a,**k)
+        try:
+            with patch.object(subprocess,'Popen',Outer):
+                with pg.cancellation_flag() as flag:
+                    row=pg.execute(command,cwd=area,environment={'PATH':'/usr/bin:/bin'},log=area/'outer.log',pending=flag,seconds=0.7)
+            os.close(writefd);writefd=None
+            import select
+            assert select.select([readfd],[],[],2)[0],'owned outer never observed real Git readiness'
+            raw=os.read(readfd,4096);ready=json.loads(raw)
+            assert ready['innerGroup']==ready['outerGroup']==ready['outerPid']==row['pid']
+            assert row['timedOut'] and row['stopSignalSent'] and row['status']=='FAIL' and row['ownership']=='reaped'
+            query,rows=pg.numeric_snapshot()
+            assert rows is not None
+            observed=pg.classify_group(rows,group=row['pid'],uid=row['uid'])
+            assert observed['status']=='CLEAR'
+            return {'outer':row,'actualReadiness':ready,'query':query,'postStopGroup':observed,
+                    'innerDisposition':'same-group hard stop observed stopped/absent; killed parent cannot publish an inner direct-child reap',
+                    'fixtureSeam':'held batch request only; actual leaf, acquisition, PGID, outer timeout and numeric observation'}
+        finally:
+            if writefd is not None:os.close(writefd)
+            os.close(readfd)
+
+    def legacy_cleanup(self, area, variant):
+        """Original cleanup obligations with real source/freeze/producer evidence.
+
+        The tiny source and route are explicitly synthetic. pip, generated egg-info,
+        build bytes, wheel archive, installed payload, actual child completion,
+        source authority, prior workers and destructive consumers are all real.
+        """
+        evidence,config,logical=self.full_fixture(area,contents=SYNTHETIC_PACKAGE)
+        script=area/'synthetic-producer.txt'
+        wheel=variant.startswith('wheel-')
+        final_gate='cleanup-wheel-installation' if wheel else 'cleanup-generated-build'
+        python=[config['python'],'-I','-B','-u']
+        route=[('prepare-owned-build',[*python,str(script),'prepare'],'command'),
+               ('editable-install',[*python,'-m','pip','install','--no-deps','--no-index','--no-compile','--no-build-isolation','-e',config['source']],'command'),
+               ('wheel-install',[*python,str(script),'wheel'],'command'),
+               (final_gate,[*python,str(script),'cleanup'],'command')]
+        self.reroute_fixture(evidence,route)
+        script.write_text(r"""import sys,os,json
+from pathlib import Path
+sys.path.insert(0,@EVIDENCE@)
+import action_io as io,owned_outputs as owned,process_gate as pg
+from result_protocols import inspect_result
+from bindings import clean_environment
+E=Path(@EVIDENCE@);variant=@VARIANT@;mode=sys.argv[1]
+C=json.loads((E/'CONFIG.json').read_text())
+def offline(config,evidence):
+ return [config['python'],'-I','-B','-u','-m','pip','wheel','--no-deps','--no-index','--no-build-isolation','--wheel-dir',str(Path(evidence)/'wheels'),config['source']]
+# Explicit synthetic command routing only; no guard, producer or evidence stub.
+owned.wheel_build_command=offline
+with pg.cancellation_flag() as pending:
+ def checked(command,name,protocol='command',installed=False):
+  with io.action('synthetic-subcommand-inputs:'+name,pending=pending) as ctx:
+   owned.guard_inputs(E,ctx=ctx,wheel=True,installed=installed)
+  log=E/('final-'+name+'.log')
+  row=pg.execute(command,cwd=C['source'],environment=clean_environment(C),log=log,pending=pending,seconds=30)
+  row.update(gate=name,protocol=protocol,log=log.name)
+  with io.action('synthetic-subcommand-result:'+name,pending=pending) as ctx:
+   data=io.read_file(log,ctx=ctx,role='log',retain=True)
+   row['logSha256']=data['sha256'];row['protocolResult']=inspect_result(protocol,data['data'].decode(),row['exitCode'])
+   for key in ('tests','assertions','skips'):
+    if key in row['protocolResult']:row[key]=row['protocolResult'][key]
+   owned.completed_row(row,E,ctx=ctx)
+   io.write_new(E/('synthetic-'+name+'-actual-completion.json'),row,ctx=ctx)
+  return row
+ if mode=='prepare':
+  # This import checks an installed prerequisite; it never installs missing tools.
+  from importlib.metadata import version
+  assert version('setuptools')=='79.0.1' and version('pip')=='24.0', 'BLOCKED missing exact reviewed fixture backend'
+  with io.action('actual-synthetic-output-prepare',pending=pending) as ctx:owned.prepare_build(E,ctx=ctx)
+ elif mode=='wheel':
+  with io.action('actual-synthetic-wheel-prepare',pending=pending) as ctx:owned.prepare_wheel(E,ctx=ctx)
+  owned.produce_wheel(E)
+  root=Path(C['owner'])/'final-wheel-r1';venv=root/'venv';wp=str(venv/'bin/python')
+  checked([C['python'],'-I','-B','-m','venv',str(venv)],'synthetic-wheel-venv')
+  checked([wp,'-I','-B','-m','pip','install','--no-deps','--no-index','--no-compile',str(E/'wheels/mobile_release_kit-0.3.0-py3-none-any.whl')],'synthetic-wheel-pip')
+  (root/'project/release').mkdir(parents=True);(root/'tests').mkdir()
+  (root/'project/release/mobile-release.json').write_text('{"syntheticFixtureOnly":true}\n')
+  (root/'tests/README.txt').write_text('Actual tiny installed-wheel checks, NOT first-party suites.\n')
+  for name in ('preview.txt','apply.txt','recover.json','workflow-help.txt','android-module-help.txt','ios-module-help.txt','android-bootstrap-help.txt','ios-bootstrap-help.txt'):
+   (root/name).write_text('SYNTHETIC fixture output, not product behavior\n')
+  tests={
+   'wheel-init-recovery': "import unittest,pathlib,mobile_release\nclass Check(unittest.TestCase):\n def test_installed_not_source(self):\n  self.assertTrue(pathlib.Path(mobile_release.__file__).is_relative_to(pathlib.Path("+repr(str(venv))+")))\nunittest.main()\n",
+   'wheel-ios-entitlements': "import unittest,mobile_release\nclass Check(unittest.TestCase):\n def test_exact_fixture_module(self):\n  self.assertEqual(mobile_release.FIXTURE,'R4-R2 genuine setuptools producer')\nunittest.main()\n",
+   'wheel-native-profile': "import unittest,pathlib\nclass Check(unittest.TestCase):\n def test_packaged_fixture_data(self):\n  self.assertEqual((pathlib.Path("+repr(str(venv))+" )/'share/mobile-release-kit/Gemfile').read_bytes(),b'# Synthetic packaged data; never Bundler input\\n')\nunittest.main()\n",
+  }
+  for name,code in tests.items():checked([wp,'-I','-B','-u','-c',code],name,'python-unittest',installed=True)
+  with io.action('actual-synthetic-wheel-seal',pending=pending) as ctx:owned.seal_wheel(E,ctx=ctx)
+ else:
+  output=Path(C['owner'])/'final-wheel-r1' if variant.startswith('wheel-') else Path(C['source'])/'build'
+  source=Path(C['source'])/'src/mobile_release/__init__.py'
+  if variant.endswith('-unknown'):(output/'unknown').write_text('FOREIGN; reject without payload read\n')
+  if variant=='build-changed-source':source.write_bytes(b'FIXTURE = "changed synthetic source"\n')
+  if variant=='wheel-changed-wheel':(E/'wheels/mobile_release_kit-0.3.0-py3-none-any.whl').write_bytes(b'changed synthetic retained wheel')
+  if variant in ('build-root-symlink','build-root-replacement'):
+   saved=Path(@AREA@)/'preserved-build';output.rename(saved)
+   if variant.endswith('-symlink'):output.symlink_to(saved,target_is_directory=True)
+   else:output.mkdir(mode=0o700);(output/'canary').write_text('FOREIGN replacement\n')
+  with io.action('actual-synthetic-cleanup',pending=pending) as ctx:
+   (owned.cleanup_wheel if variant.startswith('wheel-') else owned.cleanup_build)(E,ctx=ctx)
+if pending.signal is not None:raise RuntimeError('synthetic producer cancelled at restoration')
+""".replace('@EVIDENCE@',repr(str(evidence))).replace('@VARIANT@',repr(variant)).replace('@AREA@',repr(str(area))))
+        frozen=self.freeze_fixture(evidence)
+        # Commands are the only parent seam, matching the child routing above.
+        with patch.object(owned,'wheel_build_command',synthetic_wheel_command):
+            code=self.controller_fixture(evidence,config,frozen,route)
+        positive=variant in ('build-positive','wheel-positive')
+        assert (code==0)==positive,(variant,code)
+        source=Path(config['source'])/'src/mobile_release/__init__.py'
+        expected=b'FIXTURE = "changed synthetic source"\n' if variant=='build-changed-source' else SYNTHETIC_PACKAGE['src/mobile_release/__init__.py']
+        assert source.read_bytes()==expected,'cleanup modified accepted/retained fixture source'
+        output=Path(config['owner'])/'final-wheel-r1' if wheel else Path(config['source'])/'build'
+        if positive:assert not output.exists()
+        elif variant.startswith('build-root-'):
+            assert (area/'preserved-build/lib/mobile_release/__init__.py').read_bytes()==SYNTHETIC_PACKAGE['src/mobile_release/__init__.py']
+            if variant.endswith('-replacement'):assert (output/'canary').read_text()=='FOREIGN replacement\n'
+        else:assert output.exists()
+        wheel_file=evidence/'wheels/mobile_release_kit-0.3.0-py3-none-any.whl'
+        assert wheel_file.is_file(),'retained distributable deleted'
+        with io.action('real-cleanup-migration-readback') as ctx:
+            ledger=io.read_json(evidence/'final-verification.json',ctx=ctx)
+        assert all(row['status']=='PASS' for row in ledger['gates'][:-1]),'test never reached intended dangerous consumer'
+        assert ledger['gates'][-1]['status']==('PASS' if positive else 'FAIL')
+        return {'actualExit':code,'ledger':ledger,'sourcePreserved':True,'retainedWheel':str(wheel_file),
+                'fixtureEvidence':str(evidence),'actualConsumers':'genuine frozen authority -> real pip/egg-info/wheel/installation -> actual completion -> actual prior_workers -> exact guarded cleanup',
+                'setupSeams':['explicit tiny synthetic source/acceptance/config','explicit offline four-gate and compound command routing','real tiny unittest bodies; NOT first-party wheel suites'],
+                'syntheticSources':{name:hashlib.sha256(body).hexdigest() for name,body in SYNTHETIC_PACKAGE.items()},
+                'scriptSha256':hashlib.sha256(script.read_bytes()).hexdigest()}
+
+    def finish(self):
+        unresolved=[]
+        for child in self.children:
+            if child.returncode is None:
+                try:child.wait(timeout=3)
+                except subprocess.TimeoutExpired:unresolved.append(child.pid)
+        summary={'scope':'PREPARATION ONLY; no first-party/full45/Store/acceptance result',
+                 'cases':[{'case':r['case'],'status':r['status'],'resultPath':str(self.root/r['case']/'RESULT.json'),
+                           'resultSha256':hashlib.sha256((self.root/r['case']/'RESULT.json').read_bytes()).hexdigest()} for r in self.results],'counts':{'PASS':sum(r['status']=='PASS' for r in self.results),'FAIL':sum(r['status']=='FAIL' for r in self.results)},
+                 'workers':[{'pid':p.pid,'exitCode':p.returncode} for p in self.children],
+                  'signals':self.signals,'unresolved':unresolved,'allDirectChildrenReaped':not unresolved,
+                  'retainedRoot':str(self.root),'resourceBlocked':self.resource_blocked,
+                  'fixtureHeadroomBytes':PROOF_FIXTURE_HEADROOM,'freeFloorBytes':PROOF_FREE_FLOOR}
+        with io.action('proof-summary') as ctx:io.write_new(self.root/'RESULTS.json',summary,ctx=ctx)
+        assert not unresolved,'owned proof worker unresolved'
+        return summary
+
+
+def main(evidence=EVIDENCE):
+    suite=Proofs(evidence)
+    try:
+        with suite.track():
+            for state in ('ZE','ZEs','Z++','ZNN','Z+E','ZsL','SNN','RN<','Zbogus','Sss','ZXX'):
+                suite.case('state-malformed-'+state.encode().hex(),lambda a,s=state:suite.state(a,s,'MALFORMED'))
+            for state in ('Z','Z+','Zs','ZNXLsl+'):
+                suite.case('state-stopped-'+state.encode().hex(),lambda a,s=state:suite.state(a,s,'CLEAR'))
+            for state in ('R','S','D','T','t','I','W','U','SNs+'):
+                suite.case('state-live-'+state.encode().hex(),lambda a,s=state:suite.state(a,s,'LIVE'))
+            for state in ('?','?E','?Es','H','X','SE','REs'):
+                suite.case('state-indeterminate-'+state.replace('?','unknown'),lambda a,s=state:suite.state(a,s,'INDETERMINATE'))
+            bad={'nonascii':"import os;os.write(1,b'10 1 10 1 S\\xff\\n')",'empty':'pass','extra':"print('10 1 10 1 S extra')",'missing':"print('10 1 10 S')",
+                 'duplicate':"print('10 1 10 1 S\\n10 1 10 1 S')",'zero-pid':"print('0 1 10 1 S')",'zero-group':"print('10 1 0 1 S')",'bad-parent':"print('10 -1 10 1 S')",'bad-uid':"print('10 1 10 -1 S')",'stderr':"import os;print('10 1 10 1 S');os.write(2,b'bad')",'nonzero':"print('10 1 10 1 S');raise SystemExit(3)"}
+            for name,code in bad.items():suite.case('query-'+name,lambda a,c=code:suite.query_bad(a,c))
+            suite.case('query-byte-overflow',lambda a:suite.query_bad(a,"import os;os.write(1,b'x'*5000)",cap=4096))
+            suite.case('query-deadline',lambda a:suite.query_bad(a,'import time;time.sleep(2)',seconds=0.03))
+            for mode in ('transition','persistent','late'):suite.case('state-'+mode,lambda a,m=mode:suite.state_transition(a,m))
+            for pipe,cap in (('stdout',io.LIMITS['stdout']),('stderr',io.LIMITS['stderr'])):
+                for delta in (-1,0,1):
+                    code=f'import os;data=b"x"*65536;n={cap+delta};\nwhile n:\n b=data[:min(n,len(data))];w=os.write({1 if pipe=="stdout" else 2},b);n-=w'
+                    suite.case('native-'+pipe+'-'+str(delta).replace('-','minus'),lambda a,c=code,d=delta:suite.native(a,c,expected=d<=0))
+            suite.case('native-endless',lambda a:suite.native(a,'import os\nwhile True:os.write(1,b"x"*65536)',expected=False))
+            suite.case('native-blocked-stdin',lambda a:suite.native(a,'import time;time.sleep(2)',expected=False,seconds=0.08,input_data=b'x'*1048576))
+            suite.case('native-early-exit',lambda a:suite.native(a,'raise SystemExit(5)',expected=False,input_data=b'x'*1048576))
+            for variant in ('valid','header-long','wrong-oid','wrong-type','large-size','noncanonical-size','short','delimiter','extra','nonzero','stderr'):
+                suite.case('frame-'+variant,lambda a,v=variant:suite.frame(a,v))
+            for mode in ('json-valid','json-duplicate','json-constant','json-depth','json-string','json-bytes','json-tokens','at-limit','over-limit','tool-large','expired','pending-cancel','cumulative'):
+                suite.case('fs-'+mode,lambda a,m=mode:suite.fs(a,m))
+            for variant in ('positive','cancel-before','extra-before','cancel-partial','replace-partial'):
+                suite.case('deletion-'+variant,lambda a,v=variant:suite.deletion(a,v))
+            for variant in ('identical','modified','deleted','untracked','executable','empty-file','nested','whitespace-changed','whitespace-new','whitespace-blank-eof','hostile-attributes'):
+                suite.case('git-'+variant,lambda a,v=variant:suite.graph(a,v))
+            for variant in ('unknown-no-child','unknown-hidden-child','unknown-reap','cancel-acquire','cancel-reap','cancel-read','read-error','late-reap'):
+                suite.case('native-fault-'+variant,lambda a,v=variant:suite.native_fault(a,v))
+            for variant in ('head-blob','commit-missing-tree','commit-duplicate-tree','missing-object','corrupt-object','zlib-tail','zlib-extra-stream','zlib-truncated','header','declared-too-large','extra-body','object-symlink','object-hardlink','tree-symlink','tree-gitlink','tree-mode','tree-duplicate','tree-unsorted','tree-wrong-type','tree-dot','tree-path','pack','alternate','promisor','missing-index','index-stage','index-assume','index-sparse','index-split','index-version','index-oid','index-checksum','ref-symlink','head-indirection','packed-only-ref','reftable','empty-head','linked-valid','linked-commondir','linked-backpointer','linked-symlink'):
+                suite.case('raw-'+variant,lambda a,v=variant:suite.raw_graph(a,v))
+            for variant in ('positive','target-indeterminate','unrelated-indeterminate','malformed','stopped','live','foreign','reused','ledger-log','ledger-route','ledger-status','ledger-unreaped','ledger-cancel','ledger-timeout','ledger-nonzero','ledger-protocol','ledger-error','ledger-group'):
+                suite.case('worker-delete-'+variant,lambda a,v=variant:suite.worker_delete(a,v))
+            suite.case('two-real-collect-two-check',suite.collection)
+            for variant in ('positive','actual-source','prepare-object-cancel','prepare-seal-cancel','prepare-return-nonzero','completion-missing','completion-failed','completion-running','completion-unreaped','completion-nonzero','completion-late','completion-cancel','completion-wrong-slot','completion-log','completion-binding','store-missing','store-corrupt','store-extra','store-index','store-owner','store-symlink'):
+                suite.case('lifecycle-'+variant,lambda a,v=variant:suite.lifecycle(a,v))
+            for variant in ('positive','last-return','final-save','restoration','log-collision','storage'):
+                suite.case('ledger-'+variant,lambda a,v=variant:suite.ledger_case(a,v))
+            for variant in ('chunks','growing','slow-read','slow-fsync','fanout','inventory','visited','cumulative-payload','cumulative-global','failure-remaining','failure-exhausted'):
+                suite.case('bounded-fs-'+variant,lambda a,v=variant:suite.bounded_fs(a,v))
+            for variant in ('tail','tee','log','exit-storage'):
+                suite.case('wrapper-'+variant,lambda a,v=variant:suite.wrapper(a,v))
+            for variant in ('selector','selector-close','write','close'):
+                suite.case('native-io-'+variant,lambda a,v=variant:suite.native_io_fault(a,v))
+            suite.case('owned-outer-git-stop',suite.outer_git_stop)
+            for variant in ('build-positive','build-unknown','build-changed-source','build-root-symlink','build-root-replacement','wheel-positive','wheel-unknown','wheel-changed-wheel'):
+                suite.case('mapped-'+variant,lambda a,v=variant:suite.legacy_cleanup(a,v))
+    finally:
+        result=suite.finish()
+    print(json.dumps({'retainedRoot':result['retainedRoot'],'counts':result['counts'],'allDirectChildrenReaped':result['allDirectChildrenReaped']},sort_keys=True),flush=True)
+    if result['counts']['FAIL']:
+        raise RuntimeError('verifier proof failures retained; no acceptance')
+    return result
+
+
+if __name__=='__main__':main()

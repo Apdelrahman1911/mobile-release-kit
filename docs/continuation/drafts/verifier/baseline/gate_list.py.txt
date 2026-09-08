@@ -1,0 +1,66 @@
+"""One explicit ordered list of all QA-006 baseline-applicable local gates."""
+from pathlib import Path
+from action_io import names, exists, participating
+
+
+@participating
+def commands(config, evidence, frozen, *, ctx):
+    root, python = Path(config['source']), config['python']
+    evidence = Path(evidence)
+    py = [python, '-B', '-P', '-u']
+    helper = lambda name, *args: [*py, str(evidence / name), *args]
+    python_groups = (
+        ('init-transactions', 'test_init_transaction.py'), ('ios-entitlements', 'test_ios_entitlements.py'),
+        ('ios-profile-authority', 'test_ios_profile_*.py'), ('default-cancellation', 'test_default_cancellation.py'),
+        ('profile-process-containment', 'test_profile_processes.py'), ('native-ci-aggregate', 'test_native_profile_ci.py'),
+        ('ios-binary-plist', 'test_ios_plist_binary.py'), ('ios-native-correspondence', 'test_macho_native.py'),
+    )
+    ruby_bundle = ('play_store', 'play_lanes', 'apple_store', 'apple_lanes', 'apple_production',
+                   'apple_production_lane', 'apple_asset_upload', 'ios_upload_validation', 'android_upload_validation')
+    expected_ruby = {f'test_{name}.rb' for name in (*ruby_bundle, 'fastlane_support', 'native_upload_validation', 'workflow_yaml', 'supply_wif')}
+    actual_ruby = {name for name in names(root/'tests/workflow', ctx=ctx) if name.startswith('test_') and name.endswith('.rb')}
+    if actual_ruby != expected_ruby:
+        raise RuntimeError('Ruby test inventory changed: explicitly review full gate coverage')
+    if exists(root / 'tests/workflow/run_local_signing_matrix.py', ctx=ctx):
+        raise RuntimeError('QA-003 matrix now applicable: explicitly review expanded final gate coverage')
+    command = 'command'
+    python_result, ruby_result = 'python-unittest', 'ruby-minitest'
+    values = [
+        ('freeze-before', helper('freeze.py', '--check'), command),
+        ('verification-process-ownership', helper('verify-process-gate.py'), command),
+        ('verification-result-protocols', helper('verify-result-protocols.py'), command),
+        ('prepare-frozen-diff', helper('frozen_diff.py', '--prepare'), command),
+        ('prepare-owned-build', helper('prepare-build.py'), command),
+        ('editable-install', [*py, '-m', 'pip', 'install', '-e', '.[test]'], command),
+        ('bundle-install', ['bundle', 'install'], command),
+        ('bundle-check', ['bundle', 'check'], command),
+        ('python-full', [*py, '-m', 'unittest', 'discover', '-s', 'tests', '-v'], python_result),
+        *[(name, [*py, '-m', 'unittest', 'discover', '-s', 'tests', '-p', pattern, '-v'], python_result)
+          for name, pattern in python_groups],
+        ('native-profile-gate', [python, '-I', '-B', '-u', 'tests/workflow/run_native_profile_checks.py'], python_result),
+        ('ruby-support', ['ruby', '-I.', 'tests/workflow/test_fastlane_support.rb'], ruby_result),
+        ('ruby-native-capture', ['ruby', 'tests/workflow/test_native_upload_validation.rb'], ruby_result),
+        *[('ruby-' + name, ['bundle', 'exec', 'ruby', f'tests/workflow/test_{name}.rb'], ruby_result) for name in ruby_bundle],
+        ('ruby-workflow-yaml', ['ruby', 'tests/workflow/test_workflow_yaml.rb'], ruby_result),
+        ('ruby-supply-wif', ['bundle', 'exec', 'ruby', 'tests/workflow/test_supply_wif.rb'], 'supply-wif'),
+        ('fastfile-validate', ['bundle', 'exec', 'ruby', 'fastlane/run_lane.rb', '--validate'], command),
+        ('actionlint', ['actionlint', '-no-color', '-ignore', 'property "workflow_(repository|sha|ref)" is not defined in object type',
+                       *[str(Path('.github/workflows')/name) for name in names(root/'.github/workflows', ctx=ctx) if name.endswith('.yml')],
+                       *[str(Path('templates/workflows')/name) for name in names(root/'templates/workflows', ctx=ctx) if name.endswith('.yml')]], command),
+        ('dependency-pins', helper('verify-pins.py'), command),
+        ('wheel-install', ['bash', str(evidence / 'wheel-smoke.sh')], command),
+        ('pip-check', [*py, '-m', 'pip', 'check'], command),
+        ('jdk21-signature-policy', helper('probe-jdk21-signing.py'), command),
+        ('diff-check', helper('frozen_diff.py', '--check'), command),
+        ('freeze-before-cleanup', helper('freeze.py', '--check'), command),
+        ('owned-worker-observation', helper('observe-owned-workers.py'), command),
+        ('cleanup-generated-build', helper('cleanup-build.py'), command),
+        ('cleanup-wheel-installation', helper('cleanup-wheel.py'), command),
+        ('cleanup-frozen-diff', helper('frozen_diff.py', '--cleanup'), command),
+        ('freeze-after', helper('freeze.py', '--check'), command),
+        ('empty-final-tmp', helper('owned_outputs.py', 'empty-final-tmp'), command),
+    ]
+    if len({name for name, _argv, _protocol in values}) != len(values):
+        raise RuntimeError('duplicate final gate identifier')
+    ctx.require(len(values) == 45 and values[3][0] == 'prepare-frozen-diff' and values[37][0] == 'diff-check' and values[42][0] == 'cleanup-frozen-diff', 'exact45 routing mismatch')
+    return values

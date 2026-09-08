@@ -1,0 +1,124 @@
+#!/bin/bash
+set -euo pipefail
+repo="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+evidence="$(cd "$(dirname "$0")" && pwd -P)"
+python="$repo/.mobile-release/remediation/MRK-002/venv/bin/python"
+mkdir -p "$evidence/wheels"
+"$python" -m pip wheel --no-deps --wheel-dir "$evidence/wheels" "$repo"
+wheel="$evidence/wheels/mobile_release_kit-0.3.0-py3-none-any.whl"
+shasum -a 256 "$wheel"
+temporary="$(mktemp -d "${TMPDIR:-/tmp}/mrk-wheel-smoke.XXXXXXXX")"
+trap 'rm -rf -- "$temporary"' EXIT
+"$python" -m venv "$temporary/venv"
+"$temporary/venv/bin/python" -m pip install --no-deps "$wheel"
+mkdir -p "$temporary/project/app"
+printf '%s\n' 'plugins { id("com.android.application") }' \
+  'android { namespace = "com.example.wheelsmoke"; defaultConfig { applicationId = "com.example.wheelsmoke" } }' \
+  > "$temporary/project/app/build.gradle.kts"
+cd "$temporary/project"
+unset MOBILE_RELEASE_TOOLING_ROOT PYTHONPATH PYTHONHOME
+export PYTHONSAFEPATH=1
+"$temporary/venv/bin/mobile-release" --version
+"$temporary/venv/bin/mobile-release" local-signing --help > "$temporary/local-signing-help.txt"
+"$temporary/venv/bin/mobile-release" local-signing recover --help > "$temporary/local-signing-recover-help.txt"
+"$temporary/venv/bin/mobile-release" init > "$temporary/preview.txt"
+"$temporary/venv/bin/mobile-release" init --apply \
+  --tooling-repository example/mobile-release-kit \
+  --tooling-sha 1111111111111111111111111111111111111111 > "$temporary/apply.txt"
+"$temporary/venv/bin/mobile-release" init --recover > "$temporary/recover.json"
+"$temporary/venv/bin/python" -I -c 'import json,sys; assert json.load(open(sys.argv[1]))["recovery"] == "no-op"' "$temporary/recover.json"
+for name in .mobile-release-init-prepare .mobile-release-init .mobile-release-init-cleanup; do
+  test ! -e "$name"
+  grep -Fx "$name/" .gitignore
+done
+# Run real interruption/recovery regression code against only the installed wheel.
+# -P and an external cwd prevent imports from the repository source checkout.
+"$temporary/venv/bin/python" -P "$repo/tests/unit/test_init_transaction.py" -v > "$evidence/final-wheel-init-recovery.log" 2>&1
+cat "$evidence/final-wheel-init-recovery.log"
+# Exercise the complete new grant/parser/inventory suite against the actual
+# installed package outside the checkout, copying only non-secret test code.
+mkdir -p "$temporary/tests/unit"
+for name in __init__.py ios_artifact_helpers.py ios_entitlement_helpers.py test_ios_entitlements.py test_ios_plist_binary.py; do
+  cp "$repo/tests/unit/$name" "$temporary/tests/unit/$name"
+done
+"$temporary/venv/bin/python" -I -m unittest discover -s "$temporary/tests" -v \
+  > "$evidence/final-wheel-ios-entitlements.log" 2>&1
+cat "$evidence/final-wheel-ios-entitlements.log"
+test -f release/mobile-release.json
+test -f release/store/android/en-US/changelogs/default.txt
+test ! -s release/store/android/en-US/changelogs/default.txt
+for name in preflight candidate external-testing production-submit; do
+  test -f ".github/workflows/mobile-$name.yml"
+done
+grep -Fx '.mobile-release/' .gitignore
+grep -F 'example/mobile-release-kit/.github/workflows/reusable-candidate.yml@1111111111111111111111111111111111111111' .github/workflows/mobile-candidate.yml
+"$temporary/venv/bin/python" -I - "$repo" <<'PY'
+import hashlib
+import importlib
+import json
+import pathlib
+import sys
+from importlib.metadata import distribution
+from mobile_release.tooling import REQUIRED_TOOLING_FILES, resolve_tooling_root
+
+repository = pathlib.Path(sys.argv[1])
+root = resolve_tooling_root(environ={})
+assert root is not None and not root.is_relative_to(repository), root
+for relative in ('fastlane/ios_upload_validation.rb', 'fastlane/android_upload_validation.rb',
+                 'fastlane/native_upload_validation.rb'):
+    assert (root / relative).is_file()
+assert (root / 'schemas/store-operation-intent.schema.json').is_file()
+for relative in REQUIRED_TOOLING_FILES:
+    assert (root / relative).is_file(), relative
+    assert (root / relative).read_bytes() == (repository / relative).read_bytes(), relative
+package = distribution('mobile-release-kit')
+assert package.metadata['Requires-Python'] == '>=3.11'
+assert package.version == '0.3.0'
+assert all('extra ==' in item for item in (package.requires or [])), package.requires
+assert package.metadata['License-Expression'] == 'MIT'
+assert any(str(path).endswith('/licenses/LICENSE') for path in package.files)
+source = pathlib.Path(importlib.import_module('mobile_release').__file__).parent
+assert not source.is_relative_to(repository)
+from mobile_release.ios_profile_trust import apple_roots
+assert len(apple_roots()) == 3
+assert (source / "data/apple-profile-roots.pem").read_bytes() == (repository / "src/mobile_release/data/apple-profile-roots.pem").read_bytes()
+source_modules = {item.name for item in (repository / 'src/mobile_release').glob('*.py')}
+assert source_modules == {item.name for item in source.glob('*.py')}
+assert {'macho.py', 'ios_artifacts.py', 'ios_der.py', 'ios_entitlements.py', 'ios_plist_binary.py',
+        'local_signing.py', 'owned_process.py'} <= source_modules
+for name in source_modules:
+    assert (source / name).read_bytes() == (repository / 'src/mobile_release' / name).read_bytes(), name
+for module in sorted(source.glob('*.py')):
+    if module.stem != '__main__':
+        importlib.import_module(f'mobile_release.{module.stem}')
+print(json.dumps({'installedRoot': str(root), 'resourceCount': len(REQUIRED_TOOLING_FILES),
+                  'moduleCount': len(list(source.glob('*.py'))), 'runtimeDependencies': []}))
+PY
+"$temporary/venv/bin/python" -I -m mobile_release.workflow --help > "$temporary/workflow-help.txt"
+module_root="$("$temporary/venv/bin/python" -I -c 'from pathlib import Path; import mobile_release; print(Path(mobile_release.__file__).parent.parent)')"
+tooling_root="$("$temporary/venv/bin/python" -I -c 'from mobile_release.tooling import resolve_tooling_root; print(resolve_tooling_root(environ={}))')"
+# Execute the real installed Ruby helper's fixed Python bootstrap without .pth,
+# cwd, user-site or PYTHONPATH imports. --help performs no native or Store work.
+for platform in android ios; do
+  "$temporary/venv/bin/python" -I -m "mobile_release.${platform}_upload_validation" --help > "$temporary/$platform-module-help.txt"
+  bootstrap="$(ruby -r "$tooling_root/fastlane/${platform}_upload_validation.rb" -e 'print(ARGV.fetch(0) == "android" ? MobileReleaseKit::AndroidUploadValidation::BOOTSTRAP : MobileReleaseKit::IosUploadValidation::BOOTSTRAP)' "$platform")"
+  "$temporary/venv/bin/python" -I -S -c "$bootstrap" \
+    "$module_root" --help > "$temporary/$platform-bootstrap-help.txt"
+done
+"$temporary/venv/bin/python" -I - "$temporary" <<'PY'
+import pathlib
+import re
+import sys
+root = pathlib.Path(sys.argv[1])
+for platform, artifact in (("android", "aab"), ("ios", "ipa")):
+    # argparse's displayed program name differs for -m versus -c bootstrap.
+    # Compare the complete option surface, not that presentation detail.
+    module = set(re.findall(r"--[a-z][a-z0-9-]*", (root / f"{platform}-module-help.txt").read_text()))
+    bootstrap = set(re.findall(r"--[a-z][a-z0-9-]*", (root / f"{platform}-bootstrap-help.txt").read_text()))
+    assert module == bootstrap, (platform, module, bootstrap)
+    assert {"--app-root", "--config-path", "--operation-intent", "--intent-sha256", f"--{artifact}"} <= module, (platform, module)
+PY
+"$temporary/venv/bin/python" -I "$repo/tests/workflow/run_native_profile_checks.py" --installed-wheel > "$evidence/final-wheel-native-profile.log" 2>&1
+cat "$evidence/final-wheel-native-profile.log"
+"$temporary/venv/bin/python" -m pip check
+printf '%s\n' 'PASS: actual wheel install, all resources/modules, init outside checkout, isolated upload bootstrap, no runtime dependencies'

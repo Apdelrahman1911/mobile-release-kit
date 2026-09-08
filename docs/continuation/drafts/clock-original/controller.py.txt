@@ -1,0 +1,929 @@
+"""Finite ignored inheritance experiment; an exact independent approval is required."""
+
+from __future__ import annotations
+
+import sys
+import types
+from pathlib import Path
+
+for _name in ("contract", "runtime", "reconcile"):
+    _path = Path(__file__).absolute().parent / (_name + ".py")
+    _module = types.ModuleType(_name)
+    _module.__file__ = str(_path)
+    sys.modules[_name] = _module
+    exec(compile(_path.read_bytes(), str(_path), "exec"), _module.__dict__)
+
+from dataclasses import dataclass
+import hashlib
+import re
+import os
+import secrets
+import select
+import stat
+
+from contract import (ACQUISITION_CAP, BASE, CAPTURE_CAP, CHUNK, DISPOSITION, EVIDENCE_CAP,
+                      EXEC_CAP, OPEN3, PLAN_SHA, PS, PYTHON, QUERY_CLEANUP, QUERY_WORK,
+                      ROWS, SCRIPTS, STREAM_CAP, TOOL_HASHES, TOTAL, WORK, Failure, QueryWindow,
+                      admit_query, admit_row, command, dumps, failure, fixed_argv, loads,
+                      marker_ok, matrix, matrix_hash, need, policy, positive_pid, query_result,
+                      validate_frame)
+from reconcile import exact, final_transport, identity, reconcile, route_terminal, shape
+from runtime import (Cancellation, CaptureBudget, OutsideChild, QueryChild, Reader, Registry,
+                     RelayChild, digest, fd_identity, identity as actual_identity, marker,
+                     now, remaining, signal_owned, write_bytes)
+
+ROOT = Path("/ORIGINAL_REPOSITORY")
+QA = ROOT / ".mobile-release/remediation/QA-006"
+SOURCE = Path("/ORIGINAL_QA006_SOURCE")
+APPROVAL = QA / "sandbox-inheritance-implementation-review-r3-r4/DECISION.json"
+OUTPUT = BASE / "execution-r1"
+
+
+def regular_bytes(path, cap=2 * 1024 * 1024):
+    need(path.is_absolute(), "absolute-input")
+    for parent in reversed(path.parents):
+        need(stat.S_ISDIR(parent.lstat().st_mode), "input-ancestor-symlink")
+    before = path.lstat()
+    need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_size <= cap, "regular-input-kind-size")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        observed = os.fstat(fd)
+        need((observed.st_dev, observed.st_ino, observed.st_size) == (before.st_dev, before.st_ino, before.st_size), "input-open-drift")
+        value = bytearray()
+        while block := os.read(fd, min(CHUNK, cap - len(value) + 1)):
+            value.extend(block)
+            need(len(value) <= cap, "regular-input-byte-cap")
+        after = os.fstat(fd)
+        need((after.st_size, after.st_mtime_ns, after.st_ctime_ns) ==
+             (observed.st_size, observed.st_mtime_ns, observed.st_ctime_ns), "input-read-drift")
+        return bytes(value)
+    finally:
+        os.close(fd)
+
+
+SELECTOR_CONTROLS = (
+    (str(QA / "implementation-r6/SNAPSHOT.json"), 25573,
+     "abb6503fe36d442b229ed294a423e6fdabd507a49d4c2628d399c2544fa2226a"),
+    (str(QA / "implementation-review-r6/BASELINE.json"), 32910,
+     "9afd73ab899717857ecb8ccbac3be16d00fab3ef15836c965a686a473b69d691"),
+)
+SELECTOR_HEAD = "2beb37336fa8002b69f598fe431082606368310d"
+SELECTOR_TREE = "6009247f3627c9825e9ad9c790a57876e09f3726"
+SELECTOR_BRANCH = "fix/qa-006-upload-process-fixtures"
+AGENTS_SHA = "7a520b569d674ad637be886c400f88d38c294b36f925595ca1f3b479526757eb"
+INDEX_ROWS = (
+    ("root", str(ROOT / ".git/index"), "0ddba9fac6daeb32b7f66749135fcc7c4fb049459a7d46b71663ea963e5d6af7"),
+    ("source", str(ROOT / ".git/worktrees/source/index"), "8ea9408d8d09c7b129cada155704262b00167e7f333e3d1b82638917b1f4d23b"),
+)
+CHANGED_PATHS = (".github/workflows/ci.yml", "tests/workflow/test_android_upload_validation.rb",
+                 "tests/workflow/test_ios_upload_validation.rb", "tests/workflow/test_native_profile_ci.py",
+                 "tests/workflow/test_native_upload_validation.rb", "tests/workflow/upload_process_fixture.rb",
+                 "tests/workflow/upload_process_ownership.rb")
+R6_CHANGED_PATHS = ("tests/workflow/test_native_upload_validation.rb", "tests/workflow/upload_process_fixture.rb")
+SNAPSHOT_KEYS = frozenset(("branch", "changedPaths", "changedSinceR5", "completeDiffSha256", "files", "head",
+                           "planDecisionSha256", "planSha256", "proposedTree", "r6DiffSha256", "updatedAt", "userAgentsSha256"))
+BASELINE_KEYS = frozenset(("reviewer", "atUtc", "source", "tree", "computedTree", "head", "branch", "firstPartyFiles",
+                          "changedPaths", "r6ChangedPaths", "bindings", "allFilesystemHashesModesMatched",
+                          "gitTreeRecomputedIndependently", "completeDiffAndR6DiffIndependentlyRecomputed",
+                          "gitTreeObjectLookup", "sourceStatus", "sourceIndexDiff", "rootStatus", "rootIndexDiff",
+                          "indexBindings", "rootUserFiles", "rootAgentalSha256"))
+
+
+def sha256_text(value):
+    return type(value) is str and re.fullmatch(r"[a-f0-9]{64}", value) is not None
+
+
+def canonical_name(value, *, absolute=False):
+    if type(value) is not str or not value or len(value) > 4096 or "\\" in value:
+        return False
+    if value.startswith("/") is not absolute or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        return False
+    parts = value[1:].split("/") if absolute else value.split("/")
+    return all(part not in {"", ".", ".."} for part in parts)
+
+
+def verify_references(raw, checkpoint):
+    """All approved reference content is verified BEFORE any selected leaf read."""
+    checkpoint()
+    references = loads(raw, file_record=True)
+    need(type(references) is dict and 2 <= len(references) <= 128, "reference-inventory-shape")
+    for path, expected in references.items():
+        need(canonical_name(path, absolute=True) and type(expected) is dict
+             and set(expected) == {"bytes", "sha256"} and type(expected["bytes"]) is int
+             and 0 <= expected["bytes"] <= 2 * 1024 * 1024 and sha256_text(expected["sha256"]),
+             "reference-row-shape")
+    for path, size, sha in SELECTOR_CONTROLS:
+        need(exact(references.get(path), dict(bytes=size, sha256=sha)), "selector-reference-binding", path=path)
+    buffers = {}
+    for path, expected in references.items():
+        checkpoint()
+        value = regular_bytes(Path(path), expected["bytes"])
+        checkpoint()
+        need(len(value) == expected["bytes"] and hashlib.sha256(value).hexdigest() == expected["sha256"],
+             "reference-drift", path=path)
+        buffers[path] = value  # Immutable verified bytes, not a second pathname read.
+    checkpoint()
+    return buffers
+
+
+def frozen_rows(rows, count):
+    need(type(rows) is dict and len(rows) == count, "selector-inventory-count")
+    result = []
+    for name, row in rows.items():
+        need(canonical_name(name) and type(row) is dict and set(row) == {"sha256", "executable"}
+             and sha256_text(row["sha256"]) and type(row["executable"]) is bool, "selector-file-row")
+        result.append((name, row["sha256"], row["executable"]))
+    return tuple(sorted(result))
+
+
+@dataclass(frozen=True)
+class SelectorAuthority:
+    """Only immutable original bindings/rows survive into either read phase."""
+    controls: tuple
+    source_rows: tuple
+    root_rows: tuple
+    index_rows: tuple
+    agents_sha256: str
+
+    def __post_init__(self):
+        need(type(self.controls) is tuple and self.controls == SELECTOR_CONTROLS
+             and type(self.index_rows) is tuple and self.index_rows == INDEX_ROWS
+             and self.agents_sha256 == AGENTS_SHA, "selector-authority-identity")
+        for rows, count in ((self.source_rows, 152), (self.root_rows, 174)):
+            need(type(rows) is tuple and len(rows) == count, "selector-authority-row-count")
+            need(all(type(row) is tuple and len(row) == 3 and canonical_name(row[0])
+                     and sha256_text(row[1]) and type(row[2]) is bool for row in rows), "selector-authority-immutable-rows")
+            need(rows == tuple(sorted(rows)) and len({row[0] for row in rows}) == count,
+                 "selector-authority-unique-rows")
+        need(all(row[0] != "AGENTS.md" for row in self.source_rows)
+             and ("AGENTS.md", AGENTS_SHA, False) in self.root_rows, "selector-authority-agents")
+
+    def record(self):
+        return dict(controls=[dict(path=path, bytes=size, sha256=sha) for path, size, sha in self.controls],
+                    files=dict(qa006=len(self.source_rows), root=len(self.root_rows)),
+                    indexes=[dict(name=name, path=path, sha256=sha) for name, path, sha in self.index_rows],
+                    agentsSha256=self.agents_sha256)
+
+
+def selector_authority(buffers):
+    """Strict schemas over the exact already-authenticated selector byte buffers."""
+    parsed = []
+    for path, size, sha in SELECTOR_CONTROLS:
+        raw = buffers.get(path)
+        need(type(raw) is bytes and len(raw) == size and hashlib.sha256(raw).hexdigest() == sha,
+             "selector-buffer-binding")
+        parsed.append(loads(raw, file_record=True))
+    snapshot, baseline = parsed
+    need(type(snapshot) is dict and set(snapshot) == SNAPSHOT_KEYS, "selector-snapshot-shape")
+    need(type(baseline) is dict and set(baseline) == BASELINE_KEYS, "selector-baseline-shape")
+    need(snapshot["head"] == baseline["head"] == SELECTOR_HEAD
+         and snapshot["proposedTree"] == baseline["tree"] == baseline["computedTree"] == SELECTOR_TREE
+         and snapshot["branch"] == baseline["branch"] == SELECTOR_BRANCH
+         and baseline["source"] == str(SOURCE) and type(baseline["firstPartyFiles"]) is int
+         and baseline["firstPartyFiles"] == 152, "selector-source-head-tree")
+    need(exact(snapshot["changedPaths"], list(CHANGED_PATHS))
+         and exact(baseline["changedPaths"], list(CHANGED_PATHS))
+         and exact(snapshot["changedSinceR5"], list(R6_CHANGED_PATHS))
+         and exact(baseline["r6ChangedPaths"], list(R6_CHANGED_PATHS)), "selector-changed-paths")
+    expected_digests = dict(planSha256="669c9c4398a9c80a52e2f35a02f0c6338341e4a8c171396057b4e70a235f91a1",
+                            planDecisionSha256="484a59265ec9d79bafc154c0fb296dc061e08f91cba6de2367d9a9f233f1ad09",
+                            completeDiffSha256="2887af02483daa161f58de7a9e0c7d1af711953a3c445cfc4ceb77eb97a7b251",
+                            r6DiffSha256="88413fb5c79cb1d2264486708065b4fb5bee1216a7fd040047ab9164518bf299")
+    need(all(snapshot[key] == sha for key, sha in expected_digests.items()), "selector-original-r6-bindings")
+    need(exact(baseline["bindings"], {
+        "PLAN-R6-R2.md": expected_digests["planSha256"],
+        "plan-review-r6-r2/PLAN-DECISION.json": expected_digests["planDecisionSha256"],
+        "implementation-r6/SNAPSHOT.json": SELECTOR_CONTROLS[0][2],
+        "implementation-r6/complete.diff": expected_digests["completeDiffSha256"],
+        "implementation-r6/r6.diff": expected_digests["r6DiffSha256"],
+    }), "selector-baseline-reference-bindings")
+    need(all(type(baseline[key]) is str for key in
+             ("reviewer", "atUtc", "sourceStatus", "sourceIndexDiff", "rootStatus", "rootIndexDiff"))
+         and type(snapshot["updatedAt"]) is str
+         and all(baseline[key] is True for key in ("allFilesystemHashesModesMatched", "gitTreeRecomputedIndependently",
+                                                  "completeDiffAndR6DiffIndependentlyRecomputed")),
+         "selector-baseline-metadata-types")
+    lookup = baseline["gitTreeObjectLookup"]
+    need(type(lookup) is dict and set(lookup) == {"exitCode", "stdout", "stderr"}
+         and type(lookup["exitCode"]) is int and type(lookup["stdout"]) is str and type(lookup["stderr"]) is str,
+         "selector-historical-git-result-shape")
+    need(snapshot["userAgentsSha256"] == baseline["rootAgentalSha256"] == AGENTS_SHA,
+         "selector-agents-binding")
+    indexes = baseline["indexBindings"]
+    need(type(indexes) is dict and set(indexes) == {"source", "root"}, "selector-index-inventory")
+    for name, path, sha in INDEX_ROWS:
+        need(exact(indexes[name], dict(path=path, sha256=sha)), "selector-fixed-index-binding", name=name)
+    return SelectorAuthority(SELECTOR_CONTROLS, frozen_rows(snapshot["files"], 152),
+                             frozen_rows(baseline["rootUserFiles"], 174), INDEX_ROWS, AGENTS_SHA)
+
+
+def reverify_selectors(authority, checkpoint):
+    need(type(authority) is SelectorAuthority, "selector-authority-type")
+    for path, size, sha in authority.controls:
+        checkpoint()
+        raw = regular_bytes(Path(path), size)
+        checkpoint()
+        need(len(raw) == size and hashlib.sha256(raw).hexdigest() == sha, "final-selector-drift", path=path)
+
+
+def preservation(authority, checkpoint):
+    need(type(authority) is SelectorAuthority, "selector-authority-type")
+    counts = {}
+    for label, base, rows in (("qa006", SOURCE, authority.source_rows), ("root", ROOT, authority.root_rows)):
+        for name, expected_sha, executable in rows:
+            checkpoint()
+            # Names were canonicalized before freezing; regular_bytes also checks
+            # every actual ancestor and the opened no-follow/stable regular leaf.
+            path = base / name
+            raw = regular_bytes(path)
+            need(hashlib.sha256(raw).hexdigest() == expected_sha
+                 and bool(path.lstat().st_mode & 0o111) is executable, "source-preservation-drift", name=name)
+            checkpoint()
+        counts[label] = len(rows)
+    for name, path, sha in authority.index_rows:
+        checkpoint()
+        need(hashlib.sha256(regular_bytes(Path(path))).hexdigest() == sha, "index-drift", name=name)
+        checkpoint()
+    checkpoint()
+    agents_sha = hashlib.sha256(regular_bytes(ROOT / "AGENTS.md")).hexdigest()
+    need(agents_sha == authority.agents_sha256, "agents-preservation-drift")
+    checkpoint()
+    return dict(files=counts, indexesMatched=True, agentsSha256=agents_sha, selectors=authority.record(),
+                scope="named-file preservation only; not native Git or complete source execution applicability")
+
+
+class Evidence:
+    def __init__(self):
+        OUTPUT.mkdir(mode=0o700)  # Exclusive single invocation; no retry/adoption.
+        self.path, self.bytes, self.records = OUTPUT, 0, {}
+
+    def write(self, name, value):
+        need(type(name) is str and name not in {"", ".", ".."} and "/" not in name, "evidence-name")
+        raw = value if type(value) is bytes else dumps(value)
+        need(self.bytes + len(raw) <= EVIDENCE_CAP, "evidence-cap")
+        self.bytes += len(raw)  # A partial/failed write still spends its charge.
+        path = self.path / name
+        self.records[name] = dict(incomplete=True, attemptedBytes=len(raw))
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        except BaseException as exc:
+            self.records[name]["primary"] = failure(exc)
+            raise
+        primary = None
+        try:
+            view = memoryview(raw)
+            while view:
+                count = os.write(fd, view[:CHUNK])
+                need(count > 0, "evidence-zero-write")
+                view = view[count:]
+            os.fsync(fd)
+        except BaseException as exc:
+            primary = exc
+            self.records[name]["primary"] = failure(exc)
+            raise
+        finally:
+            try:
+                os.close(fd)
+            except BaseException as exc:
+                self.records[name]["closeError"] = failure(exc)
+                if primary is None:
+                    raise
+        self.records[name] = dict(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+
+
+class Endpoints:
+    def __init__(self):
+        self.entries, self.reader = [], None
+        self.failed = None
+
+    def pipe(self, read_role, write_role):
+        need(self.failed is None, "endpoint-prior-custody-failure")
+        pair = os.pipe()
+        # Publish both returned descriptors before validation or flag changes.
+        slots = [dict(fd=pair[0], role=read_role, direction=os.O_RDONLY, identity=None, closed=False, closeAttempted=False, closeError=None),
+                 dict(fd=pair[1], role=write_role, direction=os.O_WRONLY, identity=None, closed=False, closeAttempted=False, closeError=None)]
+        self.entries.extend(slots)
+        try:
+            for slot in slots:
+                os.set_inheritable(slot["fd"], False)
+                slot["identity"] = fd_identity(slot["fd"], slot["direction"])
+        except BaseException as exc:
+            self.failed = failure(exc)
+            raise
+        return pair
+
+    def close(self, role):
+        slot = next(e for e in self.entries if e["role"] == role)
+        if not slot["closed"]:
+            need(not slot["closeAttempted"], "ambiguous-endpoint-close-not-retryable")
+            slot["closeAttempted"] = True
+            try:
+                if slot["identity"] is not None:
+                    need(fd_identity(slot["fd"], slot["direction"]) == slot["identity"], "endpoint-close-custody")
+                os.close(slot["fd"])  # One fresh-owned close even if metadata never succeeded.
+                slot["closed"] = True
+            except BaseException as exc:
+                slot["closeError"] = failure(exc)
+                self.failed = self.failed or slot["closeError"]
+                raise
+
+    def fd(self, role):
+        need(self.failed is None, "endpoint-not-usable")
+        return next(e["fd"] for e in self.entries if e["role"] == role and not e["closed"] and e["identity"] is not None)
+
+    def binding(self, role):
+        return next(e["identity"] for e in self.entries if e["role"] == role)
+
+
+class Row:
+    def __init__(self, controller, route):
+        self.owner, self.route = controller, route
+        self.c, self.registry, self.outside, self.relay = None, None, None, None
+        self.channels = Endpoints()
+        self.frames, self.sequences, self.commands, self.root_signals, self.observations = [], {}, [], [], []
+        self.primary, self.errors, self.unknown = None, [], False
+        self.clean, self.absent, self.sender_pid, self.relay_wait, self.proof = False, None, None, None, None
+        self.scratch, self.owned_files, self.owned_directories = None, {}, {}
+        self.subtree, self.preproof = "not-acquired", None
+
+    def remember(self, exc):
+        if self.primary is None:
+            self.primary = failure(exc)
+        else:
+            self.errors.append(failure(exc))
+
+    def update_unknown(self):
+        self.unknown = not self.clean or bool(self.errors) or self.subtree not in {"not-acquired", "resolved"}
+
+    def check(self, *, disposition=False):
+        self.owner.cancel.check()
+        remaining(self.c["disposition"] if disposition else self.c["work"])
+        remaining(self.owner.cutoff)
+
+    def prepare(self):
+        started = now()
+        admit_row(started, self.owner.cutoff, self.owner.acquisition_reserved, self.owner.exec_reserved, self.route)
+        self.owner.acquisition_reserved += self.route.acquisitions
+        self.owner.exec_reserved += self.route.execs
+        self.scratch = OUTPUT / (self.route.name + "-inputs")
+        self.scratch.mkdir(mode=0o700)
+        self.owned_directories[""] = self.scratch.lstat()
+        for name in ("home", "tmp"):
+            p = self.scratch / name
+            p.mkdir(mode=0o700)
+            self.owned_directories[name] = p.lstat()
+        nonce = secrets.token_hex(16)
+        marker_bytes = (nonce + "-outside-readable").encode()
+        policy_bytes = policy(self.scratch / "marker", self.route.fenced)
+        self.c = dict(row=self.route.name, nonce=nonce, rootPid=os.getpid(), uid=os.getuid(),
+                      start=started, work=started + WORK, disposition=started + WORK + DISPOSITION,
+                      outer=self.owner.cutoff, scratch=str(self.scratch),
+                      markerSha256=hashlib.sha256(marker_bytes).hexdigest(),
+                      policySha256=hashlib.sha256(policy_bytes).hexdigest(), scripts=self.owner.scripts,
+                      external=None, channels=None)
+        self.registry = Registry(self.c, self.owner.cancel, "root", budget=self.owner.capture)
+        for name, raw in (("marker", marker_bytes), ("policy.sb", policy_bytes)):
+            self.input(name, raw)
+        self.input("outside-context.json", dumps(self.c))
+        marker_ok(marker(self.c), True)
+
+    def input(self, name, raw):
+        need(type(name) is str and name not in {"", ".", ".."} and "/" not in name
+             and name not in self.owned_files, "input-exclusive-name")
+        need(not self.errors and all(v["complete"] and v["closed"] and v["primary"] is None
+                                    and v["closeError"] is None for v in self.owned_files.values()),
+             "input-prior-custody-failure")
+        need(self.owner.evidence.bytes + len(raw) <= EVIDENCE_CAP, "input-evidence-cap")
+        self.owner.evidence.bytes += len(raw)
+        path = self.scratch / name
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        entry = dict(fd=fd, identity=None, sha256=None, bytes=len(raw), complete=False,
+                     closeAttempted=False, closed=False, primary=None, closeError=None)
+        self.owned_files[name] = entry  # Fresh fd/file custody before metadata/write/fsync.
+        primary = None
+        try:
+            entry["identity"] = os.fstat(fd)
+            entry["sha256"] = hashlib.sha256(raw).hexdigest()
+            view = memoryview(raw)
+            while view:
+                count = os.write(fd, view[:CHUNK])
+                need(count > 0, "input-zero-write")
+                view = view[count:]
+            os.fsync(fd)
+            entry["complete"] = True
+        except BaseException as exc:
+            primary, entry["primary"] = exc, failure(exc)
+            raise
+        finally:
+            entry["closeAttempted"] = True
+            try:
+                if entry["identity"] is not None:
+                    current, initial = os.fstat(fd), entry["identity"]
+                    need((current.st_dev, current.st_ino, current.st_mode, current.st_uid) ==
+                         (initial.st_dev, initial.st_ino, initial.st_mode, initial.st_uid), "input-close-custody")
+                os.close(fd)
+                entry["closed"] = True
+            except BaseException as exc:
+                entry["closeError"] = failure(exc)
+                self.errors.append(failure(exc))
+                if primary is None:
+                    raise
+
+    def pump(self):
+        pairs = []
+        for label, child in (("outside", self.outside), ("route", self.relay)):
+            if child is not None:
+                need(child.out is not None and child.err is not None, "partial-child-capture")
+                child.err.read()
+                need(not child.err.failed and not child.err.raw, "unexpected-stderr", actor=label)
+                pairs.append((label + ".stdout", child.out))
+        if self.channels.reader is not None:
+            pairs.append(("independent", self.channels.reader))
+        for label, reader in pairs:
+            reader.read()
+            need(not reader.failed, "event-capture-failure")
+            for frame in reader.frames():
+                validate_frame(frame, self.c, self.sequences)
+                self.frames.append(dict(stream=label, frame=frame))
+                need(len(self.frames) <= 256, "event-count")
+                if frame["kind"] in {"final", "unknown-exit"}:
+                    data = frame["data"]
+                    need(frame["kind"] != "unknown-exit" and data.get("primary") is None
+                         and data.get("cleanupErrors") == [] and data.get("unknown") is False
+                         and data.get("flags") == [], "worker-reported-failure", actor=frame["actor"])
+
+    def found(self, actor, kind):
+        return [e["frame"] for e in self.frames if e["frame"]["actor"] == actor and e["frame"]["kind"] == kind]
+
+    def one(self, actor, kind):
+        found = self.found(actor, kind)
+        need(len(found) == 1, "single-event-required", actor=actor, kind=kind)
+        return found[0]
+
+    def phase(self, predicate, *, disposition=False):
+        while True:
+            self.check(disposition=disposition)
+            self.pump()
+            if predicate():
+                return
+            select.select([], [], [], min(0.01, remaining(self.c["disposition"] if disposition else self.c["work"])))
+
+    def send(self, channel, fd, kind):
+        self.check()
+        raw = command(self.c, kind)
+        record = dict(channel=channel, kind=kind, before=now(), completed=None, bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+        self.commands.append(record)
+        write_bytes(fd, raw, self.c["work"], self.check)
+        record["completed"] = now()
+
+    def start(self):
+        self.outside = self.registry.acquire(OutsideChild, "outside", fixed_argv(self.c, "root", "outside", os.getpid()), group=True)
+        self.outside.group = self.outside.pid
+        self.phase(lambda: bool(self.found("outside", "ready")))
+        outside = self.one("outside", "ready")
+        need(outside["pid"] == self.outside.pid, "outside-actual-pid")
+        value = outside["data"]
+        shape(value, "identity marker counter entry", "outside-ready-shape")
+        identity(value["identity"], pid=self.outside.pid, parent=os.getpid(), group=self.outside.pid,
+                 session=self.owner.identity["session"], uid=os.getuid())
+        marker_ok(value["marker"], True)
+        self.c["external"] = dict(pid=self.outside.pid, group=self.outside.pid, parent=os.getpid(), uid=os.getuid())
+        if self.route.loss:
+            c_read, _ = self.channels.pipe("c-read-handoff", "c-write-root")
+            r_read, r_write = self.channels.pipe("r-read-root", "r-write-handoff")
+            self.c["channels"] = dict(c=c_read, r=r_write, cIdentity=self.channels.binding("c-read-handoff"),
+                                      rIdentity=self.channels.binding("r-write-handoff"))
+            self.channels.reader = Reader(r_read, self.owner.capture)
+        self.input("route-context.json", dumps(self.c))
+        pass_fds = (() if not self.route.loss else (self.c["channels"]["c"], self.c["channels"]["r"]))
+        self.subtree = "unresolved"  # Popen may have acquired a route even if it raises.
+        self.relay = self.registry.acquire(RelayChild, "route", fixed_argv(self.c, "root", "route", os.getpid()),
+                                           group=True, pass_fds=pass_fds, execs=2)
+        self.relay.group = self.relay.pid
+        if self.route.loss:
+            self.channels.close("c-read-handoff")
+            self.channels.close("r-write-handoff")
+        self.phase(lambda: bool(self.found("sender", "ready")))
+        ready = self.one("sender", "ready")
+        self.sender_pid = ready["pid"]
+        if self.route.loss:
+            self.loss_handoff(ready)
+        else:
+            self.send("route-stdin", self.relay.handle.stdin.fileno(), "start")
+        self.phase(lambda: bool(self.found("sender", "final")))
+        if self.route.loss:
+            self.phase(lambda: self.channels.reader.eof, disposition=True)
+        self.wait_relay()
+        # Same real outside recipient must still answer after both exact probes.
+        self.send("outside-stdin", self.outside.handle.stdin.fileno(), "ping")
+        self.phase(lambda: bool(self.found("outside", "pong")))
+        need(exact(self.one("outside", "pong")["data"], outside["data"]), "outside-after-probe-identity")
+
+    def loss_handoff(self, ready):
+        self.phase(lambda: bool(self.found("ruby-relay", "acquired")))
+        acquired = self.one("ruby-relay", "acquired")
+        need(acquired["pid"] == self.relay.pid and acquired["data"]["pid"] == ready["pid"]
+             and acquired["data"]["inheritedCopiesClosed"] is True
+             and exact(acquired["data"]["passFds"], self.c["channels"]), "loss-dual-acquisition-binding")
+        identity(ready["data"]["identity"], pid=ready["pid"], parent=self.relay.pid, group=ready["pid"],
+                 session=self.owner.identity["session"], uid=os.getuid())
+        need(exact(ready["data"]["channels"], self.c["channels"]), "loss-dual-descriptor-binding")
+        self.send("C", self.channels.fd("c-write-root"), "handoff")
+        self.phase(lambda: bool(self.found("sender", "loss-ready")) and bool(self.found("ruby-relay", "loss-ready")))
+        loss = self.one("ruby-relay", "loss-ready")["data"]
+        need(loss["pid"] == ready["pid"] and loss["inheritedCopiesClosed"] is True
+             and loss["senderWait"] is None and type(loss["streams"]) is list and len(loss["streams"]) == 2
+             and all(v.get("eof") is True and v.get("failed") is None and v.get("bytes") == 0 for v in loss["streams"]),
+             "loss-actual-ordinary-eof")
+        if self.route.loss == "exit":
+            self.send("route-stdin", self.relay.handle.stdin.fileno(), "exit")
+        else:
+            sent = signal_owned(self.relay, "kill-relay")
+            self.root_signals.append(sent)
+            need(sent["returned"], "deliberate-relay-signal-failure")
+        self.wait_relay()
+        need(self.relay.status is not None and self.relay.handle.returncode == (-9 if self.route.loss == "kill" else 0),
+             "loss-actual-relay-exit")
+        self.relay_wait = dict(pid=self.relay.pid, status=self.relay.status, observed=now())
+        self.send("C", self.channels.fd("c-write-root"), "release")
+
+    def wait_relay(self):
+        def done():
+            if self.relay.status is None:
+                self.relay.observe()
+            return self.relay.status is not None and self.relay.out.eof and self.relay.err.eof
+        self.phase(done, disposition=True)
+
+    def cleanup(self):
+        if self.registry is None:
+            self.unknown = self.scratch is not None
+            return
+        for role in ("c-read-handoff", "r-write-handoff", "c-write-root"):
+            if any(e["role"] == role for e in self.channels.entries):
+                try:
+                    self.channels.close(role)
+                except BaseException as exc:
+                    self.errors.append(failure(exc))
+        try:
+            self.clean = self.registry.cleanup(extra_readers=(() if self.channels.reader is None else (self.channels.reader,)))
+            self.errors.extend(self.registry.errors)
+            self.pump()
+        except BaseException as exc:
+            self.errors.append(failure(exc))
+            self.clean = False
+        self.update_unknown()
+
+    def terminal_preproof(self):
+        self.check(disposition=True)
+        need(self.clean and not self.errors, "pre-observation-direct-disposition")
+        self.preproof = route_terminal(self.c, self.owner.identity,
+                                       [v.record() for v in self.registry.children[:2]], self.registry.attempts[:2],
+                                       self.frames, None if self.channels.reader is None else self.channels.reader.record(),
+                                       self.root_signals)
+        need(self.preproof["senderPid"] == self.sender_pid, "pre-observation-actual-sender")
+        self.check(disposition=True)
+        self.subtree = self.preproof["subtreeDisposition"]
+        self.update_unknown()
+        return self.preproof
+
+    def observe_orphan_once(self, count, sender):
+        need(self.primary is None and not self.errors and count == len(self.observations)
+             and all(v["primary"] is None and not v["cleanupErrors"] and v["observation"] is not None
+                     and v["observation"]["absent"] is False for v in self.observations),
+             "observer-prior-failure-or-absence")
+        self.check(disposition=True)
+        started = now()
+        admit_query(started, self.c, count, self.owner.acquisition_reserved, self.owner.exec_reserved, self.owner.capture.available)
+        window = QueryWindow.original(started, self.c)
+        self.owner.acquisition_reserved += 1
+        self.owner.exec_reserved += 1
+        # The query owner retains the SAME slot before any returned-handle adoption.
+        observer = self.registry.pending_query(window, self.sender_pid)
+        item = dict(queriedSenderPid=self.sender_pid, queryChild=None, attempted=started,
+                    workDeadline=window.work, disposalDeadline=window.disposition, primary=None,
+                    timeout=False, disposalSignal=None, observation=None, cleanupErrors=[])
+        self.observations.append(item)
+        argv = [PS, "-p", str(self.sender_pid), "-o", "pid=,ppid=,pgid=,stat="]
+        try:
+            self.registry.acquire(QueryChild, f"query-{count + 1}", argv, query=True, slot=observer)
+            while True:
+                self.check(disposition=True)
+                remaining(window.work)
+                observer.out.read()
+                observer.err.read()
+                need(not observer.out.failed and not observer.err.failed, "observer-capture-failure")
+                if observer.status is None:
+                    observer.observe()
+                complete = observer.complete_capture()
+                self.check(disposition=True)
+                remaining(window.work)  # Late status/EOF remains evidence, not a timely result.
+                if complete:
+                    break
+                select.select([], [], [], min(0.01, remaining(window.work)))
+        except BaseException as exc:
+            observer.remember(exc)
+        finally:
+            try:
+                self.registry.dispose_query(observer)
+            except BaseException as exc:
+                observer.remember(exc)
+                # Disposal already has its own independent closes, but a caller
+                # failure must still preserve the registered partial record below.
+            item["timeout"] = (observer.returned_at is not None and observer.returned_at >= window.work
+                               or observer.first_complete is None or observer.first_complete >= window.work)
+            item["disposalSignal"] = observer.signals[0] if observer.signals else None
+            item["primary"] = observer.primary
+            item["cleanupErrors"] = list(observer.errors)
+            item["queryChild"] = observer.record()
+            self.errors.extend(observer.errors)
+            self.unknown |= observer.unknown
+        try:
+            need(observer.primary is None and not observer.capture_errors and not observer.errors
+                 and not observer.unknown and not item["timeout"] and all(observer.closed)
+                 and observer.disposition_observed < window.disposition, "observer-failed-or-unresolved")
+            item["observation"] = query_result(bytes(observer.out.raw), bytes(observer.err.raw), observer.handle.returncode,
+                                               dict(pid=self.sender_pid, parent=sender["parentChange"]["after"], group=self.sender_pid))
+        except BaseException as exc:
+            if observer.primary is None:
+                observer.remember(exc)
+                item["primary"] = observer.primary
+                item["queryChild"] = observer.record()
+            raise
+        return item["observation"]
+
+    def query_orphan(self):
+        need(self.route.loss is not None, "ordinary-observer-forbidden")
+        self.terminal_preproof()  # FULL final/wait/channel/signal proof, before QueryChild registration.
+        need(self.subtree == "awaiting-absence", "query-awaiting-original-absence")
+        sender = self.one("sender", "final")["data"]
+        for count in range(3):
+            observation = self.observe_orphan_once(count, sender)
+            if observation["absent"]:
+                self.absent, self.subtree = True, "resolved"
+                self.update_unknown()
+                return
+        raise Failure("orphan-presence-after-three-observations")
+
+    def finish_channels(self):
+        if any(e["role"] == "r-read-root" for e in self.channels.entries):
+            try:
+                self.channels.close("r-read-root")
+            except BaseException as exc:
+                self.errors.append(failure(exc))
+                self.unknown = True
+
+    def run(self):
+        try:
+            self.prepare()
+            self.start()
+        except BaseException as exc:
+            self.remember(exc)
+        finally:
+            try:
+                self.cleanup()
+            except BaseException as exc:
+                self.remember(exc)
+                self.clean = False
+                self.update_unknown()
+        try:
+            need(self.primary is None and not self.errors and self.clean, "row-work-or-cleanup-failed")
+            if self.route.loss:
+                self.query_orphan()
+            else:
+                self.terminal_preproof()
+            self.check(disposition=True)
+            self.proof = reconcile(self.c, self.owner.identity, [v.record() for v in self.registry.children],
+                                   self.registry.attempts, self.frames,
+                                   None if self.channels.reader is None else self.channels.reader.record(), self.absent,
+                                   self.root_signals, self.observations)
+            if self.route.loss:
+                release = [c for c in self.commands if c["kind"] == "release"]
+                need(len(release) == 1 and self.relay_wait is not None
+                     and release[0]["before"] >= self.relay_wait["observed"], "release-before-actual-parent-wait")
+            self.subtree = self.proof["subtreeDisposition"]
+            self.update_unknown()
+        except BaseException as exc:
+            self.remember(exc)
+        finally:
+            try:
+                self.finish_channels()
+            except BaseException as exc:
+                self.remember(exc)
+                self.unknown = True
+        try:
+            self.check(disposition=True)  # Reconciliation/channel-close time is not free.
+        except BaseException as exc:
+            self.remember(exc)
+        return self.primary is None and not self.errors and not self.unknown and self.proof is not None
+
+    def record(self):
+        return dict(row=self.route.name, context=self.c, primary=self.primary, cleanupErrors=self.errors,
+                    unknown=self.unknown, clean=self.clean, subtreeDisposition=self.subtree, proof=self.proof, frames=self.frames,
+                    commands=self.commands, actualRelayWaitBeforeRelease=self.relay_wait,
+                    children=[] if self.registry is None else [v.record() for v in self.registry.children],
+                    attempts=[] if self.registry is None else self.registry.attempts, rootSignals=self.root_signals,
+                    independent=None if self.channels.reader is None else self.channels.reader.record(),
+                    endpoints=self.channels.entries, observations=self.observations, orphanAbsent=self.absent,
+                    pendingInputs={name: {k: v for k, v in item.items() if k != "identity"} for name, item in self.owned_files.items()})
+
+    def archive_and_remove_scratch(self):
+        need(self.primary is None and not self.errors and not self.unknown and self.clean, "scratch-cleanup-preconditions")
+        need(self.route.loss is None or self.absent is True, "scratch-live-orphan-unknown")
+        need(set(os.listdir(self.scratch)) == set(self.owned_files) | {"home", "tmp"}, "scratch-name-drift")
+        for name, before in self.owned_directories.items():
+            p = self.scratch / name
+            after = p.lstat()
+            need(stat.S_ISDIR(after.st_mode) and (after.st_dev, after.st_ino, after.st_uid, after.st_mode) ==
+                 (before.st_dev, before.st_ino, before.st_uid, before.st_mode), "scratch-directory-drift")
+            if name:
+                need(os.listdir(p) == [], "scratch-runtime-output-retained")
+        for name, before in self.owned_files.items():
+            self.owner.completion()
+            path = self.scratch / name
+            after = path.lstat()
+            need(before["complete"] and before["closed"] and before["identity"] is not None
+                 and before["primary"] is None and before["closeError"] is None, "scratch-pending-input-retained")
+            old = before["identity"]
+            need((after.st_dev, after.st_ino, after.st_uid, after.st_mode) ==
+                 (old.st_dev, old.st_ino, old.st_uid, old.st_mode), "scratch-file-custody")
+            raw = regular_bytes(path)
+            self.owner.completion()
+            need(len(raw) == before["bytes"] and hashlib.sha256(raw).hexdigest() == before["sha256"], "scratch-payload-drift")
+            self.owner.evidence.write(self.route.name + "-inputs--" + name, raw)
+            self.owner.completion()
+        # Every payload is retained, all actual workers disposed. No recursive delete.
+        for name in self.owned_files:
+            self.owner.completion()
+            (self.scratch / name).unlink()
+        for name in ("home", "tmp"):
+            self.owner.completion()
+            (self.scratch / name).rmdir()
+        self.owner.completion()
+        self.scratch.rmdir()
+        self.owner.completion()
+
+
+class Controller:
+    def __init__(self, started):
+        self.started, self.cutoff = started, started + TOTAL
+        self.cancel, self.evidence, self.selectors = None, None, None
+        self.primary, self.errors, self.rows = None, [], []
+        self.capture = CaptureBudget()
+        self.acquisition_reserved, self.exec_reserved = 0, 0
+        self.results = [dict(row=r.name, status="UNEXECUTED") for r in ROWS]
+
+    def remember(self, exc):
+        if self.primary is None:
+            self.primary = failure(exc)
+        else:
+            self.errors.append(failure(exc))
+
+    def completion(self):
+        if self.cancel is not None:
+            self.cancel.check()
+        remaining(self.cutoff)
+
+    def prepare(self):
+        self.cancel = Cancellation()
+        self.identity = actual_identity()
+        need(sys.platform == "darwin" and sys.version_info[:2] == (3, 11), "pinned-controller-host")
+        self.completion()
+        self.scripts = {name: hashlib.sha256(regular_bytes(BASE / name)).hexdigest() for name in SCRIPTS}
+        references_raw = regular_bytes(BASE / "REFERENCE-BINDINGS.json")
+        approved_raw = regular_bytes(APPROVAL)
+        approved = loads(approved_raw, file_record=True)
+        need(approved.get("decision") == "APPROVED_SINGLE_INHERITANCE_FEASIBILITY_EXECUTION"
+             and approved.get("planSha256") == PLAN_SHA and approved.get("scripts") == self.scripts
+             and approved.get("referenceBindingsSha256") == hashlib.sha256(references_raw).hexdigest()
+             and approved.get("matrixSha256") == matrix_hash(), "missing-or-stale-independent-code-approval")
+        need(not os.path.lexists(BASE / "__pycache__"), "unexpected-helper-bytecode")
+        reference_buffers = verify_references(references_raw, self.completion)
+        self.selectors = selector_authority(reference_buffers)
+        self.before = preservation(self.selectors, self.completion)
+        self.tools = {}
+        for name, expected in TOOL_HASHES.items():
+            resolved = Path(name).resolve(strict=True)
+            raw = regular_bytes(resolved, 32 * 1024 * 1024)
+            observed = hashlib.sha256(raw).hexdigest()
+            need(observed == expected, "pinned-tool-drift", tool=name)
+            self.tools[name] = dict(resolved=str(resolved), sha256=observed, bytes=len(raw))
+        self.evidence = Evidence()
+        self.completion()
+        uname = os.uname()
+        self.evidence.write("BASELINE.json", dict(planSha256=PLAN_SHA, approvalSha256=hashlib.sha256(approved_raw).hexdigest(),
+                                                scripts=self.scripts, tools=self.tools, python=sys.version,
+                                                os=dict(system=uname.sysname, release=uname.release, version=uname.version, machine=uname.machine),
+                                                rootIdentity=self.identity, started=self.started, cutoff=self.cutoff,
+                                                matrix=matrix(), preservation=self.before))
+
+    def final_preservation(self):
+        self.completion()
+        reverify_selectors(self.selectors, self.completion)
+        after = preservation(self.selectors, self.completion)
+        need(exact(after, self.before), "final-named-preservation-drift")
+        self.completion()
+        return after
+
+    def run(self):
+        try:
+            for index, route in enumerate(ROWS):
+                self.cancel.check()
+                remaining(self.cutoff)
+                row = Row(self, route)
+                self.rows.append(row)  # Keep every real Popen reservation strongly owned.
+                passed = row.run()
+                if row.primary is not None and self.primary is None:
+                    self.primary = row.primary
+                self.evidence.write(route.name + ".run.json", row.record())
+                for label, observed in (("outside", row.outside), ("route", row.relay)):
+                    if observed is not None:
+                        if observed.out is not None:
+                            self.evidence.write(route.name + "." + label + ".stdout", bytes(observed.out.raw))
+                        if observed.err is not None:
+                            self.evidence.write(route.name + "." + label + ".stderr", bytes(observed.err.raw))
+                if row.channels.reader is not None:
+                    self.evidence.write(route.name + ".independent.raw", bytes(row.channels.reader.raw))
+                self.results[index] = dict(row=route.name, status="PASS_EXPECTED_NEGATIVE" if passed and not route.fenced else
+                                           "PASS_PERMISSION_INHERITANCE_ONLY" if passed else "FAIL", proof=row.proof)
+                need(passed, "row-failed-stop", row=route.name)
+                try:
+                    self.completion()
+                    row.archive_and_remove_scratch()
+                    self.evidence.write(route.name + ".scratch-disposition.json",
+                                        dict(path=str(row.scratch), removed=True, archivedFiles=sorted(row.owned_files),
+                                             actualWorkersDisposed=True, orphanAbsent=row.absent))
+                except BaseException:
+                    self.results[index]["status"] = "FAIL_SCRATCH_DISPOSITION"
+                    raise
+            self.cancel.check()
+            remaining(self.cutoff)
+            self.final_preservation()
+            need(self.acquisition_reserved <= ACQUISITION_CAP and self.exec_reserved <= EXEC_CAP
+                 and self.capture.retained <= CAPTURE_CAP and not self.capture.exceeded, "final-budget-reconciliation")
+            need(sum(r.proof["acquisitions"] for r in self.rows) == self.acquisition_reserved
+                 and sum(r.proof["execs"] for r in self.rows) == self.exec_reserved, "actual-reserved-count-agreement")
+        except BaseException as exc:
+            self.remember(exc)
+        result = dict(provisional=True, actualOuterCompletion="required-independent-tool-observation",
+                      primary=self.primary, cleanupErrors=self.errors, flags=list(self.cancel.seen), rows=self.results,
+                      elapsed=now() - self.started, acquisitionReserved=self.acquisition_reserved,
+                      explicitExecReserved=self.exec_reserved, captures=self.capture.retained,
+                      unknownResources=any(r.unknown for r in self.rows),
+                      selectorAuthority=None if self.selectors is None else self.selectors.record(),
+                      limitations=["Outside probes use signal zero; no inherited external nonzero-delivery proof",
+                                   "Orphan sender absence is not a direct wait or an observed exit status",
+                                   "No full-suite launch, QA-006/007 closure, Store action or READY authority"])
+        for name, value in (("RESULT.json", result),
+                            ("MANIFEST.json", dict(provisional=True, files=self.evidence.records, chargedBytes=self.evidence.bytes))):
+            try:
+                self.evidence.write(name, value)
+            except BaseException as exc:
+                self.remember(exc)
+        try:
+            self.completion()  # Includes preservation, serialization, write/fsync/close.
+        except BaseException as exc:
+            self.remember(exc)
+        return 0 if self.primary is None and not self.errors and not self.cancel.seen else 1
+
+    def restore(self):
+        if self.cancel is not None:
+            self.errors.extend(self.cancel.restore())
+
+
+def main():
+    started = now()  # The one epoch includes preparation; it is never reset.
+    controller = Controller(started)
+    result = 1
+    try:
+        need(sys.argv == [str(BASE / "controller.py"), "--execute-reviewed"], "controller-fixed-argv")
+        controller.prepare()
+        result = controller.run()
+    except BaseException as exc:
+        controller.remember(exc)
+    try:
+        print(dumps(dict(provisional=True, proposedExit=result, result=str(OUTPUT / "RESULT.json"))).decode(), end="", flush=True)
+    except BaseException as exc:
+        controller.remember(exc)
+    try:
+        controller.restore()
+    except BaseException as exc:
+        controller.remember(exc)
+    try:
+        controller.completion()  # AFTER terminal output and all owned restoration.
+    except BaseException as exc:
+        controller.remember(exc)
+    if result != 0 or controller.primary is not None or controller.errors:
+        if controller.evidence is not None:
+            try:
+                controller.evidence.write("FINALIZATION-FAILURE.json", dict(provisional=True, primary=controller.primary,
+                                          cleanupErrors=controller.errors, proposedExit=1,
+                                          actualOuterCompletion="required-independent-tool-observation"))
+            except BaseException as exc:
+                controller.errors.append(failure(exc))
+        return 1
+    # No blocking/fallible IO, restoration, query or cleanup after this final gate.
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

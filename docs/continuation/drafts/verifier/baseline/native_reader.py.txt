@@ -1,0 +1,358 @@
+"""Bounded same-group direct children. No observation-derived signal authority."""
+from pathlib import Path
+import hashlib
+import base64
+import os
+import re
+import selectors
+import signal
+import subprocess
+import time
+import math
+
+from action_io import CHUNK, LIMITS, ActionFailure, participating, participating_method
+
+
+class NativeFailure(ActionFailure):
+    def __init__(self, message, record):
+        super().__init__(message)
+        self.record = record
+
+
+class BatchFrames:
+    """Incremental cat-file body hashing, one request outstanding at a time."""
+    def __init__(self, objects, *, ctx):
+        self.ctx = ctx
+        ctx.require(type(objects) in (list, tuple) and len(objects) <= LIMITS['objects'], 'too many native object frames')
+        self.objects = list(objects)
+        seen = set()
+        for row in self.objects:
+            ctx.require(type(row) is dict and set(row) == {'oid', 'type', 'bytes', 'sha256'}
+                        and type(row['oid']) is str and re.fullmatch('[0-9a-f]{40}', row['oid'])
+                        and row['oid'] not in seen and row['type'] in ('blob', 'tree', 'commit')
+                        and type(row['bytes']) is int and 0 <= row['bytes'] <= LIMITS[row['type']]
+                        and type(row['sha256']) is str and re.fullmatch('[0-9a-f]{64}', row['sha256']), 'invalid native frame expectation')
+            seen.add(row['oid'])
+        self.index = 0
+        self.header = bytearray()
+        self.remaining = None
+        self.delimiter = False
+        self.sha1 = self.sha256 = None
+        self.waiting = False
+        self.results = []
+
+    @participating_method
+    def next_request(self):
+        self.ctx.check()
+        if self.waiting or self.index == len(self.objects):
+            return None
+        self.waiting = True
+        return (self.objects[self.index]['oid'] + '\n').encode('ascii')
+
+    @property
+    def complete(self):
+        return self.index == len(self.objects)
+
+    @participating_method
+    def feed(self, data):
+        ctx = self.ctx
+        view = memoryview(data)
+        while view:
+            ctx.check()
+            ctx.require(self.waiting and not self.complete, 'extra cat-file terminal output')
+            expected = self.objects[self.index]
+            if self.remaining is None:
+                # Stop at the 97th observed header byte, never absorb body first.
+                byte = bytes(view[:1])
+                self.header.extend(byte)
+                view = view[1:]
+                ctx.require(len(self.header) <= LIMITS['header'], 'cat-file overlong header')
+                if byte != b'\n':
+                    continue
+                wanted = f"{expected['oid']} {expected['type']} {expected['bytes']}\n".encode('ascii')
+                ctx.require(bytes(self.header) == wanted, 'cat-file OID/type/length/header mismatch')
+                ctx.require(expected['type'] in ('blob', 'tree', 'commit')
+                            and expected['bytes'] <= LIMITS[expected['type']], 'excessive native body declaration')
+                framed = (expected['type']+' '+str(expected['bytes'])).encode('ascii')+b'\0'
+                self.sha1 = hashlib.sha1(framed)
+                self.sha256 = hashlib.sha256()
+                self.remaining = expected['bytes']
+            elif self.remaining:
+                take = min(self.remaining, len(view), CHUNK)
+                block = view[:take]
+                ctx.bytes(take, 'native', hashing=True)
+                self.sha1.update(block)
+                self.sha256.update(block)
+                self.remaining -= take
+                view = view[take:]
+            else:
+                ctx.require(view[0] == 10, 'missing cat-file body delimiter')
+                view = view[1:]
+                ctx.require(self.sha1.hexdigest() == expected['oid'] and self.sha256.hexdigest() == expected['sha256'],
+                            'cat-file body hash mismatch')
+                self.results.append({'oid': expected['oid'], 'type': expected['type'],
+                                     'bytes': expected['bytes'], 'sha256': self.sha256.hexdigest()})
+                self.index += 1
+                self.header.clear()
+                self.remaining = None
+                self.waiting = False
+                # Another body before its next actual request is also invalid.
+                ctx.require(not view, 'unsolicited cat-file frame bytes')
+
+    @participating_method
+    def finish(self):
+        self.ctx.require(self.complete and not self.waiting, 'short/early EOF cat-file stream')
+
+
+def _close(stream, record, ctx):
+    if stream is None or stream.closed:
+        return
+    try:
+        stream.close()
+    except BaseException as error:
+        ctx.latch(error)
+        record.setdefault('errors', []).append({'phase': 'pipe-close', 'type': type(error).__name__})
+        raise
+
+
+def _dispose(process, record):
+    """Only an actual unambiguously unreaped handle grants this one direct stop."""
+    cutoff = time.monotonic() + LIMITS['stopSeconds']
+    record['stopCutoff'] = cutoff
+    try:
+        code = process.poll()
+    except BaseException:
+        record['ownership'] = 'unknown'
+        raise
+    if code is not None:
+        record.update(ownership='reaped', exitCode=code, signalAuthority=False)
+        return
+    record['stopRequested'] = True
+    # This child deliberately shares the outer gate group. Never killpg here.
+    try:
+        process.kill()
+        record['stopSignalSent'] = True
+    except ProcessLookupError:
+        record['stopAbsent'] = True
+    while True:
+        try:
+            code = process.poll()
+        except BaseException:
+            record['ownership'] = 'unknown'
+            raise
+        if code is not None:
+            record.update(ownership='reaped', exitCode=code, signalAuthority=False)
+            return
+        if time.monotonic() >= cutoff:
+            record['ownership'] = 'unknown'
+            raise NativeFailure('known native child could not be joined', record)
+        time.sleep(0.01)
+
+
+@participating
+def run(command, *, cwd, environment, ctx, input_data=b'', frames=None,
+        stdout_limit=LIMITS['stdout'], stderr_limit=LIMITS['stderr'],
+        seconds=LIMITS['commandSeconds'], allow_stderr=False):
+    """Fixed executable/list argv, streamed two-pipe drain, no timeout threads.
+
+    Nonzero, diagnostic, late, truncated, ambiguous or unclosed results FAIL.
+    Caller supplies an allowed policy; this reader is not a shell/Store API.
+    """
+    ctx.require(type(command) is list and command and Path(command[0]).is_absolute()
+                and all(type(arg) is str and '\0' not in arg for arg in command), 'native argv must be explicit')
+    ctx.require(type(seconds) in (int, float) and math.isfinite(seconds) and 0 < seconds <= LIMITS['commandSeconds']
+                and type(stdout_limit) is int and 0 <= stdout_limit <= LIMITS['catStdout']
+                and type(stderr_limit) is int and 0 <= stderr_limit <= LIMITS['stderr'], 'native limits cannot widen policy')
+    ctx.require(isinstance(input_data, bytes) and (frames is None or not input_data), 'invalid native input mode')
+    ctx.charge('launches', 1)
+    ctx.require(not any(row['ownership'] not in ('unstarted', 'reaped') for row in ctx.native + ctx.queries), 'previous native worker unresolved')
+    started = time.monotonic()
+    cutoff = min(ctx.cutoff, started + seconds)
+    record = {'command': command, 'cwd': str(cwd), 'environment': dict(environment),
+              'phase': 'before-acquire', 'ownership': 'unstarted', 'pid': None,
+              'pgid': None, 'parentGroup': os.getpgrp(), 'startNewSession': False,
+              'signalAuthority': False, 'exitCode': None, 'stopSignalSent': False,
+              'status': 'FAIL', 'started': started, 'cutoff': cutoff,
+              'stdoutBytes': 0, 'stderrBytes': 0, 'stdinBytes': 0,
+              'stdoutTruncated': False, 'stderrTruncated': False,
+              'stdoutPrefixBytes': 0, 'stderrPrefixBytes': 0}
+    ctx.native.append(record)
+    process, selector, phase = None, None, 'before-acquire'
+    outputs = {'stdout': bytearray(), 'stderr': bytearray()}
+    hashes = {name: hashlib.sha256() for name in outputs}
+    pending = memoryview(input_data)
+    input_open, normal, ambiguous = True, False, False
+    error = None
+
+    def checkpoint():
+        ctx.check()
+        if time.monotonic() >= cutoff:
+            ctx.fail('original native command deadline exceeded')
+
+    try:
+        checkpoint()
+        phase = 'acquire'
+        record['ownership'] = 'acquiring'
+        try:
+            process = subprocess.Popen(command, cwd=cwd, env=environment,
+                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, start_new_session=False,
+                                       close_fds=True, bufsize=0)
+        except BaseException:
+            ambiguous = True
+            raise
+        record.update(ownership='live', pid=process.pid, signalAuthority=True)
+        checkpoint()
+        # Not evidence for signaling; it verifies that we did not escape.
+        try:
+            record['pgid'] = os.getpgid(process.pid)
+            ctx.require(record['pgid'] == record['parentGroup'], 'native child escaped invoking gate group')
+        except ProcessLookupError:
+            record['pgid'] = None  # child may have completed before observation
+        selector = selectors.DefaultSelector()
+        for stream in (process.stdin, process.stdout, process.stderr):
+            os.set_blocking(stream.fileno(), False)
+        selector.register(process.stdout, selectors.EVENT_READ, 'stdout')
+        selector.register(process.stderr, selectors.EVENT_READ, 'stderr')
+        selector.register(process.stdin, selectors.EVENT_WRITE, 'stdin')
+        phase = 'read-write-reap'
+        while True:
+            checkpoint()
+            try:
+                code = process.poll()
+            except BaseException:
+                ambiguous = True
+                raise
+            if code is not None:
+                record.update(ownership='reaped', exitCode=code, signalAuthority=False)
+            checkpoint()
+            if frames is not None and not pending:
+                request = frames.next_request()
+                if request is not None:
+                    pending = memoryview(request)
+            if input_open and not pending and (frames is None or frames.complete):
+                if process.stdin.fileno() in selector.get_map():
+                    selector.unregister(process.stdin)
+                _close(process.stdin, record, ctx)
+                input_open = False
+                checkpoint()
+            if not selector.get_map():
+                if code is not None:
+                    break
+                time.sleep(min(0.01, max(0, cutoff-time.monotonic())))
+                continue
+            # Avoid busy-writable spin while awaiting the current frame.
+            if input_open:
+                registered = process.stdin.fileno() in selector.get_map()
+                if pending and not registered:
+                    selector.register(process.stdin, selectors.EVENT_WRITE, 'stdin')
+                if not pending and registered:
+                    selector.unregister(process.stdin)
+            for key, _ in selector.select(min(0.02, max(0, cutoff-time.monotonic()))):
+                checkpoint()
+                name = key.data
+                if name == 'stdin':
+                    try:
+                        count = os.write(key.fd, pending[:CHUNK])
+                    except BlockingIOError:
+                        continue
+                    checkpoint()
+                    ctx.require(count > 0, 'native short stdin write')
+                    ctx.bytes(count, 'native')
+                    record['stdinBytes'] += count
+                    pending = pending[count:]
+                    continue
+                cap = stdout_limit if name == 'stdout' else stderr_limit
+                try:
+                    block = os.read(key.fd, min(CHUNK, cap-record[name+'Bytes']+1))
+                except BlockingIOError:
+                    continue
+                checkpoint()
+                if not block:
+                    selector.unregister(key.fileobj)
+                    continue
+                record[name+'Bytes'] += len(block)
+                ctx.bytes(len(block), 'native')
+                allowed = max(0, cap-record[name+'PrefixBytes'])
+                prefix = block[:allowed]
+                hashes[name].update(prefix)
+                record[name+'PrefixBytes'] += len(prefix)
+                if frames is None or name == 'stderr':
+                    ctx.charge('diagnostics', len(prefix))
+                    outputs[name].extend(prefix)
+                if record[name+'Bytes'] > cap:
+                    record[name+'Truncated'] = True
+                    ctx.fail(name+' native output limit exceeded')
+                if name == 'stdout' and frames is not None:
+                    frames.feed(block)
+        checkpoint()
+        ctx.require(record['ownership'] == 'reaped' and record['exitCode'] == 0, 'native nonzero/unknown exit')
+        ctx.require(allow_stderr or not outputs['stderr'], 'native unexpected diagnostics')
+        if frames is not None:
+            frames.finish()
+            record['frames'] = frames.results
+        normal = True
+    except BaseException as problem:
+        error = problem
+        ctx.latch(problem)
+        record.setdefault('errors', []).append({'phase': phase, 'type': type(problem).__name__, 'message': str(problem)[:1024]})
+        if ambiguous:
+            record.update(ownership='unknown', signalAuthority=False)
+        elif process is not None and record['ownership'] == 'live':
+            try:
+                _close(process.stdin, record, ctx)
+            except BaseException as close_error:
+                record['inputCloseError'] = type(close_error).__name__
+            # A failed close is not permission to abandon a known child. The
+            # actual final poll/stop/join is attempted independently.
+            try:
+                _dispose(process, record)
+            except BaseException as disposition:
+                ctx.latch(disposition)
+                record.update(ownership='unknown', signalAuthority=False)
+                record['dispositionError'] = type(disposition).__name__
+    finally:
+        # No failing checkpoint can skip close; close failures prevent success.
+        if selector is not None:
+            try:
+                selector.close()
+            except BaseException as problem:
+                ctx.latch(problem)
+                record.setdefault('errors', []).append({'phase': 'selector-close', 'type': type(problem).__name__})
+                normal, error = False, error or problem
+        if process is not None:
+            for stream in (process.stdin, process.stdout, process.stderr):
+                try:
+                    _close(stream, record, ctx)
+                except BaseException as problem:
+                    ctx.latch(problem)
+                    normal, error = False, error or problem
+        record['diagnosticRetentionTruncated'] = False
+        for name, data in outputs.items():
+            chunks = []
+            record[name+'ChunksBase64'] = chunks
+            try:
+                for start in range(0, len(data), CHUNK):
+                    ctx.check(failure_only=not normal)
+                    chunks.append(base64.b64encode(data[start:start+CHUNK]).decode('ascii'))
+                    ctx.check(failure_only=not normal)
+            except BaseException as problem:
+                ctx.latch(problem)
+                record['diagnosticRetentionTruncated'] = True
+                normal, error = False, error or problem
+        record.update(phase=phase, seconds=time.monotonic()-started, cancelSignal=ctx.pending.signal,
+                      stdoutPrefixSha256=hashes['stdout'].hexdigest(), stderrPrefixSha256=hashes['stderr'].hexdigest(),
+                      stderrPrefix=outputs['stderr'][:4096].decode('utf-8', 'replace'))
+        if normal:
+            try:
+                checkpoint()
+                record['status'] = 'PASS'
+            except BaseException as problem:
+                ctx.latch(problem)
+                normal, error = False, error or problem
+        if not normal:
+            record['status'] = 'FAIL'
+    if not normal:
+        raise NativeFailure(str(error or 'native observation failed'), record) from error
+    ctx.check()
+    return bytes(outputs['stdout']), bytes(outputs['stderr']), record

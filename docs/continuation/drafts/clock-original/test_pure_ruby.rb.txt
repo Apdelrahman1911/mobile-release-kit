@@ -1,0 +1,440 @@
+# frozen_string_literal: true
+
+# DO NOT EXECUTE without the distinct exact-byte safety approval. This file
+# invokes only fictional IO/process interfaces, never a relay main/native route.
+require "json"
+require "digest"
+require "digest/sha2"
+require "fcntl"
+require "open3"
+
+module PureSafety
+  class Violation < Exception; end
+  class Exit < SystemExit; end
+  REAL_CLOCK = Process.method(:clock_gettime)
+  STARTED = REAL_CLOCK.call(Process::CLOCK_MONOTONIC)
+  OUTPUT = STDOUT.method(:write)
+  EXIT = Kernel.method(:exit)
+  LIMIT = 2 * 1024 * 1024
+  ATTEMPTS = []
+  RESULTS = []
+  CLOCK = [109.0]
+  OUTPUT_BYTES = [0]
+
+  def self.guard(label)
+    proc do |*_, **_, &_block|
+      PureSafety::ATTEMPTS << label
+      raise PureSafety::Violation, "forbidden-native-boundary: #{label}"
+    end
+  end
+
+  def self.boundary(target, names)
+    names.each do |name|
+      next unless target.respond_to?(name, true)
+      target.singleton_class.send(:define_method, name, &guard("#{target}.#{name}"))
+    end
+  end
+
+  def self.stub(target, name, replacement)
+    before = target.method(name)
+    target.singleton_class.send(:define_method, name, &replacement)
+    yield
+  ensure
+    target.singleton_class.send(:define_method, name, before) if before
+  end
+
+  def self.stubs(entries, &block)
+    return block.call if entries.empty?
+    target, name, callable = entries.first
+    stub(target, name, callable) { stubs(entries.drop(1), &block) }
+  end
+
+  def self.assert(value, message)
+    raise StandardError, message unless value
+  end
+
+  def self.check
+    assert(REAL_CLOCK.call(Process::CLOCK_MONOTONIC) < STARTED + 30.0, "original-30s-pure-cutoff")
+    raise Violation, "forbidden boundary was attempted" unless ATTEMPTS.empty?
+  end
+
+  def self.output(value)
+    raw = JSON.generate(value) + "\n"
+    OUTPUT_BYTES[0] += raw.bytesize
+    assert(OUTPUT_BYTES[0] <= LIMIT, "pure-output-cap")
+    OUTPUT.call(raw)
+    check
+  end
+
+  def self.test(name)
+    check
+    CLOCK[0] = 109.0
+    yield
+    check
+    RESULTS << {name: name, status: "PASS"}
+  rescue Violation
+    raise
+  rescue Exception => e
+    RESULTS << {name: name, status: "FAIL", error: e.class.name, message: e.message.byteslice(0, 2048)}
+  end
+end
+
+# Installed BEFORE loading the relay definitions. Unknown native boundaries veto,
+# not silently simulate success. Every permitted fake is local to a named case.
+PureSafety.boundary(Process, %i[spawn fork exec daemon detach wait wait2 waitpid waitpid2 waitall kill setpgid setsid
+                              getpgid getpgrp getsid pid ppid uid euid gid egid clock_gettime exit!])
+PureSafety.boundary(Kernel, %i[spawn fork exec system syscall trap sleep exit exit! `])
+%i[spawn fork exec system syscall trap sleep exit exit! `].each do |name|
+  Kernel.send(:define_method, name, &PureSafety.guard("Kernel##{name}")) if Kernel.private_method_defined?(name)
+  Kernel.send(:private, name)
+end
+PureSafety.boundary(Signal, %i[trap])
+PureSafety.boundary(Open3, %i[popen3 popen2 popen2e capture2 capture2e capture3 pipeline pipeline_r pipeline_rw pipeline_w start_pipeline])
+PureSafety.boundary(IO, %i[pipe popen new sysopen select])
+PureSafety.boundary(File, %i[lstat stat open new read binread write binwrite unlink delete rename])
+PureSafety.boundary(Digest::SHA256, %i[file])
+PureSafety.boundary(Thread, %i[new start fork])
+%i[reopen close close_read close_write read_nonblock write_nonblock fcntl stat close_on_exec=].each do |name|
+  IO.send(:define_method, name, &PureSafety.guard("IO##{name}"))
+end
+
+# No socket/FFI implementation is imported. Further requires are restricted to
+# the already-loaded relay's four literal libraries; dynamic loads are forbidden.
+before_require = Kernel.instance_method(:require)
+Kernel.send(:define_method, :require) do |name|
+  unless %w[json digest fcntl open3].include?(name)
+    PureSafety::ATTEMPTS << "require:#{name}"
+    raise PureSafety::Violation, "unlisted import"
+  end
+  before_require.bind_call(self, name)
+end
+Kernel.send(:private, :require)
+load File.join(__dir__, "ruby_relay.rb")
+
+class FictionalIO
+  attr_accessor :close_error, :stat_error, :flag_error, :read_value, :write_hook, :fail_flag_call
+  attr_reader :id, :events, :close_calls, :write_calls
+
+  def initialize(id, events, direction = 0, read_value = nil)
+    @id, @events, @direction, @read_value = id, events, direction, read_value
+    @closed, @close_calls, @write_calls = false, 0, 0
+    @flag_calls = 0
+  end
+
+  def fileno = @id
+  def closed? = @closed
+  def fcntl(_) = @direction
+  def close_on_exec=(_)
+    @flag_calls += 1
+    raise @flag_error if @flag_error && (!@fail_flag_call || @flag_calls == @fail_flag_call)
+  end
+  def stat
+    if @stat_error
+      error, @stat_error = @stat_error, nil
+      raise error
+    end
+    Struct.new(:dev, :ino, :mode) { def pipe? = true }.new(1, @id, 0o010600)
+  end
+  def read_nonblock(*_, **_) = @read_value
+  def write_nonblock(raw, **_)
+    @write_calls += 1
+    @write_hook&.call
+    raw.bytesize
+  end
+  def close
+    @close_calls += 1
+    @events << ["close", @id]
+    @closed = true
+    raise @close_error if @close_error
+  end
+end
+
+class FictionalStatus
+  def pid = 601
+  def to_i = 0
+  def exitstatus = 0
+  def signaled? = false
+  def termsig = nil
+  def success? = true
+end
+
+module PureFixtures
+  def self.context(row)
+    {"row" => row, "nonce" => "a" * 32, "rootPid" => 100, "uid" => 501,
+     "start" => 100.0, "work" => 130.0, "disposition" => 140.0, "outer" => 280.0,
+     "scratch" => "#{InheritanceRelay::BASE}/execution-r1/#{row}-inputs", "markerSha256" => "b" * 64,
+     "policySha256" => "c" * 64, "scripts" => {}, "external" => {"pid" => 101},
+     "channels" => nil}
+  end
+
+  def self.relay(row, events)
+    value = InheritanceRelay::Relay.allocate
+    control = InheritanceRelay::Stream.new(FictionalIO.new(900, events, 0, :wait_readable))
+    state = {c: context(row), flags: [], traps: {}, errors: [], primary: nil, all_pipes: [], io_custody: {},
+             control_writers: [], streams: [], waiter: nil, pid: nil, status: nil, input: nil,
+             attempted: false, acquired: false, actual_join: false, cleaned: false, sequence: 0,
+             written: {1 => 0, 2 => 0}, channels: [], closed_pass: false, loss_ready: false, sender_frames: {},
+             env: {}, argv: ["fictional-never-executed"], loss: false, control: control, entry: {fictional: true}}
+    state.each { |name, entry| value.instance_variable_set("@#{name}", entry) }
+    value.define_singleton_method(:emit) { |kind, _data, **_| events << ["emit", kind] }
+    value
+  end
+
+  def self.fakes(events, pipes = [], &block)
+    PureSafety.stubs([
+      [Process, :clock_gettime, ->(*) { PureSafety::CLOCK[0] }],
+      [Process, :pid, -> { 201 }], [Process, :ppid, -> { 100 }], [Process, :getpgrp, -> { 201 }],
+      [Process, :getsid, ->(*) { 80 }], [Process, :uid, -> { 501 }],
+      [IO, :select, ->(r, w, e, wait = nil) { PureSafety::CLOCK[0] += wait || 0; [r || [], w || [], e || []] }],
+      [IO, :pipe, -> { PureSafety.assert(!pipes.empty?, "unlisted fake pipe"); pipes.shift }],
+      [Process, :spawn, ->(*) { events << ["spawn"]; 601 }],
+      [Process, :waitpid2, ->(pid, mode) { PureSafety.assert(pid == 601 && mode == Process::WNOHANG, "wait-role"); events << ["wait", pid]; [601, FictionalStatus.new] }],
+      [Process, :exit!, ->(code) { events << ["own-exit", code]; raise PureSafety::Exit.new(code) }]
+    ], &block)
+  end
+
+  def self.pipes(events)
+    (0...3).map { |i| [FictionalIO.new(10 + i * 2, events), FictionalIO.new(11 + i * 2, events, 1)] }
+  end
+
+  def self.change(value, event)
+    case event
+    when :cancel then value.instance_variable_get(:@flags) << "INT"
+    when :expired then PureSafety::CLOCK[0] = 130.0
+    when :eof then value.instance_variable_get(:@control).eof = true
+    end
+  end
+end
+
+begin
+  %w[ruby-spawn ruby-fork-exec ruby-open3 parent-exit].each do |row|
+    %i[cancel expired eof].each do |event|
+      PureSafety.test("dispatch-after-charge/#{row}/#{event}") do
+        events = []
+        pairs = PureFixtures.pipes(events)
+        PureFixtures.fakes(events, pairs.dup) do
+          relay = PureFixtures.relay(row, events)
+          relay.define_singleton_method(:emit) do |kind, _data, **_|
+            events << ["emit", kind]
+            PureFixtures.change(self, event) if kind == "attempt"
+          end
+          result = relay.run
+          PureSafety.assert(result == 1 && relay.instance_variable_get(:@attempted), "failed dispatch must keep charge")
+          PureSafety.assert(events.none? { |v| %w[spawn wait own-exit].include?(v.first) }, "no acquisition after changed owner")
+          PureSafety.assert(relay.instance_variable_get(:@all_pipes).all? { |io| io.close_calls == 1 }, "all acquired fake pipes closed once")
+        end
+      end
+    end
+  end
+
+  %w[ruby-spawn ruby-fork-exec].each do |row|
+    PureSafety.test("temporary-close-before-published-writer/#{row}") do
+      events = []
+      pairs = PureFixtures.pipes(events)
+      pairs[0][0].close_error = IOError.new("first temporary close failed after consuming fake fd")
+      PureFixtures.fakes(events, pairs.dup) do
+        relay = PureFixtures.relay(row, events)
+        relay.define_singleton_method(:fork) { |&_body| events << ["fork"]; 601 }
+        begin
+          relay.run
+          raise "ambiguous close must prevent ordinary Open3/relay completion"
+        rescue PureSafety::Exit => e
+          PureSafety.assert(e.status == 72, "failure-only own exit")
+        end
+        writer = pairs[0][1]
+        PureSafety.assert(relay.instance_variable_get(:@input).equal?(writer), "actual writer published before temporary close")
+        PureSafety.assert(events.index(["close", writer.id]) < events.index(["wait", 601]), "known writer closes before wait")
+        PureSafety.assert(pairs.flatten.all? { |io| io.close_calls == 1 }, "all known IO exactly one close")
+        PureSafety.assert(relay.instance_variable_get(:@primary)[:message].include?("first temporary close"), "original setup error retained")
+      end
+    end
+  end
+
+  (0...6).each do |slot|
+    %i[stat_error flag_error].each do |attribute|
+      PureSafety.test("fresh-pipe-publication/#{slot}/#{attribute}") do
+        events = []
+        pairs = PureFixtures.pipes(events)
+        pairs.flatten[slot].public_send("#{attribute}=", IOError.new("fresh metadata fault"))
+        PureFixtures.fakes(events, pairs.dup) do
+          relay = PureFixtures.relay("ruby-spawn", events)
+          PureSafety.assert(relay.run == 1, "metadata failure not success")
+          owned = relay.instance_variable_get(:@all_pipes)
+          PureSafety.assert(owned.length == (slot / 2 + 1) * 2 && owned.all? { |io| io.close_calls == 1 }, "both fresh endpoints retained/closed")
+          PureSafety.assert(events.none? { |v| v.first == "spawn" || v.first == "wait" }, "no process after pipe metadata fault")
+        end
+      end
+    end
+  end
+
+  %i[cancel expired eof].each do |event|
+    PureSafety.test("backpressured-work-write/#{event}") do
+      events = []
+      PureFixtures.fakes(events) do
+        relay, output = PureFixtures.relay("ruby-spawn", events), FictionalIO.new(55, events, 1)
+        PureSafety.stub(IO, :select, ->(*) { PureFixtures.change(relay, event); [[], [output], []] }) do
+          begin
+            relay.write(output, "fixture", 130.0)
+            raise "late work write accepted"
+          rescue InheritanceRelay::Rejection
+            PureSafety.assert(output.write_calls.zero?, "no write after blocked-select change")
+          end
+        end
+      end
+    end
+  end
+
+  [2, 4].each do |slot|
+    PureSafety.test("returned-child-stream-adoption/#{slot}") do
+      events = []
+      pairs = PureFixtures.pipes(events)
+      pairs.flatten[slot].flag_error = IOError.new("Reader construction after returned child")
+      pairs.flatten[slot].fail_flag_call = 2
+      PureFixtures.fakes(events, pairs.dup) do
+        relay = PureFixtures.relay("ruby-spawn", events)
+        PureSafety.assert(relay.run == 1, "partial Stream construction cannot pass")
+        PureSafety.assert(relay.instance_variable_get(:@pid) == 601 && relay.instance_variable_get(:@input).equal?(pairs[0][1]),
+                          "all actual returned custody remains published")
+        PureSafety.assert(events.index(["close", 11]) < events.index(["wait", 601]), "writer closes before real fake wait")
+        PureSafety.assert(pairs.flatten.all? { |io| io.close_calls == 1 }, "every known descriptor independently closes")
+        PureSafety.assert(relay.instance_variable_get(:@primary)[:message] == "Reader construction after returned child",
+                          "adoption primary retained")
+      end
+    end
+  end
+
+  PureSafety.test("substituted-descriptor-veto-and-no-retry") do
+    events = []
+    PureFixtures.fakes(events) do
+      relay, io = PureFixtures.relay("ruby-spawn", events), FictionalIO.new(55, events)
+      relay.own_io(io)
+      relay.instance_variable_get(:@io_custody).fetch(io.object_id)[:identity] = [1, 99, 0o010000]
+      2.times do
+        begin
+          relay.close_io(io)
+          raise "substituted descriptor close accepted"
+        rescue InheritanceRelay::Rejection
+          PureSafety.assert(io.close_calls.zero?, "no close of replacement or retry of ambiguous number")
+        end
+      end
+      begin
+        relay.own_pipe
+        raise "later pipe admitted after custody failure"
+      rescue InheritanceRelay::Rejection
+        PureSafety.assert(io.close_calls.zero?, "no later acquisition")
+      end
+    end
+  end
+
+  PureSafety.test("disposition-write-is-not-new-work") do
+    events = []
+    PureFixtures.fakes(events) do
+      relay, output = PureFixtures.relay("ruby-spawn", events), FictionalIO.new(55, events, 1)
+      relay.instance_variable_get(:@flags) << "INT"
+      relay.write(output, "owned cleanup", 140.0)
+      PureSafety.assert(output.write_calls == 1, "cancellation does not abandon owned disposition")
+      PureSafety::CLOCK[0] = 140.0
+      begin
+        relay.write(output, "too late", 140.0)
+        raise "late disposition write accepted"
+      rescue InheritanceRelay::Rejection
+        PureSafety.assert(output.write_calls == 1, "original disposition cannot renew")
+      end
+    end
+  end
+
+  %i[cancel expired eof].each do |event|
+    PureSafety.test("fork-exec-frame-post-emission/#{event}") do
+      events = []
+      PureFixtures.fakes(events) do
+        relay = PureFixtures.relay("ruby-fork-exec", events)
+        relay.define_singleton_method(:emit) { |kind, _data, **opts| PureFixtures.change(self, event) if kind == "exec" && !opts[:cleanup] }
+        PureSafety.stubs([
+          [STDIN, :reopen, ->(*) {}], [STDOUT, :reopen, ->(*) {}], [STDERR, :reopen, ->(*) {}],
+          [STDIN, :close_on_exec=, ->(*) {}], [STDIN, :read_nonblock, ->(*, **) { :wait_readable }],
+          [Process, :setpgid, ->(pid, group) { PureSafety.assert([pid, group] == [0, 0], "fixed fake fork group") }]
+        ]) do
+          begin
+            relay.fork_exec_frame(FictionalIO.new(41, events), FictionalIO.new(42, events), FictionalIO.new(43, events))
+            raise "late fork exec accepted"
+          rescue PureSafety::Exit => e
+            PureSafety.assert(e.status == 71, "failed fork has only own failure exit")
+            PureSafety.assert(relay.instance_variable_get(:@control).io.equal?(STDIN), "fork owns reopened actual control object")
+          end
+        end
+      end
+    end
+  end
+
+  %i[cancel expired].each do |event|
+    PureSafety.test("actual-run-terminal-emission/#{event}") do
+      events = []
+      PureFixtures.fakes(events, PureFixtures.pipes(events)) do
+        relay = PureFixtures.relay("ruby-spawn", events)
+        relay.define_singleton_method(:emit) do |kind, _data, **_|
+          if kind == "final"
+            event == :cancel ? @flags << "INT" : PureSafety::CLOCK[0] = 140.0
+          end
+        end
+        PureSafety.assert(relay.run == 1, "actual final return must not outvote late/cancelled emission")
+        PureSafety.assert(events.count { |v| v.first == "spawn" } == 1 && events.count { |v| v.first == "wait" } == 1,
+                          "one actual fake acquisition/wait, no retry")
+      end
+    end
+  end
+
+  PureSafety.test("independent-handler-restoration-and-terminal-failure") do
+    events = []
+    PureFixtures.fakes(events, PureFixtures.pipes(events)) do
+      relay = PureFixtures.relay("ruby-spawn", events)
+      relay.instance_variable_set(:@traps, {"INT" => {original: "old-int", installed: "mine-int"},
+                                           "TERM" => {original: "old-term", installed: "mine-term"}})
+      PureSafety.stub(Signal, :trap, ->(sig, _handler) {
+        events << ["restore", sig]
+        PureSafety::CLOCK[0] = 141.0 if sig == "INT"
+        raise IOError, "first restoration failure" if sig == "INT"
+        "mine-term"
+      }) do
+        PureSafety.assert(relay.run == 1, "restoration failure must fail actual return")
+        PureSafety.assert(events.select { |v| v.first == "restore" } == [["restore", "INT"], ["restore", "TERM"]],
+                          "later restoration independently attempted")
+        PureSafety.assert(relay.instance_variable_get(:@errors).any? { |v| v[:message] == "first restoration failure" },
+                          "restoration error retained")
+      end
+    end
+  end
+
+  PureSafety.test("capable-entry-and-buffered-phase-command") do
+    events = []
+    PureFixtures.fakes(events) do
+      relay = PureFixtures.relay("ruby-spawn", events)
+      relay.instance_variable_get(:@control).pending << '{"kind":"start"}'
+      admitted = relay.entry_admission("ruby-relay")
+      PureSafety.assert(admitted[:admittedAt] == 109.0 && admitted[:identity][:pid] == 201 && admitted[:controlEof] == false,
+                        "real guard leaves a buffered phase command, carries original time and fictional actual identity")
+      PureSafety::CLOCK[0] = 130.0
+      begin
+        relay.entry_admission("ruby-relay")
+        raise "late capable entry accepted"
+      rescue InheritanceRelay::Rejection
+        PureSafety.assert(relay.instance_variable_get(:@control).pending == '{"kind":"start"}', "no consumed phase command")
+      end
+    end
+  end
+
+  PureSafety.check
+  PureSafety.output(schemaVersion: 1, method: "actual-owner methods with entirely fictional interfaces",
+                    nativeAttempts: PureSafety::ATTEMPTS, cases: PureSafety::RESULTS,
+                    actualOuterExit: nil, completionRequiresOuterReceipt: true,
+                    elapsed: PureSafety::REAL_CLOCK.call(Process::CLOCK_MONOTONIC) - PureSafety::STARTED)
+  proposed_exit = PureSafety::RESULTS.all? { |row| row[:status] == "PASS" } ? 0 : 1
+rescue Exception => e
+  emergency = JSON.generate(failed: true, type: e.class.name, message: e.message.byteslice(0, 2048),
+                            nativeAttempts: PureSafety::ATTEMPTS, cases: PureSafety::RESULTS) + "\n"
+  if PureSafety::OUTPUT_BYTES[0] + emergency.bytesize <= PureSafety::LIMIT
+    PureSafety::OUTPUT_BYTES[0] += emergency.bytesize
+    PureSafety::OUTPUT.call(emergency)
+  end
+  proposed_exit = 1
+end
+PureSafety::EXIT.call(proposed_exit)

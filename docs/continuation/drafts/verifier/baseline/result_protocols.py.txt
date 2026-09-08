@@ -1,0 +1,32 @@
+"""Explicit gate output protocols; never infer a framework from a name prefix."""
+import re
+
+PROTOCOLS = {"command", "python-unittest", "ruby-minitest", "supply-wif"}
+
+
+def inspect_result(protocol, text, exit_code):
+    if protocol not in PROTOCOLS:
+        raise ValueError("unknown result protocol")
+    result = {"protocol": protocol, "status": "FAIL"}
+    if exit_code != 0:
+        return {**result, "reason": "actual command exit was not zero"}
+    if protocol == "command":
+        return {**result, "status": "PASS"}
+    terminal = text.rstrip()
+    if protocol == "supply-wif":
+        if terminal.splitlines()[-1:] == ["locked Fastlane Supply WIF contract: PASS"]:
+            return {**result, "status": "PASS"}
+        return {**result, "reason": "missing exact terminal Supply/WIF assertion footer"}
+    if protocol == "python-unittest":
+        match = re.search(r"(?m)^Ran ([0-9]+) tests? in [0-9]+(?:\.[0-9]+)?s\r?\n\r?\nOK\Z", terminal)
+        if match and int(match[1]) > 0:
+            return {**result, "status": "PASS", "tests": int(match[1]), "skips": 0}
+        return {**result, "reason": "nonempty, zero-failure/skip terminal unittest summary required"}
+    match = re.search(r"(?m)^([0-9]+) runs, ([0-9]+) assertions, ([0-9]+) failures, ([0-9]+) errors, ([0-9]+) skips\Z", terminal)
+    if match:
+        tests, assertions, failures, errors, skips = map(int, match.groups())
+        result.update(tests=tests, assertions=assertions, failures=failures, errors=errors, skips=skips)
+        if tests > 0 and failures == errors == skips == 0:
+            result["status"] = "PASS"
+            return result
+    return {**result, "reason": "nonempty, zero-failure/skip terminal Minitest summary required"}

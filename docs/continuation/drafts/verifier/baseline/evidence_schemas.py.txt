@@ -1,0 +1,336 @@
+"""Pure exact schemas shared by the private verifier's producers and consumers.
+
+These are validation, not authentication. Callers still bind original files,
+actual child results, action lifetime, source identity and fresh observations.
+"""
+from pathlib import Path
+import math
+import os
+import re
+import stat
+
+from action_io import LIMITS, ROLES, participating
+
+
+@participating
+def fields(value, expected, *, ctx, label):
+    ctx.require(type(value) is dict and set(value) == set(expected), label + ' exact fields')
+
+
+@participating
+def same(value, expected, *, ctx, label='fixed policy'):
+    """Typed equality: JSON true/1 and false/0 are never interchangeable."""
+    pending = [(value, expected)]
+    while pending:
+        ctx.check()
+        left, right = pending.pop()
+        ctx.require(type(left) is type(right), label + ' value type')
+        if type(left) is dict:
+            ctx.require(set(left) == set(right), label + ' fields')
+            pending.extend((left[key], right[key]) for key in right)
+        elif type(left) in (list, tuple):
+            ctx.require(len(left) == len(right), label + ' array length')
+            pending.extend(zip(left, right))
+        else:
+            ctx.require(left == right, label + ' value')
+
+
+@participating
+def integer(value, *, ctx, label, minimum=0, maximum=None):
+    ctx.require(type(value) is int and value >= minimum and (maximum is None or value <= maximum),
+                label + ' integer/range')
+
+
+@participating
+def number(value, *, ctx, label, minimum=0, maximum=None):
+    ctx.require(type(value) in (int, float) and math.isfinite(value) and value >= minimum
+                and (maximum is None or value <= maximum), label + ' finite number/range')
+
+
+@participating
+def label(value, *, ctx, name='label'):
+    ctx.require(type(value) is str and value and '\0' not in value and len(value.encode()) <= LIMITS['jsonString'],
+                name + ' nonempty string')
+
+
+@participating
+def digest(value, *, ctx, length=64):
+    ctx.require(type(value) is str and re.fullmatch('[0-9a-f]{' + str(length) + '}', value) is not None,
+                'invalid digest/nonce/OID')
+
+
+@participating
+def absolute(value, *, ctx):
+    ctx.require(type(value) is str and '\0' not in value and Path(value).is_absolute()
+                and os.path.normpath(value) == value and len(Path(value).parts) <= LIMITS['fsDepth'],
+                'noncanonical absolute schema path')
+
+
+@participating
+def relative(value, *, ctx, dot=False):
+    if dot and value == '.':
+        return
+    ctx.require(type(value) is str and value and '\0' not in value and not Path(value).is_absolute()
+                and '/'.join(Path(value).parts) == value and '..' not in Path(value).parts
+                and len(Path(value).parts) <= LIMITS['fsDepth']
+                and len(os.fsencode(value)) <= LIMITS['gitPath']
+                and all(len(os.fsencode(p)) <= LIMITS['component'] for p in Path(value).parts),
+                'noncanonical relative schema path')
+
+
+@participating
+def identity(value, *, ctx, kind=None):
+    fields(value, {'device', 'inode', 'uid', 'mode', 'type'}, ctx=ctx, label='identity')
+    for key in ('device', 'inode', 'uid'):
+        integer(value[key], ctx=ctx, label='identity ' + key)
+    integer(value['mode'], ctx=ctx, label='identity mode', maximum=0o7777)
+    integer(value['type'], ctx=ctx, label='identity type')
+    ctx.require(value['type'] in (stat.S_IFREG, stat.S_IFDIR, stat.S_IFLNK)
+                and (kind is None or value['type'] == kind), 'identity kind')
+
+
+@participating
+def file_reference(value, *, ctx, role='record'):
+    fields(value, {'path', 'identity', 'bytes', 'sha256'}, ctx=ctx, label='file reference')
+    absolute(value['path'], ctx=ctx)
+    identity(value['identity'], ctx=ctx, kind=stat.S_IFREG)
+    digest(value['sha256'], ctx=ctx)
+    ctx.require(role in ROLES, 'file reference role')
+    integer(value['bytes'], ctx=ctx, label='file reference bytes', maximum=LIMITS[ROLES[role]])
+
+
+@participating
+def ancestry(value, root, *, ctx):
+    absolute(root, ctx=ctx)
+    fields(value, {str(p) for p in (Path(root), *Path(root).parents)}, ctx=ctx, label='ancestry')
+    for row in value.values():
+        identity(row, ctx=ctx, kind=stat.S_IFDIR)
+
+
+@participating
+def owner_record(value, *, ctx):
+    fields(value, {'path', 'identity', 'parentAncestry', 'nonce', 'tree', 'purpose'}, ctx=ctx, label='owner')
+    absolute(value['path'], ctx=ctx)
+    identity(value['identity'], ctx=ctx, kind=stat.S_IFDIR)
+    ancestry(value['parentAncestry'], str(Path(value['path']).parent), ctx=ctx)
+    digest(value['nonce'], ctx=ctx, length=48)
+    digest(value['tree'], ctx=ctx, length=40)
+    label(value['purpose'], ctx=ctx, name='owner purpose')
+    ctx.require(value['identity']['uid'] == os.getuid() and value['identity']['mode'] == 0o700,
+                'owner UID/private directory mode')
+
+
+@participating
+def counters(value, *, ctx):
+    ctx.require(type(value) is dict, 'action counters object')
+    # Scalar limits such as seconds/path length are not charge categories.
+    allowed = {'allBytes', 'payload', 'toolBytes', 'newBytes', 'diagnostics', 'jsonTokens',
+               'objects', 'forestBytes', 'references', 'visited', 'launches', 'views'}
+    ctx.require(set(value) <= allowed, 'unknown action counter')
+    for key, count in value.items():
+        integer(count, ctx=ctx, label='counter ' + key, maximum=LIMITS[key])
+
+
+@participating
+def action_metadata(value, *, ctx, full=False):
+    expected = {'action', 'nonce', 'started', 'cutoff', 'seconds', 'counts', 'cancelSignal', 'failure', 'queries'}
+    if full:
+        expected |= {'native', 'views', 'removals'}
+    fields(value, expected, ctx=ctx, label='action metadata')
+    label(value['action'], ctx=ctx, name='action name')
+    digest(value['nonce'], ctx=ctx, length=48)
+    for key in ('started', 'cutoff', 'seconds'):
+        number(value[key], ctx=ctx, label='action ' + key)
+    ctx.require(0 <= value['seconds'] < value['cutoff'] - value['started'] <= LIMITS['seconds']
+                and value['failure'] is None and value['cancelSignal'] is None, 'successful action timing/state')
+    counters(value['counts'], ctx=ctx)
+    ctx.require(type(value['queries']) is list and len(value['queries']) <= LIMITS['launches'], 'query inventory')
+    for query in value['queries']:
+        query_record(query, ctx=ctx)
+        ctx.require(value['started'] <= query['started'] and query['cutoff'] <= value['cutoff'],
+                    'query outside original action')
+    ctx.require(len(value['queries']) <= value['counts'].get('launches', 0), 'unaccounted participating queries')
+    if full:
+        ctx.require(all(type(value[k]) is list for k in ('native', 'views', 'removals')), 'action observation arrays')
+        ctx.require(len(value['native']) + len(value['queries']) <= value['counts'].get('launches', 0)
+                    and len(value['views']) <= value['counts'].get('views', 0), 'action acquisition counts')
+        for removal in value['removals']:
+            fields(removal, {'root', 'relative', 'kind'}, ctx=ctx, label='removal')
+            absolute(removal['root'], ctx=ctx)
+            relative(removal['relative'], ctx=ctx, dot=True)
+            ctx.require(removal['kind'] in ('directory', 'file', 'symlink'), 'removal kind')
+
+
+@participating
+def numeric_rows(rows, *, ctx):
+    from process_gate import valid_state
+    ctx.require(type(rows) is list and len(rows) <= 2 * 1024 * 1024 // 10, 'numeric row count')
+    seen = set()
+    for row in rows:
+        fields(row, {'pid', 'parent', 'group', 'uid', 'state'}, ctx=ctx, label='numeric row')
+        for key in ('pid', 'parent', 'group', 'uid'):
+            integer(row[key], ctx=ctx, label='numeric ' + key, minimum=1 if key in ('pid', 'group') else 0)
+        ctx.require(row['pid'] not in seen and valid_state(row['state']), 'numeric duplicate/state')
+        seen.add(row['pid'])
+
+
+@participating
+def query_record(value, *, ctx, command=None):
+    from process_gate import GROUP_SCOPE, DEFAULT_PS_COMMAND, PS_BYTES, PS_SECONDS
+    # Consumers require the fixed system query. Only the immediate producer may
+    # pass its actual argv explicitly (the synthetic numeric-text proof seam).
+    command = list(DEFAULT_PS_COMMAND) if command is None else command
+    fields(value, {'ownership', 'pid', 'exitCode', 'stopSignalSent', 'status', 'command', 'bytes', 'scope',
+                   'seconds', 'stdoutSha256', 'stderrSha256', 'started', 'cutoff', 'secondsLimit',
+                   'byteLimit', 'rowCount'}, ctx=ctx, label='successful numeric query')
+    ctx.require(value['ownership'] == 'reaped' and value['status'] == 'PARSED' and type(value['exitCode']) is int
+                and value['exitCode'] == 0 and value['stopSignalSent'] is False and value['scope'] == GROUP_SCOPE
+                and value['command'] == command, 'successful numeric query scope/completion')
+    integer(value['pid'], ctx=ctx, label='query PID', minimum=1)
+    integer(value['byteLimit'], ctx=ctx, label='query byte limit', minimum=1, maximum=PS_BYTES)
+    integer(value['bytes'], ctx=ctx, label='query bytes', minimum=1, maximum=value['byteLimit'])
+    integer(value['rowCount'], ctx=ctx, label='query rows', minimum=1, maximum=value['bytes']//10)
+    for key in ('seconds', 'started', 'cutoff', 'secondsLimit'):
+        number(value[key], ctx=ctx, label='query ' + key)
+    ctx.require(0 < value['secondsLimit'] <= PS_SECONDS and value['cutoff'] == value['started'] + value['secondsLimit']
+                and value['seconds'] < value['secondsLimit'], 'query original timing')
+    digest(value['stdoutSha256'], ctx=ctx)
+    digest(value['stderrSha256'], ctx=ctx)
+    import hashlib
+    ctx.require(value['stderrSha256'] == hashlib.sha256(b'').hexdigest(), 'query nonempty diagnostics')
+
+
+@participating
+def group_completion(value, *, pid, uid, ctx):
+    from process_gate import GROUP_SCOPE, classify_group, GROUP_SECONDS
+    fields(value, {'status', 'scope', 'observations', 'signalsAuthorized', 'started', 'cutoff', 'secondsLimit'},
+           ctx=ctx, label='group completion')
+    ctx.require(value['status'] == 'CLEAR' and value['scope'] == GROUP_SCOPE and value['signalsAuthorized'] is False,
+                'group completion not clear/scoped')
+    for key in ('started', 'cutoff', 'secondsLimit'):
+        number(value[key], ctx=ctx, label='group ' + key)
+    ctx.require(0 < value['secondsLimit'] <= GROUP_SECONDS and value['cutoff'] == value['started'] + value['secondsLimit'],
+                'group allowance relationship')
+    rows = value['observations']
+    ctx.require(type(rows) is list and 0 < len(rows) <= LIMITS['launches'], 'group observation sequence')
+    previous_end = value['started']
+    for index, observation in enumerate(rows):
+        terminal = index == len(rows) - 1
+        fields(observation, {'query', 'status', 'matches'} | (set() if terminal else {'reason'}),
+               ctx=ctx, label='group observation')
+        query_record(observation['query'], ctx=ctx)
+        query = observation['query']
+        ctx.require(previous_end <= query['started'] and query['cutoff'] <= value['cutoff'], 'group query order/cutoff')
+        previous_end = query['started'] + query['seconds']
+        numeric_rows(observation['matches'], ctx=ctx)
+        ctx.require(len(observation['matches']) <= query['rowCount'], 'matches exceed actual query rows')
+        ctx.require(all(row['group'] == pid for row in observation['matches']), 'group matches scope')
+        expected = classify_group(observation['matches'], group=pid, uid=uid)
+        ctx.require({k: v for k, v in observation.items() if k != 'query'} == expected,
+                    'group classifier/evidence disagreement')
+        ctx.require(expected['status'] == 'CLEAR' if terminal else expected['status'] in {'LIVE', 'INDETERMINATE'},
+                    'nonterminal/terminal group state')
+
+
+@participating
+def group_observation(value, *, bindings, ctx, command=None):
+    from process_gate import GROUP_SCOPE, classify_group
+    fields(value, {'query', 'groups', 'scope', 'signalsAuthorized', 'status'}, ctx=ctx, label='prior groups')
+    query_record(value['query'], ctx=ctx, command=command)
+    ctx.require(value['status'] == 'CLEAR' and value['scope'] == GROUP_SCOPE and value['signalsAuthorized'] is False
+                and type(value['groups']) is list and len(value['groups']) == len(bindings) > 0, 'prior group scope/count')
+    for row, binding in zip(value['groups'], bindings):
+        fields(row, {'gate', 'pid', 'uid', 'status', 'matches'}, ctx=ctx, label='prior group')
+        ctx.require({k: row[k] for k in ('gate', 'pid', 'uid')} == binding, 'prior group identity/order')
+        label(row['gate'], ctx=ctx, name='gate')
+        integer(row['pid'], ctx=ctx, label='group PID', minimum=1)
+        integer(row['uid'], ctx=ctx, label='group UID')
+        numeric_rows(row['matches'], ctx=ctx)
+        ctx.require(len(row['matches']) <= value['query']['rowCount'], 'prior matches exceed actual query rows')
+        ctx.require(all(m['group'] == row['pid'] for m in row['matches'])
+                    and classify_group(row['matches'], group=row['pid'], uid=row['uid']) ==
+                    {'status': 'CLEAR', 'matches': row['matches']} and row['status'] == 'CLEAR', 'prior group classifier')
+
+
+@participating
+def protocol_result(value, protocol, *, ctx):
+    base = {'protocol', 'status'}
+    extra = {'tests', 'skips'} if protocol == 'python-unittest' else {'tests', 'assertions', 'failures', 'errors', 'skips'} if protocol == 'ruby-minitest' else set()
+    fields(value, base | extra, ctx=ctx, label='successful result protocol')
+    ctx.require(protocol in {'command', 'python-unittest', 'ruby-minitest', 'supply-wif'}
+                and value['protocol'] == protocol and value['status'] == 'PASS', 'protocol status/identity')
+    for key in extra:
+        integer(value[key], ctx=ctx, label='protocol ' + key, minimum=1 if key == 'tests' else 0)
+        if key in {'failures', 'errors', 'skips'}:
+            ctx.require(value[key] == 0, 'protocol failures/skips')
+
+
+@participating
+def collected_output(value, *, ctx):
+    """Only fully retained, EOF-complete and disposed output may prove PASS."""
+    from process_gate import COMBINED_BYTES, FREE_FLOOR, DISPATCH_HEADROOM
+    fields(value, {'stream', 'byteLimit', 'observedBytes', 'retainedBytes', 'sha256', 'overflow', 'eof', 'digestComplete',
+                   'completeWrites', 'pipeClosed', 'selectorClosed', 'logClosed', 'logSynced', 'parentClosed',
+                   'freeFloorBytes', 'dispatchHeadroomBytes', 'diskChecks', 'minimumFreeBytes', 'acquisitionFreeBytes'},
+           ctx=ctx, label='successful combined collector')
+    ctx.require(value['stream'] == 'stdout+stderr' and value['overflow'] is False
+                and all(value[key] is True for key in ('eof', 'digestComplete', 'completeWrites', 'pipeClosed', 'selectorClosed',
+                                                       'logClosed', 'logSynced', 'parentClosed')),
+                'combined output incomplete/overflow/undisposed')
+    integer(value['byteLimit'], ctx=ctx, label='combined byte cap', minimum=1, maximum=COMBINED_BYTES)
+    for key in ('observedBytes', 'retainedBytes'):
+        integer(value[key], ctx=ctx, label='combined ' + key, maximum=value['byteLimit'])
+    ctx.require(value['observedBytes'] == value['retainedBytes'], 'combined output lost bytes')
+    digest(value['sha256'], ctx=ctx)
+    same(value['freeFloorBytes'], FREE_FLOOR, ctx=ctx, label='free-space floor')
+    same(value['dispatchHeadroomBytes'], DISPATCH_HEADROOM, ctx=ctx, label='dispatch headroom')
+    integer(value['diskChecks'], ctx=ctx, label='actual disk checks', minimum=1)
+    integer(value['minimumFreeBytes'], ctx=ctx, label='minimum observed free bytes', minimum=FREE_FLOOR)
+    integer(value['acquisitionFreeBytes'], ctx=ctx, label='acquisition observed free bytes',
+            minimum=FREE_FLOOR + DISPATCH_HEADROOM)
+    ctx.require(value['minimumFreeBytes'] <= value['acquisitionFreeBytes'], 'disk observation relationship')
+
+
+@participating
+def completed_gate(value, *, ctx, pending_binding=False):
+    base = {'status', 'command', 'cwd', 'ownership', 'uid', 'pid', 'exitCode', 'stopSignalSent', 'timedOut',
+            'cancelSignal', 'workSecondsLimit', 'groupSecondsLimit', 'groupProof', 'seconds',
+            'gate', 'protocol', 'log', 'logSha256', 'protocolResult', 'output'}
+    extra = {k for k in ('tests', 'assertions', 'skips') if k in value.get('protocolResult', {})}
+    if value.get('gate') == 'prepare-frozen-diff' and not pending_binding:
+        extra.add('preparedEvidence')
+    if value.get('gate') in {'prepare-owned-build', 'editable-install'} and not pending_binding:
+        extra.add('outputEvidence')
+    fields(value, base | extra, ctx=ctx, label='completed gate')
+    ctx.require(value['status'] == 'PASS' and value['ownership'] == 'reaped' and type(value['exitCode']) is int
+                and value['exitCode'] == 0 and value['stopSignalSent'] is False and value['timedOut'] is False
+                and value['cancelSignal'] is None, 'gate actual success')
+    label(value['gate'], ctx=ctx, name='gate')
+    ctx.require(re.fullmatch('[a-z0-9][a-z0-9-]*', value['gate']) is not None
+                and value['log'] == 'final-' + value['gate'] + '.log', 'gate/log canonical scope')
+    absolute(value['cwd'], ctx=ctx)
+    command = value['command']
+    ctx.require(type(command) is list and command and all(type(arg) is str and '\0' not in arg for arg in command),
+                'gate argv schema')
+    integer(value['pid'], ctx=ctx, label='gate PID', minimum=1)
+    integer(value['uid'], ctx=ctx, label='gate UID')
+    ctx.require(value['uid'] == os.getuid(), 'gate UID scope')
+    for key in ('seconds', 'workSecondsLimit', 'groupSecondsLimit'):
+        number(value[key], ctx=ctx, label='gate ' + key)
+    from process_gate import GROUP_SECONDS
+    ctx.require(0 < value['workSecondsLimit'] <= 900 and 0 < value['groupSecondsLimit'] <= GROUP_SECONDS
+                and value['seconds'] < value['workSecondsLimit'] + value['groupSecondsLimit'], 'gate deadline')
+    group_completion(value['groupProof'], pid=value['pid'], uid=value['uid'], ctx=ctx)
+    ctx.require(value['groupProof']['secondsLimit'] == value['groupSecondsLimit'], 'gate group allowance')
+    digest(value['logSha256'], ctx=ctx)
+    collected_output(value['output'], ctx=ctx)
+    ctx.require(value['logSha256'] == value['output']['sha256'], 'collector/log digest disagreement')
+    protocol_result(value['protocolResult'], value['protocol'], ctx=ctx)
+    for key in extra & {'tests', 'assertions', 'skips'}:
+        ctx.require(type(value[key]) is int and value[key] == value['protocolResult'][key], 'gate/protocol count mismatch')
+    if 'preparedEvidence' in extra:
+        fields(value['preparedEvidence'], {'seal', 'preparationObservation', 'owner', 'freeze'}, ctx=ctx, label='prepared completion')
+        for reference in value['preparedEvidence'].values():
+            file_reference(reference, ctx=ctx)
+    if 'outputEvidence' in extra:
+        file_reference(value['outputEvidence'], ctx=ctx)

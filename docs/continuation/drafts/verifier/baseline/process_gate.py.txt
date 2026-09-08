@@ -1,0 +1,781 @@
+"""Verifier-only direct-child ownership and bounded, read-only group evidence.
+
+Only a still-unreaped Popen child started in its own session authorizes a stop.
+Numeric observations NEVER grant signal authority. A clear original group does
+not prove containment of descendants that escaped into another session/group;
+the native fixture-owned lifecycle contracts remain independently mandatory.
+"""
+from contextlib import contextmanager
+from pathlib import Path
+import hashlib
+import os
+import re
+import selectors
+import signal
+import subprocess
+import time
+import math
+import sys
+import stat
+import types
+from functools import wraps
+
+GROUP_SCOPE = "original same-group only; escaped/session-changing descendants require fixture-owned proofs"
+DEFAULT_PS_COMMAND = ("/bin/ps", "-axo", "pid=,ppid=,pgid=,uid=,stat=")
+PS_COMMAND = list(DEFAULT_PS_COMMAND)
+PS_BYTES = 2 * 1024 * 1024
+PS_SECONDS = 2.0
+STOP_SECONDS = 5.0
+GROUP_SECONDS = 3.0
+COMBINED_BYTES = 64 * 1024 * 1024
+FREE_FLOOR = 4 * 1024 * 1024 * 1024
+DISPATCH_HEADROOM = 512 * 1024 * 1024
+OUTPUT_CHUNK = 64 * 1024
+
+
+def helper_namespace(root, *, ctx=None):
+    """Metadata-only admission before sibling imports; never open cache bytes.
+
+    The initial script/stdlib are runner TCB. This closes incidental helper
+    import candidates, not arbitrary same-user/whole-host interference.
+    """
+    def check(value=True, message='helper namespace'):
+        if ctx is not None:
+            ctx.require(value, message)
+        elif not value:
+            raise RuntimeError(message)
+    root = Path(root)
+    check(root.is_absolute() and str(root) == os.path.normpath(root) and len(root.parts) <= 64,
+          'noncanonical helper import root')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open('/', flags)
+    try:
+        for part in root.parts[1:]:
+            check()
+            new = os.open(part, flags, dir_fd=fd)
+            old, fd = fd, new
+            os.close(old)
+        original = os.fstat(fd)
+        check(original.st_uid == os.getuid() and not original.st_mode & 0o022,
+              'foreign/writable helper namespace')
+        known = set(['action_io.py', 'bindings.py', 'cleanup-build.py', 'cleanup-wheel.py', 'evidence_schemas.py', 'freeze.py', 'frozen_diff.py', 'gate_list.py', 'git_readonly.py', 'native_reader.py', 'observe-owned-workers.py', 'owned_outputs.py', 'prepare-build.py', 'probe-jdk21-signing.py', 'process_gate.py', 'result_protocols.py', 'run-once.sh', 'source_inventory.py', 'verify-all.py', 'verify-frozen-diff.py', 'verify-pins.py', 'verify-process-gate.py', 'verify-result-protocols.py', 'wheel-smoke.sh'])
+        found, count = set(), 0
+        with os.scandir(fd) as iterator:
+            while True:
+                # Reserve the enumeration operation before advancing; even an
+                # EOF probe consumes this finite namespace-admission budget.
+                check(count < 4096, 'helper namespace enumeration cap')
+                count += 1
+                if ctx is not None:
+                    ctx.charge('visited', 1)
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    break
+                name = item.name
+                check(len(os.fsencode(name)) <= 255, 'helper namespace component cap')
+                before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                check(name != '__pycache__' and not name.endswith(('.pyc', '.pyo', '.pyd', '.so', '.pth')),
+                      'unapproved helper bytecode/startup/cache name; payload not read')
+                if name in known:
+                    check(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+                          and before.st_uid == os.getuid() and not before.st_mode & 0o022,
+                          'helper replaced, symlinked, hardlinked or writable')
+                    found.add(name)
+                else:
+                    check(not name.endswith(('.py', '.sh')), 'unknown helper/import source name')
+                    if (stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode)) and name.isidentifier():
+                        check(name == 'wheels' and stat.S_ISDIR(before.st_mode)
+                              and before.st_uid == os.getuid() and stat.S_IMODE(before.st_mode) == 0o700,
+                              'unapproved helper import directory; contents not read')
+                        child = os.open(name, flags, dir_fd=fd)
+                        try:
+                            check(os.fstat(child) == before, 'wheel-data directory replaced')
+                            names = []
+                            with os.scandir(child) as entries:
+                                for entry in entries:
+                                    check(not names, 'unknown wheel-data sibling; payload not read')
+                                    names.append(entry.name)
+                                    check(entry.name == 'mobile_release_kit-0.3.0-py3-none-any.whl',
+                                          'unexpected wheel-data name; payload not read')
+                                    row = os.stat(entry.name, dir_fd=child, follow_symlinks=False)
+                                    check(stat.S_ISREG(row.st_mode) and row.st_nlink == 1 and row.st_uid == os.getuid(),
+                                          'untrusted wheel-data type; payload not read')
+                        finally:
+                            os.close(child)
+                check(os.stat(name, dir_fd=fd, follow_symlinks=False) == before, 'helper namespace entry changed')
+        check(found == known, 'missing reviewed helper')
+        current = os.fstat(fd)
+        check((current.st_dev, current.st_ino, current.st_uid, current.st_mode, current.st_mtime_ns, current.st_ctime_ns) ==
+              (original.st_dev, original.st_ino, original.st_uid, original.st_mode, original.st_mtime_ns, original.st_ctime_ns),
+              'helper namespace changed during admission')
+    finally:
+        os.close(fd)
+
+
+def source_module(path, expected, *, ctx):
+    """Fixed proof/controller modules from the authenticated read, never pyc.
+
+    The expected reference comes from the approved initial helper copy. This
+    does not let a consumer supply an arbitrary plugin/module path or loader.
+    """
+    from action_io import participating, read_file
+
+    @participating
+    def load(*, ctx):
+        path_value = Path(path)
+        allowed = {'verify-all.py': 'reviewed_verifier_controller',
+                   'verify-frozen-diff.py': 'reviewed_verifier_proofs',
+                   'verify-process-gate.py': 'reviewed_process_proofs',
+                   'verify-result-protocols.py': 'reviewed_protocol_proofs'}
+        ctx.require(path_value.name in allowed and expected['path'] == str(path_value),
+                    'source-only loader is limited to the fixed reviewed helpers')
+        name = allowed[path_value.name]
+        ctx.require(name not in sys.modules, 'preexisting proof module collision')
+        helper_namespace(path_value.parent, ctx=ctx)
+        reference = read_file(path_value, ctx=ctx, role='source', retain=True)
+        body = reference.pop('data')
+        ctx.require(reference == expected, 'reviewed proof source changed before compilation')
+        module = types.ModuleType(name)
+        module.__file__, module.__package__, module.__loader__, module.__spec__ = reference['path'], '', None, None
+        exec(compile(body, reference['path'], 'exec', dont_inherit=True), module.__dict__)
+        ctx.check()
+        ctx.require(read_file(path_value, ctx=ctx, role='source') == expected,
+                    'proof source changed while loading definitions')
+        helper_namespace(path_value.parent, ctx=ctx)
+        return module
+
+    return load(ctx=ctx)
+
+
+class Interrupted:
+    def __init__(self):
+        self.signal = None
+
+    def __call__(self, number, _frame):
+        if self.signal is None:
+            self.signal = number
+
+
+@contextmanager
+def cancellation_flag():
+    pending, previous = Interrupted(), {}
+    try:
+        for number in (signal.SIGINT, signal.SIGTERM):
+            previous[number] = signal.signal(number, pending)
+        yield pending
+    finally:
+        primary = sys.exc_info()[1]
+        restoration = None
+        for number in (signal.SIGTERM, signal.SIGINT):
+            if number in previous:
+                try:
+                    signal.signal(number, previous[number])
+                except BaseException as error:
+                    restoration = restoration or error
+                    if primary is not None:
+                        primary.add_note('signal-handler restoration failed: ' + type(error).__name__)
+        if restoration is not None and primary is None:
+            raise restoration
+
+
+def _participating_optional(function):
+    """Participate whenever a caller supplies its original action context."""
+    @wraps(function)
+    def guarded(*args, ctx=None, **kwargs):
+        try:
+            if ctx is not None:
+                ctx.check()
+            return function(*args, ctx=ctx, **kwargs)
+        except BaseException as error:
+            if ctx is not None:
+                ctx.latch(error)
+            raise
+    return guarded
+
+
+def _stop_reserved(process, record, *, allowance=STOP_SECONDS):
+    """One final poll; a reaped child irrevocably loses stop authority."""
+    code = process.poll()
+    if code is not None and type(code) is not int:
+        raise RuntimeError('ambiguous reserved-child poll result')
+    if code is not None:
+        record.update(ownership="reaped", exitCode=code)
+        return
+    record["stopRequested"] = True
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+        record["stopSignalSent"] = True
+    except ProcessLookupError:
+        record["stopAbsent"] = True
+    cutoff = time.monotonic() + allowance
+    while True:
+        code = process.poll()
+        if code is not None and type(code) is not int:
+            raise RuntimeError('ambiguous reserved-child terminal result')
+        if code is not None:
+            record.update(ownership="reaped", exitCode=code)
+            return
+        if time.monotonic() >= cutoff:
+            raise RuntimeError("reserved child could not be reaped within stop allowance")
+        time.sleep(0.01)
+
+
+@_participating_optional
+def numeric_snapshot(*, seconds=PS_SECONDS, byte_limit=PS_BYTES, ctx=None, outer_cutoff=None, pending=None):
+    """Join our own ps child; bound both pipes, time and retained output.
+
+    Query stderr is hashed, not printed. Only numeric identities and state flags
+    are requested; arbitrary process arguments/environment are never collected.
+    A synchronous acquisition/reap ambiguity is UNKNOWN, never a PID cleanup.
+    """
+    if not (type(seconds) in (int, float) and math.isfinite(seconds) and 0 < seconds <= PS_SECONDS
+            and type(byte_limit) is int and 0 < byte_limit <= PS_BYTES):
+        error = ValueError('numeric query may not widen its limits')
+        if ctx is not None:
+            ctx.latch(error)
+        raise error
+    if ctx is not None:
+        ctx.require(pending is None or pending is ctx.pending, 'numeric query cancellation scope changed')
+        pending = ctx.pending
+        ctx.check()
+        seconds = min(seconds, ctx.cutoff-time.monotonic())
+        ctx.charge('launches', 1)
+        ctx.require(not any(row['ownership'] not in {'unstarted', 'reaped'} for row in ctx.native + ctx.queries),
+                    'unresolved participating acquisition')
+    def active():
+        if ctx is not None:
+            ctx.check()
+        if pending is not None and pending.signal is not None:
+            raise RuntimeError('numeric query cancelled; no later acquisition or ordinary work')
+
+    active()
+    started = time.monotonic()
+    if ctx is not None:
+        seconds = min(seconds, ctx.cutoff - started)
+    if outer_cutoff is not None:
+        if type(outer_cutoff) not in (int, float) or not math.isfinite(outer_cutoff):
+            error = ValueError('invalid enclosing query cutoff')
+            if ctx is not None:
+                ctx.latch(error)
+            raise error
+        seconds = min(seconds, outer_cutoff - started)
+    if seconds <= 0:
+        error = RuntimeError('numeric query enclosing deadline elapsed before acquisition')
+        if ctx is not None:
+            ctx.latch(error)
+        raise error
+    command = list(PS_COMMAND)
+    if not (command and all(type(arg) is str and '\0' not in arg for arg in command) and Path(command[0]).is_absolute()):
+        raise ValueError('numeric query argv must be explicit')
+    record = {"ownership": "unstarted", "pid": None, "exitCode": None,
+              "stopSignalSent": False, "status": "UNKNOWN", "command": command,
+              "bytes": 0, "scope": GROUP_SCOPE, "started": started, "cutoff": started + seconds,
+              "secondsLimit": seconds, "byteLimit": byte_limit, "rowCount": 0}
+    if ctx is not None:
+        ctx.queries.append(record)
+    stdout, stderr = bytearray(), bytearray()
+    process = None
+    selector = None
+    phase = "query-acquire"
+    try:
+        selector = selectors.DefaultSelector()
+        active()
+        record["ownership"] = "acquiring"
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   start_new_session=True, close_fds=True,
+                                   env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+        record.update(ownership="live", pid=process.pid)
+        active()
+        for stream, target in ((process.stdout, stdout), (process.stderr, stderr)):
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, target)
+        phase = "query-read-reap"
+        cutoff = started + seconds
+        while True:
+            active()
+            phase = "query-poll"
+            code = process.poll()
+            phase = "query-read-reap"
+            if code is not None:
+                record.update(ownership="reaped", exitCode=code)
+            if time.monotonic() >= cutoff:
+                record["reason"] = "numeric query exceeded original deadline"
+                if record["ownership"] != "reaped":
+                    phase = "query-owned-stop"
+                    _stop_reserved(process, record)
+                break
+            if record["ownership"] == "reaped" and not selector.get_map():
+                if code == 0 and not stderr:
+                    record["status"] = "READ"
+                else:
+                    record["reason"] = "numeric query returned failure/diagnostics"
+                break
+            for key, _event in selector.select(min(0.02, max(0, cutoff - time.monotonic()))):
+                active()
+                data = os.read(key.fileobj.fileno(), min(4096, byte_limit-record['bytes']+1))
+                if not data:
+                    selector.unregister(key.fileobj)
+                else:
+                    key.data.extend(data)
+                    record["bytes"] += len(data)
+                    if ctx is not None:
+                        ctx.bytes(len(data), "native")
+                    if record["bytes"] > byte_limit:
+                        record["reason"] = "numeric query output limit exceeded"
+                        if record["ownership"] != "reaped":
+                            phase = "query-owned-stop"
+                            _stop_reserved(process, record)
+                        raise ValueError("bounded query output exceeded")
+                active()
+    except BaseException as error:
+        if ctx is not None:
+            ctx.latch(error)
+        if process is not None and record['ownership'] == 'live' and phase not in {'query-poll', 'query-owned-stop'}:
+            try:
+                _stop_reserved(process, record)
+            except BaseException as disposition:
+                record['dispositionError'] = type(disposition).__name__
+                record['ownership'] = 'unknown'
+        if record["ownership"] not in {"unstarted", "reaped"}:
+            record["ownership"] = "unknown"
+        record.update(errorType=type(error).__name__, errorPhase=phase, status="UNKNOWN")
+    finally:
+        try:
+            if selector is not None:
+                selector.close()
+        except BaseException as error:
+            if ctx is not None:
+                ctx.latch(error)
+            record['status'] = 'UNKNOWN'
+            record.setdefault('errorType', type(error).__name__)
+            record.setdefault('errorPhase', 'query-selector-close')
+            record['selectorCloseError'] = type(error).__name__
+        if process is not None:
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except BaseException as error:
+                        if ctx is not None:
+                            ctx.latch(error)
+                        record['status'] = 'UNKNOWN'
+                        record.setdefault('errorType', type(error).__name__)
+                        record.setdefault('errorPhase', 'query-pipe-close')
+                        record.setdefault('pipeCloseErrors', []).append(type(error).__name__)
+        hashes = []
+        try:
+            for data in (stdout, stderr):
+                hasher = hashlib.sha256()
+                for start in range(0, len(data), 64*1024):
+                    if ctx is not None:
+                        ctx.bytes(min(64*1024, len(data)-start), 'native', hashing=True,
+                                  failure_only=ctx.failure is not None or ctx.pending.signal is not None)
+                    hasher.update(memoryview(data)[start:start+64*1024])
+                hashes.append(hasher.hexdigest())
+            record.update(stdoutSha256=hashes[0], stderrSha256=hashes[1])
+        except BaseException as error:
+            if ctx is not None:
+                ctx.latch(error)
+            record.update(status='UNKNOWN', diagnosticError=type(error).__name__)
+        record['seconds'] = time.monotonic() - started
+    if time.monotonic() >= started + seconds:
+        record.update(status="UNKNOWN", reason="query completion beyond original cutoff")
+    if pending is not None and pending.signal is not None:
+        record.update(status='UNKNOWN', reason='numeric query cancellation pending', cancelSignal=pending.signal)
+    if record["status"] != "READ":
+        if ctx is not None:
+            ctx.latch(RuntimeError(record.get('reason', 'numeric query failed')))
+        return record, None
+    try:
+        rows, seen = [], set()
+        for line in stdout.decode("ascii").splitlines():
+            if time.monotonic() >= started + seconds:
+                raise ValueError("numeric parse beyond original cutoff")
+            active()
+            fields = line.split()
+            if len(fields) != 5 or any(not re.fullmatch(r"[0-9]+", value) for value in fields[:4]):
+                raise ValueError("malformed numeric process row")
+            pid, parent, group, uid = map(int, fields[:4])
+            state = fields[4]
+            if pid <= 0 or group <= 0 or pid in seen or not valid_state(state):
+                raise ValueError("ambiguous numeric process identity/state")
+            seen.add(pid)
+            rows.append({"pid": pid, "parent": parent, "group": group, "uid": uid, "state": state})
+        if not rows:
+            raise ValueError("empty global numeric query cannot prove completeness")
+        if time.monotonic() >= started + seconds:
+            raise ValueError("numeric publication beyond original cutoff")
+        active()
+        record.update(status='PARSED', rowCount=len(rows), seconds=time.monotonic() - started)
+        if ctx is not None:
+            from evidence_schemas import query_record
+            query_record(record, ctx=ctx, command=command)
+        return record, rows
+    except BaseException as error:
+        if ctx is not None:
+            ctx.latch(error)
+        record.update(status="UNKNOWN", errorType=type(error).__name__, errorPhase="query-parse")
+        return record, None
+
+
+STATE = re.compile(r"[RSDTtZXIWUH?][<N]?X?E?V?L?s?l?\+?", re.ASCII)
+
+
+def valid_state(state):
+    return isinstance(state, str) and STATE.fullmatch(state) is not None and not (state[0] == 'Z' and 'E' in state[1:])
+
+
+def state_status(state):
+    if not valid_state(state):
+        raise ValueError('malformed/contradictory process state')
+    if state[0] == 'Z':
+        return 'STOPPED'
+    if state[0] in '?HX' or 'E' in state[1:]:
+        return 'INDETERMINATE'
+    return 'LIVE'
+
+
+def classify_group(rows, *, group, uid):
+    if type(group) is not int or group <= 0 or type(uid) is not int or uid < 0:
+        raise ValueError("invalid original group binding")
+    seen = set()
+    for row in rows:
+        if set(row) != {'pid', 'parent', 'group', 'uid', 'state'} or any(type(row[name]) is not int for name in ('pid', 'parent', 'group', 'uid')):
+            raise ValueError('invalid numeric row schema')
+        if row['pid'] <= 0 or row['group'] <= 0 or row['parent'] < 0 or row['uid'] < 0 or row['pid'] in seen:
+            raise ValueError('invalid numeric identity')
+        state_status(row['state'])
+        seen.add(row['pid'])
+    matches = [row for row in rows if row["group"] == group]
+    if any(row["uid"] != uid or row["pid"] == group for row in matches):
+        return {"status": "UNKNOWN", "reason": "foreign or reused original-leader identity", "matches": matches}
+    states = {state_status(row['state']) for row in matches}
+    if 'INDETERMINATE' in states:
+        return {'status': 'INDETERMINATE', 'reason': 'same-group indeterminate remains', 'matches': matches}
+    if 'LIVE' in states:
+        return {"status": "LIVE", "reason": "same-group live remains", "matches": matches}
+    return {"status": "CLEAR", "matches": matches}
+
+
+@_participating_optional
+def observe_groups(bindings, *, ctx=None):
+    """One read-only query for explicitly recorded, already-reaped groups."""
+    query, rows = numeric_snapshot(ctx=ctx) if ctx is not None else numeric_snapshot()
+    if ctx is not None:
+        ctx.check()
+    result = {"query": query, "groups": [], "scope": GROUP_SCOPE, "signalsAuthorized": False}
+    if rows is None:
+        result["status"] = "UNKNOWN"
+        return result
+    for binding in bindings:
+        value = classify_group(rows, group=binding["pid"], uid=binding["uid"])
+        result["groups"].append({**binding, **value})
+    result["status"] = "CLEAR" if all(row["status"] == "CLEAR" for row in result["groups"]) else "UNKNOWN"
+    if ctx is not None and result['status'] == 'CLEAR':
+        from evidence_schemas import group_observation
+        group_observation(result, bindings=bindings, ctx=ctx, command=query['command'])
+    return result
+
+
+def _group_completion(pid, uid, *, allowance=GROUP_SECONDS, pending=None):
+    if not (type(allowance) in (int, float) and math.isfinite(allowance) and 0 < allowance <= GROUP_SECONDS):
+        raise ValueError('group completion allowance')
+    started = time.monotonic()
+    cutoff = started + allowance
+    result = {"status": "UNKNOWN", "scope": GROUP_SCOPE, "observations": [], "signalsAuthorized": False,
+              "started": started, "cutoff": cutoff, "secondsLimit": allowance}
+    while True:
+        if pending is not None and pending.signal is not None:
+            result['reason'] = 'group observation cancelled; no later query acquisition'
+            return result
+        remaining = cutoff - time.monotonic()
+        if remaining <= 0:
+            result["reason"] = "same-group observation allowance expired"
+            return result
+        query, rows = numeric_snapshot(seconds=min(PS_SECONDS, remaining), outer_cutoff=cutoff, pending=pending)
+        observation = {"query": query}
+        if pending is not None and pending.signal is not None:
+            observation['status'] = 'UNKNOWN'
+            result['observations'].append(observation)
+            result['reason'] = 'group observation cancelled during actual query'
+            return result
+        if time.monotonic() >= cutoff:
+            observation["status"] = "UNKNOWN"
+            result["observations"].append(observation)
+            result["reason"] = "numeric query returned beyond original group cutoff"
+            return result
+        if rows is None:
+            observation["status"] = "UNKNOWN"
+            result["observations"].append(observation)
+            return result
+        observation.update(classify_group(rows, group=pid, uid=uid))
+        result["observations"].append(observation)
+        if observation["status"] in {"CLEAR", "UNKNOWN"}:
+            if time.monotonic() >= cutoff:
+                result["reason"] = "late group publication"
+                return result
+            result["status"] = observation["status"]
+            return result
+        time.sleep(min(0.02, max(0, cutoff - time.monotonic())))
+
+
+def disk_available(fd):
+    """Named observation seam; cooperative admission, not a disk reservation."""
+    value = os.fstatvfs(fd)
+    return value.f_bavail * value.f_frsize
+
+
+def _log_parent(path, check):
+    path = Path(path)
+    if not (path.is_absolute() and str(path) == os.path.normpath(path) and len(path.parts) <= 64):
+        raise ValueError('noncanonical retained log path')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    check()
+    fd = os.open('/', flags)
+    try:
+        check()
+        for name in path.parts[1:-1]:
+            replacement = os.open(name, flags, dir_fd=fd)
+            old, fd = fd, replacement
+            os.close(old)
+            check()
+        result, fd = fd, None
+        return result
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def execute(command, *, cwd, environment, log: Path, pending, seconds=900,
+            group_seconds=GROUP_SECONDS, combined_limit=COMBINED_BYTES,
+            free_floor=FREE_FLOOR, headroom=DISPATCH_HEADROOM):
+    """Collect before retaining: no child ever receives the retained-log fd.
+
+    At most one overflow byte is observed and never stored. Every ordinary
+    read/write/observation uses the original work cutoff. A stopped/reaped or
+    ambiguous identity never authorizes a later numeric-group signal. Failure
+    preserves the available prefix and actual disposition, not a fake EOF.
+    """
+    if not (type(seconds) in (int, float) and math.isfinite(seconds) and 0 < seconds <= 900
+            and type(group_seconds) in (int, float) and math.isfinite(group_seconds)
+            and 0 < group_seconds <= GROUP_SECONDS
+            and type(combined_limit) is int and 0 < combined_limit <= COMBINED_BYTES
+            and type(free_floor) is int and free_floor == FREE_FLOOR
+            and type(headroom) is int and headroom == DISPATCH_HEADROOM):
+        raise ValueError('execute may not widen or disable its finite policies')
+    if not (type(command) is list and command and all(type(arg) is str and '\0' not in arg for arg in command)
+            and type(environment) is dict and all(type(k) is str and type(v) is str and '\0' not in k + v
+                                                 for k, v in environment.items())):
+        raise ValueError('explicit argv/environment required')
+    started = time.monotonic()
+    deadline = started + seconds
+    output = {'stream': 'stdout+stderr', 'byteLimit': combined_limit, 'observedBytes': 0,
+              'retainedBytes': 0, 'sha256': hashlib.sha256(b'').hexdigest(), 'overflow': False,
+              'digestComplete': True, 'eof': False, 'completeWrites': True, 'pipeClosed': False, 'selectorClosed': False,
+              'logClosed': False, 'logSynced': False, 'parentClosed': False,
+              'freeFloorBytes': free_floor, 'dispatchHeadroomBytes': headroom,
+              'diskChecks': 0, 'minimumFreeBytes': None, 'acquisitionFreeBytes': None}
+    record = {'command': command, 'cwd': str(cwd), 'ownership': 'unstarted', 'uid': os.getuid(),
+              'pid': None, 'exitCode': None, 'stopSignalSent': False, 'timedOut': False,
+              'cancelSignal': None, 'workSecondsLimit': seconds, 'groupSecondsLimit': group_seconds,
+              'groupProof': {'status': 'UNKNOWN', 'scope': GROUP_SCOPE}, 'output': output}
+    process = parent = log_fd = selector = stream = None
+    phase, primary, reaped_at, log_info = 'log-parent-open', None, None, None
+    hasher = hashlib.sha256()
+
+    def fail(error, where):
+        nonlocal primary
+        if primary is None:
+            primary = error
+            record.update(errorType=type(error).__name__, errorPhase=where)
+        elif error is not primary:
+            errors = record.setdefault('secondaryErrors', [])
+            if len(errors) < 16:
+                errors.append({'errorType': type(error).__name__, 'errorPhase': where})
+
+    def timely():
+        if time.monotonic() >= deadline:
+            record['timedOut'] = True
+            raise RuntimeError('original execution work deadline exceeded')
+        if pending.signal is not None:
+            raise RuntimeError('verification cancellation pending')
+        if primary is not None:
+            raise RuntimeError('execution already failed')
+
+    def space(*, acquisition=False, writing=0):
+        timely()
+        available = disk_available(log_fd)
+        timely()
+        if type(available) is not int or available < 0:
+            raise RuntimeError('invalid disk observation')
+        output['diskChecks'] += 1
+        output['minimumFreeBytes'] = available if output['minimumFreeBytes'] is None else min(output['minimumFreeBytes'], available)
+        if acquisition:
+            output['acquisitionFreeBytes'] = available
+        if available < free_floor + (headroom if acquisition else writing):
+            raise RuntimeError('observed free-space floor/headroom exhausted')
+
+    def log_identity():
+        current = os.fstat(log_fd)
+        named = os.stat(Path(log).name, dir_fd=parent, follow_symlinks=False)
+        timely()
+        if not (stat.S_ISREG(current.st_mode) and current.st_nlink == 1 and current.st_uid == os.getuid()
+                and stat.S_IMODE(current.st_mode) == 0o600 and current.st_size == output['retainedBytes']
+                and (current.st_dev, current.st_ino) == (log_info.st_dev, log_info.st_ino)
+                and (named.st_dev, named.st_ino, named.st_mode, named.st_size, named.st_nlink) ==
+                    (current.st_dev, current.st_ino, current.st_mode, current.st_size, current.st_nlink)):
+            raise RuntimeError('retained log replaced or changed')
+
+    try:
+        timely()
+        parent = _log_parent(log, timely)
+        timely()
+        phase = 'log-open'
+        log_fd = os.open(Path(log).name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         0o600, dir_fd=parent)
+        log_info = os.fstat(log_fd)
+        timely()
+        log_identity()
+        phase = 'selector-create'
+        selector = selectors.DefaultSelector()
+        timely()
+        phase = 'acquire'
+        space(acquisition=True)
+        record['ownership'] = 'acquiring'
+        process = subprocess.Popen(command, cwd=cwd, env=environment, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   start_new_session=True, close_fds=True)
+        stream = process.stdout
+        if type(process.pid) is not int or process.pid <= 0:
+            raise RuntimeError('unusable acquired child identity')
+        record.update(ownership='live', pid=process.pid)
+        timely()
+        phase = 'pipe-register'
+        os.set_blocking(stream.fileno(), False)
+        timely()
+        selector.register(stream, selectors.EVENT_READ)
+        timely()
+        while True:
+            phase = 'disk-observation'
+            space()
+            phase = 'poll'
+            code = process.poll()
+            if code is not None:
+                if type(code) is not int:
+                    raise RuntimeError('ambiguous child poll result')
+                record.update(ownership='reaped', exitCode=code)
+                if reaped_at is None:
+                    reaped_at = time.monotonic()
+            phase = 'collect'
+            timely()
+            if record['ownership'] == 'reaped' and output['eof']:
+                break
+            if reaped_at is not None and time.monotonic() >= min(deadline, reaped_at + group_seconds):
+                raise RuntimeError('reaped child retains unresolved combined-pipe EOF')
+            delay = min(0.02, max(0, deadline - time.monotonic()))
+            if output['eof']:
+                time.sleep(delay)
+                timely()
+                continue
+            phase = 'select'
+            events = selector.select(delay)
+            timely()
+            for key, _ in events:
+                phase = 'pipe-read'
+                timely()
+                capacity = combined_limit - output['retainedBytes']
+                try:
+                    block = os.read(key.fileobj.fileno(), min(OUTPUT_CHUNK, capacity) if capacity else 1)
+                except BlockingIOError:
+                    timely()
+                    continue
+                if not block:
+                    output['eof'] = True
+                    timely()
+                    phase = 'pipe-unregister'
+                    selector.unregister(key.fileobj)
+                    timely()
+                    continue
+                output['observedBytes'] += len(block)
+                if not capacity:
+                    output['overflow'] = True
+                    raise RuntimeError('combined output exceeds retained byte cap')
+                output['completeWrites'] = False
+                timely()
+                view = memoryview(block)
+                while view:
+                    phase = 'log-write-admission'
+                    space(writing=len(view))
+                    phase = 'log-write'
+                    count = os.write(log_fd, view)
+                    if type(count) is not int or not 0 < count <= len(view):
+                        raise RuntimeError('invalid/short retained log write')
+                    output['retainedBytes'] += count
+                    output['digestComplete'] = False
+                    hasher.update(view[:count])
+                    output['digestComplete'] = True
+                    view = view[count:]
+                    timely()
+                    phase = 'post-write-disk'
+                    space()
+                output['completeWrites'] = True
+        phase = 'log-final-identity'
+        log_identity()
+        space()
+        phase = 'log-fsync'
+        os.fsync(log_fd)
+        timely()
+        output['logSynced'] = True
+    except BaseException as error:
+        fail(error, phase)
+        # A failure in poll/acquisition itself loses identity certainty. Only
+        # the retained, unambiguously live Popen may enter the bounded stop.
+        if phase == 'poll' or record['ownership'] == 'acquiring':
+            record['ownership'] = 'unknown'
+        elif process is not None and record['ownership'] == 'live':
+            try:
+                _stop_reserved(process, record)
+            except BaseException as disposition:
+                record['ownership'] = 'unknown'
+                fail(disposition, 'owned-stop-reap')
+    finally:
+        # Pop each resource before its one close attempt. Later close failures
+        # cannot replace the primary error or justify retrying a numeric fd.
+        for resource, label, close in ((selector, 'selectorClosed', lambda item: item.close()),
+                                      (stream, 'pipeClosed', lambda item: item.close()),
+                                      (log_fd, 'logClosed', os.close),
+                                      (parent, 'parentClosed', os.close)):
+            if resource is not None:
+                try:
+                    close(resource)
+                    output[label] = True
+                except BaseException as error:
+                    fail(error, label)
+                    if label == 'logClosed':
+                        record['logCloseErrorType'] = type(error).__name__
+        try:
+            output['sha256'] = hasher.hexdigest()
+        except BaseException as error:
+            output['sha256'], output['digestComplete'] = None, False
+            fail(error, 'retained-prefix-digest-publication')
+        # The work allowance includes terminal fd disposal; it is never
+        # extended by a successful child or by handler restoration later.
+        if time.monotonic() >= deadline:
+            record['timedOut'] = True
+        record['cancelSignal'] = pending.signal
+    if primary is None and not record['timedOut'] and pending.signal is None:
+        try:
+            record['groupProof'] = _group_completion(process.pid, record['uid'], allowance=group_seconds, pending=pending)
+        except BaseException as error:
+            fail(error, 'post-reap-numeric-observation')
+    record['cancelSignal'] = pending.signal
+    record['seconds'] = time.monotonic() - started
+    record['status'] = 'PASS' if (record['ownership'] == 'reaped' and record['exitCode'] == 0
+        and not record['timedOut'] and record['cancelSignal'] is None and primary is None
+        and record['groupProof']['status'] == 'CLEAR' and output['eof'] and output['completeWrites']
+        and not output['overflow'] and output['digestComplete'] and output['observedBytes'] == output['retainedBytes']
+        and all(output[key] for key in ('pipeClosed', 'selectorClosed', 'logClosed', 'logSynced', 'parentClosed'))
+        and record['seconds'] < seconds + group_seconds) else 'FAIL'
+    return record

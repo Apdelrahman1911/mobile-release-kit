@@ -1,0 +1,611 @@
+# frozen_string_literal: true
+
+# Ignored fixed synthetic routes. There is deliberately no Process.kill call.
+require "json"
+require "digest"
+require "fcntl"
+require "open3"
+
+module InheritanceRelay
+  BASE = "/ORIGINAL_REPOSITORY/.mobile-release/remediation/QA-006/sandbox-inheritance-r3-r4"
+  PYTHON = "/ORIGINAL_REPOSITORY/.mobile-release/remediation/MRK-002/venv/bin/python"
+  ROWS = %w[ruby-spawn ruby-fork-exec ruby-open3 multi-hop no-fence-multi-hop parent-exit parent-kill].freeze
+  CHUNK = 4096
+  STREAM_CAP = 65_536
+  FRAME_CAP = 32_768
+
+  class Rejection < StandardError; end
+  class StrictObject < Hash
+    def []=(key, value)
+      raise Rejection, "duplicate-json-key" if key?(key)
+      super
+    end
+  end
+
+  def self.need(value, code)
+    raise Rejection, code unless value
+  end
+
+  def self.parse(raw)
+    need(raw.bytesize <= STREAM_CAP, "json-size")
+    value = JSON.parse(raw, object_class: StrictObject, max_nesting: 20, allow_nan: false)
+    pending = [value]
+    nodes = 0
+    until pending.empty?
+      item = pending.pop
+      nodes += 1
+      need(nodes <= 8192, "json-node-bound")
+      need(item.finite?, "json-nonfinite") if item.is_a?(Float)
+      pending.concat(item.values) if item.is_a?(Hash)
+      pending.concat(item) if item.is_a?(Array)
+    end
+    value
+  end
+
+  def self.clock
+    Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
+
+  def self.remaining(cutoff)
+    result = cutoff - clock
+    need(result.positive?, "original-deadline")
+    result
+  end
+
+  def self.identity
+    {pid: Process.pid, parent: Process.ppid, group: Process.getpgrp,
+     session: Process.getsid(0), uid: Process.uid}
+  end
+
+  def self.canonical(value)
+    return value.keys.sort.to_h { |key| [key, canonical(value.fetch(key))] } if value.is_a?(Hash)
+    return value.map { |item| canonical(item) } if value.is_a?(Array)
+    value
+  end
+
+  def self.status_record(status)
+    return nil unless status
+    {pid: status.pid, raw: status.to_i, exitCode: status.exitstatus, signaled: status.signaled?,
+     signal: status.termsig, success: status.success?}
+  end
+
+  def self.error(exc)
+    {type: exc.class.name, message: exc.message.to_s.byteslice(0, 2048)}
+  end
+
+  class Stream
+    attr_reader :io, :raw, :pending
+    attr_accessor :eof, :failed
+
+    def initialize(io)
+      @io, @raw, @pending, @eof, @failed = io, +"".b, +"".b, false, nil
+      io.close_on_exec = true
+    end
+
+    def read
+      return if @eof || @failed
+      value = @io.read_nonblock([CHUNK, STREAM_CAP - @raw.bytesize + 1].min, exception: false)
+      return if value == :wait_readable
+      if value.nil?
+        @eof = true # Actual read EOF, never parent-side close.
+        return
+      end
+      allowance = STREAM_CAP - @raw.bytesize
+      @raw << value.byteslice(0, allowance)
+      @pending << value.byteslice(0, allowance)
+      InheritanceRelay.need(value.bytesize <= allowance, "stream-limit")
+    rescue StandardError => e
+      @failed = InheritanceRelay.error(e)
+      raise
+    end
+
+    def record
+      {eof: @eof, failed: @failed, bytes: @raw.bytesize, sha256: Digest::SHA256.hexdigest(@raw)}
+    end
+  end
+
+  class Relay
+    def initialize(context)
+      @flags = []
+      @traps, @errors, @primary = {}, [], nil
+      @all_pipes, @io_custody, @control_writers = [], {}, []
+      @streams, @waiter, @pid, @status, @input = [], nil, nil, nil, nil
+      @attempted, @acquired, @actual_join, @cleaned = false, false, false, false
+      install_handlers
+      @c = InheritanceRelay.parse(context)
+      required = %w[row nonce rootPid uid start work disposition outer scratch markerSha256 policySha256 scripts external channels]
+      InheritanceRelay.need(@c.keys.sort == required.sort && ROWS.include?(@c["row"]), "context-shape")
+      InheritanceRelay.need(/\A[0-9a-f]{32}\z/.match?(@c["nonce"]) && @c["uid"] == Process.uid, "context-identity")
+      InheritanceRelay.need(%w[start work disposition outer].all? { |key| @c[key].is_a?(Numeric) && @c[key].finite? }, "context-time")
+      InheritanceRelay.need(@c["work"] == @c["start"] + 30.0 && @c["disposition"] == @c["work"] + 10.0 &&
+                           @c["disposition"] <= @c["outer"], "context-cutoffs")
+      InheritanceRelay.need(@c["scratch"] == "#{BASE}/execution-r1/#{@c['row']}-inputs", "context-scratch")
+      @control = Stream.new(STDIN)
+      check # Capable interpreter rejects late/control-failed entry before script IO.
+      scripts = %w[contract.py runtime.py reconcile.py canary.py sender.py python_relay.py ruby_relay.rb bash_relay.sh controller.py]
+      InheritanceRelay.need(@c["scripts"].is_a?(Hash) && @c["scripts"].keys.sort == scripts.sort, "script-inventory")
+      @c["scripts"].each do |name, sha|
+        InheritanceRelay.need(scripts.include?(name) && sha.is_a?(String) && /\A[0-9a-f]{64}\z/.match?(sha), "script-name")
+        path = "#{BASE}/#{name}"
+        InheritanceRelay.need(File.lstat(path).file? && Digest::SHA256.file(path).hexdigest == sha, "script-drift")
+      end
+      InheritanceRelay.need(Digest::SHA256.file("#{@c['scratch']}/policy.sb").hexdigest == @c["policySha256"], "policy-drift")
+      @sequence, @written, @channels = 0, {1 => 0, 2 => 0}, []
+      @closed_pass, @loss_ready, @sender_frames = false, false, {}
+      @env = {"HOME" => "#{@c['scratch']}/home", "TMPDIR" => "#{@c['scratch']}/tmp",
+              "PATH" => "/usr/bin:/bin", "LANG" => "C", "LC_ALL" => "C"}
+      @argv = [PYTHON, "-I", "-B", "#{BASE}/sender.py", JSON.generate(@c)]
+      @loss = %w[parent-exit parent-kill].include?(@c["row"])
+      InheritanceRelay.need(@loss == !@c["channels"].nil?, "channels-route")
+      adopt_channels if @loss
+      check
+      @entry = entry_admission("ruby-relay")
+    rescue Exception
+      restore_handlers
+      raise
+    end
+
+    def install_handlers
+      {"INT" => proc { @flags << "INT" }, "TERM" => proc { @flags << "TERM" }, "CHLD" => "DEFAULT"}.each do |sig, handler|
+        previous = Signal.trap(sig, handler)
+        @traps[sig] = {original: previous, installed: handler}
+      end
+    end
+
+    def restore_handlers
+      @traps.keys.each do |sig|
+        entry = @traps.delete(sig) # One owned restoration attempt; do not retry a partial mutation.
+        begin
+          current = Signal.trap(sig, entry.fetch(:original))
+          InheritanceRelay.need(current == entry.fetch(:installed), "handler-custody-changed")
+        rescue Exception => e
+          @errors << InheritanceRelay.error(e)
+        end
+      end
+    end
+
+    def check
+      InheritanceRelay.need(@flags.empty?, "cancelled")
+      InheritanceRelay.remaining(@c["work"])
+      InheritanceRelay.remaining(@c["outer"])
+      @control.read
+      InheritanceRelay.need(!@control.eof && !@control.failed, "root-control-eof")
+      InheritanceRelay.need(@flags.empty?, "cancelled")
+      InheritanceRelay.remaining([@c["work"], @c["outer"]].min)
+    end
+
+    def disposition
+      InheritanceRelay.remaining([@c["disposition"], @c["outer"]].min)
+    end
+
+    def completion
+      InheritanceRelay.need(@flags.empty?, "cancelled")
+      disposition
+    end
+
+    def entry_admission(actor)
+      check
+      actual = InheritanceRelay.identity
+      check
+      value = {version: 1, actor: actor, identity: actual,
+               contextSha256: Digest::SHA256.hexdigest(JSON.generate(InheritanceRelay.canonical(@c)) + "\n"),
+               admittedAt: InheritanceRelay.clock, work: @c["work"], disposition: @c["disposition"], outer: @c["outer"],
+               controlRole: "stdin", controlEof: false, controlFailed: nil, cancelled: false}
+      InheritanceRelay.need(value[:admittedAt] >= @c["start"] && value[:admittedAt] < [@c["work"], @c["outer"]].min,
+                           "entry-original-window")
+      check
+      value
+    end
+
+    def write(io, raw, cutoff)
+      InheritanceRelay.need([@c["work"], @c["disposition"]].include?(cutoff), "write-original-cutoff")
+      cleanup = cutoff == @c["disposition"]
+      InheritanceRelay.need(@written.fetch(io.fileno, 0) + raw.bytesize <= STREAM_CAP, "forward-stream-cap")
+      @written[io.fileno] = @written.fetch(io.fileno, 0) + raw.bytesize
+      until raw.empty?
+        cleanup ? disposition : check
+        ready = IO.select(nil, [io], nil, [0.02, InheritanceRelay.remaining(cutoff)].min)
+        next unless ready
+        cleanup ? disposition : check # A potentially blocked select cannot leave stale admission.
+        count = io.write_nonblock(raw.byteslice(0, CHUNK), exception: false)
+        next if count == :wait_writable
+        InheritanceRelay.need(count.positive?, "zero-write")
+        raw = raw.byteslice(count..)
+      end
+      cleanup ? disposition : check
+    end
+
+    def emit(kind, data, cleanup: false, actor: "ruby-relay", sequence: nil)
+      @sequence += 1 unless sequence
+      frame = {version: 1, row: @c["row"], nonce: @c["nonce"], actor: actor, pid: Process.pid,
+               sequence: sequence || @sequence, work: @c["work"], disposition: @c["disposition"],
+               outer: @c["outer"], kind: kind, data: data}
+      raw = JSON.generate(frame) + "\n"
+      InheritanceRelay.need(raw.bytesize <= FRAME_CAP, "emitted-frame-cap")
+      write(STDOUT, raw, cleanup ? @c["disposition"] : @c["work"])
+    end
+
+    def adopt_channels
+      ch = @c["channels"]
+      InheritanceRelay.need(ch.keys.sort == %w[c r cIdentity rIdentity].sort && ch["c"].is_a?(Integer) &&
+                           ch["r"].is_a?(Integer) && ch["c"] > 2 && ch["r"] > 2 && ch["c"] != ch["r"], "channel-shape")
+      [["c", "r", 0], ["r", "w", 1]].each do |key, mode, direction|
+        io = IO.new(ch[key], mode)
+        @channels << io # Publish actual descriptor before the validation below.
+        own_io(io)
+        actual = [io.stat.dev, io.stat.ino, io.stat.mode & 0o170000, io.fcntl(Fcntl::F_GETFL) & 3]
+        InheritanceRelay.need(io.stat.pipe? && actual == ch["#{key}Identity"] && actual.last == direction, "channel-custody")
+        io.close_on_exec = true
+      end
+    end
+
+    def options
+      value = {unsetenv_others: true, close_others: true, pgroup: true, chdir: @c["scratch"]}
+      @channels.each { |io| value[io.fileno] = io.fileno }
+      value
+    end
+
+    def charge(method)
+      check
+      InheritanceRelay.need(!@attempted, "second-sender-acquisition")
+      @attempted = true
+      emit("attempt", {token: "sender", argv: @argv, acquisitions: 1, execs: 1,
+                       before: InheritanceRelay.clock, method: method, group: true,
+                       session: false, passFds: @channels.map(&:fileno), query: false})
+    end
+
+    def own_io(io)
+      return if @io_custody.key?(io.object_id)
+      @io_custody[io.object_id] = {io: io, identity: nil, attempted: false, closed: false, error: nil}
+      @all_pipes << io
+    end
+
+    def io_identity(io)
+      info = io.stat
+      [info.dev, info.ino, info.mode & 0o170000]
+    end
+
+    def close_io(io)
+      item = @io_custody.fetch(io.object_id)
+      return if item[:closed]
+      InheritanceRelay.need(!item[:attempted], "ambiguous-io-close-not-retryable")
+      item[:attempted] = true
+      InheritanceRelay.need(item[:identity].nil? || io_identity(io) == item[:identity], "io-close-custody")
+      io.close
+      item[:closed] = true
+    rescue Exception => e
+      item[:error] ||= InheritanceRelay.error(e) if item
+      raise
+    end
+
+    def close_many(values)
+      first = nil
+      values.uniq(&:object_id).each do |io|
+        item = @io_custody.fetch(io.object_id)
+        next if item[:closed] || item[:attempted]
+        begin
+          close_io(io)
+        rescue Exception => e
+          first ||= e
+          @errors << InheritanceRelay.error(e)
+        end
+      end
+      first
+    end
+
+    def publish_handles(input, out, err, pid = nil, waiter = nil)
+      @input, @waiter = input, waiter
+      [input, out, err].each { |io| own_io(io) }
+      @control_writers << input unless @control_writers.include?(input)
+      @acquired = true
+      @pid = pid || waiter.pid # Streams/writer/waiter are retained before this accessor.
+      InheritanceRelay.need(@pid.is_a?(Integer) && @pid > 1 && @pid != Process.pid, "actual-returned-child-pid")
+    end
+
+    def published(input, out, err, pid, waiter = nil)
+      publish_handles(input, out, err, pid, waiter)
+      @streams << Stream.new(out)
+      @streams << Stream.new(err)
+      close_error = close_many(@channels)
+      raise close_error if close_error
+      @closed_pass = true
+      emit("acquired", {pid: @pid, identity: InheritanceRelay.identity, method: method,
+                        passFds: @c["channels"], inheritedCopiesClosed: true,
+                        waiterOwnership: waiter ? "Open3-detached-no-signal-authority" : "sole-Process.waitpid2"})
+    end
+
+    def method
+      return "Process.spawn" if @c["row"] == "ruby-spawn"
+      return "fork/exec" if @c["row"] == "ruby-fork-exec"
+      @c["row"] == "parent-exit" ? "Open3-no-block" : "Open3-block"
+    end
+
+    def own_pipe(control_writer: false)
+      check
+      InheritanceRelay.need(@errors.empty? && @io_custody.values.none? { |item| item[:error] }, "prior-io-failure")
+      pair = IO.pipe
+      pair.each { |io| own_io(io) } # Both returned endpoints precede ALL metadata.
+      @control_writers << pair[1] if control_writer
+      pair.each do |io|
+        @io_custody.fetch(io.object_id)[:identity] = io_identity(io)
+        io.close_on_exec = true
+      end
+      pair
+    rescue Exception => e
+      @errors << InheritanceRelay.error(e)
+      raise
+    end
+
+    def fork_exec_frame(input_r, output_w, error_w)
+      begin
+        STDIN.reopen(input_r)
+        STDOUT.reopen(output_w)
+        STDERR.reopen(error_w)
+        @control = Stream.new(STDIN) # This fork owns reopened control, not the parent's buffered Reader.
+        close_error = close_many(@all_pipes)
+        raise close_error if close_error
+        Process.setpgid(0, 0)
+        opts = {unsetenv_others: true, close_others: true, in: STDIN, out: STDOUT, err: STDERR, chdir: @c["scratch"]}
+        check
+        emit("exec", {parent: Process.ppid, target: "sender.py", chargedBy: "ruby-relay:sender"},
+             actor: "ruby-fork", sequence: 1)
+        check # AFTER exec-frame emission, immediately before this capable exec boundary.
+        Process.exec(@env, *@argv, **opts)
+      rescue Exception => e
+        begin
+          emit("exec", {error: InheritanceRelay.error(e)}, cleanup: true, actor: "ruby-fork", sequence: 2)
+        rescue Exception
+          # No fallback child, group signal, process lookup or new deadline.
+        end
+        Process.exit!(71)
+      end
+    end
+
+    def acquire_plain
+      input_r, input_w = own_pipe(control_writer: true)
+      output_r, output_w = own_pipe
+      error_r, error_w = own_pipe
+      opts = options.merge(in: input_r, out: output_w, err: error_w)
+      charge(method)
+      check # Argument/option construction and charged emit are already complete.
+      pid = if @c["row"] == "ruby-fork-exec"
+              fork { fork_exec_frame(input_r, output_w, error_w) }
+            else
+              Process.spawn(@env, *@argv, **opts)
+            end
+      publish_handles(input_w, output_r, error_r, pid) # Before ANY temporary-end close.
+      close_error = close_many([input_r, output_w, error_w])
+      raise close_error if close_error
+      published(input_w, output_r, error_r, @pid)
+      body
+    end
+
+    def forward(stream, io, cutoff)
+      stream.read
+      if io == STDOUT
+        while (at = stream.pending.index("\n"))
+          raw = stream.pending.slice!(0, at + 1)
+          frame = InheritanceRelay.parse(raw)
+          InheritanceRelay.need(frame["row"] == @c["row"] && frame["nonce"] == @c["nonce"] &&
+                               %w[sender ruby-fork].include?(frame["actor"]) && frame["pid"] == @pid,
+                               "child-frame-identity")
+          key = [frame["actor"], frame["pid"]]
+          InheritanceRelay.need(frame["sequence"] == @sender_frames.fetch(key, 0) + 1, "child-frame-sequence")
+          @sender_frames[key] = frame["sequence"]
+          write(io, raw, cutoff)
+        end
+        InheritanceRelay.need(!stream.eof || stream.pending.empty?, "child-partial-frame")
+      elsif !stream.pending.empty?
+        raw = stream.pending.dup
+        stream.pending.clear
+        write(io, raw, cutoff)
+      end
+    end
+
+    def observe_wait(cleanup: false)
+      return if @status
+      cleanup ? disposition : check
+      if @waiter
+        joined = @waiter.join(0)
+        if joined
+          @status = @waiter.value
+          @actual_join = true
+        end
+      else
+        InheritanceRelay.need(@pid.is_a?(Integer) && @pid > 1, "wait-not-actual-child")
+        result = Process.waitpid2(@pid, Process::WNOHANG)
+        @status = result.last if result
+      end
+      InheritanceRelay.need(@status.nil? || @status.pid == @pid, "wrong-wait-status")
+    end
+
+    def controls
+      @control.read
+      InheritanceRelay.need(!@control.eof, "root-control-eof")
+      while (at = @control.pending.index("\n"))
+        command = InheritanceRelay.parse(@control.pending.slice!(0, at + 1))
+        InheritanceRelay.need(command.keys.sort == %w[kind nonce row].sort && command["nonce"] == @c["nonce"] &&
+                             command["row"] == @c["row"], "control-binding")
+        if @c["row"] == "parent-exit"
+          InheritanceRelay.need(command["kind"] == "exit" && @loss_ready && @streams.all?(&:eof), "ordinary-loss-exit-gate")
+          emit("loss-exit", {normalExit: 0, noBlock: true, senderWait: nil, streams: @streams.map(&:record)})
+          # Deliberately NOT waiter.join/value, exit!, or an Open3 block return.
+          close_error = close_many(@control_writers + @channels + @all_pipes)
+          raise close_error if close_error
+          restore_handlers
+          InheritanceRelay.need(@errors.empty?, "ordinary-loss-restoration-failed")
+          completion
+          exit(0)
+        else
+          InheritanceRelay.need(!@loss && command["kind"] == "start", "unexpected-relay-command")
+          raw = JSON.generate(command) + "\n"
+          write(@input, raw, @c["work"])
+        end
+      end
+    end
+
+    def body
+      begin
+        loop do
+          check
+          controls
+          @streams.zip([STDOUT, STDERR]).each { |stream, io| forward(stream, io, @c["work"]) }
+          if @loss
+            if !@loss_ready && @streams.all?(&:eof)
+              @loss_ready = true
+              emit("loss-ready", {pid: @pid, streams: @streams.map(&:record),
+                                  inheritedCopiesClosed: @closed_pass, senderWait: nil, method: method})
+            end
+            # No wait/join can release the sender's parent-loss barrier.
+            # Parent-exit waits for root's explicit exit request; parent-kill
+            # waits to be killed solely by root's still-reserved direct handle.
+          else
+            observe_wait
+            break if @status && @streams.all?(&:eof)
+          end
+          readable = [@control.io] + @streams.reject(&:eof).map(&:io)
+          IO.select(readable, nil, nil, [0.02, InheritanceRelay.remaining(@c["work"])].min)
+        end
+        InheritanceRelay.need(@status&.success?, "child-nonzero-status")
+      rescue SystemExit
+        raise # Ordinary no-block parent-exit is the measured boundary.
+      rescue Exception => e
+        @primary ||= InheritanceRelay.error(e)
+      ensure
+        # Ordinary parent-exit must NOT enter bounded cleanup or join. Its real
+        # no-block streams are EOF, independent C/R copies were already closed.
+        cleanup unless @c["row"] == "parent-exit" && $!.is_a?(SystemExit) && $!.status == 0
+      end
+    end
+
+    def cleanup
+      return if @cleaned
+      @cleaned = true # Every returned object has one recorded close attempt.
+      # Writer publication includes pre-spawn/partial setup. A temporary-close
+      # error cannot skip the actual child's EOF path or any other known writer.
+      close_many(@control_writers + @channels)
+      failed_wait = false
+      begin
+        while @acquired && InheritanceRelay.clock < [@c["disposition"], @c["outer"]].min
+          @streams.zip([STDOUT, STDERR]).each do |stream, io|
+            begin
+              forward(stream, io, @c["disposition"]) unless stream.failed
+            rescue Exception => e
+              @errors << InheritanceRelay.error(e)
+              stream.failed ||= InheritanceRelay.error(e)
+            end
+          end
+          unless failed_wait
+            begin
+              observe_wait(cleanup: true)
+            rescue Exception => e
+              @errors << InheritanceRelay.error(e)
+              failed_wait = true
+            end
+          end
+          break if failed_wait || (@status && @streams.all? { |stream| stream.eof || stream.failed })
+          IO.select(nil, nil, nil, [0.02, [0, [@c["disposition"], @c["outer"]].min - InheritanceRelay.clock].max].min)
+        end
+      rescue Exception => e
+        @errors << InheritanceRelay.error(e)
+      ensure
+        close_many(@all_pipes) # Even failed read/select/wait cannot skip another owned close.
+      end
+      return unless @acquired
+      # The actual detached waiter, never our remembered PID, owns Open3's wait.
+      # Do not enter its implicit ensure/join with unresolved wait/ambiguous IO.
+      unless @status && (!@waiter || @actual_join) && @io_custody.values.all? { |item| item[:closed] }
+        begin
+          emit("unknown-exit", {primary: @primary, cleanupErrors: @errors, childPid: @pid,
+                                status: InheritanceRelay.status_record(@status), actualJoin: @actual_join,
+                                failureOnlyExitBang: true, originalDisposition: @c["disposition"]}, cleanup: true)
+        rescue Exception
+          # Failure-only immediate own exit; no later guessed disposal or success.
+        end
+        Process.exit!(72)
+      end
+    end
+
+    def protected_body(input, out, err, pid, waiter = nil)
+      # Actual acquisition references are published before any metadata, framing,
+      # channel close or Stream construction. In block-form Open3 this complete
+      # scope must finish bounded disposal BEFORE Open3's implicit ensure/join.
+      ordinary_exit = false
+      begin
+        publish_handles(input, out, err, pid, waiter)
+        published(input, out, err, @pid, waiter)
+        body
+      rescue SystemExit => e
+        ordinary_exit = @c["row"] == "parent-exit" && e.status == 0
+        raise
+      rescue Exception => e
+        @primary ||= InheritanceRelay.error(e)
+      ensure
+        unless ordinary_exit
+          begin
+            cleanup
+          rescue Exception => e
+            @errors << InheritanceRelay.error(e)
+            # Failure-only self expiry, never a successful parent-exit row or
+            # fabricated join. Do not fall through to an unbounded Open3 ensure.
+            Process.exit!(73)
+          end
+        end
+      end
+    end
+
+    def run
+      emit("ready", {identity: InheritanceRelay.identity, ruby: RUBY_DESCRIPTION,
+                     open3Path: $LOADED_FEATURES.find { |path| path.end_with?("/open3.rb") },
+                     channels: @c["channels"], method: method, entry: @entry})
+      ensured = false
+      if %w[ruby-spawn ruby-fork-exec].include?(@c["row"])
+        acquire_plain
+      elsif @c["row"] == "parent-exit"
+        opts = options
+        charge(method)
+        check
+        handles = Open3.popen3(@env, *@argv, **opts) # Intentionally real no-block form.
+        protected_body(*handles.first(3), nil, handles[3])
+      else
+        opts = options
+        charge(method)
+        check
+        Open3.popen3(@env, *@argv, **opts) do |input, out, err, waiter|
+          protected_body(input, out, err, nil, waiter)
+        end
+        ensured = true # Set ONLY after real block-form ensure/join returned.
+      end
+      unknown = !@status || @streams.length != 2 || @streams.any? { |stream| !stream.eof || stream.failed } || !@errors.empty?
+      emit("final", {primary: @primary, cleanupErrors: @errors, status: InheritanceRelay.status_record(@status),
+                     childPid: @pid, streams: @streams.map(&:record), method: method, blockEnsureReturned: ensured,
+                     actualDetachedJoin: @actual_join, unknown: unknown, flags: @flags}, cleanup: true)
+      restore_handlers
+      completion
+      @primary.nil? && !unknown && @flags.empty? && @errors.empty? ? 0 : 1
+    rescue SystemExit
+      raise
+    rescue Exception => e
+      @primary ||= InheritanceRelay.error(e)
+      begin
+        cleanup
+      rescue Exception => secondary
+        @errors << InheritanceRelay.error(secondary)
+        raise if secondary.is_a?(SystemExit)
+      end
+      begin
+        emit("final", {primary: @primary, cleanupErrors: @errors, unknown: true,
+                       status: InheritanceRelay.status_record(@status), childPid: @pid}, cleanup: true)
+      rescue Exception
+        # No after-cutoff signal, process query or launch.
+      end
+      restore_handlers
+      1
+    end
+  end
+end
+
+if $PROGRAM_NAME == __FILE__
+  InheritanceRelay.need(ARGV.length == 1, "ruby-relay-argv")
+  exit(InheritanceRelay::Relay.new(ARGV.fetch(0)).run)
+end

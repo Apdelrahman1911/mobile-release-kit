@@ -1,0 +1,30 @@
+"""Remove only byte-proven disposable setuptools source copies after gates exit."""
+import hashlib
+import json
+from pathlib import Path
+
+root = Path(__file__).resolve().parents[3]
+evidence = Path(__file__).resolve().parent
+build = root / 'build'
+if not build.exists():
+    print('No disposable build/ directory exists.')
+    raise SystemExit(0)
+entries = list(build.rglob('*'))
+assert all(not p.is_symlink() and (p.is_dir() or p.is_file()) for p in entries)
+files = [p for p in entries if p.is_file()]
+sources = list((root / 'src/mobile_release').glob('*.py')) + [root / 'src/mobile_release/data/apple-profile-roots.pem']
+expected = {'lib/mobile_release/' + p.relative_to(root / 'src/mobile_release').as_posix() for p in sources}
+assert {p.relative_to(build).as_posix() for p in files} == expected
+record = []
+for path in files:
+    source = root / 'src' / path.relative_to(build / 'lib')
+    assert path.read_bytes() == source.read_bytes(), path
+    record.append({'path':str(path.relative_to(root)), 'source':str(source.relative_to(root)),
+                   'sha256':hashlib.sha256(path.read_bytes()).hexdigest(), 'bytes':path.stat().st_size})
+(evidence / 'final-build-cleanup.json').write_text(json.dumps(record, indent=2) + '\n')
+for path in files:
+    path.unlink()
+for path in sorted((p for p in entries if p.is_dir()), key=lambda p:len(p.parts), reverse=True):
+    path.rmdir()
+build.rmdir()
+print(f'Removed {len(files)} exact generated copies and their empty directories; source, wheel and evidence retained.')

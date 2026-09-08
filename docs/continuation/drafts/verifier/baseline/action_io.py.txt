@@ -1,0 +1,879 @@
+"""Bounded cooperative I/O for one verifier action, never a timeout sandbox.
+
+Every public primitive requires its caller's context. Failure-only diagnostics
+may use remaining budget, but cannot renew work, publish a seal or delete data.
+Descriptor disposition is mandatory even after cancellation/deadline failure.
+"""
+from contextlib import contextmanager
+from pathlib import Path
+import hashlib
+import json
+import math
+import os
+import secrets
+import stat
+import sys
+import time
+from functools import wraps
+
+KIB = 1024
+MIB = 1024 * KIB
+CHUNK = 64 * KIB
+LIMITS = {
+    'seconds': 120, 'commandSeconds': 30, 'stopSeconds': 5,
+    'blob': 8*MIB, 'tree': 2*MIB, 'commit': 256*KIB,
+    'compressed': 8*MIB+64*KIB, 'forestBytes': 64*MIB, 'objects': 4096,
+    'references': 32768, 'gitDepth': 64, 'component': 255, 'gitPath': 1024,
+    'names': 4096, 'index': 16*MIB, 'locator': 4*KIB, 'header': 96,
+    'stdout': 2*MIB, 'stderr': 256*KIB, 'catStdout': 64*MIB+4096*97,
+    'payload': 256*MIB, 'launches': 64, 'activeNative': 1,
+    'activeViews': 1, 'views': 8, 'storedForest': 72*MIB,
+    'newBytes': 192*MIB, 'diagnostics': 8*MIB, 'record': 4*MIB,
+    'jsonDepth': 64, 'jsonTokens': 262144, 'jsonString': 128*KIB,
+    'tool': 512*MIB, 'toolBytes': 4*1024*MIB, 'log': 64*MIB,
+    'other': 512*MIB, 'allBytes': 8*1024*MIB, 'inventory': 32768,
+    'fanout': 4096, 'visited': 131072, 'fsDepth': 64,
+}
+ROLES = {'source': 'blob', 'blob': 'blob', 'tree': 'tree', 'commit': 'commit',
+         'compressed': 'compressed', 'index': 'index', 'locator': 'locator',
+         'record': 'record', 'tool': 'tool', 'log': 'log', 'other': 'other'}
+PAYLOAD_ROLES = {'source', 'blob', 'tree', 'commit', 'compressed', 'index', 'locator'}
+
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
+class ActionFailure(RuntimeError):
+    pass
+
+
+def participating(function):
+    """An I/O/parser failure poisons its caller even if it catches the error."""
+    @wraps(function)
+    def guarded(*args, ctx, **kwargs):
+        try:
+            ctx.check(failure_only=kwargs.get('failure_only', False))
+            return function(*args, ctx=ctx, **kwargs)
+        except BaseException as error:
+            ctx.latch(error)
+            raise
+    return guarded
+
+
+def participating_generator(function):
+    """Cover iteration/entry/exit, not merely creation of a lazy generator."""
+    @wraps(function)
+    def guarded(*args, ctx, **kwargs):
+        try:
+            ctx.check()
+            yield from function(*args, ctx=ctx, **kwargs)
+        except BaseException as error:
+            ctx.latch(error)
+            raise
+    return guarded
+
+
+def participating_method(function):
+    """Equivalent boundary for stateful parsers carrying their original ctx."""
+    @wraps(function)
+    def guarded(self, *args, **kwargs):
+        try:
+            self.ctx.check()
+            return function(self, *args, **kwargs)
+        except BaseException as error:
+            self.ctx.latch(error)
+            raise
+    return guarded
+
+
+class Action:
+    def __init__(self, name, pending, *, seconds=LIMITS['seconds']):
+        require(type(name) is str and name and type(seconds) in (int, float)
+                and math.isfinite(seconds) and 0 < seconds <= LIMITS['seconds'], 'invalid action time budget/name')
+        self.name, self.pending = name, pending
+        self.started = time.monotonic()
+        self.cutoff = self.started + seconds
+        self.nonce = secrets.token_hex(24)
+        self.counts = {}
+        self.failure = None
+        self.native = []
+        self.views = []
+        self.removals = []
+        self.observations = []
+        self.queries = []
+        self.state = 'created'
+        self.first_error = None
+        self.secondary_errors = []
+        self.secondary_error_count = 0
+        self._authorities = {}
+
+    def activate(self):
+        require(self.state == 'created', 'action cannot be re-entered')
+        self.state = 'active'
+
+    def revoke(self):
+        self._authorities.clear()
+        self.state = 'closed'
+
+    def latch(self, error):
+        if self.first_error is None:
+            self.first_error = error
+            self.failure = self.failure or type(error).__name__
+        elif error is not self.first_error:
+            self.secondary_error_count += 1
+            if len(self.secondary_errors) < 16:
+                self.secondary_errors.append(type(error).__name__)
+
+    def terminal_check(self):
+        """After handler restoration, never grants ordinary work authority."""
+        if time.monotonic() >= self.cutoff:
+            self.fail('original action deadline exceeded')
+        if self.pending.signal is not None:
+            self.fail('action cancellation pending')
+        if self.failure is not None:
+            raise ActionFailure('action already failed: ' + self.failure)
+
+    def fail(self, message):
+        self.failure = self.failure or str(message)
+        error = ActionFailure(str(message))
+        self.latch(error)
+        raise error
+
+    def check(self, *, failure_only=False):
+        if failure_only:
+            require(self.state in {'active', 'closed'} and (self.failure is not None or self.pending.signal is not None),
+                    'FAIL-only work requires an actual failure/cancellation')
+        elif self.state != 'active':
+            self.fail('ordinary work requires the currently active action')
+        if time.monotonic() >= self.cutoff:
+            self.fail('original action deadline exceeded')
+        if not failure_only:
+            if self.pending.signal is not None:
+                self.fail('action cancellation pending')
+            if self.failure is not None:
+                raise ActionFailure('action already failed: ' + self.failure)
+
+    def require(self, condition, message):
+        self.check()
+        if not condition:
+            self.fail(message)
+
+    def charge(self, category, count, *, failure_only=False):
+        self.check(failure_only=failure_only)
+        if category not in LIMITS or type(count) is not int or count < 0:
+            self.fail('invalid resource charge')
+        value = self.counts.get(category, 0) + count
+        self.counts[category] = value
+        if value > LIMITS[category]:
+            self.fail('action resource limit exceeded: ' + category)
+
+    def bytes(self, count, role, *, writing=False, hashing=False, failure_only=False):
+        self.charge('allBytes', count, failure_only=failure_only)
+        if role in PAYLOAD_ROLES or role == 'native':
+            self.charge('payload', count, failure_only=failure_only)
+        if role == 'tool' and not hashing and not writing:
+            self.charge('toolBytes', count, failure_only=failure_only)
+        if writing:
+            self.charge('newBytes', count, failure_only=failure_only)
+
+    def summary(self):
+        return {'action': self.name, 'nonce': self.nonce, 'started': self.started,
+                'cutoff': self.cutoff, 'seconds': time.monotonic()-self.started,
+                'counts': dict(self.counts), 'cancelSignal': self.pending.signal,
+                'failure': self.failure, 'native': self.native, 'views': self.views,
+                'removals': list(self.removals), 'queries': self.queries}
+
+
+@contextmanager
+def action(name, *, pending=None, seconds=LIMITS['seconds']):
+    # Import here: process_gate has no dependency on this module.
+    from process_gate import cancellation_flag
+    if pending is not None:
+        ctx = Action(name, pending, seconds=seconds)
+        ctx.activate()
+        try:
+            ctx.check()
+            yield ctx
+            ctx.check()
+        except BaseException as error:
+            ctx.latch(error)
+            raise
+        finally:
+            ctx.revoke()
+        return
+    ctx = None
+    try:
+        with cancellation_flag() as flag:
+            ctx = Action(name, flag, seconds=seconds)
+            ctx.activate()
+            try:
+                ctx.check()
+                yield ctx
+                ctx.check()
+            finally:
+                ctx.revoke()
+        ctx.terminal_check()  # includes a flag delivered immediately before restoration
+    except BaseException as error:
+        if ctx is not None:
+            ctx.latch(error)
+        raise
+    finally:
+        if ctx is not None:
+            ctx.revoke()
+
+
+def _identity(info):
+    return {'device': info.st_dev, 'inode': info.st_ino, 'uid': info.st_uid,
+            'mode': stat.S_IMODE(info.st_mode), 'type': stat.S_IFMT(info.st_mode)}
+
+
+def _unchanged(before, after):
+    return (_identity(before) == _identity(after) and before.st_size == after.st_size
+            and before.st_nlink == after.st_nlink and before.st_mtime_ns == after.st_mtime_ns
+            and before.st_ctime_ns == after.st_ctime_ns)
+
+
+def _parts(path, ctx):
+    ctx.check()
+    path = Path(path)
+    ctx.require(path.is_absolute() and '..' not in path.parts and str(path) == os.path.normpath(path),
+                'noncanonical absolute path')
+    ctx.require(len(path.parts) <= LIMITS['fsDepth'], 'filesystem depth exceeded')
+    return path, path.parts[1:]
+
+
+def close_fd(fd, ctx):
+    # Checking first must NEVER skip the close, even on cancellation/expiry.
+    # A finally-close must not replace the original failing operation. Still
+    # latch close/check failures and actually attempt every acquired descriptor.
+    primary = sys.exc_info()[1]
+    if primary is not None:
+        ctx.latch(primary)
+    error = None
+    try:
+        ctx.check()
+    except BaseException as problem:
+        ctx.latch(problem)
+        error = problem
+    try:
+        os.close(fd)
+    except BaseException as problem:
+        ctx.latch(problem)
+        error = error or problem
+    if primary is not None:
+        return
+    if error is not None:
+        raise error
+    try:
+        ctx.check()
+    except BaseException as problem:
+        ctx.latch(problem)
+        raise
+
+
+@contextmanager
+def _directory(path, *, ctx, missing_ok=False):
+    path, parts = _parts(path, ctx)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    ctx.check()
+    fd = None
+    primary = None
+    try:
+        fd = os.open('/', flags)
+        ctx.check()
+        for part in parts:
+            ctx.check()
+            try:
+                new = os.open(part, flags, dir_fd=fd)
+            except FileNotFoundError:
+                if missing_ok:
+                    yield None
+                    return
+                raise
+            try:
+                ctx.check()
+            except BaseException:
+                close_fd(new, ctx)
+                raise
+            old, fd = fd, new
+            close_fd(old, ctx)
+        yield fd
+    except BaseException as error:
+        primary = error
+        ctx.latch(error)
+        raise
+    finally:
+        if fd is not None:
+            try:
+                close_fd(fd, ctx)
+            except BaseException as error:
+                ctx.latch(error)
+                if primary is None:
+                    raise
+
+
+@contextmanager
+@participating_generator
+def directory(path, *, ctx):
+    with _directory(path, ctx=ctx) as fd:
+        yield fd
+
+
+@participating
+def identity(path, *, ctx):
+    path, parts = _parts(path, ctx)
+    if not parts:
+        ctx.check()
+        value = os.lstat('/')
+    else:
+        with directory(path.parent, ctx=ctx) as fd:
+            ctx.check()
+            value = os.stat(path.name, dir_fd=fd, follow_symlinks=False)
+            ctx.check()
+    return _identity(value)
+
+
+@participating
+def ancestry(path, *, ctx):
+    path, _ = _parts(path, ctx)
+    result = {}
+    for item in reversed((path, *path.parents)):
+        value = identity(item, ctx=ctx)
+        ctx.require(value['type'] == stat.S_IFDIR, 'symlink/non-directory ancestry')
+        result[str(item)] = value
+    return result
+
+
+@participating
+def exists(path, *, ctx):
+    path = Path(path)
+    with _directory(path.parent, ctx=ctx, missing_ok=True) as fd:
+        if fd is None:
+            return False
+        try:
+            ctx.check()
+            os.stat(path.name, dir_fd=fd, follow_symlinks=False)
+            ctx.check()
+        except FileNotFoundError:
+            # ENOENT is resolved before any participating boundary sees it.
+            ctx.check()
+            return False
+    return True
+
+
+@participating
+def names_fd(fd, *, ctx):
+    ctx.check()
+    names = []
+    iterator = os.scandir(fd)
+    primary = None
+    try:
+        for entry in iterator:
+            ctx.check()
+            ctx.charge('visited', 1)
+            ctx.require(len(names) < LIMITS['fanout'], 'directory fanout exceeded')
+            ctx.require(len(os.fsencode(entry.name)) <= LIMITS['component'], 'directory component too long')
+            names.append(entry.name)
+    except BaseException as error:
+        primary = error
+        ctx.latch(error)
+        raise
+    finally:
+        try:
+            iterator.close()
+        except BaseException as error:
+            ctx.latch(error)
+            if primary is None:
+                raise
+    ctx.check()
+    names.sort()
+    ctx.check()
+    return names
+
+
+@participating
+def names(path, *, ctx):
+    with directory(path, ctx=ctx) as fd:
+        return names_fd(fd, ctx=ctx)
+
+
+def _read_fd(fd, *, ctx, role, sink=None, hardlinks=False):
+    ctx.check()
+    before = os.fstat(fd)
+    ctx.require(stat.S_ISREG(before.st_mode) and (hardlinks or before.st_nlink == 1),
+                'nonregular/hardlinked input')
+    cap = LIMITS[ROLES[role]]
+    ctx.require(before.st_size <= cap, 'declared file size exceeds ' + role + ' limit')
+    hasher, size = hashlib.sha256(), 0
+    while True:
+        ctx.check()
+        block = os.read(fd, min(CHUNK, cap-size+1))
+        ctx.check()
+        if not block:
+            break
+        size += len(block)
+        ctx.bytes(len(block), role)
+        ctx.require(size <= cap, 'growing file exceeds role limit')
+        ctx.bytes(len(block), role, hashing=True)
+        hasher.update(block)
+        if sink is not None:
+            sink(block)
+        ctx.check()
+    after = os.fstat(fd)
+    ctx.require(_unchanged(before, after) and size == before.st_size, 'input changed while reading')
+    return {'identity': _identity(after), 'bytes': size, 'sha256': hasher.hexdigest()}
+
+
+@participating
+def read_file(path, *, ctx, role='record', sink=None, retain=False, hardlinks=False):
+    path = Path(path)
+    chunks = [] if retain else None
+    ctx.require(not (retain and sink is not None), 'ambiguous file sink')
+    with directory(path.parent, ctx=ctx) as parent:
+        ctx.check()
+        before = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        ctx.require(stat.S_ISREG(before.st_mode), 'input must be regular, not symlink')
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        try:
+            ctx.require(_unchanged(before, os.fstat(fd)), 'input replaced while opening')
+            value = _read_fd(fd, ctx=ctx, role=role,
+                             sink=chunks.append if retain else sink, hardlinks=hardlinks)
+            ctx.require(_unchanged(before, os.stat(path.name, dir_fd=parent, follow_symlinks=False)),
+                        'input path changed during read')
+        finally:
+            close_fd(fd, ctx)
+    value['path'] = str(path)
+    if retain:
+        ctx.check()
+        value['data'] = b''.join(chunks)
+        ctx.check()
+    return value
+
+
+@participating
+def digest(path, *, ctx, role):
+    return read_file(path, ctx=ctx, role=role, hardlinks=role == 'tool')['sha256']
+
+
+@participating
+def bounded_text(path, *, ctx, role='record', errors='strict'):
+    data = read_file(path, ctx=ctx, role=role, retain=True)['data']
+    ctx.check()
+    value = data.decode('utf-8', errors=errors)
+    ctx.check()
+    return value
+
+
+def _json_preflight(text, ctx):
+    # Lexically bound before json.loads allocates containers. Decoder then
+    # independently rejects grammar/escapes; no permissive constants or keys.
+    stack, quoted, escaped, token, string_len = [], False, False, False, 0
+    nodes = 0
+    for index, char in enumerate(text):
+        if index % CHUNK == 0:
+            ctx.check()
+        if quoted:
+            string_len += len(char.encode('utf-8'))
+            ctx.require(string_len <= LIMITS['jsonString'], 'JSON string bound exceeded')
+            if escaped:
+                escaped = False
+            elif char == '\\':
+                escaped = True
+            elif char == '"':
+                quoted = False
+            continue
+        if char == '"':
+            quoted, string_len, token = True, 0, False
+            nodes += 1
+        elif char in '[{':
+            stack.append(char)
+            ctx.require(len(stack) <= LIMITS['jsonDepth'], 'JSON depth exceeded')
+            nodes += 1
+            token = False
+        elif char in ']}':
+            ctx.require(bool(stack) and stack.pop() == ('[' if char == ']' else '{'), 'JSON nesting invalid')
+            token = False
+        elif char in ',: \r\n\t':
+            token = False
+        elif not token:
+            nodes += 1
+            token = True
+        ctx.require(nodes <= LIMITS['jsonTokens'], 'JSON token bound exceeded')
+    ctx.require(not stack and not quoted, 'JSON truncated')
+    ctx.charge('jsonTokens', nodes)
+
+
+@participating
+def decode_json(data, *, ctx):
+    ctx.require(len(data) <= LIMITS['record'], 'JSON record too large')
+    ctx.check()
+    text = data.decode('utf-8')
+    _json_preflight(text, ctx)
+    def pairs(items):
+        value = {}
+        for key, child in items:
+            ctx.check()
+            ctx.require(key not in value, 'duplicate verification record key')
+            value[key] = child
+        return value
+    def invalid(value):
+        ctx.fail('non-finite JSON constant: ' + value)
+    def finite_float(value):
+        number = float(value)
+        ctx.require(math.isfinite(number), 'non-finite JSON exponent overflow')
+        return number
+    ctx.check()
+    value = json.loads(text, object_pairs_hook=pairs, parse_constant=invalid, parse_float=finite_float)
+    ctx.check()
+    return value
+
+
+@participating
+def read_json(path, *, ctx):
+    return decode_json(read_file(path, ctx=ctx, role='record', retain=True)['data'], ctx=ctx)
+
+
+def _validate_value(value, ctx, *, failure_only=False):
+    stack = [(value, 0)]
+    count = 0
+    while stack:
+        ctx.check(failure_only=failure_only)
+        item, depth = stack.pop()
+        count += 1
+        if depth > LIMITS['jsonDepth'] or count > LIMITS['jsonTokens']:
+            ctx.fail('structured record container bound exceeded')
+        if isinstance(item, str):
+            if len(item) > LIMITS['jsonString'] or len(item.encode('utf-8')) > LIMITS['jsonString']:
+                ctx.fail('structured record string bound exceeded')
+        elif type(item) in (dict, list, tuple):
+            if len(stack)+(2 if isinstance(item, dict) else 1)*len(item) > LIMITS['jsonTokens']-count:
+                ctx.fail('structured record node bound exceeded')
+            if isinstance(item, dict):
+                for key, child in item.items():
+                    if not isinstance(key, str):
+                        ctx.fail('non-string record key')
+                    stack.append((key, depth+1))
+                    stack.append((child, depth+1))
+            else:
+                stack.extend((child, depth+1) for child in item)
+        elif isinstance(item, float) and not math.isfinite(item):
+            ctx.fail('non-finite record number')
+        elif item is not None and not isinstance(item, (bool, int, float)):
+            ctx.fail('unsupported record value')
+    ctx.charge('jsonTokens', count, failure_only=failure_only)
+
+
+@participating
+def encode_json(value, *, ctx, failure_only=False):
+    _validate_value(value, ctx, failure_only=failure_only)
+    encoder = json.JSONEncoder(ensure_ascii=True, allow_nan=False, sort_keys=True,
+                               separators=(',', ':'))
+    chunks, size = [], 0
+    for fragment in encoder.iterencode(value):
+        ctx.check(failure_only=failure_only)
+        for start in range(0, len(fragment), CHUNK):
+            block = fragment[start:start+CHUNK].encode('ascii')
+            size += len(block)
+            if size > LIMITS['record']:
+                ctx.fail('encoded record too large')
+            chunks.append(block)
+    ctx.check(failure_only=failure_only)
+    return b''.join(chunks)
+
+
+@participating
+def canonical_digest(value, *, ctx):
+    data = encode_json(value, ctx=ctx)
+    h = hashlib.sha256()
+    for start in range(0, len(data), CHUNK):
+        ctx.check()
+        block = data[start:start+CHUNK]
+        ctx.bytes(len(block), 'record', hashing=True)
+        h.update(block)
+    ctx.check()
+    return h.hexdigest()
+
+
+def _write_fd(fd, blocks, *, ctx, role, failure_only=False):
+    size = 0
+    for block in blocks:
+        for start in range(0, len(block), CHUNK):
+            piece = memoryview(block)[start:start+CHUNK]
+            while piece:
+                ctx.check(failure_only=failure_only)
+                count = os.write(fd, piece)
+                ctx.check(failure_only=failure_only)
+                require(count > 0, 'short output write')
+                size += count
+                if size > LIMITS[ROLES[role]]:
+                    ctx.fail('output role limit exceeded')
+                ctx.bytes(count, role, writing=True, failure_only=failure_only)
+                piece = piece[count:]
+    ctx.check(failure_only=failure_only)
+    os.fsync(fd)
+    ctx.check(failure_only=failure_only)
+    info = os.fstat(fd)
+    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size == size,
+            'output identity/length invalid')
+    return size
+
+
+@participating
+def write_bytes_new(path, blocks, *, ctx, role='record', failure_only=False):
+    path = Path(path)
+    # Failure-only is confined to an existing parent; no new owner or directory.
+    if failure_only:
+        ctx.check(failure_only=True)
+        # Still no-follow; directory's ordinary checks are deliberately replaced
+        # by a failure-only facade, not a fresh deadline/counter context.
+        guard = FailureOnly(ctx)
+    else:
+        guard = ctx
+    with directory(path.parent, ctx=guard) as parent:
+        guard.check()
+        fd = os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o600, dir_fd=parent)
+        try:
+            guard.check()
+            _write_fd(fd, blocks, ctx=ctx, role=role, failure_only=failure_only)
+        finally:
+            close_fd(fd, guard)
+        guard.check()
+        os.fsync(parent)
+        guard.check()
+
+
+class FailureOnly:
+    """Private facade for bounded diagnostic writes/closes, never exported work."""
+    def __init__(self, ctx):
+        self.ctx = ctx
+    def check(self, **_):
+        self.ctx.check(failure_only=True)
+    def require(self, value, message):
+        self.check()
+        if not value:
+            self.ctx.fail(message)
+    def __getattr__(self, name):
+        return getattr(self.ctx, name)
+    @property
+    def failure(self):
+        return self.ctx.failure
+    @failure.setter
+    def failure(self, value):
+        self.ctx.failure = value
+
+
+@participating
+def write_new(path, value, *, ctx):
+    data = encode_json(value, ctx=ctx) + b'\n'
+    write_bytes_new(path, [data], ctx=ctx)
+    ctx.check()
+
+
+def write_failure(path, *, ctx, phase, error):
+    # Fixed FAIL schema; callers cannot smuggle a seal/success/adoption payload.
+    ctx.latch(error)
+    value = {'status': 'FAIL', 'action': ctx.name, 'nonce': ctx.nonce,
+             'phase': str(phase)[:1024], 'errorType': type(error).__name__,
+             'failure': (ctx.failure or str(error))[:4096],
+             'cancelSignal': ctx.pending.signal, 'removals': ctx.removals,
+             'native': ctx.native, 'seconds': time.monotonic()-ctx.started}
+    data = encode_json(value, ctx=ctx, failure_only=True) + b'\n'
+    ctx.charge('diagnostics', len(data), failure_only=True)
+    write_bytes_new(path, [data], ctx=ctx, failure_only=True)
+
+
+@participating
+def mkdir_new(path, *, ctx):
+    path = Path(path)
+    with directory(path.parent, ctx=ctx) as parent:
+        ctx.check()
+        os.mkdir(path.name, 0o700, dir_fd=parent)
+        ctx.check()
+        os.fsync(parent)
+        ctx.check()
+    return identity(path, ctx=ctx)
+
+
+@participating
+def replace_ledger(temporary, target, value, *, ctx):
+    temporary, target = Path(temporary), Path(target)
+    ctx.require(temporary.parent == target.parent, 'ledger replacement must stay in owned parent')
+    original = None
+    if exists(target, ctx=ctx):
+        original = read_file(target, ctx=ctx, role='record')
+        ctx.require(original['identity']['uid'] == os.getuid(), 'foreign accounting file')
+    write_new(temporary, value, ctx=ctx)
+    temp_bound = read_file(temporary, ctx=ctx, role='record')
+    with directory(target.parent, ctx=ctx) as fd:
+        ctx.check()
+        if original is not None:
+            ctx.require(read_file(target, ctx=ctx, role='record') == original, 'accounting replaced concurrently')
+        else:
+            ctx.require(not exists(target, ctx=ctx), 'unexpected accounting file appeared')
+        ctx.require(read_file(temporary, ctx=ctx, role='record') == temp_bound, 'pending accounting changed')
+        os.replace(temporary.name, target.name, src_dir_fd=fd, dst_dir_fd=fd)
+        ctx.check()
+        os.fsync(fd)
+        ctx.check()
+
+
+@participating
+def assert_owned(owner, *, ctx):
+    from evidence_schemas import owner_record
+    owner_record(owner, ctx=ctx)
+    ctx.require(set(owner) == {'path', 'identity', 'parentAncestry', 'nonce', 'tree', 'purpose'}, 'invalid owner fields')
+    root = Path(owner['path'])
+    ctx.require(ancestry(root.parent, ctx=ctx) == owner['parentAncestry'], 'owned ancestry changed')
+    value = identity(root, ctx=ctx)
+    ctx.require(value == owner['identity'] and value['type'] == stat.S_IFDIR
+                and value['uid'] == os.getuid() and value['mode'] == 0o700,
+                'owned output root replaced/symlinked/foreign')
+    ctx.require(len(owner['nonce']) == 48 and all(c in '0123456789abcdef' for c in owner['nonce']), 'invalid owner nonce')
+    return root
+
+
+@participating
+def create_owned(root, marker, tree, purpose, *, ctx):
+    from evidence_schemas import digest as schema_digest, label
+    schema_digest(tree, ctx=ctx, length=40)
+    label(purpose, ctx=ctx, name='owner purpose')
+    root, marker = Path(root), Path(marker)
+    ctx.require(not exists(marker, ctx=ctx), 'owner marker exists; no adoption')
+    parents = ancestry(root.parent, ctx=ctx)
+    value = mkdir_new(root, ctx=ctx)
+    owner = {'path': str(root), 'identity': value, 'parentAncestry': parents,
+             'nonce': secrets.token_hex(24), 'tree': tree, 'purpose': purpose}
+    assert_owned(owner, ctx=ctx)
+    ctx.require(not names(root, ctx=ctx), 'new root not empty')
+    write_new(marker, owner, ctx=ctx)
+    return owner
+
+
+@participating
+def inventory(owner, *, ctx, symlink_paths=frozenset(), allowed_names=None, file_roles=None, expected_entries=None):
+    root = assert_owned(owner, ctx=ctx)
+    result = {}
+    def walk(fd, prefix, depth):
+        ctx.require(depth <= LIMITS['fsDepth'], 'inventory depth exceeded')
+        for name in names_fd(fd, ctx=ctx):
+            ctx.require(len(result) < LIMITS['inventory'], 'inventory size exceeded')
+            rel = prefix + name
+            if allowed_names is not None:
+                ctx.require(rel in allowed_names, 'unapproved owned-output name; no payload read')
+            ctx.check()
+            before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            ctx.check()
+            ident = _identity(before)
+            if expected_entries is not None:
+                ctx.require(rel in expected_entries and ident == expected_entries[rel]['identity'],
+                            'owned output replaced before payload read')
+            ctx.require(ident['uid'] == os.getuid(), 'foreign output')
+            row = {'identity': ident}
+            if stat.S_ISLNK(before.st_mode):
+                ctx.require(rel in symlink_paths, 'unknown output symlink')
+                ctx.check()
+                row.update(kind='symlink', target=os.readlink(name, dir_fd=fd))
+                ctx.check()
+            elif stat.S_ISDIR(before.st_mode):
+                row['kind'] = 'directory'
+                result[rel] = row
+                ctx.check()
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                try:
+                    ctx.require(_identity(os.fstat(child)) == ident, 'inventory parent replaced')
+                    walk(child, rel+'/', depth+1)
+                finally:
+                    close_fd(child, ctx)
+            elif stat.S_ISREG(before.st_mode):
+                ctx.check()
+                child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                try:
+                    ctx.require(_unchanged(before, os.fstat(child)), 'inventory file replaced')
+                    value = _read_fd(child, ctx=ctx, role=(file_roles or {}).get(rel, 'other'))
+                finally:
+                    close_fd(child, ctx)
+                row.update(kind='file', bytes=value['bytes'], sha256=value['sha256'])
+            else:
+                ctx.fail('unexpected output type')
+            after = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            ctx.require(_unchanged(before, after), 'inventory entry changed')
+            result[rel] = row
+    with directory(root, ctx=ctx) as fd:
+        ctx.require(_identity(os.fstat(fd)) == owner['identity'], 'inventory root descriptor mismatch')
+        walk(fd, '', 0)
+    assert_owned(owner, ctx=ctx)
+    return result
+
+
+@participating
+def delete_inventory(owner, entries, *, ctx, file_roles=None):
+    """Exact preflight, then guarded per-entry removal; failures may be partial."""
+    ctx.check()  # pending cancellation -> zero inventory/removals
+    ctx.require(type(entries) is dict and len(entries) <= LIMITS['inventory'], 'invalid removal inventory')
+    for rel, row in entries.items():
+        ctx.check()
+        parts = Path(rel).parts
+        ctx.require(parts and not Path(rel).is_absolute() and '..' not in parts and '.' not in parts
+                    and '/'.join(parts) == rel and len(parts) <= LIMITS['fsDepth'], 'unsafe inventory path')
+        expected = {'identity', 'kind'} | ({'bytes', 'sha256'} if row['kind'] == 'file' else
+                                         {'target'} if row['kind'] == 'symlink' else set())
+        ctx.require(row['kind'] in {'file', 'directory', 'symlink'} and set(row) == expected, 'invalid inventory schema')
+    links = {name for name, row in entries.items() if row['kind'] == 'symlink'}
+    ctx.require(inventory(owner, ctx=ctx, symlink_paths=links, allowed_names=set(entries),
+                          expected_entries=entries, file_roles=file_roles) == entries, 'pre-deletion complete inventory drift')
+    root = assert_owned(owner, ctx=ctx)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    ordered = sorted(entries.items(), key=lambda item: (len(Path(item[0]).parts), item[0]), reverse=True)
+    ctx.check()
+    with directory(root, ctx=ctx) as root_fd:
+        ctx.require(_identity(os.fstat(root_fd)) == owner['identity'], 'owned root descriptor mismatch')
+        for rel, row in ordered:
+            assert_owned(owner, ctx=ctx)
+            parts = Path(rel).parts
+            ctx.check()
+            fd = os.dup(root_fd)
+            try:
+                ctx.check()
+                for index, component in enumerate(parts[:-1]):
+                    ctx.check()
+                    child = os.open(component, flags, dir_fd=fd)
+                    try:
+                        ctx.require(_identity(os.fstat(child)) == entries['/'.join(parts[:index+1])]['identity'], 'output parent replaced')
+                    except BaseException:
+                        close_fd(child, ctx)
+                        raise
+                    old, fd = fd, child
+                    close_fd(old, ctx)
+                name = parts[-1]
+                before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                ctx.require(_identity(before) == row['identity'], 'output identity changed before deletion')
+                if row['kind'] == 'file':
+                    ctx.check()
+                    child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                    try:
+                        ctx.require(_unchanged(before, os.fstat(child)), 'output file replaced')
+                        value = _read_fd(child, ctx=ctx, role=(file_roles or {}).get(rel, 'other'))
+                        ctx.require(value['bytes'] == row['bytes'] and value['sha256'] == row['sha256'], 'output content changed before deletion')
+                    finally:
+                        close_fd(child, ctx)
+                elif row['kind'] == 'symlink':
+                    ctx.require(os.readlink(name, dir_fd=fd) == row['target'], 'output symlink changed')
+                ctx.require(_unchanged(before, os.stat(name, dir_fd=fd, follow_symlinks=False)), 'entry substituted before deletion')
+                ctx.check()
+                (os.rmdir if row['kind'] == 'directory' else os.unlink)(name, dir_fd=fd)
+                ctx.removals.append({'root': str(root), 'relative': rel, 'kind': row['kind']})
+                ctx.check()
+            finally:
+                close_fd(fd, ctx)
+        assert_owned(owner, ctx=ctx)
+        ctx.require(not names_fd(root_fd, ctx=ctx), 'unknown output appeared')
+        with directory(root.parent, ctx=ctx) as parent:
+            ctx.require(_identity(os.fstat(parent)) == owner['parentAncestry'][str(root.parent)], 'owned parent replaced')
+            ctx.require(identity(root, ctx=ctx) == owner['identity'], 'owned root replaced')
+            ctx.check()
+            os.rmdir(root.name, dir_fd=parent)
+            ctx.removals.append({'root': str(root), 'relative': '.', 'kind': 'directory'})
+            ctx.check()

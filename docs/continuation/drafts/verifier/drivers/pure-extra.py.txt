@@ -1,0 +1,571 @@
+"""Finite additional R4-R2 file-only proofs; no native/product acceptance.
+
+Boundaries use the real unchanged limits and actual file/graph consumers. Sparse
+fixture files retain their logical bytes without allocating large disk payloads.
+All fixtures/results are newly owned here; no historical file is edited/deleted.
+"""
+from pathlib import Path
+import ast
+import base64
+import copy
+import csv
+import hashlib
+import io as text_io
+import json
+import os
+import stat
+import sys
+import shutil
+import tomllib
+import traceback
+from unittest.mock import patch
+
+BASE = Path(__file__).absolute().parent
+assert len(sys.argv) in (1, 3), 'usage: pure-extra.py [PREPARED_HELPERS OUTPUT_PARENT]'
+HELPERS = Path(sys.argv[1]).absolute() if len(sys.argv) == 3 else BASE.parent/'verification-final-r1'
+OUTPUT = Path(sys.argv[2]).absolute() if len(sys.argv) == 3 else BASE
+assert HELPERS.resolve() == HELPERS and OUTPUT.resolve() == OUTPUT and OUTPUT.is_dir()
+ROOT = OUTPUT/('pure-extra-run-'+os.urandom(12).hex())
+ROOT.mkdir(mode=0o700)
+ATTEMPTS = []
+
+
+def audit(event, arguments):
+    if event in {'subprocess.Popen', 'os.system', 'os.posix_spawn', 'os.fork', 'os.forkpty', 'os.exec',
+                 'os.kill', 'os.killpg', 'socket.connect', 'socket.connect_ex', 'socket.bind', 'socket.getaddrinfo'}:
+        ATTEMPTS.append(event)
+        raise RuntimeError('DENIED file-only proof: '+event)
+
+
+sys.addaudithook(audit)
+import stat
+
+def helper_namespace(root, *, ctx=None):
+    """Metadata-only admission before sibling imports; never open cache bytes.
+
+    The initial script/stdlib are runner TCB. This closes incidental helper
+    import candidates, not arbitrary same-user/whole-host interference.
+    """
+    def check(value=True, message='helper namespace'):
+        if ctx is not None:
+            ctx.require(value, message)
+        elif not value:
+            raise RuntimeError(message)
+    root = Path(root)
+    check(root.is_absolute() and str(root) == os.path.normpath(root) and len(root.parts) <= 64,
+          'noncanonical helper import root')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open('/', flags)
+    try:
+        for part in root.parts[1:]:
+            check()
+            new = os.open(part, flags, dir_fd=fd)
+            old, fd = fd, new
+            os.close(old)
+        original = os.fstat(fd)
+        check(original.st_uid == os.getuid() and not original.st_mode & 0o022,
+              'foreign/writable helper namespace')
+        known = set(['action_io.py', 'bindings.py', 'cleanup-build.py', 'cleanup-wheel.py', 'evidence_schemas.py', 'freeze.py', 'frozen_diff.py', 'gate_list.py', 'git_readonly.py', 'native_reader.py', 'observe-owned-workers.py', 'owned_outputs.py', 'prepare-build.py', 'probe-jdk21-signing.py', 'process_gate.py', 'result_protocols.py', 'run-once.sh', 'source_inventory.py', 'verify-all.py', 'verify-frozen-diff.py', 'verify-pins.py', 'verify-process-gate.py', 'verify-result-protocols.py', 'wheel-smoke.sh'])
+        found, count = set(), 0
+        with os.scandir(fd) as iterator:
+            while True:
+                # Reserve the enumeration operation before advancing; even an
+                # EOF probe consumes this finite namespace-admission budget.
+                check(count < 4096, 'helper namespace enumeration cap')
+                count += 1
+                if ctx is not None:
+                    ctx.charge('visited', 1)
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    break
+                name = item.name
+                check(len(os.fsencode(name)) <= 255, 'helper namespace component cap')
+                before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                check(name != '__pycache__' and not name.endswith(('.pyc', '.pyo', '.pyd', '.so', '.pth')),
+                      'unapproved helper bytecode/startup/cache name; payload not read')
+                if name in known:
+                    check(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+                          and before.st_uid == os.getuid() and not before.st_mode & 0o022,
+                          'helper replaced, symlinked, hardlinked or writable')
+                    found.add(name)
+                else:
+                    check(not name.endswith(('.py', '.sh')), 'unknown helper/import source name')
+                    if (stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode)) and name.isidentifier():
+                        check(name == 'wheels' and stat.S_ISDIR(before.st_mode)
+                              and before.st_uid == os.getuid() and stat.S_IMODE(before.st_mode) == 0o700,
+                              'unapproved helper import directory; contents not read')
+                        child = os.open(name, flags, dir_fd=fd)
+                        try:
+                            check(os.fstat(child) == before, 'wheel-data directory replaced')
+                            names = []
+                            with os.scandir(child) as entries:
+                                for entry in entries:
+                                    check(not names, 'unknown wheel-data sibling; payload not read')
+                                    names.append(entry.name)
+                                    check(entry.name == 'mobile_release_kit-0.3.0-py3-none-any.whl',
+                                          'unexpected wheel-data name; payload not read')
+                                    row = os.stat(entry.name, dir_fd=child, follow_symlinks=False)
+                                    check(stat.S_ISREG(row.st_mode) and row.st_nlink == 1 and row.st_uid == os.getuid(),
+                                          'untrusted wheel-data type; payload not read')
+                        finally:
+                            os.close(child)
+                check(os.stat(name, dir_fd=fd, follow_symlinks=False) == before, 'helper namespace entry changed')
+        check(found == known, 'missing reviewed helper')
+        current = os.fstat(fd)
+        check((current.st_dev, current.st_ino, current.st_uid, current.st_mode, current.st_mtime_ns, current.st_ctime_ns) ==
+              (original.st_dev, original.st_ino, original.st_uid, original.st_mode, original.st_mtime_ns, original.st_ctime_ns),
+              'helper namespace changed during admission')
+    finally:
+        os.close(fd)
+
+helper_namespace(HELPERS)
+sys.path.insert(0, str(HELPERS))
+import action_io as io
+import evidence_schemas as schema
+import git_readonly as git
+import source_inventory as discovery
+import process_gate as pg
+import native_reader as native
+import owned_outputs as owned
+
+RESULTS = []
+
+
+def case(name, operation):
+    area = ROOT/name
+    area.mkdir(mode=0o700)
+    try:
+        result = operation(area)
+        row = {'case': name, 'status': 'PASS', 'result': result}
+    except BaseException as error:
+        row = {'case': name, 'status': 'FAIL', 'errorType': type(error).__name__, 'traceback': traceback.format_exc()}
+    RESULTS.append(row)
+    (area/'RESULT.json').write_text(json.dumps(row, sort_keys=True, indent=2)+'\n')
+    print(row['status'], name, flush=True)
+
+
+def denial(operation, *, expected=None):
+    ctx = None
+    try:
+        with io.action('actual-pure-denial', pending=pg.Interrupted()) as ctx:
+            operation(ctx)
+    except (io.ActionFailure, OSError, UnicodeError, ValueError, RuntimeError) as error:
+        assert ctx is not None and ctx.failure is not None and ctx.state == 'closed'
+        if expected is not None:
+            assert expected in str(error), (expected, str(error))
+        return {'errorType': type(error).__name__, 'error': str(error), 'counts': ctx.counts}
+    raise AssertionError('actual consumer accepted invalid fixture')
+
+
+def graph_limit(area, variant):
+    positive, negative = {}, {}
+    if variant in {'component', 'path', 'depth'}:
+        for delta in (0, 1):
+            def run(ctx):
+                graph = git.Forest(ctx)
+                child = graph.add('blob', b'fixture')
+                parts = ['a'*(255+delta)] if variant == 'component' else \
+                        ['a'*255, 'b'*255, 'c'*255, 'd'*252, 'e'*(3+delta)] if variant == 'path' else \
+                        ['d']*(63+delta)+['f']
+                for index, name in enumerate(reversed(parts)):
+                    mode = b'100644' if index == 0 else b'40000'
+                    child = graph.add('tree', mode+b' '+name.encode()+b'\0'+bytes.fromhex(child))
+                files, _ = graph.traverse(child)
+                assert set(files) == {'/'.join(parts)}
+            if delta:
+                negative = denial(run, expected={'component': 'invalid/duplicate tree name', 'path': 'tree path too long', 'depth': 'tree depth/cycle'}[variant])
+            else:
+                with io.action('exact-graph-'+variant, pending=pg.Interrupted()) as ctx:
+                    run(ctx)
+                    positive = dict(ctx.counts)
+    elif variant == 'objects':
+        with io.action('exact-object-count', pending=pg.Interrupted()) as ctx:
+            graph = git.Forest(ctx)
+            for i in range(io.LIMITS['objects']):
+                graph.add('blob', str(i).encode())
+            assert len(graph.objects) == io.LIMITS['objects']
+            positive = dict(ctx.counts)
+        def excess(ctx):
+            graph = git.Forest(ctx)
+            for i in range(io.LIMITS['objects']+1):
+                graph.add('blob', str(i).encode())
+        negative = denial(excess, expected='objects')
+    elif variant == 'references':
+        for delta in (0, 1):
+            def run(ctx):
+                graph = git.Forest(ctx)
+                empty = graph.add('tree', b'')
+                def branch(count):
+                    return graph.add('tree', b''.join(b'40000 '+f'd{i:04d}'.encode()+b'\0'+bytes.fromhex(empty) for i in range(count)))
+                regular, last = branch(1023), branch(1023+delta)
+                root = graph.add('tree', b''.join(b'40000 '+f'r{i:02d}'.encode()+b'\0'+bytes.fromhex(last if i == 31 else regular) for i in range(32)))
+                graph.traverse(root)
+                assert ctx.counts['references'] == io.LIMITS['references']
+            if delta:
+                negative = denial(run, expected='references')
+            else:
+                with io.action('exact-reference-count', pending=pg.Interrupted()) as ctx:
+                    run(ctx)
+                    positive = dict(ctx.counts)
+    elif variant == 'forest-bytes':
+        for delta in (0, 1):
+            def run(ctx):
+                graph = git.Forest(ctx)
+                for i in range(8):
+                    graph.add('blob', bytes([i])+b'x'*(io.LIMITS['blob']-1))
+                assert ctx.counts['forestBytes'] == io.LIMITS['forestBytes']
+                if delta:
+                    graph.add('blob', b'!')
+            if delta:
+                negative = denial(run, expected='forestBytes')
+            else:
+                with io.action('exact-forest-bytes', pending=pg.Interrupted()) as ctx:
+                    run(ctx)
+                    positive = dict(ctx.counts)
+    elif variant == 'names':
+        for delta in (0, 1):
+            def run(ctx):
+                graph = git.Forest(ctx)
+                blob = graph.add('blob', b'x')
+                root = graph.add('tree', b''.join(b'100644 '+f'f{i:04d}'.encode()+b'\0'+bytes.fromhex(blob) for i in range(io.LIMITS['names']+delta)))
+                files, _ = graph.traverse(root)
+                assert len(files) == io.LIMITS['names']
+            if delta:
+                negative = denial(run, expected='source names exceeded')
+            else:
+                with io.action('exact-source-names', pending=pg.Interrupted()) as ctx:
+                    run(ctx)
+                    positive = dict(ctx.counts)
+    else:
+        raise AssertionError(variant)
+    return {'unchangedLimits': io.LIMITS, 'actualExactBoundaryCounts': positive, 'actualOneOverDenial': negative}
+
+
+def narrow_role(area, role):
+    limit = io.LIMITS[io.ROLES[role]]
+    path = area/'sparse-fixture'
+    with path.open('xb') as stream:
+        stream.seek(limit)
+        stream.write(b'x')
+    over = denial(lambda ctx: io.digest(path, ctx=ctx, role=role), expected='file size')
+    with path.open('r+b') as stream:
+        stream.truncate(limit)
+    with io.action('actual-exact-'+role+'-read', pending=pg.Interrupted()) as ctx:
+        bound = io.read_file(path, ctx=ctx, role=role)
+        assert bound['bytes'] == limit
+        counts = dict(ctx.counts)
+    assert not ATTEMPTS
+    return {'role': role, 'actualCap': limit, 'exactFile': bound, 'exactCounts': counts, 'oneOver': over,
+            'retainedSparseFixtureBlocks': path.stat().st_blocks}
+
+
+def cumulative_source(area):
+    path = area/'sparse-source'
+    with path.open('xb') as stream:
+        stream.truncate(io.LIMITS['blob'])
+    try:
+        with io.action('actual-cumulative-source', pending=pg.Interrupted()) as ctx:
+            for _ in range(io.LIMITS['payload']//(2*io.LIMITS['blob'])):
+                io.digest(path, ctx=ctx, role='source')
+            assert ctx.counts['payload'] == io.LIMITS['payload']
+            exact = dict(ctx.counts)
+            io.digest(path, ctx=ctx, role='source')
+    except io.ActionFailure as error:
+        assert 'payload' in str(error) and ctx.counts['payload'] > io.LIMITS['payload']
+    else:
+        raise AssertionError('cumulative source budget reset')
+    return {'actualExactCounts': exact, 'failedCounts': ctx.counts, 'failure': ctx.failure}
+
+
+def growing_role(area, role):
+    limit = io.LIMITS[io.ROLES[role]]
+    path = area/'sparse-growing-fixture'
+    with path.open('xb') as stream:
+        stream.truncate(limit)
+    inode = path.stat().st_ino
+    real_read = os.read
+    hits = []
+    def read(fd, size):
+        block = real_read(fd, size)
+        if not hits and os.fstat(fd).st_ino == inode:
+            with path.open('ab') as stream:
+                stream.write(b'!')
+            hits.append('actual one-byte append after first actual read')
+        return block
+    with patch.object(os, 'read', read):
+        result = denial(lambda ctx: io.digest(path, ctx=ctx, role=role), expected='growing file exceeds role limit')
+    assert len(hits) == 1 and path.stat().st_size == limit+1
+    return {'role': role, 'unchangedCap': limit, 'namedActualFault': hits, 'actualDenial': result,
+            'retainedSparseFixtureBlocks': path.stat().st_blocks}
+
+
+def mirror(area, variant):
+    root = area/'source'
+    root.mkdir()
+    for name, body in {'module.py': b'NEVER COPY ORDINARY PAYLOAD\n', '.gitignore': b'ignored*\n'}.items():
+        (root/name).write_bytes(body)
+    logical = {path.name: {'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'executable': False} for path in root.iterdir()}
+    accepted = {'role': 'execution', 'structuralDirectories': [], 'additionalControls': {}, 'agents': None}
+    with io.action('actual-mirror-setup', pending=pg.Interrupted()) as ctx:
+        universe, bodies = discovery.discover(root, logical, accepted, logical, ctx=ctx)
+        graph = git.Forest(ctx)
+        graph.add('tree', b'', expected=git.EMPTY_TREE)
+        owner, view = git.create_view(area/'view', area/'OWNER.json', graph, tree=git.EMPTY_TREE, ctx=ctx, universe=universe, control_bodies=bodies)
+        entries = view['initialInventory']
+        assert (area/'view/worktree/module.py').read_bytes() == b''
+    if variant == 'positive':
+        with io.action('actual-mirror-validation', pending=pg.Interrupted()) as ctx:
+            discovery.validate_mirror(view['mirror'], universe, entries, view_root=area/'view', ctx=ctx)
+        return {'actualMirror': view['mirror'], 'placeholderEmpty': True, 'ordinaryPayloadNotCopied': True}
+    if variant == 'control':
+        (area/'view/worktree/.gitignore').write_bytes(b'changed control\n')
+    elif variant == 'ordinary-payload':
+        (area/'view/worktree/module.py').write_bytes(b'unapproved executable payload')
+    elif variant == 'name':
+        (area/'view/worktree/new.py').write_bytes(b'foreign')
+    elif variant == 'inode':
+        old = area/'view/worktree/module.py'
+        old.rename(area/'retained-placeholder')
+        old.write_bytes(b'')
+    elif variant == 'mode':
+        (area/'view/worktree/module.py').chmod(0o700)
+    else:
+        raise AssertionError(variant)
+    with io.action('fresh-bound-graph', pending=pg.Interrupted()) as ctx:
+        graph = git.Forest(ctx)
+        graph.add('tree', b'', expected=git.EMPTY_TREE)
+        # The actual consuming action below must own its graph context.
+    def consume(ctx):
+        graph = git.Forest(ctx)
+        graph.add('tree', b'', expected=git.EMPTY_TREE)
+        git.validate_view(owner, graph, ctx=ctx, expected_inventory=entries, universe=universe, mirror=view['mirror'])
+    return {'actualDenial': denial(consume), 'retainedView': str(area/'view')}
+
+
+def metadata(area, variant):
+    # Fixed synthetic project from the reviewed driver, parsed without importing
+    # or executing that driver's module, fixtures or native entry point.
+    tree = ast.parse((HELPERS/'verify-frozen-diff.py').read_text())
+    source = next(node.value for node in tree.body if isinstance(node, ast.Assign)
+                  and any(isinstance(target, ast.Name) and target.id == 'SYNTHETIC_PACKAGE' for target in node.targets))
+    package = ast.literal_eval(source)
+    project = tomllib.loads(package['pyproject.toml'].decode())['project']
+    body = b'Name: mobile-release-kit\nVersion: 0.3.0\nRequires-Python: >=3.11\nLicense-Expression: MIT\nLicense-File: LICENSE\nProvides-Extra: test\nRequires-Dist: packaging==24.2; extra == "test"\nRequires-Dist: typing-extensions==4.16.0; python_version < "3.13" and extra == "test"\n\n'
+    entry = b'[console_scripts]\nmobile-release = mobile_release.cli:main\n'
+    requirements = b'[test]\npackaging==24.2\n\n[test:python_version < "3.13"]\ntyping-extensions==4.16.0\n'
+    if variant == 'positive':
+        with io.action('actual-exact-package-metadata', pending=pg.Interrupted()) as ctx:
+            owned.package_metadata(body, entry, project, ctx=ctx)
+            owned.egg_requirements(requirements, project, ctx=ctx)
+        return {'syntheticExactMetadataOnly': True, 'notActualPackageProducer': True}
+    if variant == 'duplicate-name':
+        body = b'Name: mobile-release-kit\n'+body
+    elif variant == 'duplicate-extra':
+        body = b'Provides-Extra: test\n'+body
+    elif variant == 'runtime-dependency':
+        body = b'Requires-Dist: arbitrary-package==1\n'+body
+    elif variant == 'wrong-marker':
+        body = body.replace(b'python_version < "3.13"', b'python_version >= "3.13"')
+    elif variant == 'wrong-license':
+        body = body.replace(b'License-File: LICENSE', b'License-File: OTHER')
+    elif variant == 'entry-defaults':
+        entry = b'[DEFAULT]\nfoo=bar\n'+entry
+    elif variant == 'entry-extra':
+        entry += b'[other_scripts]\nextra=mobile_release.cli:main\n'
+    elif variant.startswith('egg-'):
+        if variant == 'egg-runtime':
+            requirements = b'arbitrary-package==1\n'+requirements
+        elif variant == 'egg-marker':
+            requirements = requirements.replace(b'python_version < "3.13"', b'python_version >= "3.13"')
+        elif variant == 'egg-duplicate':
+            requirements += b'[test]\npackaging==24.2\n'
+        else:
+            raise AssertionError(variant)
+        return denial(lambda ctx: owned.egg_requirements(requirements, project, ctx=ctx))
+    else:
+        raise AssertionError(variant)
+    return denial(lambda ctx: owned.package_metadata(body, entry, project, ctx=ctx))
+
+
+def record(area, variant):
+    name = 'mobile_release/module.py'
+    self_record = 'mobile_release_kit-0.3.0.dist-info/RECORD'
+    digest = hashlib.sha256(b'fixture').hexdigest()
+    rows = [[name, 'sha256='+base64.urlsafe_b64encode(bytes.fromhex(digest)).rstrip(b'=').decode(), '7'], [self_record, '', '']]
+    members = {name: {'bytes': 7, 'sha256': digest}, self_record: {'bytes': 0, 'sha256': '0'*64}}
+    if variant == 'missing':
+        rows.pop(0)
+    elif variant == 'duplicate':
+        rows.append(rows[0])
+    elif variant == 'wrong-hash':
+        rows[0][1] = 'sha256=wrong'
+    elif variant == 'wrong-size':
+        rows[0][2] = '8'
+    elif variant == 'self-hash':
+        rows[1][1] = 'sha256=not-independent'
+    elif variant == 'unknown':
+        rows[0][0] = 'unknown.py'
+    elif variant != 'positive':
+        raise AssertionError(variant)
+    stream = text_io.StringIO()
+    csv.writer(stream).writerows(rows)
+    if variant == 'positive':
+        with io.action('actual-wheel-record-positive', pending=pg.Interrupted()) as ctx:
+            owned.wheel_record(stream.getvalue().encode(), members, ctx=ctx)
+        # Regression for the shadowed consumer name: it must resolve the actual
+        # global validator, not a same-function local assigned later.
+        tree = ast.parse((HELPERS/'owned_outputs.py').read_text())
+        payload = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'wheel_payload')
+        assert not any(isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id == 'wheel_record' for node in ast.walk(payload))
+        return {'exactRecordValidated': True, 'consumerValidatorNotShadowed': True}
+    return denial(lambda ctx: owned.wheel_record(stream.getvalue().encode(), members, ctx=ctx))
+
+
+def wheel_stream(area, variant):
+    path = area/'actual-read-only-fixture'
+    path.write_bytes(b'actual wheel descriptor fixture\n')
+    original = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    real_dup, real_fdopen, real_close = os.dup, os.fdopen, os.close
+    duplicated, disposed, streams, hits = [], [], [], []
+    pending = pg.Interrupted()
+    primary = OSError('named wheel duplicate-stream fault: '+variant)
+    secondary = OSError('named secondary stream close')
+    def duplicate(fd):
+        if variant == 'dup-failure':
+            hits.append(variant)
+            raise primary
+        actual = real_dup(fd)
+        duplicated.append(actual)
+        if variant == 'cancel-after-dup':
+            hits.append(variant)
+            pending.signal = 15  # pending fixture cancellation; no OS signal
+        return actual
+    class Stream:
+        def __init__(self, value):
+            self.value = value
+        def __getattr__(self, name):
+            return getattr(self.value, name)
+        def close(self):
+            self.value.close()
+            if variant in {'stream-close-failure', 'body-and-close-failure'}:
+                hits.append('actual-stream-close')
+                raise secondary if variant == 'body-and-close-failure' else primary
+    def fdopen(fd, *args, **kwargs):
+        assert kwargs.get('closefd') is False, 'stream must never adopt duplicate ownership'
+        if variant == 'fdopen-failure':
+            hits.append(variant)
+            raise primary
+        result = Stream(real_fdopen(fd, *args, **kwargs))
+        streams.append(result)
+        return result
+    def close(fd):
+        result = real_close(fd)
+        if fd in duplicated:
+            disposed.append(fd)
+            if variant == 'descriptor-close-failure':
+                hits.append('actual-descriptor-close')
+                raise primary
+        return result
+    caught = None
+    try:
+        with patch.object(os, 'dup', duplicate), patch.object(os, 'fdopen', fdopen), patch.object(os, 'close', close):
+            try:
+                with io.action('wheel-stream-'+variant, pending=pending) as ctx:
+                    try:
+                        with owned._wheel_stream(original, ctx=ctx) as stream:
+                            assert stream.read() == b'actual wheel descriptor fixture\n'
+                            if variant == 'body-and-close-failure':
+                                hits.append('body-failure')
+                                raise primary
+                    except (OSError, io.ActionFailure) as error:
+                        caught = {'type': type(error).__name__, 'message': str(error)}
+                        assert variant != 'positive' and ctx.first_error is not None
+                        if variant != 'cancel-after-dup':
+                            assert ctx.first_error is primary, 'cleanup replaced original failure'
+                        try:
+                            io.read_file(path, ctx=ctx, role='source')
+                        except io.ActionFailure:
+                            pass
+                        else:
+                            raise AssertionError('failed duplicate-stream action performed ordinary work')
+            except io.ActionFailure:
+                assert variant != 'positive' and ctx.failure is not None
+        assert duplicated == disposed, 'each acquired duplicate needs exactly one actual close'
+        for fd in duplicated:
+            try:
+                os.fstat(fd)
+            except OSError as error:
+                assert error.errno == 9
+            else:
+                raise AssertionError('duplicate actually remains open')
+        assert os.fstat(original).st_size == len(b'actual wheel descriptor fixture\n'), 'caller descriptor was closed'
+        assert all(stream.closed for stream in streams)
+        assert (caught is None) == (variant == 'positive')
+        if variant == 'body-and-close-failure':
+            assert ctx.secondary_errors and ctx.first_error is primary
+        return {'actualDuplicateCount': len(duplicated), 'actualDisposedCount': len(disposed),
+                'actualStreamsClosed': len(streams), 'callerDescriptorRetained': True,
+                'faultHits': hits, 'caughtError': caught, 'firstError': str(ctx.first_error),
+                'secondaryErrors': ctx.secondary_errors, 'counts': ctx.counts}
+    finally:
+        real_close(original)
+
+
+def disk_guard(area, variant):
+    # Execute only the actual pure guard function and its two literal constants,
+    # not the native driver module or any fixture/Proofs constructor.
+    source = ast.parse((HELPERS/'verify-frozen-diff.py').read_text())
+    nodes = [node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == 'proof_space'
+             or isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id in
+                {'PROOF_FREE_FLOOR', 'PROOF_FIXTURE_HEADROOM'} for target in node.targets)]
+    assert len(nodes) == 3
+    namespace = {'shutil': shutil}
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), 'actual-pure-disk-guard', 'exec'), namespace)
+    floor, headroom = namespace['PROOF_FREE_FLOOR'], namespace['PROOF_FIXTURE_HEADROOM']
+    assert floor == 4*1024**3 and headroom == 512*1024**2
+    if variant == 'actual-observation':
+        result = namespace['proof_space'](area, before=True)
+        assert type(result['freeBytes']) is int
+        return {'actualFilesystemObservation': result, 'nativeExecutionAuthorized': False}
+    before = variant.startswith('before-')
+    exact = floor + (headroom if before else 0)
+    free = exact - (1 if variant.endswith('one-below') else 0)
+    sample = type(shutil.disk_usage(area))(total=free+100, used=100, free=free)
+    with patch.object(shutil, 'disk_usage', return_value=sample):
+        result = namespace['proof_space'](area, before=before)
+    assert result['sufficient'] == variant.endswith('exact')
+    return {'declaredNumericDiskSeam': sample._asdict(), 'actualGuardResult': result}
+
+
+def main():
+    for variant in ('component', 'path', 'depth', 'objects', 'references', 'forest-bytes', 'names'):
+        case('graph-'+variant, lambda area, v=variant: graph_limit(area, v))
+    for role in ('source', 'record', 'locator', 'index', 'compressed', 'tree', 'commit', 'log', 'tool'):
+        case('exact-role-'+role, lambda area, r=role: narrow_role(area, r))
+        case('growing-role-'+role, lambda area, r=role: growing_role(area, r))
+    case('cumulative-source-payload', cumulative_source)
+    for variant in ('positive', 'control', 'ordinary-payload', 'name', 'inode', 'mode'):
+        case('mirror-'+variant, lambda area, v=variant: mirror(area, v))
+    for variant in ('positive', 'duplicate-name', 'duplicate-extra', 'runtime-dependency', 'wrong-marker', 'wrong-license',
+                    'entry-defaults', 'entry-extra', 'egg-runtime', 'egg-marker', 'egg-duplicate'):
+        case('package-'+variant, lambda area, v=variant: metadata(area, v))
+    for variant in ('positive', 'missing', 'duplicate', 'wrong-hash', 'wrong-size', 'self-hash', 'unknown'):
+        case('wheel-record-'+variant, lambda area, v=variant: record(area, v))
+    for variant in ('positive', 'dup-failure', 'fdopen-failure', 'cancel-after-dup', 'stream-close-failure',
+                    'body-and-close-failure', 'descriptor-close-failure'):
+        case('wheel-stream-'+variant, lambda area, v=variant: wheel_stream(area, v))
+    for variant in ('actual-observation', 'before-exact', 'before-one-below', 'after-exact', 'after-one-below'):
+        case('disk-guard-'+variant, lambda area, v=variant: disk_guard(area, v))
+    report = {'scope': 'FILE_ONLY; no native/product/Store/implementation acceptance', 'counts':
+              {status: sum(row['status'] == status for row in RESULTS) for status in ('PASS', 'FAIL')},
+              'cases': RESULTS, 'forbiddenAttempts': ATTEMPTS, 'retainedRoot': str(ROOT),
+              'helpers': {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(HELPERS.glob('*.py'))},
+              'buildOrBackgroundWorkersStarted': 0}
+    (ROOT/'RESULTS.json').write_text(json.dumps(report, indent=2, sort_keys=True)+'\n')
+    print(json.dumps({'counts': report['counts'], 'forbiddenAttempts': ATTEMPTS, 'retainedRoot': str(ROOT)}), flush=True)
+    return int(bool(ATTEMPTS or report['counts']['FAIL']))
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

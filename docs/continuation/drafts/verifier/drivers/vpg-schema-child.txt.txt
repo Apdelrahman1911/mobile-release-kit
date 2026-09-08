@@ -1,0 +1,291 @@
+"""Full-consumer nested-schema negatives from genuine prepared fixture evidence.
+
+Every mutation is local to this new synthetic fixture. Its affected references
+are rebound, so a stale outer checksum cannot be the rejection oracle. Original
+bytes are restored between separate actions; no failed action or output is reused.
+This child occupies the actual RUNNING diff-check slot after actual parent prepare
+completion. It does not synthesize any successful native/parent/worker result.
+"""
+from pathlib import Path
+import copy
+import hashlib
+import json
+import os
+import sys
+
+assert len(sys.argv) == 2
+E = Path(sys.argv[1])
+import stat
+
+def helper_namespace(root, *, ctx=None):
+    """Metadata-only admission before sibling imports; never open cache bytes.
+
+    The initial script/stdlib are runner TCB. This closes incidental helper
+    import candidates, not arbitrary same-user/whole-host interference.
+    """
+    def check(value=True, message='helper namespace'):
+        if ctx is not None:
+            ctx.require(value, message)
+        elif not value:
+            raise RuntimeError(message)
+    root = Path(root)
+    check(root.is_absolute() and str(root) == os.path.normpath(root) and len(root.parts) <= 64,
+          'noncanonical helper import root')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open('/', flags)
+    try:
+        for part in root.parts[1:]:
+            check()
+            new = os.open(part, flags, dir_fd=fd)
+            old, fd = fd, new
+            os.close(old)
+        original = os.fstat(fd)
+        check(original.st_uid == os.getuid() and not original.st_mode & 0o022,
+              'foreign/writable helper namespace')
+        known = set(['action_io.py', 'bindings.py', 'cleanup-build.py', 'cleanup-wheel.py', 'evidence_schemas.py', 'freeze.py', 'frozen_diff.py', 'gate_list.py', 'git_readonly.py', 'native_reader.py', 'observe-owned-workers.py', 'owned_outputs.py', 'prepare-build.py', 'probe-jdk21-signing.py', 'process_gate.py', 'result_protocols.py', 'run-once.sh', 'source_inventory.py', 'verify-all.py', 'verify-frozen-diff.py', 'verify-pins.py', 'verify-process-gate.py', 'verify-result-protocols.py', 'wheel-smoke.sh'])
+        found, count = set(), 0
+        with os.scandir(fd) as iterator:
+            while True:
+                # Reserve the enumeration operation before advancing; even an
+                # EOF probe consumes this finite namespace-admission budget.
+                check(count < 4096, 'helper namespace enumeration cap')
+                count += 1
+                if ctx is not None:
+                    ctx.charge('visited', 1)
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    break
+                name = item.name
+                check(len(os.fsencode(name)) <= 255, 'helper namespace component cap')
+                before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                check(name != '__pycache__' and not name.endswith(('.pyc', '.pyo', '.pyd', '.so', '.pth')),
+                      'unapproved helper bytecode/startup/cache name; payload not read')
+                if name in known:
+                    check(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+                          and before.st_uid == os.getuid() and not before.st_mode & 0o022,
+                          'helper replaced, symlinked, hardlinked or writable')
+                    found.add(name)
+                else:
+                    check(not name.endswith(('.py', '.sh')), 'unknown helper/import source name')
+                    if (stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode)) and name.isidentifier():
+                        check(name == 'wheels' and stat.S_ISDIR(before.st_mode)
+                              and before.st_uid == os.getuid() and stat.S_IMODE(before.st_mode) == 0o700,
+                              'unapproved helper import directory; contents not read')
+                        child = os.open(name, flags, dir_fd=fd)
+                        try:
+                            check(os.fstat(child) == before, 'wheel-data directory replaced')
+                            names = []
+                            with os.scandir(child) as entries:
+                                for entry in entries:
+                                    check(not names, 'unknown wheel-data sibling; payload not read')
+                                    names.append(entry.name)
+                                    check(entry.name == 'mobile_release_kit-0.3.0-py3-none-any.whl',
+                                          'unexpected wheel-data name; payload not read')
+                                    row = os.stat(entry.name, dir_fd=child, follow_symlinks=False)
+                                    check(stat.S_ISREG(row.st_mode) and row.st_nlink == 1 and row.st_uid == os.getuid(),
+                                          'untrusted wheel-data type; payload not read')
+                        finally:
+                            os.close(child)
+                check(os.stat(name, dir_fd=fd, follow_symlinks=False) == before, 'helper namespace entry changed')
+        check(found == known, 'missing reviewed helper')
+        current = os.fstat(fd)
+        check((current.st_dev, current.st_ino, current.st_uid, current.st_mode, current.st_mtime_ns, current.st_ctime_ns) ==
+              (original.st_dev, original.st_ino, original.st_uid, original.st_mode, original.st_mtime_ns, original.st_ctime_ns),
+              'helper namespace changed during admission')
+    finally:
+        os.close(fd)
+
+helper_namespace(E)
+sys.path.insert(0, str(E))
+import action_io as io
+import bindings
+import evidence_schemas as schema
+import frozen_diff as diff
+import owned_outputs as owned
+
+assert json.loads((E/'CONFIG.json').read_text())['scope'].startswith('SYNTHETIC PREPARATION')
+FILES = {'freeze': E/'final-freeze.json', 'seal': E/diff.SEAL, 'prep': E/diff.PREP,
+         'owner': E/diff.OWNER, 'ledger': E/'final-verification.json'}
+initial_freeze = json.loads(FILES['freeze'].read_text())
+FILES['creation'] = Path(initial_freeze['creationObservation']['path'])
+initial_prep = json.loads(FILES['prep'].read_text())
+FILES['sourceObservation'] = Path(initial_prep['sourceObservation']['path'])
+ORIGINALS = {name: path.read_bytes() for name, path in FILES.items()}
+BASE = {name: json.loads(body) for name, body in ORIGINALS.items()}
+RESULTS = []
+
+# Finite typed path matrix, including the eight original preparation and two
+# completed-row defects. Exponent and caught-I/O defects have separate pure rows.
+MUTATIONS = [
+    ('original-root-extra', 'prep', ('native', 'rootHashes', 0, 'unknown'), 1),
+    ('original-action-none', 'prep', ('action', 'action'), None),
+    ('original-nonce-label', 'prep', ('action', 'nonce'), 'not-a-nonce'),
+    ('original-negative-seconds', 'prep', ('action', 'seconds'), -1),
+    ('original-negative-allbytes', 'prep', ('action', 'counts', 'allBytes'), -1),
+    ('original-over-json', 'prep', ('action', 'counts', 'jsonTokens'), 262145),
+    ('original-counter-extra', 'prep', ('action', 'counts', 'unknown'), 1),
+    ('original-boolean-version', 'prep', ('schemaVersion',), True),
+    ('original-group-label-only', 'ledger', ('gates', 3, 'groupProof'), {'status': 'CLEAR'}),
+    ('original-infinite-work', 'ledger', ('gates', 3, 'workSecondsLimit'), float('inf')),
+    ('prep-missing-root-oid', 'prep', ('native', 'rootHashes', 0, 'oid'), '__DELETE__'),
+    ('prep-root-negative', 'prep', ('native', 'rootHashes', 0, 'oid'), -1),
+    ('prep-root-wrong-native', 'prep', ('native', 'rootHashes', 0, 'native', 'exitCode'), False),
+    ('prep-unknown', 'prep', ('unreviewed',), True),
+    ('prep-boolean-start', 'prep', ('action', 'started'), True),
+    ('prep-missing-cutoff', 'prep', ('action', 'cutoff'), '__DELETE__'),
+    ('prep-over-native-launches', 'prep', ('action', 'counts', 'launches'), 65),
+    ('prep-boolean-counter', 'prep', ('action', 'counts', 'views'), True),
+    ('prep-unknown-query', 'prep', ('action', 'queries'), [{'status': 'PARSED'}]),
+    ('prep-old-creation-substitution', 'prep', ('sourceObservation',), '__CREATION__'),
+    ('prep-permanent-owner-nonce', 'prep', ('action', 'nonce'), '__OWNER_NONCE__'),
+    ('seal-unknown', 'seal', ('unreviewed',), True),
+    ('seal-boolean-version', 'seal', ('schemaVersion',), True),
+    ('seal-missing-base', 'seal', ('base',), '__DELETE__'),
+    ('seal-owner-negative-uid', 'seal', ('owner', 'identity', 'uid'), -1),
+    ('seal-owner-boolean-device', 'seal', ('owner', 'identity', 'device'), True),
+    ('seal-owner-nonstr-purpose', 'seal', ('owner', 'purpose'), 3),
+    ('seal-owner-missing-nonce', 'seal', ('owner', 'nonce'), '__DELETE__'),
+    ('seal-owner-unsafe-path', 'seal', ('owner', 'path'), '/tmp/../unowned'),
+    ('seal-anchor-record-overlimit', 'seal', ('rawAnchor', 'bytes'), 262145),
+    ('seal-freeze-reference-boolean', 'seal', ('freezeReference', 'bytes'), True),
+    ('seal-prep-reference-negative', 'seal', ('preparationObservation', 'bytes'), -1),
+    ('completion-boolean-pid', 'ledger', ('gates', 3, 'pid'), True),
+    ('completion-boolean-exit', 'ledger', ('gates', 3, 'exitCode'), False),
+    ('completion-negative-seconds', 'ledger', ('gates', 3, 'seconds'), -1),
+    ('completion-unknown', 'ledger', ('gates', 3, 'unknown'), True),
+    ('completion-missing-binding', 'ledger', ('gates', 3, 'preparedEvidence'), '__DELETE__'),
+    ('completion-group-unknown', 'ledger', ('gates', 3, 'groupProof', 'extra'), True),
+    ('completion-group-boolean-signal', 'ledger', ('gates', 3, 'groupProof', 'signalsAuthorized'), 0),
+    ('completion-group-empty-query', 'ledger', ('gates', 3, 'groupProof', 'observations'), []),
+    ('completion-query-bool-rows', 'ledger', ('gates', 3, 'groupProof', 'observations', 0, 'query', 'rowCount'), True),
+    ('completion-query-wrong-scope', 'ledger', ('gates', 3, 'groupProof', 'observations', 0, 'query', 'scope'), 'foreign'),
+    ('completion-query-missing-bytes', 'ledger', ('gates', 3, 'groupProof', 'observations', 0, 'query', 'bytes'), '__DELETE__'),
+    ('completion-query-unknown', 'ledger', ('gates', 3, 'groupProof', 'observations', 0, 'query', 'unknown'), True),
+    ('creation-failed', 'creation', ('status',), 'FAIL'),
+    ('creation-unknown', 'creation', ('unknown',), True),
+    ('creation-context-type', 'creation', ('contextNonce',), False),
+    ('creation-nonce-mismatch', 'creation', ('action', 'nonce'), '0'*48),
+    ('creation-native-failed', 'creation', ('action', 'native', 0, 'status'), 'FAIL'),
+    ('creation-native-unknown', 'creation', ('action', 'native', 0, 'ownership'), 'unknown'),
+    ('creation-native-bool-pid', 'creation', ('action', 'native', 0, 'pid'), True),
+    ('creation-unclean-view', 'creation', ('action', 'views', 0, 'removed'), False),
+    ('creation-view-partial-cleanup', 'creation', ('action', 'views', 0, 'cleanup'), {'status': 'PASS'}),
+    ('creation-view-bool-cleanup', 'creation', ('action', 'views', 0, 'cleanup', 'removedEntries'), True),
+    ('creation-view-mirror-nonce', 'creation', ('action', 'views', 0, 'mirror', 'nonce'), 'bad'),
+    ('creation-view-mirror-universe', 'creation', ('action', 'views', 0, 'mirror', 'universeSha256'), '0'*64),
+    ('creation-view-unknown-owner', 'creation', ('action', 'views', 0, 'owner', 'unknown'), 1),
+    ('source-observation-old-context', 'sourceObservation', ('contextNonce',), '0'*48),
+    ('source-observation-wrong-scope', 'sourceObservation', ('stableSha256',), '0'*64),
+    ('source-observation-failed', 'sourceObservation', ('status',), 'FAIL'),
+    ('source-observation-missing-field', 'sourceObservation', ('helperSnapshot',), '__DELETE__'),
+    ('stable-missing-universe', 'freeze', ('stable', 'sourceUniverse'), '__DELETE__'),
+    ('stable-unknown-policy', 'freeze', ('stable', 'policy', 'unknown'), True),
+    ('stable-boolean-limit', 'freeze', ('stable', 'policy', 'limits', 'seconds'), True),
+    ('stable-boolean-config-version', 'freeze', ('stable', 'configuration', 'record', 'policyVersion'), True),
+    ('stable-bad-classification', 'freeze', ('stable', 'sourceUniverse', 'classification', 'role'), 'unapproved'),
+    ('stable-control-boolean-type', 'freeze', ('stable', 'sourceUniverse', 'controls', '.gitignore', 'tracked'), 1),
+]
+
+
+def store(name, value):
+    # These are fixture mutations, not a success publication by the real helper.
+    FILES[name].write_text(json.dumps(value, sort_keys=True, indent=2)+'\n')
+
+
+def reference(name):
+    with io.action('fixture-rebind-'+name) as ctx:
+        return io.read_file(FILES[name], ctx=ctx, role='record')
+
+
+def restore():
+    for name, body in ORIGINALS.items():
+        FILES[name].write_bytes(body)
+
+
+def mutate(target, path, value):
+    records = copy.deepcopy(BASE)
+    selected = records[target]
+    for key in path[:-1]:
+        selected = selected[key]
+    if value == '__DELETE__':
+        del selected[path[-1]]
+    else:
+        selected[path[-1]] = copy.deepcopy(BASE['freeze']['creationObservation'] if value == '__CREATION__' else
+                                          BASE['seal']['owner']['nonce'] if value == '__OWNER_NONCE__' else value)
+    if target == 'freeze':
+        with io.action('mutated-synthetic-stable-digest') as ctx:
+            records['freeze']['stableSha256'] = io.canonical_digest(records['freeze']['stable'], ctx=ctx)
+        records['creation']['stableSha256'] = records['freeze']['stableSha256']
+        store('creation', records['creation'])
+        records['freeze']['creationObservation'] = reference('creation')
+    if target == 'creation':
+        store('creation', records['creation'])
+        records['freeze']['creationObservation'] = reference('creation')
+    if target in {'creation', 'freeze'}:
+        store('freeze', records['freeze'])
+        records['seal']['freezeReference'] = reference('freeze')
+        records['prep']['freezeReference'] = reference('freeze')
+        records['ledger']['freezeReference'] = reference('freeze')
+    if target == 'sourceObservation':
+        store('sourceObservation', records['sourceObservation'])
+        records['prep']['sourceObservation'] = reference('sourceObservation')
+    # Apply only the ref changes needed by the chosen mutation. Never overwrite
+    # a deliberately malformed seal preparationReference with a valid value.
+    if target in {'prep', 'creation', 'freeze', 'sourceObservation'}:
+        store('prep', records['prep'])
+        records['seal']['preparationObservation'] = reference('prep')
+    if target != 'ledger':
+        store('seal', records['seal'])
+        row = records['ledger']['gates'][3]
+        row['preparedEvidence'] = {'seal': reference('seal'), 'preparationObservation': reference('prep'),
+                                   'owner': reference('owner'), 'freeze': reference('freeze')}
+    store('ledger', records['ledger'])
+    return records
+
+
+with io.action('genuine-predecessor-positive') as ctx:
+    seal, authority = diff.predecessor(E, 'diff-check', ctx=ctx)
+    assert seal == BASE['seal']
+    authority.recheck(ctx=ctx)
+RESULTS.append({'case': 'genuine-full-predecessor-positive', 'status': 'PASS', 'counts': ctx.counts})
+
+for label, target, path, value in MUTATIONS:
+    restore()
+    records = mutate(target, path, value)
+    result = {'case': label, 'target': target, 'path': list(path), 'status': 'FAIL'}
+    try:
+        with io.action('actual-full-predecessor-'+label) as ctx:
+            diff.predecessor(E, 'diff-check', ctx=ctx)
+    except io.ActionFailure as error:
+        assert ctx.failure is not None and ctx.state == 'closed' and not ctx.native and not ctx.removals
+        result.update(status='PASS', actualRejection={'type': type(error).__name__, 'message': str(error)},
+                      counts=ctx.counts, outerReferencesRebound=True, subsequentNativeOrDeletion=0)
+    else:
+        raise AssertionError('complete predecessor accepted '+label)
+    # Exercise the direct complete row consumer as well for the two originally
+    # reproduced completion defects, including an actual in-memory infinity.
+    if label in {'original-group-label-only', 'original-infinite-work'}:
+        try:
+            with io.action('actual-completed-row-'+label) as row_ctx:
+                owned.completed_row(records['ledger']['gates'][3], E, ctx=row_ctx)
+        except io.ActionFailure as error:
+            result['directCompletedRowRejection'] = str(error)
+        else:
+            raise AssertionError('actual completed_row accepted '+label)
+    RESULTS.append(result)
+    (E/('VPG-SCHEMA-'+label+'.json')).write_text(json.dumps(result, indent=2, sort_keys=True)+'\n')
+
+restore()
+with io.action('genuine-restored-predecessor-positive') as ctx:
+    seal, authority = diff.predecessor(E, 'diff-check', ctx=ctx)
+    assert seal == BASE['seal']
+    authority.recheck(ctx=ctx)
+RESULTS.append({'case': 'genuine-restored-predecessor-positive', 'status': 'PASS', 'counts': ctx.counts})
+assert all(FILES[name].read_bytes() == body for name, body in ORIGINALS.items())
+report = {'scope': 'ACTUAL SYNTHETIC CONSUMERS; not product/Store/implementation acceptance',
+          'cases': RESULTS, 'counts': {'PASS': len(RESULTS), 'FAIL': 0},
+          'preparedParentWasActuallyCompleted': True, 'originalFixtureMetadataRestored': True,
+          'productOrNativeSuitesExecuted': False}
+(E/'VPG-FULL-SCHEMA-RESULTS.json').write_text(json.dumps(report, indent=2, sort_keys=True)+'\n')
+print('PASS finite actual full-consumer schema matrix:', len(RESULTS))

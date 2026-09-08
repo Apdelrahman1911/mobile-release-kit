@@ -1,0 +1,1020 @@
+"""Complete stable authority; fresh owned/native observations are separate receipts.
+
+No native command sees real Git storage. Historical snapshots keep their legacy
+head/branch/files shape; new freezes have an exact, versioned envelope.
+"""
+from pathlib import Path
+import hashlib
+import base64
+import json
+import os
+import re
+import shutil
+import stat
+import sys
+from types import MappingProxyType
+from collections.abc import Mapping
+
+from action_io import (CHUNK, LIMITS, action, ancestry, bounded_text, canonical_digest,
+                       decode_json, digest, encode_json, exists, identity, inventory,
+                       names, read_file, read_json, require, write_failure, write_new, participating)
+import evidence_schemas as schema
+from git_readonly import (CONTROL_DIRS, EMPTY_TREE, FIXED_CONFIG, FIXED_HEAD, Forest, GIT_POLICY, create_view, git_call, git_invocation, leaf_binding,
+                          proposed_tree, raw_source, recheck_raw, remove_view,
+                          source_files, validate_view)
+from native_reader import run
+
+HELPERS = {
+    'bindings.py', 'action_io.py', 'native_reader.py', 'git_readonly.py', 'frozen_diff.py',
+    'source_inventory.py', 'evidence_schemas.py',
+    'owned_outputs.py', 'result_protocols.py', 'gate_list.py', 'process_gate.py',
+    'freeze.py', 'verify-all.py', 'verify-pins.py', 'verify-process-gate.py',
+    'verify-frozen-diff.py', 'verify-result-protocols.py', 'observe-owned-workers.py',
+    'prepare-build.py', 'cleanup-build.py', 'cleanup-wheel.py',
+    'probe-jdk21-signing.py', 'wheel-smoke.sh', 'run-once.sh',
+}
+STATIC_RECORDS = {'CONFIG.json', 'FINAL-TMP-OWNER.json', 'OWNERSHIP-BASELINE.json', 'DISCOVERY-ACCEPTANCE.json', 'WHEEL-BOOTSTRAP.json'}
+CONFIG_FIELDS = {'source', 'owner', 'tmp', 'python', 'rootUserWorktree', 'expectedSourceHead',
+                 'expectedBranch', 'javaHome', 'path', 'sourceUserAgentsSha256', 'scope',
+                 'developerDir', 'expectedVersions', 'gitLeaf', 'gitLayouts', 'policyVersion', 'identityEnvironment'}
+STABLE_FIELDS = {'schemaVersion', 'head', 'branch', 'files', 'proposedTree', 'sourcePhysical',
+                 'sourceGit', 'preservedUser', 'preservedUserPhysical', 'preservedUserGit',
+                 'ownerBindings', 'verificationHelpers', 'tools', 'configuration', 'policy',
+                 'preservedUserSnapshotSha256', 'preservedUserFreezeSha256', 'userInstructions',
+                 'implementationAcceptance', 'verifierAcceptance', 'sourceUniverse', 'preservedUserUniverse', 'discoveryAcceptance', 'wheelBootstrap'}
+IDENTITY_FIELDS = {'device', 'inode', 'uid', 'mode', 'type'}
+FILE_FIELDS = {'path', 'identity', 'bytes', 'sha256'}
+GIT_FIELDS = {'root', 'rootIdentity', 'layout', 'gitdir', 'common', 'head', 'branch', 'controls',
+              'index', 'indexFormat', 'anchor', 'baseRoot', 'looseObjects', 'baseForest',
+              'conditions', 'gitAncestries'}
+TOOL_NAMES = {'python', 'ruby', 'bundle', 'java', 'keytool', 'jarsigner', 'actionlint', 'gh', 'git', 'bash',
+              'xcrun', 'xcodebuild', 'codesign', 'openssl', 'shasum', 'grep', 'mkdir', 'cp', 'cat', 'clang', 'dsymutil',
+              '/usr/bin/git', '/usr/bin/xcrun', '/usr/bin/xcodebuild', '/usr/bin/xcode-select', '/usr/bin/openssl',
+              '/usr/bin/codesign', '/usr/bin/security', '/bin/ps', '/usr/bin/tee', 'gitLeaf'}
+HOSTED_POLICY = {'localXcode': '26.5', 'requiredHostedXcode': '26.3',
+                 'hostedVerification': 'BLOCKED until actual protected macOS CI; local is not hosted proof'}
+
+
+def _fields(value, fields, ctx, label):
+    ctx.require(type(value) is dict and set(value) == set(fields), label+' fields')
+
+
+def _hash(value, length, ctx):
+    ctx.require(type(value) is str and re.fullmatch('[0-9a-f]{'+str(length)+'}', value) is not None, 'invalid digest/OID')
+
+
+def _path(value, ctx):
+    ctx.require(type(value) is str and '\0' not in value and Path(value).is_absolute()
+                and value == os.path.normpath(value) and len(Path(value).parts) <= LIMITS['fsDepth'], 'noncanonical schema path')
+
+
+@participating
+def validate_config(value, *, ctx):
+    _fields(value, CONFIG_FIELDS, ctx, 'configuration')
+    ctx.require(value['policyVersion'] == 'qa006-verifier-r4-r3-v1', 'invalid config policy')
+    for name in ('source', 'owner', 'tmp', 'python', 'rootUserWorktree', 'javaHome', 'developerDir', 'gitLeaf'):
+        _path(value[name], ctx)
+    ctx.require(value['source'] == str(Path(value['owner'])/'source') and value['tmp'] == str(Path(value['owner'])/'final-tmp-r1')
+                and value['python'] == str(Path(value['owner'])/'venv/bin/python'), 'configuration owner destinations')
+    _hash(value['expectedSourceHead'], 40, ctx)
+    _hash(value['sourceUserAgentsSha256'], 64, ctx)
+    ctx.require(type(value['scope']) is str and value['scope'] and type(value['path']) is str and value['path'], 'configuration scope/PATH')
+    identity_environment = value['identityEnvironment']
+    ctx.require(type(identity_environment) is dict and set(identity_environment) <= {'HOME', 'USER', 'LOGNAME'},
+                'finite explicitly bound outer identity environment required')
+    for key, item in identity_environment.items():
+        schema.label(item, ctx=ctx, name='outer identity environment ' + key)
+        if key == 'HOME':
+            _path(item, ctx)
+    for path in value['path'].split(':'):
+        _path(path, ctx)
+    _fields(value['gitLayouts'], {value['source'], value['rootUserWorktree']}, ctx, 'Git layouts')
+    for layout in value['gitLayouts'].values():
+        _fields(layout, {'gitdir', 'common', 'branch'}, ctx, 'Git layout')
+        _path(layout['gitdir'], ctx); _path(layout['common'], ctx)
+        ctx.require(type(layout['branch']) is str and re.fullmatch('[A-Za-z0-9][A-Za-z0-9._/-]*', layout['branch'])
+                    and '..' not in layout['branch'] and not layout['branch'].endswith('/'), 'configured branch schema')
+    ctx.require(value['gitLayouts'][value['source']]['branch'] == value['expectedBranch'], 'source branch schema mismatch')
+    _fields(value['expectedVersions'], {'python', 'pip', 'ruby', 'bundle', 'java', 'actionlint', 'xcode'}, ctx, 'version policy')
+    ctx.require(all(type(v) is str and v and '\0' not in v for v in value['expectedVersions'].values()), 'version policy values')
+    return value
+
+
+@participating
+def config_load(evidence, *, ctx):
+    return validate_config(read_json(Path(evidence)/'CONFIG.json', ctx=ctx), ctx=ctx)
+
+
+def clean_environment(config):
+    # This is the frozen outer tool environment, not the current caller's env.
+    # The source-only wheel child deliberately has another, private environment.
+    result = dict(config['identityEnvironment'])
+    result.update({'PATH': config['path'], 'TMPDIR': config['tmp'], 'JAVA_HOME': config['javaHome'],
+                   'DEVELOPER_DIR': config['developerDir'], 'LANG': 'en_US.UTF-8', 'LC_ALL': 'en_US.UTF-8',
+                   'PYTHONSAFEPATH': '1', 'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONUNBUFFERED': '1',
+                   'MOBILE_RELEASE_REQUIRE_RUBY_CONTRACTS': '1', 'MOBILE_RELEASE_TEST_PYTHON': config['python'],
+                   'BUNDLE_FROZEN': 'true', 'FASTLANE_HIDE_CHANGELOG': 'true',
+                   'FASTLANE_OPT_OUT_USAGE': 'true', 'FASTLANE_SKIP_UPDATE_CHECK': 'true',
+                   'GIT_OPTIONAL_LOCKS': '0'})
+    return result
+
+
+@participating
+def read_command(command, *, cwd, env, ctx, allow_stderr=False):
+    out, err, _record = run(command, cwd=cwd, environment=env, ctx=ctx, allow_stderr=allow_stderr)
+    return out, err
+
+
+@participating
+def helper_snapshot(evidence, *, ctx):
+    evidence = Path(evidence)
+    from process_gate import helper_namespace
+    helper_namespace(evidence, ctx=ctx)
+    actual = {name for name in names(evidence, ctx=ctx) if Path(name).suffix in {'.py', '.sh'}}
+    ctx.require(actual == HELPERS, 'unbound/missing verifier helper')
+    result = {}
+    for name in sorted(HELPERS | STATIC_RECORDS):
+        value = read_file(evidence/name, ctx=ctx, role='source' if name in HELPERS else 'record')
+        result[name] = {'sha256': value['sha256'], 'mode': value['identity']['mode']}
+    return result
+
+
+@participating
+def owner_bindings(config, evidence, *, ctx):
+    evidence = Path(evidence)
+    workspace_path = evidence.parent/'WORKSPACE.json'
+    workspace = read_json(workspace_path, ctx=ctx)
+    ctx.require(set(workspace) == {'purpose', 'baseCommit', 'parent', 'parentDevice', 'parentInode',
+                'worktree', 'tmp', 'rootWorktree', 'nonce', 'sourceDevice', 'sourceInode', 'sourceStatus', 'rootUserAgentsSha256'}, 'workspace schema drift')
+    for key in ('parentDevice', 'parentInode', 'sourceDevice', 'sourceInode'):
+        schema.integer(workspace[key], ctx=ctx, label='workspace ' + key)
+    for key in ('parent', 'worktree', 'tmp', 'rootWorktree'):
+        schema.absolute(workspace[key], ctx=ctx)
+    for key in ('purpose', 'nonce'):
+        schema.label(workspace[key], ctx=ctx)
+    schema.digest(workspace['baseCommit'], ctx=ctx, length=40)
+    schema.digest(workspace['rootUserAgentsSha256'], ctx=ctx)
+    ctx.require(type(workspace['sourceStatus']) is str and workspace['baseCommit'] == config['expectedSourceHead'],
+                'workspace source status/baseline')
+    owner, source, user_root, temporary = map(Path, (config['owner'], config['source'], config['rootUserWorktree'], config['tmp']))
+    ctx.require(source == owner/'source' and temporary == owner/'final-tmp-r1', 'unexpected verifier destinations')
+    ctx.require(str(owner) == workspace['parent'] and str(source) == workspace['worktree'] and str(user_root) == workspace['rootWorktree'], 'workspace path mismatch')
+    for path, dev, inode in ((owner, workspace['parentDevice'], workspace['parentInode']), (source, workspace['sourceDevice'], workspace['sourceInode'])):
+        actual = identity(path, ctx=ctx)
+        ctx.require(actual['type'] == stat.S_IFDIR and actual['device'] == dev and actual['inode'] == inode and actual['uid'] == os.getuid(), 'workspace owner replaced')
+    tmp_owner = read_json(evidence/'FINAL-TMP-OWNER.json', ctx=ctx)
+    ctx.require(set(tmp_owner) == {'path', 'device', 'inode', 'purpose', 'createdUtc'}, 'tmp owner schema')
+    for key in ('device', 'inode'):
+        schema.integer(tmp_owner[key], ctx=ctx, label='temporary owner ' + key)
+    for key in ('purpose', 'createdUtc'):
+        schema.label(tmp_owner[key], ctx=ctx)
+    schema.absolute(tmp_owner['path'], ctx=ctx)
+    actual = identity(temporary, ctx=ctx)
+    ctx.require(tmp_owner['path'] == str(temporary) and actual['type'] == stat.S_IFDIR and actual['device'] == tmp_owner['device'] and actual['inode'] == tmp_owner['inode'] and actual['uid'] == os.getuid(), 'exclusive final tmp replaced')
+    live = {str(path): ancestry(path, ctx=ctx) for path in (owner, source, user_root, temporary, evidence)}
+    baseline = read_json(evidence/'OWNERSHIP-BASELINE.json', ctx=ctx)
+    ctx.require(set(baseline) == {'purpose', 'ancestries'} and live == baseline['ancestries'], 'owned directory/ancestry drift')
+    schema.label(baseline['purpose'], ctx=ctx)
+    ctx.require(workspace['rootUserAgentsSha256'] == config['sourceUserAgentsSha256'] == digest(user_root/'AGENTS.md', ctx=ctx, role='source'), 'user instructions changed')
+    return {'ancestries': live, 'workspace': read_file(workspace_path, ctx=ctx, role='record'),
+            'tmpOwner': read_file(evidence/'FINAL-TMP-OWNER.json', ctx=ctx, role='record')}
+
+
+@participating
+def executable(path, *, ctx):
+    path = Path(path)
+    ctx.require(path.is_absolute() and os.access(path, os.X_OK), 'required executable unavailable')
+    selected = identity(path, ctx=ctx)
+    ctx.check()
+    resolved = path.resolve(strict=True)
+    ctx.check()
+    bound = read_file(resolved, ctx=ctx, role='tool', hardlinks=True)
+    ctx.require(bound['identity']['mode'] & 0o111, 'resolved tool not executable')
+    return {'path': str(path), 'pathIdentity': selected, 'resolved': str(resolved), 'file': bound}
+
+
+@participating
+def _temporary_view(evidence, config, graph, tree, *, ctx, index=None, anchor=None, universe=None, control_bodies=None):
+    nonce = os.urandom(24).hex()
+    return create_view(Path(config['tmp'])/('metadata-'+nonce),
+                       Path(evidence)/('native-view-owner-'+nonce+'.json'), graph,
+                       tree=tree, ctx=ctx, index=index, anchor=anchor, universe=universe, control_bodies=control_bodies)
+
+
+@participating
+def snapshot(root, *, config, evidence, ctx, discovery, logical, output_authorities=None):
+    from source_inventory import discover
+    layout = config['gitLayouts'][str(root)]
+    raw = raw_source(root, branch=layout['branch'], expected_gitdir=layout['gitdir'],
+                     expected_common=layout['common'], ctx=ctx)
+    graph = raw['graph']
+    universe, bodies = discover(root, raw['baseFiles'], discovery, logical['files'], ctx=ctx,
+                                output_authorities=output_authorities)
+    owner, view = _temporary_view(evidence, config, graph, raw['stable']['baseRoot'], ctx=ctx,
+                                  index=raw['indexBytes'], anchor=raw['anchorBytes'], universe=universe, control_bodies=bodies)
+    files, physical = source_files(root, raw, owner, config['gitLeaf'], ctx=ctx, accepted=logical['files'], universe=universe)
+    entries = validate_view(owner, graph, ctx=ctx, with_index=raw['indexBytes'] is not None,
+                            expected_inventory=view['initialInventory'], universe=universe, mirror=view['mirror'])
+    ctx.require(discover(root, raw['baseFiles'], discovery, logical['files'], ctx=ctx,
+                         output_authorities=output_authorities)[0] == universe, 'source structure/control changed after native selection')
+    recheck_raw(raw, ctx=ctx)
+    remove_view(owner, view, entries, ctx=ctx)
+    return {'head': raw['stable']['head'], 'branch': raw['stable']['branch'], 'files': files}, physical, raw, universe
+
+
+@participating
+def git_tree(root, files, *, ctx):
+    return proposed_tree(root, files, ctx=ctx)[0]
+
+
+@participating
+def tool_bindings(config, evidence, *, ctx):
+    env, root = clean_environment(config), Path(config['source'])
+    result = {'executables': {}, 'versions': {}, 'environment': env}
+    tool_names = ('python', 'ruby', 'bundle', 'java', 'keytool', 'jarsigner', 'actionlint', 'gh', 'git', 'bash',
+                  'xcrun', 'xcodebuild', 'codesign', 'openssl', 'shasum', 'grep', 'mkdir', 'cp', 'cat')
+    for name in tool_names:
+        path = config['python'] if name == 'python' else shutil.which(name, path=config['path'])
+        ctx.require(path is not None, 'required tool unavailable: '+name)
+        result['executables'][name] = executable(path, ctx=ctx)
+    for path in ('/usr/bin/git', '/usr/bin/xcrun', '/usr/bin/xcodebuild', '/usr/bin/xcode-select',
+                 '/usr/bin/openssl', '/usr/bin/codesign', '/usr/bin/security', '/bin/ps', '/usr/bin/tee'):
+        result['executables'][path] = executable(path, ctx=ctx)
+    result['executables']['gitLeaf'] = executable(config['gitLeaf'], ctx=ctx)
+    ctx.require(result['executables']['gitLeaf']['path'] == result['executables']['gitLeaf']['resolved'], 'selected Git must be leaf')
+    ctx.require(result['executables']['python']['path'] == str(Path(config['owner'])/'venv/bin/python'), 'unexpected interpreter selection')
+    calls = {
+        'python': [config['python'], '-I', '-B', '-c', 'import sys,json;from importlib.metadata import version;print(json.dumps({"version":sys.version.split()[0],"prefix":sys.prefix,"basePrefix":sys.base_prefix,"executable":sys.executable,"pip":version("pip")},sort_keys=True))'],
+        'ruby': ['ruby', '--version'], 'bundle': ['bundle', '--version'], 'java': ['java', '-version'],
+        'actionlint': ['actionlint', '--version'], 'gh': ['gh', '--version'],
+        'bash': ['bash', '--version'], 'xcode': ['/usr/bin/xcodebuild', '-version'],
+        'xcodeSelect': ['/usr/bin/xcode-select', '-p'], 'openssl': ['/usr/bin/openssl', 'version'],
+    }
+    for name, command in calls.items():
+        if not Path(command[0]).is_absolute():
+            command[0] = result['executables'][command[0]]['path']
+        out, err = read_command(command, cwd=root, env=env, ctx=ctx, allow_stderr=name == 'java')
+        text = (out+err).decode('utf-8').strip()
+        ctx.require(text and '\0' not in text, 'empty/malformed tool version')
+        result['versions'][name] = text
+    python = decode_json(result['versions']['python'].encode(), ctx=ctx)
+    ctx.require(set(python) == {'version', 'prefix', 'basePrefix', 'executable', 'pip'}, 'Python version schema')
+    ctx.require(python['version'] == config['expectedVersions']['python'] and python['pip'] == config['expectedVersions']['pip'], 'Python/pip version drift')
+    ctx.require(python['prefix'] == str(Path(config['owner'])/'venv') and python['executable'] == config['python'], 'interpreter/venv resolution drift')
+    ctx.require(re.fullmatch(r'ruby '+re.escape(config['expectedVersions']['ruby'])+r' \([^\n]+\) \[[^\n]+\]', result['versions']['ruby']), 'Ruby version drift')
+    # Bundler 4 emits the bare number; older documented prefixed output is not adopted.
+    ctx.require(result['versions']['bundle'] == config['expectedVersions']['bundle'], 'Bundler version drift')
+    ctx.require(result['versions']['actionlint'].splitlines()[0] == config['expectedVersions']['actionlint'], 'actionlint version drift')
+    ctx.require(re.search(r'^openjdk version "'+re.escape(config['expectedVersions']['java'])+r'"(?: |$)', result['versions']['java']), 'Java version drift')
+    ctx.require(result['versions']['xcode'] == config['expectedVersions']['xcode'], 'Xcode version drift')
+    ctx.require(result['versions']['xcodeSelect'] == config['developerDir'], 'Xcode selection drift')
+    ctx.require(re.match(r'gh version [0-9]+\.[0-9]+\.[0-9]+(?: |\n|$)', result['versions']['gh']), 'GitHub CLI version malformed')
+    ctx.require(re.match(r'GNU bash, version [0-9]+\.[0-9]+\.[0-9]+', result['versions']['bash']), 'Bash version malformed')
+    ctx.require(re.match(r'(?:LibreSSL|OpenSSL) [0-9]+\.[0-9]+\.[0-9]+', result['versions']['openssl']), 'OpenSSL version malformed')
+    for name in ('clang', 'dsymutil'):
+        out, err = read_command(['/usr/bin/xcrun', '--find', name], cwd=root, env=env, ctx=ctx)
+        ctx.require(not err and len(out.splitlines()) == 1, 'native tool lookup diagnostics')
+        path = out.decode().strip()
+        result['executables'][name] = executable(path, ctx=ctx)
+        out, err = read_command([path, '--version'], cwd=root, env=env, ctx=ctx)
+        version = (out+err).decode().strip()
+        ctx.require(re.match(r'(?:Apple clang version|LLVM \(http[^\n]+\):\n  LLVM version|LLVM version|Apple LLVM version|Apple LLVM dsymutil version|LLVM dsymutil version) ', version), 'native tool version malformed')
+        result['versions'][name] = version
+    graph = Forest(ctx)
+    empty = graph.add('tree', b'')
+    owner, view = _temporary_view(evidence, config, graph, empty, ctx=ctx)
+    out, _ = git_call(owner, config['gitLeaf'], 'version', ctx=ctx)
+    git_version = out.decode('ascii').strip()
+    ctx.require(re.fullmatch(r'git version [0-9]+\.[0-9]+\.[0-9]+(?: \(Apple Git-[0-9]+\))?', git_version), 'Git leaf version malformed')
+    result['versions']['git'] = git_version
+    entries = validate_view(owner, graph, ctx=ctx, expected_inventory=view['initialInventory'])
+    remove_view(owner, view, entries, ctx=ctx)
+    result['venvConfig'] = read_file(Path(config['owner'])/'venv/pyvenv.cfg', ctx=ctx, role='locator')
+    result['localVsHosted'] = HOSTED_POLICY
+    for value in result['executables'].values():
+        ctx.require(executable(value['path'], ctx=ctx) == value, 'effective tool changed during collection')
+    return result
+
+
+@participating
+def accepted_implementation(evidence, source, *, ctx):
+    path = Path(evidence)/'ACCEPTED-IMPLEMENTATION.json'
+    approval = read_json(path, ctx=ctx)
+    ctx.require(set(approval) == {'status', 'tree', 'reportPath', 'reportSha256', 'snapshotPath', 'snapshotSha256'}, 'implementation acceptance schema')
+    ctx.require(approval['status'] == 'APPROVED_IMPLEMENTATION_ONLY' and re.fullmatch('[0-9a-f]{40}', approval['tree']), 'implementation not independently approved')
+    references = {}
+    for key in ('report', 'snapshot'):
+        bound = read_file(approval[key+'Path'], ctx=ctx, role='record')
+        ctx.require(bound['sha256'] == approval[key+'Sha256'], 'accepted review/snapshot changed')
+        references[key] = bound
+    saved = read_json(approval['snapshotPath'], ctx=ctx)
+    ctx.require(all(source[key] == saved[key] for key in ('head', 'branch', 'files')), 'accepted implementation snapshot differs')
+    ctx.require(source['proposedTree'] == approval['tree'], 'implementation tree binding differs')
+    return {'record': approval, 'file': read_file(path, ctx=ctx, role='record'), 'references': references}
+
+
+def _schema_identity(value, ctx):
+    schema.identity(value, ctx=ctx)
+
+
+def _schema_file(value, ctx, role='record'):
+    schema.file_reference(value, ctx=ctx, role=role)
+
+
+def _schema_ancestry(value, root, ctx):
+    _path(root, ctx)
+    expected = {str(path) for path in (Path(root), *Path(root).parents)}
+    _fields(value, expected, ctx, 'ancestry')
+    for row in value.values():
+        _schema_identity(row, ctx)
+        ctx.require(row['type'] == stat.S_IFDIR, 'ancestry must contain only directories')
+
+
+def _schema_object(row, ctx):
+    _fields(row, {'oid', 'type', 'bytes', 'sha256'}, ctx, 'typed object')
+    _hash(row['oid'], 40, ctx); _hash(row['sha256'], 64, ctx)
+    ctx.require(row['type'] in ('commit', 'tree', 'blob') and type(row['bytes']) is int
+                and 0 <= row['bytes'] <= LIMITS[row['type']], 'typed object values')
+
+
+def _schema_logical(value, ctx):
+    _fields(value, {'head', 'branch', 'files'}, ctx, 'logical snapshot')
+    _hash(value['head'], 40, ctx)
+    ctx.require(type(value['branch']) is str and type(value['files']) is dict and len(value['files']) <= LIMITS['names'], 'logical snapshot schema')
+    for name, row in value['files'].items():
+        ctx.check()
+        ctx.require(type(name) is str and name and not Path(name).is_absolute() and '..' not in Path(name).parts
+                    and '/'.join(Path(name).parts) == name and '\0' not in name and name != 'AGENTS.md'
+                    and len(os.fsencode(name)) <= LIMITS['gitPath'] and len(Path(name).parts) <= LIMITS['gitDepth']
+                    and all(len(os.fsencode(p)) <= LIMITS['component'] for p in Path(name).parts), 'logical file path')
+        ctx.require(type(row) is dict, 'logical row schema')
+        if row.get('deleted'):
+            ctx.require(set(row) == {'deleted'} and row['deleted'] is True, 'deleted file schema')
+        else:
+            ctx.require(set(row) == {'sha256', 'executable'} and type(row['executable']) is bool
+                        and re.fullmatch('[0-9a-f]{64}', row['sha256']), 'logical file schema')
+
+
+def _schema_git(value, ctx):
+    _fields(value, GIT_FIELDS, ctx, 'stable Git')
+    for name in ('root', 'gitdir', 'common'):
+        _path(value[name], ctx)
+    _hash(value['head'], 40, ctx); _hash(value['baseRoot'], 40, ctx)
+    ctx.require(value['layout'] in ('directory', 'linked-worktree') and type(value['branch']) is str, 'stable Git layout')
+    _schema_identity(value['rootIdentity'], ctx)
+    root, gitdir, common = map(Path, (value['root'], value['gitdir'], value['common']))
+    controls = {str(gitdir/'HEAD'), str(common/'refs/heads'/value['branch'])}
+    if value['layout'] == 'directory':
+        ctx.require(root/'.git' == gitdir == common, 'primary Git layout relationship')
+    else:
+        controls |= {str(root/'.git'), str(gitdir/'commondir'), str(gitdir/'gitdir')}
+        ctx.require(gitdir != common and gitdir != root/'.git', 'linked Git layout relationship')
+    _fields(value['controls'], controls, ctx, 'Git control bindings')
+    for path, row in value['controls'].items():
+        _schema_file(row, ctx, role='locator')
+        ctx.require(row['path'] == path and row['bytes'] <= LIMITS['locator'], 'Git control path/size')
+    ctx.require(type(value['baseForest']) is dict and len(value['baseForest']) <= LIMITS['objects'], 'Git forest count')
+    for oid, row in value['baseForest'].items():
+        _schema_object(row, ctx)
+        ctx.require(row['oid'] == oid and row['type'] in ('blob', 'tree'), 'base forest object scope')
+    ctx.require(value['baseRoot'] in value['baseForest'] and value['baseForest'][value['baseRoot']]['type'] == 'tree', 'missing base root')
+    _schema_object(value['anchor'], ctx)
+    ctx.require(value['anchor']['oid'] == value['head'] and value['anchor']['type'] == 'commit', 'raw anchor identity')
+    _fields(value['looseObjects'], set(value['baseForest'])|{value['head']}, ctx, 'complete loose binding set')
+    for oid, row in value['looseObjects'].items():
+        _schema_file(row, ctx, role='compressed')
+        ctx.require(row['path'] == str(common/'objects'/oid[:2]/oid[2:]) and row['bytes'] <= LIMITS['compressed'], 'raw object path/size')
+    ctx.require(value['index']['path'] == str(gitdir/'index'), 'raw index scope')
+    if value['index'].get('absent'):
+        ctx.require(set(value['index']) == {'absent', 'path'} and value['index']['absent'] is True, 'absent index schema')
+        ctx.require(value['baseRoot'] == EMPTY_TREE and value['indexFormat'] == {'emptyFixture': True}, 'absent nonempty index')
+    else:
+        _schema_file(value['index'], ctx, role='index')
+        index = value['indexFormat']
+        _fields(index, {'version', 'count', 'extensions', 'entries'}, ctx, 'index format')
+        ctx.require(type(index['version']) is int and index['version'] in (2, 3) and index['extensions'] == 'TREE-only'
+                    and type(index['entries']) is dict and type(index['count']) is int
+                    and index['count'] == len(index['entries']) <= LIMITS['names'] and value['index']['bytes'] <= LIMITS['index'], 'index format values')
+        for name, row in index['entries'].items():
+            _fields(row, {'mode', 'oid'}, ctx, 'index entry')
+            ctx.require(type(name) is str and name and not Path(name).is_absolute() and '/'.join(Path(name).parts) == name
+                        and '..' not in Path(name).parts and row['mode'] in ('100644', '100755')
+                        and row['oid'] in value['baseForest'] and value['baseForest'][row['oid']]['type'] == 'blob', 'index entry binding')
+    schema.same(value['conditions'], {'emptyPack': True, 'emptyInfo': True, 'looseBranchOnly': True,
+                                        'noExternalIndex': True, 'objectFormat': 'sha1'}, ctx=ctx, label='Git storage policy')
+    _fields(value['gitAncestries'], {str(p) for p in (gitdir, common, common/'objects', common/'objects/pack', common/'objects/info')}, ctx, 'Git ancestry set')
+    for path, group in value['gitAncestries'].items():
+        _schema_ancestry(group, path, ctx)
+
+
+@participating
+def validate_stable(value, *, ctx):
+    ctx.require(type(value) is dict and set(value) == STABLE_FIELDS and type(value['schemaVersion']) is int and value['schemaVersion'] == 1, 'complete stable projection schema required')
+    _schema_logical({key: value[key] for key in ('head', 'branch', 'files')}, ctx)
+    _schema_logical(value['preservedUser'], ctx)
+    config = validate_config(value['configuration']['record'], ctx=ctx)
+    for logical_key, physical_key in (('files', 'sourcePhysical'), (None, 'preservedUserPhysical')):
+        files = value['files'] if logical_key else value['preservedUser']['files']
+        physical = value[physical_key]
+        ctx.require(set(physical) == set(files), 'stable physical/logical file set mismatch')
+        for name, row in physical.items():
+            root = config['source'] if logical_key else config['rootUserWorktree']
+            ctx.require(row['path'] == str(Path(root)/name), 'physical/logical path scope')
+            if files[name].get('deleted'):
+                ctx.require(set(row) == {'deleted', 'path'} and row['deleted'] is True, 'deleted physical schema')
+            else:
+                _schema_file(row, ctx, role='source')
+                ctx.require(row['sha256'] == files[name]['sha256'] and row['bytes'] <= LIMITS['blob']
+                            and bool(row['identity']['mode'] & 0o100) == files[name]['executable'], 'logical/physical hash/mode mismatch')
+    _schema_git(value['sourceGit'], ctx)
+    _schema_git(value['preservedUserGit'], ctx)
+    ctx.require(value['sourceGit']['head'] == value['head'] and value['sourceGit']['branch'] == value['branch'], 'Git/logical authority mismatch')
+    for key, root in (('sourceGit', config['source']), ('preservedUserGit', config['rootUserWorktree'])):
+        git_value = value[key]
+        ctx.require(git_value['root'] == root and {k:git_value[k] for k in ('gitdir', 'common', 'branch')} == config['gitLayouts'][root], 'Git/config layout mismatch')
+    ctx.require(value['preservedUserGit']['head'] == value['preservedUser']['head']
+                and value['preservedUserGit']['branch'] == value['preservedUser']['branch'], 'preserved logical/Git mismatch')
+    ctx.require(re.fullmatch('[0-9a-f]{40}', value['proposedTree']), 'stable tree ID invalid')
+    schema.same(value['policy'], {'schemaVersion': 1, 'limits': LIMITS, 'git': GIT_POLICY,
+                                   'filesystem': 'no-follow-owned-exact-inventory-cooperative-v1',
+                                   'observation': 'fresh-byte-bound-separate-from-stable-v1'}, ctx=ctx, label='complete policy')
+    ctx.require(set(value['verificationHelpers']) == HELPERS|STATIC_RECORDS, 'stable helper inventory incomplete')
+    for row in value['verificationHelpers'].values():
+        ctx.require(set(row) == {'sha256', 'mode'} and re.fullmatch('[0-9a-f]{64}', row['sha256']) and type(row['mode']) is int, 'helper binding schema')
+    _schema_file(value['configuration']['file'], ctx)
+    ctx.require(set(value['configuration']) == {'file', 'record'} and set(value['configuration']['record']) == CONFIG_FIELDS, 'stable config schema')
+    _schema_file(value['userInstructions'], ctx, role='source')
+    evidence = Path(value['configuration']['file']['path']).parent
+    ctx.require(value['configuration']['file']['path'] == str(evidence/'CONFIG.json')
+                and value['userInstructions']['path'] == str(Path(config['rootUserWorktree'])/'AGENTS.md')
+                and value['userInstructions']['sha256'] == config['sourceUserAgentsSha256'], 'configuration/instructions scope')
+    owners = value['ownerBindings']
+    ctx.require(set(owners) == {'ancestries', 'workspace', 'tmpOwner'}, 'stable ownership schema')
+    _schema_file(owners['workspace'], ctx)
+    _schema_file(owners['tmpOwner'], ctx)
+    _fields(owners['ancestries'], {config['owner'], config['source'], config['rootUserWorktree'], config['tmp'], str(evidence)}, ctx, 'permanent ancestry set')
+    for path, group in owners['ancestries'].items():
+        _schema_ancestry(group, path, ctx)
+    ctx.require(owners['workspace']['path'] == str(evidence.parent/'WORKSPACE.json')
+                and owners['tmpOwner']['path'] == str(evidence/'FINAL-TMP-OWNER.json'), 'permanent owner record scope')
+    tools = value['tools']
+    ctx.require(set(tools) == {'executables', 'versions', 'venvConfig', 'localVsHosted', 'environment'}, 'stable tools schema')
+    ctx.require(set(tools['executables']) == TOOL_NAMES and set(tools['versions']) == {'python', 'ruby', 'bundle', 'java', 'actionlint', 'gh', 'bash', 'xcode', 'xcodeSelect', 'openssl', 'clang', 'dsymutil', 'git'}, 'tool inventory/version schema')
+    for row in tools['executables'].values():
+        ctx.require(set(row) == {'path', 'pathIdentity', 'resolved', 'file'}, 'tool binding schema')
+        _schema_identity(row['pathIdentity'], ctx)
+        _schema_file(row['file'], ctx, role='tool')
+        _path(row['path'], ctx); _path(row['resolved'], ctx)
+        ctx.require(row['file']['path'] == row['resolved'] and row['file']['identity']['mode'] & 0o111, 'tool resolved path/mode')
+    ctx.require(tools['executables']['gitLeaf']['path'] == tools['executables']['gitLeaf']['resolved'] == config['gitLeaf']
+                and tools['executables']['python']['path'] == config['python'] and tools['localVsHosted'] == HOSTED_POLICY
+                and tools['environment'] == clean_environment(config), 'tool fixed authority/configuration')
+    _schema_file(tools['venvConfig'], ctx, role='locator')
+    ctx.require(tools['venvConfig']['path'] == str(Path(config['owner'])/'venv/pyvenv.cfg')
+                and all(type(v) is str and v and '\0' not in v for v in tools['versions'].values()), 'tool version/config schema')
+    from owned_outputs import validate_wheel_bootstrap
+    bootstrap = value['wheelBootstrap']
+    _fields(bootstrap, {'record', 'file'}, ctx, 'stable wheel bootstrap')
+    _schema_file(bootstrap['file'], ctx)
+    validate_wheel_bootstrap(bootstrap['record'], config, ctx=ctx)
+    ctx.require(bootstrap['file']['path'] == str(evidence/'WHEEL-BOOTSTRAP.json')
+                and bootstrap['file']['sha256'] == value['verificationHelpers']['WHEEL-BOOTSTRAP.json']['sha256']
+                and bootstrap['record']['python'] == tools['executables']['python'],
+                'bootstrap accepted static/interpreter binding')
+    for key in ('implementationAcceptance', 'verifierAcceptance'):
+        accepted = value[key]
+        ctx.require(type(accepted) is dict and set(accepted) == {'record', 'file', 'references'}, 'complete acceptance schema required')
+        _schema_file(accepted['file'], ctx)
+        for row in accepted['references'].values():
+            _schema_file(row, ctx)
+        record = accepted['record']
+        implementation = key == 'implementationAcceptance'
+        _fields(record, {'status', 'tree', 'reportPath', 'reportSha256', 'snapshotPath', 'snapshotSha256'} if implementation else
+                {'status', 'helpers', 'reportPath', 'reportSha256'}, ctx, 'accepted record')
+        ctx.require(record['status'] == ('APPROVED_IMPLEMENTATION_ONLY' if implementation else 'APPROVED_VERIFIER_ONLY')
+                    and accepted['file']['path'] == str(evidence/('ACCEPTED-IMPLEMENTATION.json' if implementation else 'ACCEPTED-VERIFIER.json')), 'accepted record scope/status')
+        _fields(accepted['references'], {'report', 'snapshot'} if implementation else {'report'}, ctx, 'accepted references')
+        for role, row in accepted['references'].items():
+            ctx.require(row['path'] == record[role+'Path'] and row['sha256'] == record[role+'Sha256'], 'acceptance reference relationship')
+        ctx.require(record['tree'] == value['proposedTree'] if implementation else record['helpers'] == value['verificationHelpers'], 'accepted source/helper scope')
+    for key in ('preservedUserSnapshotSha256', 'preservedUserFreezeSha256'):
+        ctx.require(re.fullmatch('[0-9a-f]{64}', value[key]), 'preservation digest schema')
+    from source_inventory import validate_acceptance, validate_universe
+    accepted = value['discoveryAcceptance']
+    _fields(accepted, {'record', 'file', 'references'}, ctx, 'complete discovery acceptance')
+    _schema_file(accepted['file'], ctx)
+    ctx.require(accepted['file']['path'] == str(evidence/'DISCOVERY-ACCEPTANCE.json')
+                and accepted['file']['sha256'] == value['verificationHelpers']['DISCOVERY-ACCEPTANCE.json']['sha256'],
+                'discovery static review binding')
+    validate_acceptance(accepted['record'], config, ctx=ctx)
+    _fields(accepted['references'], {config['source'], config['rootUserWorktree']}, ctx, 'discovery references')
+    for key, root, role in (('sourceUniverse', config['source'], 'execution'),
+                             ('preservedUserUniverse', config['rootUserWorktree'], 'preservation')):
+        universe = value[key]
+        validate_universe(universe, ctx=ctx)
+        ctx.require(universe['root'] == root and universe['classification']['role'] == role,
+                    'universe/config root relationship')
+        _schema_file(accepted['references'][root], ctx)
+        ctx.require(accepted['references'][root] == accepted['record']['roots'][root]['snapshot'], 'discovery original reference relationship')
+        git = value['sourceGit' if role == 'execution' else 'preservedUserGit']
+        tracked = git['indexFormat'].get('entries', {})
+        ctx.require(universe['rootIdentity'] == git['rootIdentity'], 'universe/raw source identity')
+        selected = value['files'] if role == 'execution' else value['preservedUser']['files']
+        physical = value['sourcePhysical'] if role == 'execution' else value['preservedUserPhysical']
+        approved = accepted['record']['roots'][root]
+        leaves = {name for name, row in universe['entries'].items() if row['kind'] == 'file'}
+        expected_leaves = {name for name, row in selected.items() if not row.get('deleted')} | set(approved['additionalControls'])
+        if approved['agents'] is not None:
+            expected_leaves.add('AGENTS.md')
+            ctx.require(approved['agents'] == value['userInstructions'], 'universe AGENTS authority')
+        ctx.require(leaves == expected_leaves, 'universe contains missing/unapproved source leaves')
+        from source_inventory import CLASSIFICATION, name_excluded
+        ctx.require(not any(name_excluded(name) for name in set(tracked) | set(selected)), 'excluded tracked/selected source')
+        permitted_dirs = set(approved['structuralDirectories']) | set(CLASSIFICATION['structuralAncestors'])
+        ctx.require(all(name in permitted_dirs for name, row in universe['entries'].items() if row['kind'] == 'directory'),
+                    'unapproved universe directory')
+        for name, row in selected.items():
+            if not row.get('deleted'):
+                ctx.require(universe['entries'][name]['identity'] == physical[name]['identity'], 'universe/source physical identity')
+        for name, control in universe['controls'].items():
+            ctx.require(control['tracked'] == (name in tracked), 'control tracked state differs from complete raw index')
+            if name in selected:
+                ctx.require(control['file'] == physical[name], 'selected control physical binding')
+            else:
+                reference = control['file']
+                ctx.require({'bytes': reference['bytes'], 'sha256': reference['sha256'], 'mode': reference['identity']['mode'],
+                             'tracked': control['tracked']} == approved['additionalControls'][name], 'additional control original authority')
+    ctx.require(accepted['references'][config['source']] == value['implementationAcceptance']['references']['snapshot']
+                and accepted['references'][config['rootUserWorktree']]['sha256'] == value['preservedUserFreezeSha256'],
+                'discovery independent source review identity')
+    return value
+
+
+@participating
+def _reference(path, *, ctx):
+    value = read_file(path, ctx=ctx, role='record')
+    ctx.require(value['identity']['uid'] == os.getuid() and value['identity']['mode'] == 0o600, 'observation not privately owned')
+    return value
+
+
+@participating
+def validate_native(row, *, command, environment, cwd, ctx, frames=None, git_policy=None):
+    fields = {'command', 'cwd', 'environment', 'phase', 'ownership', 'pid', 'pgid', 'parentGroup',
+              'startNewSession', 'signalAuthority', 'exitCode', 'stopSignalSent', 'status', 'started', 'cutoff',
+              'stdoutBytes', 'stderrBytes', 'stdinBytes', 'stdoutTruncated', 'stderrTruncated',
+              'stdoutPrefixBytes', 'stderrPrefixBytes', 'diagnosticRetentionTruncated', 'stdoutChunksBase64',
+              'stderrChunksBase64', 'seconds', 'cancelSignal', 'stdoutPrefixSha256', 'stderrPrefixSha256', 'stderrPrefix'}
+    if frames is not None: fields.add('frames')
+    if git_policy is not None: fields.add('gitPolicy')
+    _fields(row, fields, ctx, 'native observation')
+    ctx.require(row['command'] == command and row['environment'] == environment and row['cwd'] == str(cwd), 'native command/environment scope changed')
+    ctx.require(row['phase'] == 'read-write-reap' and row['status'] == 'PASS' and row['ownership'] == 'reaped'
+                and type(row['exitCode']) is int and row['exitCode'] == 0 and row['cancelSignal'] is None
+                and row['startNewSession'] is False and row['signalAuthority'] is False and row['stopSignalSent'] is False
+                and row['diagnosticRetentionTruncated'] is False, 'unsuccessful/ambiguous native completion')
+    ctx.require(type(row['pid']) is int and row['pid'] > 0 and type(row['parentGroup']) is int and row['parentGroup'] > 0
+                and (row['pgid'] is None or type(row['pgid']) is int and row['pgid'] == row['parentGroup']), 'native escaped/invalid group observation')
+    for key in ('started', 'cutoff', 'seconds'):
+        schema.number(row[key], ctx=ctx, label='native ' + key)
+    ctx.require(0 <= row['seconds'] < row['cutoff']-row['started'] <= LIMITS['commandSeconds'], 'late native observation')
+    ctx.require(type(row['stdinBytes']) is int and 0 <= row['stdinBytes'] <= LIMITS['payload'], 'invalid native input count')
+    outputs = {}
+    for name in ('stdout', 'stderr'):
+        cap = LIMITS['catStdout'] if name == 'stdout' and frames is not None else LIMITS[name]
+        ctx.require(type(row[name+'Bytes']) is int and type(row[name+'PrefixBytes']) is int
+                    and 0 <= row[name+'Bytes'] == row[name+'PrefixBytes'] <= cap
+                    and row[name+'Truncated'] is False, 'truncated/invalid native output count')
+        _hash(row[name+'PrefixSha256'], 64, ctx)
+        chunks = row[name+'ChunksBase64']
+        ctx.require(type(chunks) is list and len(chunks) <= (cap+CHUNK-1)//CHUNK, 'native diagnostic chunk bounds')
+        decoded, hasher, size = [], hashlib.sha256(), 0
+        for chunk in chunks:
+            ctx.check()
+            ctx.require(type(chunk) is str and len(chunk) <= (CHUNK+2)//3*4, 'native diagnostic chunk size')
+            block = base64.b64decode(chunk, validate=True)
+            ctx.require(len(block) <= CHUNK, 'native retained read chunk size')
+            size += len(block); ctx.bytes(len(block), 'record', hashing=True)
+            hasher.update(block); decoded.append(block)
+        outputs[name] = b''.join(decoded)
+        if name == 'stdout' and frames is not None:
+            ctx.require(not chunks and row['frames'] == frames and row['stdinBytes'] == len(frames)*41
+                        and row['stdoutBytes'] == sum(len(f"{v['oid']} {v['type']} {v['bytes']}\n".encode())+v['bytes']+1 for v in frames),
+                        'native complete forest framing mismatch')
+        else:
+            ctx.require(size == row[name+'Bytes'] and hasher.hexdigest() == row[name+'PrefixSha256'], 'native raw diagnostic hash/size mismatch')
+    ctx.require(row['stderrPrefix'] == outputs['stderr'][:4096].decode('utf-8', 'replace'), 'native diagnostic preview changed')
+    if git_policy is not None:
+        ctx.require(row['gitPolicy'] == git_policy and not outputs['stderr'], 'native Git policy/diagnostics changed')
+    return outputs['stdout'], outputs['stderr']
+
+
+@participating
+def validate_inventory_schema(entries, *, ctx, symlink_paths=frozenset(), file_roles=None):
+    ctx.require(type(entries) is dict and len(entries) <= LIMITS['inventory'], 'inventory schema/count')
+    for name, row in entries.items():
+        schema.relative(name, ctx=ctx)
+        _fields(row, {'identity', 'kind', 'bytes', 'sha256'} if row.get('kind') == 'file' else
+                {'identity', 'kind', 'target'} if row.get('kind') == 'symlink' else {'identity', 'kind'}, ctx, 'inventory row')
+        _schema_identity(row['identity'], ctx)
+        ctx.require(row['identity']['uid'] == os.getuid() and row['kind'] in ('file', 'directory', 'symlink')
+                    and row['identity']['type'] == {'file':stat.S_IFREG,'directory':stat.S_IFDIR,'symlink':stat.S_IFLNK}[row['kind']], 'inventory type/owner')
+        if row['kind'] == 'file':
+            _hash(row['sha256'], 64, ctx)
+            from action_io import ROLES
+            role = (file_roles or {}).get(name, 'other')
+            schema.integer(row['bytes'], ctx=ctx, label='inventory bytes', maximum=LIMITS[ROLES[role]])
+        elif row['kind'] == 'symlink':
+            ctx.require(name in symlink_paths, 'unapproved inventory symlink')
+            schema.label(row['target'], ctx=ctx, name='symlink target')
+
+
+@participating
+def validate_observation(reference, stable_hash, evidence, *, ctx, stable, expected_nonce=None, references=None):
+    _schema_file(reference, ctx)
+    path = Path(reference['path'])
+    ctx.require(path.parent == Path(evidence) and re.fullmatch(r'native-observation-[0-9a-f]{48}\.json', path.name), 'observation path scope')
+    original = read_file(path, ctx=ctx, role='record', retain=True)
+    data = original.pop('data')
+    ctx.require(original == reference and original['identity']['uid'] == os.getuid()
+                and original['identity']['mode'] == 0o600, 'observation bytes/identity changed')
+    if references is not None:
+        references.append((original, 'record'))
+    record = decode_json(data, ctx=ctx)
+    _fields(record, {'schemaVersion', 'status', 'stableSha256', 'action', 'contextNonce', 'toolPolicySha256', 'helperSnapshot'}, ctx, 'collection observation')
+    schema.digest(record['contextNonce'], ctx=ctx, length=48)
+    ctx.require(type(record['schemaVersion']) is int and record['schemaVersion'] == 1 and record['status'] == 'PASS'
+                and record['stableSha256'] == stable_hash, 'failed/wrong-scope observation')
+    summary = record['action']
+    schema.action_metadata(summary, ctx=ctx, full=True)
+    ctx.require(summary['nonce'] == path.name.removeprefix('native-observation-').removesuffix('.json')
+                and (expected_nonce is None or summary['nonce'] == expected_nonce)
+                and summary['failure'] is None and summary['cancelSignal'] is None
+                and type(summary['action']) is str and summary['action']
+                and all(type(summary[k]) in (int, float) for k in ('started', 'cutoff', 'seconds'))
+                and 0 <= summary['seconds'] < summary['cutoff']-summary['started'] <= LIMITS['seconds'], 'late/old/failed collection observation')
+    ctx.require(type(summary['counts']) is dict and all(k in LIMITS and type(v) is int and 0 <= v <= LIMITS[k] for k,v in summary['counts'].items()), 'invalid action counters')
+    ctx.require(type(summary['native']) is list and len(summary['native']) == 21 and type(summary['views']) is list and len(summary['views']) == 3, 'missing/extra actual collection observations')
+    config = stable['configuration']['record']; tools = stable['tools']
+    expected_native = []
+    for index, view in enumerate(summary['views']):
+        _fields(view, {'owner', 'marker', 'markerReference', 'removed', 'initialInventory', 'cleanup'} |
+                ({'mirror'} if index < 2 else set()), ctx, 'temporary view observation')
+        owner = view['owner']
+        schema.owner_record(owner, ctx=ctx)
+        _hash(owner['nonce'], 48, ctx); _schema_identity(owner['identity'], ctx)
+        root = Path(owner['path']); _path(owner['path'], ctx)
+        ctx.require(root.parent == Path(config['tmp']) and re.fullmatch('metadata-[0-9a-f]{48}', root.name)
+                    and owner['purpose'] == 'exclusive nonwriting Git view; no real source storage'
+                    and owner['identity']['type'] == stat.S_IFDIR and owner['identity']['uid'] == os.getuid()
+                    and owner['identity']['mode'] == 0o700, 'view owner scope')
+        _schema_ancestry(owner['parentAncestry'], str(root.parent), ctx)
+        ctx.require(owner['parentAncestry'] == stable['ownerBindings']['ancestries'][config['tmp']], 'view parent authority')
+        marker = Path(evidence)/('native-view-owner-'+root.name.removeprefix('metadata-')+'.json')
+        marker_reference = read_file(marker, ctx=ctx, role='record', retain=True)
+        marker_body = marker_reference.pop('data')
+        if references is not None:
+            references.append((marker_reference, 'record'))
+        schema.same(view['cleanup'], {'status':'PASS','removedEntries':len(view['initialInventory'])+1}, ctx=ctx, label='view cleanup')
+        ctx.require(view['marker'] == str(marker) and view['markerReference'] == marker_reference
+                    and decode_json(marker_body, ctx=ctx) == owner and view['removed'] is True
+                    and view['cleanup'] == {'status':'PASS','removedEntries':len(view['initialInventory'])+1}
+                    and not exists(root, ctx=ctx), 'unknown/unclean/substituted temporary view')
+        from git_readonly import view_roles
+        entries = view['initialInventory']; validate_inventory_schema(entries, ctx=ctx, file_roles=view_roles(entries))
+        objects = {EMPTY_TREE}
+        if index < 2:
+            source = stable['sourceGit' if index == 0 else 'preservedUserGit']
+            objects |= set(source['baseForest'])|{source['head']}
+            ctx.require(owner['tree'] == source['baseRoot'], 'view base root scope')
+        else:
+            source = None
+            ctx.require(owner['tree'] == EMPTY_TREE, 'version-only empty view scope')
+        expected = set(CONTROL_DIRS)|{'config','HEAD'}|{'objects/'+oid[:2] for oid in objects}|{'objects/'+oid[:2]+'/'+oid[2:] for oid in objects}
+        if source is not None and not source['index'].get('absent'): expected.add('index')
+        if index < 2:
+            universe = stable['sourceUniverse' if index == 0 else 'preservedUserUniverse']
+            from source_inventory import validate_mirror
+            validate_mirror(view['mirror'], universe, entries, view_root=root, ctx=ctx)
+            expected |= {'worktree'} | {'worktree/' + name for name in universe['entries']}
+        ctx.require(set(entries) == expected, 'view exact scaffolding/object/index set')
+        for name, body in (('config', FIXED_CONFIG), ('HEAD', FIXED_HEAD)):
+            ctx.require(entries[name]['sha256'] == hashlib.sha256(body).hexdigest() and entries[name]['bytes'] == len(body), 'view fixed control changed')
+        if 'index' in expected:
+            ctx.require(entries['index']['sha256'] == source['index']['sha256'] and entries['index']['bytes'] == source['index']['bytes'], 'copied index binding changed')
+        for builtin in (('stages','flags','names') if index < 2 else ('version',)):
+            command, env = git_invocation(root, config['gitLeaf'], builtin, worktree=root/'worktree' if index < 2 else None)
+            expected_native.append((command, env, root, {'builtin':builtin,'ownerNonce':owner['nonce'],'tool':tools['executables']['gitLeaf']['file']}))
+    rows = summary['native']
+    for row, expected in zip(rows[:6]+rows[-1:], expected_native):
+        out, err = validate_native(row, command=expected[0], environment=expected[1], cwd=expected[2], ctx=ctx, git_policy=expected[3])
+        ctx.require(row['stdinBytes'] == 0, 'unexpected Git collection input')
+        if expected[3]['builtin'] == 'version':
+            ctx.require(out.decode('ascii').strip() == tools['versions']['git'], 'actual Git version differs from stable')
+    python_code = 'import sys,json;from importlib.metadata import version;print(json.dumps({"version":sys.version.split()[0],"prefix":sys.prefix,"basePrefix":sys.base_prefix,"executable":sys.executable,"pip":version("pip")},sort_keys=True))'
+    calls = [('python',[config['python'],'-I','-B','-c',python_code]),('ruby',['ruby','--version']),('bundle',['bundle','--version']),
+             ('java',['java','-version']),('actionlint',['actionlint','--version']),('gh',['gh','--version']),('bash',['bash','--version']),
+             ('xcode',['/usr/bin/xcodebuild','-version']),('xcodeSelect',['/usr/bin/xcode-select','-p']),('openssl',['/usr/bin/openssl','version'])]
+    for name in ('clang','dsymutil'):
+        calls += [(name+'Lookup',['/usr/bin/xcrun','--find',name]),(name,[tools['executables'][name]['path'],'--version'])]
+    for row,(name,command) in zip(rows[6:-1],calls):
+        if not Path(command[0]).is_absolute():command[0] = tools['executables'][command[0]]['path']
+        out,err = validate_native(row, command=command, environment=tools['environment'], cwd=config['source'], ctx=ctx)
+        ctx.require(row['stdinBytes'] == 0 and (name == 'java' or not err), 'tool unexpected input/diagnostics')
+        expected = tools['executables'][name.removesuffix('Lookup')]['path'] if name.endswith('Lookup') else tools['versions'][name]
+        ctx.require((out+err).decode('utf-8').strip() == expected, 'actual tool version/path differs from stable')
+    expected_removals = []
+    for view in summary['views']:
+        entries = view['initialInventory']
+        expected_removals += [{'root':view['owner']['path'], 'relative':name, 'kind':row['kind']}
+                             for name,row in sorted(entries.items(), key=lambda item:(len(Path(item[0]).parts),item[0]), reverse=True)]
+        expected_removals.append({'root':view['owner']['path'], 'relative':'.', 'kind':'directory'})
+    ctx.require(summary['removals'] == expected_removals and summary['counts'].get('launches', 0) >= len(rows)
+                and summary['counts'].get('views', 0) >= len(summary['views']), 'incomplete actual teardown/accounting')
+    for row in rows:
+        ctx.require(summary['started'] <= row['started'] and row['cutoff'] <= summary['cutoff'], 'native observation not in original action')
+    ctx.require(record['helperSnapshot'] == stable['verificationHelpers'] == helper_snapshot(evidence, ctx=ctx)
+                and record['toolPolicySha256'] == canonical_digest({'limits': LIMITS, 'git': GIT_POLICY}, ctx=ctx), 'observation helper/policy mismatch')
+    return record
+
+
+@participating
+def collect(evidence, *, ctx, require_acceptance=True, frozen=None):
+    """No utility reset: source, native, tools, projection and teardown share ctx."""
+    evidence = Path(evidence)
+    ctx.check()
+    start_native, start_views, start_removals = len(ctx.native), len(ctx.views), len(ctx.removals)
+    start_queries = len(ctx.queries)
+    config = config_load(evidence, ctx=ctx)
+    config_bound = read_file(evidence/'CONFIG.json', ctx=ctx, role='record')
+    owners = owner_bindings(config, evidence, ctx=ctx)
+    helpers = helper_snapshot(evidence, ctx=ctx)
+    from source_inventory import load_acceptance, discover
+    discovery, logical = load_acceptance(evidence, config, ctx=ctx)
+    root, user_root = Path(config['source']), Path(config['rootUserWorktree'])
+    from owned_outputs import execution_outputs
+    outputs = execution_outputs(evidence, config, frozen=frozen, ctx=ctx)
+    source, source_physical, source_raw, source_universe = snapshot(root, config=config, evidence=evidence, ctx=ctx,
+                    discovery=discovery['record']['roots'][str(root)], logical=logical[str(root)], output_authorities=outputs)
+    user, user_physical, user_raw, user_universe = snapshot(user_root, config=config, evidence=evidence, ctx=ctx,
+                    discovery=discovery['record']['roots'][str(user_root)], logical=logical[str(user_root)])
+    ctx.require(source['head'] == config['expectedSourceHead'] and source['branch'] == config['expectedBranch'], 'source baseline drift')
+    old_user_path = user_root/'.mobile-release/remediation/QA-003-final-r4/final-freeze.json'
+    old_user = read_json(old_user_path, ctx=ctx)
+    # Historical v0 shape is deliberately named and byte-bound; not a fallback
+    # parser for the new exact v1 freeze envelope.
+    ctx.require(all(user[key] == old_user[key] for key in ('head', 'branch', 'files')), 'preserved QA-003 source changed')
+    source['proposedTree'] = git_tree(root, source['files'], ctx=ctx)
+    tools = tool_bindings(config, evidence, ctx=ctx)
+    from owned_outputs import wheel_bootstrap, bootstrap_recheck
+    bootstrap = wheel_bootstrap(evidence, config, ctx=ctx)
+    source.update(schemaVersion=1, sourcePhysical=source_physical, sourceGit=source_raw['stable'],
+                  preservedUser=user, preservedUserPhysical=user_physical, preservedUserGit=user_raw['stable'],
+                  sourceUniverse=source_universe, preservedUserUniverse=user_universe, discoveryAcceptance=discovery,
+                  ownerBindings=owners, verificationHelpers=helpers, tools=tools, wheelBootstrap=bootstrap,
+                  configuration={'file': config_bound, 'record': config},
+                  policy={'schemaVersion': 1, 'limits': LIMITS, 'git': GIT_POLICY,
+                          'filesystem': 'no-follow-owned-exact-inventory-cooperative-v1',
+                          'observation': 'fresh-byte-bound-separate-from-stable-v1'},
+                  preservedUserSnapshotSha256=canonical_digest(user, ctx=ctx),
+                  preservedUserFreezeSha256=digest(old_user_path, ctx=ctx, role='record'),
+                  userInstructions=read_file(user_root/'AGENTS.md', ctx=ctx, role='source'))
+    ctx.require(require_acceptance, 'unaccepted collection cannot establish freeze authority')
+    source['implementationAcceptance'] = accepted_implementation(evidence, source, ctx=ctx)
+    path = evidence/'ACCEPTED-VERIFIER.json'
+    verifier = read_json(path, ctx=ctx)
+    ctx.require(set(verifier) == {'status', 'helpers', 'reportPath', 'reportSha256'}, 'verifier acceptance schema')
+    ctx.require(verifier['status'] == 'APPROVED_VERIFIER_ONLY' and verifier['helpers'] == helpers, 'verifier not independently approved')
+    report = read_file(verifier['reportPath'], ctx=ctx, role='record')
+    ctx.require(report['sha256'] == verifier['reportSha256'], 'verifier review changed')
+    source['verifierAcceptance'] = {'record': verifier, 'file': read_file(path, ctx=ctx, role='record'), 'references': {'report': report}}
+    recheck_raw(source_raw, ctx=ctx)
+    recheck_raw(user_raw, ctx=ctx)
+    for group in (source_physical, user_physical):
+        for row in group.values():
+            if row.get('deleted'):
+                ctx.require(not exists(row['path'], ctx=ctx), 'deleted source reappeared')
+            else:
+                ctx.require(read_file(row['path'], ctx=ctx, role='source') == row, 'source changed after collection')
+    ctx.require(helpers == helper_snapshot(evidence, ctx=ctx) and owners == owner_bindings(config, evidence, ctx=ctx)
+                and read_file(evidence/'CONFIG.json', ctx=ctx, role='record') == config_bound, 'helper/owner/config changed')
+    for r, raw, logical_files, universe in ((root, source_raw, source['files'], source_universe),
+                                           (user_root, user_raw, user['files'], user_universe)):
+        authorized = execution_outputs(evidence, config, frozen=frozen, ctx=ctx) if r == root else None
+        current, _ = discover(r, raw['baseFiles'], discovery['record']['roots'][str(r)], logical_files, ctx=ctx,
+                               output_authorities=authorized)
+        ctx.require(current == universe, 'late full source structure/control drift')
+    for reference in [discovery['file'], *discovery['references'].values()]:
+        ctx.require(read_file(reference['path'], ctx=ctx, role='record') == reference, 'discovery backing authority changed')
+    bootstrap_recheck(bootstrap['record'], config, ctx=ctx)
+    ctx.require(read_file(bootstrap['file']['path'], ctx=ctx, role='record') == bootstrap['file'],
+                'wheel bootstrap authority changed during collection')
+    validate_stable(source, ctx=ctx)
+    stable_hash = canonical_digest(source, ctx=ctx)
+    ctx.require(all(row['removed'] for row in ctx.views[start_views:]), 'collection view teardown incomplete')
+    ctx.check()
+    # The action nonce is unique per collection, even if the caller performs
+    # multiple collections under one action budget. No new resource scope.
+    nonce = os.urandom(24).hex()
+    summary = ctx.summary()
+    summary.update(nonce=nonce, native=ctx.native[start_native:], views=ctx.views[start_views:], removals=ctx.removals[start_removals:],
+                   queries=ctx.queries[start_queries:])
+    schema.action_metadata(summary, ctx=ctx, full=True)
+    record = {'schemaVersion': 1, 'status': 'PASS', 'stableSha256': stable_hash, 'action': summary, 'contextNonce': ctx.nonce,
+              'toolPolicySha256': canonical_digest({'limits': LIMITS, 'git': GIT_POLICY}, ctx=ctx), 'helperSnapshot': helpers}
+    path = evidence/('native-observation-'+nonce+'.json')
+    write_new(path, record, ctx=ctx)
+    reference = _reference(path, ctx=ctx)
+    ctx.check()
+    ctx.observations.append(reference)
+    return {'stable': source, 'stableSha256': stable_hash, 'observation': reference}
+
+
+def _immutable(value):
+    if type(value) is dict:
+        return MappingProxyType({key: _immutable(child) for key, child in value.items()})
+    if type(value) in (list, tuple):
+        return tuple(_immutable(child) for child in value)
+    return value
+
+
+def _export(value):
+    if isinstance(value, Mapping):
+        return {key: _export(child) for key, child in value.items()}
+    if type(value) is tuple:
+        return [_export(child) for child in value]
+    return value
+
+
+class FrozenAuthority(Mapping):
+    """Exact factory-registered, action-local, immutable validated original inputs.
+
+    Defensive public values are not authority. No instance works outside its
+    original active action/root; a new action decodes/validates the originals.
+    This is a helper API invariant, not secrecy against Python introspection.
+    """
+    __slots__ = ('_ctx', '_root', '_value', '_references')
+
+    def __init__(self, ctx, root, value, references):
+        self._ctx, self._root = ctx, root
+        self._value = _immutable(value)
+        unique = {}
+        for reference, role in references:
+            previous = unique.get(reference['path'])
+            ctx.require(previous is None or previous == (reference, role), 'contradictory original authority references')
+            unique[reference['path']] = (reference, role)
+        self._references = tuple((_immutable(reference), role) for reference, role in unique.values())
+
+    @participating
+    def check(self, evidence, *, ctx):
+        ctx.check()
+        ctx.require(type(self) is FrozenAuthority and self._ctx is ctx and self._root == str(Path(evidence))
+                    and ctx._authorities.get(self._root) is self, 'wrong/closed/substituted frozen authority')
+        return self
+
+    def __getitem__(self, key):
+        try:
+            self.check(self._root, ctx=self._ctx)
+            return _export(self._value[key])
+        except BaseException as error:
+            self._ctx.latch(error)
+            raise
+
+    def __iter__(self):
+        for key in self._value:
+            self.check(self._root, ctx=self._ctx)
+            yield key
+
+    def __len__(self):
+        self.check(self._root, ctx=self._ctx)
+        return len(self._value)
+
+    @participating
+    def bind(self, reference, *, ctx, role='record'):
+        self.check(self._root, ctx=ctx)
+        schema.file_reference(reference, ctx=ctx, role=role)
+        for original, original_role in self._references:
+            if original['path'] == reference['path']:
+                ctx.require(_export(original) == reference and original_role == role,
+                            'authority backing file changed during action')
+                return
+        self._references += ((_immutable(reference), role),)
+
+    @participating
+    def read_record(self, path, *, ctx):
+        self.check(self._root, ctx=ctx)
+        bound = read_file(path, ctx=ctx, role='record', retain=True)
+        data = bound.pop('data')
+        self.bind(bound, ctx=ctx)
+        return decode_json(data, ctx=ctx), bound
+
+    @participating
+    def recheck(self, *, ctx):
+        self.check(self._root, ctx=ctx)
+        from owned_outputs import bootstrap_namespace
+        bootstrap_namespace(_export(self._value['stable']['wheelBootstrap']['record']),
+                            _export(self._value['stable']['configuration']['record']), ctx=ctx)
+        for original, role in self._references:
+            ctx.require(read_file(original['path'], ctx=ctx, role=role, hardlinks=role == 'tool') == _export(original),
+                        'validated authority backing reference changed')
+
+
+@participating
+def require_authority(value, evidence, *, ctx):
+    ctx.require(type(value) is FrozenAuthority, 'unvalidated dictionary/lookalike is not frozen authority')
+    return value.check(evidence, ctx=ctx)
+
+
+@participating
+def load_frozen(evidence, *, ctx):
+    evidence = Path(evidence)
+    schema.absolute(str(evidence), ctx=ctx)
+    ctx.require(str(evidence) not in ctx._authorities, 'original authority already loaded; pass the validated instance explicitly')
+    frozen_reference = read_file(evidence/'final-freeze.json', ctx=ctx, role='record', retain=True)
+    value = decode_json(frozen_reference.pop('data'), ctx=ctx)
+    ctx.require(type(value) is dict and set(value) == {'schemaVersion', 'stable', 'stableSha256', 'creationObservation'}
+                and type(value['schemaVersion']) is int and value['schemaVersion'] == 1, 'invalid freeze envelope')
+    validate_stable(value['stable'], ctx=ctx)
+    ctx.require(canonical_digest(value['stable'], ctx=ctx) == value['stableSha256'], 'stable projection digest mismatch')
+    references = [(frozen_reference, 'record')]
+    validate_observation(value['creationObservation'], value['stableSha256'], evidence, ctx=ctx,
+                         stable=value['stable'], references=references)
+    # Every distinct original is read/decoded once here. The freeze's embedded
+    # records must equal their original bytes, not merely cite a genuine file.
+    original_records = {}
+    def original(reference):
+        prior = original_records.get(reference['path'])
+        if prior is not None:
+            ctx.require(prior[0] == reference, 'different references to same original')
+            return prior[1]
+        bound = read_file(reference['path'], ctx=ctx, role='record', retain=True)
+        data = bound.pop('data')
+        ctx.require(bound == reference, 'original acceptance reference changed')
+        references.append((bound, 'record'))
+        original_records[reference['path']] = (bound, data)
+        return data
+    for key in ('implementationAcceptance', 'verifierAcceptance', 'discoveryAcceptance'):
+        accepted = value['stable'][key]
+        ctx.require(decode_json(original(accepted['file']), ctx=ctx) == accepted['record'], 'embedded original acceptance differs')
+        for reference in accepted['references'].values():
+            original(reference)
+    stable = value['stable']
+    config = stable['configuration']['record']
+    bootstrap = stable['wheelBootstrap']
+    ctx.require(decode_json(original(bootstrap['file']), ctx=ctx) == bootstrap['record'],
+                'embedded bootstrap differs from original independently bound record')
+    from owned_outputs import bootstrap_recheck
+    bootstrap_recheck(bootstrap['record'], config, ctx=ctx)
+    boot = bootstrap['record']
+    references += [(boot['venvSource'], 'source'), (boot['pip'], 'tool'), (boot['python']['file'], 'tool')]
+    references += [(reference, 'source') for reference in boot['templates'].values()]
+    for root, reference in stable['discoveryAcceptance']['references'].items():
+        snapshot = decode_json(original(reference), ctx=ctx)
+        expected = {key: stable[key] for key in ('head', 'branch', 'files')} if root == config['source'] else stable['preservedUser']
+        ctx.require({key: snapshot[key] for key in ('head', 'branch', 'files')} == expected,
+                    'frozen source differs from independently reviewed original snapshot')
+    for reference in (stable['ownerBindings']['workspace'], stable['ownerBindings']['tmpOwner']):
+        original(reference)
+    references.append((stable['userInstructions'], 'source'))
+    for name in sorted(HELPERS | STATIC_RECORDS):
+        role = 'source' if name in HELPERS else 'record'
+        reference = read_file(evidence/name, ctx=ctx, role=role)
+        ctx.require({'sha256': reference['sha256'], 'mode': reference['identity']['mode']} ==
+                    value['stable']['verificationHelpers'][name], 'original accepted helper changed')
+        references.append((reference, role))
+    authority = FrozenAuthority(ctx, str(evidence), value, references)
+    ctx._authorities[str(evidence)] = authority
+    authority.recheck(ctx=ctx)
+    return authority
+
+
+@participating
+def check_frozen(evidence, *, ctx, observations=None, frozen=None, checked_observations=None):
+    saved = load_frozen(evidence, ctx=ctx) if frozen is None else require_authority(frozen, evidence, ctx=ctx)
+    # A newly changed executable/configuration must not be executed first and
+    # rejected only by end-of-collection equality. This is a descriptor-only
+    # check of already accepted inputs, sharing (not renewing) the same quota.
+    stable = saved['stable']
+    from owned_outputs import bootstrap_recheck
+    bootstrap_recheck(stable['wheelBootstrap']['record'], stable['configuration']['record'], ctx=ctx)
+    ctx.require(read_file(Path(evidence)/'CONFIG.json', ctx=ctx, role='record') == stable['configuration']['file'], 'frozen configuration changed before native work')
+    for tool in stable['tools']['executables'].values():
+        ctx.require(executable(tool['path'], ctx=ctx) == tool, 'frozen tool changed before native execution')
+    before_observations = len(ctx.observations)
+    current = collect(evidence, ctx=ctx, frozen=saved)
+    ctx.require(len(ctx.observations) == before_observations+1 and current['observation'] == ctx.observations[-1], 'fresh observation not produced by current action')
+    ctx.require(current['observation'] != saved['creationObservation'], 'old observation substituted for fresh collection')
+    current_hash = current['stableSha256']
+    references = []
+    checked = validate_observation(current['observation'], current_hash, evidence, ctx=ctx, stable=current['stable'],
+                         expected_nonce=Path(ctx.observations[-1]['path']).stem.removeprefix('native-observation-'), references=references)
+    ctx.require(checked['contextNonce'] == ctx.nonce, 'fresh observation not from current active context')
+    for reference, role in references:
+        saved.bind(reference, ctx=ctx, role=role)
+    ctx.require(saved['stable'] == current['stable'], 'frozen source/reviews/owners/helpers/effective tools changed; no retry/adoption')
+    if observations is not None:
+        observations.append(current['observation'])
+    if checked_observations is not None:
+        checked_observations.append((current['observation'], checked))
+    saved.recheck(ctx=ctx)
+    ctx.check()
+    return saved['stable']

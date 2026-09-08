@@ -1,0 +1,678 @@
+"""Finite VPG01-08 additions; preparation only, never product/Store execution.
+
+Requires a separately reviewed prepared helper copy. Real source/authority/native
+producer/consumer paths remain intact. Setup, synthetic routes and the one named
+fault are explicit; no successful collection, completion or removal is stubbed.
+"""
+from pathlib import Path
+from contextlib import contextmanager
+import copy
+import hashlib
+import importlib.util
+import json
+import os
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import time
+from unittest.mock import patch
+
+assert len(sys.argv) == 2, 'usage: vpg-proofs-r4.py PREPARED_HELPERS'
+HERE = Path(__file__).absolute().parent
+HELPERS = Path(sys.argv[1]).absolute()
+assert HELPERS.resolve() == HELPERS and HELPERS.is_dir()
+import stat
+
+def helper_namespace(root, *, ctx=None):
+    """Metadata-only admission before sibling imports; never open cache bytes.
+
+    The initial script/stdlib are runner TCB. This closes incidental helper
+    import candidates, not arbitrary same-user/whole-host interference.
+    """
+    def check(value=True, message='helper namespace'):
+        if ctx is not None:
+            ctx.require(value, message)
+        elif not value:
+            raise RuntimeError(message)
+    root = Path(root)
+    check(root.is_absolute() and str(root) == os.path.normpath(root) and len(root.parts) <= 64,
+          'noncanonical helper import root')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open('/', flags)
+    try:
+        for part in root.parts[1:]:
+            check()
+            new = os.open(part, flags, dir_fd=fd)
+            old, fd = fd, new
+            os.close(old)
+        original = os.fstat(fd)
+        check(original.st_uid == os.getuid() and not original.st_mode & 0o022,
+              'foreign/writable helper namespace')
+        known = set(['action_io.py', 'bindings.py', 'cleanup-build.py', 'cleanup-wheel.py', 'evidence_schemas.py', 'freeze.py', 'frozen_diff.py', 'gate_list.py', 'git_readonly.py', 'native_reader.py', 'observe-owned-workers.py', 'owned_outputs.py', 'prepare-build.py', 'probe-jdk21-signing.py', 'process_gate.py', 'result_protocols.py', 'run-once.sh', 'source_inventory.py', 'verify-all.py', 'verify-frozen-diff.py', 'verify-pins.py', 'verify-process-gate.py', 'verify-result-protocols.py', 'wheel-smoke.sh'])
+        found, count = set(), 0
+        with os.scandir(fd) as iterator:
+            while True:
+                # Reserve the enumeration operation before advancing; even an
+                # EOF probe consumes this finite namespace-admission budget.
+                check(count < 4096, 'helper namespace enumeration cap')
+                count += 1
+                if ctx is not None:
+                    ctx.charge('visited', 1)
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    break
+                name = item.name
+                check(len(os.fsencode(name)) <= 255, 'helper namespace component cap')
+                before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                check(name != '__pycache__' and not name.endswith(('.pyc', '.pyo', '.pyd', '.so', '.pth')),
+                      'unapproved helper bytecode/startup/cache name; payload not read')
+                if name in known:
+                    check(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+                          and before.st_uid == os.getuid() and not before.st_mode & 0o022,
+                          'helper replaced, symlinked, hardlinked or writable')
+                    found.add(name)
+                else:
+                    check(not name.endswith(('.py', '.sh')), 'unknown helper/import source name')
+                    if (stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode)) and name.isidentifier():
+                        check(name == 'wheels' and stat.S_ISDIR(before.st_mode)
+                              and before.st_uid == os.getuid() and stat.S_IMODE(before.st_mode) == 0o700,
+                              'unapproved helper import directory; contents not read')
+                        child = os.open(name, flags, dir_fd=fd)
+                        try:
+                            check(os.fstat(child) == before, 'wheel-data directory replaced')
+                            names = []
+                            with os.scandir(child) as entries:
+                                for entry in entries:
+                                    check(not names, 'unknown wheel-data sibling; payload not read')
+                                    names.append(entry.name)
+                                    check(entry.name == 'mobile_release_kit-0.3.0-py3-none-any.whl',
+                                          'unexpected wheel-data name; payload not read')
+                                    row = os.stat(entry.name, dir_fd=child, follow_symlinks=False)
+                                    check(stat.S_ISREG(row.st_mode) and row.st_nlink == 1 and row.st_uid == os.getuid(),
+                                          'untrusted wheel-data type; payload not read')
+                        finally:
+                            os.close(child)
+                check(os.stat(name, dir_fd=fd, follow_symlinks=False) == before, 'helper namespace entry changed')
+        check(found == known, 'missing reviewed helper')
+        current = os.fstat(fd)
+        check((current.st_dev, current.st_ino, current.st_uid, current.st_mode, current.st_mtime_ns, current.st_ctime_ns) ==
+              (original.st_dev, original.st_ino, original.st_uid, original.st_mode, original.st_mtime_ns, original.st_ctime_ns),
+              'helper namespace changed during admission')
+    finally:
+        os.close(fd)
+
+helper_namespace(HELPERS)
+sys.path.insert(0, str(HELPERS))
+import action_io as initial_io
+import process_gate as initial_pg
+with initial_io.action('source-only-initial-proof-loader') as initial_ctx:
+    initial_reference = initial_io.read_file(HELPERS/'verify-frozen-diff.py', ctx=initial_ctx, role='source')
+    p = initial_pg.source_module(HELPERS/'verify-frozen-diff.py', initial_reference, ctx=initial_ctx)
+suite = p.Proofs(HELPERS)
+
+DISCOVERY_CASES = ('tracked-nested-positive', 'approved-self-excluded-positive', 'two-distinct-mirrors',
+                   'unapproved-self-hiding', 'unapproved-refreeze', 'approved-control-drift', 'approved-control-mode',
+                   'approved-control-inode', 'late-ignored-file', 'late-directory', 'late-delete', 'late-mode',
+                   'late-inode', 'control-swap-after-read', 'leaf-symlink', 'private-symlink')
+DRIFT_CASES = ('source-bytes', 'source-mode', 'source-name', 'source-control', 'raw-head', 'raw-ref', 'raw-index',
+               'raw-locator', 'user-bytes', 'user-mode', 'agents', 'tool-bytes', 'tool-identity', 'tool-version',
+               'helper', 'configuration', 'policy', 'owner', 'owner-record', 'acceptance', 'acceptance-report',
+               'acceptance-snapshot', 'discovery-record', 'discovery-snapshot', 'venv-config')
+AUTHORITY_CASES = ('same-action-immutable', 'closed-success', 'wrong-context', 'wrong-root', 'dictionary',
+                   'lookalike', 'duplicate-load', 'changed-backing-reference', 'restoration-failure')
+OBSERVATION_CASES = ('original-missing', 'original-corrupt', 'original-copied', 'original-wrong-scope',
+                     'fresh-missing', 'fresh-corrupt', 'fresh-old', 'fresh-copied', 'fresh-failed',
+                     'fresh-unknown-native', 'fresh-unclean-view', 'fresh-context', 'fresh-stable-rebound')
+FINALIZER_CASES = ('selector-close', 'pipe-close', 'query-selector-close', 'query-pipe-close',
+                   'primary-plus-secondary', 'diagnostics-exhausted')
+PREPARE_CASES = ('root-mkdir-before', 'root-mkdir-after', 'owner-write-before', 'owner-write-after',
+                 'object-write-before', 'object-write-after', 'object-readback', 'anchor-write-before',
+                 'anchor-write-after', 'prep-write-before', 'prep-write-after', 'seal-write-before',
+                 'seal-write-after', 'owner-fsync', 'object-fsync', 'prep-fsync', 'seal-fsync',
+                 'post-diff-cancel', 'restoration-fault', 'restoration-cancel', 'collision-owner',
+                 'collision-seal', 'collision-prep', 'collision-anchor', 'collision-root',
+                 'collision-failure', 'collision-cleanup', 'collision-partial-prefix')
+PREPARE_CASES += ('collection-write-before', 'collection-write-after', 'collection-fsync', 'anchor-fsync',
+                  'root-dir-fsync-before', 'root-dir-fsync-after',
+                  'source-view-owner-before', 'source-view-owner-after', 'user-view-owner-before', 'user-view-owner-after')
+PREPARE_CASES += tuple(target+'-fsync-after' for target in ('owner', 'object', 'anchor', 'collection', 'prep', 'seal'))
+PREPARE_CASES += tuple(target+'-dir-fsync-'+side for target in ('owner', 'object', 'anchor', 'collection', 'prep', 'seal')
+                       for side in ('before', 'after'))
+PREPARE_CASES += tuple(target+'-readback-'+side for target in ('owner', 'anchor', 'collection', 'prep', 'seal')
+                       for side in ('before', 'after'))
+PREPARE_CASES += ('object-readback-before',)
+CLEANUP_CASES = ('cleanup-partial-failure', 'cleanup-partial-cancel', 'cleanup-partial-substitution')
+
+
+def append_fixture(path, data):
+    with path.open('ab') as stream:
+        stream.write(data)
+
+
+def change_fixture_mode(path):
+    before = stat.S_IMODE(path.stat().st_mode)
+    path.chmod(before ^ stat.S_IRGRP)
+    assert stat.S_IMODE(path.stat().st_mode) != before
+
+
+def rebind_fixture_static(evidence):
+    with p.io.action('explicit-new-synthetic-static-binding') as ctx:
+        approval = p.io.read_json(evidence/'ACCEPTED-VERIFIER.json', ctx=ctx)
+        approval['helpers'] = p.bindings.helper_snapshot(evidence, ctx=ctx)
+        (evidence/'ACCEPTED-VERIFIER.json').unlink()
+        p.io.write_new(evidence/'ACCEPTED-VERIFIER.json', approval, ctx=ctx)
+
+
+def approve_extra_control(evidence, config, name, body):
+    root = Path(config['source'])
+    path = root/name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(body)
+    value = json.loads((evidence/'DISCOVERY-ACCEPTANCE.json').read_text())
+    approved = value['roots'][str(root)]
+    approved['structuralDirectories'] = sorted(set(approved['structuralDirectories']) |
+                                               {str(parent) for parent in Path(name).parents if str(parent) != '.'})
+    approved['additionalControls'][name] = {'bytes': len(body), 'sha256': hashlib.sha256(body).hexdigest(),
+                                          'mode': stat.S_IMODE(path.stat().st_mode), 'tracked': False}
+    (evidence/'DISCOVERY-ACCEPTANCE.json').write_text(json.dumps(value, sort_keys=True, indent=2)+'\n')
+    rebind_fixture_static(evidence)
+
+
+@contextmanager
+def forbid_payloads(forbidden, native_commands):
+    """Observe real descriptor opens and native argv; do not stub their results."""
+    forbidden = {Path(path) for path in forbidden}
+    opened, handles = [], {}
+    real_open, real_close, real_dup, real_popen = os.open, os.close, os.dup, subprocess.Popen
+    def opening(path, flags, *args, **kwargs):
+        value = Path(path)
+        actual = value if value.is_absolute() else handles.get(kwargs.get('dir_fd'), Path.cwd())/value
+        assert actual not in forbidden, 'forbidden ordinary/private/outside payload was opened: '+str(actual)
+        fd = real_open(path, flags, *args, **kwargs)
+        handles[fd] = actual
+        opened.append(str(actual))
+        return fd
+    def closing(fd):
+        try:
+            return real_close(fd)
+        finally:
+            handles.pop(fd, None)
+    def duplicate(fd):
+        new = real_dup(fd)
+        if fd in handles:
+            handles[new] = handles[fd]
+        return new
+    def launch(command, *args, **kwargs):
+        native_commands.append(list(command))
+        if 'ls-files' in command:
+            worktrees = [arg.split('=', 1)[1] for arg in command if arg.startswith('--work-tree=')]
+            stores = [arg.split('=', 1)[1] for arg in command if arg.startswith('--git-dir=')]
+            assert len(worktrees) == len(stores) == 1 and Path(worktrees[0]) == Path(stores[0])/'worktree'
+            assert Path(stores[0]).name.startswith('metadata-'), 'real source/native storage reached name selection'
+        return real_popen(command, *args, **kwargs)
+    with patch.object(os, 'open', opening), patch.object(os, 'close', closing), patch.object(os, 'dup', duplicate), patch.object(subprocess, 'Popen', launch):
+        yield opened
+    assert not handles, 'opened test descriptors were not actually closed'
+
+
+def reject_action(name, operation, *, expected=None):
+    before = len(suite.children)
+    try:
+        with p.io.action(name) as ctx:
+            operation(ctx)
+    except (p.io.ActionFailure, FileNotFoundError, UnicodeError, json.JSONDecodeError) as error:
+        assert ctx.first_error is not None and ctx.state == 'closed'
+        if expected is not None:
+            assert expected in str(error), (expected, str(error))
+        return {'type': type(error).__name__, 'message': str(error), 'action': p.summary_only(ctx),
+                'actualNewChildren': len(suite.children)-before}
+    raise AssertionError('actual consumer accepted '+name)
+
+
+def discovery_case(area, variant):
+    if variant == 'two-distinct-mirrors':
+        result = suite.collection(area)
+        records = [json.loads(Path(row['path']).read_text()) for row in result['receipts']]
+        mirrors = [record['action']['views'][0]['mirror'] for record in records]
+        assert len({row['nonce'] for row in mirrors}) == 4 and len({row['path'] for row in mirrors}) == 4
+        result['genuinelyDistinctMirrors'] = mirrors
+        return result
+    contents = {'alpha.txt': b'clean base\n', 'nested/file.txt': b'nested\n',
+                '.gitignore': b'.mobile-release/\nAGENTS.md\n*.ignored\n'}
+    if variant == 'tracked-nested-positive':
+        contents['nested/.gitignore'] = b'*.ignored\n'
+    evidence, config, _ = suite.full_fixture(area, contents=contents)
+    root = Path(config['source'])
+    if variant.startswith('approved-'):
+        approve_extra_control(evidence, config, 'nested/.gitignore', b'.gitignore\n*.ignored\n')
+    forbidden, commands = [], []
+    if variant in {'unapproved-self-hiding', 'unapproved-refreeze'}:
+        control = root/'nested/.gitignore'
+        hidden = root/'nested/unreviewed.py'
+        control.write_bytes(b'*\n')
+        hidden.write_bytes(b'NEVER READ; UNAPPROVED EXECUTABLE\n')
+        forbidden = [control, hidden]
+        with forbid_payloads(forbidden, commands):
+            denied = reject_action('unapproved-initial-discovery', lambda ctx: p.bindings.collect(evidence, ctx=ctx))
+        assert not commands and not (evidence/'final-freeze.json').exists()
+        if variant == 'unapproved-refreeze':
+            with forbid_payloads(forbidden, commands):
+                again = reject_action('unapproved-refreeze-denied', lambda ctx: p.bindings.collect(evidence, ctx=ctx))
+            assert not commands
+            denied['newActionStillDenied'] = again
+        return {'denied': denied, 'forbiddenPayloadOpens': 0, 'nativeCommands': commands}
+    stable = suite.freeze_fixture(evidence)
+    if variant in {'tracked-nested-positive', 'approved-self-excluded-positive'}:
+        with forbid_payloads([], commands):
+            with p.io.action('actual-control-positive') as ctx:
+                assert p.bindings.check_frozen(evidence, ctx=ctx) == stable
+        tracked = stable['sourceUniverse']['controls']['nested/.gitignore']['tracked']
+        assert tracked == (variant == 'tracked-nested-positive')
+        assert any('ls-files' in command for command in commands)
+        return {'controlTracked': tracked, 'nativeOnlyOwnedMirrors': commands, 'stableUnchanged': True}
+    if variant == 'approved-control-drift':
+        (root/'nested/.gitignore').write_bytes(b'.gitignore\n*.different\n')
+    elif variant == 'approved-control-mode':
+        change_fixture_mode(root/'nested/.gitignore')
+    elif variant == 'approved-control-inode':
+        path = root/'nested/.gitignore'; old = path.read_bytes()
+        path.rename(area/'retained-control'); path.write_bytes(old)
+    elif variant == 'leaf-symlink':
+        canary = area/'outside-source-canary'; canary.write_bytes(b'NEVER OPEN OUTSIDE CANARY\n')
+        (root/'alpha.txt').unlink(); (root/'alpha.txt').symlink_to(canary)
+        forbidden = [canary]
+    elif variant == 'private-symlink':
+        canary = area/'private-canary'; canary.mkdir(); (canary/'secret.p12').write_bytes(b'FICTIONAL NEVER READ\n')
+        (root/'.bundle').symlink_to(canary, target_is_directory=True)
+        forbidden = [canary, canary/'secret.p12']
+    real_tools, real_discover = p.bindings.tool_bindings, p.discovery.discover
+    hit = []
+    def late_tools(*args, **kwargs):
+        result = real_tools(*args, **kwargs)
+        if not hit:
+            hit.append(variant)
+            if variant == 'late-ignored-file':
+                target = root/'new.ignored'; target.write_bytes(b'NEVER READ IGNORED ORDINARY PAYLOAD\n'); forbidden.append(target)
+            elif variant == 'late-directory':
+                (root/'new.ignored').mkdir()
+            elif variant == 'late-delete':
+                (root/'alpha.txt').unlink()
+            elif variant == 'late-mode':
+                change_fixture_mode(root/'alpha.txt')
+            elif variant == 'late-inode':
+                path = root/'alpha.txt'; body = path.read_bytes(); path.rename(area/'retained-alpha'); path.write_bytes(body)
+        return result
+    canary = area/'outside-ignore-canary'
+    if variant == 'control-swap-after-read':
+        canary.write_bytes(b'NEVER OPEN CHANGED CONTROL TARGET\n'); forbidden.append(canary)
+    def late_control(*args, **kwargs):
+        result = real_discover(*args, **kwargs)
+        if not hit and Path(args[0]) == root:
+            hit.append(variant)
+            path = root/'.gitignore'; path.rename(area/'retained-root-control'); path.symlink_to(canary)
+        return result
+    scope = patch.object(p.bindings, 'tool_bindings', late_tools) if variant.startswith('late-') else \
+            patch.object(p.discovery, 'discover', late_control) if variant == 'control-swap-after-read' else \
+            patch.object(p.bindings, 'tool_bindings', real_tools)
+    # Add the exact late target before the spy snapshots its denied set.
+    if variant == 'late-ignored-file':
+        forbidden.append(root/'new.ignored')
+    with scope, forbid_payloads(forbidden, commands):
+        denied = reject_action('actual-discovery-drift-'+variant, lambda ctx: p.bindings.check_frozen(evidence, ctx=ctx))
+    if variant.startswith('late-') or variant == 'control-swap-after-read':
+        assert hit == [variant], 'late mutation never reached'
+    return {'denied': denied, 'forbiddenPayloadOpens': 0, 'nativeOnlyOwnedMirrors': commands, 'retainedFixture': str(evidence)}
+
+
+def drift(area, variant):
+    evidence, config, _ = suite.full_fixture(area)
+    root, user = Path(config['source']), Path(config['rootUserWorktree'])
+    tool, marker = area/'fixture-tools/cat', area/'fixture-gh-version'
+    if variant.startswith('tool-'):
+        tool.parent.mkdir()
+        shutil.copyfile('/bin/cat', tool); tool.chmod(0o755)
+        marker.write_text('gh version 99.0.0\n')
+        gh = tool.parent/'gh'
+        gh.write_text('#!/bin/sh\nexec /bin/cat '+repr(str(marker))+'\n'); gh.chmod(0o755)
+        config['path'] = str(tool.parent)+':'+config['path']
+        (evidence/'CONFIG.json').write_text(json.dumps(config, sort_keys=True, indent=2)+'\n')
+        rebind_fixture_static(evidence)
+    stable = suite.freeze_fixture(evidence)
+    mutations = {
+        'source-bytes': lambda: (root/'alpha.txt').write_bytes(b'changed accepted source\n'),
+        'source-mode': lambda: change_fixture_mode(root/'alpha.txt'),
+        'source-name': lambda: (root/'new.txt').write_bytes(b'NEVER READ UNAPPROVED\n'),
+        'source-control': lambda: (root/'.gitignore').write_bytes(b'*\n'),
+        'raw-head': lambda: (root/'.git/HEAD').write_bytes(b'ref: refs/heads/other\n'),
+        'raw-ref': lambda: (root/'.git/refs/heads/fixture').write_bytes(b'0'*40+b'\n'),
+        'raw-index': lambda: (root/'.git/index').write_bytes(b'invalid index'),
+        'user-bytes': lambda: (user/'alpha.txt').write_bytes(b'changed preserved source\n'),
+        'user-mode': lambda: change_fixture_mode(user/'alpha.txt'),
+        'agents': lambda: (user/'AGENTS.md').write_bytes(b'changed fictional instructions\n'),
+        'tool-bytes': lambda: append_fixture(tool, b'changed tool, never execute'),
+        'tool-version': lambda: marker.write_text('gh version 99.1.0\n'),
+        'helper': lambda: append_fixture(evidence/'result_protocols.py', b'\n# unreviewed fixture helper\n'),
+        'configuration': lambda: append_fixture(evidence/'CONFIG.json', b'\n'),
+        'owner-record': lambda: append_fixture(evidence/'FINAL-TMP-OWNER.json', b'\n'),
+        'acceptance': lambda: append_fixture(evidence/'ACCEPTED-IMPLEMENTATION.json', b'\n'),
+        'acceptance-report': lambda: append_fixture(evidence.parent/'implementation-review.md', b'changed\n'),
+        'acceptance-snapshot': lambda: append_fixture(evidence.parent/'implementation-snapshot.json', b'\n'),
+        'discovery-record': lambda: append_fixture(evidence/'DISCOVERY-ACCEPTANCE.json', b'\n'),
+        'discovery-snapshot': lambda: append_fixture(user/'.mobile-release/remediation/QA-003-final-r4/final-freeze.json', b'\n'),
+        'venv-config': lambda: append_fixture(Path(config['owner'])/'venv/pyvenv.cfg', b'\n'),
+    }
+    if variant == 'raw-locator':
+        (root/'.git').rename(root/'retained-git-storage')
+        (root/'.git').write_text('gitdir: retained-git-storage\n')
+    elif variant == 'tool-identity':
+        tool.rename(tool.parent/'retained-cat')
+        shutil.copyfile(tool.parent/'retained-cat', tool); tool.chmod(0o755)
+    elif variant == 'owner':
+        tmp = Path(config['tmp']); tmp.rename(tmp.parent/'retained-tmp'); tmp.mkdir(mode=0o700)
+    elif variant != 'policy':
+        mutations[variant]()
+    commands = []
+    scope = patch.dict(p.git.GIT_POLICY, {'schemaVersion': True}) if variant == 'policy' else patch.dict(p.git.GIT_POLICY, {})
+    with scope, forbid_payloads([root/'new.txt'] if variant == 'source-name' else [], commands):
+        result = reject_action('actual-full-stable-drift-'+variant, lambda ctx: p.bindings.check_frozen(evidence, ctx=ctx))
+    if variant in {'tool-bytes', 'tool-identity', 'helper', 'configuration', 'policy', 'acceptance', 'acceptance-report',
+                   'acceptance-snapshot', 'discovery-record', 'discovery-snapshot'}:
+        assert not commands, 'changed executable/authority was used before denial'
+    return {'actualCheckFrozen': result, 'retainedFixture': str(evidence), 'actualCommandsAfterDrift': commands,
+            'approvedBaselineTree': stable['proposedTree']}
+
+
+def authority(area, variant):
+    evidence, config, _ = suite.full_fixture(area)
+    suite.freeze_fixture(evidence)
+    result = None
+    ctx = None
+    def operation(active):
+        nonlocal result
+        loaded = p.bindings.load_frozen(evidence, ctx=active)
+        original = loaded['stable']
+        if variant == 'same-action-immutable':
+            exported = loaded['stable']; exported['files']['alpha.txt']['sha256'] = '0'*64
+            assert loaded['stable'] == original
+            tokens = active.counts.get('jsonTokens', 0)
+            assert p.bindings.require_authority(loaded, evidence, ctx=active) is loaded
+            loaded.recheck(ctx=active)
+            assert active.counts.get('jsonTokens', 0) == tokens, 'same validated authority redundantly decoded'
+            assert p.bindings.check_frozen(evidence, ctx=active, frozen=loaded) == original
+            result = {'sameActionAccepted': True, 'defensiveExports': True, 'noDuplicateDecodeForReuse': True,
+                      'actualFreshCollectionStillRequired': True, 'counts': active.counts}
+        elif variant == 'wrong-context':
+            rejected = reject_action('wrong-second-context', lambda other: p.bindings.require_authority(loaded, evidence, ctx=other))
+            assert active.failure is None
+            loaded.recheck(ctx=active)
+            result = {'wrongContextDenied': rejected, 'originalContextStillValid': True}
+        elif variant == 'wrong-root':
+            p.bindings.require_authority(loaded, evidence.parent/'wrong-root', ctx=active)
+        elif variant == 'dictionary':
+            p.bindings.require_authority(dict(loaded), evidence, ctx=active)
+        elif variant == 'lookalike':
+            forged = p.bindings.FrozenAuthority(active, str(evidence), dict(loaded), [])
+            p.bindings.require_authority(forged, evidence, ctx=active)
+        elif variant == 'duplicate-load':
+            p.bindings.load_frozen(evidence, ctx=active)
+        elif variant == 'changed-backing-reference':
+            (evidence.parent/'implementation-review.md').write_bytes(b'changed bound review\n')
+            loaded.recheck(ctx=active)
+        else:
+            result = loaded
+    if variant in {'same-action-immutable', 'wrong-context', 'closed-success', 'restoration-failure'}:
+        real_signal = signal.signal
+        restored = []
+        def restoring(number, handler):
+            value = real_signal(number, handler)
+            if not isinstance(handler, p.pg.Interrupted):
+                restored.append(number)
+                if len(restored) == 1 and variant == 'restoration-failure':
+                    raise OSError('named action restoration fault after actual restore')
+            return value
+        try:
+            with patch.object(signal, 'signal', restoring):
+                with p.io.action('genuine-authority-'+variant) as ctx:
+                    operation(ctx)
+        except OSError:
+            assert variant == 'restoration-failure' and len(restored) == 2 and ctx.failure is not None
+        if variant in {'closed-success', 'restoration-failure'}:
+            assert ctx.state == 'closed' and time.monotonic() < ctx.cutoff
+            assert not ctx._authorities
+            try:
+                result.recheck(ctx=ctx)
+            except p.io.ActionFailure:
+                pass
+            else:
+                raise AssertionError('closed authority revived before cutoff')
+            return {'closedBeforeOriginalCutoff': True, 'ordinaryReuseDenied': True, 'restoredHandlers': restored}
+        return result
+    return reject_action('genuine-authority-denial-'+variant, operation)
+
+
+def observation(area, variant):
+    evidence, config, _ = suite.full_fixture(area)
+    suite.freeze_fixture(evidence)
+    freeze = json.loads((evidence/'final-freeze.json').read_text())
+    original = freeze['creationObservation']
+    if variant.startswith('original-'):
+        path = Path(original['path'])
+        if variant == 'original-missing':
+            path.unlink()
+        elif variant == 'original-corrupt':
+            path.write_bytes(b'{')
+        else:
+            destination = area/'outside-observation.json' if variant == 'original-wrong-scope' else evidence/('native-observation-'+'f'*48+'.json')
+            destination.write_bytes(path.read_bytes()); destination.chmod(0o600)
+            path = destination
+        if variant != 'original-missing':
+            with p.io.action('rebind-new-invalid-original') as ctx:
+                freeze['creationObservation'] = p.io.read_file(path, ctx=ctx, role='record')
+            (evidence/'final-freeze.json').write_text(json.dumps(freeze, sort_keys=True, indent=2)+'\n')
+        result = reject_action('actual-original-rejection-'+variant, lambda ctx: p.bindings.check_frozen(evidence, ctx=ctx))
+        assert result['actualNewChildren'] == 0
+        return result
+    real_collect = p.bindings.collect
+    produced = []
+    def actual_then_named_fault(*args, **kwargs):
+        current = real_collect(*args, **kwargs)
+        active = kwargs['ctx']
+        produced.append(current['observation'])
+        path = Path(current['observation']['path'])
+        record = json.loads(path.read_text())
+        if variant == 'fresh-old':
+            current['observation'] = original
+            return current
+        if variant == 'fresh-missing':
+            path.unlink()
+            return current
+        if variant == 'fresh-copied':
+            new = evidence/('native-observation-'+'e'*48+'.json')
+            new.write_bytes(path.read_bytes()); new.chmod(0o600); path = new
+        elif variant == 'fresh-corrupt':
+            path.write_bytes(b'{')
+        else:
+            if variant == 'fresh-failed': record['status'] = 'FAIL'
+            elif variant == 'fresh-unknown-native': record['action']['native'][0]['ownership'] = 'unknown'
+            elif variant == 'fresh-unclean-view': record['action']['views'][0]['removed'] = False
+            elif variant == 'fresh-context': record['contextNonce'] = '0'*48
+            elif variant == 'fresh-stable-rebound':
+                current['stable']['sourcePhysical']['alpha.txt']['sha256'] = '0'*64
+                current['stable']['files']['alpha.txt']['sha256'] = '0'*64
+                current['stableSha256'] = p.io.canonical_digest(current['stable'], ctx=active)
+                record['stableSha256'] = current['stableSha256']
+            else: raise AssertionError(variant)
+            path.write_text(json.dumps(record, sort_keys=True, indent=2)+'\n')
+        reference = p.io.read_file(path, ctx=active, role='record')
+        current['observation'] = reference
+        active.observations[-1] = reference
+        return current
+    with patch.object(p.bindings, 'collect', actual_then_named_fault):
+        result = reject_action('actual-fresh-rejection-'+variant, lambda ctx: p.bindings.check_frozen(evidence, ctx=ctx))
+    assert len(produced) == 1 and result['actualNewChildren'] == 21, 'fresh denial did not use an actual complete collection'
+    return {'rejection': result, 'genuineProducedObservationBeforeFault': produced[0], 'fakeCollectPassUsed': False}
+
+
+def finalizer(area, variant):
+    real_selector, real_popen = p.nr.selectors.DefaultSelector, subprocess.Popen
+    acquired, hits = [], []
+    query = variant.startswith('query-')
+    class Stream:
+        def __init__(self, value): self.value = value
+        def __getattr__(self, name): return getattr(self.value, name)
+        def close(self):
+            self.value.close()
+            if not hits:
+                hits.append('pipe-close'); raise OSError('named actual final pipe close')
+    class Child(real_popen):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs); acquired.append(self)
+            if variant in {'pipe-close', 'query-pipe-close'}: self.stdout = Stream(self.stdout)
+    class Selector(real_selector):
+        def close(self):
+            super().close()
+            if variant not in {'pipe-close', 'query-pipe-close'} and not hits:
+                hits.append('selector-close'); raise OSError('named actual final selector close')
+    with p.io.action('owned-denial-canary') as setup:
+        owner = p.io.create_owned(area/'owned', area/'OWNER.json', '0'*40, 'exact synthetic no-delete canary', ctx=setup)
+        p.io.write_bytes_new(area/'owned/data', [b'PRESERVE\n'], ctx=setup, role='source')
+        entries = p.io.inventory(owner, ctx=setup)
+    later = []
+    try:
+        with patch.object(subprocess, 'Popen', Child), patch.object(p.nr.selectors, 'DefaultSelector', Selector):
+            with p.io.action('caught-actual-finalization-'+variant) as ctx:
+                try:
+                    if query:
+                        failed, rows = p.pg.numeric_snapshot(ctx=ctx)
+                        assert rows is None and failed['status'] == 'UNKNOWN'
+                        ctx.check()
+                    else:
+                        code = 'raise SystemExit(7)' if variant == 'primary-plus-secondary' else 'print("actual finalization fixture")'
+                        p.nr.run([suite.python, '-I', '-B', '-u', '-c', code], cwd=area,
+                                 environment={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'}, ctx=ctx)
+                except (p.nr.NativeFailure, p.io.ActionFailure):
+                    pass
+                else:
+                    raise AssertionError('native finalizer fault accepted')
+                assert hits and ctx.first_error is not None and all(child.returncode is not None for child in acquired)
+                first = ctx.first_error
+                if variant == 'primary-plus-secondary':
+                    assert 'nonzero' in str(first) and ctx.secondary_errors
+                before = len(acquired)
+                for name, operation in [('read', lambda: p.io.read_file(area/'owned/data', ctx=ctx)),
+                        ('write', lambda: p.io.write_new(area/'FORBIDDEN.json', {}, ctx=ctx)),
+                        ('native', lambda: p.nr.run([suite.python, '-I', '-B', '-c', 'pass'], cwd=area, environment={}, ctx=ctx)),
+                        ('query', lambda: p.pg.numeric_snapshot(ctx=ctx)),
+                        ('delete', lambda: p.io.delete_inventory(owner, entries, ctx=ctx))]:
+                    try: operation()
+                    except p.io.ActionFailure: later.append(name)
+                    else: raise AssertionError('failed native action permitted '+name)
+                assert len(acquired) == before and ctx.first_error is first
+                if variant == 'diagnostics-exhausted':
+                    ctx.charge('newBytes', p.io.LIMITS['newBytes']-ctx.counts.get('newBytes', 0), failure_only=True)
+                    try: p.io.write_failure(area/'FAILURE.json', ctx=ctx, phase='named-finalizer', error=first)
+                    except p.io.ActionFailure: pass
+                    else: raise AssertionError('diagnostic budget renewed')
+                else:
+                    p.io.write_failure(area/'FAILURE.json', ctx=ctx, phase='named-finalizer', error=first)
+    except p.io.ActionFailure:
+        assert ctx.failure is not None
+    assert all(all(stream is None or stream.closed for stream in (child.stdin, child.stdout, child.stderr)) for child in acquired)
+    assert not (area/'FORBIDDEN.json').exists() and (area/'owned/data').read_bytes() == b'PRESERVE\n'
+    return {'action': p.summary_only(ctx), 'allLaterOperationsDenied': later, 'faultHits': hits,
+            'actualChildren': [{'pid': child.pid, 'exitCode': child.returncode} for child in acquired],
+            'allActualDescriptorsClosed': True, 'firstError': str(ctx.first_error), 'secondaryErrors': ctx.secondary_errors}
+
+
+def lifecycle_fault(area, variant):
+    evidence, config, _ = suite.full_fixture(area)
+    script = area/'named-lifecycle-fault.txt'; script.write_bytes((HERE/'vpg-lifecycle-child.txt').read_bytes())
+    python = [config['python'], '-I', '-B', '-u']
+    cleanup = variant.startswith('cleanup-')
+    prepare = [*python, str(evidence/'frozen_diff.py'), '--prepare'] if cleanup else [*python, str(script), str(evidence), 'prepare', variant]
+    last = [*python, str(script), str(evidence), 'cleanup', variant] if cleanup else [*python, str(evidence/'frozen_diff.py'), '--cleanup']
+    route = [(name, [*python, '-c', 'pass'], 'command') for name in ('fixture-one', 'fixture-two', 'fixture-three')]+[
+        ('prepare-frozen-diff', prepare, 'command'), ('diff-check', [*python, str(evidence/'frozen_diff.py'), '--check'], 'command'),
+        ('cleanup-frozen-diff', last, 'command')]
+    suite.reroute_fixture(evidence, route)
+    frozen = suite.freeze_fixture(evidence)
+    collision = None
+    if variant.startswith('collision-'):
+        name = {'owner': 'FROZEN-DIFF-OWNER.json', 'seal': 'FROZEN-DIFF-SEAL.json', 'prep': 'frozen-diff-preparation-observation.json',
+                'anchor': 'frozen-diff-raw-head.bin', 'failure': 'FROZEN-DIFF-FAILURE.json', 'cleanup': 'FROZEN-DIFF-CLEANUP.json',
+                'partial-prefix': 'frozen-diff-unfinished.json'}.get(variant.removeprefix('collision-'))
+        collision = evidence/name if name else Path(config['owner'])/'final-frozen-diff-r1'
+        if name:
+            collision.write_bytes(b'FOREIGN COLLISION; DO NOT ADOPT\n')
+        else:
+            collision.mkdir(mode=0o700); (collision/'canary').write_bytes(b'FOREIGN COLLISION; DO NOT ADOPT\n')
+    code = suite.controller_fixture(evidence, config, frozen, route)
+    assert code == 1
+    ledger = json.loads((evidence/'final-verification.json').read_text())
+    failed = 5 if cleanup else 3
+    assert all(row['status'] == 'PASS' for row in ledger['gates'][:failed]), 'fault consumer was never reached'
+    assert ledger['gates'][failed]['status'] == 'FAIL' and ledger['gates'][failed]['exitCode'] == 7
+    assert all(row['status'] == 'BLOCKED' for row in ledger['gates'][failed+1:])
+    actual = json.loads((evidence/'VPG-EXPECTED-FAILURE.json').read_text())
+    assert actual['allActualNativeChildrenReaped'] and actual['allActualQueriesReaped'] and actual['allInterceptedDescriptorsClosed']
+    if collision:
+        assert (collision if collision.is_file() else collision/'canary').read_bytes() == b'FOREIGN COLLISION; DO NOT ADOPT\n'
+    return {'actualControllerExit': code, 'actualFailedOperation': actual, 'retainedFixture': str(evidence), 'ledger': ledger}
+
+
+def schemas(area):
+    evidence, config, _ = suite.full_fixture(area)
+    script = area/'full-schema-consumer.txt'; script.write_bytes((HERE/'vpg-schema-child.txt').read_bytes())
+    python = [config['python'], '-I', '-B', '-u']
+    route = [(name, [*python, '-c', 'pass'], 'command') for name in ('fixture-one', 'fixture-two', 'fixture-three')]+[
+        ('prepare-frozen-diff', [*python, str(evidence/'frozen_diff.py'), '--prepare'], 'command'),
+        ('diff-check', [*python, str(script), str(evidence)], 'command'),
+        ('cleanup-frozen-diff', [*python, str(evidence/'frozen_diff.py'), '--cleanup'], 'command')]
+    suite.reroute_fixture(evidence, route)
+    frozen = suite.freeze_fixture(evidence)
+    code = suite.controller_fixture(evidence, config, frozen, route)
+    assert code == 0, 'actual schema consumer/parent/cleanup failed'
+    result = json.loads((evidence/'VPG-FULL-SCHEMA-RESULTS.json').read_text())
+    assert result['counts']['FAIL'] == 0 and result['counts']['PASS'] == 69
+    assert len({row['case'] for row in result['cases']}) == 69
+    return {'actualControllerExit': code, 'actualNestedCases': result, 'fixtureEvidence': str(evidence)}
+
+
+def both_pipes(area, delta):
+    # Alternate finite writes pressure both pipes, rather than filling only one.
+    limits = (p.io.LIMITS['stdout']+delta, p.io.LIMITS['stderr']+delta)
+    code = ('import os\nremaining={1:'+str(limits[0])+',2:'+str(limits[1])+'}\n'
+            'while any(remaining.values()):\n'
+            ' for fd in (1,2):\n'
+            '  if remaining[fd]: remaining[fd]-=os.write(fd,b"x"*min(32768,remaining[fd]))\n')
+    try:
+        with p.io.action('simultaneous-pipe-boundary') as ctx:
+            out, err, row = p.nr.run([suite.python, '-I', '-B', '-u', '-c', code], cwd=area,
+                                    environment={'PATH': '/usr/bin:/bin'}, ctx=ctx, allow_stderr=True)
+            assert delta <= 0 and (len(out), len(err)) == limits
+    except p.nr.NativeFailure as error:
+        assert delta == 1 and error.record['ownership'] == 'reaped'
+        row = error.record
+        assert row['stdoutTruncated'] or row['stderrTruncated']
+    assert row['ownership'] == 'reaped'
+    return {'actualNative': row, 'action': p.summary_only(ctx), 'simultaneousLimits': limits}
+
+
+try:
+    with suite.track():
+        for variant in DISCOVERY_CASES: suite.case('vpg01-'+variant, lambda area, v=variant: discovery_case(area, v))
+        for variant in FINALIZER_CASES: suite.case('vpg02-'+variant, lambda area, v=variant: finalizer(area, v))
+        for variant in DRIFT_CASES: suite.case('vpg03-'+variant, lambda area, v=variant: drift(area, v))
+        for variant in AUTHORITY_CASES: suite.case('pr4-authority-'+variant, lambda area, v=variant: authority(area, v))
+        for variant in OBSERVATION_CASES: suite.case('vpg04-'+variant, lambda area, v=variant: observation(area, v))
+        suite.case('vpg05-complete-rebound-schema-consumers', schemas)
+        for variant in PREPARE_CASES: suite.case('vpg06-'+variant, lambda area, v=variant: lifecycle_fault(area, v))
+        for variant in CLEANUP_CASES: suite.case('vpg07-'+variant, lambda area, v=variant: lifecycle_fault(area, v))
+        for delta in (-1, 0, 1): suite.case('vpg08-both-pipes-'+str(delta).replace('-', 'minus'), lambda area, d=delta: both_pipes(area, d))
+finally:
+    result = suite.finish()
+print(json.dumps({'retainedRoot': result['retainedRoot'], 'counts': result['counts'], 'allDirectChildrenReaped': result['allDirectChildrenReaped']}), flush=True)
+raise SystemExit(int(bool(result['counts']['FAIL'])))

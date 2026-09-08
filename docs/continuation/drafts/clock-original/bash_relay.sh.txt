@@ -1,0 +1,24 @@
+#!/bin/bash
+# Fixed, no-profile Bash exec hop; no command construction or external utilities.
+# Precharged exec-only trampoline: Bash3.2 has NO carried monotonic clock guard.
+# This transition may occur late. The next Ruby capable-entry guard must reject
+# late/cancelled/control-failed work; root cannot accept an unobserved/late entry.
+set -u
+cancelled=0
+trap 'cancelled=1' INT TERM
+if [[ $# != 6 || ! $2 =~ ^[a-f0-9]{32}$ || ( $3 != multi-hop && $3 != no-fence-multi-hop ) ]]; then
+  exit 64
+fi
+if [[ ! $4 =~ ^[0-9]+\.[0-9]+$ || ! $5 =~ ^[0-9]+\.[0-9]+$ || ! $6 =~ ^[0-9]+\.[0-9]+$ ]]; then
+  exit 65
+fi
+if [[ $cancelled != 0 ]]; then
+  exit 66
+fi
+# The Python parent charged both the Bash acquisition exec and this fixed exec
+# before Popen. This frame records the actual second attempted transition.
+printf '{"version":1,"row":"%s","nonce":"%s","actor":"bash","pid":%s,"sequence":1,"work":%s,"disposition":%s,"outer":%s,"kind":"exec","data":{"parent":%s,"bashVersion":"%s","target":"ruby_relay.rb","chargedBy":"python-relay:hop","transition":"precharged-exec-only-trampoline","clockSample":null}}\n' "$3" "$2" "$$" "$4" "$5" "$6" "$PPID" "$BASH_VERSION"
+if [[ $cancelled != 0 ]]; then
+  exit 66
+fi
+exec /opt/homebrew/Cellar/ruby@3.3/3.3.12/bin/ruby --disable-gems /ORIGINAL_REPOSITORY/.mobile-release/remediation/QA-006/sandbox-inheritance-r3-r4/ruby_relay.rb "$1"

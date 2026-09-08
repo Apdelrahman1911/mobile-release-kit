@@ -1,0 +1,242 @@
+"""One dispatch. Child completion precedes evidence bindings; wrapper is final-only."""
+from pathlib import Path
+import sys
+
+EVIDENCE = Path(__file__).absolute().parent
+if EVIDENCE.resolve() != EVIDENCE or Path(__file__).is_symlink() or not sys.flags.safe_path:
+    raise RuntimeError('Use trusted regular helper path with Python -P/-I')
+import os
+import stat
+
+def helper_namespace(root, *, ctx=None):
+    """Metadata-only admission before sibling imports; never open cache bytes.
+
+    The initial script/stdlib are runner TCB. This closes incidental helper
+    import candidates, not arbitrary same-user/whole-host interference.
+    """
+    def check(value=True, message='helper namespace'):
+        if ctx is not None:
+            ctx.require(value, message)
+        elif not value:
+            raise RuntimeError(message)
+    root = Path(root)
+    check(root.is_absolute() and str(root) == os.path.normpath(root) and len(root.parts) <= 64,
+          'noncanonical helper import root')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open('/', flags)
+    try:
+        for part in root.parts[1:]:
+            check()
+            new = os.open(part, flags, dir_fd=fd)
+            old, fd = fd, new
+            os.close(old)
+        original = os.fstat(fd)
+        check(original.st_uid == os.getuid() and not original.st_mode & 0o022,
+              'foreign/writable helper namespace')
+        known = set(['action_io.py', 'bindings.py', 'cleanup-build.py', 'cleanup-wheel.py', 'evidence_schemas.py', 'freeze.py', 'frozen_diff.py', 'gate_list.py', 'git_readonly.py', 'native_reader.py', 'observe-owned-workers.py', 'owned_outputs.py', 'prepare-build.py', 'probe-jdk21-signing.py', 'process_gate.py', 'result_protocols.py', 'run-once.sh', 'source_inventory.py', 'verify-all.py', 'verify-frozen-diff.py', 'verify-pins.py', 'verify-process-gate.py', 'verify-result-protocols.py', 'wheel-smoke.sh'])
+        found, count = set(), 0
+        with os.scandir(fd) as iterator:
+            while True:
+                # Reserve the enumeration operation before advancing; even an
+                # EOF probe consumes this finite namespace-admission budget.
+                check(count < 4096, 'helper namespace enumeration cap')
+                count += 1
+                if ctx is not None:
+                    ctx.charge('visited', 1)
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    break
+                name = item.name
+                check(len(os.fsencode(name)) <= 255, 'helper namespace component cap')
+                before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                check(name != '__pycache__' and not name.endswith(('.pyc', '.pyo', '.pyd', '.so', '.pth')),
+                      'unapproved helper bytecode/startup/cache name; payload not read')
+                if name in known:
+                    check(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+                          and before.st_uid == os.getuid() and not before.st_mode & 0o022,
+                          'helper replaced, symlinked, hardlinked or writable')
+                    found.add(name)
+                else:
+                    check(not name.endswith(('.py', '.sh')), 'unknown helper/import source name')
+                    if (stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode)) and name.isidentifier():
+                        check(name == 'wheels' and stat.S_ISDIR(before.st_mode)
+                              and before.st_uid == os.getuid() and stat.S_IMODE(before.st_mode) == 0o700,
+                              'unapproved helper import directory; contents not read')
+                        child = os.open(name, flags, dir_fd=fd)
+                        try:
+                            check(os.fstat(child) == before, 'wheel-data directory replaced')
+                            names = []
+                            with os.scandir(child) as entries:
+                                for entry in entries:
+                                    check(not names, 'unknown wheel-data sibling; payload not read')
+                                    names.append(entry.name)
+                                    check(entry.name == 'mobile_release_kit-0.3.0-py3-none-any.whl',
+                                          'unexpected wheel-data name; payload not read')
+                                    row = os.stat(entry.name, dir_fd=child, follow_symlinks=False)
+                                    check(stat.S_ISREG(row.st_mode) and row.st_nlink == 1 and row.st_uid == os.getuid(),
+                                          'untrusted wheel-data type; payload not read')
+                        finally:
+                            os.close(child)
+                check(os.stat(name, dir_fd=fd, follow_symlinks=False) == before, 'helper namespace entry changed')
+        check(found == known, 'missing reviewed helper')
+        current = os.fstat(fd)
+        check((current.st_dev, current.st_ino, current.st_uid, current.st_mode, current.st_mtime_ns, current.st_ctime_ns) ==
+              (original.st_dev, original.st_ino, original.st_uid, original.st_mode, original.st_mtime_ns, original.st_ctime_ns),
+              'helper namespace changed during admission')
+    finally:
+        os.close(fd)
+
+helper_namespace(EVIDENCE)
+sys.path.insert(0, str(EVIDENCE))
+from action_io import action, exists, read_file, replace_ledger, require, write_failure
+from bindings import check_frozen, clean_environment, config_load, load_frozen
+from gate_list import commands
+from process_gate import GROUP_SCOPE, cancellation_flag, execute, COMBINED_BYTES, FREE_FLOOR, DISPATCH_HEADROOM
+from result_protocols import inspect_result
+
+
+def save(evidence, ledger, *, ctx):
+    replace_ledger(Path(evidence)/'final-verification.pending', Path(evidence)/'final-verification.json', ledger, ctx=ctx)
+
+
+def note_error(ledger, error, phase):
+    ledger.setdefault('errors', []).append({'type': type(error).__name__, 'phase': phase})
+    ledger['status'] = 'FAIL'
+
+
+def run_gates(evidence, config, frozen, required, *, pending=None):
+    """Only source/acceptance/routing setup can differ in preparation fixtures.
+
+    Real execute/reap, accounting, log/protocol and predecessor consumers stay
+    intact. No global exit file is required before its wrapper actually exits.
+    """
+    if pending is not None:
+        return _run(evidence, config, frozen, required, pending)
+    failed = 1
+    flag = None
+    try:
+        with cancellation_flag() as flag:
+            failed = _run(evidence, config, frozen, required, flag)
+        if flag.signal is not None:
+            return 1
+    except BaseException:
+        return 1
+    return failed
+
+
+def _run(evidence, config, frozen, required, pending):
+    evidence = Path(evidence)
+    ledger = {'candidate': {'commit': frozen['head'], 'tree': frozen['proposedTree'], 'clean': False},
+              'status': 'RUNNING_NOT_ACCEPTED', 'scope': config['scope'], 'ownershipScope': GROUP_SCOPE,
+              'notApplicable': [{'id': 'qa003-local-signing-matrix', 'reason': 'Absent on QA-006 baseline; mandatory separately for pending QA-003, not waived.'},
+                                {'id': 'live-stores-gradle-signing', 'reason': 'No consumer/account/publication authority; synthetic/native gates still required.'}],
+              'externalRequired': [{'id': 'protected-linux-macos-ci', 'status': 'BLOCKED', 'reason': 'Local Xcode26.5 does not prove actual protected Linux/hosted Xcode26.3 CI.'}],
+              'gates': [{'gate': name, 'command': argv, 'protocol': protocol, 'status': 'BLOCKED', 'reason': 'Not dispatched yet'}
+                        for name, argv, protocol in required]}
+    ctx, failed, phase = None, True, 'initial-accounting'
+    try:
+        with action('controller-setup', pending=pending) as ctx:
+            ctx.require(required and len({name for name, _, _ in required}) == len(required), 'empty/duplicate dispatch')
+            ctx.require(not exists(evidence/'final-verification.json', ctx=ctx), 'never restart/adopt final accounting')
+            ledger['freezeReference'] = read_file(evidence/'final-freeze.json', ctx=ctx, role='record')
+            environment = clean_environment(config)
+            save(evidence, ledger, ctx=ctx)
+        for index, (name, argv, protocol) in enumerate(required):
+            phase = 'attempted-gate-save:'+name
+            with action(phase, pending=pending) as ctx:
+                ledger['gates'][index].update(status='RUNNING', reason='Attempt starting; no success claimed')
+                save(evidence, ledger, ctx=ctx)
+            # All declared code/configuration inputs are rechecked before the
+            # actual acquisition, including excluded source bytecode/Bundler
+            # paths and the exact successful producer of owned build metadata.
+            with action('prelaunch-inputs:' + name, pending=pending) as ctx:
+                from owned_outputs import guard_inputs
+                guard_inputs(evidence, ctx=ctx)
+            print(f'RUN {index+1}/{len(required)} {name}: {argv!r}', flush=True)
+            phase = 'execute:'+name
+            log = evidence/('final-'+name+'.log')
+            row = execute(argv, cwd=config['source'], environment=environment, log=log, pending=pending,
+                          combined_limit=COMBINED_BYTES, free_floor=FREE_FLOOR, headroom=DISPATCH_HEADROOM)
+            row.update(gate=name, protocol=protocol, log=log.name)
+            # Preserve actual handle accounting before any later read can fail.
+            ledger['gates'][index] = row
+            phase = 'completed-gate-accounting:'+name
+            with action(phase, pending=pending) as ctx:
+                bound = read_file(log, ctx=ctx, role='log', retain=True)
+                row['logSha256'] = bound['sha256']
+                result = inspect_result(protocol, bound['data'].decode('utf-8', 'replace'), row['exitCode'])
+                row['protocolResult'] = result
+                if result['status'] != 'PASS':
+                    row.update(status='FAIL', reason=result['reason'])
+                for key in ('tests', 'assertions', 'skips'):
+                    if key in result:
+                        row[key] = result[key]
+                ctx.check()
+                if name == 'prepare-frozen-diff' and row['status'] == 'PASS':
+                    from frozen_diff import bind_prepare_completion
+                    # Only now has the actual prepare child returned and been
+                    # reaped. Child seal != this parent's completed PASS row.
+                    row['preparedEvidence'] = bind_prepare_completion(evidence, frozen, ctx=ctx)
+                if name in {'prepare-owned-build', 'editable-install'} and row['status'] == 'PASS':
+                    from owned_outputs import bind_output_completion
+                    row['outputEvidence'] = bind_output_completion(evidence, frozen, dict(row), ctx=ctx)
+                if row['status'] == 'PASS':
+                    from evidence_schemas import completed_gate
+                    completed_gate(row, ctx=ctx)
+                save(evidence, ledger, ctx=ctx)
+            print(f"{row['status']} {name} ({row['seconds']}s; actual exit {row['exitCode']})", flush=True)
+            if row['status'] != 'PASS':
+                raise RuntimeError('actual gate failed; subsequent gates remain blocked')
+        phase = 'final-ledger-save'
+        with action(phase, pending=pending) as ctx:
+            ctx.require(all(row['status'] == 'PASS' for row in ledger['gates']), 'incomplete route')
+            ledger['status'] = 'PASS_ALL_APPLICABLE_LOCAL_GATES'
+            save(evidence, ledger, ctx=ctx)
+        failed = False
+    except BaseException as error:
+        note_error(ledger, error, phase)
+        if pending.signal is not None:
+            ledger['cancelSignal'] = pending.signal
+        if ctx is not None:
+            try:
+                # Same failed action cutoff/counters. No new scope to fabricate
+                # completed accounting after storage/cancellation failure.
+                write_failure(evidence/'final-accounting-failure.json', ctx=ctx, phase=phase, error=error)
+            except BaseException:
+                pass
+    if pending.signal is not None:
+        failed = True
+    print(f"{'FAIL' if failed else ledger['status']}: {sum(row['status'] == 'PASS' for row in ledger['gates'])}/{len(required)} local gates; not delivery or READY", flush=True)
+    return 1 if failed else 0
+
+
+def main():
+    require(sys.argv[1:] == ['--single-dispatch'], 'usage: verify-all.py --single-dispatch')
+    flag, code, ctx = None, 1, None
+    try:
+        with cancellation_flag() as flag:
+            with action('controller-entry', pending=flag) as ctx:
+                from action_io import identity
+                import stat
+                ctx.require(identity(EVIDENCE/'dispatch-lock', ctx=ctx)['type'] == stat.S_IFDIR, 'missing dispatch reservation')
+                ctx.require(not exists(EVIDENCE/'final-verification.json', ctx=ctx), 'never resume final namespace')
+                config = config_load(EVIDENCE, ctx=ctx)
+                ctx.require(sys.executable == config['python'], 'controller interpreter differs')
+                frozen = check_frozen(EVIDENCE, ctx=ctx)
+                required = commands(config, EVIDENCE, frozen, ctx=ctx)
+            code = run_gates(EVIDENCE, config, frozen, required, pending=flag)
+        if flag.signal is not None:
+            code = 1
+    except BaseException as error:
+        if ctx is not None:
+            try:
+                write_failure(EVIDENCE/'final-setup-failure.json', ctx=ctx, phase='controller-entry', error=error)
+            except BaseException:
+                pass
+        code = 1
+    return code
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

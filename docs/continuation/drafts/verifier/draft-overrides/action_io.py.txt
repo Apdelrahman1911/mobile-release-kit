@@ -1,0 +1,2584 @@
+"""Bounded cooperative I/O for one verifier action, never a timeout sandbox.
+
+Every public primitive requires its caller's context. Failure-only diagnostics
+may use remaining budget, but cannot renew work, publish a seal or delete data.
+Descriptor disposition is mandatory even after cancellation/deadline failure.
+"""
+from contextlib import contextmanager
+from pathlib import Path
+import fcntl
+import hashlib
+import json
+import math
+import os
+import secrets
+import select
+import stat
+import struct
+import sys
+import time
+from functools import wraps
+from types import MappingProxyType
+
+KIB = 1024
+MIB = 1024 * KIB
+CHUNK = 64 * KIB
+LIMITS = {
+    'seconds': 120, 'commandSeconds': 30, 'stopSeconds': 5,
+    'blob': 8*MIB, 'tree': 2*MIB, 'commit': 256*KIB,
+    'compressed': 8*MIB+64*KIB, 'forestBytes': 64*MIB, 'objects': 4096,
+    'references': 32768, 'gitDepth': 64, 'component': 255, 'gitPath': 1024,
+    'names': 4096, 'index': 16*MIB, 'locator': 4*KIB, 'header': 96,
+    'stdout': 2*MIB, 'stderr': 256*KIB, 'catStdout': 64*MIB+4096*97,
+    'payload': 256*MIB, 'launches': 64, 'activeNative': 1,
+    'activeViews': 1, 'views': 8, 'storedForest': 72*MIB,
+    'newBytes': 192*MIB, 'diagnostics': 8*MIB, 'record': 4*MIB,
+    'jsonDepth': 64, 'jsonTokens': 262144, 'jsonString': 128*KIB,
+    'tool': 512*MIB, 'toolBytes': 4*1024*MIB, 'log': 64*MIB,
+    'other': 512*MIB, 'allBytes': 8*1024*MIB, 'inventory': 32768,
+    'fanout': 4096, 'visited': 131072, 'fsDepth': 64,
+}
+ROLES = {'source': 'blob', 'blob': 'blob', 'tree': 'tree', 'commit': 'commit',
+         'compressed': 'compressed', 'index': 'index', 'locator': 'locator',
+         'record': 'record', 'tool': 'tool', 'log': 'log', 'other': 'other'}
+PAYLOAD_ROLES = {'source', 'blob', 'tree', 'commit', 'compressed', 'index', 'locator'}
+
+# The original Proofs factory replaces this ONE literal in a case copy before
+# request/freeze publication. Neither argv, JSON nor an inherited descriptor may
+# supply the expected kernel identity. The ordinary runner has no fixture anchor.
+_FIXTURE_FACTORY_ANCHOR = None
+
+_FIXTURE_KEY = object()
+_FIXTURE_FACTORY_TYPES = {}
+_FIXTURE_FACTORIES = {}
+_FIXTURE_ROOTS = {}
+_FIXTURE_TICKETS = {}
+_FIXTURE_DISPATCHES = {}
+_FIXTURE_COLLECTORS = {}
+_FIXTURE_LEASES = {}
+_FIXTURE_ACTIVE_LEASE = None
+_FIXTURE_TRANSITIONS = {}
+_FIXTURE_HEADER_MAGIC = b'MRKFIXHEADER0001'
+_FIXTURE_GRANT_MAGIC = b'MRKFIXGRANT00001'
+_FIXTURE_READY_MAGIC = b'MRKFIXREADY00001'
+_FIXTURE_GO_MAGIC = b'MRKFIXGO00000001'
+_FIXTURE_HEADER_BYTES = 256
+_FIXTURE_GRANT_BYTES = 2048
+_FIXTURE_FRAME_BYTES = 64
+_FIXTURE_SLOT_BYTES = _FIXTURE_HEADER_BYTES + _FIXTURE_GRANT_BYTES
+_FIXTURE_ROLES = {
+    'fixture-base': 1, 'synthetic-cleanup': 2, 'prepare-frozen-diff': 3,
+    'diff-check': 4, 'cleanup-frozen-diff': 5, 'prepare-owned-build': 6,
+    'wheel-install': 7, 'cleanup-owned-build': 8, 'observe-owned-workers': 9,
+    'wheel-source-venv': 10,
+}
+_FIXTURE_PROFILES = {
+    'collection': ('fixture-base',),
+    'ledger': ('fixture-base',),
+    'worker': ('fixture-base', 'synthetic-cleanup'),
+    'preparation': ('fixture-base', 'prepare-frozen-diff', 'diff-check', 'cleanup-frozen-diff'),
+    'editable': ('fixture-base', 'prepare-owned-build', 'wheel-install', 'cleanup-owned-build', 'wheel-source-venv'),
+    'editable-observer': ('fixture-base', 'prepare-owned-build', 'wheel-install', 'observe-owned-workers',
+                          'cleanup-owned-build', 'wheel-source-venv'),
+}
+_FIXTURE_COMMITMENTS = ('header', 'request', 'freeze', 'source', 'route', 'ledger',
+                        'seed', 'editable', 'entry', 'cwd', 'environment', 'parent', 'delegation', 'scope')
+_FIXTURE_PHASES = {'bootstrap': 1, 'seeded': 2, 'editable': 3}
+_FIXTURE_ZERO = '0' * 64
+_FIXTURE_DESCRIPTOR_NAMES = {'writer', 'anchor', 'reader', 'readyReader', 'readyWriter', 'replyReader', 'replyWriter'}
+_FIXTURE_RECEIVER_NAMES = ('reader', 'readyWriter', 'replyReader')
+_FIXTURE_DELEGATED_NAMES = ('writer', 'reader', 'readyReader', 'readyWriter', 'replyReader', 'replyWriter')
+
+
+def _validate_fixture_anchor(value, *, ctx):
+    """Validate the *literal* source anchor. A decoded file is never a source."""
+    ctx.require(type(value) is dict and set(value) == {'schemaVersion', 'rootPid', 'caseIdentity',
+                'evidence', 'area', 'owner', 'source', 'profile', 'entries', 'scopes', 'slots'},
+                'fixture source anchor fields')
+    ctx.require(type(value['schemaVersion']) is int and value['schemaVersion'] == 1
+                and type(value['rootPid']) is int and 0 < value['rootPid'] < 2**64
+                and value['profile'] in _FIXTURE_PROFILES, 'fixture source anchor identity/profile')
+    _fixture_sha(value['caseIdentity'])
+    for key in ('area', 'evidence', 'owner', 'source'):
+        path = value[key]
+        ctx.require(type(path) is str and path.isascii() and '\0' not in path
+                    and Path(path).is_absolute() and path == os.path.normpath(path), 'fixture anchor canonical path')
+    ctx.require(Path(value['owner']).parent == Path(value['area'])
+                and Path(value['source']).is_relative_to(Path(value['owner']))
+                and Path(value['evidence']).is_relative_to(Path(value['area'])), 'fixture anchor path scope')
+    roles = set(_FIXTURE_PROFILES[value['profile']])
+    ctx.require(type(value['entries']) is dict and set(value['entries']) == roles
+                and type(value['scopes']) is dict and set(value['scopes']) == roles
+                and type(value['slots']) is dict and set(value['slots']) == roles, 'fixture finite anchor role maps')
+    descriptors, objects = set(), set()
+    for role in _FIXTURE_PROFILES[value['profile']]:
+        entry, scopes, slot = value['entries'][role], value['scopes'][role], value['slots'][role]
+        ctx.require(type(entry) is str and entry.isascii() and '\0' not in entry
+                    and Path(entry).is_absolute() and entry == os.path.normpath(entry)
+                    and Path(entry).is_relative_to(Path(value['area'])), 'fixture original helper entry')
+        ctx.require(type(scopes) is list and 0 < len(scopes) <= LIMITS['launches']
+                    and all(type(name) is str and name and len(name) <= LIMITS['component']
+                            and '\0' not in name for name in scopes), 'fixture original finite helper actions')
+        ctx.require(type(slot) is dict and set(slot) == {'role', 'parentRole', 'identity', 'headerSha256', 'fds'}
+                    and slot['role'] == role
+                    and slot['parentRole'] == ('wheel-install' if role == 'wheel-source-venv' else None),
+                    'fixture source anchor slot fields/parent')
+        identity_value = slot['identity']
+        ctx.require(type(identity_value) is dict and set(identity_value) == {'device', 'inode', 'uid', 'mode', 'type'}
+                    and all(type(number) is int and 0 <= number < 2**64 for number in identity_value.values())
+                    and identity_value['type'] == stat.S_IFREG and identity_value['mode'] == 0o600
+                    and identity_value['uid'] == os.getuid(), 'fixture original regular-object identity')
+        token = (identity_value['device'], identity_value['inode'])
+        ctx.require(token not in objects, 'fixture slots must have distinct retained kernel objects')
+        objects.add(token)
+        _fixture_sha(slot['headerSha256'])
+        ctx.require(type(slot['fds']) is dict and set(slot['fds']) == _FIXTURE_DESCRIPTOR_NAMES,
+                    'fixture exact descriptor custody table')
+        for fd in slot['fds'].values():
+            ctx.require(type(fd) is int and 2 < fd < 2**31 and fd not in descriptors,
+                        'fixture descriptor locators must be distinct non-stdio integers')
+            descriptors.add(fd)
+    ctx.require(value['entries']['fixture-base'] == str(Path(value['evidence'])/'verify-frozen-diff.py')
+                and value['scopes']['fixture-base'] == ['fixture-base-source'], 'fixture bootstrap source/scope')
+    if 'wheel-source-venv' in roles:
+        ctx.require(value['entries']['wheel-source-venv'] == str(Path(value['evidence'])/'owned_outputs.py')
+                    and value['scopes']['wheel-source-venv'] == ['wheel-source-only-venv-producer'],
+                    'only the original source-only venv leaf may be delegated')
+    return value
+
+
+def _fixture_immutable(value):
+    if type(value) is dict:
+        return MappingProxyType({key: _fixture_immutable(child) for key, child in value.items()})
+    if type(value) in (list, tuple):
+        return tuple(_fixture_immutable(child) for child in value)
+    return value
+
+
+def _fixture_export(value):
+    if isinstance(value, MappingProxyType):
+        return {key: _fixture_export(child) for key, child in value.items()}
+    if type(value) is tuple:
+        return [_fixture_export(child) for child in value]
+    return value
+
+
+def _fixture_u64(value):
+    require(type(value) is int and 0 <= value < 2**64, 'fixture wire unsigned integer')
+    return value
+
+
+def _fixture_sha(value):
+    require(type(value) is str and len(value) == 64
+            and all(char in '0123456789abcdef' for char in value), 'fixture wire digest')
+    return bytes.fromhex(value)
+
+
+def _fixture_header(role, parent_role, identity_value, root_pid, nonce, case):
+    """Fixed offsets: enums16..24; root/identity24..56; nonce56; case88."""
+    require(type(role) is int and type(parent_role) is int
+            and role in _FIXTURE_ROLES.values() and parent_role in {0, _FIXTURE_ROLES['wheel-install']}
+            and (parent_role != 0) == (role == _FIXTURE_ROLES['wheel-source-venv']),
+            'fixture header role')
+    require(type(nonce) is bytes and len(nonce) == 32, 'fixture header nonce')
+    result = bytearray(_FIXTURE_HEADER_BYTES)
+    result[:16] = _FIXTURE_HEADER_MAGIC
+    struct.pack_into('>HHHHQQQQ', result, 16, 1, role, parent_role, 0,
+                     *map(_fixture_u64, (root_pid, identity_value['device'], identity_value['inode'], identity_value['uid'])))
+    result[56:88] = nonce
+    result[88:120] = _fixture_sha(case)
+    return bytes(result)
+
+
+def _fixture_grant(value):
+    """Fixed2048-byte record. No path strings, extension fields or serializers."""
+    require(type(value) is dict and set(value) == {'role', 'parentRole', 'phase', 'issuerPid', 'recipientPid',
+                'generation', 'gateIndex', 'cutoffNs', 'receiverNonce', 'commitments'}, 'fixture grant fields')
+    require(all(type(value[key]) is int for key in ('role', 'parentRole', 'phase'))
+            and value['role'] in _FIXTURE_ROLES.values()
+            and value['parentRole'] in {0, _FIXTURE_ROLES['wheel-install']}
+            and value['phase'] in _FIXTURE_PHASES.values()
+            and (value['parentRole'] != 0) == (value['role'] == _FIXTURE_ROLES['wheel-source-venv']),
+            'fixture grant enums')
+    require(type(value['receiverNonce']) is bytes and len(value['receiverNonce']) == 32, 'fixture grant receiver nonce')
+    require(type(value['commitments']) is dict and set(value['commitments']) == set(_FIXTURE_COMMITMENTS),
+            'fixture grant commitment fields')
+    result = bytearray(_FIXTURE_GRANT_BYTES)
+    result[:16] = _FIXTURE_GRANT_MAGIC
+    struct.pack_into('>HHHHQQQQQ', result, 16, 1, value['role'], value['parentRole'], value['phase'],
+                     *map(_fixture_u64, (value['issuerPid'], value['recipientPid'], value['generation'],
+                                        value['gateIndex'], value['cutoffNs'])))
+    result[64:96] = value['receiverNonce']
+    for index, key in enumerate(_FIXTURE_COMMITMENTS):
+        result[96 + index*32:128 + index*32] = _fixture_sha(value['commitments'][key])
+    return bytes(result)
+
+
+def _fixture_decode_grant(body):
+    require(type(body) is bytes and len(body) == _FIXTURE_GRANT_BYTES
+            and body[:16] == _FIXTURE_GRANT_MAGIC, 'fixture grant magic/length')
+    version, role, parent, phase, issuer, recipient, generation, gate, cutoff = struct.unpack_from('>HHHHQQQQQ', body, 16)
+    require(version == 1 and not any(body[96 + len(_FIXTURE_COMMITMENTS)*32:]), 'fixture grant version/reserved fields')
+    value = {'role': role, 'parentRole': parent, 'phase': phase, 'issuerPid': issuer, 'recipientPid': recipient,
+             'generation': generation, 'gateIndex': gate, 'cutoffNs': cutoff, 'receiverNonce': body[64:96],
+             'commitments': {key: body[96 + index*32:128 + index*32].hex()
+                             for index, key in enumerate(_FIXTURE_COMMITMENTS)}}
+    require(_fixture_grant(value) == body and issuer > 0 and recipient > 0 and generation > 0
+            and (0 <= gate < 45 or gate == 2**64-1), 'fixture grant canonical scope')
+    return value
+
+
+def _fixture_ready(role, pid, nonce):
+    require(role in _FIXTURE_ROLES.values() and type(nonce) is bytes and len(nonce) == 32, 'fixture READY fields')
+    result = bytearray(_FIXTURE_FRAME_BYTES)
+    result[:16] = _FIXTURE_READY_MAGIC
+    struct.pack_into('>HHIQ', result, 16, 1, role, 0, _fixture_u64(pid))
+    result[32:64] = nonce
+    return bytes(result)
+
+
+def _fixture_go(role, digest_value):
+    require(role in _FIXTURE_ROLES.values(), 'fixture GO role')
+    result = bytearray(_FIXTURE_FRAME_BYTES)
+    result[:16] = _FIXTURE_GO_MAGIC
+    struct.pack_into('>HH', result, 16, 1, role)
+    result[32:64] = _fixture_sha(digest_value)
+    return bytes(result)
+
+
+def _fixture_exact_read(fd, size, offset, *, ctx):
+    """pread never trusts an inherited/shared descriptor offset."""
+    ctx.require(0 <= size <= _FIXTURE_SLOT_BYTES and offset in {0, _FIXTURE_HEADER_BYTES}, 'fixture bounded read')
+    data = bytearray()
+    while len(data) < size:
+        ctx.check()
+        block = os.pread(fd, size-len(data), offset+len(data))
+        ctx.bytes(len(block), 'native')
+        ctx.require(bool(block), 'truncated fixture capability object')
+        data.extend(block)
+    return bytes(data)
+
+
+def _fixture_exact_write(fd, body, offset, *, ctx):
+    ctx.require(type(body) is bytes and len(body) <= _FIXTURE_SLOT_BYTES and offset in {0, _FIXTURE_HEADER_BYTES},
+                'fixture bounded write')
+    position = 0
+    while position < len(body):
+        ctx.check()
+        count = os.pwrite(fd, body[position:], offset+position)
+        ctx.bytes(count, 'native', writing=True)
+        ctx.require(count > 0, 'fixture capability short write')
+        position += count
+    ctx.check()
+
+
+def _fixture_object(fd, descriptor, size, *, mode, ctx):
+    ctx.check()
+    current = os.fstat(fd)
+    ctx.require(_identity(current) == descriptor['identity'] and stat.S_ISREG(current.st_mode)
+                and current.st_nlink == 0 and current.st_size == size
+                and fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == mode,
+                'wrong fixture kernel object/type/link/access/size')
+    ctx.require(not os.get_inheritable(fd), 'fixture object must be CLOEXEC outside exact transfer')
+    header = _fixture_exact_read(fd, _FIXTURE_HEADER_BYTES, 0, ctx=ctx)
+    ctx.require(hashlib.sha256(header).hexdigest() == descriptor['headerSha256'], 'fixture original header commitment')
+    ctx.require(header[:16] == _FIXTURE_HEADER_MAGIC and not any(header[120:]), 'fixture header domain/reserved bytes')
+    fields = struct.unpack_from('>HHHHQQQQ', header, 16)
+    ctx.require(fields[:4] == (1, _FIXTURE_ROLES[descriptor['role']], _FIXTURE_ROLES.get(descriptor['parentRole'], 0), 0)
+                and fields[5:] == (current.st_dev, current.st_ino, current.st_uid), 'fixture header actual kernel identity')
+    return header
+
+
+def _fixture_channel_alive(fd, *, ctx):
+    """No extra data is valid after GO. EAGAIN, not EOF, means live."""
+    ctx.require(stat.S_ISFIFO(os.fstat(fd).st_mode)
+                and fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY
+                and not os.get_inheritable(fd) and not os.get_blocking(fd), 'fixture lifetime channel mode')
+    try:
+        data = os.read(fd, 1)
+    except BlockingIOError:
+        return
+    ctx.bytes(len(data), 'native')
+    ctx.fail('fixture lifetime channel revoked' if not data else 'extra fixture lifetime protocol data')
+
+
+class FixtureUseTicket:
+    """Unserialized authority for exactly one actual live context."""
+    __slots__ = ('_owner', '_ctx', '_root', '_phase', '_gate', '_active', '_transition')
+
+    def __init__(self, key, owner, ctx, phase, gate):
+        require(key is _FIXTURE_KEY and ctx._fixture_use is None, 'fixture ticket factory only')
+        self._owner, self._ctx, self._root = owner, ctx, owner.evidence
+        self._phase, self._gate, self._active, self._transition = phase, gate, True, None
+        _FIXTURE_TICKETS[id(self)] = self
+        ctx._fixture_use = self
+
+    def _fast(self, ctx):
+        require(type(self) is FixtureUseTicket and self._ctx is ctx and self._active
+                and _FIXTURE_TICKETS.get(id(self)) is self and ctx._fixture_use is self,
+                'wrong/closed/copied fixture ticket')
+        self._owner._fast(ctx)
+
+
+class FixtureEditableTransition:
+    """Only the original parent's joint completion may inspect pending startup."""
+    __slots__ = ('_ctx', '_ticket', '_authority', '_attempt', '_expected', '_pending_ledger', '_state')
+
+    def __init__(self, key, authority, attempt, expected, pending_ledger, *, ctx):
+        from bindings import FrozenAuthority, require_authority
+        ticket = ctx._fixture_use
+        ctx.require(key is _FIXTURE_KEY and type(ticket) is FixtureUseTicket
+                    and type(ticket._owner) is FixtureSession and ticket._phase == 'editable'
+                    and ticket._transition is None and ticket._owner._editable is None,
+                    'only the original one-action editable prelaunch may create a transition')
+        ctx.require(type(authority) is FrozenAuthority and require_authority(authority, ticket._root, ctx=ctx) is authority
+                    and type(pending_ledger) is LedgerObservation and pending_ledger.check(ctx) is pending_ledger,
+                    'editable transition requires the same original authority/current ledger')
+        self._ctx, self._ticket, self._authority = ctx, ticket, authority
+        self._attempt, self._expected = _fixture_immutable(attempt), _fixture_immutable(expected)
+        self._pending_ledger, self._state = pending_ledger, 'prepared'
+        _FIXTURE_TRANSITIONS[id(self)] = self
+        ticket._transition = self
+
+    def check(self, authority, *, ctx):
+        ctx.require(type(self) is FixtureEditableTransition and _FIXTURE_TRANSITIONS.get(id(self)) is self
+                    and self._ctx is ctx and ctx._fixture_use is self._ticket
+                    and self._ticket._transition is self and self._authority is authority
+                    and self._state in {'validating', 'validated'}, 'wrong/expired/copied editable transition')
+        fixture_admit(self._ticket._root, ctx=ctx, operation='transition', transition=self)
+        ctx.require(read_file(self._attempt['path'], ctx=ctx, role='record') == _fixture_export(self._attempt),
+                    'original editable attempt changed')
+        reference = self._pending_ledger._reference
+        ctx.require(read_file(reference['path'], ctx=ctx, role='record') == _fixture_export(reference),
+                    'editable current ledger differs from the original pending observation')
+        return self
+
+    def validate_result(self, key, actual, *, ctx):
+        ctx.require(key is _FIXTURE_KEY and self._ctx is ctx and self._state == 'running',
+                    'joint editable validation only after original acquisition')
+        dispatch = self._ticket._owner._reservation
+        ctx.require(type(dispatch) is FixtureDispatch and dispatch._finished and not dispatch._revoked
+                    and _fixture_export(dispatch._row) == actual and actual.get('status') == 'PASS',
+                    'pending editable runtime lacks actual successful producer completion')
+        self._state = 'validating'
+
+    def validated(self, key, reference, *, ctx):
+        self.check(self._authority, ctx=ctx)
+        ctx.require(key is _FIXTURE_KEY and self._state == 'validating'
+                    and reference['path'] == str(Path(self._ticket._root)/'EDITABLE-COMPLETE.json')
+                    and read_file(reference['path'], ctx=ctx, role='record') == reference,
+                    'joint editable completion requires independent complete validation/readback')
+        self._state = 'validated'
+        self._ticket._owner.stage(_FIXTURE_KEY, 'editable', {'reference': reference}, ctx=ctx)
+
+
+def fixture_admit(evidence, *, ctx, operation='ordinary', transition=None):
+    """Denial may use root tombstones; authority NEVER comes from that lookup."""
+    root = str(Path(evidence))
+    ticket = ctx._fixture_use
+    if ticket is None:
+        ctx.require(_FIXTURE_FACTORY_ANCHOR is None and root not in _FIXTURE_ROOTS,
+                    'produced fixture requires its original live dispatch authority')
+        return None
+    ctx.check()
+    ctx.require(type(ticket) is FixtureUseTicket and ticket._root == root, 'fixture ticket root')
+    ticket._fast(ctx)
+    ticket._owner._admit(ticket, operation, transition, ctx)
+    return ticket
+
+
+def fixture_native_admit(*, ctx):
+    ticket = ctx._fixture_use
+    if ticket is None:
+        ctx.require(_FIXTURE_FACTORY_ANCHOR is None, 'stamped helper needs a live original-parent lease before acquisition')
+    else:
+        ctx.require(type(ticket) is FixtureUseTicket, 'native acquisition cannot use inspection/lookalike authority')
+        fixture_admit(ticket._root, ctx=ctx, operation='native')
+
+
+class LedgerObservation:
+    """Immutable observation; only the original writer may publish a successor."""
+    __slots__ = ('_ctx', '_root', '_reference', '_body', '_value')
+
+    def __init__(self, key, ctx, root, reference, body, value):
+        require(key is _FIXTURE_KEY, 'ledger observation factory only')
+        self._ctx, self._root, self._reference = ctx, root, _fixture_immutable(reference)
+        self._body, self._value = body, _fixture_immutable(value)
+
+    def check(self, ctx):
+        ctx.require(type(self) is LedgerObservation and self._ctx is ctx
+                    and ctx._fixture_ledgers.get(self._root) is self, 'wrong/old ledger observation')
+        fixture_admit(self._root, ctx=ctx, operation='ledger')
+        path = Path(self._root)/'final-verification.json'
+        if self._reference is None:
+            ctx.require(not exists(path, ctx=ctx), 'unobserved current ledger appeared')
+        else:
+            ctx.require(read_file(path, ctx=ctx, role='record') == _fixture_export(self._reference),
+                        'current ledger differs from the original action-local observation')
+        return self
+
+    def values(self, *, ctx):
+        self.check(ctx)
+        return _fixture_export(self._value), _fixture_export(self._reference)
+
+
+def fixture_ledger(evidence, *, ctx, absent=False):
+    root = str(Path(evidence))
+    ticket = fixture_admit(root, ctx=ctx, operation='ledger')
+    ctx.require(ticket is not None, 'current-ledger transaction requires a produced fixture')
+    previous = ctx._fixture_ledgers.get(root)
+    if previous is not None:
+        previous.check(ctx)
+        return previous
+    path = Path(root)/'final-verification.json'
+    if exists(path, ctx=ctx):
+        reference = read_file(path, ctx=ctx, role='record', retain=True)
+        body = reference.pop('data')
+        value = decode_json(body, ctx=ctx)
+    else:
+        ctx.require(absent and ticket._phase == 'controller-setup', 'missing current fixture ledger')
+        reference, body, value = None, None, None
+    ticket._owner._check_ledger(reference, ctx)
+    observation = LedgerObservation(_FIXTURE_KEY, ctx, root, reference, body, value)
+    ctx._fixture_ledgers[root] = observation
+    return observation
+
+
+def read_ledger(evidence, frozen, *, ctx):
+    """Generic authority semantics unchanged; produced ledgers are not backing refs."""
+    if fixture_admit(evidence, ctx=ctx, operation='ledger') is None:
+        return frozen.read_record(Path(evidence)/'final-verification.json', ctx=ctx)
+    return fixture_ledger(evidence, ctx=ctx).values(ctx=ctx)
+
+
+def fixture_factory_type(factory_type):
+    """Called only by the original source-loaded Proofs declaration, not a receiver."""
+    require(isinstance(factory_type, type)
+            and factory_type.__name__ == 'Proofs', 'original Proofs factory declaration required')
+    if _FIXTURE_FACTORY_ANCHOR is not None:
+        # The case copy contains the source-only bootstrap entry and the class
+        # declaration, but it can never register/instantiate an original factory.
+        return factory_type
+    source = str(Path(factory_type.__init__.__code__.co_filename).absolute())
+    require(source == str(Path(__file__).absolute().with_name('verify-frozen-diff.py')),
+            'fixture factory must be adjacent original reviewed Proofs source')
+    require(factory_type not in _FIXTURE_FACTORY_TYPES, 'fixture factory type already registered')
+    _FIXTURE_FACTORY_TYPES[factory_type] = source
+    return factory_type
+
+
+def fixture_factory(owner):
+    require(type(owner) in _FIXTURE_FACTORY_TYPES and id(owner) not in _FIXTURE_FACTORIES,
+            'unregistered/copied/repeated fixture factory')
+    value = FixtureFactory(_FIXTURE_KEY, owner)
+    _FIXTURE_FACTORIES[id(owner)] = value
+    return value
+
+
+class FixtureFactory:
+    __slots__ = ('_proofs', '_pid', '_nonce', '_cases', '_closed')
+
+    def __init__(self, key, proofs):
+        require(key is _FIXTURE_KEY and type(proofs) in _FIXTURE_FACTORY_TYPES, 'fixture factory constructor is private')
+        self._proofs, self._pid, self._nonce = proofs, os.getpid(), secrets.token_hex(32)
+        self._cases, self._closed = {}, False
+
+    def _check(self):
+        require(type(self) is FixtureFactory and not self._closed and os.getpid() == self._pid
+                and _FIXTURE_FACTORIES.get(id(self._proofs)) is self, 'wrong/closed/forked fixture factory')
+
+    def case(self, area, evidence, owner, source, *, profile, uses, entries, scopes):
+        self._check()
+        paths = tuple(str(Path(path)) for path in (area, evidence, owner, source))
+        require(all(Path(path).is_absolute() and path == os.path.normpath(path) for path in paths), 'fixture case canonical paths')
+        require(profile in _FIXTURE_PROFILES and type(uses) is tuple and uses
+                and all(type(item) is str and item in {'setup', 'collect', 'freeze', 'check', 'source-controller'} for item in uses),
+                'finite predeclared fixture profile actions required')
+        require(type(entries) is dict and set(entries) == set(_FIXTURE_PROFILES[profile]), 'exact fixture helper roles required')
+        require(type(scopes) is dict and set(scopes) == set(entries), 'predeclare every actual helper action')
+        require(paths[1] not in _FIXTURE_ROOTS and paths[0] not in self._cases, 'no fixture root adoption/re-registration')
+        session = FixtureSession(_FIXTURE_KEY, self, paths, profile, uses, entries, scopes)
+        self._cases[paths[0]] = session
+        _FIXTURE_ROOTS[paths[1]] = session
+        return FixtureCase(_FIXTURE_KEY, session)
+
+    def close_case(self, area):
+        self._check()
+        session = self._cases.pop(str(Path(area)), None)
+        if session is not None:
+            session.close()
+
+    def close(self):
+        self._check()
+        failures = []
+        for area in tuple(self._cases):
+            try:
+                self.close_case(area)
+            except BaseException as error:
+                failures.append(error)
+        self._closed = True
+        _FIXTURE_FACTORIES.pop(id(self._proofs), None)
+        if failures:
+            raise failures[0]
+
+
+class FixtureCase:
+    """Explicit caller handle. Paths/decoded values cannot reconstruct a session."""
+    __slots__ = ('_session', 'evidence', 'config', 'logical')
+
+    def __init__(self, key, session):
+        require(key is _FIXTURE_KEY and type(session) is FixtureSession, 'fixture case constructor is private')
+        self._session, self.evidence = session, Path(session.evidence)
+        self.config, self.logical = None, None
+
+    def action(self, name, *, use, pending=None, gate=None):
+        return self._session.action(name, use=use, pending=pending, gate=gate)
+
+    def paths(self):
+        require(self.config is not None and self.logical is not None, 'fixture configuration not completed')
+        return self.evidence, _fixture_export(self.config), _fixture_export(self.logical)
+
+    def configured(self, config, logical):
+        self._session._owner_check()
+        require(self._session._seed is not None and self.config is None, 'fixture configuration before original seed finality')
+        self.config, self.logical = _fixture_immutable(config), _fixture_immutable(logical)
+
+
+class _FixtureSlot:
+    """One finite original object. The root anchor is NEVER a transfer duplicate."""
+    __slots__ = ('role', 'parent_role', 'descriptor', '_fds', '_used', '_closed', '_errors')
+
+    def __init__(self, role, parent_role):
+        self.role, self.parent_role = role, parent_role
+        self.descriptor, self._fds, self._used, self._closed, self._errors = None, {}, False, False, []
+
+    def create(self, session, *, ctx):
+        ctx.require(not self._fds and self.descriptor is None, 'fixture slot cannot be reseeded')
+        path = Path(session.area)/('.fixture-capability-' + self.role)
+        with directory(path.parent, ctx=ctx) as parent:
+            ctx.check()
+            # Exactly one writable descriptor; readback uses this same O_RDWR
+            # descriptor. No duplicate writable open survives seal/close-before-GO.
+            self._fds['writer'] = os.open(path.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                           0o600, dir_fd=parent)
+            ctx.check()
+            before = os.fstat(self._fds['writer'])
+            ctx.require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_size == 0
+                        and before.st_uid == os.getuid() and stat.S_IMODE(before.st_mode) == 0o600,
+                        'new fixture capability object identity')
+            for name in ('anchor', 'reader'):
+                ctx.check()
+                self._fds[name] = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+                ctx.require(_identity(os.fstat(self._fds[name])) == _identity(before), 'fixture read object substitution')
+            ctx.require(len(set(self._fds.values())) == 3, 'root anchor/recipient/writer custody must be distinct')
+            ctx.require(_identity(os.stat(path.name, dir_fd=parent, follow_symlinks=False)) == _identity(before),
+                        'fixture object replaced before unlink')
+            os.unlink(path.name, dir_fd=parent)
+            ctx.check()
+            os.fsync(parent)
+            ctx.check()
+        header = _fixture_header(_FIXTURE_ROLES[self.role], _FIXTURE_ROLES.get(self.parent_role, 0),
+                                 _identity(before), session._pid, secrets.token_bytes(32), session._case_identity)
+        _fixture_exact_write(self._fds['writer'], header, 0, ctx=ctx)
+        os.fsync(self._fds['writer'])
+        ctx.check()
+        for read_name, write_name in (('readyReader', 'readyWriter'), ('replyReader', 'replyWriter')):
+            ctx.check()
+            read_fd, write_fd = os.pipe()
+            self._fds[read_name], self._fds[write_name] = read_fd, write_fd
+            for fd in (read_fd, write_fd):
+                os.set_inheritable(fd, False)
+                os.set_blocking(fd, False)
+            ctx.check()
+        self.descriptor = {'role': self.role, 'parentRole': self.parent_role, 'identity': _identity(before),
+                           'headerSha256': hashlib.sha256(header).hexdigest(), 'fds': dict(self._fds)}
+        _fixture_object(self._fds['anchor'], self.descriptor, _FIXTURE_HEADER_BYTES, mode=os.O_RDONLY, ctx=ctx)
+
+    def pop_close(self, key, *, ctx=None):
+        fd = self._fds.pop(key, None)
+        if fd is None:
+            return
+        # Remove ownership before the single close attempt. A close-after-effect
+        # error does not permit closing a potentially recycled number again.
+        try:
+            os.close(fd)
+        except BaseException as error:
+            self._errors.append(type(error).__name__)
+            if ctx is not None:
+                ctx.latch(error)
+            raise
+
+    def close(self):
+        failures = []
+        for key in tuple(self._fds):
+            try:
+                self.pop_close(key)
+            except BaseException as error:
+                failures.append(error)
+        self._closed = True
+        if failures:
+            raise failures[0]
+
+
+class FixtureSession:
+    """Retained original-parent control flow, not a loader for success files."""
+    def __init__(self, key, factory, paths, profile, uses, entries, scopes):
+        require(key is _FIXTURE_KEY and type(factory) is FixtureFactory, 'fixture session constructor is private')
+        self._factory, self._pid = factory, os.getpid()
+        self.area, self.evidence, self.owner, self.source = paths
+        self.profile, self._uses, self._use_index = profile, uses, 0
+        self._entries = {role: str(Path(path)) for role, path in entries.items()}
+        self._scopes = {role: tuple(names) for role, names in scopes.items()}
+        require(self._entries['fixture-base'] == str(Path(self.evidence)/'verify-frozen-diff.py'),
+                'source-only bootstrap must use the case copy beside its stamped action_io')
+        require(all(Path(path).is_absolute() and path == os.path.normpath(path)
+                    and Path(path).is_relative_to(Path(self.area)) for path in self._entries.values()),
+                'fixture helper entries must be inside the original case')
+        self._nonce = secrets.token_hex(32)
+        self._case_identity = hashlib.sha256((factory._nonce + '\0' + self._nonce + '\0' + '\0'.join(paths)).encode()).hexdigest()
+        self._slots, self._anchor, self._entry_references = {}, None, {}
+        self._current, self._failed, self._closed, self._terminal = None, None, False, False
+        self._errors, self._history = [], []
+        self._request, self._request_value, self._seed, self._freeze, self._editable, self._ledger = (None,)*6
+        self._route, self._gate, self._reservation, self._generation = None, None, None, 0
+        self._bootstrap_dispatched = False
+        self._bootstrap_rows = {}
+
+    def _owner_check(self):
+        self._factory._check()
+        require(type(self) is FixtureSession and not self._closed and self._failed is None
+                and os.getpid() == self._pid and _FIXTURE_ROOTS.get(self.evidence) is self,
+                'wrong/closed/failed/forked original fixture session')
+
+    def _fast(self, ctx):
+        self._owner_check()
+        require(self._current is ctx and not self._terminal, 'fixture action no longer owns dispatch')
+
+    def _fail(self, error):
+        if self._failed is None:
+            self._failed = type(error).__name__
+        for slot in self._slots.values():
+            try:
+                slot.pop_close('replyWriter')
+            except BaseException as problem:
+                if len(self._errors) < 16:
+                    self._errors.append(type(problem).__name__)
+        if self._reservation is not None:
+            self._reservation._revoked = True
+
+    def _admit(self, ticket, operation, transition, ctx):
+        ctx.require(operation in {'ordinary', 'native', 'bootstrap', 'ledger', 'transition'}, 'fixture admission operation')
+        if ticket._phase == 'bootstrap':
+            ctx.require(operation in {'bootstrap', 'native'}, 'in-progress bootstrap is not SEEDED authority')
+        else:
+            ctx.require(self._seed is not None, 'original parent did not observe whole seed-action return')
+        if ticket._phase == 'editable' and ticket._transition is not None:
+            active = ticket._transition
+            if active._state != 'prepared':
+                ctx.require((operation == 'transition' and transition is active
+                             and active._state in {'validating', 'validated'})
+                            or (operation == 'ledger' and active._state == 'validated'),
+                            'pending editable runtime is not ordinary acquisition authority')
+        elif transition is not None:
+            ctx.fail('unexpected transition capability')
+        if operation == 'native':
+            ctx.require(ticket._phase in {'collect', 'check', 'completion'},
+                        'fixture action has no native acquisition role')
+        if self._request is not None:
+            ctx.require(read_file(self._request['path'], ctx=ctx, role='record') == _fixture_export(self._request),
+                        'original fixture request changed')
+        if self._freeze is not None:
+            reference = self._freeze['reference']
+            ctx.require(read_file(reference['path'], ctx=ctx, role='record') == _fixture_export(reference),
+                        'original fixture freeze changed')
+
+    def _check_ledger(self, reference, ctx):
+        wanted = None if self._ledger is None else _fixture_export(self._ledger['reference'])
+        ctx.require(reference == wanted, 'current ledger lacks original-parent successful-return binding')
+
+    def reserve(self, command, cwd, environment, *, ctx, purpose='gate'):
+        """Called by the original guarded prelaunch, not by an argv/record loader."""
+        ticket = ctx._fixture_use
+        ctx.require(type(ticket) is FixtureUseTicket and ticket._owner is self and self._current is ctx,
+                    'fixture dispatch requires its original active parent action')
+        ctx.require(type(command) is list and command and all(type(part) is str and '\0' not in part for part in command)
+                    and type(environment) is dict and all(type(key) is str and type(value) is str
+                        and '\0' not in key + value for key, value in environment.items()), 'fixture exact argv/environment')
+        cwd = str(Path(cwd))
+        ctx.require(Path(cwd).is_absolute() and cwd == os.path.normpath(cwd), 'fixture dispatch canonical cwd')
+        if purpose in {'fixture-base', 'fixture-seed'}:
+            ctx.require(ticket._phase == 'bootstrap' and self._request is not None
+                        and purpose not in self._bootstrap_rows, 'fixture bootstrap dispatch is original and one-shot')
+            requested = _fixture_export(self._request_value['creation' if purpose == 'fixture-base' else 'seed'])
+            wanted = requested['command']
+            if purpose == 'fixture-base':
+                ctx.require(wanted[-1] == '{original-request-sha256}', 'single declared request self-reference required')
+                wanted[-1] = self._request['sha256']
+                ctx.require(not self._bootstrap_dispatched, 'source-only fixture creation cannot repeat')
+                self._bootstrap_dispatched = True
+            else:
+                ctx.require(self._bootstrap_rows.get('fixture-base', {}).get('status') == 'PASS',
+                            'seed cannot start before genuine source-only parent completion')
+            ctx.require(command == wanted and cwd == requested['cwd'] and environment == requested['environment'],
+                        'fixture creation/seed differs from original request')
+            role, index = ('fixture-base' if purpose == 'fixture-base' else None), None
+            self._bootstrap_rows[purpose] = {'status': 'ATTEMPTED_NOT_COMPLETED'}
+        else:
+            ctx.require(purpose == 'gate' and ticket._phase in {'prelaunch', 'editable'}
+                        and self._route is not None and ticket._gate == self._gate
+                        and (self._reservation is None or self._reservation._accepted), 'original gate dispatch reservation scope')
+            row = self._route[self._gate]
+            ctx.require(command == _fixture_export(row[1]), 'fixture dispatch differs from frozen route')
+            name = row[0]
+            role = ('cleanup-owned-build' if name in {'cleanup-generated-build', 'cleanup-wheel-installation'}
+                    else name if name in self._slots else None)
+            ctx.require(role is None or role != 'fixture-base', 'bootstrap is not a controller role')
+            if name == 'editable-install':
+                ctx.require(ticket._phase == 'editable' and type(ticket._transition) is FixtureEditableTransition
+                            and ticket._transition._state == 'prepared', 'editable dispatch requires its original transition')
+            else:
+                ctx.require(ticket._phase == 'prelaunch', 'noneditable gate cannot use transition scope')
+            index = self._gate
+        if role is not None:
+            ctx.require(role in self._slots and not self._slots[role]._used, 'undeclared/repeated helper role')
+            reference = self._entry_references.get(role)
+            ctx.require(reference is not None and self._entries[role] in command
+                        and read_file(reference['path'], ctx=ctx, role='source') == reference,
+                        'actual helper entry source was not originally bound before execution')
+        self._generation += 1
+        dispatch = FixtureDispatch(_FIXTURE_KEY, self, ctx, purpose, role, index, self._generation,
+                                   command, cwd, environment, ctx._fixture_use._phase == 'bootstrap', ctx=ctx)
+        if purpose == 'gate':
+            self._reservation = dispatch
+        return dispatch
+
+    def _dispatch_check(self, dispatch):
+        self._owner_check()
+        require(type(dispatch) is FixtureDispatch and dispatch._owner is self and not self._terminal,
+                'fixture reservation owner is not live')
+        if dispatch._purpose == 'gate':
+            require(self._reservation is dispatch and dispatch._gate == self._gate
+                    and not dispatch._accepted, 'fixture original active gate reservation mismatch')
+            if dispatch._ctx._fixture_use._phase == 'editable':
+                require(self._current is dispatch._ctx and dispatch._ctx.state == 'active',
+                        'editable dispatch outlived its one original action')
+            else:
+                require(self._current is None and dispatch._ctx.state == 'closed' and dispatch._ready,
+                        'prelaunch must have actually returned through its whole original action')
+        else:
+            require(self._current is dispatch._ctx and dispatch._ctx.state == 'active'
+                    and self._seed is None, 'bootstrap dispatch outlived its original setup')
+
+    def _dispatch_returned(self, dispatch, row):
+        if dispatch._purpose in {'fixture-base', 'fixture-seed'}:
+            self._bootstrap_rows[dispatch._purpose] = _fixture_immutable(row)
+        if row.get('status') != 'PASS':
+            self._fail(ActionFailure('actual fixture producer/collector failed'))
+
+    def allocate(self, original_action_source, *, ctx):
+        ticket = ctx._fixture_use
+        ctx.require(ticket is not None and ticket._owner is self and ticket._phase == 'bootstrap'
+                    and not self._slots and self._anchor is None, 'fixture capability allocation scope')
+        for role in _FIXTURE_PROFILES[self.profile]:
+            slot = _FixtureSlot(role, 'wheel-install' if role == 'wheel-source-venv' else None)
+            self._slots[role] = slot  # register ownership before any acquisition
+            slot.create(self, ctx=ctx)
+        anchor = {'schemaVersion': 1, 'rootPid': self._pid, 'caseIdentity': self._case_identity,
+                  'evidence': self.evidence, 'area': self.area, 'owner': self.owner, 'source': self.source,
+                  'profile': self.profile, 'entries': self._entries,
+                  'scopes': {role: list(names) for role, names in self._scopes.items()},
+                  'slots': {role: slot.descriptor for role, slot in self._slots.items()}}
+        _validate_fixture_anchor(anchor, ctx=ctx)
+        marker = b'_FIXTURE_FACTORY_ANCHOR = None\n'
+        ctx.require(type(original_action_source) is bytes and original_action_source.count(marker) == 1,
+                    'original helper has exactly one unstamped factory sentinel')
+        emitted = original_action_source.replace(marker, ('_FIXTURE_FACTORY_ANCHOR = ' + repr(anchor) + '\n').encode('ascii'))
+        self._anchor = _fixture_immutable(anchor)
+        return emitted
+
+    def bind_request(self, value, reference, *, ctx):
+        ticket = ctx._fixture_use
+        ctx.require(ticket is not None and ticket._owner is self and ticket._phase == 'bootstrap'
+                    and self._request is None and self._anchor is not None, 'original request binding scope')
+        ctx.require(reference['path'] == str(Path(self.evidence)/'FIXTURE-BASE-REQUEST.json')
+                    and read_file(reference['path'], ctx=ctx, role='record') == reference
+                    and read_json(reference['path'], ctx=ctx) == value, 'original request exact readback')
+        self._request, self._request_value = _fixture_immutable(reference), _fixture_immutable(value)
+        self._entry_references['fixture-base'] = read_file(self._entries['fixture-base'], ctx=ctx, role='source')
+
+    def stage(self, key, kind, value, *, ctx):
+        ticket = ctx._fixture_use
+        ctx.require(key is _FIXTURE_KEY and ticket is not None and ticket._owner is self and self._current is ctx,
+                    'original fixture validated action result only')
+        allowed = {'seed': {'bootstrap'}, 'freeze': {'collect', 'freeze'},
+                   'ledger': {'controller-setup', 'attempt', 'completion', 'editable', 'final'}, 'editable': {'editable'}}
+        ctx.require(kind in allowed and ticket._phase in allowed[kind]
+                    and kind not in {key for key, _ in ctx._fixture_staged}, 'fixture staged result kind/phase')
+        _validate_value(value, ctx)
+        ctx._fixture_staged.append((kind, _fixture_immutable(value)))
+
+    def freeze_route(self, route, *, ctx):
+        ctx.require(self._freeze is None and self._route is None and self._seed is not None,
+                    'fixture route cannot be replaced/refrozen')
+        ctx.require(type(route) is list and len(route) <= 45 and (route or self.profile == 'collection'),
+                    'fixture finite declared route')
+        for row in route:
+            ctx.require(type(row) in {tuple, list} and len(row) == 3 and type(row[0]) is str
+                        and type(row[1]) is list and row[1] and all(type(item) is str for item in row[1])
+                        and row[2] in {'command', 'python-unittest', 'ruby-minitest', 'supply-wif'}, 'fixture route shape')
+        ctx.require(len({row[0] for row in route}) == len(route), 'fixture duplicate gate')
+        for role, path in self._entries.items():
+            self._entry_references[role] = read_file(path, ctx=ctx, role='source')
+        self._route = _fixture_immutable(route)
+
+    def _begin(self, use, gate, ctx):
+        self._owner_check()
+        ctx.require(self._current is None and not self._terminal, 'fixture cannot overlap/restart/continue a terminal session')
+        if use == 'bootstrap':
+            ctx.require(self._seed is None and self._request is None, 'fixture bootstrap is one-shot')
+        elif use in {'setup', 'collect', 'freeze', 'check', 'source-controller'}:
+            ctx.require(self._seed is not None and self._use_index < len(self._uses)
+                        and self._uses[self._use_index] == use, 'undeclared/repeated original fixture action')
+        else:
+            ctx.require(self._freeze is not None and self._route is not None
+                        and use in {'controller-setup', 'attempt', 'prelaunch', 'completion', 'editable', 'final'},
+                        'fixture controller action requires original completed freeze')
+            if use == 'controller-setup':
+                ctx.require(self._ledger is None and gate is None, 'fixture controller is one-shot')
+            elif use == 'attempt':
+                ctx.require(type(gate) is int and 0 <= gate < len(self._route)
+                            and gate == (0 if self._gate is None else self._gate + 1)
+                            and (self._reservation is None or self._reservation._accepted), 'fixture gate progression')
+            elif use in {'prelaunch', 'completion', 'editable'}:
+                ctx.require(gate == self._gate and self._ledger is not None, 'fixture active gate mismatch')
+                if use in {'prelaunch', 'editable'}:
+                    ctx.require(self._reservation is None or self._reservation._accepted, 'fixture gate already reserved')
+                else:
+                    ctx.require(self._reservation is not None and self._reservation._finished,
+                                'fixture completion requires actual collector return')
+            else:
+                ctx.require(self._gate == len(self._route)-1 and self._reservation is not None
+                            and self._reservation._accepted, 'fixture final accounting before complete route')
+        self._current = ctx
+        return FixtureUseTicket(_FIXTURE_KEY, self, ctx, use, gate)
+
+    @contextmanager
+    def action(self, name, *, use, pending=None, gate=None):
+        ctx, ticket = None, None
+        try:
+            # The observer below is OUTSIDE this real context's entire exit,
+            # including revoke, applicable handler restoration and terminal check.
+            with action(name, pending=pending) as ctx:
+                ticket = self._begin(use, gate, ctx)
+                yield ctx
+                ctx.check()
+            ctx.terminal_check()
+            self._owner_check()
+            self._validate_finality(use, gate, ctx, ticket)
+            for kind, value in ctx._fixture_staged:
+                if kind == 'seed':
+                    require(self._seed is None, 'original seed finality cannot be replaced')
+                    self._seed = value
+                elif kind == 'freeze':
+                    require(self._freeze is None and self._route is not None, 'original freeze finality cannot be replaced')
+                    self._freeze = value
+                elif kind == 'editable':
+                    require(self._editable is None and ticket._transition is not None
+                            and ticket._transition._state == 'validated', 'editable finality requires original joint completion')
+                    self._editable = value
+                else:
+                    self._ledger = value
+            self._history.append((ctx.nonce, name, tuple(key for key, _ in ctx._fixture_staged)))
+            if use in {'setup', 'collect', 'freeze', 'check', 'source-controller'}:
+                self._use_index += 1
+            elif use == 'attempt':
+                self._gate = gate
+            elif use in {'prelaunch', 'editable'}:
+                if self._reservation is not None and self._reservation._ctx is ctx:
+                    self._reservation._ready = True
+                if use == 'editable' and self._reservation is not None:
+                    self._reservation._accepted = True
+            elif use == 'completion':
+                self._reservation._accepted = True
+            elif use == 'final':
+                self._terminal = True
+        except BaseException as error:
+            # A wrong-context request has no authority to poison another live
+            # action. Actual participating work is latched by its registered
+            # ticket, including failures after the ticket is revoked on exit.
+            if ticket is not None and ticket._owner is self and self._current is ctx:
+                self._fail(error)
+            raise
+        finally:
+            if self._current is ctx:
+                self._current = None
+
+    def _validate_finality(self, use, gate, ctx, ticket):
+        """No I/O or partial state publication here: the real action has returned."""
+        staged = {kind: value for kind, value in ctx._fixture_staged}
+        required = {'bootstrap': {'seed'}, 'controller-setup': {'ledger'}, 'attempt': {'ledger'},
+                    'completion': {'ledger'}, 'editable': {'editable', 'ledger'}, 'final': {'ledger'}}
+        require(set(staged) == required.get(use, set(staged)), 'fixture action lacks its complete finality bundle')
+        if use == 'bootstrap':
+            require(self._seed is None and self._request is not None and self._bootstrap_dispatched,
+                    'seed finality requires original request/actual base dispatch')
+            require(set(self._bootstrap_rows) == {'fixture-base', 'fixture-seed'}
+                    and all(row.get('status') == 'PASS' for row in self._bootstrap_rows.values()),
+                    'seed finality requires both actual successful original producers')
+        if 'freeze' in staged:
+            require(self._freeze is None and self._route is not None, 'freeze finality is one-shot')
+        if use == 'prelaunch':
+            require(self._reservation is not None and self._reservation._ctx is ctx
+                    and not self._reservation._used, 'prelaunch must return its original unconsumed reservation')
+        if use in {'completion', 'editable'}:
+            reservation = self._reservation
+            require(type(reservation) is FixtureDispatch and reservation._finished and not reservation._revoked
+                    and not reservation._accepted and reservation._row is not None,
+                    'completion requires the actual successful original collector')
+            ledger = _fixture_export(staged['ledger']['value'])
+            row = ledger['gates'][gate]
+            actual = _fixture_export(reservation._row)
+            require(row['status'] == 'PASS' and all(row.get(key) == value for key, value in actual.items()),
+                    'completed ledger substituted actual collector facts')
+        if use == 'editable':
+            require(ticket._transition is not None and ticket._transition._ctx is ctx
+                    and ticket._transition._state == 'validated' and self._editable is None,
+                    'editable finality requires the original one-action joint validation')
+        if 'ledger' in staged:
+            ledger = _fixture_export(staged['ledger']['value'])
+            require(ledger['freezeReference'] == _fixture_export(self._freeze['reference'])
+                    and len(ledger['gates']) == len(self._route), 'staged ledger scope changed')
+            for index, (row, declared) in enumerate(zip(ledger['gates'], self._route)):
+                require((row['gate'], row['command'], row['protocol']) ==
+                        (declared[0], _fixture_export(declared[1]), declared[2]), 'staged ledger route changed')
+                wanted = ('BLOCKED' if use == 'controller-setup' or (gate is not None and index > gate)
+                          else 'RUNNING' if use == 'attempt' and index == gate else 'PASS')
+                require(row['status'] == wanted, 'staged ledger skipped/failed/replayed a gate')
+            require(ledger['status'] == ('PASS_ALL_APPLICABLE_LOCAL_GATES' if use == 'final' else 'RUNNING_NOT_ACCEPTED'),
+                    'staged ledger terminal status mismatch')
+
+    def close(self):
+        require(type(self) is FixtureSession and os.getpid() == self._pid, 'only original case owner may dispose descriptors')
+        if self._closed:
+            return
+        self._closed = True
+        if self._reservation is not None:
+            self._reservation._revoked = True
+        failures = []
+        for slot in self._slots.values():
+            try:
+                slot.close()
+            except BaseException as error:
+                failures.append(error)
+        # Retain a small denial tombstone, not megabytes of old namespace rows
+        # or an importable disk session. It grants no operation after case exit.
+        _FIXTURE_ROOTS[self.evidence] = ('closed', self._factory._nonce, self._case_identity)
+        for key, dispatch in tuple(_FIXTURE_DISPATCHES.items()):
+            if dispatch._owner is self:
+                dispatch._revoked = True
+                _FIXTURE_DISPATCHES.pop(key, None)
+        self._slots.clear()
+        self._request_value = None
+        self._bootstrap_rows.clear()
+        if failures:
+            raise failures[0]
+
+
+def _fixture_source_description(anchor):
+    return {key: anchor[key] for key in ('caseIdentity', 'area', 'owner', 'source', 'evidence', 'profile')}
+
+
+def _fixture_scope(anchor, role, phase, gate, generation):
+    return {'caseIdentity': anchor['caseIdentity'], 'role': role,
+            'parentRole': anchor['slots'][role]['parentRole'], 'phase': phase,
+            'gateIndex': 2**64-1 if gate is None else gate, 'generation': generation,
+            'scopes': anchor['scopes'][role]}
+
+
+def _fixture_delegation(anchor):
+    """One root-preallocated leaf. No relay, fresh slots or arbitrary commands."""
+    return {'role': 'wheel-source-venv', 'parentRole': 'wheel-install',
+            'command': [str(Path(anchor['owner'])/'venv/bin/python'), '-I', '-B', '-S',
+                        str(Path(anchor['evidence'])/'owned_outputs.py'), 'produce-venv'],
+            'cwd': str(Path(anchor['owner'])/'final-wheel-r1'),
+            'scopes': anchor['scopes']['wheel-source-venv']}
+
+
+class FixtureDispatch:
+    """One-use retained reservation; it neither revives an action nor owns a PID."""
+    def __init__(self, key, owner, original_ctx, purpose, role, gate, generation,
+                 command, cwd, environment, ready, *, ctx):
+        ctx.require(key is _FIXTURE_KEY and type(owner) in {FixtureSession, FixtureLease},
+                    'fixture dispatch factory only')
+        self._owner, self._ctx, self._purpose, self._role, self._gate = owner, original_ctx, purpose, role, gate
+        self._generation = generation
+        self._command, self._cwd, self._environment = tuple(command), cwd, _fixture_immutable(environment)
+        self._ready, self._used, self._finished, self._accepted, self._revoked = ready, False, False, False, False
+        self._collector, self._row, self._commitments = None, None, None
+        self._pending = original_ctx.pending
+        self._inherited_cutoff = owner._cutoff if type(owner) is FixtureLease else None
+        if type(owner) is FixtureSession:
+            phase = 'bootstrap' if purpose != 'gate' else 'editable' if owner._editable is not None else 'seeded'
+            self._phase, self._slot = phase, owner._slots.get(role)
+            if role is not None:
+                anchor = _fixture_export(owner._anchor)
+                values = {'request': _fixture_export(owner._request),
+                          'freeze': None if owner._freeze is None else _fixture_export(owner._freeze['reference']),
+                          'source': _fixture_source_description(anchor), 'route': command,
+                          'ledger': None if owner._ledger is None else _fixture_export(owner._ledger['reference']),
+                          'seed': None if owner._seed is None else _fixture_export(owner._seed['reference']),
+                          'editable': None if owner._editable is None else _fixture_export(owner._editable['reference']),
+                          'entry': owner._entry_references[role], 'cwd': cwd, 'environment': environment,
+                          'scope': _fixture_scope(anchor, role, phase, gate, generation),
+                          'delegation': _fixture_delegation(anchor) if role == 'wheel-install' else None}
+                self._commitments = {name: _FIXTURE_ZERO if value is None else canonical_digest(value, ctx=ctx)
+                                     for name, value in values.items()}
+                self._commitments.update(header=self._slot.descriptor['headerSha256'], parent=_FIXTURE_ZERO)
+        else:
+            self._phase, self._slot = owner._phase, owner._delegated if role is not None else None
+            if role is not None:
+                ctx.require(role == 'wheel-source-venv' and owner._role == 'wheel-install', 'only the fixed leaf delegation exists')
+                anchor = _fixture_export(owner._anchor)
+                wanted = _fixture_delegation(anchor)
+                ctx.require(command == wanted['command'] and cwd == wanted['cwd']
+                            and canonical_digest(wanted, ctx=ctx) == owner._grant['commitments']['delegation'],
+                            'nested dispatch is not the exact original root delegation')
+                self._commitments = dict(owner._grant['commitments'])
+                self._commitments.update(header=self._slot.descriptor['headerSha256'],
+                    route=canonical_digest(command, ctx=ctx), cwd=canonical_digest(cwd, ctx=ctx),
+                    environment=canonical_digest(environment, ctx=ctx),
+                    entry=canonical_digest(read_file(anchor['entries'][role], ctx=ctx, role='source'), ctx=ctx),
+                    parent=owner._grant_digest, delegation=_FIXTURE_ZERO,
+                    scope=canonical_digest(_fixture_scope(anchor, role, self._phase, gate, generation), ctx=ctx))
+        _FIXTURE_DISPATCHES[id(self)] = self
+
+    def check(self):
+        require(type(self) is FixtureDispatch and _FIXTURE_DISPATCHES.get(id(self)) is self
+                and not self._revoked and not self._finished and self._pending.signal is None,
+                'wrong/consumed/revoked/cancelled fixture dispatch')
+        self._owner._dispatch_check(self)
+        if self._inherited_cutoff is not None:
+            require(time.monotonic() < self._inherited_cutoff, 'original ancestor invocation deadline expired')
+
+    def finish(self, record):
+        require(type(self) is FixtureDispatch and _FIXTURE_DISPATCHES.get(id(self)) is self
+                and self._used and not self._finished, 'fixture collector may return exactly once')
+        self._row = _fixture_immutable(record)
+        self._finished = True
+        self._owner._dispatch_returned(self, record)
+
+
+def fixture_dispatch(command, *, cwd, environment, ctx, purpose='gate'):
+    ticket = ctx._fixture_use
+    if ticket is None:
+        ctx.require(_FIXTURE_FACTORY_ANCHOR is None, 'stamped helper cannot dispatch before receive')
+        return None
+    ctx.require(type(ticket) is FixtureUseTicket, 'dispatch cannot upgrade an inspection/lookalike')
+    ticket._fast(ctx)
+    return ticket._owner.reserve(command, cwd, environment, ctx=ctx, purpose=purpose)
+
+
+class _FixtureTransportBudget:
+    """The existing collector's counters/cutoff, never a fresh Action or quota."""
+    def __init__(self, key, collector):
+        require(key is _FIXTURE_KEY, 'collector accounting factory only')
+        self._collector = collector
+
+    def check(self):
+        value = self._collector
+        require(_FIXTURE_COLLECTORS.get(id(value)) is value and not value._closed,
+                'fixture collector accounting is closed')
+        value._dispatch.check()
+        require(value._pending.signal is None and time.monotonic() < value._cutoff,
+                'fixture protocol shares the original collector deadline/cancellation')
+        if value._ctx is not None:
+            value._ctx.check()
+
+    def require(self, condition, message):
+        self.check()
+        if not condition:
+            self.fail(message)
+
+    def fail(self, message):
+        error = ActionFailure(message)
+        self.latch(error)
+        raise error
+
+    def latch(self, error):
+        self._collector._dispatch._owner._fail(error)
+        if self._collector._ctx is not None:
+            self._collector._ctx.latch(error)
+
+    def bytes(self, count, role, *, writing=False, hashing=False):
+        self.require(type(count) is int and count >= 0 and role == 'native', 'fixed protocol byte accounting')
+        value = self._collector
+        control = value._record['fixtureControl']
+        control['bytes'] += count
+        control['writtenBytes' if writing else 'readBytes'] += count
+        if value._ctx is not None:
+            value._ctx.bytes(count, 'native', writing=writing, hashing=hashing)
+        self.require(value.output_bytes() + control['bytes'] <= value._limit,
+                     'fixture protocol and actual output exhausted the original combined byte cap')
+
+
+class FixtureCollector:
+    """READY/seal/GO service attached to the *existing* collector selector."""
+    def __init__(self, key, dispatch, command, cwd, environment, pending, started, cutoff,
+                 record, limit, mode, ctx):
+        require(key is _FIXTURE_KEY and type(dispatch) is FixtureDispatch, 'collector requires original exact dispatch')
+        dispatch.check()
+        require(not dispatch._used and tuple(command) == dispatch._command and str(cwd) == dispatch._cwd
+                and environment == _fixture_export(dispatch._environment) and pending is dispatch._pending,
+                'actual collector argv/cwd/environment/cancellation differs from original reservation')
+        require(mode in {'native', 'gate'} and type(record) is dict and type(limit) is int and limit > 0,
+                'fixture existing collector accounting mode')
+        require((mode == 'native' and type(ctx) is Action and cutoff <= ctx.cutoff
+                 and limit <= LIMITS['catStdout'] + LIMITS['stderr'])
+                or (mode == 'gate' and (ctx is None or type(ctx) is Action) and limit <= 64*MIB),
+                'fixture transport may not widen the original collector policy')
+        require(type(started) in {int, float} and type(cutoff) in {int, float}
+                and math.isfinite(started) and math.isfinite(cutoff) and started < cutoff,
+                'fixture existing collector cutoff')
+        self._dispatch, self._pending, self._ctx = dispatch, pending, ctx
+        self._started, self._cutoff = started, min(cutoff, dispatch._inherited_cutoff or cutoff)
+        self._record, self._limit, self._mode = record, limit, mode
+        self._slot, self._process = dispatch._slot, None
+        self._ready, self._go, self._go_offset = bytearray(), None, 0
+        self._sealed, self._ready_eof, self._closed = False, False, False
+        self._budget = _FixtureTransportBudget(_FIXTURE_KEY, self)
+        self._pass = ()
+        dispatch._used, dispatch._collector = True, self
+        _FIXTURE_COLLECTORS[id(self)] = self
+        transition = dispatch._ctx._fixture_use._transition
+        if transition is not None:
+            require(type(transition) is FixtureEditableTransition and transition._state == 'prepared'
+                    and dispatch._purpose == 'gate' and dispatch._role is None,
+                    'editable may dispatch its one prescribed leaf only')
+            transition._state = 'running'
+        if self._slot is not None:
+            require(not self._slot._used and not self._slot._closed, 'fixture role slot consumed/closed')
+            self._slot._used = True
+            record['fixtureControl'] = {'schemaVersion': 1, 'role': dispatch._role, 'generation': dispatch._generation,
+                'gateIndex': dispatch._gate, 'started': started, 'cutoff': self._cutoff,
+                'bytes': 0, 'readBytes': 0, 'writtenBytes': 0, 'readyEof': False,
+                'writerClosedBeforeGo': False, 'goComplete': False, 'closed': False}
+            endpoints = [self._slot._fds[name] for name in _FIXTURE_RECEIVER_NAMES]
+            if dispatch._role == 'wheel-install':
+                delegated = dispatch._owner._slots['wheel-source-venv']
+                endpoints += [delegated._fds[name] for name in _FIXTURE_DELEGATED_NAMES]
+            elif dispatch._role == 'wheel-source-venv':
+                endpoints += [dispatch._owner._fds[name] for name in ('reader', 'replyReader')]
+            require(len(endpoints) == len(set(endpoints)), 'fixture transfer descriptor alias')
+            self._pass = tuple(sorted(endpoints))
+
+    @property
+    def cutoff(self):
+        return self._cutoff
+
+    @property
+    def pass_fds(self):
+        self._budget.check()
+        for fd in self._pass:
+            require(not os.get_inheritable(fd), 'parent capability endpoints must stay CLOEXEC before exact Popen')
+        if self._slot is not None:
+            _fixture_object(self._slot._fds['reader'], self._slot.descriptor, _FIXTURE_HEADER_BYTES,
+                            mode=os.O_RDONLY, ctx=self._budget)
+            _fixture_object(self._slot._fds['writer'], self._slot.descriptor, _FIXTURE_HEADER_BYTES,
+                            mode=os.O_RDWR, ctx=self._budget)
+        return self._pass
+
+    def output_bytes(self):
+        return (self._record['stdoutBytes'] + self._record['stderrBytes'] if self._mode == 'native'
+                else self._record['output']['observedBytes'])
+
+    def remaining(self):
+        self._budget.check()
+        control = self._record.get('fixtureControl', {}).get('bytes', 0)
+        return max(0, self._limit - self.output_bytes() - control)
+
+    def acquired(self, process, selector):
+        """Only after real Popen returned; no reported/guessed PID can seal a slot."""
+        self._budget.check()
+        require(self._process is None and type(process.pid) is int and process.pid > 0
+                and self._record.get('pid') == process.pid and self._record['ownership'] == 'live',
+                'fixture collector needs its actual unambiguously acquired handle')
+        self._process = process
+        if self._slot is None:
+            return
+        for name in _FIXTURE_RECEIVER_NAMES:
+            self._slot.pop_close(name, ctx=self._budget)
+        if self._dispatch._role == 'wheel-install':
+            delegated = self._dispatch._owner._slots['wheel-source-venv']
+            for name in _FIXTURE_DELEGATED_NAMES:
+                delegated.pop_close(name, ctx=self._budget)
+        # The wheel parent still needs its own RO object/lifetime channel. Those
+        # are inherited duplicates, NOT ownership transferred out of that lease.
+        selector.register(self._slot._fds['readyReader'], 1, 'fixture-ready')
+        self._budget.check()
+
+    def service(self, key, selector):
+        if key.data not in {'fixture-ready', 'fixture-go'}:
+            return False
+        budget, slot = self._budget, self._slot
+        budget.require(slot is not None and self._process is not None, 'fixture protocol before actual acquisition')
+        if key.data == 'fixture-ready':
+            budget.require(not self._ready_eof and key.fd == slot._fds['readyReader'], 'unexpected/replayed READY endpoint')
+            try:
+                body = os.read(key.fd, _FIXTURE_FRAME_BYTES + 1 - len(self._ready))
+            except BlockingIOError:
+                return True
+            budget.bytes(len(body), 'native')
+            if body:
+                self._ready.extend(body)
+                budget.require(len(self._ready) <= _FIXTURE_FRAME_BYTES, 'extra READY bytes')
+                return True
+            budget.require(len(self._ready) == _FIXTURE_FRAME_BYTES, 'early READY EOF')
+            role = _FIXTURE_ROLES[self._dispatch._role]
+            nonce = bytes(self._ready[32:])
+            budget.require(bytes(self._ready) == _fixture_ready(role, self._process.pid, nonce),
+                           'READY differs from actual child PID/role/fixed frame')
+            selector.unregister(key.fd)
+            slot.pop_close('readyReader', ctx=budget)
+            self._ready_eof = True
+            self._record['fixtureControl']['readyEof'] = True
+            grant = {'role': role, 'parentRole': _FIXTURE_ROLES.get(slot.parent_role, 0),
+                     'phase': _FIXTURE_PHASES[self._dispatch._phase], 'issuerPid': os.getpid(),
+                     'recipientPid': self._process.pid, 'generation': self._dispatch._generation,
+                     'gateIndex': 2**64-1 if self._dispatch._gate is None else self._dispatch._gate,
+                     'cutoffNs': int(self._cutoff * 1_000_000_000), 'receiverNonce': nonce,
+                     'commitments': dict(self._dispatch._commitments)}
+            raw = _fixture_grant(grant)
+            _fixture_object(slot._fds['writer'], slot.descriptor, _FIXTURE_HEADER_BYTES, mode=os.O_RDWR, ctx=budget)
+            _fixture_exact_write(slot._fds['writer'], raw, _FIXTURE_HEADER_BYTES, ctx=budget)
+            os.fsync(slot._fds['writer'])
+            budget.check()
+            _fixture_object(slot._fds['writer'], slot.descriptor, _FIXTURE_SLOT_BYTES, mode=os.O_RDWR, ctx=budget)
+            budget.require(_fixture_exact_read(slot._fds['writer'], _FIXTURE_GRANT_BYTES,
+                                               _FIXTURE_HEADER_BYTES, ctx=budget) == raw, 'sealed original grant readback differs')
+            slot.pop_close('writer', ctx=budget)
+            budget.check()
+            self._record['fixtureControl']['writerClosedBeforeGo'] = True
+            self._sealed = True
+            self._go = _fixture_go(role, hashlib.sha256(raw).hexdigest())
+            selector.register(slot._fds['replyWriter'], 2, 'fixture-go')
+        else:
+            budget.require(self._sealed and self._ready_eof and self._go is not None
+                           and key.fd == slot._fds['replyWriter'] and 'writer' not in slot._fds,
+                           'GO before original writer close/readback/READY EOF')
+            try:
+                count = os.write(key.fd, self._go[self._go_offset:])
+            except BlockingIOError:
+                return True
+            budget.require(type(count) is int and 0 < count <= len(self._go)-self._go_offset, 'invalid GO write')
+            budget.bytes(count, 'native', writing=True)
+            self._go_offset += count
+            if self._go_offset == len(self._go):
+                selector.unregister(key.fd)
+                self._record['fixtureControl']['goComplete'] = True
+                # Keep only this issuer's live write end. Closing it revokes the
+                # receiver, so it cannot be a normally duplicated log descriptor.
+        budget.check()
+        return True
+
+    def require_complete(self):
+        self._budget.check()
+        if self._slot is not None:
+            self._budget.require(self._sealed and self._ready_eof and self._go_offset == _FIXTURE_FRAME_BYTES,
+                                 'actual child ended without its exact original grant handshake')
+
+    def close(self, error=None):
+        """Only actual custody, popped before close; no ownership manufactured."""
+        if self._closed:
+            return
+        failures = []
+        if error is not None:
+            self._dispatch._owner._fail(error)
+        if self._slot is not None:
+            # A pre/post-Popen failure still owns every endpoint not explicitly
+            # transferred after actual handle registration. Retain the root RO
+            # inode anchor for the case; release nothing belonging to another role.
+            for name in tuple(self._slot._fds):
+                if name == 'anchor':
+                    continue
+                try:
+                    self._slot.pop_close(name)
+                except BaseException as problem:
+                    failures.append(problem)
+            self._record['fixtureControl']['closed'] = not failures
+        self._closed = True
+        _FIXTURE_COLLECTORS.pop(id(self), None)
+        if failures:
+            self._dispatch._owner._fail(failures[0])
+            raise failures[0]
+
+
+def fixture_collector(dispatch, command, *, cwd, environment, pending, started, cutoff,
+                      record, limit, mode, ctx=None):
+    if dispatch is None:
+        require(_FIXTURE_FACTORY_ANCHOR is None and (ctx is None or ctx._fixture_use is None),
+                'fixture-bound collector cannot omit its original reservation')
+        return None
+    require(type(dispatch) is FixtureDispatch, 'inspection/decoded record is not collector dispatch authority')
+    return FixtureCollector(_FIXTURE_KEY, dispatch, command, cwd, environment, pending, started, cutoff,
+                            record, limit, mode, ctx)
+
+
+def _fixture_pipe(fd, mode, *, ctx):
+    ctx.require(stat.S_ISFIFO(os.fstat(fd).st_mode)
+                and fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == mode
+                and not os.get_inheritable(fd) and not os.get_blocking(fd),
+                'fixture pipe access/nonblocking/CLOEXEC mode')
+
+
+def _fixture_wait(fd, *, writing, ctx):
+    ctx.check()
+    timeout = min(0.02, max(0, ctx.cutoff-time.monotonic()))
+    select.select([] if writing else [fd], [fd] if writing else [], [], timeout)
+    ctx.check()
+
+
+class FixtureLease:
+    """Actual recipient of a fixed original-source/kernel/Popen-bound grant."""
+    def __init__(self, key, role, *, ctx):
+        global _FIXTURE_ACTIVE_LEASE
+        ctx.require(key is _FIXTURE_KEY and _FIXTURE_ACTIVE_LEASE is None
+                    and _FIXTURE_FACTORY_ANCHOR is not None, 'lease requires the original stamped receiver source')
+        anchor = _validate_fixture_anchor(_FIXTURE_FACTORY_ANCHOR, ctx=ctx)
+        ctx.require(role in anchor['slots'] and os.getpid() != anchor['rootPid']
+                    and str(Path(sys.argv[0])) == anchor['entries'][role], 'wrong actual helper receiver entry/role')
+        self._anchor, self._role, self._pid = _fixture_immutable(anchor), role, os.getpid()
+        self.evidence, self._phase = anchor['evidence'], None
+        self._fds, self._delegated, self._grant, self._grant_digest = {}, None, None, None
+        self._current, self._index, self._failed, self._closed = None, 0, None, False
+        self._reservation, self._cutoff, self._generation, self._gate = None, ctx.cutoff, None, None
+        self._references = {}
+        self._errors = []
+        slot = anchor['slots'][role]
+        descriptor = slot['fds']
+        expected = {name: descriptor[name] for name in _FIXTURE_RECEIVER_NAMES}
+        if role == 'wheel-source-venv':
+            parent = anchor['slots']['wheel-install']['fds']
+            expected.update(parentReader=parent['reader'], parentReplyReader=parent['replyReader'])
+        if role == 'wheel-install':
+            expected.update({'delegated:' + name: anchor['slots']['wheel-source-venv']['fds'][name]
+                             for name in _FIXTURE_DELEGATED_NAMES})
+        # Possession of an fd *number* is insufficient. The first inherited
+        # descriptor must be the exact original still-anchored regular object.
+        info = os.fstat(descriptor['reader'])
+        ctx.require(_identity(info) == slot['identity'] and stat.S_ISREG(info.st_mode)
+                    and info.st_nlink == 0 and info.st_size == _FIXTURE_HEADER_BYTES
+                    and fcntl.fcntl(descriptor['reader'], fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY,
+                    'receiver has no original root-created capability object')
+        allowed = set(expected.values())
+        ctx.require(len(allowed) == len(expected), 'aliased inherited fixture endpoints')
+        for item in anchor['slots'].values():
+            for fd in item['fds'].values():
+                if fd not in allowed:
+                    try:
+                        os.fstat(fd)
+                    except OSError as error:
+                        import errno
+                        ctx.require(error.errno == errno.EBADF, 'unexpected descriptor inspection failure')
+                    else:
+                        ctx.fail('extra inherited fixture endpoint/anchor/writer')
+        try:
+            for name, fd in expected.items():
+                ctx.require(os.get_inheritable(fd), 'receiver endpoint did not arrive through exact pass_fds')
+                os.set_inheritable(fd, False)
+                self._fds[name] = fd
+            header = _fixture_object(descriptor['reader'], slot, _FIXTURE_HEADER_BYTES, mode=os.O_RDONLY, ctx=ctx)
+            ctx.require(struct.unpack_from('>Q', header, 24)[0] == anchor['rootPid']
+                        and header[88:120].hex() == anchor['caseIdentity'], 'original header case/root identity')
+            _fixture_pipe(descriptor['readyWriter'], os.O_WRONLY, ctx=ctx)
+            _fixture_pipe(descriptor['replyReader'], os.O_RDONLY, ctx=ctx)
+            parent_grant, parent_digest = None, _FIXTURE_ZERO
+            if role == 'wheel-source-venv':
+                parent_slot = anchor['slots']['wheel-install']
+                _fixture_object(self._fds['parentReader'], parent_slot, _FIXTURE_SLOT_BYTES, mode=os.O_RDONLY, ctx=ctx)
+                parent_raw = _fixture_exact_read(self._fds['parentReader'], _FIXTURE_GRANT_BYTES,
+                                                 _FIXTURE_HEADER_BYTES, ctx=ctx)
+                parent_grant, parent_digest = _fixture_decode_grant(parent_raw), hashlib.sha256(parent_raw).hexdigest()
+                ctx.require(parent_grant['role'] == _FIXTURE_ROLES['wheel-install']
+                            and parent_grant['parentRole'] == 0 and parent_grant['issuerPid'] == anchor['rootPid']
+                            and parent_grant['recipientPid'] == os.getppid()
+                            and parent_grant['commitments']['header'] == parent_slot['headerSha256']
+                            and parent_grant['commitments']['parent'] == _FIXTURE_ZERO
+                            and parent_grant['commitments']['delegation'] == canonical_digest(_fixture_delegation(anchor), ctx=ctx),
+                            'nested receiver lacks its original root-to-actual-parent grant')
+                _fixture_channel_alive(self._fds['parentReplyReader'], ctx=ctx)
+            else:
+                ctx.require(os.getppid() == anchor['rootPid'], 'receiver parent is not the original registered factory process')
+            if role == 'wheel-install':
+                original = anchor['slots']['wheel-source-venv']
+                delegated = _FixtureSlot('wheel-source-venv', 'wheel-install')
+                delegated.descriptor = original
+                delegated._fds = {name: self._fds.pop('delegated:' + name) for name in _FIXTURE_DELEGATED_NAMES}
+                self._delegated = delegated
+                for name, mode in (('writer', os.O_RDWR), ('reader', os.O_RDONLY)):
+                    _fixture_object(delegated._fds[name], original, _FIXTURE_HEADER_BYTES, mode=mode, ctx=ctx)
+                for name, mode in (('readyReader', os.O_RDONLY), ('readyWriter', os.O_WRONLY),
+                                   ('replyReader', os.O_RDONLY), ('replyWriter', os.O_WRONLY)):
+                    _fixture_pipe(delegated._fds[name], mode, ctx=ctx)
+            nonce = secrets.token_bytes(32)
+            ready = _fixture_ready(_FIXTURE_ROLES[role], self._pid, nonce)
+            sent = 0
+            while sent < len(ready):
+                ctx.check()
+                try:
+                    count = os.write(self._fds['readyWriter'], ready[sent:])
+                except BlockingIOError:
+                    _fixture_wait(self._fds['readyWriter'], writing=True, ctx=ctx)
+                    continue
+                ctx.require(type(count) is int and 0 < count <= len(ready)-sent, 'invalid receiver READY write')
+                ctx.bytes(count, 'native', writing=True)
+                sent += count
+            self._pop_close('readyWriter')
+            go = bytearray()
+            while len(go) < _FIXTURE_FRAME_BYTES:
+                ctx.check()
+                if parent_grant is not None:
+                    ctx.require(time.monotonic_ns() < parent_grant['cutoffNs'], 'original ancestor cutoff before grant')
+                    _fixture_channel_alive(self._fds['parentReplyReader'], ctx=ctx)
+                try:
+                    body = os.read(self._fds['replyReader'], _FIXTURE_FRAME_BYTES+1-len(go))
+                except BlockingIOError:
+                    _fixture_wait(self._fds['replyReader'], writing=False, ctx=ctx)
+                    continue
+                ctx.bytes(len(body), 'native')
+                ctx.require(bool(body), 'original issuer closed before GO')
+                go.extend(body)
+                ctx.require(len(go) <= _FIXTURE_FRAME_BYTES, 'extra GO frame data')
+            _fixture_object(self._fds['reader'], slot, _FIXTURE_SLOT_BYTES, mode=os.O_RDONLY, ctx=ctx)
+            raw = _fixture_exact_read(self._fds['reader'], _FIXTURE_GRANT_BYTES, _FIXTURE_HEADER_BYTES, ctx=ctx)
+            grant, digest_value = _fixture_decode_grant(raw), hashlib.sha256(raw).hexdigest()
+            ctx.require(bytes(go) == _fixture_go(_FIXTURE_ROLES[role], digest_value)
+                        and grant['receiverNonce'] == nonce and grant['recipientPid'] == self._pid
+                        and grant['issuerPid'] == os.getppid() and grant['role'] == _FIXTURE_ROLES[role]
+                        and grant['parentRole'] == _FIXTURE_ROLES.get(slot['parentRole'], 0)
+                        and grant['commitments']['header'] == slot['headerSha256']
+                        and grant['commitments']['parent'] == parent_digest
+                        and time.monotonic_ns() < grant['cutoffNs'], 'GO/grant actual receiver/parent/nonce/cutoff mismatch')
+            phase = next(name for name, number in _FIXTURE_PHASES.items() if number == grant['phase'])
+            gate = None if grant['gateIndex'] == 2**64-1 else grant['gateIndex']
+            ctx.require((role == 'fixture-base') == (phase == 'bootstrap' and gate is None), 'fixture grant phase/role scope')
+            if parent_grant is not None:
+                ctx.require(grant['cutoffNs'] <= parent_grant['cutoffNs']
+                            and all(grant[key] == parent_grant[key] for key in ('phase', 'generation', 'gateIndex'))
+                            and all(grant['commitments'][key] == parent_grant['commitments'][key]
+                                    for key in ('request', 'freeze', 'source', 'ledger', 'seed', 'editable')),
+                            'nested grant changed original ancestor candidate/scope/cutoff')
+            self._grant, self._grant_digest, self._phase = grant, digest_value, phase
+            self._cutoff, self._generation, self._gate = grant['cutoffNs']/1_000_000_000, grant['generation'], gate
+            expected_hashes = {'source': canonical_digest(_fixture_source_description(anchor), ctx=ctx),
+                'route': canonical_digest(list(sys.orig_argv), ctx=ctx),
+                'entry': canonical_digest(read_file(anchor['entries'][role], ctx=ctx, role='source'), ctx=ctx),
+                'cwd': canonical_digest(os.getcwd(), ctx=ctx), 'environment': canonical_digest(dict(os.environ), ctx=ctx),
+                'scope': canonical_digest(_fixture_scope(anchor, role, phase, gate, grant['generation']), ctx=ctx),
+                'delegation': canonical_digest(_fixture_delegation(anchor), ctx=ctx) if role == 'wheel-install' else _FIXTURE_ZERO}
+            for name, expected_hash in expected_hashes.items():
+                ctx.require(grant['commitments'][name] == expected_hash, 'actual receiver differs from original grant: ' + name)
+            for name, filename in (('request', 'FIXTURE-BASE-REQUEST.json'), ('freeze', 'final-freeze.json'),
+                                   ('ledger', 'final-verification.json'), ('seed', 'FIXTURE-BASE-COMPLETE.json'),
+                                   ('editable', 'EDITABLE-COMPLETE.json')):
+                applicable = name == 'request' or phase != 'bootstrap' and (name != 'editable' or phase == 'editable')
+                if not applicable:
+                    ctx.require(grant['commitments'][name] == _FIXTURE_ZERO, 'nonzero inapplicable fixture grant commitment')
+                    continue
+                reference = read_file(Path(self.evidence)/filename, ctx=ctx, role='record')
+                ctx.require(canonical_digest(reference, ctx=ctx) == grant['commitments'][name],
+                            'receiver original evidence differs from live grant: ' + name)
+                self._references[name] = _fixture_immutable(reference)
+            _fixture_channel_alive(self._fds['replyReader'], ctx=ctx)
+            ctx.check()
+            _FIXTURE_LEASES[id(self)] = self
+            _FIXTURE_ACTIVE_LEASE = self
+        except BaseException as error:
+            self._fail(error)
+            try:
+                self.close()
+            except BaseException:
+                pass
+            raise
+
+    def _pop_close(self, name):
+        fd = self._fds.pop(name, None)
+        if fd is not None:
+            try:
+                os.close(fd)
+            except BaseException as error:
+                self._errors.append(type(error).__name__)
+                raise
+
+    def _owner_check(self):
+        require(type(self) is FixtureLease and _FIXTURE_LEASES.get(id(self)) is self
+                and _FIXTURE_ACTIVE_LEASE is self and not self._closed and self._failed is None
+                and self._pid == os.getpid() and time.monotonic() < self._cutoff,
+                'closed/failed/forked/expired original fixture lease')
+
+    def _fast(self, ctx):
+        self._owner_check()
+        require(self._current is ctx, 'fixture lease belongs to another original action')
+        self._objects_live()
+        _fixture_channel_alive(self._fds['replyReader'], ctx=ctx)
+        if 'parentReplyReader' in self._fds:
+            _fixture_channel_alive(self._fds['parentReplyReader'], ctx=ctx)
+
+    def _objects_live(self):
+        for name, role in (('reader', self._role), ('parentReader', 'wheel-install')):
+            if name not in self._fds:
+                continue
+            fd = self._fds[name]
+            before = os.fstat(fd)
+            require(_identity(before) == _fixture_export(self._anchor['slots'][role]['identity'])
+                    and before.st_size == _FIXTURE_SLOT_BYTES and before.st_nlink == 0
+                    and fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY
+                    and not os.get_inheritable(fd), 'original inherited kernel object was substituted/closed')
+
+    def _admit(self, ticket, operation, transition, ctx):
+        ctx.require(transition is None and operation in {'ordinary', 'native', 'bootstrap', 'ledger'},
+                    'exec helper has no original-parent editable completion authority')
+        if self._phase == 'bootstrap':
+            ctx.require(operation == 'bootstrap', 'source-only bootstrap lease has no seeded/native authority')
+        if operation == 'native':
+            ctx.require(self._role not in {'fixture-base', 'wheel-source-venv'}, 'source-only venv helper cannot acquire children')
+        for name in ('request', 'freeze', 'seed', 'editable'):
+            if name in self._references:
+                reference = _fixture_export(self._references[name])
+                ctx.require(read_file(reference['path'], ctx=ctx, role='record') == reference,
+                            'leased original evidence changed: ' + name)
+
+    def _check_ledger(self, reference, ctx):
+        ctx.require('ledger' in self._references and reference == _fixture_export(self._references['ledger']),
+                    'helper current ledger is not the exact original dispatch observation')
+
+    def enter(self, ctx):
+        self._owner_check()
+        scopes = self._anchor['scopes'][self._role]
+        ctx.require(self._current is None and self._index < len(scopes) and ctx.name == scopes[self._index],
+                    'helper action is outside its finite original source profile')
+        if self._reservation is not None and not self._reservation._accepted:
+            ctx.require(self._reservation._finished and self._reservation._row.get('status') == 'PASS',
+                        'helper cannot continue before actual successful original collector return')
+        self._current = ctx
+        FixtureUseTicket(_FIXTURE_KEY, self, ctx, 'helper', self._gate)
+        self._fast(ctx)
+
+    def returned(self, ctx):
+        self._owner_check()
+        require(self._current is ctx and ctx.state == 'closed' and ctx.failure is None
+                and ctx.pending.signal is None and time.monotonic() < ctx.cutoff,
+                'helper action did not fully return through its original context')
+        self._index += 1
+        self._current = None
+        reservation = self._reservation
+        if reservation is not None:
+            if reservation._ctx is ctx:
+                require(not reservation._used, 'helper prelaunch collector started before whole-action return')
+                reservation._ready = True
+            elif not reservation._accepted:
+                require(reservation._finished and reservation._row.get('status') == 'PASS', 'helper result was not successful')
+                reservation._accepted = True
+        if self._index == len(self._anchor['scopes'][self._role]):
+            require(reservation is None or reservation._accepted, 'last helper action cannot leave an unaccounted reservation')
+            self.close()
+
+    def reserve(self, command, cwd, environment, *, ctx, purpose='gate'):
+        ctx.require(purpose in {'gate', 'wheel-source-venv'} and self._role == 'wheel-install'
+                    and self._current is ctx and (self._reservation is None or self._reservation._accepted),
+                    'only the actual compound wheel role may invoke its original finite subcommands')
+        role = 'wheel-source-venv' if purpose == 'wheel-source-venv' else None
+        if role is not None:
+            ctx.require(self._delegated is not None and not self._delegated._used, 'nested source-only delegation is one-shot')
+        dispatch = FixtureDispatch(_FIXTURE_KEY, self, ctx, purpose, role, self._gate, self._generation,
+                                   command, str(cwd), environment, False, ctx=ctx)
+        self._reservation = dispatch
+        return dispatch
+
+    def _dispatch_check(self, dispatch):
+        self._owner_check()
+        self._objects_live()
+        require(self._current is None and self._reservation is dispatch and dispatch._ctx.state == 'closed'
+                and dispatch._ready and not dispatch._accepted,
+                'compound helper collector requires whole original prelaunch return')
+        # The collector owns no fresh Action. Re-use its fixed no-data lifetime
+        # check, with no JSON/runtime/filesystem loader and no new time budget.
+        for name in ('replyReader', 'parentReplyReader'):
+            if name not in self._fds:
+                continue
+            fd = self._fds[name]
+            require(stat.S_ISFIFO(os.fstat(fd).st_mode)
+                    and fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY
+                    and not os.get_inheritable(fd) and not os.get_blocking(fd), 'dispatch ancestor channel changed')
+            try:
+                data = os.read(fd, 1)
+            except BlockingIOError:
+                continue
+            self._fail(ActionFailure('ancestor channel revoked during original collector'))
+            raise ActionFailure('ancestor channel EOF/error/extra data')
+
+    def _dispatch_returned(self, dispatch, row):
+        if row.get('status') != 'PASS':
+            self._fail(ActionFailure('actual nested collector failed'))
+
+    def _fail(self, error):
+        if self._failed is None:
+            self._failed = type(error).__name__
+        if self._reservation is not None:
+            self._reservation._revoked = True
+        if self._delegated is not None:
+            try:
+                self._delegated.pop_close('replyWriter')
+            except BaseException as problem:
+                if len(self._errors) < 16:
+                    self._errors.append(type(problem).__name__)
+
+    def close(self):
+        global _FIXTURE_ACTIVE_LEASE
+        if self._closed:
+            return
+        require(self._pid == os.getpid(), 'forked lease cannot dispose another owner')
+        failures = []
+        for name in tuple(self._fds):
+            try:
+                self._pop_close(name)
+            except BaseException as error:
+                failures.append(error)
+        if self._delegated is not None:
+            try:
+                self._delegated.close()
+            except BaseException as error:
+                failures.append(error)
+        self._closed = True
+        _FIXTURE_LEASES.pop(id(self), None)
+        for key, dispatch in tuple(_FIXTURE_DISPATCHES.items()):
+            if dispatch._owner is self:
+                dispatch._revoked = True
+                _FIXTURE_DISPATCHES.pop(key, None)
+        if _FIXTURE_ACTIVE_LEASE is self:
+            _FIXTURE_ACTIVE_LEASE = None
+        if failures:
+            self._fail(failures[0])
+            raise failures[0]
+
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
+class ActionFailure(RuntimeError):
+    pass
+
+
+def participating(function):
+    """An I/O/parser failure poisons its caller even if it catches the error."""
+    @wraps(function)
+    def guarded(*args, ctx, **kwargs):
+        try:
+            ctx.check(failure_only=kwargs.get('failure_only', False))
+            return function(*args, ctx=ctx, **kwargs)
+        except BaseException as error:
+            ctx.latch(error)
+            raise
+    return guarded
+
+
+def participating_generator(function):
+    """Cover iteration/entry/exit, not merely creation of a lazy generator."""
+    @wraps(function)
+    def guarded(*args, ctx, **kwargs):
+        try:
+            ctx.check()
+            yield from function(*args, ctx=ctx, **kwargs)
+        except BaseException as error:
+            ctx.latch(error)
+            raise
+    return guarded
+
+
+def participating_method(function):
+    """Equivalent boundary for stateful parsers carrying their original ctx."""
+    @wraps(function)
+    def guarded(self, *args, **kwargs):
+        try:
+            self.ctx.check()
+            return function(self, *args, **kwargs)
+        except BaseException as error:
+            self.ctx.latch(error)
+            raise
+    return guarded
+
+
+class Action:
+    def __init__(self, name, pending, *, seconds=LIMITS['seconds']):
+        require(type(name) is str and name and type(seconds) in (int, float)
+                and math.isfinite(seconds) and 0 < seconds <= LIMITS['seconds'], 'invalid action time budget/name')
+        self.name, self.pending = name, pending
+        self.started = time.monotonic()
+        self.cutoff = self.started + seconds
+        self.nonce = secrets.token_hex(24)
+        self.counts = {}
+        self.failure = None
+        self.native = []
+        self.views = []
+        self.removals = []
+        self.observations = []
+        self.queries = []
+        self.state = 'created'
+        self.first_error = None
+        self.secondary_errors = []
+        self.secondary_error_count = 0
+        self._authorities = {}
+        self._fixture_use = None
+        self._fixture_busy = False
+        self._fixture_ledgers = {}
+        self._fixture_staged = []
+
+    def activate(self):
+        require(self.state == 'created', 'action cannot be re-entered')
+        self.state = 'active'
+
+    def revoke(self):
+        self._authorities.clear()
+        ticket = self._fixture_use
+        if type(ticket) is FixtureUseTicket and _FIXTURE_TICKETS.get(id(ticket)) is ticket:
+            ticket._active = False
+            _FIXTURE_TICKETS.pop(id(ticket), None)
+            if ticket._transition is not None:
+                _FIXTURE_TRANSITIONS.pop(id(ticket._transition), None)
+        self._fixture_ledgers.clear()
+        self.state = 'closed'
+
+    def latch(self, error):
+        if self.first_error is None:
+            self.first_error = error
+            self.failure = self.failure or type(error).__name__
+        elif error is not self.first_error:
+            self.secondary_error_count += 1
+            if len(self.secondary_errors) < 16:
+                self.secondary_errors.append(type(error).__name__)
+        ticket = self._fixture_use
+        if (type(ticket) is FixtureUseTicket and ticket._ctx is self
+                and _FIXTURE_TICKETS.get(id(ticket)) is ticket):
+            ticket._owner._fail(error)
+
+    def terminal_check(self):
+        """After handler restoration, never grants ordinary work authority."""
+        if time.monotonic() >= self.cutoff:
+            self.fail('original action deadline exceeded')
+        if self.pending.signal is not None:
+            self.fail('action cancellation pending')
+        if self.failure is not None:
+            raise ActionFailure('action already failed: ' + self.failure)
+
+    def fail(self, message):
+        self.failure = self.failure or str(message)
+        error = ActionFailure(str(message))
+        self.latch(error)
+        raise error
+
+    def check(self, *, failure_only=False):
+        if failure_only:
+            require(self.state in {'active', 'closed'} and (self.failure is not None or self.pending.signal is not None),
+                    'FAIL-only work requires an actual failure/cancellation')
+        elif self.state != 'active':
+            self.fail('ordinary work requires the currently active action')
+        if time.monotonic() >= self.cutoff:
+            self.fail('original action deadline exceeded')
+        if not failure_only:
+            if self.pending.signal is not None:
+                self.fail('action cancellation pending')
+            if self.failure is not None:
+                raise ActionFailure('action already failed: ' + self.failure)
+            if self._fixture_use is not None and not self._fixture_busy:
+                self._fixture_busy = True
+                try:
+                    self._fixture_use._fast(self)
+                except BaseException as error:
+                    self.latch(error)
+                    raise
+                finally:
+                    self._fixture_busy = False
+
+    def require(self, condition, message):
+        self.check()
+        if not condition:
+            self.fail(message)
+
+    def charge(self, category, count, *, failure_only=False):
+        self.check(failure_only=failure_only)
+        if category not in LIMITS or type(count) is not int or count < 0:
+            self.fail('invalid resource charge')
+        value = self.counts.get(category, 0) + count
+        self.counts[category] = value
+        if value > LIMITS[category]:
+            self.fail('action resource limit exceeded: ' + category)
+
+    def bytes(self, count, role, *, writing=False, hashing=False, failure_only=False):
+        self.charge('allBytes', count, failure_only=failure_only)
+        if role in PAYLOAD_ROLES or role == 'native':
+            self.charge('payload', count, failure_only=failure_only)
+        if role == 'tool' and not hashing and not writing:
+            self.charge('toolBytes', count, failure_only=failure_only)
+        if writing:
+            self.charge('newBytes', count, failure_only=failure_only)
+
+    def summary(self):
+        return {'action': self.name, 'nonce': self.nonce, 'started': self.started,
+                'cutoff': self.cutoff, 'seconds': time.monotonic()-self.started,
+                'counts': dict(self.counts), 'cancelSignal': self.pending.signal,
+                'failure': self.failure, 'native': self.native, 'views': self.views,
+                'removals': list(self.removals), 'queries': self.queries}
+
+
+@contextmanager
+def action(name, *, pending=None, seconds=LIMITS['seconds'], fixture_role=None):
+    """Original action scope; a receiver handshake cannot allocate another one."""
+    lease, ctx, entered, created = None, None, False, False
+    try:
+        with _action_context(name, pending=pending, seconds=seconds) as ctx:
+            if _FIXTURE_FACTORY_ANCHOR is not None:
+                lease = _FIXTURE_ACTIVE_LEASE
+                if lease is None:
+                    ctx.require(fixture_role in _FIXTURE_ROLES, 'stamped entry must name its original fixed role')
+                    lease = FixtureLease(_FIXTURE_KEY, fixture_role, ctx=ctx)
+                    created = True
+                else:
+                    ctx.require(fixture_role is None or fixture_role == lease._role,
+                                'a helper cannot change role within one inherited invocation')
+                lease.enter(ctx)
+                entered = True
+            else:
+                ctx.require(fixture_role is None or fixture_role in _FIXTURE_ROLES, 'unknown fixed helper role')
+            yield ctx
+        if lease is not None and entered:
+            lease.returned(ctx)  # after the entire original context/handler exit
+    except BaseException as error:
+        if lease is not None and (created or entered or
+                ctx is not None and type(ctx._fixture_use) is FixtureUseTicket and ctx._fixture_use._owner is lease):
+            lease._fail(error)
+            try:
+                lease.close()
+            except BaseException as problem:
+                if ctx is not None:
+                    ctx.latch(problem)
+        raise
+
+
+@contextmanager
+def _action_context(name, *, pending=None, seconds=LIMITS['seconds']):
+    # Import here: process_gate has no dependency on this module.
+    from process_gate import cancellation_flag
+    if pending is not None:
+        ctx = Action(name, pending, seconds=seconds)
+        ctx.activate()
+        try:
+            ctx.check()
+            yield ctx
+            ctx.check()
+        except BaseException as error:
+            ctx.latch(error)
+            raise
+        finally:
+            ctx.revoke()
+        return
+    ctx = None
+    try:
+        with cancellation_flag() as flag:
+            ctx = Action(name, flag, seconds=seconds)
+            ctx.activate()
+            try:
+                ctx.check()
+                yield ctx
+                ctx.check()
+            finally:
+                ctx.revoke()
+        ctx.terminal_check()  # includes a flag delivered immediately before restoration
+    except BaseException as error:
+        if ctx is not None:
+            ctx.latch(error)
+        raise
+    finally:
+        if ctx is not None:
+            ctx.revoke()
+
+
+def _identity(info):
+    return {'device': info.st_dev, 'inode': info.st_ino, 'uid': info.st_uid,
+            'mode': stat.S_IMODE(info.st_mode), 'type': stat.S_IFMT(info.st_mode)}
+
+
+def _unchanged(before, after):
+    return (_identity(before) == _identity(after) and before.st_size == after.st_size
+            and before.st_nlink == after.st_nlink and before.st_mtime_ns == after.st_mtime_ns
+            and before.st_ctime_ns == after.st_ctime_ns)
+
+
+def _parts(path, ctx):
+    ctx.check()
+    path = Path(path)
+    ctx.require(path.is_absolute() and '..' not in path.parts and str(path) == os.path.normpath(path),
+                'noncanonical absolute path')
+    ctx.require(len(path.parts) <= LIMITS['fsDepth'], 'filesystem depth exceeded')
+    return path, path.parts[1:]
+
+
+def close_fd(fd, ctx):
+    # Checking first must NEVER skip the close, even on cancellation/expiry.
+    # A finally-close must not replace the original failing operation. Still
+    # latch close/check failures and actually attempt every acquired descriptor.
+    primary = sys.exc_info()[1]
+    if primary is not None:
+        ctx.latch(primary)
+    error = None
+    try:
+        ctx.check()
+    except BaseException as problem:
+        ctx.latch(problem)
+        error = problem
+    try:
+        os.close(fd)
+    except BaseException as problem:
+        ctx.latch(problem)
+        error = error or problem
+    if primary is not None:
+        return
+    if error is not None:
+        raise error
+    try:
+        ctx.check()
+    except BaseException as problem:
+        ctx.latch(problem)
+        raise
+
+
+@contextmanager
+def _directory(path, *, ctx, missing_ok=False):
+    path, parts = _parts(path, ctx)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    ctx.check()
+    fd = None
+    primary = None
+    try:
+        fd = os.open('/', flags)
+        ctx.check()
+        for part in parts:
+            ctx.check()
+            try:
+                new = os.open(part, flags, dir_fd=fd)
+            except FileNotFoundError:
+                if missing_ok:
+                    yield None
+                    return
+                raise
+            try:
+                ctx.check()
+            except BaseException:
+                close_fd(new, ctx)
+                raise
+            old, fd = fd, new
+            close_fd(old, ctx)
+        yield fd
+    except BaseException as error:
+        primary = error
+        ctx.latch(error)
+        raise
+    finally:
+        if fd is not None:
+            try:
+                close_fd(fd, ctx)
+            except BaseException as error:
+                ctx.latch(error)
+                if primary is None:
+                    raise
+
+
+@contextmanager
+@participating_generator
+def directory(path, *, ctx):
+    with _directory(path, ctx=ctx) as fd:
+        yield fd
+
+
+@participating
+def identity(path, *, ctx):
+    path, parts = _parts(path, ctx)
+    if not parts:
+        ctx.check()
+        value = os.lstat('/')
+    else:
+        with directory(path.parent, ctx=ctx) as fd:
+            ctx.check()
+            value = os.stat(path.name, dir_fd=fd, follow_symlinks=False)
+            ctx.check()
+    return _identity(value)
+
+
+@participating
+def ancestry(path, *, ctx):
+    path, _ = _parts(path, ctx)
+    result = {}
+    for item in reversed((path, *path.parents)):
+        value = identity(item, ctx=ctx)
+        ctx.require(value['type'] == stat.S_IFDIR, 'symlink/non-directory ancestry')
+        result[str(item)] = value
+    return result
+
+
+@participating
+def exists(path, *, ctx):
+    path = Path(path)
+    with _directory(path.parent, ctx=ctx, missing_ok=True) as fd:
+        if fd is None:
+            return False
+        try:
+            ctx.check()
+            os.stat(path.name, dir_fd=fd, follow_symlinks=False)
+            ctx.check()
+        except FileNotFoundError:
+            # ENOENT is resolved before any participating boundary sees it.
+            ctx.check()
+            return False
+    return True
+
+
+@participating
+def names_fd(fd, *, ctx):
+    ctx.check()
+    names = []
+    iterator = os.scandir(fd)
+    primary = None
+    try:
+        for entry in iterator:
+            ctx.check()
+            ctx.charge('visited', 1)
+            ctx.require(len(names) < LIMITS['fanout'], 'directory fanout exceeded')
+            ctx.require(len(os.fsencode(entry.name)) <= LIMITS['component'], 'directory component too long')
+            names.append(entry.name)
+    except BaseException as error:
+        primary = error
+        ctx.latch(error)
+        raise
+    finally:
+        try:
+            iterator.close()
+        except BaseException as error:
+            ctx.latch(error)
+            if primary is None:
+                raise
+    ctx.check()
+    names.sort()
+    ctx.check()
+    return names
+
+
+@participating
+def names(path, *, ctx):
+    with directory(path, ctx=ctx) as fd:
+        return names_fd(fd, ctx=ctx)
+
+
+def _read_fd(fd, *, ctx, role, sink=None, hardlinks=False):
+    ctx.check()
+    before = os.fstat(fd)
+    ctx.require(stat.S_ISREG(before.st_mode) and (hardlinks or before.st_nlink == 1),
+                'nonregular/hardlinked input')
+    cap = LIMITS[ROLES[role]]
+    ctx.require(before.st_size <= cap, 'declared file size exceeds ' + role + ' limit')
+    hasher, size = hashlib.sha256(), 0
+    while True:
+        ctx.check()
+        block = os.read(fd, min(CHUNK, cap-size+1))
+        ctx.check()
+        if not block:
+            break
+        size += len(block)
+        ctx.bytes(len(block), role)
+        ctx.require(size <= cap, 'growing file exceeds role limit')
+        ctx.bytes(len(block), role, hashing=True)
+        hasher.update(block)
+        if sink is not None:
+            sink(block)
+        ctx.check()
+    after = os.fstat(fd)
+    ctx.require(_unchanged(before, after) and size == before.st_size, 'input changed while reading')
+    return {'identity': _identity(after), 'bytes': size, 'sha256': hasher.hexdigest()}
+
+
+@participating
+def read_file(path, *, ctx, role='record', sink=None, retain=False, hardlinks=False):
+    path = Path(path)
+    chunks = [] if retain else None
+    ctx.require(not (retain and sink is not None), 'ambiguous file sink')
+    with directory(path.parent, ctx=ctx) as parent:
+        ctx.check()
+        before = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        ctx.require(stat.S_ISREG(before.st_mode), 'input must be regular, not symlink')
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        try:
+            ctx.require(_unchanged(before, os.fstat(fd)), 'input replaced while opening')
+            value = _read_fd(fd, ctx=ctx, role=role,
+                             sink=chunks.append if retain else sink, hardlinks=hardlinks)
+            ctx.require(_unchanged(before, os.stat(path.name, dir_fd=parent, follow_symlinks=False)),
+                        'input path changed during read')
+        finally:
+            close_fd(fd, ctx)
+    value['path'] = str(path)
+    if retain:
+        ctx.check()
+        value['data'] = b''.join(chunks)
+        ctx.check()
+    return value
+
+
+@participating
+def digest(path, *, ctx, role):
+    return read_file(path, ctx=ctx, role=role, hardlinks=role == 'tool')['sha256']
+
+
+@participating
+def bounded_text(path, *, ctx, role='record', errors='strict'):
+    data = read_file(path, ctx=ctx, role=role, retain=True)['data']
+    ctx.check()
+    value = data.decode('utf-8', errors=errors)
+    ctx.check()
+    return value
+
+
+def _json_preflight(text, ctx):
+    # Lexically bound before json.loads allocates containers. Decoder then
+    # independently rejects grammar/escapes; no permissive constants or keys.
+    stack, quoted, escaped, token, string_len = [], False, False, False, 0
+    nodes = 0
+    for index, char in enumerate(text):
+        if index % CHUNK == 0:
+            ctx.check()
+        if quoted:
+            string_len += len(char.encode('utf-8'))
+            ctx.require(string_len <= LIMITS['jsonString'], 'JSON string bound exceeded')
+            if escaped:
+                escaped = False
+            elif char == '\\':
+                escaped = True
+            elif char == '"':
+                quoted = False
+            continue
+        if char == '"':
+            quoted, string_len, token = True, 0, False
+            nodes += 1
+        elif char in '[{':
+            stack.append(char)
+            ctx.require(len(stack) <= LIMITS['jsonDepth'], 'JSON depth exceeded')
+            nodes += 1
+            token = False
+        elif char in ']}':
+            ctx.require(bool(stack) and stack.pop() == ('[' if char == ']' else '{'), 'JSON nesting invalid')
+            token = False
+        elif char in ',: \r\n\t':
+            token = False
+        elif not token:
+            nodes += 1
+            token = True
+        ctx.require(nodes <= LIMITS['jsonTokens'], 'JSON token bound exceeded')
+    ctx.require(not stack and not quoted, 'JSON truncated')
+    ctx.charge('jsonTokens', nodes)
+
+
+@participating
+def decode_json(data, *, ctx):
+    ctx.require(len(data) <= LIMITS['record'], 'JSON record too large')
+    ctx.check()
+    text = data.decode('utf-8')
+    _json_preflight(text, ctx)
+    def pairs(items):
+        value = {}
+        for key, child in items:
+            ctx.check()
+            ctx.require(key not in value, 'duplicate verification record key')
+            value[key] = child
+        return value
+    def invalid(value):
+        ctx.fail('non-finite JSON constant: ' + value)
+    def finite_float(value):
+        number = float(value)
+        ctx.require(math.isfinite(number), 'non-finite JSON exponent overflow')
+        return number
+    ctx.check()
+    value = json.loads(text, object_pairs_hook=pairs, parse_constant=invalid, parse_float=finite_float)
+    ctx.check()
+    return value
+
+
+@participating
+def read_json(path, *, ctx):
+    return decode_json(read_file(path, ctx=ctx, role='record', retain=True)['data'], ctx=ctx)
+
+
+def _validate_value(value, ctx, *, failure_only=False):
+    stack = [(value, 0)]
+    count = 0
+    while stack:
+        ctx.check(failure_only=failure_only)
+        item, depth = stack.pop()
+        count += 1
+        if depth > LIMITS['jsonDepth'] or count > LIMITS['jsonTokens']:
+            ctx.fail('structured record container bound exceeded')
+        if isinstance(item, str):
+            if len(item) > LIMITS['jsonString'] or len(item.encode('utf-8')) > LIMITS['jsonString']:
+                ctx.fail('structured record string bound exceeded')
+        elif type(item) in (dict, list, tuple):
+            if len(stack)+(2 if isinstance(item, dict) else 1)*len(item) > LIMITS['jsonTokens']-count:
+                ctx.fail('structured record node bound exceeded')
+            if isinstance(item, dict):
+                for key, child in item.items():
+                    if not isinstance(key, str):
+                        ctx.fail('non-string record key')
+                    stack.append((key, depth+1))
+                    stack.append((child, depth+1))
+            else:
+                stack.extend((child, depth+1) for child in item)
+        elif isinstance(item, float) and not math.isfinite(item):
+            ctx.fail('non-finite record number')
+        elif item is not None and not isinstance(item, (bool, int, float)):
+            ctx.fail('unsupported record value')
+    ctx.charge('jsonTokens', count, failure_only=failure_only)
+
+
+@participating
+def encode_json(value, *, ctx, failure_only=False):
+    _validate_value(value, ctx, failure_only=failure_only)
+    encoder = json.JSONEncoder(ensure_ascii=True, allow_nan=False, sort_keys=True,
+                               separators=(',', ':'))
+    chunks, size = [], 0
+    for fragment in encoder.iterencode(value):
+        ctx.check(failure_only=failure_only)
+        for start in range(0, len(fragment), CHUNK):
+            block = fragment[start:start+CHUNK].encode('ascii')
+            size += len(block)
+            if size > LIMITS['record']:
+                ctx.fail('encoded record too large')
+            chunks.append(block)
+    ctx.check(failure_only=failure_only)
+    return b''.join(chunks)
+
+
+@participating
+def canonical_digest(value, *, ctx):
+    data = encode_json(value, ctx=ctx)
+    h = hashlib.sha256()
+    for start in range(0, len(data), CHUNK):
+        ctx.check()
+        block = data[start:start+CHUNK]
+        ctx.bytes(len(block), 'record', hashing=True)
+        h.update(block)
+    ctx.check()
+    return h.hexdigest()
+
+
+def _write_fd(fd, blocks, *, ctx, role, failure_only=False):
+    size = 0
+    for block in blocks:
+        for start in range(0, len(block), CHUNK):
+            piece = memoryview(block)[start:start+CHUNK]
+            while piece:
+                ctx.check(failure_only=failure_only)
+                count = os.write(fd, piece)
+                ctx.check(failure_only=failure_only)
+                require(count > 0, 'short output write')
+                size += count
+                if size > LIMITS[ROLES[role]]:
+                    ctx.fail('output role limit exceeded')
+                ctx.bytes(count, role, writing=True, failure_only=failure_only)
+                piece = piece[count:]
+    ctx.check(failure_only=failure_only)
+    os.fsync(fd)
+    ctx.check(failure_only=failure_only)
+    info = os.fstat(fd)
+    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size == size,
+            'output identity/length invalid')
+    return size
+
+
+@participating
+def write_bytes_new(path, blocks, *, ctx, role='record', failure_only=False):
+    path = Path(path)
+    # Failure-only is confined to an existing parent; no new owner or directory.
+    if failure_only:
+        ctx.check(failure_only=True)
+        # Still no-follow; directory's ordinary checks are deliberately replaced
+        # by a failure-only facade, not a fresh deadline/counter context.
+        guard = FailureOnly(ctx)
+    else:
+        guard = ctx
+    with directory(path.parent, ctx=guard) as parent:
+        guard.check()
+        fd = os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o600, dir_fd=parent)
+        try:
+            guard.check()
+            _write_fd(fd, blocks, ctx=ctx, role=role, failure_only=failure_only)
+        finally:
+            close_fd(fd, guard)
+        guard.check()
+        os.fsync(parent)
+        guard.check()
+
+
+class FailureOnly:
+    """Private facade for bounded diagnostic writes/closes, never exported work."""
+    def __init__(self, ctx):
+        self.ctx = ctx
+    def check(self, **_):
+        self.ctx.check(failure_only=True)
+    def require(self, value, message):
+        self.check()
+        if not value:
+            self.ctx.fail(message)
+    def __getattr__(self, name):
+        return getattr(self.ctx, name)
+    @property
+    def failure(self):
+        return self.ctx.failure
+    @failure.setter
+    def failure(self, value):
+        self.ctx.failure = value
+
+
+@participating
+def write_new(path, value, *, ctx):
+    data = encode_json(value, ctx=ctx) + b'\n'
+    write_bytes_new(path, [data], ctx=ctx)
+    ctx.check()
+
+
+def write_failure(path, *, ctx, phase, error):
+    # Fixed FAIL schema; callers cannot smuggle a seal/success/adoption payload.
+    ctx.latch(error)
+    value = {'status': 'FAIL', 'action': ctx.name, 'nonce': ctx.nonce,
+             'phase': str(phase)[:1024], 'errorType': type(error).__name__,
+             'failure': (ctx.failure or str(error))[:4096],
+             'cancelSignal': ctx.pending.signal, 'removals': ctx.removals,
+             'native': ctx.native, 'seconds': time.monotonic()-ctx.started}
+    data = encode_json(value, ctx=ctx, failure_only=True) + b'\n'
+    ctx.charge('diagnostics', len(data), failure_only=True)
+    write_bytes_new(path, [data], ctx=ctx, failure_only=True)
+
+
+@participating
+def mkdir_new(path, *, ctx):
+    path = Path(path)
+    with directory(path.parent, ctx=ctx) as parent:
+        ctx.check()
+        os.mkdir(path.name, 0o700, dir_fd=parent)
+        ctx.check()
+        os.fsync(parent)
+        ctx.check()
+    return identity(path, ctx=ctx)
+
+
+@participating
+def replace_ledger(temporary, target, value, *, ctx):
+    temporary, target = Path(temporary), Path(target)
+    ctx.require(temporary.parent == target.parent, 'ledger replacement must stay in owned parent')
+    ticket = fixture_admit(target.parent, ctx=ctx, operation='ledger')
+    transaction = None
+    if ticket is not None:
+        ctx.require(type(ticket._owner) is FixtureSession and ticket._owner._current is ctx
+                    and ticket._phase in {'controller-setup', 'attempt', 'completion', 'editable', 'final'}
+                    and target.name == 'final-verification.json' and temporary.name == 'final-verification.pending',
+                    'only the original current controller owns the mutable fixture ledger')
+        transaction = fixture_ledger(target.parent, ctx=ctx, absent=ticket._phase == 'controller-setup')
+    original = None
+    if exists(target, ctx=ctx):
+        original = read_file(target, ctx=ctx, role='record')
+        ctx.require(original['identity']['uid'] == os.getuid(), 'foreign accounting file')
+    if transaction is not None:
+        ctx.require(original == _fixture_export(transaction._reference), 'ledger changed since original pending observation')
+    write_new(temporary, value, ctx=ctx)
+    temp_bound = read_file(temporary, ctx=ctx, role='record', retain=transaction is not None)
+    intended = temp_bound.pop('data') if transaction is not None else None
+    if transaction is not None:
+        ctx.require(decode_json(intended, ctx=ctx) == value, 'pending ledger bytes are not the intended original value')
+    with directory(target.parent, ctx=ctx) as fd:
+        ctx.check()
+        if transaction is not None:
+            transaction.check(ctx)
+        if original is not None:
+            ctx.require(read_file(target, ctx=ctx, role='record') == original, 'accounting replaced concurrently')
+        else:
+            ctx.require(not exists(target, ctx=ctx), 'unexpected accounting file appeared')
+        ctx.require(read_file(temporary, ctx=ctx, role='record') == temp_bound, 'pending accounting changed')
+        os.replace(temporary.name, target.name, src_dir_fd=fd, dst_dir_fd=fd)
+        ctx.check()
+        os.fsync(fd)
+        ctx.check()
+    if transaction is not None:
+        # Neither os.replace nor a fsync return is parent-action finality. Retain
+        # the exact candidate bytes on any later failure; never retry/overwrite.
+        bound = read_file(target, ctx=ctx, role='record', retain=True)
+        observed = bound.pop('data')
+        ctx.require(observed == intended and bound == {**temp_bound, 'path': str(target)},
+                    'replacement ledger independent readback/identity differs')
+        successor = LedgerObservation(_FIXTURE_KEY, ctx, str(target.parent), bound, observed, value)
+        ctx._fixture_ledgers[str(target.parent)] = successor
+        ticket._owner.stage(_FIXTURE_KEY, 'ledger', {'reference': bound, 'value': value}, ctx=ctx)
+        ctx.check()
+
+
+@participating
+def assert_owned(owner, *, ctx):
+    from evidence_schemas import owner_record
+    owner_record(owner, ctx=ctx)
+    ctx.require(set(owner) == {'path', 'identity', 'parentAncestry', 'nonce', 'tree', 'purpose'}, 'invalid owner fields')
+    root = Path(owner['path'])
+    ctx.require(ancestry(root.parent, ctx=ctx) == owner['parentAncestry'], 'owned ancestry changed')
+    value = identity(root, ctx=ctx)
+    ctx.require(value == owner['identity'] and value['type'] == stat.S_IFDIR
+                and value['uid'] == os.getuid() and value['mode'] == 0o700,
+                'owned output root replaced/symlinked/foreign')
+    ctx.require(len(owner['nonce']) == 48 and all(c in '0123456789abcdef' for c in owner['nonce']), 'invalid owner nonce')
+    return root
+
+
+@participating
+def create_owned(root, marker, tree, purpose, *, ctx):
+    from evidence_schemas import digest as schema_digest, label
+    schema_digest(tree, ctx=ctx, length=40)
+    label(purpose, ctx=ctx, name='owner purpose')
+    root, marker = Path(root), Path(marker)
+    ctx.require(not exists(marker, ctx=ctx), 'owner marker exists; no adoption')
+    parents = ancestry(root.parent, ctx=ctx)
+    value = mkdir_new(root, ctx=ctx)
+    owner = {'path': str(root), 'identity': value, 'parentAncestry': parents,
+             'nonce': secrets.token_hex(24), 'tree': tree, 'purpose': purpose}
+    assert_owned(owner, ctx=ctx)
+    ctx.require(not names(root, ctx=ctx), 'new root not empty')
+    write_new(marker, owner, ctx=ctx)
+    return owner
+
+
+@participating
+def inventory(owner, *, ctx, symlink_paths=frozenset(), allowed_names=None, file_roles=None, expected_entries=None):
+    root = assert_owned(owner, ctx=ctx)
+    result = {}
+    def walk(fd, prefix, depth):
+        ctx.require(depth <= LIMITS['fsDepth'], 'inventory depth exceeded')
+        for name in names_fd(fd, ctx=ctx):
+            ctx.require(len(result) < LIMITS['inventory'], 'inventory size exceeded')
+            rel = prefix + name
+            if allowed_names is not None:
+                ctx.require(rel in allowed_names, 'unapproved owned-output name; no payload read')
+            ctx.check()
+            before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            ctx.check()
+            ident = _identity(before)
+            if expected_entries is not None:
+                ctx.require(rel in expected_entries and ident == expected_entries[rel]['identity'],
+                            'owned output replaced before payload read')
+            ctx.require(ident['uid'] == os.getuid(), 'foreign output')
+            row = {'identity': ident}
+            if stat.S_ISLNK(before.st_mode):
+                ctx.require(rel in symlink_paths, 'unknown output symlink')
+                ctx.check()
+                row.update(kind='symlink', target=os.readlink(name, dir_fd=fd))
+                ctx.check()
+            elif stat.S_ISDIR(before.st_mode):
+                row['kind'] = 'directory'
+                result[rel] = row
+                ctx.check()
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                try:
+                    ctx.require(_identity(os.fstat(child)) == ident, 'inventory parent replaced')
+                    walk(child, rel+'/', depth+1)
+                finally:
+                    close_fd(child, ctx)
+            elif stat.S_ISREG(before.st_mode):
+                ctx.check()
+                child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                try:
+                    ctx.require(_unchanged(before, os.fstat(child)), 'inventory file replaced')
+                    value = _read_fd(child, ctx=ctx, role=(file_roles or {}).get(rel, 'other'))
+                finally:
+                    close_fd(child, ctx)
+                row.update(kind='file', bytes=value['bytes'], sha256=value['sha256'])
+            else:
+                ctx.fail('unexpected output type')
+            after = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            ctx.require(_unchanged(before, after), 'inventory entry changed')
+            result[rel] = row
+    with directory(root, ctx=ctx) as fd:
+        ctx.require(_identity(os.fstat(fd)) == owner['identity'], 'inventory root descriptor mismatch')
+        walk(fd, '', 0)
+    assert_owned(owner, ctx=ctx)
+    return result
+
+
+@participating
+def delete_inventory(owner, entries, *, ctx, file_roles=None):
+    """Exact preflight, then guarded per-entry removal; failures may be partial."""
+    ctx.check()  # pending cancellation -> zero inventory/removals
+    ctx.require(type(entries) is dict and len(entries) <= LIMITS['inventory'], 'invalid removal inventory')
+    for rel, row in entries.items():
+        ctx.check()
+        parts = Path(rel).parts
+        ctx.require(parts and not Path(rel).is_absolute() and '..' not in parts and '.' not in parts
+                    and '/'.join(parts) == rel and len(parts) <= LIMITS['fsDepth'], 'unsafe inventory path')
+        expected = {'identity', 'kind'} | ({'bytes', 'sha256'} if row['kind'] == 'file' else
+                                         {'target'} if row['kind'] == 'symlink' else set())
+        ctx.require(row['kind'] in {'file', 'directory', 'symlink'} and set(row) == expected, 'invalid inventory schema')
+    links = {name for name, row in entries.items() if row['kind'] == 'symlink'}
+    ctx.require(inventory(owner, ctx=ctx, symlink_paths=links, allowed_names=set(entries),
+                          expected_entries=entries, file_roles=file_roles) == entries, 'pre-deletion complete inventory drift')
+    root = assert_owned(owner, ctx=ctx)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    ordered = sorted(entries.items(), key=lambda item: (len(Path(item[0]).parts), item[0]), reverse=True)
+    ctx.check()
+    with directory(root, ctx=ctx) as root_fd:
+        ctx.require(_identity(os.fstat(root_fd)) == owner['identity'], 'owned root descriptor mismatch')
+        for rel, row in ordered:
+            assert_owned(owner, ctx=ctx)
+            parts = Path(rel).parts
+            ctx.check()
+            fd = os.dup(root_fd)
+            try:
+                ctx.check()
+                for index, component in enumerate(parts[:-1]):
+                    ctx.check()
+                    child = os.open(component, flags, dir_fd=fd)
+                    try:
+                        ctx.require(_identity(os.fstat(child)) == entries['/'.join(parts[:index+1])]['identity'], 'output parent replaced')
+                    except BaseException:
+                        close_fd(child, ctx)
+                        raise
+                    old, fd = fd, child
+                    close_fd(old, ctx)
+                name = parts[-1]
+                before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                ctx.require(_identity(before) == row['identity'], 'output identity changed before deletion')
+                if row['kind'] == 'file':
+                    ctx.check()
+                    child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                    try:
+                        ctx.require(_unchanged(before, os.fstat(child)), 'output file replaced')
+                        value = _read_fd(child, ctx=ctx, role=(file_roles or {}).get(rel, 'other'))
+                        ctx.require(value['bytes'] == row['bytes'] and value['sha256'] == row['sha256'], 'output content changed before deletion')
+                    finally:
+                        close_fd(child, ctx)
+                elif row['kind'] == 'symlink':
+                    ctx.require(os.readlink(name, dir_fd=fd) == row['target'], 'output symlink changed')
+                ctx.require(_unchanged(before, os.stat(name, dir_fd=fd, follow_symlinks=False)), 'entry substituted before deletion')
+                ctx.check()
+                (os.rmdir if row['kind'] == 'directory' else os.unlink)(name, dir_fd=fd)
+                ctx.removals.append({'root': str(root), 'relative': rel, 'kind': row['kind']})
+                ctx.check()
+            finally:
+                close_fd(fd, ctx)
+        assert_owned(owner, ctx=ctx)
+        ctx.require(not names_fd(root_fd, ctx=ctx), 'unknown output appeared')
+        with directory(root.parent, ctx=ctx) as parent:
+            ctx.require(_identity(os.fstat(parent)) == owner['parentAncestry'][str(root.parent)], 'owned parent replaced')
+            ctx.require(identity(root, ctx=ctx) == owner['identity'], 'owned root replaced')
+            ctx.check()
+            os.rmdir(root.name, dir_fd=parent)
+            ctx.removals.append({'root': str(root), 'relative': '.', 'kind': 'directory'})
+            ctx.check()

@@ -1,0 +1,222 @@
+"""Required preparation integration controls. No final dispatch/project build."""
+from pathlib import Path
+import ast
+import hashlib
+import importlib.util
+import json
+import os
+import shutil
+import sys
+
+assert len(sys.argv) == 2, 'usage: integration-proofs-r4.py PREPARED_HELPERS'
+HERE=Path(sys.argv[1]).absolute()
+assert HERE.resolve()==HERE and HERE.is_dir()
+import stat
+
+def helper_namespace(root, *, ctx=None):
+    """Metadata-only admission before sibling imports; never open cache bytes.
+
+    The initial script/stdlib are runner TCB. This closes incidental helper
+    import candidates, not arbitrary same-user/whole-host interference.
+    """
+    def check(value=True, message='helper namespace'):
+        if ctx is not None:
+            ctx.require(value, message)
+        elif not value:
+            raise RuntimeError(message)
+    root = Path(root)
+    check(root.is_absolute() and str(root) == os.path.normpath(root) and len(root.parts) <= 64,
+          'noncanonical helper import root')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open('/', flags)
+    try:
+        for part in root.parts[1:]:
+            check()
+            new = os.open(part, flags, dir_fd=fd)
+            old, fd = fd, new
+            os.close(old)
+        original = os.fstat(fd)
+        check(original.st_uid == os.getuid() and not original.st_mode & 0o022,
+              'foreign/writable helper namespace')
+        known = set(['action_io.py', 'bindings.py', 'cleanup-build.py', 'cleanup-wheel.py', 'evidence_schemas.py', 'freeze.py', 'frozen_diff.py', 'gate_list.py', 'git_readonly.py', 'native_reader.py', 'observe-owned-workers.py', 'owned_outputs.py', 'prepare-build.py', 'probe-jdk21-signing.py', 'process_gate.py', 'result_protocols.py', 'run-once.sh', 'source_inventory.py', 'verify-all.py', 'verify-frozen-diff.py', 'verify-pins.py', 'verify-process-gate.py', 'verify-result-protocols.py', 'wheel-smoke.sh'])
+        found, count = set(), 0
+        with os.scandir(fd) as iterator:
+            while True:
+                # Reserve the enumeration operation before advancing; even an
+                # EOF probe consumes this finite namespace-admission budget.
+                check(count < 4096, 'helper namespace enumeration cap')
+                count += 1
+                if ctx is not None:
+                    ctx.charge('visited', 1)
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    break
+                name = item.name
+                check(len(os.fsencode(name)) <= 255, 'helper namespace component cap')
+                before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                check(name != '__pycache__' and not name.endswith(('.pyc', '.pyo', '.pyd', '.so', '.pth')),
+                      'unapproved helper bytecode/startup/cache name; payload not read')
+                if name in known:
+                    check(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+                          and before.st_uid == os.getuid() and not before.st_mode & 0o022,
+                          'helper replaced, symlinked, hardlinked or writable')
+                    found.add(name)
+                else:
+                    check(not name.endswith(('.py', '.sh')), 'unknown helper/import source name')
+                    if (stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode)) and name.isidentifier():
+                        check(name == 'wheels' and stat.S_ISDIR(before.st_mode)
+                              and before.st_uid == os.getuid() and stat.S_IMODE(before.st_mode) == 0o700,
+                              'unapproved helper import directory; contents not read')
+                        child = os.open(name, flags, dir_fd=fd)
+                        try:
+                            check(os.fstat(child) == before, 'wheel-data directory replaced')
+                            names = []
+                            with os.scandir(child) as entries:
+                                for entry in entries:
+                                    check(not names, 'unknown wheel-data sibling; payload not read')
+                                    names.append(entry.name)
+                                    check(entry.name == 'mobile_release_kit-0.3.0-py3-none-any.whl',
+                                          'unexpected wheel-data name; payload not read')
+                                    row = os.stat(entry.name, dir_fd=child, follow_symlinks=False)
+                                    check(stat.S_ISREG(row.st_mode) and row.st_nlink == 1 and row.st_uid == os.getuid(),
+                                          'untrusted wheel-data type; payload not read')
+                        finally:
+                            os.close(child)
+                check(os.stat(name, dir_fd=fd, follow_symlinks=False) == before, 'helper namespace entry changed')
+        check(found == known, 'missing reviewed helper')
+        current = os.fstat(fd)
+        check((current.st_dev, current.st_ino, current.st_uid, current.st_mode, current.st_mtime_ns, current.st_ctime_ns) ==
+              (original.st_dev, original.st_ino, original.st_uid, original.st_mode, original.st_mtime_ns, original.st_ctime_ns),
+              'helper namespace changed during admission')
+    finally:
+        os.close(fd)
+
+helper_namespace(HERE)
+sys.path.insert(0,str(HERE))
+import action_io as initial_io
+import process_gate as initial_pg
+with initial_io.action('source-only-integration-input-bindings') as initial_ctx:
+    MODULE_INPUTS = {name: initial_io.read_file(HERE/name, ctx=initial_ctx, role='source') for name in
+                     ('verify-frozen-diff.py', 'verify-process-gate.py', 'verify-result-protocols.py')}
+def module(name, path):
+    # The caller label is diagnostic only; fixed path selects the reviewed name.
+    with initial_io.action('source-only-integration-loader:' + name) as initial_ctx:
+        return initial_pg.source_module(path, MODULE_INPUTS[path.name], ctx=initial_ctx)
+p=module('integration_frozen_proofs',HERE/'verify-frozen-diff.py')
+import gate_list
+suite=p.Proofs(HERE)
+
+
+def original_controller(area):
+    controller=module('original_controller_proofs',HERE/'verify-process-gate.py')
+    with p.io.action('original-controller-ten') as ctx:controller.main(ctx)
+    with p.io.action('controller-result-readback') as ctx:
+        result=p.io.read_json(HERE/'final-process-controller-proof.json',ctx=ctx)
+    assert len(result['results'])==10 and result['allDirectChildrenReaped'] is True
+    assert all(row['scenario'] in {'success','timeout','reap-cancellation','late-zero-exit','nonzero',
+                'unknown-acquisition','unknown-acquisition-after-child','unknown-reap','log-collision','same-group-descendant'} for row in result['results'])
+    return {'actualCases':10,'resultPath':str(HERE/'final-process-controller-proof.json'),'result':result}
+
+
+def original_protocols(area):
+    protocols=module('original_protocol_proofs',HERE/'verify-result-protocols.py')
+    with p.io.action('original-protocol-twentyfour') as ctx:protocols.main(ctx)
+    with p.io.action('protocol-result-readback') as ctx:
+        result=p.io.read_json(HERE/'final-result-protocol-proof.json',ctx=ctx)
+    assert len(result['cases'])==24
+    return {'actualCases':24,'resultPath':str(HERE/'final-result-protocol-proof.json'),'result':result}
+
+
+def routing(area):
+    expected='''freeze-before verification-process-ownership verification-result-protocols prepare-frozen-diff
+prepare-owned-build editable-install bundle-install bundle-check python-full init-transactions ios-entitlements
+ios-profile-authority default-cancellation profile-process-containment native-ci-aggregate ios-binary-plist
+ios-native-correspondence native-profile-gate ruby-support ruby-native-capture ruby-play_store ruby-play_lanes
+ruby-apple_store ruby-apple_lanes ruby-apple_production ruby-apple_production_lane ruby-apple_asset_upload
+ruby-ios_upload_validation ruby-android_upload_validation ruby-workflow-yaml ruby-supply-wif fastfile-validate
+actionlint dependency-pins wheel-install pip-check jdk21-signature-policy diff-check freeze-before-cleanup
+owned-worker-observation cleanup-generated-build cleanup-wheel-installation cleanup-frozen-diff freeze-after empty-final-tmp'''.split()
+    with p.io.action('exact45-routing-only') as ctx:
+        config=p.io.read_json(HERE/'CONFIG.json',ctx=ctx)
+        values=gate_list.commands(config,HERE,{'head':config['expectedSourceHead'],'proposedTree':'0'*40},ctx=ctx)
+        actual_ruby={name for name in p.io.names(Path(config['source'])/'tests/workflow',ctx=ctx) if name.startswith('test_') and name.endswith('.rb')}
+    assert [row[0] for row in values]==expected and len(values)==45
+    routed_ruby={Path(arg).name for _gate,argv,_protocol in values for arg in argv if arg.startswith('tests/workflow/test_') and arg.endswith('.rb')}
+    assert routed_ruby==actual_ruby and len(routed_ruby)==13
+    counts={protocol:sum(row[2]==protocol for row in values) for protocol in ('command','python-unittest','ruby-minitest','supply-wif')}
+    assert counts=={'command':22,'python-unittest':10,'ruby-minitest':12,'supply-wif':1},counts
+    negative=[]
+    for variant in ('missing-ruby','extra-ruby','qa003-matrix'):
+        root=area/variant;(root/'tests/workflow').mkdir(parents=True)
+        for name in actual_ruby:(root/'tests/workflow'/name).write_text('# synthetic inventory only\n')
+        if variant=='missing-ruby':(root/'tests/workflow/test_supply_wif.rb').unlink()
+        if variant=='extra-ruby':(root/'tests/workflow/test_unreviewed.rb').write_text('# synthetic only\n')
+        if variant=='qa003-matrix':(root/'tests/workflow/run_local_signing_matrix.py').write_text('# synthetic only\n')
+        try:
+            with p.io.action('route-applicability-denial') as ctx:
+                gate_list.commands({**config,'source':str(root)},HERE,{},ctx=ctx)
+        except RuntimeError as error:
+            assert ('Ruby test inventory changed' if variant!='qa003-matrix' else 'QA-003 matrix now applicable') in str(error)
+            negative.append({'variant':variant,'message':str(error)})
+        else:raise AssertionError('unreviewed applicability accepted')
+    return {'commands':values,'actualRubyFiles':sorted(actual_ruby),'protocolCounts':counts,'denials':negative,
+            'scope':'Routing/applicability inspection only; ZERO first-party/Ruby/Store gates executed'}
+
+
+def helper_ast_shell(area):
+    parsed=[]
+    for name in sorted(p.bindings.HELPERS):
+        if name.endswith('.py'):
+            data=(HERE/name).read_bytes();ast.parse(data,filename=name)
+            parsed.append({'name':name,'sha256':hashlib.sha256(data).hexdigest()})
+    config=json.loads((HERE/'CONFIG.json').read_text())
+    bash=shutil.which('bash',path=config['path']);assert bash and Path(bash).is_absolute()
+    results=[]
+    for script in ('run-once.sh','wheel-smoke.sh'):
+        with p.io.action('separate-shell-syntax-'+script) as ctx:
+            before=p.bindings.executable(bash,ctx=ctx)
+            out,err,result=p.nr.run([bash,'-n',str(HERE/script)],cwd=area,
+                                   environment={'PATH':'/usr/bin:/bin','LC_ALL':'C'},ctx=ctx)
+            assert before==p.bindings.executable(bash,ctx=ctx)
+        assert not out and not err and result['exitCode']==0
+        results.append({'script':script,'actualCommand':[bash,'-n',str(HERE/script)],'native':result,'bash':before})
+    return {'parsedPythonHelpers':parsed,'separateShellSyntax':results,'scriptsExecuted':False}
+
+
+def safe_path(area):
+    code=f"import runpy,sys;v=runpy.run_path({str(HERE/'frozen_diff.py')!r},run_name='safe_startup_only');assert sys.flags.safe_path;assert str(v['EVIDENCE'])=={str(HERE)!r};print('SAFE_PATH_STARTUP_ONLY')"
+    results=[]
+    for label,options,env in (
+            ('explicit-P',['-P','-B'],{'PATH':'/usr/bin:/bin','LC_ALL':'C'}),
+            ('PYTHONSAFEPATH',['-B'],{'PATH':'/usr/bin:/bin','LC_ALL':'C','PYTHONSAFEPATH':'1'}),
+            ('isolated-I-B',['-I','-B'],{'PATH':'/usr/bin:/bin','LC_ALL':'C'})):
+        with p.io.action('safe-startup-'+label) as ctx:
+            out,err,row=p.nr.run([suite.python,*options,'-c',code],cwd=area,environment=env,ctx=ctx)
+        assert out==b'SAFE_PATH_STARTUP_ONLY\n' and not err
+        results.append({'label':label,'native':row})
+    link=area/'helper-link.py';link.symlink_to(HERE/'frozen_diff.py')
+    for label,options,path in (('unsafe-no-flag',['-B'],HERE/'frozen_diff.py'),('symlink-entry',['-I','-B'],link)):
+        code=f"import runpy;runpy.run_path({str(path)!r},run_name='safe_startup_only')"
+        ctx=None
+        try:
+            with p.io.action('unsafe-startup-denied') as ctx:
+                p.nr.run([suite.python,*options,'-c',code],cwd=area,environment={'PATH':'/usr/bin:/bin','LC_ALL':'C'},ctx=ctx)
+        except p.nr.NativeFailure:
+            row=ctx.native[-1]
+            assert row['exitCode']==1 and row['ownership']=='reaped' and 'Use trusted regular helper path with Python -P/-I' in row['stderrPrefix'],row
+            results.append({'label':label,'native':row})
+        else:raise AssertionError('unsafe helper startup accepted')
+    return {'controls':results,'sourceHelpersExecutedAsMain':False}
+
+
+try:
+    with suite.track():
+        suite.case('original-controller-ten',original_controller)
+        suite.case('original-protocol-twentyfour',original_protocols)
+        suite.case('exact45-and-all13-ruby-applicability',routing)
+        suite.case('all-helper-AST-and-shell-syntax',helper_ast_shell)
+        suite.case('safe-path-startup-modes-and-denials',safe_path)
+finally:result=suite.finish()
+print(json.dumps({'retainedRoot':result['retainedRoot'],'counts':result['counts'],'allDirectChildrenReaped':result['allDirectChildrenReaped']},sort_keys=True),flush=True)
+raise SystemExit(0 if result['counts']['FAIL']==0 else 1)

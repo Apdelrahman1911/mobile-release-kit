@@ -1,0 +1,56 @@
+"""Read-only repository pin/metadata contract verification for this remediation."""
+import ast
+import hashlib
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tomllib
+
+root = Path(__file__).resolve().parents[3]
+project = tomllib.loads((root / "pyproject.toml").read_text())
+assert project["project"]["dependencies"] == []
+assert project["project"]["requires-python"] == ">=3.11"
+assert project["build-system"]["requires"] == ["setuptools==80.9.0"]
+assert all(re.fullmatch(r"[A-Za-z0-9_.-]+==[0-9][^;\s]*(?:;.*)?", item)
+           for item in project["project"]["optional-dependencies"]["test"])
+imports = set()
+for file in (root / "src/mobile_release").glob("*.py"):
+    for item in ast.walk(ast.parse(file.read_text())):
+        if isinstance(item, ast.Import):
+            imports.update(value.name.split(".")[0] for value in item.names)
+        elif isinstance(item, ast.ImportFrom) and item.level == 0 and item.module:
+            imports.add(item.module.split(".")[0])
+assert not (imports - sys.stdlib_module_names - {"mobile_release"}), imports - sys.stdlib_module_names
+lock = (root / "Gemfile.lock").read_text()
+sections = dict(re.findall(r"(?ms)^([A-Z][A-Z ]+)\n(.*?)(?=^[A-Z]|\Z)", lock))
+specs = re.findall(r"(?m)^    ([\w.-]+) \(([^)]+)\)$", sections["GEM"])
+checksums = dict(re.findall(r"(?m)^  ([\w.-]+ \([^)]+\)) sha256=([0-9a-f]{64})$", sections["CHECKSUMS"]))
+assert specs and all(f"{name} ({version})" in checksums for name, version in specs)
+assert len(checksums) == len(specs)
+assert sections["RUBY VERSION"].strip() == "ruby 3.3.12"
+assert sections["BUNDLED WITH"].strip() == "4.0.16"
+assert dict(specs)["fastlane"] == "2.235.0"
+assert dict(specs)["google-apis-androidpublisher_v3"] == "0.106.0"
+
+uses = set()
+for file in [*(root / ".github/workflows").glob("*.yml"), *(root / "templates/workflows").glob("*.yml")]:
+    for reference in re.findall(r"(?m)^\s*(?:-\s+)?uses:\s*([^\s#]+)", file.read_text()):
+        if "__MOBILE_RELEASE_KIT_" in reference:
+            assert reference.endswith("@__MOBILE_RELEASE_KIT_SHA__")
+            continue
+        assert re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}", reference), (file, reference)
+        path, sha = reference.split("@")
+        owner_repo = "/".join(path.split("/")[:2])
+        uses.add((owner_repo, sha))
+verified = []
+for repository, sha in sorted(uses):
+    result = subprocess.run(["gh", "api", f"repos/{repository}/commits/{sha}", "--jq", ".sha"],
+                            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    assert result.returncode == 0, f"GitHub could not verify {repository}@{sha}; gate unavailable, not passed"
+    assert result.stdout.strip() == sha, (repository, sha)
+    verified.append(f"{repository}@{sha}")
+print(json.dumps({"runtimeDependencies": [], "runtimeImportRoots": sorted(imports),
+                  "lockChecksumEntries": len(checksums), "verifiedActionCommits": verified,
+                  "lockSha256": hashlib.sha256((root / "Gemfile.lock").read_bytes()).hexdigest()}, indent=2))

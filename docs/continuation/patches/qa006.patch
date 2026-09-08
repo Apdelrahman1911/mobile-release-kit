@@ -1,0 +1,2945 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 18c06c278fb29a0fafebe8a63ae1050b7abef775..028ef0dec55b923dff4c1b61c918a8abdb01d6c2 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -144,0 +145,11 @@ jobs:
++      - name: Set up pinned Ruby for native process contracts
++        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
++        with:
++          ruby-version: '3.3.12'
++          bundler-cache: true
++      - name: Require macOS upload process contracts
++        run: |
++          set -euo pipefail
++          bundle exec ruby tests/workflow/test_ios_upload_validation.rb
++          bundle exec ruby tests/workflow/test_android_upload_validation.rb
++          bundle exec ruby tests/workflow/test_native_upload_validation.rb
+diff --git a/tests/workflow/test_android_upload_validation.rb b/tests/workflow/test_android_upload_validation.rb
+index 792d74f8113c04cbf3d1b0391e352439afd8af1e..569082f26ddc061c0778fe0e45ca3374bc54d111 100644
+--- a/tests/workflow/test_android_upload_validation.rb
++++ b/tests/workflow/test_android_upload_validation.rb
+@@ -10,0 +11 @@ require_relative "../../fastlane/android_upload_validation"
++require_relative "upload_process_fixture"
+@@ -13,0 +15 @@ class AndroidUploadValidationTest < Minitest::Test
++  include UploadProcessFixture::Contracts
+@@ -38 +40,5 @@ class AndroidUploadValidationTest < Minitest::Test
+-    FileUtils.remove_entry(@root)
++    if UploadProcessFixture.cleanup_unresolved?(@root)
++      warn "Preserve unresolved synthetic process evidence: #{@root}"
++    else
++      FileUtils.remove_entry(@root)
++    end
+@@ -62,0 +69,8 @@ class AndroidUploadValidationTest < Minitest::Test
++  def process_case(mode)
++    UploadProcessFixture.run(platform: "android", root: @root, mode: mode, parameters: {
++      python: @python, module_root: @module_root, app_root: @app,
++      config_path: @config, intent_path: @intent, aab_path: @aab,
++      intent_sha256: "a" * 64, tooling_directory: @tooling_directory,
++    })
++  end
++
+@@ -145,46 +158,0 @@ class AndroidUploadValidationTest < Minitest::Test
+-  def test_deadline_terminates_validator_without_authorizing_upload
+-    interpreter("sleep 60")
+-    prior = Gate::MAX_SECONDS
+-    Gate.send(:remove_const, :MAX_SECONDS)
+-    Gate.const_set(:MAX_SECONDS, 0.25)
+-    real_spawn = Open3.method(:popen3)
+-    pid = nil
+-    error = Open3.stub(:popen3, lambda do |*args, **options, &block|
+-      real_spawn.call(*args, **options) do |stdin, stdout, stderr, waiter|
+-        pid = waiter.pid
+-        block.call(stdin, stdout, stderr, waiter)
+-      end
+-    end) { assert_raises(MobileReleaseKit::ContractError) { validate } }
+-    assert_includes error.message, "timed out"
+-    refute_nil pid
+-    assert_raises(Errno::ESRCH) { Process.kill(0, pid) }
+-  ensure
+-    Gate.send(:remove_const, :MAX_SECONDS)
+-    Gate.const_set(:MAX_SECONDS, prior)
+-  end
+-
+-  def test_deadline_terminates_inherited_pipe_children_after_validator_parent_exits
+-    child_record = File.join(@root, "validator-child")
+-    interpreter("child = fork { sleep 60 }; File.write(#{child_record.inspect}, child.to_s); exit 0")
+-    prior = Gate::MAX_SECONDS
+-    Gate.send(:remove_const, :MAX_SECONDS)
+-    Gate.const_set(:MAX_SECONDS, 3)
+-    error = assert_raises(MobileReleaseKit::ContractError) { validate }
+-    assert_includes error.message, "timed out"
+-    child = Integer(File.read(child_record), 10)
+-    # An orphaned, killed child can remain a zombie briefly until the OS reaps
+-    # it. Either absence or zombie proves it cannot keep inspecting files.
+-    state, status = Open3.capture2("ps", "-o", "stat=", "-p", child.to_s)
+-    assert !status.success? || state.strip.start_with?("Z"), "validator's inherited-pipe child survived its deadline"
+-  ensure
+-    if child
+-      begin
+-        Process.kill("KILL", child)
+-      rescue Errno::ESRCH
+-        nil
+-      end
+-    end
+-    Gate.send(:remove_const, :MAX_SECONDS)
+-    Gate.const_set(:MAX_SECONDS, prior)
+-  end
+-
+diff --git a/tests/workflow/test_ios_upload_validation.rb b/tests/workflow/test_ios_upload_validation.rb
+index 3d1dc226a484bfab6b5beb05068b490196ba4be8..9e15afb3537a558d5c23826e50f9cc17d0fd5916 100644
+--- a/tests/workflow/test_ios_upload_validation.rb
++++ b/tests/workflow/test_ios_upload_validation.rb
+@@ -10,0 +11 @@ require_relative "../../fastlane/ios_upload_validation"
++require_relative "upload_process_fixture"
+@@ -13,0 +15 @@ class IosUploadValidationTest < Minitest::Test
++  include UploadProcessFixture::Contracts
+@@ -39 +41,5 @@ class IosUploadValidationTest < Minitest::Test
+-    FileUtils.remove_entry(@root)
++    if UploadProcessFixture.cleanup_unresolved?(@root)
++      warn "Preserve unresolved synthetic process evidence: #{@root}"
++    else
++      FileUtils.remove_entry(@root)
++    end
+@@ -63,0 +70,8 @@ class IosUploadValidationTest < Minitest::Test
++  def process_case(mode)
++    UploadProcessFixture.run(platform: "ios", root: @root, mode: mode, parameters: {
++      python: @python, module_root: @module_root, app_root: @app,
++      config_path: @config, intent_path: @intent, ipa_path: @ipa,
++      intent_sha256: "a" * 64, tooling_directory: @tooling_directory,
++    })
++  end
++
+@@ -132,46 +145,0 @@ class IosUploadValidationTest < Minitest::Test
+-  def test_deadline_terminates_validator_without_authorizing_upload
+-    interpreter("sleep 60")
+-    prior = Gate::MAX_SECONDS
+-    Gate.send(:remove_const, :MAX_SECONDS)
+-    Gate.const_set(:MAX_SECONDS, 0.25)
+-    real_spawn = Open3.method(:popen3)
+-    pid = nil
+-    error = Open3.stub(:popen3, lambda do |*args, **options, &block|
+-      real_spawn.call(*args, **options) do |stdin, stdout, stderr, waiter|
+-        pid = waiter.pid
+-        block.call(stdin, stdout, stderr, waiter)
+-      end
+-    end) { assert_raises(MobileReleaseKit::ContractError) { validate } }
+-    assert_includes error.message, "timed out"
+-    refute_nil pid
+-    assert_raises(Errno::ESRCH) { Process.kill(0, pid) }
+-  ensure
+-    Gate.send(:remove_const, :MAX_SECONDS)
+-    Gate.const_set(:MAX_SECONDS, prior)
+-  end
+-
+-  def test_deadline_terminates_inherited_pipe_children_after_validator_parent_exits
+-    child_record = File.join(@root, "validator-child")
+-    interpreter("child = fork { sleep 60 }; File.write(#{child_record.inspect}, child.to_s); exit 0")
+-    prior = Gate::MAX_SECONDS
+-    Gate.send(:remove_const, :MAX_SECONDS)
+-    Gate.const_set(:MAX_SECONDS, 3)
+-    error = assert_raises(MobileReleaseKit::ContractError) { validate }
+-    assert_includes error.message, "timed out"
+-    child = Integer(File.read(child_record), 10)
+-    # An orphaned, killed child can remain a zombie briefly until the OS reaps
+-    # it. Either absence or zombie proves it cannot keep inspecting files.
+-    state, status = Open3.capture2("ps", "-o", "stat=", "-p", child.to_s)
+-    assert !status.success? || state.strip.start_with?("Z"), "validator's inherited-pipe child survived its deadline"
+-  ensure
+-    if child
+-      begin
+-        Process.kill("KILL", child)
+-      rescue Errno::ESRCH
+-        nil
+-      end
+-    end
+-    Gate.send(:remove_const, :MAX_SECONDS)
+-    Gate.const_set(:MAX_SECONDS, prior)
+-  end
+-
+diff --git a/tests/workflow/test_native_profile_ci.py b/tests/workflow/test_native_profile_ci.py
+index 7838c68616d844dea0c4beb305ca09648a725761..79877a66d6695b6917a229f95063aced8842b2e3 100644
+--- a/tests/workflow/test_native_profile_ci.py
++++ b/tests/workflow/test_native_profile_ci.py
+@@ -17,0 +18,36 @@ class NativeProfileCITests(unittest.TestCase):
++    def test_macos_upload_process_contracts_require_all_suites_and_pinned_ruby(self):
++        workflow = load_workflow(Path(__file__).parents[2] / ".github/workflows/ci.yml")
++        native = workflow["jobs"]["test-native-profiles"]
++        linux_ruby = next(step for step in workflow["jobs"]["test-linux"]["steps"]
++                          if step.get("uses", "").startswith("ruby/setup-ruby@"))
++        ruby = next(step for step in native["steps"]
++                    if step["name"] == "Set up pinned Ruby for native process contracts")
++        self.assertEqual(ruby["uses"], linux_ruby["uses"])
++        self.assertEqual(ruby["with"], {"ruby-version": "3.3.12", "bundler-cache": True})
++        step = next(step for step in native["steps"]
++                    if step["name"] == "Require macOS upload process contracts")
++        self.assertLess(native["steps"].index(ruby), native["steps"].index(step))
++        for required in (ruby, step):
++            self.assertNotIn("if", required)
++            self.assertNotIn("continue-on-error", required)
++            self.assertNotIn("env", required)
++        ios = "tests/workflow/test_ios_upload_validation.rb"
++        android = "tests/workflow/test_android_upload_validation.rb"
++        shared = "tests/workflow/test_native_upload_validation.rb"
++        # Execute the actual workflow shell, not a search for reassuring text.
++        # A shell function avoids adding another fresh-executable startup race.
++        fixture = '''bundle() {
++  [[ "$#" == 3 && "$1" == exec && "$2" == ruby ]] || return 99
++  printf '%s\\n' "$3"
++  [[ "$3" != "$FAIL_SUITE" ]]
++}
++'''
++        for failed, expected_calls in (("none", [ios, android, shared]), (ios, [ios]),
++                                       (android, [ios, android]), (shared, [ios, android, shared])):
++            with self.subTest(failed=failed):
++                result = subprocess.run(["bash", "-c", fixture + step["run"]],
++                                        capture_output=True, text=True, timeout=10,
++                                        env={"PATH": os.environ["PATH"], "FAIL_SUITE": failed})
++                self.assertEqual(result.returncode == 0, failed == "none", result.stderr)
++                self.assertEqual(result.stdout.splitlines(), expected_calls)
++
+diff --git a/tests/workflow/test_native_upload_validation.rb b/tests/workflow/test_native_upload_validation.rb
+index 7c337dbe6cbcd35ffc7b161575132a3a26155f60..0b9fb2ac4e0d5f4d1e6896cd683b94f2d252bf04 100644
+--- a/tests/workflow/test_native_upload_validation.rb
++++ b/tests/workflow/test_native_upload_validation.rb
+@@ -5,2 +5 @@ require "minitest/mock"
+-require "rbconfig"
+-require_relative "../../fastlane/native_upload_validation"
++require_relative "upload_process_fixture"
+@@ -8,0 +8,131 @@ class NativeUploadValidationTest < Minitest::Test
++  def setup
++    @root = File.realpath(Dir.mktmpdir("mrk-native-setup-"))
++  end
++
++  def teardown
++    if UploadProcessFixture.cleanup_unresolved?(@root)
++      warn "Preserve unresolved native fixture evidence: #{@root}"
++    else
++      FileUtils.remove_entry(@root)
++    end
++  end
++
++  def process_case(mode, cleanup_errors: [])
++    value = UploadProcessFixture.run(platform: "native", root: @root, parameters: {}, mode: mode)
++    assert value.fetch("driverJoined"), value.inspect
++    assert value.fetch("knownProcessesDead"), value.inspect
++    unless mode.start_with?("kill-")
++      %w[watchdogJoined waiterJoined injectorsJoined ownedDescriptorsClosed handlersRestored registryInactive].each do |name|
++        assert value.fetch(name), value.inspect
++      end
++      refute value.fetch("pendingInterrupt"), value.inspect
++      if cleanup_errors.empty?
++        assert_empty value.fetch("cleanupErrors"), value.inspect
++      else
++        assert_equal cleanup_errors, value.fetch("cleanupErrors"), value.inspect
++      end
++    end
++    value
++  end
++
++  def primary_case(mode)
++    boundary, kind, secondary = UploadProcessFixture::NATIVE_PRIMARY_PROOFS.fetch(mode)
++    cleanup = secondary == "none" ? [] : ["UploadProcessFixture::NativePrimaryProbe::CleanupFailure"]
++    value = process_case(mode, cleanup_errors: cleanup)
++    proof = value.fetch("primaryProof")
++    assert_equal mode, proof.fetch("case")
++    assert_equal boundary == "entered" ? "native-setup-io-error" : "native-setup-interrupt", value.fetch("mode")
++    assert_empty proof.fetch("failures"), proof.inspect
++    assert_equal 1, proof.fetch("driverExitStatus")
++    assert_equal 1, proof.fetch("faultCount")
++    assert_equal 1, proof.fetch("resultObservations")
++    assert value.fetch("harnessPrimaryRetained"), value.inspect
++    %w[outerPrimarySameObject nestedPrimarySameObject originalMessagePreserved originalStatusPreserved
++       originalNotIntentional framePublishedBeforeFault actualWaiterMatchesDriver actualDescriptorsClosed].each do |name|
++      assert proof.fetch(name), proof.inspect
++    end
++    assert_equal secondary == "none" ? "unexpected" : "fixture-cleanup", value.fetch("kind")
++    assert_equal secondary == "none" ? 0 : 1, proof.fetch("secondaryCount")
++    assert proof.fetch("secondaryObjectRecorded"), proof.inspect unless secondary == "none"
++    if kind == "io"
++      assert_equal "MobileReleaseKit::ContractError", value.fetch("nativeErrorClass")
++      assert_equal "Synthetic validator could not be executed safely; no upload is authorized", value.fetch("nativeErrorMessage")
++      assert_equal "IOError", value.fetch("errorClass")
++    end
++    assert_equal 41, value.fetch("nativeExitStatus") if kind == "system-exit"
++    if boundary == "frame"
++      assert_equal 0, proof.fetch("backendEntries")
++      assert_equal 0, proof.fetch("callbackEntries")
++      assert_equal 0, value.fetch("nativeSpawnAttempts")
++      assert_equal 4, value.fetch("ownedDescriptorCount")
++      assert proof.fetch("callbackAbsent"), proof.inspect
++      refute proof.fetch("actualWaiterReaped"), proof.inspect
++      refute value.fetch("fallbackUsed"), value.inspect
++      refute value.key?("workerControlEOF"), value.inspect
++    else
++      assert_equal 1, proof.fetch("backendEntries")
++      assert_equal 1, proof.fetch("callbackEntries")
++      assert_equal 7, value.fetch("ownedDescriptorCount")
++      assert proof.fetch("callbackPrimarySameObject"), proof.inspect
++      assert proof.fetch("actualWaiterReaped"), proof.inspect
++      refute proof.fetch("callbackAbsent"), proof.inspect
++      if boundary == "entered"
++        %w[captureEntered firstCloseFromNative originalCloseCompleted].each { |name| assert value.fetch(name), value.inspect }
++        assert_equal 1, value.fetch("injectionCount")
++        assert_equal Signal.list.fetch("KILL"), proof.fetch("actualWorkerTermSignal")
++        assert_nil proof.fetch("actualWorkerExitStatus")
++        assert proof.fetch("enteredDeathBeforeControlClose"), proof.inspect
++        refute value.fetch("fallbackUsed"), value.inspect
++        refute value.key?("workerControlEOF"), value.inspect
++        assert_equal 1, proof.fetch("signalRequests").length
++        assert proof.fetch("signalRequests").first.fetch("forwarded"), proof.inspect
++      else
++        assert value.fetch("fallbackUsed"), value.inspect
++        assert value.fetch("workerControlEOF"), value.inspect
++        assert_equal 0, proof.fetch("actualWorkerExitStatus")
++        assert_nil proof.fetch("actualWorkerTermSignal")
++      end
++    end
++    unless boundary == "entered"
++      refute value.fetch("captureEntered"), value.inspect
++      refute value.key?("firstCloseFromNative"), value.inspect
++      assert_equal 0, value.fetch("injectionCount")
++      assert_empty proof.fetch("signalRequests"), proof.inspect
++    end
++    refute value.fetch("watchdogIntervened"), value.inspect
++    assert_equal boundary == "watchdog" || boundary == "entered", value.fetch("watchdogStarted")
++    value
++  end
++
++  def test_unexpected_pre_entry_failures_preserve_original_through_real_cleanup
++    cases = UploadProcessFixture::NATIVE_PRIMARY_PROOFS.keys.grep(/native-proof-(publication|readiness|watchdog)-/)
++    assert_equal 24, cases.length
++    cases.each { |mode| primary_case(mode) }
++  end
++
++  def test_unexpected_primary_outlives_late_teardown_and_lookalike_diagnostics
++    %w[native-proof-late-cleanup native-proof-lookalike].each { |mode| primary_case(mode) }
++  end
++
++  def test_first_close_requires_the_actual_intentional_error_not_redacted_lookalike
++    primary_case("native-proof-entered-io")
++  end
++
++  def test_nested_lifetime_preserves_pre_callback_ioerror_without_acquiring_native_child
++    %w[native-proof-frame-io native-proof-frame-io-close].each { |mode| primary_case(mode) }
++  end
++
++  def assert_native_cleanup(value)
++    assert_equal 1, value.fetch("nativeSpawnAttempts")
++    assert_equal 1, value.fetch("injectionCount")
++    %w[ready captureEntered firstCloseFromNative originalCloseCompleted watchdogStarted deadBeforeFallback].each do |name|
++      assert value.fetch(name), value.inspect
++    end
++    refute value.fetch("watchdogIntervened"), value.inspect
++    refute value.fetch("fallbackUsed"), value.inspect
++    refute value.key?("workerControlEOF"), value.inspect
++    assert_nil value.fetch("workerExitStatus")
++    assert_equal Signal.list.fetch("KILL"), value.fetch("workerTermSignal")
++    assert_equal 7, value.fetch("ownedDescriptorCount")
++  end
++
+@@ -10,54 +140,87 @@ class NativeUploadValidationTest < Minitest::Test
+-    [Interrupt.new("synthetic setup cancellation"), SystemExit.new(23), IOError.new("synthetic private diagnostic")].each do |injected_error|
+-      original_spawn = Open3.method(:popen3)
+-      pid = watchdog = nil
+-      watchdog_required = injected = false
+-      begin
+-        expected = injected_error.is_a?(IOError) ? MobileReleaseKit::ContractError : injected_error.class
+-        error = Open3.stub(:popen3, lambda do |*arguments, **options, &block|
+-          original_spawn.call(*arguments, **options) do |stdin, stdout, stderr, waiter|
+-            pid = waiter.pid
+-            original_close = stdin.method(:close)
+-            stdin.define_singleton_method(:close) do
+-              original_close.call unless closed?
+-              unless injected
+-                injected = true
+-                raise injected_error
+-              end
+-            end
+-            # A pre-fix failure must not leave this test hung with a live child.
+-            # Passing requires production cleanup, never this safety watchdog.
+-            watchdog = Thread.new do
+-              sleep 3
+-              if waiter.alive?
+-                watchdog_required = true
+-                Process.kill("KILL", -pid)
+-              end
+-            end
+-            block.call(stdin, stdout, stderr, waiter)
+-          end
+-        end) do
+-          assert_raises(expected) do
+-            MobileReleaseKit::NativeUploadValidation.capture(
+-              {}, [RbConfig.ruby, "-e", "sleep 30"], File.expand_path("../../fastlane", __dir__),
+-              max_seconds: 0.1, max_output_bytes: 1_024,
+-              label: "Synthetic", failure_message: "synthetic validation failure",
+-            )
+-          end
+-        end
+-        assert injected
+-        refute watchdog_required, "setup failure left cleanup to an external watchdog"
+-        assert_raises(Errno::ESRCH) { Process.kill(0, pid) }
+-        if injected_error.is_a?(IOError)
+-          refute_includes error.message, "private diagnostic"
+-        else
+-          assert_same injected_error, error, "cleanup must preserve the original cancellation"
+-        end
+-      ensure
+-        watchdog&.kill
+-        watchdog&.join
+-        if pid
+-          begin
+-            Process.kill("KILL", -pid)
+-          rescue Errno::ESRCH
+-            nil
+-          end
++    %w[interrupt system-exit io-error].each do |kind|
++      value = process_case("native-setup-#{kind}")
++      assert_native_cleanup(value)
++      if kind == "io-error"
++        assert_equal "MobileReleaseKit::ContractError", value.fetch("nativeErrorClass")
++        assert_equal "Synthetic validator could not be executed safely; no upload is authorized", value.fetch("nativeErrorMessage")
++        refute_includes value.fetch("nativeErrorMessage"), "private diagnostic"
++      else
++        assert value.fetch("nativeOriginalErrorPreserved"), value.inspect
++        assert_equal kind == "interrupt" ? "Interrupt" : "SystemExit", value.fetch("nativeErrorClass")
++        assert_equal 23, value.fetch("nativeExitStatus") if kind == "system-exit"
++      end
++    end
++  end
++
++  def test_missing_native_cleanup_requires_eof_and_cannot_pass_the_production_oracle
++    value = process_case("native-setup-no-cleanup")
++    assert_equal "setup-fallback", value.fetch("kind")
++    assert_equal 1, value.fetch("injectionCount")
++    assert value.fetch("nativeOriginalErrorPreserved"), value.inspect
++    assert value.fetch("watchdogIntervened"), value.inspect
++    assert value.fetch("fallbackUsed"), value.inspect
++    assert value.fetch("workerControlEOF"), value.inspect
++    assert_equal 0, value.fetch("workerExitStatus")
++    assert_nil value.fetch("workerTermSignal")
++    refute value.key?("deadBeforeFallback"), value.inspect
++    assert_match(/\A[0-9a-f]{64}\z/, value.fetch("mutationSourceSha256"))
++    assert_match(/\A[0-9a-f]{64}\z/, value.fetch("mutationSha256"))
++    refute_equal value.fetch("mutationSourceSha256"), value.fetch("mutationSha256")
++  end
++
++  def test_partial_pipe_and_pre_entry_faults_close_actual_resources_before_implicit_join
++    %w[second-pipe owner-failure readiness-failure watchdog-unavailable watchdog-failure].each do |fault|
++      value = process_case("native-setup-#{fault}")
++      assert_equal fault == "readiness-failure" ? "readiness" : "setup-fixture-fault", value.fetch("kind")
++      assert value.fetch("harnessPrimaryRetained"), value.inspect
++      assert_equal 0, value.fetch("injectionCount")
++      refute value.fetch("captureEntered"), value.inspect
++      refute value.key?("firstCloseFromNative"), value.inspect
++      refute value.key?("deadBeforeFallback"), value.inspect
++      refute value.fetch("watchdogIntervened"), value.inspect
++      assert_equal fault == "watchdog-failure", value.fetch("watchdogStarted")
++      if fault == "second-pipe"
++        assert_equal 0, value.fetch("nativeSpawnAttempts")
++        assert_equal 2, value.fetch("ownedDescriptorCount")
++        refute value.fetch("fallbackUsed"), value.inspect
++        refute value.key?("workerExitStatus"), value.inspect
++      else
++        assert_equal 1, value.fetch("nativeSpawnAttempts")
++        assert_equal 7, value.fetch("ownedDescriptorCount")
++        assert value.fetch("fallbackUsed"), value.inspect
++        assert value.fetch("workerControlEOF"), value.inspect
++        assert_equal 0, value.fetch("workerExitStatus")
++        assert_nil value.fetch("workerTermSignal")
++        assert value.fetch("ready"), value.inspect if fault.start_with?("watchdog-")
++      end
++    end
++  end
++
++  def test_real_post_reap_cancellation_preserves_original_and_closes_only_owned_resources
++    value = process_case("native-setup-post-reap-cancel")
++    assert_native_cleanup(value)
++    assert value.fetch("nativeOriginalErrorPreserved"), value.inspect
++    assert_equal "Interrupt", value.fetch("nativeErrorClass")
++    assert_equal "synthetic setup cancellation", value.fetch("nativeErrorMessage")
++    assert value.fetch("postReapCancellationInjected"), value.inspect
++    assert_operator value.fetch("postReapCleanupDepth"), :>, 0
++    assert_equal Signal.list.fetch("INT"), value.fetch("selfSignalQueued")
++  end
++
++  def test_hard_driver_loss_stops_native_leader_via_the_sole_control_writer
++    value = process_case("kill-native-setup")
++    assert_equal "driver-terminated", value.fetch("kind")
++    assert_equal "kill-native-setup", value.fetch("phase")
++    assert value.fetch("eofAfterDriverDeath"), value.inspect
++  end
++
++  def test_native_platform_modes_and_empty_parameters_are_validated_before_acquisition
++    cases = UploadProcessFixture::NATIVE_MODES.flat_map { |mode| %w[ios android].map { |platform| [platform, mode, {}] } }
++    cases.concat((UploadProcessFixture::MODES - UploadProcessFixture::NATIVE_MODES).map { |mode| ["native", mode, {}] })
++    cases.concat([["native", "missing", {}], ["missing", "native-setup-interrupt", {}],
++                  ["native", "native-setup-interrupt", {"python" => "untrusted"}]])
++    starts = 0
++    Process.stub(:spawn, lambda { |*| starts += 1; raise "invalid fixture spawned a child" }) do
++      cases.each do |platform, mode, parameters|
++        error = assert_raises(UploadProcessFixture::Failure) do
++          UploadProcessFixture.run(platform: platform, root: @root, mode: mode, parameters: parameters)
+@@ -64,0 +228,5 @@ class NativeUploadValidationTest < Minitest::Test
++        assert_equal "fixture-input", error.kind
++        UploadProcessFixture.atomic_json(File.join(@root, "input.json"), {"platform" => platform, "mode" => mode, "parameters" => parameters})
++        error = assert_raises(UploadProcessFixture::Failure) { UploadProcessFixture.driver(@root) }
++        assert_equal "fixture-input", error.kind
++        assert_equal ["input.json"], Dir.children(@root)
+@@ -66,0 +235 @@ class NativeUploadValidationTest < Minitest::Test
++    assert_equal 0, starts
+diff --git a/tests/workflow/upload_process_fixture.rb b/tests/workflow/upload_process_fixture.rb
+new file mode 100644
+index 0000000000000000000000000000000000000000..3147e1b7e8996212d05fa6971fb26a2c1c93ce24
+--- /dev/null
++++ b/tests/workflow/upload_process_fixture.rb
+@@ -0,0 +1,1380 @@
++# frozen_string_literal: true
++
++# Test-only real process fixtures. No production file imports this module.
++# Startup is independent of the timeout being tested: a module-local clock is
++# advanced only after a live orphan actually holds the real capture pipes open.
++# A separate ready-leader case uses the real clock. Fallback closes a private
++# control pipe; it never signals a child PID recovered from a late marker.
++require "json"
++require "tmpdir"
++require "tempfile"
++require "fileutils"
++require "rbconfig"
++require "open3"
++require "digest"
++require_relative "upload_process_ownership"
++
++module UploadProcessFixture
++  DEADLINE = 0.2
++  READINESS_LIMIT = 5
++  CAPTURE_LIMIT = 3
++  DRIVER_LIMIT = 15
++  CLEANUP_LIMIT = 5
++  WORKER_LIMIT = 30
++  OUTPUT_LIMIT = 32_768
++  NATIVE_PRIMARY_PROOFS = begin
++    cases = {}
++    %w[publication readiness watchdog].product(%w[standard io interrupt system-exit], %w[none close]).each do |boundary, kind, secondary|
++      cases["native-proof-#{boundary}-#{kind}-#{secondary}"] = [boundary, kind, secondary].freeze
++    end
++    cases.merge!("native-proof-late-cleanup" => %w[readiness standard outer].freeze,
++                 "native-proof-lookalike" => %w[publication contract none].freeze,
++                 "native-proof-entered-io" => %w[entered io none].freeze,
++                 "native-proof-frame-io" => %w[frame io none].freeze,
++                 "native-proof-frame-io-close" => %w[frame io close].freeze)
++    cases.freeze
++  end
++  NATIVE_MODES = (%w[native-setup-interrupt native-setup-system-exit native-setup-io-error
++                    native-setup-no-cleanup native-setup-second-pipe native-setup-owner-failure
++                    native-setup-readiness-failure native-setup-watchdog-unavailable
++                    native-setup-watchdog-failure native-setup-post-reap-cancel kill-native-setup] + NATIVE_PRIMARY_PROOFS.keys).freeze
++  MODES = (%w[inherited delayed-start late-record unready real-deadline
++             real-deadline-slow-cleanup immediate-deadline-slow-cleanup
++             leader-only no-deadline immediate-deadline kill-startup kill-descendant
++             ownership-async ownership-signals ownership-policies ownership-unknown
++             ownership-setup ownership-observation] + NATIVE_MODES).freeze
++
++  class Failure < StandardError
++    attr_reader :kind
++
++    def initialize(kind, message)
++      @kind = kind
++      super(message)
++    end
++  end
++
++  module_function
++
++  def clock
++    Process.clock_gettime(Process::CLOCK_MONOTONIC)
++  end
++
++  def atomic_json(path, value)
++    temporary = "#{path}.pending"
++    File.write(temporary, JSON.generate(value))
++    File.rename(temporary, path)
++  end
++
++  def read_json(path)
++    text = File.binread(path, OUTPUT_LIMIT + 1)
++    raise Failure.new("diagnostic", "oversized fixture diagnostic") if text.bytesize > OUTPUT_LIMIT
++    JSON.parse(text)
++  end
++
++  def wait_until(seconds, kind)
++    deadline = clock + seconds
++    until yield
++      raise Failure.new(kind, "#{kind} deadline expired") if clock >= deadline
++      sleep 0.01
++    end
++  end
++
++  # Only this parent waits on these direct Process.spawn children. Their PID is
++  # reserved until waitpid actually reaps it; no asynchronous detach/waiter runs.
++  # No signal is sent after that point, even on an assertion or parser failure.
++  def capture_command(argv, seconds: 2)
++    lifetime do |scope|
++      directory = output = errors = nil
++      child = OwnedChild.new
++      begin
++        directory = File.realpath(Dir.mktmpdir("mrk-process-observation-"))
++        output = File.open(File.join(directory, "stdout"), "w+", 0o600)
++        errors = File.open(File.join(directory, "stderr"), "w+", 0o600)
++        scope.active do
++          child.start({}, *argv, out: output, err: errors, in: File::NULL,
++                      unsetenv_others: true, pgroup: true)
++          wait_until(seconds, "process-observation") do
++            !child.poll.nil?
++          end
++          [output, errors].each(&:rewind)
++          stdout, stderr = [output, errors].map { |file| file.read(OUTPUT_LIMIT + 1) || "" }
++          raise Failure.new("diagnostic", "oversized process observation") if [stdout, stderr].any? { |text| text.bytesize > OUTPUT_LIMIT }
++          [stdout, stderr, child.status.exitstatus]
++        end
++      rescue Exception => error
++        scope.remember(error) # Setup can fail before active installs its rescue.
++        raise
++      ensure
++        scope.cleanup do
++          begin
++            child.stop
++          ensure
++            [output, errors].compact.each { |io| close(io) }
++            if directory
++              if child.complete?
++                FileUtils.remove_entry(directory)
++              else
++                atomic_json(File.join(directory, "ownership.json"), {"phase" => child.phase, "pid" => child.pid})
++                warn "Preserve unknown process observation: #{directory}"
++              end
++            end
++          end
++        end
++      end
++    end
++  end
++
++  def parse_state(stdout, stderr, status, pid, group)
++    raise Failure.new("process-observation", "process probe returned diagnostics") unless stderr == ""
++    return "absent" if status == 1 && stdout == ""
++    # Union of Linux procps and Darwin ps modifiers, in their emission order.
++    # Darwin can report ?E while its BSD/Mach exit snapshots disagree. That is
++    # indeterminate, NOT malformed identity and NOT evidence of ready/dead code.
++    match = /\A[ \t]*(\d+)[ \t]+(\d+)[ \t]+([RSDTtZXIWUH?][<N]?X?E?V?L?s?l?\+?)[ \t]*\n?\z/.match(stdout)
++    unless status == 0 && match && Integer(match[1], 10) == pid && Integer(match[2], 10) == group &&
++           !(match[3].start_with?("Z") && match[3].include?("E"))
++      # Only numeric PID/group/state columns from /bin/ps, not command lines or
++      # process environments. Retain this bounded observation on a failed probe.
++      detail = {"pid" => pid, "group" => group, "exit" => status, "stdout" => stdout.byteslice(0, 256)}
++      raise Failure.new("process-observation", "process probe returned unsupported or incorrectly scoped state: #{JSON.generate(detail)}")
++    end
++    match[3]
++  end
++
++  def liveness(value)
++    return :stopped if value == "absent" || value.start_with?("Z")
++    return :indeterminate if %w[? H X].include?(value[0]) || value.include?("E")
++    :live
++  end
++
++  def state(pid, group, seconds: 2)
++    value = parse_state(*capture_command(["/bin/ps", "-o", "pid=,pgid=,stat=", "-p", pid.to_s], seconds: seconds), pid, group)
++    liveness(value)
++  end
++
++  def alive?(pid, group)
++    state(pid, group) == :live
++  end
++
++  def ready?(pid, group, seconds: 2)
++    value = state(pid, group, seconds: seconds)
++    raise Failure.new("readiness", "fixture stopped before readiness") if value == :stopped
++    value == :live # Valid indeterminate state proves neither readiness nor death.
++  end
++
++  def dead!(pid, group, deadline: clock + CLEANUP_LIMIT, kind: "fixture-cleanup")
++    loop do
++      remaining = deadline - clock
++      raise Failure.new(kind, "#{kind} deadline expired") unless remaining.positive?
++      value = state(pid, group, seconds: [remaining, 2].min)
++      raise Failure.new(kind, "#{kind} deadline expired") if clock >= deadline
++      return if value == :stopped
++      sleep [0.01, [deadline - clock, 0].max].min
++    end
++  end
++
++  def close(io)
++    io.close unless io.closed?
++  rescue IOError
++    nil # Another fixture thread may already have closed this exact descriptor.
++  end
++
++  def cleanup_unresolved?(root)
++    (@unresolved_roots || {}).key?(root)
++  end
++
++  # EOF is monitored in EVERY phase, not only after fork. Losing the driver
++  # closes the sole control writer and stops both a delayed leader and an orphan.
++  def control_wait(control, seconds)
++    return false unless IO.select([control], nil, nil, seconds)
++    raise Failure.new("control", "unexpected fixture control bytes") unless control.read(1).nil?
++    true
++  end
++
++  def worker(directory, mode, control_fd, events_fd)
++    control, events = IO.for_fd(control_fd), IO.for_fd(events_fd)
++    events.sync = true
++    emit = lambda do |kind|
++      events.puts(JSON.generate("kind" => kind, "pid" => Process.pid, "group" => Process.getpgrp))
++    end
++    emit.call("entered")
++    if %w[unready kill-startup].include?(mode)
++      emit.call("startup-wait")
++      eof = control_wait(control, WORKER_LIMIT)
++      atomic_json(File.join(directory, "leader-eof.json"), {"eof" => eof})
++      return 0
++    end
++    if NATIVE_MODES.include?(mode) || %w[real-deadline immediate-deadline].include?(mode.delete_suffix("-slow-cleanup"))
++      if mode == "native-setup-readiness-failure"
++        events.puts(JSON.generate("kind" => "leader-ready", "pid" => "not-a-pid", "group" => Process.getpgrp))
++      else
++        emit.call("leader-ready")
++      end
++      eof = control_wait(control, WORKER_LIMIT)
++      atomic_json(File.join(directory, "leader-eof.json"), {"eof" => eof})
++      return 0
++    end
++    return 0 if mode == "delayed-start" && control_wait(control, DEADLINE * 2)
++    child = fork do
++      emit.call("child-ready")
++      events.close
++      eof = control_wait(control, WORKER_LIMIT)
++      atomic_json(File.join(directory, "child-eof.json"), {"eof" => eof})
++      exit! 0
++    end
++    events.close
++    return 0 if mode == "late-record" && control_wait(control, DEADLINE * 2)
++    # This deliberately late legacy record is NEVER read for ownership/readiness.
++    atomic_json(File.join(directory, "legacy-child.json"), {"pid" => child})
++    0
++  end
++
++  def validate_request!(platform, mode, parameters)
++    valid = if NATIVE_MODES.include?(mode)
++      platform == "native" && parameters == {}
++    else
++      MODES.include?(mode) && %w[ios android].include?(platform)
++    end
++    raise Failure.new("fixture-input", "unknown or mismatched fixture mode/platform/parameters") unless valid
++  end
++
++  def no_native_child?(mode, owner, result, proof)
++    frame_probe = NATIVE_PRIMARY_PROOFS[mode]&.first == "frame"
++    return false unless mode == "native-setup-second-pipe" || frame_probe
++    return false unless owner == {"phase" => "no-native-child", "nativeSpawnAttempts" => 0} &&
++                        result && result["nativeSpawnAttempts"] == 0 && result["ownedDescriptorsClosed"]
++    !frame_probe || (proof && proof["case"] == mode && proof["backendEntries"] == 0 &&
++                    proof["callbackEntries"] == 0 && proof["framePublishedBeforeFault"])
++  end
++
++  def run(platform:, root:, parameters:, mode:)
++    validate_request!(platform, mode, parameters)
++    return run_ownership_probe(platform: platform, root: root, parameters: parameters, mode: mode) if mode.start_with?("ownership-")
++    lifetime do |scope|
++      directory = nil
++      child = OwnedChild.new
++      cleaned = false
++      native_deadline = nil
++      result = proof = nil
++      begin
++        directory = File.realpath(Dir.mktmpdir("native-process-", root))
++        atomic_json(File.join(directory, "input.json"), {"platform" => platform, "parameters" => parameters, "mode" => mode})
++        File.open(File.join(directory, "driver.stdout"), "w") do |output|
++          File.open(File.join(directory, "driver.stderr"), "w") do |errors|
++            scope.active do
++              child.start({}, RbConfig.ruby, File.realpath(__FILE__), "driver", directory,
++                          in: File::NULL, out: output, err: errors, unsetenv_others: true, pgroup: true)
++              killed = false
++              wait_until(DRIVER_LIMIT, "driver") do
++                child.poll
++                if !child.status && !killed && mode.start_with?("kill-") && File.file?(File.join(directory, "owner.json"))
++                  owner = read_json(File.join(directory, "owner.json"))
++                  if owner["phase"] == mode
++                    # Only the real unreaped direct child, never owner.json's PID.
++                    killed = child.signal("KILL", group: false)
++                  end
++                end
++                !child.status.nil?
++              end
++              owner = read_json(File.join(directory, "owner.json"))
++              if mode.start_with?("kill-")
++                raise Failure.new("driver", "driver did not terminate at the requested known phase") unless killed && child.status.signaled? && child.status.termsig == Signal.list.fetch("KILL")
++                raise Failure.new("driver", "killed driver unexpectedly supplied a final result") if File.exist?(File.join(directory, "result.json"))
++                expected_eof = owner["child"] ? "child-eof.json" : "leader-eof.json"
++                wait_until(CLEANUP_LIMIT, "fixture-cleanup") { File.file?(File.join(directory, expected_eof)) }
++                raise Failure.new("fixture-cleanup", "orphan stopped for a reason other than control EOF") unless read_json(File.join(directory, expected_eof)) == {"eof" => true}
++                result = {"kind" => "driver-terminated", "phase" => owner.fetch("phase"), "eofAfterDriverDeath" => true}
++              else
++                result = read_json(File.join(directory, "result.json"))
++                if NATIVE_PRIMARY_PROOFS.key?(mode)
++                  # A passing regression envelope never replaces the actual
++                  # failed native driver's result/status or grants PID authority.
++                  proof = read_json(File.join(directory, "primary-proof.json"))
++                  unless proof["case"] == mode && proof["failures"] == [] && proof["driverExitStatus"] == 1 &&
++                         result["kind"] != "pass" && child.status.exitstatus == 0
++                    raise Failure.new("fixture-result", "unexpected native primary proof: #{JSON.generate(proof)}")
++                  end
++                else
++                  expected = {"unready" => "readiness", "leader-only" => "descendant-alive",
++                              "no-deadline" => "capture-watchdog", "immediate-deadline" => "elapsed-bound",
++                              "native-setup-no-cleanup" => "setup-fallback",
++                              "native-setup-second-pipe" => "setup-fixture-fault",
++                              "native-setup-owner-failure" => "setup-fixture-fault",
++                              "native-setup-readiness-failure" => "readiness",
++                              "native-setup-watchdog-unavailable" => "setup-fixture-fault",
++                              "native-setup-watchdog-failure" => "setup-fixture-fault"}.fetch(mode.delete_suffix("-slow-cleanup"), "pass")
++                  unless result["kind"] == expected && child.status.exitstatus == (expected == "pass" ? 0 : 1)
++                    raise Failure.new("fixture-result", "unexpected fixture result: #{JSON.generate(result)}")
++                  end
++                end
++              end
++              native_deadline ||= clock + CLEANUP_LIMIT
++              unless no_native_child?(mode, owner, result, proof)
++                dead!(owner.fetch("leader"), owner.fetch("group"), deadline: native_deadline)
++                dead!(owner["child"], owner.fetch("group"), deadline: native_deadline) if owner["child"]
++              end
++              cleaned = true
++              result = result.merge("primaryProof" => proof) if proof
++              result.merge("driverJoined" => true, "knownProcessesDead" => true)
++            end
++          end
++        end
++      rescue Exception => error
++        scope.remember(error) # Includes setup and failures while collecting diagnostics.
++        if error.is_a?(StandardError)
++          diagnostics = {"errorClass" => error.class.name, "error" => error.message,
++                         "driverStatus" => child.status&.to_s, "ownedDirectory" => directory}
++          if directory
++            %w[owner.json result.json driver.stderr driver.stdout].each do |name|
++              path = File.join(directory, name)
++              diagnostics[name] = File.binread(path, OUTPUT_LIMIT).force_encoding("UTF-8").scrub if File.file?(path)
++            end
++          end
++          warn JSON.generate(diagnostics)
++        end
++        raise
++      ensure
++        scope.cleanup do
++          begin
++            child.stop
++            cleaned = true if child.phase == :unstarted
++            if directory && !cleaned
++              # EOF stops native workers. Marker PIDs authorize observation only.
++              owner_path = File.join(directory, "owner.json")
++              if File.file?(owner_path)
++                owner = read_json(owner_path)
++                native_deadline ||= clock + CLEANUP_LIMIT
++                unless no_native_child?(mode, owner, result, proof)
++                  dead!(owner.fetch("leader"), owner.fetch("group"), deadline: native_deadline)
++                  dead!(owner["child"], owner.fetch("group"), deadline: native_deadline) if owner["child"]
++                end
++                cleaned = true
++              end
++            end
++          ensure
++            FileUtils.remove_entry(directory) if directory && cleaned
++            if directory && !cleaned
++              (@unresolved_roots ||= {})[root] = true
++              warn "Fixture ownership/cleanup unresolved; preserve #{directory}"
++            end
++          end
++        end
++      end
++    end
++  end
++
++  # The shared-core setup cases have no application/platform parameters. Their
++  # watchdog owns only a private pipe writer, never the asynchronous Open3
++  # waiter's numeric PID. An EOF fallback must make the production oracle fail.
++  class NativeSetupDriver
++    def initialize(directory, mode)
++      @directory, @mode = directory, mode
++      @control_read = @control_write = @event_read = @event_write = nil
++      @stdin = @stdout = @stderr = @waiter = @watchdog = @injector = nil
++      @native_frame = nil
++      @hook_armed = false
++      @owner, @cleanup_errors = {}, []
++      @fixture_error = Failure.new("setup-fixture-fault", "synthetic #{@mode} failure")
++      @injected_error = case mode
++      when "native-setup-system-exit" then SystemExit.new(23)
++      when "native-setup-io-error" then IOError.new("synthetic private diagnostic")
++      else Interrupt.new("synthetic setup cancellation")
++      end
++      @injected_message = @injected_error.message.dup.freeze
++      @injected_status = @injected_error.status if @injected_error.is_a?(SystemExit)
++      @observed = {"mode" => mode, "nativeSpawnAttempts" => 0, "captureEntered" => false,
++                   "injectionCount" => 0, "watchdogStarted" => false, "watchdogIntervened" => false,
++                   "fallbackUsed" => false, "postReapCancellationInjected" => false}
++    end
++
++    def path(name)
++      File.join(@directory, name)
++    end
++
++    def owned_ios
++      [@control_read, @control_write, @event_read, @event_write, @stdin, @stdout, @stderr].compact
++    end
++
++    def trap_state
++      %w[INT TERM].to_h do |name|
++        current = Signal.trap(name) {}
++        Signal.trap(name, current)
++        [name, current]
++      end
++    end
++
++    def cleanup_step
++      yield
++    rescue Exception => error
++      @cleanup_errors << error
++    end
++
++    def close_owned(io)
++      return unless io
++      UploadProcessFixture.close(io)
++      raise Failure.new("fixture-cleanup", "owned native fixture descriptor remains open") unless io.closed?
++    end
++
++    def stop_watchdog
++      return unless @watchdog
++      @watchdog.kill if @watchdog.alive?
++    ensure
++      if @watchdog && !@watchdog.join(CLEANUP_LIMIT)
++        raise Failure.new("fixture-cleanup", "native fixture watchdog did not join")
++      end
++    end
++
++    def join_waiter
++      if @waiter && !@waiter.join(CLEANUP_LIMIT)
++        raise Failure.new("fixture-cleanup", "native fixture waiter did not join")
++      end
++    end
++
++    def publish_owner
++      UploadProcessFixture.atomic_json(path("owner.json"), @owner)
++    end
++
++    def cleanup_callback(frame)
++      @hook_armed = false # Open3's own close must never inject the native fault.
++      reaped = false
++      cleanup_step { reaped = !@waiter || !@waiter.join(0).nil? }
++      if !@observed["captureEntered"] || !reaped
++        @observed["fallbackUsed"] = true
++        cleanup_step { close_owned(@control_write) } # BEFORE Open3's implicit join.
++      end
++      cleanup_step { stop_watchdog }
++      cleanup_step { join_waiter }
++      cleanup_step do
++        if @mode == "native-setup-post-reap-cancel" && @callback_error.equal?(@injected_error)
++          raise "post-reap probe lacks an actual reaped native child" unless @waiter&.join(0)
++          raise "post-reap probe did not retain the original primary" unless frame.primary.equal?(@injected_error)
++          @observed["postReapCancellationInjected"] = true
++          @observed["postReapCleanupDepth"] = UploadProcessFixture.instance_variable_get(:@cancellation_scope).cleanup_depth
++          # The expected original was remembered before this protected teardown.
++          # Both real repeat deliveries must be joined/drained, not leak into a
++          # later test or replace the original native cancellation facts.
++          @injector = Thread.new { Thread.main.raise(Interrupt.new("repeat after actual native reap")) }
++          raise "native cancellation injector did not join" unless @injector.join(2)
++          Process.kill("INT", Process.pid) # Only this isolated driver's own process.
++          @observed["selfSignalQueued"] = Signal.list.fetch("INT")
++        end
++      end
++      [@control_read, @event_write, @event_read, @stdin, @stdout, @stderr].each do |io|
++        cleanup_step { close_owned(io) }
++      end
++      raise @cleanup_errors.first unless @cleanup_errors.empty?
++    end
++
++    def finish_resources
++      @hook_armed = false
++      cleanup_step { close_owned(@control_write) }
++      cleanup_step { stop_watchdog }
++      cleanup_step do
++        raise "native cancellation injector did not join" if @injector && !@injector.join(2)
++      end
++      owned_ios.each { |io| cleanup_step { close_owned(io) } }
++      cleanup_step { join_waiter }
++      cleanup_step do
++        if @waiter
++          # A one-shot owner-write fault cannot discard the actual acquired
++          # identity. This final record grants read-only observation, not signals.
++          @owner = {"leader" => @waiter.pid, "group" => @waiter.pid, "phase" => "finished"}
++          publish_owner
++        elsif @observed["nativeSpawnAttempts"].zero?
++          @owner = {"phase" => "no-native-child", "nativeSpawnAttempts" => 0}
++          publish_owner
++        end
++      end
++      raise @cleanup_errors.first unless @cleanup_errors.empty?
++    end
++
++    def ready!
++      deadline = UploadProcessFixture.clock + READINESS_LIMIT
++      buffer, announced = +"", false
++      loop do
++        remaining = deadline - UploadProcessFixture.clock
++        raise Failure.new("readiness", "native readiness deadline expired") unless remaining.positive?
++        if IO.select([@event_read], nil, nil, [remaining, 0.01].min)
++          chunk = @event_read.read_nonblock(4_096, exception: false)
++          buffer << chunk if chunk.is_a?(String)
++          raise Failure.new("readiness", "oversized native readiness event") if buffer.bytesize > 4_096
++          while (line = buffer.slice!(/\A[^\n]*\n/))
++            event = JSON.parse(line)
++            unless event.keys.sort == %w[group kind pid] && event["pid"] == @waiter.pid && event["group"] == @waiter.pid &&
++                   %w[entered leader-ready].include?(event["kind"])
++              raise Failure.new("readiness", "malformed or incorrectly scoped native readiness event")
++            end
++            announced = true if event["kind"] == "leader-ready"
++          end
++        end
++        raise Failure.new("readiness", "native worker stopped before readiness") if @waiter.join(0)
++        next unless announced
++        remaining = deadline - UploadProcessFixture.clock
++        raise Failure.new("readiness", "native readiness deadline expired") unless remaining.positive?
++        next unless UploadProcessFixture.ready?(@waiter.pid, @waiter.pid, seconds: [remaining, 2].min)
++        raise Failure.new("readiness", "native readiness deadline expired") if UploadProcessFixture.clock >= deadline
++        @observed["ready"] = true
++        return
++      end
++    end
++
++    def first_close(location, stdin)
++      return unless @hook_armed && location.path == @capture_path && location.lineno == @close_line
++      return unless @observed["injectionCount"].zero?
++      @observed["injectionCount"] += 1
++      @observed["firstCloseFromNative"] = true
++      @observed["originalCloseCompleted"] = stdin.closed?
++      raise @injected_error
++    end
++
++    def start_watchdog
++      Thread.handle_interrupt(Exception => :never) do
++        @watchdog = Thread.new do
++          sleep CAPTURE_LIMIT
++          @observed["watchdogIntervened"] = true
++          @observed["fallbackUsed"] = true
++          close_owned(@control_write) # No waiter/PID/group-based fallback.
++        end
++        @observed["watchdogStarted"] = true
++        raise @fixture_error if @mode == "native-setup-watchdog-failure"
++      end
++    end
++
++    def popen(environment, *argv, **options, &block)
++      unless environment == {} && argv == @argv && options == @options
++        raise "unexpected shared native launch contract"
++      end
++      UploadProcessFixture.lifetime do |frame|
++        @native_frame = frame # Remember the whole lifetime, even before a callback exists.
++        begin
++          @observed["nativeSpawnAttempts"] += 1
++          # lifetime defers acquisition/publication; only the registered callback
++          # below reopens active cancellation. No writer is inherited by worker.
++          Open3.popen3(environment, *argv, **options,
++                       @control_read.fileno => @control_read, @event_write.fileno => @event_write) do |stdin, stdout, stderr, waiter|
++            @stdin, @stdout, @stderr, @waiter = stdin, stdout, stderr, waiter
++            begin # Installed before owner I/O, unused-end closes or readiness.
++              @owner = {"leader" => waiter.pid, "group" => waiter.pid, "phase" => "launched"}
++              frame.active do
++                raise @fixture_error if @mode == "native-setup-owner-failure"
++                publish_owner
++                close_owned(@control_read)
++                close_owned(@event_write)
++                ready!
++                if @mode == "kill-native-setup"
++                  @owner["phase"] = @mode
++                  publish_owner
++                  sleep READINESS_LIMIT
++                  raise Failure.new("driver", "parent did not stop its owned native driver")
++                end
++                raise @fixture_error if @mode == "native-setup-watchdog-unavailable"
++                start_watchdog
++                original_close, driver = stdin.method(:close), self
++                stdin.define_singleton_method(:close) do
++                  original_close.call unless closed?
++                  driver.first_close(caller_locations(1, 1).first, self)
++                end
++                Thread.handle_interrupt(Exception => :never) do
++                  @hook_armed = true
++                  @observed["captureEntered"] = true
++                  Thread.handle_interrupt(Exception => :immediate) { block.call(stdin, stdout, stderr, waiter) }
++                ensure
++                  @hook_armed = false
++                end
++              end
++            rescue Exception => error
++              @callback_error = error
++              frame.remember(error)
++              raise
++            ensure
++              frame.cleanup { cleanup_callback(frame) }
++            end
++          end
++        rescue Exception => error
++          frame.remember(error)
++          raise
++        ensure
++          # All native callback cleanup and Open3's join have completed. The
++          # injected repeat queue belongs to this remembered original exception.
++          frame.finishing { frame.drain_pending } if @observed["postReapCancellationInjected"]
++        end
++      end
++    end
++
++    def prepare_native
++      require_relative "../../fastlane/native_upload_validation"
++      @native = MobileReleaseKit::NativeUploadValidation
++      if @mode == "native-setup-no-cleanup"
++        source = File.read(File.expand_path("../../fastlane/native_upload_validation.rb", __dir__))
++        @observed["mutationSourceSha256"] = Digest::SHA256.hexdigest(source)
++        anchor = 'Process.kill("KILL", -waiter.pid)'
++        raise "native setup mutation anchor changed" unless source.scan(anchor).length == 1
++        source = source.sub(anchor, "nil # synthetic missing production cleanup").sub(
++          'require_relative "release_support"', "require #{File.expand_path('../../fastlane/release_support', __dir__).inspect}")
++        File.write(path("mutated-native.rb"), source)
++        @observed["mutationSha256"] = Digest::SHA256.hexdigest(source)
++        load path("mutated-native.rb")
++      end
++      @capture_path = @native.method(:capture).source_location.first
++      lines = File.readlines(@capture_path).each_with_index.select { |line, _| line.strip == "stdin.close" }
++      raise "native first-close source anchor changed" unless lines.length == 1
++      @close_line = lines.first.last + 1
++      @options = {chdir: File.realpath(File.expand_path("../../fastlane", __dir__)), unsetenv_others: true, pgroup: true}
++      @argv = [RbConfig.ruby, File.realpath(__FILE__), "worker", @directory, @mode,
++               @control_read.fileno.to_s, @event_write.fileno.to_s]
++      driver, facade = self, Module.new
++      facade.define_singleton_method(:popen3) { |*arguments, **options, &block| driver.popen(*arguments, **options, &block) }
++      @native.const_set(:Open3, facade)
++    end
++
++    def expected_native_error?(primary)
++      return false unless @observed["captureEntered"] && @observed["injectionCount"] == 1 &&
++                          @observed["firstCloseFromNative"] && @observed["originalCloseCompleted"] &&
++                          primary.equal?(@injected_error) && @injected_error.message == @injected_message
++      if @injected_error.is_a?(IOError)
++        @native_error.instance_of?(MobileReleaseKit::ContractError) &&
++          @native_error.message == "Synthetic validator could not be executed safely; no upload is authorized"
++      else
++        @native_error.equal?(@injected_error) && @native_error.message == @injected_message &&
++          (!@injected_error.is_a?(SystemExit) || @native_error.status == @injected_status)
++      end
++    end
++
++    def exercise
++      begin
++        @native.capture({}, @argv, @options.fetch(:chdir), max_seconds: DEADLINE, max_output_bytes: 1_024,
++                        label: "Synthetic", failure_message: "synthetic validation failure")
++      rescue Exception => error
++        @native_error = error
++      end
++      @observed["nativeErrorClass"] = @native_error&.class&.name
++      @observed["nativeErrorMessage"] = @native_error&.message
++      @observed["nativeOriginalErrorPreserved"] = @native_error.equal?(@injected_error) && @native_error.message == @injected_message
++      @observed["nativeExitStatus"] = @native_error.status if @native_error.is_a?(SystemExit)
++      # The native wrapper intentionally redacts IOErrors. Our own first error
++      # is still held by the nested lifetime and must not become a later cleanup
++      # error/assertion. A mode name or matching redacted message grants no waiver.
++      primary = @native_frame&.primary || @callback_error || @native_error
++      unless expected_native_error?(primary)
++        raise primary if primary
++        raise "native capture did not return the expected first-close failure"
++      end
++      raise @cleanup_errors.first unless @cleanup_errors.empty?
++      raise "native capture did not reap its worker" unless @waiter&.join(0)
++      if @observed["watchdogIntervened"]
++        raise Failure.new("setup-fallback", "native setup cleanup required control EOF")
++      end
++      unless @waiter.value.signaled? && @waiter.value.termsig == Signal.list.fetch("KILL")
++        raise "native cleanup did not SIGKILL the actual worker"
++      end
++      UploadProcessFixture.dead!(@waiter.pid, @waiter.pid, deadline: UploadProcessFixture.clock + CLEANUP_LIMIT)
++      raise "native control closed before death proof" if @control_write.closed? || @observed["fallbackUsed"]
++      @observed["deadBeforeFallback"] = true
++    end
++
++    def execute
++      saved_handlers = trap_state
++      failure = nil
++      begin
++        UploadProcessFixture.lifetime do |frame|
++          begin
++            @control_read, @control_write = IO.pipe
++            raise @fixture_error if @mode == "native-setup-second-pipe"
++            @event_read, @event_write = IO.pipe
++            prepare_native
++            frame.active { exercise }
++          rescue Exception => error
++            frame.remember(error)
++            raise
++          ensure
++            frame.cleanup { finish_resources }
++          end
++        end
++      rescue Exception => error
++        failure = error
++      end
++      @observed.merge!("ownedDescriptorCount" => owned_ios.length, "ownedDescriptorsClosed" => owned_ios.all?(&:closed?),
++                       "watchdogJoined" => !@watchdog || !@watchdog.alive?, "waiterJoined" => !@waiter || !@waiter.alive?,
++                       "injectorsJoined" => !@injector || !@injector.alive?, "handlersRestored" => trap_state == saved_handlers,
++                       "registryInactive" => UploadProcessFixture.instance_variable_get(:@cancellation_scope).nil?,
++                       "pendingInterrupt" => Thread.current.pending_interrupt?,
++                       "harnessPrimaryRetained" => failure && (failure.equal?(@fixture_error) || failure.equal?(@callback_error) || failure.equal?(@native_frame&.primary)),
++                       "cleanupErrors" => @cleanup_errors.map { |error| error.class.name })
++      if @waiter && @waiter.join(0)
++        @observed["workerExitStatus"] = @waiter.value.exitstatus
++        @observed["workerTermSignal"] = @waiter.value.termsig
++      end
++      @observed["workerControlEOF"] = UploadProcessFixture.read_json(path("leader-eof.json")) == {"eof" => true} if File.file?(path("leader-eof.json"))
++      kind = failure ? (failure.is_a?(Failure) ? failure.kind : "unexpected") : "pass"
++      unless @observed.values_at("ownedDescriptorsClosed", "watchdogJoined", "waiterJoined", "injectorsJoined", "handlersRestored", "registryInactive").all? &&
++             !@observed["pendingInterrupt"] && @cleanup_errors.empty?
++        kind = "fixture-cleanup"
++      end
++      result = @observed.merge("kind" => kind, "errorClass" => failure&.class&.name, "error" => failure&.message)
++      UploadProcessFixture.atomic_json(path("result.json"), result)
++      kind == "pass" ? 0 : 1
++    end
++  end
++
++  # One isolated ordinary driver per proof. Faults occur after actual publication,
++  # readiness or watchdog registration; the observed final exception comes from
++  # the real outer result boundary, not the driver's self-reported boolean.
++  class NativePrimaryProbe
++    class UnexpectedFailure < StandardError; end
++    class CleanupFailure < StandardError; end
++
++    class Driver < NativeSetupDriver
++      attr_reader :original, :original_message, :original_status, :secondary, :fault_count,
++                  :secondary_count, :frame_published, :signal_requests, :entered_death_before_close
++
++      def initialize(directory, spec)
++        @boundary, kind, @secondary_boundary = spec
++        super(directory, @boundary == "entered" ? "native-setup-io-error" : "native-setup-interrupt")
++        require_relative "../../fastlane/release_support"
++        message = @boundary == "entered" ? @injected_message : "unexpected synthetic native setup failure"
++        @original = case kind
++        when "io" then IOError.new(message)
++        when "interrupt" then Interrupt.new(message)
++        when "system-exit" then SystemExit.new(41, message)
++        when "contract" then MobileReleaseKit::ContractError.new("Synthetic validator could not be executed safely; no upload is authorized")
++        else UnexpectedFailure.new(message)
++        end
++        @original_message = @original.message.dup.freeze
++        @original_status = @original.status if @original.is_a?(SystemExit)
++        @secondary = CleanupFailure.new("secondary synthetic native cleanup failure") unless @secondary_boundary == "none"
++        @fault_count = @secondary_count = 0
++        @frame_published = @entered_death_before_close = false
++        @signal_requests = []
++      end
++
++      def fault(boundary)
++        return unless boundary == @boundary && @fault_count.zero?
++        @fault_count += 1
++        @frame_published = !@native_frame.nil?
++        if @original.is_a?(Interrupt)
++          Thread.handle_interrupt(Exception => :never) do
++            @injector = Thread.new { Thread.main.raise(@original) }
++            raise "unexpected-fault injector did not join" unless @injector.join(2)
++          end
++        else
++          raise @original
++        end
++      end
++
++      def fail_cleanup
++        return unless @secondary && @secondary_count.zero?
++        @secondary_count += 1
++        raise @secondary
++      end
++
++      def publish_owner
++        super
++        fault("publication") if @owner["phase"] == "launched"
++        fail_cleanup if @owner["phase"] == "finished" && @secondary_boundary == "outer"
++      end
++
++      def ready!
++        super
++        fault("readiness")
++      end
++
++      def start_watchdog
++        super
++        fault("watchdog")
++      end
++
++      def close_owned(io)
++        if @boundary == "entered" && io && io.equal?(@control_write) && !io.closed?
++          unless @waiter&.join(0) && @waiter.value.signaled? && @waiter.value.termsig == Signal.list.fetch("KILL") &&
++                 !@observed["fallbackUsed"] && !@observed["watchdogIntervened"]
++            raise "entered unexpected-error worker was not killed before fixture cleanup"
++          end
++          UploadProcessFixture.dead!(@waiter.pid, @waiter.pid, deadline: UploadProcessFixture.clock + CLEANUP_LIMIT)
++          @entered_death_before_close = true
++        end
++        super
++        fail_cleanup if io && io.equal?(@control_write) && @secondary_boundary == "close" && @fault_count == 1
++      end
++
++      def prepare_native
++        super
++        driver, facade = self, Module.new
++        facade.const_set(:CLOCK_MONOTONIC, Process::CLOCK_MONOTONIC)
++        facade.define_singleton_method(:clock_gettime) { |identifier| Process.clock_gettime(identifier) }
++        facade.define_singleton_method(:kill) do |signal, target|
++          waiter = driver.instance_variable_get(:@waiter)
++          request = {"signal" => signal.to_s, "target" => target, "forwarded" => false}
++          driver.signal_requests << request
++          # Observation is a rejection oracle, not lasting PID authority. The
++          # entered proof requires exclusive isolation until QA-007 is fixed.
++          unless signal == "KILL" && waiter && target == -waiter.pid && !waiter.join(0)
++            raise "unexpected or post-reap native signal request"
++          end
++          request["forwarded"] = true
++          request["result"] = Process.kill(signal, target)
++        end
++        @native.const_set(:Process, facade)
++      end
++    end
++
++    def initialize(directory, mode)
++      @directory, @mode = directory, mode
++      @spec = NATIVE_PRIMARY_PROOFS.fetch(mode)
++    end
++
++    def execute
++      driver = Driver.new(@directory, @spec)
++      source = File.realpath(__FILE__)
++      anchors = {"result" => '@observed.merge!("ownedDescriptorCount"',
++                 "frame" => '@observed["nativeSpawnAttempts"] += 1', "entered" => 'raise @injected_error'}
++      lines = File.readlines(source)
++      anchors.transform_values! do |anchor|
++        matches = lines.each_index.select { |index| lines[index].lstrip.start_with?(anchor) }
++        raise "native proof source anchor changed" unless matches.length == 1
++        matches.first + 1
++      end
++      outer_error = nil
++      result_observations = backend_entries = callback_entries = 0
++      actual_waiter = nil
++      backend = Open3.method(:popen3)
++      trace = TracePoint.new(:line) do |point|
++        next unless point.path == source && point.self.equal?(driver)
++        if point.lineno == anchors.fetch("result")
++          result_observations += 1
++          outer_error = point.binding.local_variable_get(:failure)
++        elsif %w[frame entered].include?(@spec.first) && point.lineno == anchors.fetch(@spec.first)
++          driver.fault(@spec.first)
++        end
++      end
++      begin
++        # Count actual backend entry/yield independently, without manufacturing
++        # a child, waiter, status, stream, return value or native exception.
++        Open3.define_singleton_method(:popen3) do |*arguments, **options, &block|
++          backend_entries += 1
++          backend.call(*arguments, **options) do |stdin, stdout, stderr, waiter|
++            callback_entries += 1
++            actual_waiter = waiter
++            block.call(stdin, stdout, stderr, waiter)
++          end
++        end
++        trace.enable
++        status = driver.execute
++      ensure
++        trace.disable
++        Open3.define_singleton_method(:popen3, backend)
++      end
++      raw = UploadProcessFixture.read_json(File.join(@directory, "result.json"))
++      frame = driver.instance_variable_get(:@native_frame)
++      native_error = driver.instance_variable_get(:@native_error)
++      callback_error = driver.instance_variable_get(:@callback_error)
++      errors = driver.instance_variable_get(:@cleanup_errors)
++      reaped = false
++      wait_status = nil
++      if actual_waiter && actual_waiter.join(0)
++        wait_status = actual_waiter.value
++        begin
++          Process.waitpid2(actual_waiter.pid, Process::WNOHANG)
++        rescue Errno::ECHILD
++          reaped = true
++        end
++      end
++      proof = {"case" => @mode, "driverExitStatus" => status, "faultCount" => driver.fault_count,
++               "framePublishedBeforeFault" => driver.frame_published, "resultObservations" => result_observations,
++               "outerPrimarySameObject" => outer_error.equal?(driver.original),
++               "nestedPrimarySameObject" => frame&.primary.equal?(driver.original),
++               "callbackPrimarySameObject" => callback_error.equal?(driver.original), "callbackAbsent" => callback_error.nil?,
++               "originalMessagePreserved" => outer_error&.message == driver.original_message,
++               "originalStatusPreserved" => !driver.original.is_a?(SystemExit) ||
++                 (outer_error.is_a?(SystemExit) && outer_error.status == driver.original_status),
++               "originalNotIntentional" => !driver.original.equal?(driver.instance_variable_get(:@injected_error)),
++               "backendEntries" => backend_entries, "callbackEntries" => callback_entries,
++               "actualWaiterMatchesDriver" => actual_waiter.equal?(driver.instance_variable_get(:@waiter)),
++               "actualWaiterReaped" => reaped, "actualWorkerExitStatus" => wait_status&.exitstatus,
++               "actualWorkerTermSignal" => wait_status&.termsig,
++               "actualDescriptorsClosed" => driver.owned_ios.all?(&:closed?),
++               "secondaryCount" => driver.secondary_count,
++               "secondaryObjectRecorded" => driver.secondary && errors.any? { |error| error.equal?(driver.secondary) },
++               "enteredDeathBeforeControlClose" => driver.entered_death_before_close,
++               "nativeErrorClass" => native_error&.class&.name, "nativeErrorMessage" => native_error&.message,
++               "signalRequests" => driver.signal_requests, "failures" => []}
++      check = lambda { |name, value| proof["failures"] << name unless value }
++      check.call("actual failed native result", status == 1 && raw["kind"] == (driver.secondary ? "fixture-cleanup" : "unexpected"))
++      check.call("one real injection/final boundary", driver.fault_count == 1 && result_observations == 1)
++      %w[framePublishedBeforeFault outerPrimarySameObject nestedPrimarySameObject originalMessagePreserved
++         originalStatusPreserved originalNotIntentional actualWaiterMatchesDriver actualDescriptorsClosed].each do |name|
++        check.call(name, proof.fetch(name))
++      end
++      check.call("secondary identity", driver.secondary ? proof["secondaryObjectRecorded"] && errors.length == 1 && driver.secondary_count == 1 : errors.empty?)
++      %w[ownedDescriptorsClosed watchdogJoined waiterJoined injectorsJoined handlersRestored registryInactive].each do |name|
++        check.call(name, raw[name])
++      end
++      check.call("no pending cancellation", !raw["pendingInterrupt"])
++      if @spec[1] == "io"
++        check.call("unchanged IOError redaction", native_error.instance_of?(MobileReleaseKit::ContractError) &&
++                   native_error.message == "Synthetic validator could not be executed safely; no upload is authorized")
++      else
++        check.call("actual non-IOError return", native_error.equal?(driver.original))
++      end
++      if @spec.first == "frame"
++        check.call("no native acquisition/callback", backend_entries.zero? && callback_entries.zero? && actual_waiter.nil? &&
++                   callback_error.nil? && raw["nativeSpawnAttempts"] == 0 && raw["ownedDescriptorCount"] == 4)
++        check.call("no native fallback", !raw["fallbackUsed"] && !raw.key?("workerControlEOF"))
++      else
++        check.call("actual native callback original", backend_entries == 1 && callback_entries == 1 && proof["callbackPrimarySameObject"] &&
++                   reaped && raw["nativeSpawnAttempts"] == 1 && raw["ownedDescriptorCount"] == 7)
++        if @spec.first == "entered"
++          check.call("real first-close boundary", raw["captureEntered"] && raw["injectionCount"] == 1 && raw["firstCloseFromNative"] && raw["originalCloseCompleted"])
++          check.call("actual native kill before fallback", proof["enteredDeathBeforeControlClose"] && proof["actualWorkerTermSignal"] == Signal.list.fetch("KILL") &&
++                     proof["actualWorkerExitStatus"].nil? && !raw["fallbackUsed"] && !raw["watchdogIntervened"] && !raw.key?("workerControlEOF"))
++          check.call("one real native kill", driver.signal_requests.length == 1 && driver.signal_requests.first["forwarded"] && driver.signal_requests.first["result"] == 1)
++        else
++          check.call("real EOF before reap", raw["workerControlEOF"] && raw["fallbackUsed"] &&
++                     proof["actualWorkerExitStatus"] == 0 && proof["actualWorkerTermSignal"].nil?)
++        end
++      end
++      unless @spec.first == "entered"
++        check.call("first-close unreached", !raw["captureEntered"] && raw["injectionCount"] == 0 && !raw.key?("firstCloseFromNative"))
++        check.call("no native signals/watchdog", driver.signal_requests.empty? && !raw["watchdogIntervened"])
++      end
++      UploadProcessFixture.atomic_json(File.join(@directory, "primary-proof.json"), proof)
++      proof.fetch("failures").empty? ? 0 : 1
++    end
++  end
++
++  def driver(directory)
++    input = read_json(File.join(directory, "input.json"))
++    mode, platform = input.values_at("mode", "platform")
++    validate_request!(platform, mode, input.fetch("parameters"))
++    return NativePrimaryProbe.new(directory, mode).execute if NATIVE_PRIMARY_PROOFS.key?(mode)
++    return NativeSetupDriver.new(directory, mode).execute if platform == "native"
++    base_mode = mode.delete_suffix("-slow-cleanup")
++    real_clock = %w[real-deadline immediate-deadline].include?(base_mode)
++    require_relative "../../fastlane/ios_upload_validation"
++    require_relative "../../fastlane/android_upload_validation"
++    gate = platform == "ios" ? MobileReleaseKit::IosUploadValidation : MobileReleaseKit::AndroidUploadValidation
++    native = MobileReleaseKit::NativeUploadValidation
++    parameters = input.fetch("parameters").transform_keys(&:to_sym)
++    parameters[:environment] = {}
++    artifact_key = platform == "ios" ? :ipa_path : :aab_path
++    expected_argv = [parameters.fetch(:python), "-I", "-S", "-c", gate::BOOTSTRAP,
++                     File.realpath(parameters.fetch(:module_root)), "--app-root", File.realpath(parameters.fetch(:app_root)),
++                     "--config-path", parameters.fetch(:config_path), "--operation-intent", parameters.fetch(:intent_path),
++                     "--#{platform == 'ios' ? 'ipa' : 'aab'}", parameters.fetch(artifact_key), "--intent-sha256", parameters.fetch(:intent_sha256)]
++    expected_options = {chdir: File.realpath(parameters.fetch(:tooling_directory)), unsetenv_others: true, pgroup: true}
++    mutation = {}
++    if %w[leader-only no-deadline immediate-deadline].include?(base_mode)
++      source = File.read(File.expand_path("../../fastlane/native_upload_validation.rb", __dir__))
++      mutation["mutationSourceSha256"] = Digest::SHA256.hexdigest(source)
++      anchor, replacement = if base_mode == "leader-only"
++        ['Process.kill("KILL", -waiter.pid)', 'Process.kill("KILL", waiter.pid)']
++      else
++        [' + max_seconds', base_mode == "no-deadline" ? ' + 86_400' : ' + 0']
++      end
++      raise "mutation anchor changed" unless source.scan(anchor).length == 1
++      source = source.sub(anchor, replacement).sub('require_relative "release_support"', "require #{File.expand_path('../../fastlane/release_support', __dir__).inspect}")
++      copy = File.join(directory, "mutated-native.rb")
++      File.write(copy, source)
++      mutation["mutationSha256"] = Digest::SHA256.hexdigest(source)
++      load copy
++    end
++    gate.send(:remove_const, :MAX_SECONDS)
++    gate.const_set(:MAX_SECONDS, DEADLINE)
++
++    observed = {"mode" => mode, "pipeWaits" => 0, "deadlinePipeWaits" => 0, "nativeClockReads" => 0,
++                "legacyRecordUsedForOwnership" => false,
++                "watchdogIntervened" => false, "fallbackUsed" => false, "captureEntered" => false}.merge(mutation)
++    owner = {}
++    control_read, control_write = IO.pipe
++    event_read, event_write = IO.pipe
++    waiter_handle = watchdog = nil
++    stdout_handle = stderr_handle = nil
++    result = nil
++    deadline_started = nil
++    spawn_facade, clock_facade, io_facade = Module.new, Module.new, Module.new
++    clock_facade.const_set(:CLOCK_MONOTONIC, Process::CLOCK_MONOTONIC)
++    clock_facade.define_singleton_method(:clock_gettime) do |identifier|
++      raise "unexpected clock" unless identifier == Process::CLOCK_MONOTONIC
++      if real_clock
++        value = UploadProcessFixture.clock
++        deadline_started ||= value
++        observed["nativeClockReads"] += 1
++        # These are the REAL values returned to the native deadline calculation.
++        # Its last decision read precedes raise/ensure/KILL/join, unlike total capture.
++        observed["deadlineDecisionSeconds"] = value - deadline_started
++        value
++      else
++        observed["pipeWaits"].positive? ? 1.0 : 0.0
++      end
++    end
++    clock_facade.define_singleton_method(:kill) do |*arguments|
++      started = UploadProcessFixture.clock
++      begin
++        sleep DEADLINE * 2 if mode.end_with?("-slow-cleanup")
++        Process.kill(*arguments)
++      ensure
++        observed["cleanupSeconds"] = UploadProcessFixture.clock - started
++      end
++    end
++    io_facade.define_singleton_method(:select) do |*arguments|
++      unless !arguments[0].empty? && (arguments[0] - [stdout_handle, stderr_handle]).empty?
++        raise "unexpected capture pipe selection"
++      end
++      orphan = owner["child"] && waiter_handle.join(0) && UploadProcessFixture.alive?(owner.fetch("child"), owner.fetch("group"))
++      ready_leader = real_clock && observed["ready"] && waiter_handle.alive?
++      selected = IO.select(*arguments)
++      observed["pipeWaits"] += 1 if orphan && selected.nil?
++      observed["deadlinePipeWaits"] += 1 if ready_leader && selected.nil?
++      selected
++    end
++    spawn_facade.define_singleton_method(:popen3) do |environment, *argv, **options, &block|
++      raise "unexpected complete adapter launch contract" unless argv == expected_argv && options == expected_options && environment == {"LANG" => "C", "LC_ALL" => "C"}
++      # Extra FDs belong only to this static fixture; preserve every real adapter
++      # spawn option. Only READ authority for control crosses into the worker.
++      Open3.popen3(environment, RbConfig.ruby, File.realpath(__FILE__), "worker", directory, mode,
++                   control_read.fileno.to_s, event_write.fileno.to_s, **options,
++                   control_read.fileno => control_read, event_write.fileno => event_write) do |stdin, stdout, stderr, waiter|
++        waiter_handle, stdout_handle, stderr_handle = waiter, stdout, stderr
++        owner.merge!("leader" => waiter.pid, "group" => waiter.pid, "phase" => "launched")
++        UploadProcessFixture.atomic_json(File.join(directory, "owner.json"), owner)
++        UploadProcessFixture.close(control_read)
++        UploadProcessFixture.close(event_write)
++        begin
++          buffer = +""
++          ready_leader = false
++          started = UploadProcessFixture.clock
++          limit = mode == "unready" ? DEADLINE * 2 : READINESS_LIMIT
++          readiness_deadline = started + limit
++          UploadProcessFixture.wait_until(limit, "readiness") do
++            selected = IO.select([event_read], nil, nil, 0.01)
++            if selected
++              chunk = event_read.read_nonblock(4_096, exception: false)
++              buffer << chunk if chunk.is_a?(String)
++              raise "oversized fixture readiness" if buffer.bytesize > 4_096
++              while (line = buffer.slice!(/\A[^\n]*\n/))
++                event = JSON.parse(line)
++                unless event.keys.sort == %w[group kind pid] && event["group"] == waiter.pid && event["pid"].is_a?(Integer) && event["pid"] > 1
++                  raise Failure.new("readiness", "unexpected fixture process identity")
++                end
++                case event.fetch("kind")
++                when "entered", "startup-wait", "leader-ready"
++                  raise "wrong fixture leader" unless event["pid"] == waiter.pid
++                  ready_leader = true if event["kind"] == "leader-ready"
++                  owner["phase"] = "kill-startup" if mode == "kill-startup" && event["kind"] == "startup-wait"
++                when "child-ready"
++                  raise "fixture child is its leader" if event["pid"] == waiter.pid
++                  owner["child"] = event.fetch("pid")
++                else
++                  raise "unknown fixture readiness event"
++                end
++                UploadProcessFixture.atomic_json(File.join(directory, "owner.json"), owner)
++              end
++            end
++            leader_mode = real_clock
++            ready = leader_mode ? ready_leader && waiter.alive? : owner["child"] && waiter.join(0)
++            if ready
++              target = leader_mode ? waiter.pid : owner.fetch("child")
++              remaining = readiness_deadline - UploadProcessFixture.clock
++              raise Failure.new("readiness", "readiness deadline expired") unless remaining.positive?
++              next false unless UploadProcessFixture.ready?(target, waiter.pid, seconds: [remaining, 2].min)
++              raise Failure.new("readiness", "readiness deadline expired") if UploadProcessFixture.clock >= readiness_deadline
++              observed["ready"] = true
++              observed["leaderExitedBeforeCapture"] = !waiter.join(0).nil?
++              observed["liveChildBeforeCapture"] = !owner["child"].nil?
++              observed["readinessSeconds"] = UploadProcessFixture.clock - started
++              if mode == "kill-descendant"
++                owner["phase"] = "kill-descendant"
++                UploadProcessFixture.atomic_json(File.join(directory, "owner.json"), owner)
++                sleep 0.01 until control_write.closed? # Parent kills this isolated driver.
++              end
++            end
++            ready
++          end
++          observed["captureEntered"] = true
++          watchdog = Thread.new do
++            sleep CAPTURE_LIMIT
++            observed["watchdogIntervened"] = true
++            observed["fallbackUsed"] = true
++            UploadProcessFixture.close(control_write)
++          end
++          capture_started = UploadProcessFixture.clock
++          begin
++            block.call(stdin, stdout, stderr, waiter)
++          ensure
++            observed["captureSeconds"] = UploadProcessFixture.clock - capture_started
++          end
++        ensure
++          # Before capture entry Open3 still owns a live waiter. Close the exact
++          # lifetime descriptor BEFORE its implicit join on readiness failure.
++          unless observed["captureEntered"]
++            observed["fallbackUsed"] = true
++            UploadProcessFixture.close(control_write)
++            raise Failure.new("fixture-cleanup", "unready worker ignored EOF") unless waiter.join(CLEANUP_LIMIT)
++          end
++        end
++      end
++    end
++    native.const_set(:Open3, spawn_facade)
++    native.const_set(:Process, clock_facade)
++    native.const_set(:IO, io_facade)
++    begin
++      error = nil
++      begin
++        gate.current!(**parameters)
++      rescue Exception => failure
++        error = failure
++      ensure
++        watchdog&.kill
++        watchdog&.join
++      end
++      raise Failure.new("capture-watchdog", "independent capture watchdog was required") if observed["watchdogIntervened"]
++      raise error if error && !error.is_a?(MobileReleaseKit::ContractError)
++      raise Failure.new("timeout", "capture did not report its own timeout") unless error&.message&.include?("timed out")
++      raise "capture returned without a reaped leader" unless waiter_handle && !waiter_handle.alive?
++      if real_clock
++        unless observed["ready"] && observed["deadlinePipeWaits"].positive? &&
++               observed["deadlineDecisionSeconds"] >= DEADLINE * 0.75 &&
++               observed["deadlineDecisionSeconds"] < CAPTURE_LIMIT && observed["captureSeconds"] < CAPTURE_LIMIT
++          raise Failure.new("elapsed-bound", "real timeout decision/pipe-wait bound violated before cleanup")
++        end
++      else
++        unless observed["ready"] && observed["leaderExitedBeforeCapture"] && observed["liveChildBeforeCapture"] && observed["pipeWaits"].positive?
++          raise Failure.new("readiness", "inherited-pipe boundary was not observed")
++        end
++        dead!(owner.fetch("child"), owner.fetch("group"), deadline: clock + 2, kind: "descendant-alive")
++      end
++      raise "fixture control closed before death proof" if control_write.closed? || observed["fallbackUsed"]
++      observed["deadBeforeFallback"] = true
++      result = observed.merge("kind" => "pass")
++    rescue Exception => error # Isolated test driver must retain cancellation diagnostics and clean owned FDs.
++      result = observed.merge("kind" => error.is_a?(Failure) ? error.kind : "unexpected",
++                              "error" => error.message, "errorClass" => error.class.name)
++    ensure
++      watchdog&.kill
++      watchdog&.join
++      observed["watchdogJoined"] = !watchdog || !watchdog.alive?
++      result["fallbackAfterObservation"] = !control_write.closed? && result["kind"] != "pass"
++      close(control_write) # Only fallback, and only after the result's death oracle.
++      [control_read, event_write, event_read].each { |io| close(io) }
++      if waiter_handle
++        raise Failure.new("fixture-cleanup", "native waiter did not join") unless waiter_handle.join(CLEANUP_LIMIT)
++      end
++      result["watchdogJoined"] = observed["watchdogJoined"]
++      result["waiterJoined"] = !waiter_handle || !waiter_handle.alive?
++      atomic_json(File.join(directory, "result.json"), result)
++    end
++    result.fetch("kind") == "pass" ? 0 : 1
++  end
++
++  module Contracts
++    def assert_complete_process_case(mode)
++      value = process_case(mode)
++      assert value.fetch("driverJoined"), value.inspect
++      assert value.fetch("knownProcessesDead"), value.inspect
++      unless mode.start_with?("kill-")
++        assert value.fetch("watchdogJoined"), value.inspect
++        assert value.fetch("waiterJoined"), value.inspect
++      end
++      value
++    end
++
++    def test_deadline_terminates_validator_without_authorizing_upload
++      value = assert_complete_process_case("real-deadline")
++      assert value.fetch("deadBeforeFallback"), value.inspect
++      refute value.fetch("fallbackUsed"), value.inspect
++      assert_operator value.fetch("deadlineDecisionSeconds"), :>=, UploadProcessFixture::DEADLINE * 0.75
++      assert_operator value.fetch("deadlinePipeWaits"), :>, 0
++      assert_operator value.fetch("captureSeconds"), :<, UploadProcessFixture::CAPTURE_LIMIT
++    end
++
++    def test_deadline_terminates_inherited_pipe_children_after_validator_parent_exits
++      value = assert_complete_process_case("inherited")
++      assert value.fetch("leaderExitedBeforeCapture"), value.inspect
++      assert value.fetch("liveChildBeforeCapture"), value.inspect
++      assert_operator value.fetch("pipeWaits"), :>, 0
++      assert value.fetch("deadBeforeFallback"), value.inspect
++      refute value.fetch("fallbackUsed"), value.inspect
++    end
++
++    def test_descendant_boundary_survives_delayed_start_and_late_parent_record
++      %w[delayed-start late-record].each do |mode|
++        value = assert_complete_process_case(mode)
++        assert value.fetch("deadBeforeFallback"), value.inspect
++        assert_operator value.fetch("readinessSeconds"), :>, UploadProcessFixture::DEADLINE
++        assert_operator value.fetch("pipeWaits"), :>, 0
++        refute value.fetch("legacyRecordUsedForOwnership"), value.inspect
++        refute value.fetch("fallbackUsed"), value.inspect
++      end
++    end
++
++    def test_unready_fixture_fails_distinctly_and_stops_before_any_late_pid_record
++      value = assert_complete_process_case("unready")
++      assert_equal "readiness", value.fetch("kind")
++      refute value.fetch("captureEntered"), value.inspect
++      assert value.fetch("fallbackUsed"), value.inspect
++      refute value.fetch("watchdogIntervened"), value.inspect
++      refute value.key?("deadBeforeFallback"), value.inspect
++    end
++
++    def test_fixture_detects_leader_only_cleanup_and_missing_deadline
++      only_leader = assert_complete_process_case("leader-only")
++      assert_equal "descendant-alive", only_leader.fetch("kind")
++      assert_operator only_leader.fetch("pipeWaits"), :>, 0
++      refute only_leader.fetch("watchdogIntervened"), only_leader.inspect
++      refute only_leader.key?("deadBeforeFallback"), only_leader.inspect
++      no_deadline = assert_complete_process_case("no-deadline")
++      assert_equal "capture-watchdog", no_deadline.fetch("kind")
++      assert no_deadline.fetch("watchdogIntervened"), no_deadline.inspect
++      refute no_deadline.key?("deadBeforeFallback"), no_deadline.inspect
++    end
++
++    def test_fixture_rejects_an_immediate_timeout_even_when_the_leader_is_killed
++      value = assert_complete_process_case("immediate-deadline")
++      assert_equal "elapsed-bound", value.fetch("kind")
++      assert value.fetch("ready"), value.inspect
++      assert_equal 0, value.fetch("deadlinePipeWaits"), value.inspect
++      refute value.fetch("watchdogIntervened"), value.inspect
++      refute value.key?("deadBeforeFallback"), value.inspect
++    end
++
++    def test_slow_cleanup_cannot_supply_a_positive_deadline_wait
++      %w[real-deadline-slow-cleanup immediate-deadline-slow-cleanup].each do |mode|
++        value = assert_complete_process_case(mode)
++        assert_operator value.fetch("cleanupSeconds"), :>=, UploadProcessFixture::DEADLINE * 2
++        assert_operator value.fetch("captureSeconds"), :>=, value.fetch("cleanupSeconds")
++        if mode.start_with?("immediate")
++          assert_equal "elapsed-bound", value.fetch("kind")
++          assert_equal 0, value.fetch("deadlinePipeWaits"), value.inspect
++          refute value.key?("deadBeforeFallback"), value.inspect
++        else
++          assert_equal "pass", value.fetch("kind")
++          assert_operator value.fetch("deadlineDecisionSeconds"), :>=, UploadProcessFixture::DEADLINE * 0.75
++          assert_operator value.fetch("deadlinePipeWaits"), :>, 0
++          assert value.fetch("deadBeforeFallback"), value.inspect
++        end
++        refute value.fetch("watchdogIntervened"), value.inspect
++      end
++    end
++
++    def test_driver_termination_stops_startup_and_orphan_via_control_eof
++      %w[kill-startup kill-descendant].each do |mode|
++        value = assert_complete_process_case(mode)
++        assert_equal "driver-terminated", value.fetch("kind")
++        assert_equal mode, value.fetch("phase")
++        assert value.fetch("eofAfterDriverDeath"), value.inspect
++      end
++    end
++
++    def test_process_observation_rejects_errors_malformed_output_and_foreign_groups
++      parse = UploadProcessFixture.method(:parse_state)
++      assert_equal "absent", parse.call("", "", 1, 123, 122)
++      assert_equal "Z", parse.call("123 122 Z\n", "", 0, 123, 122)
++      assert_equal "S+", parse.call(" 123 122 S+\n", "", 0, 123, 122)
++      {"R" => :live, "SNXLsl+" => :live, "R<XVLs+" => :live,
++       "?" => :indeterminate, "?E" => :indeterminate, "?Es" => :indeterminate,
++       "H" => :indeterminate, "X" => :indeterminate, "SE" => :indeterminate,
++       "S<XEVLs+" => :indeterminate, "Zs" => :stopped}.each do |token, expected|
++        assert_equal token, parse.call("123 122 #{token}\n", "", 0, 123, 122)
++        assert_equal expected, UploadProcessFixture.liveness(token)
++      end
++      assert_equal :stopped, UploadProcessFixture.liveness(parse.call("", "", 1, 123, 122))
++      [["", "", 2], ["", "private diagnostic", 1], ["", "", 0],
++       ["123 122 S\n", "warning", 0], ["123 122 S\n123 122 Z\n", "", 0],
++       ["garbage", "", 0], ["123 999 Z\n", "", 0], ["999 122 Z\n", "", 0],
++       ["123 122 bad\n", "", 0], ["123 122 Z\n", "", 1],
++       ["123 999 ?E\n", "", 0], ["999 122 ?Es\n", "", 0]].each do |arguments|
++        assert_raises(UploadProcessFixture::Failure) { parse.call(*arguments, 123, 122) }
++      end
++      %w[Zgarbage Sgarbage ZEvil Z? ?E? S? ZE ZEs SXX SEE Sss S++ SN< S<N
++         SsL SlL SEVXE S> S- SB].each do |token|
++        assert_raises(UploadProcessFixture::Failure) { parse.call("123 122 #{token}\n", "", 0, 123, 122) }
++      end
++      error = assert_raises(UploadProcessFixture::Failure) do
++        UploadProcessFixture.capture_command([RbConfig.ruby, "-e", "sleep 30"], seconds: 0.05)
++      end
++      assert_equal "process-observation", error.kind
++    end
++
++    %w[async signals policies unknown].each do |family|
++      define_method("test_process_ownership_#{family}_through_both_real_fixture_callers") do
++        value = assert_complete_process_case("ownership-#{family}")
++        assert_equal UploadProcessFixture::OwnershipProbe::CASES.fetch(family).length * 2, value.fetch("cases").length
++        value.fetch("cases").each do |entry|
++          assert_empty entry.fetch("failures"), entry.inspect
++          assert_empty entry.fetch("signalRequestsAfterReap"), entry.inspect
++          assert entry.fetch("allAcquiredChildrenJoined"), entry.inspect
++          assert entry.fetch("firstExceptionPreserved"), entry.inspect
++          assert entry.fetch("raisersJoined"), entry.inspect
++          assert entry.fetch("handlersRestored"), entry.inspect
++          assert entry.fetch("registryInactive"), entry.inspect
++        end
++      end
++    end
++
++    def test_setup_primary_survives_cleanup_failure_and_real_queued_cancellation
++      value = assert_complete_process_case("ownership-setup")
++      assert_equal 12, value.fetch("cases").length
++      value.fetch("cases").each do |entry|
++        assert_empty entry.fetch("failures"), entry.inspect
++        assert entry.fetch("setupHit"), entry.inspect
++        assert entry.fetch("cleanupHit"), entry.inspect
++        assert entry.fetch("cleanupFaultRaised"), entry.inspect
++        assert_operator entry.fetch("cleanupDepth"), :>, 0
++        assert entry.fetch("cleanupErrorReported"), entry.inspect
++        assert entry.fetch("originalObjectAndMessagePreserved"), entry.inspect
++        assert_equal 0, entry.fetch("spawnAttempts"), entry.inspect
++        assert entry.fetch("raiserJoined"), entry.inspect
++        assert entry.fetch("handlersRestored"), entry.inspect
++        assert entry.fetch("registryInactive"), entry.inspect
++        refute entry.fetch("pendingInterrupt"), entry.inspect
++        assert_operator entry.fetch("preservedDirectories"), :>, 0
++        if entry.fetch("repeatedCancellation")
++          assert_equal [Signal.list.fetch("INT")], entry.fetch("osSignalsQueued"), entry.inspect
++          assert entry.fetch("asyncRepeatQueued"), entry.inspect
++        end
++      end
++    end
++
++    def test_indeterminate_observations_never_prove_readiness_or_renew_native_death_budget
++      value = assert_complete_process_case("ownership-observation")
++      entries = value.fetch("cases")
++      assert_equal %w[readiness sequence transient-native persistent-native], entries.map { |entry| entry.fetch("case") }
++      entries.each { |entry| assert_empty entry.fetch("failures"), entry.inspect }
++      assert_equal [false] * 7 + [true, "readiness", "readiness"], entries[0].fetch("readinessResults")
++      assert_equal 3, entries[1].fetch("observationCount")
++      assert entries[1].fetch("onlyDefiniteStoppedAccepted")
++      entries.drop(2).each do |entry|
++        assert entry.fetch("independentRealDeathProof"), entry.inspect
++        assert_equal 2, entry.fetch("knownNativeIdentities").length
++        assert_equal 1, entry.fetch("deadCalls").map { |call| call.fetch("deadline") }.uniq.length
++      end
++      assert_equal 0, entries[2].fetch("preservedBeforeIndependentProof")
++      assert_equal 1, entries[3].fetch("preservedBeforeIndependentProof")
++      assert_equal "fixture-cleanup", entries[3].fetch("originalErrorKind")
++      assert entries[3].fetch("registryUnresolvedBeforeProof")
++      assert_equal %w[active cleanup], entries[3].fetch("deadCalls").map { |call| call.fetch("phase") }
++    end
++  end
++end
++
++if $PROGRAM_NAME == __FILE__
++  File.umask(0o077)
++  command, directory, mode, control, events = ARGV
++  case command
++  when "driver"
++    exit UploadProcessFixture.driver(directory)
++  when "worker"
++    exit! UploadProcessFixture.worker(directory, mode, Integer(control, 10), Integer(events, 10))
++  when "ownership"
++    probe = case mode
++    when "setup"
++      UploadProcessFixture::SetupFailureProbe.new(directory)
++    when "observation"
++      UploadProcessFixture::ObservationProbe.new(directory)
++    else
++      UploadProcessFixture::OwnershipProbe.new(directory, mode)
++    end
++    puts JSON.generate(probe.execute)
++  else
++    abort "unknown static process fixture command"
++  end
++end
+diff --git a/tests/workflow/upload_process_ownership.rb b/tests/workflow/upload_process_ownership.rb
+new file mode 100644
+index 0000000000000000000000000000000000000000..681481eacb139888fef058c33176e0dfc1667087
+--- /dev/null
++++ b/tests/workflow/upload_process_ownership.rb
+@@ -0,0 +1,1064 @@
++# frozen_string_literal: true
++
++# Test-only ownership, shared by the process fixture and its observation commands.
++# Default Ruby SIGINT can bypass Thread.handle_interrupt. Queue it through
++# Thread#raise instead of raising synchronously from a trap; restore INT last.
++module UploadProcessFixture
++  class CancellationScope
++    attr_reader :cleanup_depth, :errors
++
++    def initialize
++      @originals, @handlers, @pending, @policies = {}, {}, {}, {}
++      @cleanup_depth = 0
++      @errors = []
++    end
++
++    def install
++      %w[INT TERM].each do |name|
++        number = Signal.list.fetch(name)
++        handler = proc do
++          case @policies[number]
++          when "DEFAULT"
++            queue(number)
++          when "IGNORE"
++            nil
++          else
++            @pending[number] = true # Policy is not known until trap returns.
++          end
++        end
++        @handlers[name] = handler
++        @originals[name] = Signal.trap(name, handler)
++        @policies[number] = @originals.fetch(name)
++        unless %w[DEFAULT IGNORE].include?(@originals[name])
++          raise Failure.new("signal-policy", "process fixture requires default or ignored INT/TERM handlers")
++        end
++        queue(number) if @pending.delete(number) && @policies[number] == "DEFAULT"
++      end
++    end
++
++    def queue(number)
++      error = number == Signal.list.fetch("INT") ? Interrupt.new("process fixture interrupted by SIGINT") : SignalException.new(number)
++      Thread.main.raise(error)
++    end
++
++    def cleanup
++      @cleanup_depth += 1
++      yield
++    ensure
++      @cleanup_depth -= 1
++    end
++
++    def restore_one(name)
++      return unless @originals.key?(name)
++      # Observe using our deferred-compatible handler, rather than temporarily
++      # installing a stale DEFAULT before detecting a foreign handler conflict.
++      actual = Signal.trap(name, @handlers.fetch(name))
++      target = @originals.fetch(name)
++      unless actual.equal?(@handlers.fetch(name))
++        target = actual
++        @errors << Failure.new("signal-policy", "process fixture signal handler changed during its lifetime")
++      end
++      Signal.trap(name, target)
++    end
++
++    def restore
++      begin
++        restore_one("TERM")
++      rescue Exception => error
++        @errors << error
++      ensure
++        yield # Publish inactive/cleanup-complete BEFORE restoring default INT.
++      end
++      restore_one("INT") # No necessary trap/registry cleanup may follow this.
++    end
++
++    def replay_custom_pending
++      @pending.each_key do |number|
++        policy = @policies[number]
++        next if %w[DEFAULT IGNORE].include?(policy)
++        Process.kill(number, Process.pid) # Original policy restored, no resources acquired.
++      end
++    end
++  end
++
++  class Lifetime
++    attr_reader :primary
++
++    def initialize(scope)
++      @scope = scope
++      @primary = nil
++      @cleanup_errors = []
++    end
++
++    def remember(error)
++      @primary ||= error
++    end
++
++    def finishing
++      yield
++    rescue Exception => error
++      remember(error)
++    end
++
++    def active
++      return yield if @scope.cleanup_depth.positive? # Never reopen an outer cleanup.
++      result = nil
++      begin
++        Thread.handle_interrupt(Exception => :never) do
++          begin
++            result = Thread.handle_interrupt(Exception => :immediate) { yield }
++          rescue Exception => error
++            remember(error)
++          end
++        end
++      rescue Exception => error
++        remember(error) # A queued repeat at scope exit cannot replace the first.
++      end
++      raise @primary if @primary
++      result
++    end
++
++    def cleanup
++      Thread.handle_interrupt(Exception => :never) do
++        @scope.cleanup { yield }
++      rescue Exception => error
++        @cleanup_errors << error
++        remember(error)
++      end
++    end
++
++    def report
++      @cleanup_errors.each do |error|
++        warn "Fixture cleanup incomplete: #{error.class}: #{error.message}; primary=#{@primary.class}: #{@primary.message}"
++      end
++    end
++
++    def drain_pending
++      deadline = UploadProcessFixture.clock + CLEANUP_LIMIT
++      while Thread.current.pending_interrupt?
++        raise Failure.new("signal-policy", "fixture cancellation queue did not quiesce after cleanup") if UploadProcessFixture.clock >= deadline
++        begin
++          Thread.handle_interrupt(Exception => :immediate) {}
++        rescue Exception => error
++          remember(error)
++        end
++      end
++    end
++  end
++
++  class OwnedChild
++    attr_reader :pid, :status, :phase
++
++    def initialize
++      @pid = @status = nil
++      @phase = :unstarted
++    end
++
++    def start(*arguments, **options)
++      Thread.handle_interrupt(Exception => :never) do
++        raise Failure.new("process-ownership", "child acquisition was already attempted") unless @phase == :unstarted
++        @phase = :acquiring
++        begin
++          @pid = Process.spawn(*arguments, **options)
++          @phase = :live
++        rescue Exception
++          @phase = :unknown # A missing published PID is not proof of no acquisition.
++          raise
++        end
++      end
++      @pid
++    end
++
++    def poll
++      Thread.handle_interrupt(Exception => :never) do
++        return @status if @phase == :reaped
++        return nil if @phase == :unstarted
++        raise Failure.new("process-ownership", "child wait authority is unknown") unless @phase == :live
++        begin
++          waited = Process.waitpid2(@pid, Process::WNOHANG)
++          if waited
++            @status = waited.last
++            @phase = :reaped
++          end
++        rescue Exception
++          @phase = :unknown # In particular ECHILD must never authorize a signal.
++          raise
++        end
++        @status
++      end
++    end
++
++    def signal(signal, group: true)
++      Thread.handle_interrupt(Exception => :never) do
++        return false if poll || @phase == :unstarted
++        raise Failure.new("process-ownership", "child signal authority is unknown") unless @phase == :live
++        begin
++          Process.kill(signal, group ? -@pid : @pid)
++          true
++        rescue Errno::ESRCH
++          false # Still reap the reserved direct child; never retry a stale PID.
++        end
++      end
++    end
++
++    def stop
++      Thread.handle_interrupt(Exception => :never) do
++        return if @phase == :unstarted || poll
++        signal("KILL")
++        UploadProcessFixture.wait_until(CLEANUP_LIMIT, "process-cleanup") { poll }
++      end
++    end
++
++    def complete?
++      %i[unstarted reaped].include?(@phase)
++    end
++  end
++
++  def self.lifetime
++    raise Failure.new("signal-policy", "process fixtures must run on the main Ruby thread") unless Thread.current.equal?(Thread.main)
++    outer = @cancellation_scope.nil?
++    scope = @cancellation_scope || CancellationScope.new
++    frame = Lifetime.new(scope) # First error survives the entire outer mask/trap exit.
++    result = nil
++    begin
++      Thread.handle_interrupt(Exception => :never) do
++        begin
++          if outer
++            scope.install
++            @cancellation_scope = scope
++          end
++          result = yield frame
++        rescue Exception => error
++          frame.remember(error)
++        ensure
++          # Diagnostics/queue draining may themselves fail. Neither may bypass
++          # restoration of the process-wide policy or replace the first error.
++          frame.finishing { frame.report }
++          if outer
++            # Several joined injectors/repeated OS signals can leave more than
++            # one queued exception. Catch ALL of them before returning to a caller;
++            # catching only the first at mask exit leaks the next into another test.
++            frame.finishing { frame.drain_pending }
++            frame.finishing { scope.restore { @cancellation_scope = nil } }
++            frame.finishing { frame.drain_pending }
++          end
++          scope.errors.each { |error| frame.remember(error) }
++        end
++      end
++    rescue Exception => error
++      frame.remember(error)
++    end
++    begin
++      scope.replay_custom_pending if outer
++    rescue Exception => error
++      frame.remember(error)
++    end
++    raise frame.primary if frame.primary
++    result
++  end
++
++  # Runs only in a static, isolated Ruby probe process. Every wrapper forwards
++  # the real syscall. A post-reap request is recorded and vetoed BEFORE signalling;
++  # that veto makes the regression fail, never manufactures a containment pass.
++  class OwnershipProbe
++    class << self
++      attr_accessor :current
++    end
++
++    CASES = {
++      "async" => %w[async-spawn async-reap cleanup-first-async repeated],
++      "signals" => %w[INT-spawn TERM-spawn INT-reap TERM-reap
++                       cleanup-first-INT cleanup-first-TERM
++                       install-before-INT install-before-TERM install-buffered-INT install-buffered-TERM
++                       install-published-INT install-published-TERM
++                       restore-before-INT restore-before-TERM restore-after-INT restore-after-TERM],
++      "policies" => %w[normal ignored-INT ignored-TERM custom-INT custom-TERM custom-pending-INT
++                        partial-install changed-handler finalize-report finalize-drain],
++      "unknown" => %w[unknown-spawn unknown-reap unknown-echild],
++    }.freeze
++
++    attr_reader :records
++
++    def initialize(directory, family)
++      @directory = directory
++      @input = UploadProcessFixture.read_json(File.join(directory, "input.json"))
++      @family = family
++      @records = []
++      @reservations = {}
++      @active = false
++    end
++
++    def self.instrument
++      Process.singleton_class.prepend(Module.new do
++        def spawn(*arguments, **options)
++          value = super
++          OwnershipProbe.current&.spawned(value, arguments)
++          value
++        end
++
++        def waitpid2(*arguments)
++          value = super
++          OwnershipProbe.current&.waited(arguments.first, value)
++          value
++        end
++
++        def kill(signal, *targets)
++          probe = OwnershipProbe.current
++          return 0 if probe&.veto_signal?(signal, targets)
++          super
++        end
++      end)
++      OwnedChild.prepend(Module.new do
++        def start(*arguments, **options)
++          OwnershipProbe.current&.starting(self, arguments)
++          super
++        end
++
++        def stop
++          OwnershipProbe.current&.before_stop(self)
++          super
++        ensure
++          OwnershipProbe.current&.after_stop(self)
++        end
++      end)
++      Signal.singleton_class.prepend(Module.new do
++        def trap(name, *arguments, &block)
++          probe = OwnershipProbe.current
++          probe&.before_trap(name)
++          value = super
++          probe&.after_trap(name)
++          value
++        end
++      end)
++      Lifetime.prepend(Module.new do
++        def report
++          OwnershipProbe.current&.before_finalize("report")
++          super
++        end
++
++        def drain_pending
++          OwnershipProbe.current&.before_finalize("drain")
++          super
++        end
++      end)
++    end
++
++    def starting(owner, arguments)
++      return unless @active && !@owner
++      argv = arguments.drop(1)
++      match = @helper == "capture" ? argv[1] == "-e" : argv[2] == "driver"
++      @owner = owner if match
++    end
++
++    def event(name, extra = {})
++      @events << {"boundary" => name, "ownerPhase" => @owner&.phase&.to_s}.merge(extra)
++    end
++
++    def progress
++      UploadProcessFixture.atomic_json(File.join(@directory, "progress.json"),
++                                       {"family" => @family, "helper" => @helper, "case" => @case,
++                                        "reservations" => @reservations, "events" => @events,
++                                        "vetoes" => @vetoes, "completedCases" => @records.length})
++    end
++
++    def cancel(kind, object = nil)
++      if kind == "async"
++        target = Thread.current
++        error = object || Interrupt.new("first asynchronous fixture cancellation")
++        @first ||= error
++        @first_message ||= error.message.dup
++        raiser = Thread.new { target.raise(error) }
++        @raisers << raiser
++        begin
++          raise "cancellation injector did not finish" unless raiser.join(2)
++        ensure
++          raise "cancellation injector did not join" unless raiser.join(2)
++        end
++      else
++        Process.kill(kind, Process.pid) # Only this isolated probe's own process.
++      end
++    end
++
++    def spawned(pid, arguments)
++      @reservations[pid] = {"reaped" => false}
++      progress
++      return unless @active
++      argv = arguments.drop(1)
++      target = @owner && !@target_pid && (@helper == "capture" ? argv[1] == "-e" : argv[2] == "driver")
++      if target
++        @target_pid = pid
++        if @helper == "run"
++          # Before withholding publication/cancelling, obtain actual native
++          # phase evidence. The recorded PID still NEVER authorizes a signal.
++          native_directory = argv.fetch(3)
++          UploadProcessFixture.wait_until(READINESS_LIMIT, "probe-readiness") do
++            File.file?(File.join(native_directory, "owner.json"))
++          end
++        end
++        if @case.end_with?("-spawn")
++          event("spawn-return-before-publication", "actualPid" => pid)
++          if @case == "unknown-spawn"
++            @first = Interrupt.new("synchronous unknown spawn handoff")
++            @first_message = @first.message.dup
++            raise @first
++          end
++          cancel(@case.split("-").first)
++        elsif @case.start_with?("ignored-")
++          cancel(@case.split("-").last)
++        elsif @case == "changed-handler"
++          Signal.trap("INT", @foreign)
++        end
++      elsif @case == "repeated" && argv.first == "/bin/ps" && !@nested_cancelled && @stop_entered
++        @nested_cancelled = true
++        scope = UploadProcessFixture.instance_variable_get(:@cancellation_scope)
++        event("nested-cleanup-observation", "cleanupDepth" => scope.cleanup_depth)
++        cancel("INT")
++      end
++    end
++
++    def waited(pid, value)
++      @reservations.fetch(pid)["reaped"] = true if value && @reservations.key?(pid)
++      progress if value
++      return unless @active && pid == @target_pid
++      if value && %w[async-reap INT-reap TERM-reap unknown-reap unknown-echild].include?(@case) && !@injected
++        @injected = true
++        event("waitpid-return-before-publication", "actualPid" => pid, "actualStatus" => value.last.to_s)
++        if @case.start_with?("unknown-")
++          @first = @case == "unknown-echild" ? Errno::ECHILD.new("synthetic lost reap observation") : Interrupt.new("synchronous unknown reap handoff")
++          @first_message = @first.message.dup
++          raise @first
++        end
++        cancel(@case.split("-").first)
++      elsif @case == "repeated" && !@injected
++        @injected = true
++        event("first-active-cancellation", "stillUnreaped" => value.nil?)
++        cancel("async")
++      end
++    end
++
++    def veto_signal?(signal, targets)
++      unsafe = targets.any? do |pid|
++        @reservations[pid.abs]&.fetch("reaped") ||
++          (@active && @owner&.phase == :unknown && pid.abs == @target_pid)
++      end
++      if unsafe && signal != 0
++        @vetoes << {"signal" => signal, "targets" => targets}
++        true
++      else
++        false
++      end
++    end
++
++    def before_stop(owner)
++      return unless @active && owner.equal?(@owner) && !@stop_entered
++      @stop_entered = true
++      if @case.start_with?("cleanup-first-")
++        event("first-cleanup-entry")
++        cancel(@case.delete_prefix("cleanup-first-"))
++      elsif @case == "repeated"
++        event("repeat-cleanup-entry")
++        cancel("async", Interrupt.new("repeat must not replace first cancellation"))
++      end
++    end
++
++    def after_stop(owner)
++      @stop_completed = true if @active && owner.equal?(@owner) && owner.complete?
++    end
++
++    def before_trap(name)
++      return unless @active
++      name = name.to_s.delete_prefix("SIG")
++      @trap_calls[name] += 1
++      if @case == "partial-install" && name == "TERM" && @trap_calls[name] == 1
++        @first = Failure.new("signal-policy", "synthetic second trap installation failure")
++        @first_message = @first.message.dup
++        raise @first
++      end
++      if @case == "install-before-#{name}" && @trap_calls[name] == 1
++        event("before-trap-install", "signal" => name)
++        cancel(name)
++      elsif @case == "restore-before-#{name}" && @trap_calls[name] == 3
++        event("before-original-trap-restoration", "signal" => name)
++        cancel(name)
++      end
++    end
++
++    def before_finalize(kind)
++      return unless @active && @case == "finalize-#{kind}" && !@injected
++      @injected = true
++      event("finalization-#{kind}-failure")
++      @first = Failure.new("signal-policy", "synthetic #{kind} failure must not skip handler restoration")
++      @first_message = @first.message.dup
++      raise @first
++    end
++
++    def after_trap(name)
++      return unless @active
++      name = name.to_s.delete_prefix("SIG")
++      if @trap_calls[name] == 1 && ["install-buffered-#{name}", "ignored-#{name}", "custom-pending-#{name}"].include?(@case)
++        event("trap-installed-before-policy-publication", "signal" => name)
++        cancel(name)
++      elsif @case == "restore-after-#{name}" && @trap_calls[name] == 3
++        event("after-original-trap-restoration", "signal" => name)
++        cancel(name)
++      end
++    end
++
++    def trap_state
++      %w[INT TERM].to_h do |name|
++        current = Signal.trap(name) {}
++        Signal.trap(name, current)
++        [name, current]
++      end
++    end
++
++    def invoke
++      if @helper == "capture"
++        code = @case == "repeated" || @case.end_with?("-spawn") ? "sleep 30" : "exit 0"
++        UploadProcessFixture.capture_command([RbConfig.ruby, "-e", code])
++      else
++        UploadProcessFixture.run(platform: @input.fetch("platform"), root: @case_root,
++                                 parameters: @input.fetch("parameters").transform_keys(&:to_sym), mode: "unready")
++      end
++    end
++
++    def cleanup_actual_reservations
++      # Independent probe fallback for intentionally UNKNOWN publication cases.
++      # These handles came directly from our syscall wrappers before fault injection,
++      # never from diagnostics/markers. This is not a successful fixture cleanup.
++      UploadProcessFixture.lifetime do |frame|
++        frame.cleanup do
++          @reservations.to_a.each do |pid, record|
++            next if record.fetch("reaped")
++            @fallback = true
++            unless Process.waitpid2(pid, Process::WNOHANG)
++              Process.kill("KILL", -pid)
++              UploadProcessFixture.wait_until(CLEANUP_LIMIT, "probe-fallback") { Process.waitpid2(pid, Process::WNOHANG) }
++            end
++          end
++        end
++      end
++      @native_death_deadline ||= UploadProcessFixture.clock + CLEANUP_LIMIT
++      Dir.glob(File.join(@case_root, "**", "owner.json")).each do |path|
++        value = UploadProcessFixture.read_json(path)
++        UploadProcessFixture.dead!(value.fetch("leader"), value.fetch("group"), deadline: @native_death_deadline)
++        UploadProcessFixture.dead!(value["child"], value.fetch("group"), deadline: @native_death_deadline) if value["child"]
++      end
++    end
++
++    def one(helper, name)
++      @helper, @case = helper, name
++      @owner = @target_pid = @first = @first_message = nil
++      @events, @raisers, @vetoes = [], [], []
++      @trap_calls = Hash.new(0)
++      @injected = @stop_entered = @stop_completed = @nested_cancelled = @fallback = false
++      @cleanup_confirmed = false
++      @native_death_deadline = nil
++      @custom_deliveries = []
++      @foreign = proc { |number| @custom_deliveries << number }
++      @case_root = File.realpath(Dir.mktmpdir("ownership-#{helper}-", @directory))
++      ENV["TMPDIR"] = @case_root
++      saved = trap_state
++      signal = name.split("-").last
++      Signal.trap(signal, "IGNORE") if name.start_with?("ignored-")
++      Signal.trap(signal, @foreign) if name.start_with?("custom-")
++      expected_traps = trap_state
++      expected_traps["INT"] = @foreign if name == "changed-handler"
++      published_trace = TracePoint.new(:line) do |point|
++        if @active && name.start_with?("install-published-") && point.method_id == :install &&
++           point.self.is_a?(CancellationScope) && !@injected && point.self.instance_variable_get(:@policies).key?(Signal.list.fetch(signal))
++          @injected = true
++          event("after-policy-publication", "signal" => signal)
++          cancel(signal)
++        end
++      end
++      error = nil
++      @active = true
++      published_trace.enable
++      begin
++        invoke
++      rescue Exception => failure
++        error = failure
++      ensure
++        @active = false
++        published_trace.disable
++        @raisers.each { |raiser| raise "injector not joined" unless raiser.join(2) }
++      end
++      actual_traps = trap_state
++      registry_inactive = UploadProcessFixture.instance_variable_get(:@cancellation_scope).nil?
++      preserved = Dir.glob(File.join(@case_root, "**", "*"), File::FNM_DOTMATCH).select { |path| File.file?(path) }
++      owner_phase, status = @owner&.phase, @owner&.status
++      # Restore only this probe's original policies before independent inspection.
++      saved.each { |key, handler| Signal.trap(key, handler) }
++      cleanup_actual_reservations
++      @cleanup_confirmed = true
++      failures = []
++      failures << "unsafe signal requested" unless @vetoes.empty?
++      failures << "handler policy not restored" unless actual_traps == expected_traps
++      failures << "scope registry still active" unless registry_inactive
++      failures << "unjoined child reservation" unless @reservations.values.all? { |record| record.fetch("reaped") }
++      failures << "original error object/message replaced" if @first && (!error.equal?(@first) || error.message != @first_message)
++      normal = name == "normal" || name.start_with?("ignored-")
++      unknown = name.start_with?("unknown-")
++      finalize = name.start_with?("finalize-")
++      policy = name.start_with?("custom-") || %w[partial-install changed-handler].include?(name) || finalize
++      if normal
++        failures << "normal/ignored operation failed" if error || owner_phase != :reaped || !status || @fallback
++      elsif policy
++        failures << "policy violation did not fail closed" unless error.is_a?(Failure) && error.kind == "signal-policy"
++        failures << "unsupported policy reached spawn" if name != "changed-handler" && !finalize && @target_pid
++        failures << "custom pending signal lost" if name == "custom-pending-INT" && @custom_deliveries != [Signal.list.fetch("INT")]
++        if finalize
++          failures << "finalization failure skipped cleanup" unless owner_phase == :reaped && status && @stop_completed && !@fallback && @injected
++        end
++      else
++        failures << "cancellation/unknown fault did not propagate" unless error.is_a?(SignalException) || (name == "unknown-echild" && error.is_a?(Errno::ECHILD))
++        failures << "required injection not observed" if @events.empty?
++        expected_signal = name.include?("TERM") ? "TERM" : "INT"
++        if !unknown && error.is_a?(SignalException)
++          failures << "wrong cancellation signal" unless error.signo == Signal.list.fetch(expected_signal)
++        end
++        if unknown
++          failures << "unknown ownership was accepted/removed" unless owner_phase == :unknown && !preserved.empty?
++        elsif @target_pid
++          failures << "known cancellation did not finish owned cleanup" unless owner_phase == :reaped && status && @stop_completed && !@fallback
++        end
++        if name == "repeated" && helper == "run"
++          failures << "nested cleanup cancellation not exercised" unless @nested_cancelled
++        end
++      end
++      record = {"helper" => helper, "case" => name, "events" => @events,
++                "exceptionClass" => error&.class&.name, "exceptionMessage" => error&.message,
++                "firstExceptionPreserved" => !@first || error.equal?(@first), "ownerPhase" => owner_phase,
++                "signalRequestsAfterReap" => @vetoes, "allAcquiredChildrenJoined" => true,
++                "probeFallbackForUnknown" => @fallback, "preservedBeforeFallback" => preserved.length,
++                "handlersRestored" => actual_traps == expected_traps, "registryInactive" => registry_inactive,
++                "raisersJoined" => @raisers.none?(&:alive?), "raiserCount" => @raisers.length,
++                "failures" => failures}
++      @records << record
++      progress
++      FileUtils.remove_entry(@case_root) # All actual reservations/native workers proved stopped.
++      raise Failure.new("ownership-probe", JSON.generate(record)) unless failures.empty?
++    ensure
++      @active = false
++      published_trace&.disable
++      @raisers&.each { |raiser| raiser.join(2) }
++      if saved && !@cleanup_confirmed
++        %w[TERM INT].each { |key| Signal.trap(key, saved.fetch(key)) }
++        cleanup_actual_reservations
++        @cleanup_confirmed = true
++        progress
++      end
++    end
++
++    def execute
++      self.class.current = self
++      self.class.instrument
++      %w[capture run].each do |helper|
++        CASES.fetch(@family).each { |name| one(helper, name) }
++      end
++      {"kind" => "pass", "family" => @family, "cases" => @records}
++    ensure
++      self.class.current = nil
++    end
++  end
++
++  # Setup occurs under deferral, BEFORE Lifetime#active. This isolated probe
++  # combines its first error with a cleanup fault and real queued cancellation.
++  # No native child is needed; an attempted spawn is vetoed and fails the test.
++  class SetupFailureProbe
++    class << self
++      attr_accessor :current
++    end
++
++    def initialize(directory)
++      @directory = directory
++      @input = UploadProcessFixture.read_json(File.join(directory, "input.json"))
++      @records = []
++    end
++
++    def self.instrument
++      File.singleton_class.prepend(Module.new do
++        def open(path, *arguments, **options, &block)
++          SetupFailureProbe.current&.opening(path)
++          super
++        end
++      end)
++      UploadProcessFixture.singleton_class.prepend(Module.new do
++        def atomic_json(path, value)
++          SetupFailureProbe.current&.writing(path)
++          super
++        end
++      end)
++      FileUtils.singleton_class.prepend(Module.new do
++        def remove_entry(path, *arguments)
++          SetupFailureProbe.current&.removing(path)
++          super
++        end
++      end)
++      Kernel.prepend(Module.new do
++        def warn(*messages)
++          SetupFailureProbe.current&.warning(messages)
++          super
++        end
++      end)
++      Process.singleton_class.prepend(Module.new do
++        def spawn(*arguments, **options)
++          SetupFailureProbe.current&.spawning
++          super
++        end
++      end)
++      CancellationScope.prepend(Module.new do
++        def queue(number)
++          SetupFailureProbe.current&.queued(number)
++          super
++        end
++      end)
++    end
++
++    def owned?(path)
++      @active && path.to_s.start_with?(@case_root + "/")
++    end
++
++    def opening(path)
++      setup_fault if @helper == "capture" && owned?(path) && File.basename(path) == "stderr"
++    end
++
++    def writing(path)
++      setup_fault if @helper != "capture" && owned?(path) && File.basename(path) == "input.json"
++    end
++
++    def setup_fault
++      @setup_hit = true
++      raise @first
++    end
++
++    def removing(path)
++      cleanup_fault if @helper != "ownership" && owned?(path)
++    end
++
++    def warning(messages)
++      return unless @active
++      expected = "Fixture cleanup incomplete: #{@second.class}: #{@second.message}; primary=#{@first.class}: #{@first.message}"
++      @cleanup_reported = true if messages == [expected]
++      if @helper == "ownership" && messages.first.to_s.start_with?("Preserve ownership probe failure:")
++        cleanup_fault
++      end
++    end
++
++    def spawning
++      return unless @active
++      @spawn_attempts += 1
++      raise Failure.new("setup-probe", "unexpected native spawn attempt VETOED")
++    end
++
++    def queued(number)
++      @signals << number if @active
++    end
++
++    def cleanup_fault
++      return if @cleanup_hit
++      @cleanup_hit = true
++      @cleanup_depth = UploadProcessFixture.instance_variable_get(:@cancellation_scope)&.cleanup_depth
++      if @repeats
++        Process.kill("INT", Process.pid) # Only this isolated probe's own process.
++        target = Thread.current
++        @raiser = Thread.new do
++          target.raise(Interrupt.new("queued repeat after setup and cleanup faults"))
++          @repeat_queued = true
++        end
++        raise "setup probe injector did not join" unless @raiser.join(2)
++      end
++      @cleanup_fault_raised = true
++      raise @second
++    end
++
++    def trap_state
++      %w[INT TERM].to_h do |name|
++        value = Signal.trap(name) {}
++        Signal.trap(name, value)
++        [name, value]
++      end
++    end
++
++    def one(helper, error_class, repeats)
++      @helper, @repeats = helper, repeats
++      @setup_hit = @cleanup_hit = @cleanup_reported = false
++      @cleanup_fault_raised = @repeat_queued = false
++      @cleanup_depth = nil
++      @spawn_attempts, @signals, @raiser = 0, [], nil
++      @case_root = File.realpath(Dir.mktmpdir("setup-#{helper}-", @directory))
++      ENV["TMPDIR"] = @case_root
++      @first = error_class.new("original synchronous #{helper} setup failure")
++      message = @first.message.dup
++      @second = IOError.new("distinct cleanup failure must not replace setup")
++      before = trap_state
++      error = nil
++      @active = true
++      begin
++        if helper == "capture"
++          UploadProcessFixture.capture_command([RbConfig.ruby, "-e", "exit 0"])
++        else
++          mode = helper == "run" ? "unready" : "ownership-async"
++          UploadProcessFixture.run(platform: @input.fetch("platform"), root: @case_root,
++                                   parameters: @input.fetch("parameters"), mode: mode)
++        end
++      rescue Exception => failure
++        error = failure
++      ensure
++        @active = false
++        raise "setup injector not joined" if @raiser && !@raiser.join(2)
++      end
++      # Ordinary post-return work also detects a queued exception leaking to the
++      # next caller, instead of assuming one rescued Interrupt exhausted a queue.
++      preserved = Dir.glob(File.join(@case_root, "*"))
++      failures = []
++      failures << "required setup/cleanup boundary missing" unless @setup_hit && @cleanup_hit
++      failures << "distinct protected cleanup fault missing" unless @cleanup_fault_raised && @cleanup_depth&.positive?
++      failures << "first object/message replaced" unless error.equal?(@first) && error.message == message
++      failures << "cleanup error not separately reported" unless @cleanup_reported
++      failures << "native spawn attempted" unless @spawn_attempts.zero?
++      failures << "cleanup failure evidence was removed" if preserved.empty?
++      handlers_restored = trap_state == before
++      registry_inactive = UploadProcessFixture.instance_variable_get(:@cancellation_scope).nil?
++      failures << "handlers/registry not restored" unless handlers_restored && registry_inactive
++      failures << "pending cancellation leaked" if Thread.current.pending_interrupt?
++      failures << "actual cancellation missing" if repeats && (@signals != [Signal.list.fetch("INT")] || !@repeat_queued || !@raiser || @raiser.alive?)
++      record = {"helper" => helper, "platform" => @input.fetch("platform"), "setupClass" => error_class.name, "repeatedCancellation" => repeats,
++                "setupHit" => @setup_hit, "cleanupHit" => @cleanup_hit, "cleanupErrorReported" => @cleanup_reported,
++                "cleanupDepth" => @cleanup_depth, "cleanupFaultRaised" => @cleanup_fault_raised,
++                "originalObjectAndMessagePreserved" => error.equal?(@first) && error.message == message,
++                "spawnAttempts" => @spawn_attempts, "osSignalsQueued" => @signals,
++                "handlersRestored" => handlers_restored, "registryInactive" => registry_inactive,
++                "asyncRepeatQueued" => @repeat_queued,
++                "raiserJoined" => !@raiser || !@raiser.alive?, "pendingInterrupt" => Thread.current.pending_interrupt?,
++                "preservedDirectories" => preserved.length, "failures" => failures}
++      @records << record
++      UploadProcessFixture.atomic_json(File.join(@directory, "setup-progress.json"), @records)
++      # No real native acquisition is possible through this probe's spawn veto.
++      FileUtils.remove_entry(@case_root)
++      raise Failure.new("setup-probe", JSON.generate(record)) unless failures.empty?
++    end
++
++    def execute
++      self.class.current = self
++      self.class.instrument
++      %w[capture run ownership].product([IOError, Interrupt], [false, true]).each { |arguments| one(*arguments) }
++      {"kind" => "pass", "cases" => @records}
++    ensure
++      @active = false
++      @raiser&.join(2)
++      self.class.current = nil
++    end
++  end
++
++  # Only the parent's read-only observations are substituted. The full adapter,
++  # native capture, driver/worker acquisition, signals and wait/reap stay real in
++  # their fresh Ruby processes. Restored observations independently prove death
++  # before this probe removes its own completed scratch.
++  class ObservationProbe
++    class << self
++      attr_accessor :current
++    end
++
++    def initialize(directory)
++      @directory = directory
++      @input = UploadProcessFixture.read_json(File.join(directory, "input.json"))
++      @records = []
++      @active = false
++    end
++
++    def self.instrument
++      UploadProcessFixture.singleton_class.prepend(Module.new do
++        def state(pid, group, seconds: 2)
++          probe = ObservationProbe.current
++          return probe.observe(pid, group, seconds) if probe&.active?
++          super
++        end
++
++        def dead!(pid, group, deadline: UploadProcessFixture.clock + CLEANUP_LIMIT, kind: "fixture-cleanup")
++          probe = ObservationProbe.current
++          probe&.before_dead(pid, group, deadline, kind)
++          super
++        end
++      end)
++    end
++
++    def active?
++      @active
++    end
++
++    def phase
++      scope = UploadProcessFixture.instance_variable_get(:@cancellation_scope)
++      scope && scope.cleanup_depth.positive? ? "cleanup" : "active"
++    end
++
++    def before_dead(pid, group, deadline, kind)
++      return unless @active
++      @dead_calls << {"pid" => pid, "group" => group, "deadline" => deadline, "kind" => kind,
++                      "at" => UploadProcessFixture.clock, "phase" => phase}
++    end
++
++    def observe(pid, group, seconds)
++      index = @counts[[pid, group]]
++      token = @persistent ? "?E" : @tokens.fetch(index)
++      @counts[[pid, group]] += 1
++      @observations << {"pid" => pid, "group" => group, "token" => token, "seconds" => seconds,
++                         "at" => UploadProcessFixture.clock, "phase" => phase}
++      stdout, status = token == "absent" ? ["", 1] : ["#{pid} #{group} #{token}\n", 0]
++      UploadProcessFixture.liveness(UploadProcessFixture.parse_state(stdout, "", status, pid, group))
++    end
++
++    def begin_case(name, tokens:, persistent: false)
++      @name, @tokens, @persistent = name, tokens, persistent
++      @observations, @dead_calls = [], []
++      @counts = Hash.new(0)
++      @active = true
++    end
++
++    def record(failures, extra = {})
++      # Keep the complete timed trace on failure, without overflowing the bounded
++      # parent result channel on the persistent five-second negative case.
++      trace = File.join(@directory, "#{@name}-observations.json")
++      UploadProcessFixture.atomic_json(trace, {"observations" => @observations, "deadCalls" => @dead_calls})
++      value = {"case" => @name, "platform" => @input.fetch("platform"), "failures" => failures,
++               "observationCount" => @observations.length, "deadCalls" => @dead_calls,
++               "observationTraceSha256" => Digest::SHA256.file(trace).hexdigest}.merge(extra)
++      @records << value
++      UploadProcessFixture.atomic_json(File.join(@directory, "observation-progress.json"), @records)
++      raise Failure.new("observation-probe", JSON.generate(value)) unless failures.empty?
++    end
++
++    def readiness
++      tokens = %w[? ?E ?Es H HE X SE S Z absent]
++      begin_case("readiness", tokens: tokens)
++      values = tokens.map do
++        begin
++          UploadProcessFixture.ready?(123, 122)
++        rescue Failure => error
++          error.kind
++        end
++      end
++      @active = false
++      expected = [false] * 7 + [true, "readiness", "readiness"]
++      failures = values == expected ? [] : ["indeterminate/stopped observation authorized readiness"]
++      record(failures, "readinessResults" => values)
++    ensure
++      @active = false
++    end
++
++    def sequence
++      begin_case("sequence", tokens: %w[?E S Z])
++      deadline = UploadProcessFixture.clock + CLEANUP_LIMIT
++      UploadProcessFixture.dead!(123, 122, deadline: deadline)
++      @active = false
++      failures = @observations.map { |value| value.fetch("token") } == %w[?E S Z] ? [] : ["cleanup accepted before definite Z"]
++      record(failures, "onlyDefiniteStoppedAccepted" => failures.empty?)
++    ensure
++      @active = false
++    end
++
++    def native(persistent:)
++      root = File.realpath(Dir.mktmpdir("observation-native-", @directory))
++      ENV["TMPDIR"] = root
++      begin_case(persistent ? "persistent-native" : "transient-native", tokens: %w[?E S Z], persistent: persistent)
++      error = value = nil
++      begin
++        value = UploadProcessFixture.run(platform: @input.fetch("platform"), root: root,
++                                         parameters: @input.fetch("parameters").transform_keys(&:to_sym), mode: "inherited")
++      rescue Exception => failure
++        error = failure
++      ensure
++        @active = false
++      end
++      # Observe preservation BEFORE independent real observations or deletion.
++      preserved = Dir.glob(File.join(root, "native-process-*"))
++      unresolved = UploadProcessFixture.cleanup_unresolved?(root)
++      failures = []
++      deadlines = @dead_calls.map { |call| call.fetch("deadline") }.uniq
++      failures << "native death calls did not share one absolute cutoff" unless deadlines.length == 1
++      phases = @dead_calls.map { |call| call.fetch("phase") }
++      if persistent
++        failures << "persistent uncertainty did not fail/preserve" unless error.is_a?(Failure) && error.kind == "fixture-cleanup" && value.nil? && unresolved && preserved.length == 1
++        failures << "active/ensure paths were not both reached" unless phases == %w[active cleanup]
++        failures << "cleanup renewed an exhausted observation budget" unless @observations.none? { |entry| entry.fetch("phase") == "cleanup" } &&
++                                                                             @dead_calls.last && @dead_calls.last.fetch("at") >= @dead_calls.last.fetch("deadline")
++        failures << "persistent case had no actual repeated observations" unless @observations.length > 1 && @observations.all? { |entry| entry.fetch("token") == "?E" }
++      else
++        failures << "transient observations broke a real inherited-pipe control" unless error.nil? && value && value["kind"] == "pass" && value["deadBeforeFallback"] && value["knownProcessesDead"]
++        sequences = @observations.group_by { |entry| [entry.fetch("pid"), entry.fetch("group")] }.values
++        failures << "both native identities were not observed through definite Z" unless phases == %w[active active] && sequences.length == 2 && sequences.all? { |entries| entries.map { |entry| entry.fetch("token") } == %w[?E S Z] }
++        failures << "successful transient fixture retained unresolved state" unless preserved.empty? && !unresolved
++      end
++      failures << "observation budget exceeded the remaining cutoff" unless @observations.all? do |entry|
++        entry.fetch("seconds").positive? && entry.fetch("seconds") <= 2 &&
++          deadlines.length == 1 && entry.fetch("at") + entry.fetch("seconds") <= deadlines.first + 0.05
++      end
++      # Marker/observation PIDs carry NO signal authority. The real driver already
++      # joined; collect all its known native identities and use read-only ps only.
++      identities = @dead_calls.map { |call| [call.fetch("pid"), call.fetch("group")] }
++      preserved.each do |directory|
++        owner = UploadProcessFixture.read_json(File.join(directory, "owner.json"))
++        identities << [owner.fetch("leader"), owner.fetch("group")]
++        identities << [owner["child"], owner.fetch("group")] if owner["child"]
++      end
++      identities.uniq!
++      raise Failure.new("observation-probe", "cannot prove native cleanup without identities; preserve #{root}") unless identities.length == 2
++      independent_deadline = UploadProcessFixture.clock + CLEANUP_LIMIT
++      identities.each { |pid, group| UploadProcessFixture.dead!(pid, group, deadline: independent_deadline) }
++      record(failures, "originalErrorKind" => error.is_a?(Failure) ? error.kind : nil,
++             "preservedBeforeIndependentProof" => preserved.length, "registryUnresolvedBeforeProof" => unresolved,
++             "knownNativeIdentities" => identities, "independentRealDeathProof" => true)
++      FileUtils.remove_entry(root) # Only after real, restored observations proved both identities stopped.
++    ensure
++      @active = false
++    end
++
++    def execute
++      self.class.current = self
++      self.class.instrument
++      readiness
++      sequence
++      native(persistent: false)
++      native(persistent: true)
++      {"kind" => "pass", "cases" => @records}
++    ensure
++      @active = false
++      self.class.current = nil
++    end
++  end
++
++  def self.run_ownership_probe(platform:, root:, parameters:, mode:)
++    lifetime do |scope|
++      directory = nil
++      complete = false
++      begin
++        directory = File.realpath(Dir.mktmpdir("ownership-probe-", root))
++        atomic_json(File.join(directory, "input.json"), {"platform" => platform, "parameters" => parameters})
++        scope.active do
++          output, errors, status = capture_command([RbConfig.ruby, File.realpath(File.join(__dir__, "upload_process_fixture.rb")),
++                                                   "ownership", directory, mode.delete_prefix("ownership-")], seconds: 60)
++          raise Failure.new("ownership-probe", "probe failed: #{output}\n#{errors}") unless status == 0
++          result = JSON.parse(output)
++          raise Failure.new("ownership-probe", "incomplete ownership proof") unless result["kind"] == "pass" && result.fetch("cases").all? { |value| value.fetch("failures").empty? }
++          complete = true
++          # capture_command returned only after its actual waitpid publication.
++          result.merge("driverJoined" => true, "knownProcessesDead" => true,
++                       "watchdogJoined" => true, "waiterJoined" => true)
++        end
++      rescue Exception => error
++        scope.remember(error) # Includes private-directory/input creation before active.
++        raise
++      ensure
++        scope.cleanup do
++          if directory && complete
++            FileUtils.remove_entry(directory)
++          elsif directory
++            (@unresolved_roots ||= {})[root] = true
++            warn "Preserve ownership probe failure: #{directory}"
++          end
++        end
++      end
++    end
++  end
++end

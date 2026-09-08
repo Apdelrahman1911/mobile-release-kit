@@ -1,0 +1,416 @@
+"""Pure, finite contracts for the ignored R3-R4 experiment; no launch at import."""
+
+from __future__ import annotations
+
+import errno
+import hashlib
+import json
+import math
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+BASE = Path(__file__).absolute().parent
+PLAN_SHA = "d154c478b6de6e5088f6586f40d5fda0bdfb69d3bedb2375b4e72dea3b2eec48"
+PYTHON = "/ORIGINAL_REPOSITORY/.mobile-release/remediation/MRK-002/venv/bin/python"
+RUBY = "/opt/homebrew/Cellar/ruby@3.3/3.3.12/bin/ruby"
+OPEN3 = "/opt/homebrew/Cellar/ruby@3.3/3.3.12/lib/ruby/3.3.0/open3.rb"
+SANDBOX, BASH, PS = "/usr/bin/sandbox-exec", "/bin/bash", "/bin/ps"
+TOOL_HASHES = {
+    PYTHON: "ca2aa0df94c15d303d5fc924ec4c5630d56691ed0bad79553ecc108b0cf17cdb",
+    RUBY: "6c8a4b066297f457719dac26d40f4e866e5b3d4fa3ee3e57772489086370deff",
+    SANDBOX: "fd89e1f6e6d822fcc0f3844bd11fecdc9b68f705f80c32f4334bc23913d5451b",
+    BASH: "07ad8525844ce61471e08e8c515b76bf063bac482394152bad814026cd577f69",
+    PS: "b337747e8db7a3443b82ec9f3685432ddf76b971878188c757ca09db1c5a0288",
+}
+SCRIPTS = ("contract.py", "runtime.py", "reconcile.py", "canary.py", "sender.py", "python_relay.py",
+           "ruby_relay.rb", "bash_relay.sh", "controller.py")
+CHUNK, STREAM_CAP, FRAME_CAP = 4096, 65536, 32768
+TERMINAL_COMMIT_CAP = 512  # Complete canonical envelope INCLUDING its newline.
+LOSS_TERMINAL_MODE = "provisional-final-plus-atomic-commit"
+CAPTURE_CAP, EVIDENCE_CAP = 2 * 1024 * 1024, 8 * 1024 * 1024
+ACQUISITION_CAP, EXEC_CAP = 64, 96
+WORK, DISPOSITION, TOTAL, QUERY_WORK, QUERY_CLEANUP = 30.0, 10.0, 180.0, 2.0, 5.0
+POLICY_PREFIX = '(version 1)\n(allow default)\n'
+SIGNAL_RULE = '(deny signal (require-not (target same-sandbox)))\n'
+
+
+class Failure(Exception):
+    def __init__(self, code, **facts):
+        super().__init__(code)
+        self.code, self.facts = code, facts
+
+
+def need(value, code, **facts):
+    if not value:
+        raise Failure(code, **facts)
+
+
+def number(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def positive_pid(value):
+    return type(value) is int and value > 1
+
+
+def dumps(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode() + b"\n"
+
+
+def loads(raw, *, file_record=False):
+    need(type(file_record) is bool, "json-role")
+    need(type(raw) is bytes and len(raw) <= (2 * 1024 * 1024 if file_record else STREAM_CAP), "json-size")
+
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            need(key not in result, "json-duplicate-key", key=key)
+            result[key] = value
+        return result
+
+    def finite_float(value):
+        result = float(value)
+        need(math.isfinite(result), "json-nonfinite")
+        return result
+
+    def bad_constant(value):
+        raise Failure("json-nonfinite", value=value)
+
+    result = json.loads(raw, object_pairs_hook=pairs, parse_float=finite_float,
+                        parse_constant=bad_constant)
+    stack, nodes = [(result, 0)], 0
+    while stack:
+        value, depth = stack.pop()
+        nodes += 1
+        need(nodes <= (32768 if file_record else 8192) and depth <= 20, "json-structure-bound")
+        if type(value) is dict:
+            stack.extend((v, depth + 1) for v in value.values())
+        elif type(value) is list:
+            stack.extend((v, depth + 1) for v in value)
+    return result
+
+
+@dataclass(frozen=True)
+class Route:
+    name: str
+    entry: str
+    acquisitions: int
+    execs: int
+    tokens: tuple
+    fenced: bool = True
+    loss: str | None = None
+
+
+ROWS = (
+    Route("direct", "sender.py", 3, 4, ("outside", "route", "inside")),
+    Route("python-child", "python_relay.py", 4, 5, ("outside", "route", "sender", "inside")),
+    Route("python-new-session", "python_relay.py", 4, 5, ("outside", "route", "sender", "inside")),
+    Route("ruby-spawn", "ruby_relay.rb", 4, 5, ("outside", "route", "sender", "inside")),
+    Route("ruby-fork-exec", "ruby_relay.rb", 4, 5, ("outside", "route", "sender", "inside")),
+    Route("ruby-open3", "ruby_relay.rb", 4, 5, ("outside", "route", "sender", "inside")),
+    Route("multi-hop", "python_relay.py", 5, 7, ("outside", "route", "hop", "sender", "inside")),
+    Route("parent-exit", "ruby_relay.rb", 4, 5, ("outside", "route", "sender", "inside"), loss="exit"),
+    Route("parent-kill", "ruby_relay.rb", 4, 5, ("outside", "route", "sender", "inside"), loss="kill"),
+    Route("no-fence-direct", "sender.py", 3, 4, ("outside", "route", "inside"), fenced=False),
+    Route("no-fence-multi-hop", "python_relay.py", 5, 7, ("outside", "route", "hop", "sender", "inside"), fenced=False),
+)
+ROUTES = {r.name: r for r in ROWS}
+
+
+def matrix():
+    return [dict(name=r.name, entry=r.entry, acquisitions=r.acquisitions, execs=r.execs,
+                 tokens=list(r.tokens), fenced=r.fenced, loss=r.loss) for r in ROWS]
+
+
+def matrix_hash():
+    return hashlib.sha256(dumps(matrix())).hexdigest()
+
+
+def fixed_argv(c, actor, token, owner):
+    """No caller-supplied shell/program. Context is data, compared structurally."""
+    context = dumps(c).decode().strip()
+    sender = [PYTHON, "-I", "-B", str(BASE / "sender.py"), context]
+    if (actor, token) in {("root", "outside"), ("sender", "inside")}:
+        return [PYTHON, "-I", "-B", str(BASE / "canary.py"), context, token, str(owner)]
+    if actor == "root" and token == "route":
+        entry = ROUTES[c["row"]].entry
+        program = ([RUBY, "--disable-gems", str(BASE / entry), context] if entry.endswith(".rb") else
+                   [PYTHON, "-I", "-B", str(BASE / entry), context])
+        return [SANDBOX, "-f", str(Path(c["scratch"]) / "policy.sb"), *program]
+    if actor == "python-relay" and token == "hop":
+        need(c["row"] in {"multi-hop", "no-fence-multi-hop"}, "argv-hop-route")
+        return [BASH, "--noprofile", "--norc", str(BASE / "bash_relay.sh"), context,
+                c["nonce"], c["row"], str(c["work"]), str(c["disposition"]), str(c["outer"])]
+    need(actor in {"python-relay", "ruby-relay"} and token == "sender", "argv-token")
+    return sender
+
+
+def argv_matches(actual, expected, c):
+    need(type(actual) is list and len(actual) == len(expected)
+         and all(type(s) is str for s in actual), "argv-shape")
+    for found, wanted in zip(actual, expected):
+        if wanted == dumps(c).decode().strip():
+            need(loads(found.encode()) == c, "argv-context")
+        else:
+            need(found == wanted, "argv-literal")
+
+
+def policy(marker_path, fenced):
+    need(type(fenced) is bool and re.fullmatch(r"/[A-Za-z0-9_./-]+", str(marker_path)), "policy-literal")
+    return (POLICY_PREFIX + (SIGNAL_RULE if fenced else "")
+            + f'(deny file-read-data (literal "{marker_path}"))\n').encode()
+
+
+def validate_context(c):
+    keys = {"row", "nonce", "rootPid", "uid", "start", "work", "disposition", "outer",
+            "scratch", "markerSha256", "policySha256", "scripts", "external", "channels"}
+    need(type(c) is dict and set(c) == keys, "context-shape")
+    need(type(c["row"]) is str and c["row"] in ROUTES and type(c["nonce"]) is str
+         and re.fullmatch(r"[0-9a-f]{32}", c["nonce"]), "context-row-nonce")
+    need(positive_pid(c["rootPid"]) and type(c["uid"]) is int and c["uid"] >= 0, "context-identity")
+    need(all(number(c[k]) for k in ("start", "work", "disposition", "outer")), "context-time-type")
+    need(c["work"] == c["start"] + WORK and c["disposition"] == c["work"] + DISPOSITION
+         and c["disposition"] <= c["outer"], "context-deadline-reset")
+    need(c["scratch"] == str(BASE / "execution-r1" / (c["row"] + "-inputs")), "context-scratch")
+    for key in ("markerSha256", "policySha256"):
+        need(type(c[key]) is str and re.fullmatch(r"[a-f0-9]{64}", c[key]), "context-hash")
+    need(type(c["scripts"]) is dict and set(c["scripts"]) == set(SCRIPTS)
+         and all(type(v) is str and re.fullmatch(r"[a-f0-9]{64}", v) for v in c["scripts"].values()), "context-scripts")
+    need(hashlib.sha256(policy(Path(c["scratch"]) / "marker", ROUTES[c["row"]].fenced)).hexdigest()
+         == c["policySha256"], "context-policy")
+    ext = c["external"]
+    need(ext is None or (type(ext) is dict and set(ext) == {"pid", "group", "parent", "uid"}
+                         and all(type(ext[k]) is int for k in ext)
+                         and positive_pid(ext["pid"]) and ext["pid"] == ext["group"]
+                         and ext["parent"] == c["rootPid"] and ext["uid"] == c["uid"]), "context-external")
+    ch = c["channels"]
+    need(ch is None or (ROUTES[c["row"]].loss and type(ch) is dict
+                       and set(ch) == {"c", "r", "cIdentity", "rIdentity"}), "context-channels")
+    if ch is not None:
+        need(type(ch["c"]) is int and type(ch["r"]) is int and ch["c"] > 2
+             and ch["r"] > 2 and ch["c"] != ch["r"], "context-channel-fds")
+        for k in ("cIdentity", "rIdentity"):
+            need(type(ch[k]) is list and len(ch[k]) == 4
+                 and all(type(v) is int and v >= 0 for v in ch[k]), "context-channel-identity")
+    return c
+
+
+def admit_row(now, outer, acquisitions, execs, route):
+    need(number(now) and number(outer) and outer - now >= WORK + DISPOSITION, "row-time-admission")
+    need(type(acquisitions) is int and acquisitions >= 0 and acquisitions + route.acquisitions <= ACQUISITION_CAP,
+         "row-acquisition-admission")
+    need(type(execs) is int and execs >= 0 and execs + route.execs <= EXEC_CAP, "row-exec-admission")
+
+
+def admit_query(now, c, count, acquisitions, execs, capture_available):
+    need(ROUTES[c["row"]].loss and type(count) is int and 0 <= count < 3, "query-row-count")
+    need(number(now) and min(c["disposition"], c["outer"]) - now >= QUERY_WORK + QUERY_CLEANUP,
+         "query-original-time-admission")
+    need(type(acquisitions) is int and type(execs) is int and 0 <= acquisitions < ACQUISITION_CAP
+         and 0 <= execs < EXEC_CAP, "query-count-admission")
+    need(type(capture_available) is int and capture_available >= 2 * STREAM_CAP, "query-byte-admission")
+
+
+@dataclass(frozen=True)
+class QueryWindow:
+    """The original observer reserve, never a caller-replaceable signal timeout."""
+    admitted: float
+    work: float
+    disposition: float
+
+    @classmethod
+    def original(cls, admitted, c):
+        value = cls(admitted, admitted + QUERY_WORK, admitted + QUERY_WORK + QUERY_CLEANUP)
+        value.validate(c)
+        return value
+
+    def validate(self, c):
+        need(all(number(v) for v in (self.admitted, self.work, self.disposition))
+             and c["start"] <= self.admitted and self.work == self.admitted + QUERY_WORK
+             and self.disposition == self.work + QUERY_CLEANUP
+             and self.disposition <= min(c["disposition"], c["outer"]), "query-window-binding")
+
+    def record(self):
+        return dict(admitted=self.admitted, work=self.work, disposition=self.disposition)
+
+
+def validate_entry(value, c, actor, actual_identity):
+    """Capable-entry proof, not an assertion about a trampoline's exec time."""
+    keys = {"version", "actor", "identity", "contextSha256", "admittedAt", "work", "disposition",
+            "outer", "controlRole", "controlEof", "controlFailed", "cancelled"}
+    need(type(value) is dict and set(value) == keys, "entry-shape")
+    need(type(value["version"]) is int and value["version"] == 1 and value["actor"] == actor
+         and value["identity"] == actual_identity and type(value["identity"]) is dict
+         and all(type(v) is int for v in value["identity"].values()), "entry-identity")
+    need(value["contextSha256"] == hashlib.sha256(dumps(c)).hexdigest()
+         and all(number(value[k]) and value[k] == c[k] for k in ("work", "disposition", "outer"))
+         and number(value["admittedAt"]) and c["start"] <= value["admittedAt"] < min(c["work"], c["outer"]),
+         "entry-original-context-window")
+    need(value["controlRole"] == ("C" if actor == "sender" and ROUTES[c["row"]].loss else "stdin")
+         and value["controlEof"] is False and value["controlFailed"] is None and value["cancelled"] is False,
+         "entry-owner-admission")
+
+
+def envelope(c, actor, pid, sequence, kind, data):
+    return dict(version=1, row=c["row"], nonce=c["nonce"], actor=actor, pid=pid,
+                sequence=sequence, work=c["work"], disposition=c["disposition"],
+                outer=c["outer"], kind=kind, data=data)
+
+
+ALLOWED_KINDS = {
+    "outside": {"ready", "pong", "end"}, "inside": {"ready", "pong", "end"},
+    "sender": {"ready", "loss-ready", "parent-changed", "attempt", "query", "signal", "final", "terminal-commit"},
+    "python-relay": {"ready", "attempt", "acquired", "final"},
+    "ruby-relay": {"ready", "attempt", "acquired", "loss-ready", "loss-exit", "final", "unknown-exit"},
+    "bash": {"exec"}, "ruby-fork": {"exec"},
+}
+
+
+def validate_frame(e, c, sequences):
+    need(type(e) is dict and set(e) == {"version", "row", "nonce", "actor", "pid", "sequence",
+                                     "work", "disposition", "outer", "kind", "data"}, "frame-shape")
+    need(e["version"] == 1 and type(e["version"]) is int and e["row"] == c["row"]
+         and e["nonce"] == c["nonce"], "frame-binding")
+    need(type(e["actor"]) is str and type(e["kind"]) is str and e["actor"] in ALLOWED_KINDS
+         and e["kind"] in ALLOWED_KINDS[e["actor"]], "frame-actor-kind")
+    need(e["kind"] != "terminal-commit" or (e["actor"] == "sender" and ROUTES[c["row"]].loss is not None),
+         "terminal-commit-loss-sender-only")
+    need(positive_pid(e["pid"]) and type(e["sequence"]) is int and type(e["data"]) is dict, "frame-data")
+    need(all(number(e[k]) and e[k] == c[k] for k in ("work", "disposition", "outer")), "frame-deadline")
+    key = (e["actor"], e["pid"])
+    need(e["sequence"] == sequences.get(key, 0) + 1, "frame-sequence")
+    sequences[key] = e["sequence"]
+    return e
+
+
+def exact_command(raw, c, allowed):
+    value = loads(raw)
+    need(type(value) is dict and set(value) == {"kind", "nonce", "row"}
+         and value["nonce"] == c["nonce"] and value["row"] == c["row"]
+         and value["kind"] in allowed, "command-binding")
+    return value["kind"]
+
+
+def command(c, kind):
+    return dumps(dict(kind=kind, nonce=c["nonce"], row=c["row"]))
+
+
+def marker_ok(observation, readable):
+    need(type(observation) is dict and set(observation) == {"readable", "matches", "errno"}, "marker-shape")
+    need(type(observation["readable"]) is bool and type(observation["matches"]) is bool, "marker-type")
+    if readable:
+        need(observation == {"readable": True, "matches": True, "errno": None}, "marker-not-readable")
+    else:
+        need(observation["readable"] is False and observation["matches"] is False
+             and type(observation["errno"]) is int and observation["errno"] in (errno.EPERM, errno.EACCES),
+             "marker-not-permission-denied")
+
+
+@dataclass(frozen=True)
+class ExternalReference:
+    """Protocol identity only. This is NEVER a child reservation or cleanup handle."""
+    pid: int
+    group: int
+    parent: int
+    uid: int
+
+
+def validate_external(ref, c, own_pid, own_group):
+    need(type(ref) is ExternalReference and positive_pid(ref.pid) and ref.group == ref.pid
+         and ref.parent == c["rootPid"] and ref.uid == c["uid"]
+         and ref.pid not in {own_pid, own_group, c["rootPid"]}, "external-query-scope")
+
+
+def signal_scope(role, operation, actual_owner, current_owner, registered, authorized,
+                 terminal, status, pid, group, own_group, root_pid, row):
+    need(registered and actual_owner == current_owner and authorized and not terminal and status is None,
+         "signal-unreserved")
+    need(positive_pid(pid) and pid not in {current_owner, root_pid}, "signal-pid-scope")
+    allowed = ((role == "inside" and operation in {"usr1-pid", "usr1-group", "kill-group"})
+               or (role == "relay" and row == "parent-kill" and operation == "kill-relay")
+               or (role == "query-child" and operation == "kill-query"))
+    need(allowed, "signal-role-operation")
+    if operation in {"usr1-group", "kill-group"}:
+        need(group == pid and group != own_group, "signal-group-scope")
+
+
+def query_result(stdout, stderr, exit_code, expected):
+    need(type(stdout) is bytes and type(stderr) is bytes and type(exit_code) is int
+         and type(expected) is dict and set(expected) == {"pid", "parent", "group"}
+         and positive_pid(expected["pid"]) and expected["group"] == expected["pid"]
+         and type(expected["parent"]) is int and expected["parent"] > 0, "query-result-shape")
+    need(stderr == b"", "query-stderr")
+    if exit_code == 1 and stdout.strip() == b"":
+        return {"absent": True, "waitForSender": None, "method": "ps-empty-selection-exit1"}
+    need(exit_code == 0, "query-failed-status", status=exit_code)
+    lines = stdout.splitlines()
+    need(len(lines) == 1, "query-selection-ambiguous")
+    fields = lines[0].split()
+    need(len(fields) == 4 and all(re.fullmatch(rb"[0-9]{1,10}", x) for x in fields[:3])
+         # Installed /usr/share/man/man1/ps.1:316-383. A present state is
+         # never an absence proof, including a zombie or an exiting process.
+         and re.fullmatch(rb"[IRSTUZ][+<>AELNSsVWX]{0,15}", fields[3]), "query-parser")
+    actual = dict(zip(("pid", "parent", "group"), map(int, fields[:3])))
+    need(actual == expected, "query-reused-or-ambiguous", actual=actual, expected=expected)
+    return {"absent": False, "waitForSender": None, "identity": actual,
+            "stat": fields[3].decode("ascii"), "method": "ps-present-not-absence"}
+
+
+def validate_sender_result(value, route, sender_pid):
+    keys = {"primary", "cleanupErrors", "signals", "queries", "marker", "child", "parentChange",
+            "unknown", "flags", "controlEof", "ownedAttempts", "lowFdReplacement", "isolationAccepted", "terminal"}
+    need(type(value) is dict and set(value) == keys, "sender-final-shape")
+    need(value["primary"] is None and value["cleanupErrors"] == [] and value["unknown"] is False
+         and value["flags"] == [] and type(value["ownedAttempts"]) is int and value["ownedAttempts"] == 1
+         and value["controlEof"] is False, "sender-final-failure")
+    marker_ok(value["marker"], False)
+    need(type(value["queries"]) is list and len(value["queries"]) == 2, "external-query-count")
+    for query, kind in zip(value["queries"], ("pid", "pgid")):
+        need(type(query) is dict and set(query) == {"kind", "signal", "target", "returned", "errno"}
+             and query["kind"] == kind and type(query["signal"]) is int and query["signal"] == 0
+             and type(query["returned"]) is bool, "external-query-shape")
+        need((query["returned"] is False and type(query["errno"]) is int and query["errno"] == errno.EPERM) if route.fenced else
+             (query["returned"] is True and query["errno"] is None), "external-query-oracle")
+    need(value["isolationAccepted"] is route.fenced, "isolation-negative-control")
+    child = value["child"]
+    need(type(child) is dict and child.get("role") == "inside" and child.get("owner") == sender_pid
+         and positive_pid(child.get("pid")) and child.get("group") == child.get("pid")
+         and child.get("exitCode") == -9 and type(child.get("status")) is int
+         and child.get("status") & 0x7f == 9 and child.get("authorized") is False
+         and child.get("terminal") is True and child.get("unknown") is False
+         and child.get("stdout", {}).get("eof") is True and child.get("stderr", {}).get("eof") is True
+         and child.get("closed") == [True, True, True], "owned-child-terminal-proof")
+    need(any(w == {"pid": child["pid"], "status": child["status"]} for w in child.get("waits", [])),
+         "owned-child-real-wait")
+    need(type(value["signals"]) is list and len(value["signals"]) == 3, "owned-signal-count")
+    for observation, operation in zip(value["signals"], ("usr1-pid", "usr1-group", "kill-group")):
+        need(type(observation) is dict and set(observation) == {"operation", "owner", "pid", "target", "signal", "priorWait", "returned",
+                                                               "errno", "authorizedAt", "seen", "ackCounter"}, "owned-signal-shape")
+        need(observation["operation"] == operation and observation["priorWait"] == [0, 0]
+             and type(observation["priorWait"]) is list and all(type(v) is int for v in observation["priorWait"])
+             and observation["returned"] is True and observation["errno"] is None
+             and observation["owner"] == sender_pid and observation["pid"] == child["pid"], "owned-signal-proof")
+    need(value["signals"][0]["ackCounter"] == 1 and value["signals"][1]["ackCounter"] == 2,
+         "owned-distinct-acknowledgments")
+    if route.loss:
+        change = value["parentChange"]
+        need(type(change) is dict and set(change) == {"before", "after"}
+             and positive_pid(change["before"]) and type(change["after"]) is int and change["after"] > 0
+             and change["after"] != change["before"] and value["lowFdReplacement"] is True,
+              "loss-parent-change")
+        need(value["terminal"] == dict(mode=LOSS_TERMINAL_MODE, resultChannel="R",
+                                       controlClosed=True, ordinaryClosed=[True, True, True],
+                                       resultEof="required-root-observation", senderExitStatus="not-waitable-by-root"),
+             "loss-terminal-protocol")
+        need(value["terminal"]["controlClosed"] is True and all(v is True for v in value["terminal"]["ordinaryClosed"]),
+             "loss-terminal-types")
+    else:
+        need(value["parentChange"] is None and value["lowFdReplacement"] is False
+             and value["terminal"] is None, "ordinary-parent-change")
+
+
+def failure(exc):
+    if isinstance(exc, Failure):
+        return dict(type=type(exc).__name__, code=exc.code, facts=exc.facts)
+    return dict(type=type(exc).__name__, code="unexpected", message=str(exc)[:2048])

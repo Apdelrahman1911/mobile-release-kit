@@ -1,0 +1,20 @@
+#!/bin/bash
+set -uo pipefail
+umask 077
+evidence="$(cd "$(dirname "$0")" && pwd -P)"
+python=/ORIGINAL_QA006_WORKSPACE/venv/bin/python
+test -f "$evidence/final-freeze.json" || { echo 'No accepted-tree freeze; do not dispatch'; exit 90; }
+test -f "$evidence/ACCEPTED-IMPLEMENTATION.json" && test -f "$evidence/ACCEPTED-VERIFIER.json" || exit 90
+mkdir "$evidence/dispatch-lock" || { echo 'Already dispatched; never restart/adopt this namespace'; exit 91; }
+# Exclusive actual descriptor, not check-then-truncate tee by path.
+set -C
+exec 3>"$evidence/final-controller.log" || exit 92
+"$python" -B -P -u "$evidence/verify-all.py" --single-dispatch 2>&1 | /usr/bin/tee /dev/fd/3
+statuses=("${PIPESTATUS[@]}")
+code="${statuses[0]}"
+if [ "${statuses[1]}" -ne 0 ]; then code=93; fi
+exec 3>&-
+printf '%s\n' "$code" > "$evidence/actual-controller.exit" || exit 94
+# Actual wrapper status, retained logs, complete PASS ledger AND frozen bindings
+# are jointly required; a PASS-looking partial ledger cannot override this exit.
+exit "$code"

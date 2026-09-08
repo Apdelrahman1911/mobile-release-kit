@@ -1,0 +1,113 @@
+"""Fixed Python Popen/multihop routes. Relays have NO signal authority."""
+
+import sys
+import types
+from pathlib import Path
+
+for _name in ("contract", "runtime"):
+    _path = Path(__file__).absolute().parent / (_name + ".py")
+    _module = types.ModuleType(_name)
+    _module.__file__ = str(_path)
+    sys.modules[_name] = _module
+    exec(compile(_path.read_bytes(), str(_path), "exec"), _module.__dict__)
+
+import os
+import select
+
+from contract import BASE, BASH, PYTHON, command, dumps, exact_command, failure, need, validate_frame
+from runtime import Cancellation, Emitter, Reader, Registry, RelayChild, WorkGuard, identity, now, read_context, remaining, write_bytes
+
+
+def main():
+    cancel = Cancellation()
+    need(len(sys.argv) == 2, "python-relay-argv")
+    c = read_context(sys.argv[1], cancel)
+    need(c["row"] in {"python-child", "python-new-session", "multi-hop", "no-fence-multi-hop"}
+         and c["channels"] is None, "python-relay-route")
+    control = Reader(0)
+    guard = WorkGuard(c, cancel, control)
+    emitter = Emitter(c, "python-relay", guard=guard)
+    registry = Registry(c, cancel, "python-relay", emitter, control=control)
+    child, primary, forwarded, frame_sequences = None, None, {"stdout": 0, "stderr": 0}, {}
+
+    def check():
+        registry.check()
+
+    def forward(reader, output, label):
+        reader.read()
+        if output == 1:
+            while b"\n" in reader.pending:
+                raw, _, tail = reader.pending.partition(b"\n")
+                reader.pending[:] = tail
+                from contract import loads
+                validate_frame(loads(bytes(raw)), c, frame_sequences)
+                data = bytes(raw) + b"\n"
+                write_bytes(output, data, c["work"], check)
+                forwarded[label] += len(data)
+            if reader.eof:
+                need(not reader.pending, "python-relay-child-partial-frame")
+        elif reader.pending:
+            data = bytes(reader.pending)
+            reader.pending.clear()
+            write_bytes(output, data, c["work"], check)
+            forwarded[label] += len(data)
+
+    try:
+        entry = guard.entry("python-relay")
+        emitter.emit("ready", dict(identity=identity(), python=sys.version, channels=None, entry=entry))
+        check()
+        context_arg = dumps(c).decode().strip()
+        multi = c["row"] in {"multi-hop", "no-fence-multi-hop"}
+        argv = ([BASH, "--noprofile", "--norc", str(BASE / "bash_relay.sh"), context_arg,
+                 c["nonce"], c["row"], str(c["work"]), str(c["disposition"]), str(c["outer"])] if multi else
+                [PYTHON, "-I", "-B", str(BASE / "sender.py"), context_arg])
+        child = registry.acquire(RelayChild, "hop" if multi else "sender", argv,
+                                 session=c["row"] == "python-new-session",
+                                 group=c["row"] != "python-new-session", execs=2 if multi else 1)
+        emitter.emit("acquired", dict(pid=child.pid, token="hop" if multi else "sender",
+                                      method="Popen", passFds=[], session=c["row"] == "python-new-session"))
+        while True:
+            check()
+            while b"\n" in control.pending:
+                raw, _, tail = control.pending.partition(b"\n")
+                control.pending[:] = tail
+                kind = exact_command(bytes(raw), c, {"start"})
+                write_bytes(child.handle.stdin.fileno(), command(c, kind), c["work"], check)
+            forward(child.out, 1, "stdout")
+            forward(child.err, 2, "stderr")
+            if child.status is None:
+                child.observe()
+            if child.status is not None and child.out.eof and child.err.eof:
+                break
+            select.select([r.fd for r in (control, child.out, child.err) if not r.eof], [], [],
+                          min(0.02, remaining(c["work"])))
+        need(child.handle.returncode == 0, "python-relay-child-status", status=child.handle.returncode)
+    except BaseException as exc:
+        primary = failure(exc)
+    finally:
+        clean = False
+        try:
+            clean = registry.cleanup()
+        except BaseException as exc:
+            registry.errors.append(failure(exc))
+    observed = None if child is None else child.record()
+    if observed:
+        for label in ("stdout", "stderr"):
+            if observed[label]:
+                observed[label].pop("raw")
+    try:
+        emitter.emit("final", dict(primary=primary, cleanupErrors=registry.errors, child=observed,
+                                   forwarded=forwarded, actualDirectWait=child is not None and child.status is not None,
+                                   unknown=not clean, flags=list(cancel.seen)), cleanup=True)
+    except BaseException as exc:
+        registry.errors.append(failure(exc))
+    registry.errors.extend(cancel.restore())
+    try:
+        guard.completion()
+    except BaseException as exc:
+        registry.errors.append(failure(exc))
+    return 0 if primary is None and clean and not registry.errors and not cancel.seen else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

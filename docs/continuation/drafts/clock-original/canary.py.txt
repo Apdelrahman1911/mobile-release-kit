@@ -1,0 +1,82 @@
+"""One synthetic, direct child. Private stdin EOF or carried work expiry stops it."""
+
+import sys
+import types
+from pathlib import Path
+
+for _name in ("contract", "runtime"):
+    _path = Path(__file__).absolute().parent / (_name + ".py")
+    _module = types.ModuleType(_name)
+    _module.__file__ = str(_path)
+    sys.modules[_name] = _module
+    exec(compile(_path.read_bytes(), str(_path), "exec"), _module.__dict__)
+
+import os
+import select
+import signal
+
+from contract import exact_command, failure, need
+from runtime import Cancellation, Emitter, Reader, WorkGuard, identity, marker, now, read_context
+
+
+def main():
+    cancel = Cancellation()  # Before any control protocol or resource acquisition.
+    need(len(sys.argv) == 4 and sys.argv[2] in {"outside", "inside"}, "canary-argv")
+    c, role, parent = read_context(sys.argv[1], cancel), sys.argv[2], int(sys.argv[3])
+    need(os.getppid() == parent and os.getuid() == c["uid"] and os.getpgrp() == os.getpid(), "canary-identity")
+    reader = Reader(0)
+    guard = WorkGuard(c, cancel, reader)
+    emitter = Emitter(c, role, guard=guard)
+    entry = guard.entry(role)
+    counter = 0
+
+    def usr1(_sig, _frame):
+        nonlocal counter
+        counter += 1
+
+    original_usr1 = signal.signal(signal.SIGUSR1, usr1)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGUSR1})
+
+    def state(**extra):
+        return dict(identity=identity(), marker=marker(c), counter=counter, entry=entry, **extra)
+
+    primary, reason = None, None
+    try:
+        emitter.emit("ready", state())
+        while now() < c["work"]:
+            cancel.check()
+            reader.read()
+            if reader.eof:
+                reason = "private-control-eof"
+                break
+            while b"\n" in reader.pending:
+                raw, _, tail = reader.pending.partition(b"\n")
+                reader.pending[:] = tail
+                need(exact_command(bytes(raw), c, {"ping"}) == "ping", "canary-ping")
+                emitter.emit("pong", state())
+            select.select([0], [], [], min(0.02, max(0, c["work"] - now())))
+        else:
+            reason = "original-work-expiry"
+    except BaseException as exc:
+        primary, reason = failure(exc), "error-or-cancellation"
+    # No process creation, lookup, or signal is permitted in this canary.
+    errors = []
+    try:
+        emitter.emit("end", state(reason=reason, primary=primary, flags=list(cancel.seen)), cleanup=True)
+    except BaseException as exc:
+        errors.append(failure(exc))
+    try:
+        need(signal.getsignal(signal.SIGUSR1) == usr1, "canary-usr1-handler-custody")
+        signal.signal(signal.SIGUSR1, original_usr1)
+    except BaseException as exc:
+        errors.append(failure(exc))
+    errors.extend(cancel.restore())
+    try:
+        guard.completion()
+    except BaseException as exc:
+        errors.append(failure(exc))
+    return 0 if primary is None and reason == "private-control-eof" and not errors else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

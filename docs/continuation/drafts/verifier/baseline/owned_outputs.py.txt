@@ -1,0 +1,1492 @@
+"""Exact owned inventories and actual preceding-child evidence authorize cleanup.
+
+Failure/cancellation is fail/retain; partial deletion never becomes success or a
+resumable invocation. Numeric observations confer zero signal authority.
+"""
+from pathlib import Path
+from contextlib import contextmanager
+import json
+import os
+import sys
+import sysconfig
+import hashlib
+import zipfile
+import tomllib
+import configparser
+from email.parser import BytesParser
+import fnmatch
+import stat
+import re
+import csv
+import io as string_io
+import base64
+import types
+import shlex
+import posixpath
+
+EVIDENCE = Path(__file__).absolute().parent
+if EVIDENCE.resolve() != EVIDENCE or Path(__file__).is_symlink() or not sys.flags.safe_path:
+    raise RuntimeError('Use trusted regular helper path with Python -P/-I')
+import os
+import stat
+
+def helper_namespace(root, *, ctx=None):
+    """Metadata-only admission before sibling imports; never open cache bytes.
+
+    The initial script/stdlib are runner TCB. This closes incidental helper
+    import candidates, not arbitrary same-user/whole-host interference.
+    """
+    def check(value=True, message='helper namespace'):
+        if ctx is not None:
+            ctx.require(value, message)
+        elif not value:
+            raise RuntimeError(message)
+    root = Path(root)
+    check(root.is_absolute() and str(root) == os.path.normpath(root) and len(root.parts) <= 64,
+          'noncanonical helper import root')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open('/', flags)
+    try:
+        for part in root.parts[1:]:
+            check()
+            new = os.open(part, flags, dir_fd=fd)
+            old, fd = fd, new
+            os.close(old)
+        original = os.fstat(fd)
+        check(original.st_uid == os.getuid() and not original.st_mode & 0o022,
+              'foreign/writable helper namespace')
+        known = set(['action_io.py', 'bindings.py', 'cleanup-build.py', 'cleanup-wheel.py', 'evidence_schemas.py', 'freeze.py', 'frozen_diff.py', 'gate_list.py', 'git_readonly.py', 'native_reader.py', 'observe-owned-workers.py', 'owned_outputs.py', 'prepare-build.py', 'probe-jdk21-signing.py', 'process_gate.py', 'result_protocols.py', 'run-once.sh', 'source_inventory.py', 'verify-all.py', 'verify-frozen-diff.py', 'verify-pins.py', 'verify-process-gate.py', 'verify-result-protocols.py', 'wheel-smoke.sh'])
+        found, count = set(), 0
+        with os.scandir(fd) as iterator:
+            while True:
+                # Reserve the enumeration operation before advancing; even an
+                # EOF probe consumes this finite namespace-admission budget.
+                check(count < 4096, 'helper namespace enumeration cap')
+                count += 1
+                if ctx is not None:
+                    ctx.charge('visited', 1)
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    break
+                name = item.name
+                check(len(os.fsencode(name)) <= 255, 'helper namespace component cap')
+                before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                check(name != '__pycache__' and not name.endswith(('.pyc', '.pyo', '.pyd', '.so', '.pth')),
+                      'unapproved helper bytecode/startup/cache name; payload not read')
+                if name in known:
+                    check(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+                          and before.st_uid == os.getuid() and not before.st_mode & 0o022,
+                          'helper replaced, symlinked, hardlinked or writable')
+                    found.add(name)
+                else:
+                    check(not name.endswith(('.py', '.sh')), 'unknown helper/import source name')
+                    if (stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode)) and name.isidentifier():
+                        check(name == 'wheels' and stat.S_ISDIR(before.st_mode)
+                              and before.st_uid == os.getuid() and stat.S_IMODE(before.st_mode) == 0o700,
+                              'unapproved helper import directory; contents not read')
+                        child = os.open(name, flags, dir_fd=fd)
+                        try:
+                            check(os.fstat(child) == before, 'wheel-data directory replaced')
+                            names = []
+                            with os.scandir(child) as entries:
+                                for entry in entries:
+                                    check(not names, 'unknown wheel-data sibling; payload not read')
+                                    names.append(entry.name)
+                                    check(entry.name == 'mobile_release_kit-0.3.0-py3-none-any.whl',
+                                          'unexpected wheel-data name; payload not read')
+                                    row = os.stat(entry.name, dir_fd=child, follow_symlinks=False)
+                                    check(stat.S_ISREG(row.st_mode) and row.st_nlink == 1 and row.st_uid == os.getuid(),
+                                          'untrusted wheel-data type; payload not read')
+                        finally:
+                            os.close(child)
+                check(os.stat(name, dir_fd=fd, follow_symlinks=False) == before, 'helper namespace entry changed')
+        check(found == known, 'missing reviewed helper')
+        current = os.fstat(fd)
+        check((current.st_dev, current.st_ino, current.st_uid, current.st_mode, current.st_mtime_ns, current.st_ctime_ns) ==
+              (original.st_dev, original.st_ino, original.st_uid, original.st_mode, original.st_mtime_ns, original.st_ctime_ns),
+              'helper namespace changed during admission')
+    finally:
+        os.close(fd)
+
+helper_namespace(EVIDENCE)
+sys.path.insert(0, str(EVIDENCE))
+from action_io import (action, ancestry, assert_owned, bounded_text, create_owned,
+                       delete_inventory, digest, identity, inventory, read_file,
+                       read_json, require, write_failure, write_new, exists, participating, decode_json,
+                       directory, close_fd, CHUNK)
+from bindings import check_frozen, config_load, load_frozen, require_authority, clean_environment
+import evidence_schemas as schema
+from process_gate import GROUP_SCOPE, observe_groups, COMBINED_BYTES, FREE_FLOOR, DISPATCH_HEADROOM
+from result_protocols import inspect_result
+
+
+@participating
+def validate_ledger(ledger, frozen, config, evidence, *, ctx):
+    schema.fields(ledger, {'candidate', 'status', 'scope', 'ownershipScope', 'notApplicable', 'externalRequired',
+                           'gates', 'freezeReference'}, ctx=ctx, label='active verification ledger')
+    schema.fields(ledger['candidate'], {'commit', 'tree', 'clean'}, ctx=ctx, label='ledger candidate')
+    ctx.require(ledger['candidate'] == {'commit': frozen['stable']['head'], 'tree': frozen['stable']['proposedTree'], 'clean': False}
+                and ledger['candidate']['clean'] is False and ledger['scope'] == config['scope']
+                and ledger['ownershipScope'] == GROUP_SCOPE, 'ledger source/scope relationship')
+    schema.file_reference(ledger['freezeReference'], ctx=ctx)
+    ctx.require(ledger['status'] in {'RUNNING_NOT_ACCEPTED', 'PASS_ALL_APPLICABLE_LOCAL_GATES'}, 'ledger not usable')
+    for field, keys in (('notApplicable', {'id', 'reason'}), ('externalRequired', {'id', 'status', 'reason'})):
+        rows = ledger[field]
+        ctx.require(type(rows) is list and len(rows) <= 32, 'ledger applicability rows')
+        seen = set()
+        for row in rows:
+            schema.fields(row, keys, ctx=ctx, label='ledger ' + field)
+            for key in keys:
+                schema.label(row[key], ctx=ctx)
+            ctx.require(row['id'] not in seen, 'duplicate applicability ID')
+            seen.add(row['id'])
+            if field == 'externalRequired':
+                ctx.require(row['status'] == 'BLOCKED', 'external check cannot become local success')
+    ctx.require(type(ledger['gates']) is list and 0 < len(ledger['gates']) <= 45, 'ledger gate array')
+    for row in ledger['gates']:
+        ctx.require(type(row) is dict, 'ledger gate object')
+        if row.get('status') == 'PASS':
+            schema.completed_gate(row, ctx=ctx)
+        else:
+            schema.fields(row, {'gate', 'command', 'protocol', 'status', 'reason'}, ctx=ctx, label='pending gate')
+            ctx.require(row['status'] in {'RUNNING', 'BLOCKED'} and type(row['command']) is list
+                        and row['command'] and all(type(arg) is str and '\0' not in arg for arg in row['command']), 'pending gate state/argv')
+            schema.label(row['gate'], ctx=ctx)
+            schema.label(row['reason'], ctx=ctx)
+            ctx.require(row['protocol'] in {'command', 'python-unittest', 'ruby-minitest', 'supply-wif'}, 'pending gate protocol')
+
+
+OUTPUT_PATHS = {'build': ('build', 'BUILD-OWNER.json'),
+                'eggInfo': ('src/mobile_release_kit.egg-info', 'EGG-INFO-OWNER.json')}
+OUTPUT_RECEIPTS = {'prepare-owned-build': 'BUILD-CREATION-COMPLETE.json',
+                   'editable-install': 'EDITABLE-COMPLETE.json', 'wheel-build-subcommand': 'WHEEL-BUILD-COMPLETE.json'}
+EGG_FILES = {'PKG-INFO', 'SOURCES.txt', 'dependency_links.txt', 'entry_points.txt', 'requires.txt', 'top_level.txt'}
+
+
+def _requirement(value):
+    value = ' '.join(value.replace("'", '"').split())
+    match = re.fullmatch(r'([A-Za-z0-9][A-Za-z0-9._-]*)(.*)', value)
+    require(match is not None, 'unsupported generated dependency syntax')
+    return re.sub(r'[-_.]+', '-', match[1]).lower() + re.sub(r'\s*;\s*', '; ', match[2])
+
+
+@participating
+def project_metadata(stable, root, *, ctx):
+    source = read_file(Path(root)/'pyproject.toml', ctx=ctx, role='source', retain=True)
+    ctx.require(source['sha256'] == stable['files']['pyproject.toml']['sha256'], 'project metadata source drift')
+    project = tomllib.loads(source['data'].decode())
+    ctx.require(project['project']['name'] == 'mobile-release-kit' and project['project']['version'] == '0.3.0'
+                and project['project']['dependencies'] == [], 'fixed verifier package identity/runtime dependency policy')
+    return project
+
+
+@participating
+def package_metadata(body, entry_points, project, *, ctx):
+    package = BytesParser().parsebytes(body)
+    for field, value in {'Name': project['name'], 'Version': project['version'], 'Requires-Python': project['requires-python'],
+                         'License-Expression': project['license']}.items():
+        ctx.require(package.get_all(field) == [value], 'package identity/license/duplicate metadata')
+    expected = set()
+    for extra, requirements in project.get('optional-dependencies', {}).items():
+        for requirement in requirements:
+            base, separator, marker = requirement.partition(';')
+            expected.add(_requirement(base.strip() + '; ' + (marker.strip() + ' and ' if separator else '') + 'extra == "' + extra + '"'))
+    actual = [_requirement(row) for row in package.get_all('Requires-Dist', [])]
+    ctx.require(len(actual) == len(set(actual)) and set(actual) == expected, 'package dependencies differ from accepted optional-only pins')
+    extras = package.get_all('Provides-Extra', [])
+    ctx.require(len(extras) == len(set(extras)) and set(extras) == set(project.get('optional-dependencies', {})), 'package extras changed/duplicated')
+    ctx.require(package.get_all('License-File') == project['license-files'], 'package license-file authority')
+    parser = configparser.ConfigParser(interpolation=None, strict=True)
+    parser.read_string(entry_points.decode())
+    ctx.require(not parser.defaults() and parser.sections() == ['console_scripts']
+                and dict(parser['console_scripts']) == project['scripts'], 'package entry point authority')
+
+
+@participating
+def egg_requirements(body, project, *, ctx):
+    """Interpret only setuptools' extra/marker sections, never execute them."""
+    expected = {}
+    for extra, requirements in project.get('optional-dependencies', {}).items():
+        expected[extra] = set()
+        for requirement in requirements:
+            base, separator, marker = requirement.partition(';')
+            section = extra + (':' + ' '.join(marker.replace("'", '"').split()) if separator else '')
+            expected.setdefault(section, set()).add(_requirement(base.strip()))
+    parsed, section = {}, None
+    for line in body.decode().splitlines():
+        ctx.check()
+        if not line.strip():
+            continue
+        if line.startswith('[') and line.endswith(']'):
+            section = ' '.join(line[1:-1].replace("'", '"').split())
+            ctx.require(section not in parsed, 'duplicate egg dependency section')
+            parsed[section] = set()
+        else:
+            ctx.require(section is not None and ';' not in line, 'unexpected runtime/inline egg dependency')
+            item = _requirement(line)
+            ctx.require(item not in parsed[section], 'duplicate egg dependency')
+            parsed[section].add(item)
+    ctx.require(parsed == expected, 'egg dependency extra/marker scope changed')
+
+
+@participating
+def wheel_record(body, members, *, ctx):
+    """Every wheel member is covered by an exact independent digest/size row."""
+    rows = list(csv.reader(string_io.StringIO(body.decode('utf-8')), strict=True))
+    ctx.require(len(rows) == len(members) and all(len(row) == 3 for row in rows), 'wheel RECORD cardinality/schema')
+    ctx.require(len({row[0] for row in rows}) == len(rows) and {row[0] for row in rows} == set(members), 'wheel RECORD missing/duplicate/unknown names')
+    for name, encoded, size in rows:
+        schema.relative(name, ctx=ctx)
+        if name == 'mobile_release_kit-0.3.0.dist-info/RECORD':
+            ctx.require(encoded == size == '', 'wheel RECORD must omit its own circular digest')
+        else:
+            wanted = members[name]
+            digest = base64.urlsafe_b64encode(bytes.fromhex(wanted['sha256'])).rstrip(b'=').decode()
+            ctx.require(encoded == 'sha256=' + digest and size == str(wanted['bytes']), 'wheel RECORD content/hash/size mismatch')
+
+
+@participating
+def _read_output_owners(evidence, config, frozen, *, ctx):
+    owners, references = {}, {}
+    for key, (relative, marker) in OUTPUT_PATHS.items():
+        owner, reference = frozen.read_record(Path(evidence)/marker, ctx=ctx)
+        schema.owner_record(owner, ctx=ctx)
+        ctx.require(owner['path'] == str(Path(config['source'])/relative)
+                    and owner['tree'] == frozen['stable']['proposedTree']
+                    and owner['purpose'] == 'exclusive initially empty setuptools ' + key + '; only actual producer completion grants consumption',
+                    'output owner source/path/purpose binding')
+        assert_owned(owner, ctx=ctx)
+        owners[key], references[key] = owner, reference
+    return owners, references
+
+
+@participating
+def egg_info_entries(owner, stable, root, *, ctx):
+    entries = inventory(owner, ctx=ctx, allowed_names=EGG_FILES, file_roles={name: 'record' for name in EGG_FILES})
+    ctx.require(set(entries) == EGG_FILES and all(row['kind'] == 'file' for row in entries.values()), 'incomplete egg-info producer output')
+    directory = Path(owner['path'])
+    project = project_metadata(stable, root, ctx=ctx)['project']
+    package_metadata(read_file(directory/'PKG-INFO', ctx=ctx, role='record', retain=True)['data'],
+                     read_file(directory/'entry_points.txt', ctx=ctx, role='record', retain=True)['data'], project, ctx=ctx)
+    egg_requirements(read_file(directory/'requires.txt', ctx=ctx, role='record', retain=True)['data'], project, ctx=ctx)
+    ctx.require(bounded_text(directory/'top_level.txt', ctx=ctx).splitlines() == ['mobile_release']
+                and not bounded_text(directory/'dependency_links.txt', ctx=ctx).strip(), 'egg-info package/dependency link scope')
+    sources = bounded_text(directory/'SOURCES.txt', ctx=ctx).splitlines()
+    ctx.require(len(sources) == len(set(sources)) <= 4096, 'egg-info duplicate/overlong source list')
+    generated = {'src/mobile_release_kit.egg-info/' + name for name in EGG_FILES}
+    accepted = {name for name, row in stable['files'].items() if not row.get('deleted')}
+    for name in sources:
+        schema.relative(name, ctx=ctx)
+        ctx.require(name in accepted | generated, 'egg-info contains unreviewed source input')
+    required = {name for name in accepted if name.startswith('src/mobile_release/') and (name.endswith('.py') or name.endswith('.pem'))}
+    ctx.require(required <= set(sources), 'egg-info omitted accepted package payload')
+    return entries
+
+
+@participating
+def _output_record(value, frozen, evidence, *, ctx):
+    schema.fields(value, {'schemaVersion', 'status', 'stage', 'tree', 'owners', 'ownerReferences', 'inventories', 'producer', 'predecessorEvidence'},
+                  ctx=ctx, label='owned producer receipt')
+    ctx.require(type(value['schemaVersion']) is int and value['schemaVersion'] == 1 and value['status'] == 'OBSERVED_SUCCESSFUL_PRODUCER'
+                and value['stage'] in OUTPUT_RECEIPTS and value['tree'] == frozen['stable']['proposedTree'], 'producer receipt stage/tree')
+    for field in ('owners', 'ownerReferences', 'inventories'):
+        schema.fields(value[field], set(OUTPUT_PATHS), ctx=ctx, label='producer ' + field)
+    schema.completed_gate(value['producer'], ctx=ctx, pending_binding=True)
+    ctx.require(value['producer']['gate'] == value['stage'], 'producer actual completion identity')
+    from gate_list import commands
+    config = frozen['stable']['configuration']['record']
+    route = {name: (command, protocol) for name, command, protocol in commands(config, evidence, frozen['stable'], ctx=ctx)}
+    expected = (wheel_build_command(config, evidence), 'command') if value['stage'] == 'wheel-build-subcommand' else route[value['stage']]
+    ctx.require((value['producer']['command'], value['producer']['protocol']) == expected
+                and value['producer']['cwd'] == config['source'], 'receipt producer command/protocol/cwd scope')
+    completed_row(value['producer'], evidence, ctx=ctx, frozen=frozen, pending_binding=True)
+    for key, (relative, marker) in OUTPUT_PATHS.items():
+        schema.owner_record(value['owners'][key], ctx=ctx)
+        schema.file_reference(value['ownerReferences'][key], ctx=ctx)
+        ctx.require(value['owners'][key]['path'] == str(Path(config['source'])/relative)
+                    and value['owners'][key]['tree'] == value['tree']
+                    and value['ownerReferences'][key]['path'] == str(Path(evidence)/marker), 'receipt output owner scope')
+        from bindings import validate_inventory_schema
+        validate_inventory_schema(value['inventories'][key], ctx=ctx)
+    previous = {'prepare-owned-build': None, 'editable-install': 'prepare-owned-build',
+                'wheel-build-subcommand': 'editable-install'}[value['stage']]
+    if previous is None:
+        ctx.require(value['predecessorEvidence'] is None and value['inventories'] == {'build': {}, 'eggInfo': {}},
+                    'initial producer must only create empty outputs')
+    else:
+        schema.file_reference(value['predecessorEvidence'], ctx=ctx)
+        ctx.require(value['predecessorEvidence']['path'] == str(Path(evidence)/OUTPUT_RECEIPTS[previous]), 'producer predecessor scope')
+
+
+@participating
+def execution_outputs(evidence, config, *, frozen, ctx):
+    """Only two exact outputs, from an actual successful preceding producer.
+
+    There is no adoption from directory names or a future gate PASS. Unknown
+    ignored execution inputs are rejected by source_inventory without reading.
+    """
+    evidence = Path(evidence)
+    present = {key for key, (relative, _) in OUTPUT_PATHS.items() if exists(Path(config['source'])/relative, ctx=ctx)}
+    if not present:
+        return {}
+    ctx.require(frozen is not None and present == set(OUTPUT_PATHS), 'partial/preexisting output cannot be adopted')
+    frozen = require_authority(frozen, evidence, ctx=ctx)
+    owners, references = _read_output_owners(evidence, config, frozen, ctx=ctx)
+    ledger, _ = frozen.read_record(evidence/'final-verification.json', ctx=ctx)
+    validate_ledger(ledger, frozen, config, evidence, ctx=ctx)
+    from gate_list import commands
+    route = commands(config, evidence, frozen['stable'], ctx=ctx)
+    ctx.require([(row['gate'], row['command'], row['protocol']) for row in ledger['gates']] == route, 'output preceding route changed')
+    by_name = {row['gate']: row for row in ledger['gates']}
+    stage = 'wheel-build-subcommand' if exists(evidence/OUTPUT_RECEIPTS['wheel-build-subcommand'], ctx=ctx) else \
+            'editable-install' if exists(evidence/OUTPUT_RECEIPTS['editable-install'], ctx=ctx) else 'prepare-owned-build'
+    receipt, reference = frozen.read_record(evidence/OUTPUT_RECEIPTS[stage], ctx=ctx)
+    _output_record(receipt, frozen, evidence, ctx=ctx)
+    ctx.require(receipt['owners'] == owners and receipt['ownerReferences'] == references, 'output owner evidence changed')
+    if stage == 'wheel-build-subcommand':
+        ctx.require(by_name['wheel-install']['status'] in {'RUNNING', 'PASS'}, 'compound output outside its actual active/completed gate')
+        completed_row(by_name['editable-install'], evidence, ctx=ctx, frozen=frozen)
+    else:
+        row = by_name[stage]
+        completed_row(row, evidence, ctx=ctx, frozen=frozen)
+        ctx.require(row['outputEvidence'] == reference
+                    and {k: v for k, v in row.items() if k != 'outputEvidence'} == receipt['producer'], 'output receipt not actual preceding completion')
+    predecessor = receipt
+    while predecessor['predecessorEvidence'] is not None:
+        previous, previous_reference = frozen.read_record(predecessor['predecessorEvidence']['path'], ctx=ctx)
+        ctx.require(previous_reference == predecessor['predecessorEvidence'], 'producer predecessor replaced')
+        _output_record(previous, frozen, evidence, ctx=ctx)
+        ctx.require(previous['stage'] == {'editable-install': 'prepare-owned-build',
+                                          'wheel-build-subcommand': 'editable-install'}[predecessor['stage']],
+                    'producer predecessor stage/cycle')
+        row = by_name[previous['stage']]
+        completed_row(row, evidence, ctx=ctx, frozen=frozen)
+        ctx.require(row['outputEvidence'] == previous_reference
+                    and {k: v for k, v in row.items() if k != 'outputEvidence'} == previous['producer']
+                    and previous['owners'] == owners and previous['ownerReferences'] == references, 'producer predecessor actual completion mismatch')
+        predecessor = previous
+    result = {}
+    for key, (relative, _) in OUTPUT_PATHS.items():
+        expected = receipt['inventories'][key]
+        roles = {name: 'source' if key == 'build' else 'record' for name, row in expected.items() if row['kind'] == 'file'}
+        ctx.require(inventory(owners[key], ctx=ctx, allowed_names=set(expected), file_roles=roles, expected_entries=expected) == expected,
+                    'owned produced output changed/extra/partial')
+        result[relative] = {'identity': owners[key]['identity']}
+    return result
+
+
+@participating
+def bind_output_completion(evidence, stable, producer, *, ctx, frozen=None):
+    evidence = Path(evidence)
+    frozen = load_frozen(evidence, ctx=ctx) if frozen is None else require_authority(frozen, evidence, ctx=ctx)
+    ctx.require(frozen['stable'] == stable, 'producer accepted source changed')
+    completed_row(producer, evidence, ctx=ctx, pending_binding=True)
+    stage = producer['gate']
+    ctx.require(stage in OUTPUT_RECEIPTS, 'unreviewed output producer')
+    config = stable['configuration']['record']
+    ledger, _ = frozen.read_record(evidence/'final-verification.json', ctx=ctx)
+    validate_ledger(ledger, frozen, config, evidence, ctx=ctx)
+    from gate_list import commands
+    route = commands(config, evidence, stable, ctx=ctx)
+    ctx.require([(row['gate'], row['command'], row['protocol']) for row in ledger['gates']] == route, 'producer route changed')
+    active = 'wheel-install' if stage == 'wheel-build-subcommand' else stage
+    index = next((i for i, row in enumerate(ledger['gates']) if row['gate'] == active), None)
+    ctx.require(index is not None and ledger['gates'][index]['status'] == 'RUNNING'
+                and all(row['status'] == 'PASS' for row in ledger['gates'][:index])
+                and all(row['status'] == 'BLOCKED' for row in ledger['gates'][index + 1:]), 'producer is not actual intended active stage')
+    for row in ledger['gates'][:index]:
+        completed_row(row, evidence, ctx=ctx, frozen=frozen)
+    expected_command = wheel_build_command(config, evidence) if stage == 'wheel-build-subcommand' else ledger['gates'][index]['command']
+    ctx.require(producer['command'] == expected_command and producer['cwd'] == config['source'], 'producer command/cwd mismatch')
+    owners, references = _read_output_owners(evidence, config, frozen, ctx=ctx)
+    previous_stage = {'prepare-owned-build': None, 'editable-install': 'prepare-owned-build',
+                      'wheel-build-subcommand': 'editable-install'}[stage]
+    previous_reference = None
+    if previous_stage is not None:
+        previous, previous_reference = frozen.read_record(evidence/OUTPUT_RECEIPTS[previous_stage], ctx=ctx)
+        _output_record(previous, frozen, evidence, ctx=ctx)
+        ctx.require(previous['stage'] == previous_stage, 'producer preceding stage mismatch')
+        row = next(row for row in ledger['gates'] if row['gate'] == previous_stage)
+        ctx.require(row['outputEvidence'] == previous_reference
+                    and {k: v for k, v in row.items() if k != 'outputEvidence'} == previous['producer']
+                    and previous['owners'] == owners and previous['ownerReferences'] == references, 'actual producer predecessor mismatch')
+    if stage == 'prepare-owned-build':
+        prepared, _ = frozen.read_record(evidence/'BUILD-PREPARED.json', ctx=ctx)
+        schema.fields(prepared, {'status', 'tree', 'owners', 'ownerReferences', 'inventories'}, ctx=ctx, label='prepared outputs')
+        ctx.require(prepared == {'status': 'PREPARED_NOT_CHILD_ACCEPTED', 'tree': stable['proposedTree'],
+                                 'owners': owners, 'ownerReferences': references, 'inventories': {'build': {}, 'eggInfo': {}}},
+                    'empty output creation evidence changed')
+        inventories = {key: inventory(owner, ctx=ctx, allowed_names=set()) for key, owner in owners.items()}
+    else:
+        # Producer completion is real; only then may its known exact output names
+        # be read. An extra ordinary/private file rejects before its payload.
+        inventories = {'build': build_entries(owners['build'], stable, config['source'], ctx=ctx,
+                                               allow_empty=stage == 'editable-install')[0],
+                       'eggInfo': egg_info_entries(owners['eggInfo'], stable, config['source'], ctx=ctx)}
+    value = {'schemaVersion': 1, 'status': 'OBSERVED_SUCCESSFUL_PRODUCER', 'stage': stage,
+             'tree': stable['proposedTree'], 'owners': owners, 'ownerReferences': references,
+             'inventories': inventories, 'producer': producer, 'predecessorEvidence': previous_reference}
+    _output_record(value, frozen, evidence, ctx=ctx)
+    # Ordinary source/raw/review bindings must be unchanged even while this
+    # genuine successful producer has just replaced its declared generated data.
+    # This is only the exact two owned, inventoried paths above, not a generic
+    # exclusion exception or authority from the still-running gate's future PASS.
+    from source_inventory import discover
+    from git_readonly import recheck_raw
+    for key, git_key, files, root in (
+            ('sourceUniverse', 'sourceGit', stable['files'], config['source']),
+            ('preservedUserUniverse', 'preservedUserGit', stable['preservedUser']['files'], config['rootUserWorktree'])):
+        generated = {relative: {'identity': owners[output]['identity']} for output, (relative, _) in OUTPUT_PATHS.items()} if root == config['source'] else None
+        universe, _ = discover(root, stable[git_key]['indexFormat'].get('entries', {}),
+                    stable['discoveryAcceptance']['record']['roots'][root], files, ctx=ctx, output_authorities=generated)
+        ctx.require(universe == stable[key], 'source changed during actual output producer')
+        recheck_raw({'stable': stable[git_key]}, ctx=ctx)
+    for group in (stable['sourcePhysical'], stable['preservedUserPhysical']):
+        for original in group.values():
+            ctx.require(not exists(original['path'], ctx=ctx) if original.get('deleted') else
+                        read_file(original['path'], ctx=ctx, role='source') == original, 'producer changed source bytes')
+    frozen.recheck(ctx=ctx)
+    write_new(evidence/OUTPUT_RECEIPTS[stage], value, ctx=ctx)
+    return read_file(evidence/OUTPUT_RECEIPTS[stage], ctx=ctx, role='record')
+
+
+def wheel_build_command(config, evidence):
+    return [config['python'], '-I', '-B', '-u', '-m', 'pip', 'wheel', '--no-deps',
+            '--wheel-dir', str(Path(evidence)/'wheels'), config['source']]
+
+
+@participating
+def guard_inputs(evidence, *, ctx, wheel=False, installed=False, frozen=None):
+    """Descriptor-only guard before every gate/compound code-consuming launch."""
+    frozen = load_frozen(evidence, ctx=ctx) if frozen is None else require_authority(frozen, evidence, ctx=ctx)
+    stable = frozen['stable']
+    from frozen_diff import _inputs_unchanged
+    _inputs_unchanged(stable, evidence, ctx=ctx, frozen=frozen)
+    wheel_value = wheel_payload(evidence, frozen, ctx=ctx) if wheel else None
+    if installed:
+        ctx.require(wheel, 'installed validation requires exact retained wheel')
+        installed_payload(evidence, frozen, ctx=ctx, wheel=wheel_value)
+    frozen.recheck(ctx=ctx)
+    return stable
+
+
+@contextmanager
+def _wheel_stream(fd, *, ctx):
+    """Retain explicit duplicate ownership even if fdopen/stream close fails."""
+    duplicate, stream, primary = None, None, None
+    try:
+        ctx.check()
+        duplicate = os.dup(fd)
+        ctx.check()
+        # The stream never owns the duplicate: its construction/close can fail,
+        # but the descriptor still receives the one mandatory close below.
+        stream = os.fdopen(duplicate, 'rb', closefd=False)
+        ctx.check()
+        yield stream
+        ctx.check()
+    except BaseException as error:
+        primary = error
+        ctx.latch(error)
+        raise
+    finally:
+        closing_error = None
+        if stream is not None:
+            try:
+                stream.close()
+            except BaseException as error:
+                ctx.latch(error)
+                closing_error = error
+        if duplicate is not None:
+            try:
+                close_fd(duplicate, ctx)
+            except BaseException as error:
+                ctx.latch(error)
+                closing_error = closing_error or error
+        if primary is None and closing_error is not None:
+            raise closing_error
+
+
+@participating
+def wheel_payload(evidence, frozen, *, ctx):
+    """Validate the entire wheel source payload before installation/import."""
+    stable = frozen['stable']
+    config = stable['configuration']['record']
+    execution_outputs(evidence, config, frozen=frozen, ctx=ctx)
+    receipt, _ = frozen.read_record(Path(evidence)/OUTPUT_RECEIPTS['wheel-build-subcommand'], ctx=ctx)
+    _output_record(receipt, frozen, evidence, ctx=ctx)
+    owner, owner_reference = frozen.read_record(Path(evidence)/'WHEEL-OUTPUT-OWNER.json', ctx=ctx)
+    assert_owned(owner, ctx=ctx)
+    ctx.require(owner['path'] == str(Path(evidence)/'wheels') and owner['tree'] == stable['proposedTree'], 'wheel output owner scope')
+    filename = 'mobile_release_kit-0.3.0-py3-none-any.whl'
+    contents = inventory(owner, ctx=ctx, allowed_names={filename})
+    ctx.require(set(contents) == {filename} and contents[filename]['kind'] == 'file', 'exact wheel inventory')
+    build, _ = frozen.read_record(Path(evidence)/'WHEEL-ARCHIVE-PRODUCED.json', ctx=ctx)
+    schema.fields(build, {'status', 'tree', 'owner', 'ownerReference', 'wheel', 'producerReference'}, ctx=ctx, label='wheel archive producer')
+    ctx.require(build['status'] == 'OBSERVED_SUCCESSFUL_WHEEL_BUILD' and build['tree'] == stable['proposedTree']
+                and build['owner'] == owner and build['ownerReference'] == owner_reference
+                and build['wheel'] == contents and build['producerReference'] == read_file(Path(evidence)/OUTPUT_RECEIPTS['wheel-build-subcommand'], ctx=ctx, role='record'),
+                'wheel archive changed/unbound')
+    accepted = {name: row for name, row in stable['files'].items() if not row.get('deleted')}
+    project = project_metadata(stable, config['source'], ctx=ctx)
+    expected = {name.removeprefix('src/'): name for name in accepted if name.startswith('src/mobile_release/') and (name.endswith('.py') or name.endswith('.pem'))}
+    for destination, patterns in project['tool']['setuptools']['data-files'].items():
+        for pattern in patterns:
+            matched = {name for name in accepted if fnmatch.fnmatchcase(name, pattern)}
+            ctx.require(matched, 'package-data declaration has no accepted source')
+            for name in matched:
+                expected['mobile_release_kit-0.3.0.data/data/' + destination + '/' + Path(name).name] = name
+    dist = 'mobile_release_kit-0.3.0.dist-info/'
+    expected[dist + 'licenses/LICENSE'] = 'LICENSE'
+    metadata = {dist + name for name in ('METADATA', 'WHEEL', 'entry_points.txt', 'top_level.txt', 'RECORD')}
+    path = Path(owner['path'])/filename
+    with directory(path.parent, ctx=ctx) as parent:
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        try:
+            actual = os.fstat(fd)
+            from action_io import _identity
+            ctx.require(_identity(actual) == contents[filename]['identity'] and stat.S_ISREG(actual.st_mode)
+                        and actual.st_nlink == 1 and actual.st_size == contents[filename]['bytes'], 'wheel descriptor replaced')
+            # Archive, duplicate stream and original descriptor have separately
+            # mandatory disposition; ZipFile never follows a new path.
+            with _wheel_stream(fd, ctx=ctx) as stream, zipfile.ZipFile(stream) as archive:
+                rows = archive.infolist()
+                ctx.require(len(rows) <= 4096 and len({row.filename for row in rows}) == len(rows)
+                            and {row.filename for row in rows} == set(expected) | metadata, 'wheel unknown/missing/duplicate payload')
+                metadata_bodies, member_digests, member_modes = {}, {}, {}
+                for row in rows:
+                    schema.relative(row.filename, ctx=ctx)
+                    ctx.require(not row.is_dir() and not row.flag_bits & 1 and row.file_size <= 8*1024*1024
+                                and stat.S_IFMT(row.external_attr >> 16) in {0, stat.S_IFREG}, 'unsafe wheel member')
+                    hasher, size, chunks = hashlib.sha256(), 0, []
+                    with archive.open(row) as source:
+                        while True:
+                            ctx.check()
+                            block = source.read(CHUNK)
+                            if not block:
+                                break
+                            size += len(block)
+                            ctx.require(size <= row.file_size, 'growing wheel member')
+                            ctx.bytes(len(block), 'source')
+                            ctx.bytes(len(block), 'source', hashing=True)
+                            hasher.update(block)
+                            if row.filename in metadata:
+                                ctx.require(size <= 4*1024*1024, 'wheel metadata record bound')
+                                chunks.append(block)
+                    ctx.require(size == row.file_size, 'short wheel member')
+                    member_digests[row.filename] = {'bytes': size, 'sha256': hasher.hexdigest()}
+                    mode = row.external_attr >> 16
+                    member_modes[row.filename] = 0o711 if stat.S_ISREG(mode) and mode & 0o111 else 0o600
+                    if row.filename in expected:
+                        ctx.require(hasher.hexdigest() == accepted[expected[row.filename]]['sha256'], 'wheel payload differs from independently accepted source')
+                    else:
+                        metadata_bodies[row.filename] = b''.join(chunks)
+                package_metadata(metadata_bodies[dist + 'METADATA'], metadata_bodies[dist + 'entry_points.txt'], project['project'], ctx=ctx)
+                wheel_record(metadata_bodies[dist + 'RECORD'], member_digests, ctx=ctx)
+                wheel_metadata = BytesParser().parsebytes(metadata_bodies[dist + 'WHEEL'])
+                ctx.require(wheel_metadata.get_all('Wheel-Version') == ['1.0'] and wheel_metadata.get_all('Root-Is-Purelib') == ['true']
+                            and wheel_metadata.get_all('Tag') == ['py3-none-any']
+                            and metadata_bodies[dist + 'top_level.txt'].splitlines() == [b'mobile_release'], 'wheel format/module policy')
+        finally:
+            close_fd(fd, ctx)
+    ctx.require(inventory(owner, ctx=ctx, allowed_names={filename}, expected_entries=contents) == contents, 'wheel changed during payload validation')
+    return {'file': {'path': str(path), **{key: contents[filename][key] for key in ('identity', 'bytes', 'sha256')}},
+            'members': member_digests, 'modes': member_modes}
+
+
+WHEEL_POLICY = 'qa006-verifier-r4-r3-v1'
+VENV_TEMPLATES = {'common/activate', 'common/Activate.ps1', 'posix/activate.csh', 'posix/activate.fish'}
+RUNTIME_STAGES = {
+    'venv': ('wheel-venv-subcommand', 'WHEEL-VENV-ATTEMPT.json', 'WHEEL-VENV-COMPLETE.json'),
+    'install': ('wheel-install-subcommand', 'WHEEL-INSTALL-ATTEMPT.json', 'WHEEL-INSTALL-COMPLETE.json'),
+    'check': ('wheel-dependency-subcommand', 'WHEEL-DEPENDENCY-ATTEMPT.json', 'WHEEL-DEPENDENCY-COMPLETE.json'),
+}
+RUNTIME_PURPOSE = 'actual source-only pip-free venv producer; receipt and exact bytes required before use; no cleanup authority'
+WHEEL_ENVIRONMENT = {
+    'LANG': 'en_US.UTF-8', 'LC_ALL': 'en_US.UTF-8',
+    'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONSAFEPATH': '1', 'PYTHONNOUSERSITE': '1',
+    'PYTHONUNBUFFERED': '1', 'PIP_CONFIG_FILE': '/dev/null',
+}
+PIP_COMMON = ['--isolated', '--disable-pip-version-check', '--no-input', '--no-cache-dir']
+
+
+def wheel_environment(config, owner):
+    """Complete clean parent env; pip alone adds its nested-process marker."""
+    root = Path(owner['path'])
+    return {**WHEEL_ENVIRONMENT, 'PATH': config['path'], 'HOME': str(root/'runtime-home'),
+            'TMPDIR': str(root/'runtime-tmp'), 'TMP': str(root/'runtime-tmp'), 'TEMP': str(root/'runtime-tmp')}
+
+
+def runtime_command(stage, config, evidence, bootstrap, owner):
+    """Literal dispatch templates; target argv is a contract, not a PID receipt."""
+    require(stage in RUNTIME_STAGES, 'unknown wheel runtime stage')
+    base = [config['python'], '-I', '-B', '-S']
+    if stage == 'venv':
+        return base + [str(Path(evidence)/'owned_outputs.py'), 'produce-venv']
+    target = str(Path(owner['path'])/'venv/bin/python')
+    tail = [*PIP_COMMON, '--python', target]
+    tail += ['install', '--no-index', '--no-deps', '--no-compile',
+             str(Path(evidence)/'wheels/mobile_release_kit-0.3.0-py3-none-any.whl')] if stage == 'install' else ['check']
+    return base + [bootstrap['pip']['path'] + '/pip', *tail]
+
+
+def pip_target_contract(command, environment):
+    """Pinned pip24 parse_command/get_runnable_pip semantics, not observation."""
+    require(command[1:4] == ['-I', '-B', '-S'] and command[5:9] == PIP_COMMON
+            and command[9] == '--python' and '_PIP_RUNNING_IN_SUBPROCESS' not in environment,
+            'invalid pinned pip redispatch contract')
+    return {'basis': 'source-validated pinned pip24 synchronous redispatch; no separate target PID/exit observed',
+            'argv': [command[10], command[4], *command[5:]],
+            'environment': {**environment, '_PIP_RUNNING_IN_SUBPROCESS': '1'},
+            'observedSeparately': False}
+
+
+@participating
+def validate_wheel_bootstrap(value, config, *, ctx):
+    schema.fields(value, {'schemaVersion', 'policyVersion', 'python', 'runtime', 'venvSource',
+                          'venvAncestry', 'templateDirectories', 'templates', 'pip', 'pipAncestry',
+                          'dispatch', 'environment'}, ctx=ctx, label='wheel bootstrap')
+    schema.same(value['schemaVersion'], 1, ctx=ctx)
+    ctx.require(value['policyVersion'] == config['policyVersion'] == WHEEL_POLICY, 'wheel bootstrap policy')
+    python = value['python']
+    schema.fields(python, {'path', 'pathIdentity', 'resolved', 'file'}, ctx=ctx, label='wheel base interpreter')
+    schema.absolute(python['path'], ctx=ctx); schema.absolute(python['resolved'], ctx=ctx)
+    schema.identity(python['pathIdentity'], ctx=ctx)
+    schema.file_reference(python['file'], ctx=ctx, role='tool')
+    ctx.require(python['path'] == config['python'] and python['file']['path'] == python['resolved']
+                and python['file']['identity']['mode'] & 0o111, 'wheel base interpreter selection')
+    runtime = value['runtime']
+    schema.fields(runtime, {'osName', 'platform', 'implementation', 'version', 'libraryVersion', 'basePrefix',
+                            'baseExecutable', 'symlinkMode', 'lib64'}, ctx=ctx, label='wheel runtime contract')
+    ctx.require(runtime['osName'] == 'posix' and runtime['platform'] in {'darwin', 'linux'}
+                and runtime['implementation'] == 'cpython' and runtime['version'] == config['expectedVersions']['python']
+                and runtime['libraryVersion'] == '.'.join(runtime['version'].split('.')[:2])
+                and re.fullmatch(r'3\.11\.[0-9]+', runtime['version']) is not None,
+                'unsupported pinned POSIX verifier runtime')
+    schema.absolute(runtime['basePrefix'], ctx=ctx); schema.absolute(runtime['baseExecutable'], ctx=ctx)
+    ctx.require(runtime['baseExecutable'] == python['resolved']
+                and Path(runtime['baseExecutable']).name == 'python' + runtime['libraryVersion']
+                and runtime['basePrefix'] == str(Path(python['resolved']).parent.parent), 'base runtime relationship')
+    schema.same(runtime['lib64'], runtime['platform'] != 'darwin', ctx=ctx, label='pinned 64-bit POSIX lib64')
+    schema.same(runtime['symlinkMode'], 0o700 if runtime['platform'] == 'darwin' else 0o777,
+                ctx=ctx, label='private POSIX symlink mode')
+    source = value['venvSource']
+    schema.file_reference(source, ctx=ctx, role='source')
+    expected_venv = Path(runtime['basePrefix'])/'lib'/('python' + runtime['libraryVersion'])/'venv'
+    ctx.require(source['path'] == str(expected_venv/'__init__.py'), 'fixed authenticated venv source')
+    schema.ancestry(value['venvAncestry'], str(expected_venv), ctx=ctx)
+    schema.fields(value['templateDirectories'], {'scripts', 'scripts/common', 'scripts/posix'},
+                  ctx=ctx, label='complete template directories')
+    for row in value['templateDirectories'].values():
+        schema.identity(row, ctx=ctx, kind=stat.S_IFDIR)
+    schema.fields(value['templates'], VENV_TEMPLATES, ctx=ctx, label='complete template files')
+    for name, row in value['templates'].items():
+        schema.file_reference(row, ctx=ctx, role='source')
+        ctx.require(row['path'] == str(expected_venv/'scripts'/name) and row['identity']['mode'] == 0o644,
+                    'template file source/mode')
+    schema.file_reference(value['pip'], ctx=ctx, role='tool')
+    ctx.require(value['pip']['path'] == str(expected_venv.parent/'ensurepip/_bundled/pip-24.0-py3-none-any.whl')
+                and config['expectedVersions']['pip'] == '24.0', 'fixed bundled pip24 wheel')
+    schema.ancestry(value['pipAncestry'], str(Path(value['pip']['path']).parent), ctx=ctx)
+    schema.same(value['environment'], WHEEL_ENVIRONMENT, ctx=ctx, label='complete fixed wheel environment values')
+    schema.same(value['dispatch'], {
+        'producer': ['{base}', '-I', '-B', '-S', '{evidence}/owned_outputs.py', 'produce-venv'],
+        'install': ['{base}', '-I', '-B', '-S', '{pip}/pip', *PIP_COMMON, '--python', '{target}/bin/python',
+                    'install', '--no-index', '--no-deps', '--no-compile', '{wheel}'],
+        'check': ['{base}', '-I', '-B', '-S', '{pip}/pip', *PIP_COMMON, '--python', '{target}/bin/python', 'check'],
+        'target': ['{target}/bin/python', '{pip}/pip', '{same-pip-args}'],
+        'targetFlagsForwarded': [], 'incomingMarkerAllowed': False, 'umask': 0o077,
+    }, ctx=ctx, label='complete actual/expected dispatch contract')
+
+
+@participating
+def bootstrap_namespace(value, config, *, ctx):
+    """Metadata-only source/template/interpreter alias recheck; no cache reads."""
+    validate_wheel_bootstrap(value, config, ctx=ctx)
+    selected = Path(config['python'])
+    ctx.require(identity(selected, ctx=ctx) == value['python']['pathIdentity']
+                and str(selected.resolve(strict=True)) == value['python']['resolved'],
+                'bootstrap selected interpreter alias changed')
+    root = Path(value['venvSource']['path']).parent
+    ctx.require(ancestry(root, ctx=ctx) == value['venvAncestry']
+                and ancestry(Path(value['pip']['path']).parent, ctx=ctx) == value['pipAncestry'],
+                'bootstrap source/tool parent replaced')
+    from action_io import names
+    for name, row in value['templateDirectories'].items():
+        ctx.require(identity(root/name, ctx=ctx) == row, 'template directory replaced')
+    for name, expected in (('scripts', {'common', 'posix'}),
+                           ('scripts/common', {'activate', 'Activate.ps1'}),
+                           ('scripts/posix', {'activate.csh', 'activate.fish'})):
+        ctx.require(set(names(root/name, ctx=ctx)) == expected, 'unknown/missing template entry; payload not adopted')
+
+
+@participating
+def bootstrap_recheck(value, config, *, ctx, retain_templates=False):
+    bootstrap_namespace(value, config, ctx=ctx)
+    from bindings import executable
+    ctx.require(executable(config['python'], ctx=ctx) == value['python'], 'bootstrap interpreter changed')
+    templates = {}
+    for name, expected in value['templates'].items():
+        row = read_file(expected['path'], ctx=ctx, role='source', retain=retain_templates)
+        if retain_templates:
+            templates[name] = row.pop('data')
+        ctx.require(row == expected, 'venv template bytes changed')
+    ctx.require(read_file(value['venvSource']['path'], ctx=ctx, role='source') == value['venvSource']
+                and read_file(value['pip']['path'], ctx=ctx, role='tool') == value['pip'], 'venv/pip bootstrap bytes changed')
+    return templates
+
+
+@participating
+def wheel_bootstrap(evidence, config, *, ctx):
+    path = Path(evidence)/'WHEEL-BOOTSTRAP.json'
+    value = read_json(path, ctx=ctx)
+    bootstrap_recheck(value, config, ctx=ctx)
+    return {'record': value, 'file': read_file(path, ctx=ctx, role='record')}
+
+
+@participating
+def minimal_runtime(bootstrap, config, owner, *, ctx):
+    """Independently expected layout/content, not newly inventoried authority."""
+    templates = bootstrap_recheck(bootstrap, config, ctx=ctx, retain_templates=True)
+    runtime = bootstrap['runtime']
+    target = Path(owner['path'])/'venv'
+    version = runtime['libraryVersion']
+    executable = Path(runtime['baseExecutable'])
+    expected = {name: {'kind': 'directory', 'mode': 0o700} for name in
+                ('bin', 'include', 'include/python' + version, 'lib', 'lib/python' + version,
+                 'lib/python' + version + '/site-packages')}
+    for name in {executable.name, 'python', 'python3', 'python' + version}:
+        expected['bin/' + name] = {'kind': 'symlink', 'mode': runtime['symlinkMode'],
+                                  'target': str(executable) if name == executable.name else executable.name}
+    if runtime['lib64']:
+        expected['lib64'] = {'kind': 'symlink', 'mode': runtime['symlinkMode'], 'target': 'lib'}
+    cfg = (f'home = {executable.parent}\ninclude-system-site-packages = false\nversion = {runtime["version"]}\n'
+           f'executable = {bootstrap["python"]["resolved"]}\n'
+           f'command = {config["python"]} -m venv --without-pip {target}\n').encode('utf-8')
+    expected['pyvenv.cfg'] = {'kind': 'file', 'mode': 0o600, 'bytes': len(cfg), 'sha256': hashlib.sha256(cfg).hexdigest()}
+    replacements = {'__VENV_DIR__': str(target), '__VENV_NAME__': target.name,
+                    '__VENV_PROMPT__': '(' + target.name + ') ', '__VENV_BIN_NAME__': 'bin',
+                    '__VENV_PYTHON__': str(target/'bin'/executable.name)}
+    for name, source in templates.items():
+        text = source.decode('utf-8')
+        for key, value in replacements.items():
+            quoted = "'" + value.replace("'", "''") + "'" if name.endswith('.ps1') else shlex.quote(value)
+            text = text.replace(key, quoted)
+        body = text.encode('utf-8')
+        expected['bin/' + Path(name).name] = {'kind': 'file', 'mode': bootstrap['templates'][name]['identity']['mode'],
+                                           'bytes': len(body), 'sha256': hashlib.sha256(body).hexdigest()}
+    return expected
+
+
+@participating
+def installed_runtime(bootstrap, config, owner, wheel, *, ctx):
+    expected = minimal_runtime(bootstrap, config, owner, ctx=ctx)
+    site = 'lib/python' + bootstrap['runtime']['libraryVersion'] + '/site-packages'
+    installed = {}
+    dist = 'mobile_release_kit-0.3.0.dist-info/'
+    for name, row in wheel['members'].items():
+        if name == dist + 'RECORD':
+            continue
+        relative = name.removeprefix('mobile_release_kit-0.3.0.data/data/') if name.startswith('mobile_release_kit-0.3.0.data/data/') else site + '/' + name
+        ctx.require(relative not in installed and relative not in expected, 'wheel collides with bootstrap runtime')
+        installed[relative] = {'kind': 'file', 'mode': wheel['modes'][name], **row}
+    python = str(Path(owner['path'])/'venv/bin/python')
+    ctx.require(re.fullmatch(r'[A-Za-z0-9_./-]+', python) is not None, 'unsupported private console path quoting')
+    if len(python.encode()) + 3 <= (512 if bootstrap['runtime']['platform'] == 'darwin' else 127):
+        shebang = '#!' + python + '\n'
+    else:
+        shebang = '#!/bin/sh\n\'\'\'exec\' ' + python + ' "$0" "$@"\n\' \'\'\'\n'
+    console = (shebang + "# -*- coding: utf-8 -*-\nimport re\nimport sys\nfrom mobile_release.cli import main\n"
+               "if __name__ == '__main__':\n    sys.argv[0] = re.sub(r'(-script\\.pyw|\\.exe)?$', '', sys.argv[0])\n    sys.exit(main())\n").encode()
+    digest_text = wheel['file']['sha256']
+    direct = json.dumps({'archive_info': {'hash': 'sha256=' + digest_text, 'hashes': {'sha256': digest_text}},
+                         'url': Path(wheel['file']['path']).as_uri()}, sort_keys=True).encode()
+    for name, body, mode in [('bin/mobile-release', console, 0o755), (site + '/' + dist + 'INSTALLER', b'pip\n', 0o600),
+                             (site + '/' + dist + 'REQUESTED', b'', 0o600), (site + '/' + dist + 'direct_url.json', direct, 0o600)]:
+        ctx.require(name not in installed and name not in expected, 'installer/runtime collision')
+        installed[name] = {'kind': 'file', 'mode': mode, 'bytes': len(body), 'sha256': hashlib.sha256(body).hexdigest()}
+    record_name = site + '/' + dist + 'RECORD'
+    rows = []
+    for name, row in installed.items():
+        digest_text = base64.urlsafe_b64encode(bytes.fromhex(row['sha256'])).rstrip(b'=').decode()
+        rows.append([posixpath.relpath(name, site), 'sha256=' + digest_text, str(row['bytes'])])
+    rows.append([dist + 'RECORD', '', ''])
+    stream = string_io.StringIO(newline='')
+    csv.writer(stream).writerows(sorted(rows))
+    body = stream.getvalue().encode()
+    installed[record_name] = {'kind': 'file', 'mode': 0o600, 'bytes': len(body), 'sha256': hashlib.sha256(body).hexdigest()}
+    for name in tuple(installed):
+        for parent in Path(name).parents:
+            if str(parent) != '.' and str(parent) not in expected:
+                installed.setdefault(str(parent), {'kind': 'directory', 'mode': 0o700})
+    ctx.require(not set(expected) & set(installed), 'generated install overwrote minimal runtime')
+    return {**expected, **installed}
+
+
+@participating
+def inspect_runtime(runtime_owner, expected, *, ctx, baseline=None):
+    links = {name for name, row in expected.items() if row['kind'] == 'symlink'}
+    roles = {name: 'record' if '.dist-info/' in name or name == 'pyvenv.cfg' else 'source'
+             for name, row in expected.items() if row['kind'] == 'file'}
+    current = inventory(runtime_owner, ctx=ctx, symlink_paths=links, allowed_names=set(expected), file_roles=roles)
+    ctx.require(set(current) == set(expected), 'runtime missing required files/directories')
+    for name, row in current.items():
+        wanted = expected[name]
+        semantic = {'kind': row['kind'], 'mode': row['identity']['mode']}
+        semantic.update({key: row[key] for key in ('target', 'bytes', 'sha256') if key in row})
+        ctx.require(semantic == wanted, 'runtime namespace/config/alias/payload/launcher differs: ' + name)
+    if baseline is not None:
+        ctx.require(all(current.get(name) == row for name, row in baseline.items()), 'baseline runtime was replaced or changed')
+    return current
+
+
+@participating
+def _runtime_authority(evidence, frozen, *, ctx):
+    frozen = require_authority(frozen, evidence, ctx=ctx)
+    stable = frozen['stable']
+    config = stable['configuration']['record']
+    boot = stable['wheelBootstrap']
+    ctx.require(boot['record']['python'] == stable['tools']['executables']['python'], 'runtime/frozen interpreter disagreement')
+    bootstrap_recheck(boot['record'], config, ctx=ctx)
+    owner, owner_reference = frozen.read_record(Path(evidence)/'WHEEL-OWNER.json', ctx=ctx)
+    ctx.require(owner['path'] == str(Path(config['owner'])/'final-wheel-r1') and owner['tree'] == stable['proposedTree']
+                and owner['purpose'] == 'exclusive initially empty disposable wheel installation and synthetic smoke project',
+                'wheel installation owner scope')
+    assert_owned(owner, ctx=ctx)
+    for name, marker in (('runtime-home', 'WHEEL-HOME-OWNER.json'), ('runtime-tmp', 'WHEEL-TMP-OWNER.json')):
+        scratch, _ = frozen.read_record(Path(evidence)/marker, ctx=ctx)
+        ctx.require(scratch['path'] == str(Path(owner['path'])/name) and scratch['tree'] == stable['proposedTree']
+                    and scratch['purpose'] == 'exclusive private wheel runtime ' + name, 'wheel environment root owner')
+        assert_owned(scratch, ctx=ctx)
+    return config, boot, owner, owner_reference
+
+
+@participating
+def _runtime_attempt(value, stage, evidence, frozen, wheel, *, ctx):
+    schema.fields(value, {'schemaVersion', 'policyVersion', 'status', 'stage', 'tree', 'ownerReference', 'bootstrapReference',
+                          'wheelReference', 'predecessorReference', 'action', 'command', 'environment', 'cwd', 'target',
+                          'targetDispatch', 'umask'}, ctx=ctx, label='runtime attempt')
+    config, boot, owner, owner_reference = _runtime_authority(evidence, frozen, ctx=ctx)
+    schema.same(value['schemaVersion'], 1, ctx=ctx)
+    ctx.require(stage in RUNTIME_STAGES and value['status'] == 'RESERVED_NOT_COMPLETED'
+                and value['policyVersion'] == WHEEL_POLICY and value['stage'] == stage
+                and value['tree'] == frozen['stable']['proposedTree'], 'runtime attempt scope/policy')
+    for key in ('ownerReference', 'bootstrapReference', 'wheelReference', 'predecessorReference'):
+        schema.file_reference(value[key], ctx=ctx, role='source' if key == 'wheelReference' else 'record')
+    ctx.require(value['ownerReference'] == owner_reference and value['bootstrapReference'] == boot['file']
+                and value['wheelReference'] == wheel['file'], 'runtime attempt input identity')
+    command = runtime_command(stage, config, evidence, boot['record'], owner)
+    environment = wheel_environment(config, owner)
+    schema.same(value['command'], command, ctx=ctx, label='runtime attempt argv')
+    schema.same(value['environment'], environment, ctx=ctx, label='clean wheel environment')
+    ctx.require(value['cwd'] == owner['path'] and value['target'] == str(Path(owner['path'])/'venv'),
+                'runtime attempt working/target directory')
+    schema.same(value['umask'], 0o077, ctx=ctx)
+    schema.same(value['targetDispatch'], None if stage == 'venv' else pip_target_contract(command, environment),
+                ctx=ctx, label='distinct target redispatch source contract')
+    schema.action_metadata(value['action'], ctx=ctx, full=True)
+    ctx.require(value['action']['action'] == 'wheel-runtime-admit:' + stage
+                and not value['action']['native'] and not value['action']['queries']
+                and not value['action']['views'] and not value['action']['removals'], 'runtime attempt action ownership')
+    preceding = 'WHEEL-ARCHIVE-PRODUCED.json' if stage == 'venv' else RUNTIME_STAGES['venv' if stage == 'install' else 'install'][2]
+    ctx.require(value['predecessorReference']['path'] == str(Path(evidence)/preceding), 'runtime attempt predecessor scope')
+    return config, boot, owner
+
+
+@participating
+def _runtime_semantics(entries, expected, *, ctx):
+    from bindings import validate_inventory_schema
+    validate_inventory_schema(entries, ctx=ctx, symlink_paths={name for name, row in expected.items() if row['kind'] == 'symlink'})
+    ctx.require(set(entries) == set(expected), 'recorded runtime incomplete/unknown namespace')
+    for name, row in entries.items():
+        semantic = {'kind': row['kind'], 'mode': row['identity']['mode']}
+        semantic.update({key: row[key] for key in ('target', 'bytes', 'sha256') if key in row})
+        ctx.require(semantic == expected[name], 'recorded runtime not independently justified: ' + name)
+
+
+@participating
+def _runtime_chain(evidence, frozen, stage, wheel, *, ctx):
+    """Validate real producer relationships; only the leaf reads current bytes."""
+    evidence = Path(evidence)
+    ctx.require(stage in RUNTIME_STAGES, 'unknown runtime chain stage')
+    _, attempt_name, complete_name = RUNTIME_STAGES[stage]
+    complete, reference = frozen.read_record(evidence/complete_name, ctx=ctx)
+    _runtime_complete_value(complete, evidence, frozen, stage, wheel, ctx=ctx)
+    return complete, reference
+
+
+@participating
+def _runtime_complete_value(complete, evidence, frozen, stage, wheel, *, ctx):
+    """The same full validator is used before publication and on consumption."""
+    evidence = Path(evidence)
+    ctx.require(stage in RUNTIME_STAGES, 'unknown runtime completion stage')
+    attempt_name = RUNTIME_STAGES[stage][1]
+    schema.fields(complete, {'schemaVersion', 'policyVersion', 'status', 'stage', 'tree', 'attemptReference',
+                             'producer', 'runtimeOwner', 'entries', 'predecessorReference', 'producedReference'},
+                  ctx=ctx, label='successful runtime producer completion')
+    schema.same(complete['schemaVersion'], 1, ctx=ctx)
+    ctx.require(complete['policyVersion'] == WHEEL_POLICY and complete['status'] == 'OBSERVED_SUCCESSFUL_RUNTIME_PRODUCER'
+                and complete['stage'] == stage and complete['tree'] == frozen['stable']['proposedTree'],
+                'runtime completion scope/policy/status')
+    attempt, attempt_reference = frozen.read_record(evidence/attempt_name, ctx=ctx)
+    config, boot, owner = _runtime_attempt(attempt, stage, evidence, frozen, wheel, ctx=ctx)
+    schema.file_reference(complete['attemptReference'], ctx=ctx)
+    schema.file_reference(complete['predecessorReference'], ctx=ctx)
+    ctx.require(complete['attemptReference'] == attempt_reference
+                and complete['predecessorReference'] == attempt['predecessorReference'], 'runtime predecessor/attempt changed')
+    producer = complete['producer']
+    completed_row(producer, evidence, ctx=ctx, frozen=frozen, pending_binding=True)
+    ctx.require(producer['gate'] == RUNTIME_STAGES[stage][0] and producer['command'] == attempt['command']
+                and producer['cwd'] == attempt['cwd'] and producer['protocol'] == 'command', 'actual runtime producer route')
+    runtime_owner = complete['runtimeOwner']
+    schema.owner_record(runtime_owner, ctx=ctx)
+    ctx.require(runtime_owner['path'] == attempt['target'] and runtime_owner['tree'] == complete['tree']
+                and runtime_owner['purpose'] == RUNTIME_PURPOSE, 'runtime owner does not identify this candidate')
+    assert_owned(runtime_owner, ctx=ctx)
+    if stage == 'venv':
+        expected = minimal_runtime(boot['record'], config, owner, ctx=ctx)
+        schema.file_reference(complete['producedReference'], ctx=ctx)
+        produced, produced_reference = frozen.read_record(evidence/'WHEEL-VENV-PRODUCED.json', ctx=ctx)
+        schema.fields(produced, {'status', 'tree', 'attemptReference', 'runtimeOwner', 'entries', 'observedRuntime', 'action'},
+                      ctx=ctx, label='child-produced runtime not parent completion')
+        ctx.require(complete['producedReference'] == produced_reference
+                    and produced_reference['path'] == str(evidence/'WHEEL-VENV-PRODUCED.json')
+                    and produced['status'] == 'CREATED_AND_VALIDATED_NOT_PARENT_ACCEPTED'
+                    and produced['tree'] == complete['tree'] and produced['attemptReference'] == attempt_reference
+                    and produced['runtimeOwner'] == runtime_owner and produced['entries'] == complete['entries'],
+                    'actual child runtime declaration differs from parent observation')
+        schema.same(produced['observedRuntime'], _expected_producer_runtime(config, boot['record'], evidence),
+                    ctx=ctx, label='actual source-bootstrap runtime metadata/argv')
+        schema.action_metadata(produced['action'], ctx=ctx, full=True)
+        ctx.require(produced['action']['action'] == 'wheel-source-only-venv-producer'
+                    and produced['action']['nonce'] == runtime_owner['nonce']
+                    and produced['action']['nonce'] != attempt['action']['nonce']
+                    and not produced['action']['native'] and not produced['action']['queries']
+                    and not produced['action']['views'] and not produced['action']['removals'], 'venv child action identity')
+        ctx.require(read_file(complete['predecessorReference']['path'], ctx=ctx, role='record') == complete['predecessorReference'],
+                    'wheel archive predecessor changed')
+    else:
+        previous, previous_reference = _runtime_chain(evidence, frozen, 'venv' if stage == 'install' else 'install', wheel, ctx=ctx)
+        ctx.require(complete['predecessorReference'] == previous_reference and runtime_owner == previous['runtimeOwner']
+                    and complete['producedReference'] is None, 'runtime producer chain/owner mismatch')
+        ctx.require(all(complete['entries'].get(name) == row for name, row in previous['entries'].items()),
+                    'installer/check overwrote previously accepted runtime')
+        expected = installed_runtime(boot['record'], config, owner, wheel, ctx=ctx)
+        if stage == 'check':
+            ctx.require(complete['entries'] == previous['entries'], 'dependency check changed runtime')
+    _runtime_semantics(complete['entries'], expected, ctx=ctx)
+
+
+@participating
+def runtime_guard(evidence, frozen, stage, *, ctx, wheel=None):
+    wheel = wheel_payload(evidence, frozen, ctx=ctx) if wheel is None else wheel
+    complete, reference = _runtime_chain(evidence, frozen, stage, wheel, ctx=ctx)
+    config, boot, owner, _ = _runtime_authority(evidence, frozen, ctx=ctx)
+    expected = (minimal_runtime(boot['record'], config, owner, ctx=ctx) if stage == 'venv'
+                else installed_runtime(boot['record'], config, owner, wheel, ctx=ctx))
+    ctx.require(inspect_runtime(complete['runtimeOwner'], expected, ctx=ctx, baseline=complete['entries']) == complete['entries'],
+                'runtime changed before consumer acquisition')
+    frozen.recheck(ctx=ctx)
+    return complete, reference
+
+
+def _expected_producer_runtime(config, bootstrap, evidence):
+    runtime = bootstrap['runtime']
+    return {'executable': config['python'], 'baseExecutable': runtime['baseExecutable'],
+            'prefix': runtime['basePrefix'], 'basePrefix': runtime['basePrefix'],
+            'execPrefix': runtime['basePrefix'], 'baseExecPrefix': runtime['basePrefix'],
+            'version': runtime['version'], 'implementation': runtime['implementation'],
+            'osName': runtime['osName'], 'platform': runtime['platform'],
+            'origArgv': [config['python'], '-I', '-B', '-S', str(Path(evidence)/'owned_outputs.py'), 'produce-venv'],
+            'isolated': 1, 'noSite': 1, 'dontWriteBytecode': True, 'safePath': True, 'bits': 64}
+
+
+def _observed_producer_runtime():
+    return {'executable': sys.executable, 'baseExecutable': sys._base_executable,
+            'prefix': sys.prefix, 'basePrefix': sys.base_prefix,
+            'execPrefix': sys.exec_prefix, 'baseExecPrefix': sys.base_exec_prefix,
+            'version': '.'.join(map(str, sys.version_info[:3])), 'implementation': sys.implementation.name,
+            'osName': os.name, 'platform': sys.platform, 'origArgv': list(sys.orig_argv),
+            'isolated': sys.flags.isolated, 'noSite': sys.flags.no_site,
+            'dontWriteBytecode': sys.dont_write_bytecode, 'safePath': sys.flags.safe_path,
+            'bits': 64 if sys.maxsize > 2**32 else 32}
+
+
+@participating
+def source_venv_bootstrap(evidence, frozen, attempt, attempt_reference, wheel, *, ctx):
+    """The actual fixed child entry consumes only authenticated venv source."""
+    config, boot, owner = _runtime_attempt(attempt, 'venv', evidence, frozen, wheel, ctx=ctx)
+    bootstrap = boot['record']
+    ctx.require(attempt['action']['started'] <= ctx.started < attempt['action']['cutoff'],
+                'source producer did not enter during the original admission lifetime')
+    observed = _observed_producer_runtime()
+    schema.same(observed, _expected_producer_runtime(config, bootstrap, evidence), ctx=ctx,
+                label='real source-bootstrap interpreter/context/argv')
+    schema.same(dict(os.environ), wheel_environment(config, owner), ctx=ctx, label='actual clean producer environment')
+    target = Path(attempt['target'])
+    ctx.require(not exists(target, ctx=ctx) and not exists(Path(evidence)/'WHEEL-VENV-PRODUCED.json', ctx=ctx)
+                and not exists(Path(evidence)/RUNTIME_STAGES['venv'][2], ctx=ctx), 'venv target/receipt already exists; no adoption')
+    ctx.require('venv' not in sys.modules, 'preexisting venv module is not authenticated authority')
+    bootstrap_recheck(bootstrap, config, ctx=ctx)
+    source = read_file(bootstrap['venvSource']['path'], ctx=ctx, role='source', retain=True)
+    body = source.pop('data')
+    ctx.require(source == bootstrap['venvSource'], 'venv source changed before compilation')
+    module = types.ModuleType('venv')
+    module.__file__ = source['path']
+    module.__package__, module.__path__, module.__loader__, module.__spec__ = 'venv', [str(Path(source['path']).parent)], None, None
+    # No import/reopen/SourceFileLoader and no altered interpreter metadata.
+    exec(compile(body, source['path'], 'exec', dont_inherit=True), module.__dict__)
+    ctx.check()
+    ctx.require('venv' not in sys.modules, 'venv source created an unexpected module collision')
+    previous = os.umask(0o077)
+    primary = None
+    try:
+        ctx.check()
+        module.EnvBuilder(system_site_packages=False, clear=False, symlinks=True, upgrade=False,
+                          with_pip=False, prompt=None, upgrade_deps=False).create(str(target))
+        ctx.check()
+    except BaseException as error:
+        primary = error
+        ctx.latch(error)
+        raise
+    finally:
+        try:
+            os.umask(previous)
+        except BaseException as error:
+            ctx.latch(error)
+            if primary is None:
+                raise
+    runtime_owner = {'path': str(target), 'identity': identity(target, ctx=ctx),
+                     'parentAncestry': ancestry(target.parent, ctx=ctx), 'nonce': ctx.nonce,
+                     'tree': frozen['stable']['proposedTree'], 'purpose': RUNTIME_PURPOSE}
+    expected = minimal_runtime(bootstrap, config, owner, ctx=ctx)
+    entries = inspect_runtime(runtime_owner, expected, ctx=ctx)
+    bootstrap_recheck(bootstrap, config, ctx=ctx)
+    frozen.recheck(ctx=ctx)
+    # This is a child observation, explicitly NOT its own eventual completion.
+    produced = {'status': 'CREATED_AND_VALIDATED_NOT_PARENT_ACCEPTED', 'tree': frozen['stable']['proposedTree'],
+                'attemptReference': attempt_reference, 'runtimeOwner': runtime_owner, 'entries': entries,
+                'observedRuntime': observed, 'action': ctx.summary()}
+    write_new(Path(evidence)/'WHEEL-VENV-PRODUCED.json', produced, ctx=ctx)
+
+
+def produce_venv(evidence):
+    evidence = Path(evidence)
+    with action('wheel-source-only-venv-producer') as ctx:
+        frozen = load_frozen(evidence, ctx=ctx)
+        guard_inputs(evidence, ctx=ctx, wheel=True, frozen=frozen)
+        active_ledger(evidence, 'wheel-install', ctx=ctx, frozen=frozen)
+        attempt, attempt_reference = frozen.read_record(evidence/RUNTIME_STAGES['venv'][1], ctx=ctx)
+        wheel = wheel_payload(evidence, frozen, ctx=ctx)
+        source_venv_bootstrap(evidence, frozen, attempt, attempt_reference, wheel, ctx=ctx)
+
+
+def run_runtime_producer(evidence, stage):
+    """Own actual creation/install/check completion; failure is never adopted.
+
+    The collector observes the base pip parent, not a separately collected pip
+    target PID. Its synchronous target contract is independently pinned source.
+    A child success without an exclusive validated completion blocks every use.
+    """
+    from process_gate import cancellation_flag, execute
+    evidence = Path(evidence)
+    require(stage in RUNTIME_STAGES, 'unknown runtime producer stage')
+    gate, attempt_name, complete_name = RUNTIME_STAGES[stage]
+    with cancellation_flag() as pending:
+        with action('wheel-runtime-admit:' + stage, pending=pending) as ctx:
+            frozen = load_frozen(evidence, ctx=ctx)
+            stable = guard_inputs(evidence, ctx=ctx, wheel=True, frozen=frozen)
+            active_ledger(evidence, 'wheel-install', ctx=ctx, frozen=frozen)
+            config, boot, owner, owner_reference = _runtime_authority(evidence, frozen, ctx=ctx)
+            wheel = wheel_payload(evidence, frozen, ctx=ctx)
+            ctx.require(not exists(evidence/attempt_name, ctx=ctx) and not exists(evidence/complete_name, ctx=ctx)
+                        and not exists(evidence/('final-' + gate + '.log'), ctx=ctx),
+                        'runtime producer already attempted; retain partial state, never adopt or repeat')
+            if stage == 'venv':
+                from action_io import names
+                ctx.require(not exists(Path(owner['path'])/'venv', ctx=ctx)
+                            and set(names(Path(owner['path']), ctx=ctx)) == {'runtime-home', 'runtime-tmp'},
+                            'minimal runtime target is not initially absent')
+                ctx.require(not exists(evidence/'WHEEL-VENV-PRODUCED.json', ctx=ctx), 'prior child runtime evidence')
+                predecessor_reference = read_file(evidence/'WHEEL-ARCHIVE-PRODUCED.json', ctx=ctx, role='record')
+            else:
+                _, predecessor_reference = runtime_guard(evidence, frozen, 'venv' if stage == 'install' else 'install',
+                                                          ctx=ctx, wheel=wheel)
+            command = runtime_command(stage, config, evidence, boot['record'], owner)
+            environment = wheel_environment(config, owner)
+            attempt = {'schemaVersion': 1, 'policyVersion': WHEEL_POLICY, 'status': 'RESERVED_NOT_COMPLETED',
+                       'stage': stage, 'tree': stable['proposedTree'], 'ownerReference': owner_reference,
+                       'bootstrapReference': boot['file'], 'wheelReference': wheel['file'],
+                       'predecessorReference': predecessor_reference, 'action': ctx.summary(),
+                       'command': command, 'environment': environment, 'cwd': owner['path'],
+                       'target': str(Path(owner['path'])/'venv'),
+                       'targetDispatch': None if stage == 'venv' else pip_target_contract(command, environment),
+                       'umask': 0o077}
+            _runtime_attempt(attempt, stage, evidence, frozen, wheel, ctx=ctx)
+            frozen.recheck(ctx=ctx)
+            write_new(evidence/attempt_name, attempt, ctx=ctx)
+            attempt_reference = read_file(evidence/attempt_name, ctx=ctx, role='record')
+            frozen.recheck(ctx=ctx)
+        log = evidence/('final-' + gate + '.log')
+        # This dedicated owned helper has no parallel in-process workers. The
+        # setting is inherited by the base and its synchronous pip target.
+        previous_umask = os.umask(0o077)
+        producer, primary = None, None
+        try:
+            producer = execute(command, cwd=owner['path'], environment=environment, log=log,
+                               pending=pending, seconds=900, combined_limit=COMBINED_BYTES,
+                               free_floor=FREE_FLOOR, headroom=DISPATCH_HEADROOM)
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            try:
+                os.umask(previous_umask)
+            except BaseException as error:
+                if primary is None:
+                    raise
+                primary.add_note('owned runtime umask restoration failed: ' + type(error).__name__)
+        producer.update(gate=gate, protocol='command', log=log.name)
+        print(json.dumps({'scope': 'ACTUAL_RUNTIME_PARENT_RESULT_NOT_ACCEPTANCE', 'producer': producer}, sort_keys=True), flush=True)
+        with action('wheel-runtime-result:' + stage, pending=pending) as ctx:
+            frozen = load_frozen(evidence, ctx=ctx)
+            ctx.require(frozen['stable'] == stable, 'runtime producer source/authority drift')
+            guard_inputs(evidence, ctx=ctx, wheel=True, frozen=frozen)
+            active_ledger(evidence, 'wheel-install', ctx=ctx, frozen=frozen)
+            config, boot, owner, _ = _runtime_authority(evidence, frozen, ctx=ctx)
+            current_wheel = wheel_payload(evidence, frozen, ctx=ctx)
+            ctx.require(current_wheel == wheel, 'runtime producer substituted retained wheel')
+            actual_attempt, actual_reference = frozen.read_record(evidence/attempt_name, ctx=ctx)
+            ctx.require(actual_attempt == attempt and actual_reference == attempt_reference, 'runtime attempt changed during producer')
+            _runtime_attempt(actual_attempt, stage, evidence, frozen, wheel, ctx=ctx)
+            log_reference = read_file(log, ctx=ctx, role='log', retain=True)
+            producer['logSha256'] = log_reference['sha256']
+            producer['protocolResult'] = inspect_result('command', log_reference['data'].decode('utf-8', 'replace'), producer['exitCode'])
+            # No generated namespace is read as authority if actual completion,
+            # EOF, bounded output, log write/disposal or group evidence failed.
+            completed_row(producer, evidence, ctx=ctx, frozen=frozen, pending_binding=True)
+            if stage == 'venv':
+                produced, produced_reference = frozen.read_record(evidence/'WHEEL-VENV-PRODUCED.json', ctx=ctx)
+                schema.fields(produced, {'status', 'tree', 'attemptReference', 'runtimeOwner', 'entries', 'observedRuntime', 'action'},
+                              ctx=ctx, label='actual child runtime declaration')
+                runtime_owner = produced['runtimeOwner']
+                expected = minimal_runtime(boot['record'], config, owner, ctx=ctx)
+                _runtime_semantics(produced['entries'], expected, ctx=ctx)
+                entries = inspect_runtime(runtime_owner, expected, ctx=ctx, baseline=produced['entries'])
+            else:
+                previous, previous_reference = _runtime_chain(evidence, frozen, 'venv' if stage == 'install' else 'install', wheel, ctx=ctx)
+                ctx.require(previous_reference == predecessor_reference, 'runtime predecessor changed during producer')
+                runtime_owner = previous['runtimeOwner']
+                expected = installed_runtime(boot['record'], config, owner, wheel, ctx=ctx)
+                entries = inspect_runtime(runtime_owner, expected, ctx=ctx, baseline=previous['entries'])
+                produced_reference = None
+            complete = {'schemaVersion': 1, 'policyVersion': WHEEL_POLICY, 'status': 'OBSERVED_SUCCESSFUL_RUNTIME_PRODUCER',
+                        'stage': stage, 'tree': stable['proposedTree'], 'attemptReference': attempt_reference,
+                        'producer': producer, 'runtimeOwner': runtime_owner, 'entries': entries,
+                        'predecessorReference': predecessor_reference, 'producedReference': produced_reference}
+            _runtime_complete_value(complete, evidence, frozen, stage, wheel, ctx=ctx)
+            bootstrap_recheck(boot['record'], config, ctx=ctx)
+            frozen.recheck(ctx=ctx)
+            write_new(evidence/complete_name, complete, ctx=ctx)
+            ctx.require(read_json(evidence/complete_name, ctx=ctx) == complete, 'runtime completion readback differs')
+        # Restoring handlers belongs to this original producer invocation. A
+        # pending flag prevents return to any later shell/target consumer.
+    if pending.signal is not None:
+        raise RuntimeError('runtime producer cancelled during handler restoration')
+
+
+@participating
+def installed_payload(evidence, frozen, *, ctx, wheel=None):
+    """Authenticate the complete installed runtime before every target launch."""
+    return runtime_guard(evidence, frozen, 'install', ctx=ctx, wheel=wheel)
+
+
+def produce_wheel(evidence):
+    """Own the real compound subcommand, not a shell-supplied exit integer."""
+    from process_gate import cancellation_flag, execute
+    evidence = Path(evidence)
+    with cancellation_flag() as pending:
+        with action('wheel-producer-entry', pending=pending) as ctx:
+            stable = guard_inputs(evidence, ctx=ctx)
+            config = stable['configuration']['record']
+            ctx.require(not exists(evidence/'WHEEL-ARCHIVE-PRODUCED.json', ctx=ctx)
+                        and not exists(evidence/OUTPUT_RECEIPTS['wheel-build-subcommand'], ctx=ctx), 'compound producer already attempted; no adoption')
+            owner = read_json(evidence/'WHEEL-OUTPUT-OWNER.json', ctx=ctx)
+            ctx.require(not inventory(owner, ctx=ctx), 'wheel output not initially empty')
+        log = evidence/'final-wheel-build-subcommand.log'
+        producer = execute(wheel_build_command(config, evidence), cwd=config['source'], environment=clean_environment(config),
+                           log=log, pending=pending, seconds=900, combined_limit=COMBINED_BYTES,
+                           free_floor=FREE_FLOOR, headroom=DISPATCH_HEADROOM)
+        producer.update(gate='wheel-build-subcommand', protocol='command', log=log.name)
+        print(json.dumps({'scope': 'ACTUAL_COMPOUND_RESULT_NOT_ACCEPTANCE', 'producer': producer}, sort_keys=True), flush=True)
+        with action('wheel-producer-result', pending=pending) as ctx:
+            authority = load_frozen(evidence, ctx=ctx)
+            original = read_file(log, ctx=ctx, role='log', retain=True)
+            producer['logSha256'] = original['sha256']
+            producer['protocolResult'] = inspect_result('command', original['data'].decode('utf-8', 'replace'), producer['exitCode'])
+            reference = bind_output_completion(evidence, stable, producer, ctx=ctx, frozen=authority)
+            owner, owner_reference = authority.read_record(evidence/'WHEEL-OUTPUT-OWNER.json', ctx=ctx)
+            contents = inventory(owner, ctx=ctx, allowed_names={'mobile_release_kit-0.3.0-py3-none-any.whl'})
+            ctx.require(set(contents) == {'mobile_release_kit-0.3.0-py3-none-any.whl'}, 'wheel producer incomplete')
+            authority.recheck(ctx=ctx)
+            write_new(evidence/'WHEEL-ARCHIVE-PRODUCED.json', {'status': 'OBSERVED_SUCCESSFUL_WHEEL_BUILD', 'tree': stable['proposedTree'],
+                      'owner': owner, 'ownerReference': owner_reference, 'wheel': contents, 'producerReference': reference}, ctx=ctx)
+        # A failed/cancelled compound producer never reaches a later consumer.
+        with action('wheel-producer-payload', pending=pending) as ctx:
+            guard_inputs(evidence, ctx=ctx, wheel=True)
+    if pending.signal is not None:
+        raise RuntimeError('wheel producer cancelled during handler restoration')
+
+
+@participating
+def completed_row(row, evidence, *, ctx, frozen=None, pending_binding=False):
+    schema.completed_gate(row, ctx=ctx, pending_binding=pending_binding)
+    ctx.require(row['status'] == 'PASS' and row['ownership'] == 'reaped' and row['exitCode'] == 0
+                and row['groupProof']['status'] == 'CLEAR' and row['timedOut'] is False
+                and row['cancelSignal'] is None and 'errorType' not in row and 'logCloseErrorType' not in row
+                and row['protocolResult']['status'] == 'PASS' and type(row['pid']) is int and row['pid'] > 0
+                and row['uid'] == os.getuid() and 0 <= row['seconds'] < row['workSecondsLimit']+row.get('groupSecondsLimit', 0),
+                'previous gate not completely successful; retain outputs')
+    ctx.require(row['log'] == 'final-'+row['gate']+'.log', 'unexpected gate log path')
+    bound = read_file(Path(evidence)/row['log'], ctx=ctx, role='log', retain=True)
+    ctx.require(bound['identity']['uid'] == os.getuid() and bound['sha256'] == row['logSha256']
+                and bound['bytes'] == row['output']['retainedBytes'], 'gate log changed/foreign/incomplete')
+    actual = inspect_result(row['protocol'], bound['data'].decode('utf-8', 'replace'), row['exitCode'])
+    ctx.require(actual == row['protocolResult'], 'gate protocol result changed')
+    if frozen is not None:
+        require_authority(frozen, evidence, ctx=ctx)
+        bound.pop('data')
+        frozen.bind(bound, ctx=ctx, role='log')
+
+
+@participating
+def active_ledger(evidence, current_gate, *, ctx, frozen=None):
+    from gate_list import commands
+    evidence = Path(evidence)
+    config = config_load(evidence, ctx=ctx)
+    frozen = load_frozen(evidence, ctx=ctx) if frozen is None else require_authority(frozen, evidence, ctx=ctx)
+    ledger, _ = frozen.read_record(evidence/'final-verification.json', ctx=ctx)
+    validate_ledger(ledger, frozen, config, evidence, ctx=ctx)
+    required = commands(config, evidence, frozen['stable'], ctx=ctx)
+    ctx.require([(row['gate'], row['command'], row['protocol']) for row in ledger['gates']] == required, 'ledger gate routing changed')
+    ctx.require(ledger['candidate'] == {'commit': frozen['stable']['head'], 'tree': frozen['stable']['proposedTree'], 'clean': False}
+                and ledger['freezeReference'] == read_file(evidence/'final-freeze.json', ctx=ctx, role='record'), 'ledger candidate/freeze identity mismatch')
+    indices = [i for i, row in enumerate(ledger['gates']) if row['gate'] == current_gate]
+    ctx.require(len(indices) == 1, 'missing/nonunique active stage')
+    index = indices[0]
+    ctx.require(ledger['status'] == 'RUNNING_NOT_ACCEPTED' and ledger['gates'][index]['status'] == 'RUNNING'
+                and all(row['status'] == 'BLOCKED' for row in ledger['gates'][index+1:]), 'observation not at intended active gate')
+    return ledger, index, frozen
+
+
+@participating
+def prior_workers(evidence, current_gate, *, ctx, frozen=None):
+    ledger, index, frozen = active_ledger(evidence, current_gate, ctx=ctx, frozen=frozen)
+    bindings = []
+    for row in ledger['gates'][:index]:
+        completed_row(row, evidence, ctx=ctx, frozen=frozen)
+        bindings.append({'gate': row['gate'], 'pid': row['pid'], 'uid': row['uid']})
+    ctx.require(bindings, 'no prior owned gate records')
+    result = observe_groups(bindings, ctx=ctx)
+    ctx.require(result['status'] == 'CLEAR' and result['signalsAuthorized'] is False,
+                'prior group live/reused/unknown; retain outputs without signals')
+    return result
+
+
+@participating
+def prepare_build(evidence, *, ctx):
+    evidence = Path(evidence)
+    authority = load_frozen(evidence, ctx=ctx)
+    frozen = check_frozen(evidence, ctx=ctx, frozen=authority)
+    config = read_json(evidence / 'CONFIG.json', ctx=ctx)
+    owners, references = {}, {}
+    for key, (relative, marker) in OUTPUT_PATHS.items():
+        ctx.require(not exists(Path(config['source'])/relative, ctx=ctx) and not exists(evidence/marker, ctx=ctx),
+                    'previous/partial build metadata output; no adoption')
+    ctx.require(not any(exists(evidence/name, ctx=ctx) for name in ('BUILD-PREPARED.json', *OUTPUT_RECEIPTS.values())),
+                'previous output evidence; no adoption')
+    for key, (relative, marker) in OUTPUT_PATHS.items():
+        owners[key] = create_owned(Path(config['source'])/relative, evidence/marker, frozen['proposedTree'],
+                    'exclusive initially empty setuptools ' + key + '; only actual producer completion grants consumption', ctx=ctx)
+        references[key] = read_file(evidence/marker, ctx=ctx, role='record')
+    authority.recheck(ctx=ctx)
+    write_new(evidence/'BUILD-PREPARED.json', {'status': 'PREPARED_NOT_CHILD_ACCEPTED', 'tree': frozen['proposedTree'],
+              'owners': owners, 'ownerReferences': references, 'inventories': {'build': {}, 'eggInfo': {}}}, ctx=ctx)
+    print(json.dumps(owners, indent=2))
+
+@participating
+def prepare_wheel(evidence, *, ctx):
+    evidence = Path(evidence)
+    authority = load_frozen(evidence, ctx=ctx)
+    frozen = check_frozen(evidence, ctx=ctx, frozen=authority)
+    config = read_json(evidence / 'CONFIG.json', ctx=ctx)
+    active_ledger(evidence, 'wheel-install', ctx=ctx, frozen=authority)
+    assert_owned(read_json(evidence / 'BUILD-OWNER.json', ctx=ctx), ctx=ctx)
+    create_owned(evidence / 'wheels', evidence / 'WHEEL-OUTPUT-OWNER.json', frozen['proposedTree'], 'retained immutable distributable wheel; never deleted by installation cleanup', ctx=ctx)
+    installation = create_owned(Path(config['owner']) / 'final-wheel-r1', evidence / 'WHEEL-OWNER.json', frozen['proposedTree'], 'exclusive initially empty disposable wheel installation and synthetic smoke project', ctx=ctx)
+    for name, marker in (('runtime-home', 'WHEEL-HOME-OWNER.json'), ('runtime-tmp', 'WHEEL-TMP-OWNER.json')):
+        create_owned(Path(installation['path'])/name, evidence/marker, frozen['proposedTree'],
+                     'exclusive private wheel runtime ' + name, ctx=ctx)
+
+def wheel_links():
+    return {'venv/bin/python', 'venv/bin/python3', f'venv/bin/python{sys.version_info.major}.{sys.version_info.minor}', 'venv/lib64'}
+
+@participating
+def seal_wheel(evidence, *, ctx):
+    evidence = Path(evidence)
+    authority = load_frozen(evidence, ctx=ctx)
+    frozen = check_frozen(evidence, ctx=ctx, frozen=authority)
+    wheel = wheel_payload(evidence, authority, ctx=ctx)
+    installed_payload(evidence, authority, ctx=ctx, wheel=wheel)
+    runtime_completions = {}
+    for stage in RUNTIME_STAGES:
+        _, runtime_completions[stage] = _runtime_chain(evidence, authority, stage, wheel, ctx=ctx)
+    runtime_guard(evidence, authority, 'check', ctx=ctx, wheel=wheel)
+    owner, output_owner = (read_json(evidence / 'WHEEL-OWNER.json', ctx=ctx), read_json(evidence / 'WHEEL-OUTPUT-OWNER.json', ctx=ctx))
+    require(owner['tree'] == output_owner['tree'] == frozen['proposedTree'], 'wheel root source binding changed')
+    counts = {}
+    for name in ('final-wheel-init-recovery.log', 'final-wheel-ios-entitlements.log', 'final-wheel-native-profile.log'):
+        path = evidence / name
+        value = inspect_result('python-unittest', bounded_text(path, ctx=ctx, role='log'), 0)
+        require(value['status'] == 'PASS', 'wheel test protocol failed: ' + name)
+        counts[name] = {**value, 'sha256': digest(path, ctx=ctx, role='log')}
+    outputs = inventory(output_owner, ctx=ctx)
+    require(set(outputs) == {'mobile_release_kit-0.3.0-py3-none-any.whl'}, 'unknown wheel output inventory')
+    require(outputs['mobile_release_kit-0.3.0-py3-none-any.whl']['kind'] == 'file', 'wheel not regular')
+    entries = inventory(owner, symlink_paths=wheel_links(), ctx=ctx)
+    require('venv/pyvenv.cfg' in entries and 'project/release/mobile-release.json' in entries, 'wheel installation incomplete')
+    expected_top = {'venv', 'runtime-home', 'runtime-tmp', 'project', 'tests', 'preview.txt', 'apply.txt', 'recover.json', 'workflow-help.txt', 'android-module-help.txt', 'ios-module-help.txt', 'android-bootstrap-help.txt', 'ios-bootstrap-help.txt'}
+    require({Path(name).parts[0] for name in entries} == expected_top, 'unknown wheel installation top-level content')
+    value = {'status': 'PASS_ALL_WHEEL_CHECKS', 'tree': frozen['proposedTree'], 'ownerSha256': digest(evidence / 'WHEEL-OWNER.json', ctx=ctx, role='record'), 'outputOwnerSha256': digest(evidence / 'WHEEL-OUTPUT-OWNER.json', ctx=ctx, role='record'), 'entries': entries, 'wheelOutputs': outputs, 'tests': counts, 'runtimeCompletions': runtime_completions, 'cleanup': 'not yet authorized; actual gate exit and fresh prior-worker observations remain required'}
+    validate_wheel_complete(value, ctx=ctx)
+    authority.recheck(ctx=ctx)
+    write_new(evidence / 'WHEEL-COMPLETE.json', value, ctx=ctx)
+
+
+@participating
+def validate_wheel_complete(value, *, ctx):
+    from bindings import validate_inventory_schema
+    schema.fields(value, {'status', 'tree', 'ownerSha256', 'outputOwnerSha256', 'entries', 'wheelOutputs', 'tests', 'runtimeCompletions', 'cleanup'},
+                  ctx=ctx, label='wheel completion')
+    ctx.require(value['status'] == 'PASS_ALL_WHEEL_CHECKS' and value['cleanup'] ==
+                'not yet authorized; actual gate exit and fresh prior-worker observations remain required', 'wheel completion status/authority')
+    schema.digest(value['tree'], ctx=ctx, length=40)
+    for key in ('ownerSha256', 'outputOwnerSha256'):
+        schema.digest(value[key], ctx=ctx)
+    schema.fields(value['runtimeCompletions'], set(RUNTIME_STAGES), ctx=ctx, label='complete runtime producer references')
+    for stage, reference in value['runtimeCompletions'].items():
+        schema.file_reference(reference, ctx=ctx)
+        ctx.require(Path(reference['path']).name == RUNTIME_STAGES[stage][2], 'runtime completion reference scope')
+    validate_inventory_schema(value['entries'], ctx=ctx, symlink_paths=wheel_links())
+    validate_inventory_schema(value['wheelOutputs'], ctx=ctx)
+    ctx.require(set(value['wheelOutputs']) == {'mobile_release_kit-0.3.0-py3-none-any.whl'} and
+                value['wheelOutputs']['mobile_release_kit-0.3.0-py3-none-any.whl']['kind'] == 'file', 'wheel retained payload inventory')
+    schema.fields(value['tests'], {'final-wheel-init-recovery.log', 'final-wheel-ios-entitlements.log', 'final-wheel-native-profile.log'},
+                  ctx=ctx, label='wheel tests')
+    for row in value['tests'].values():
+        schema.fields(row, {'sha256', 'protocol', 'status', 'tests', 'skips'}, ctx=ctx, label='wheel test evidence')
+        schema.digest(row['sha256'], ctx=ctx)
+        schema.protocol_result({k:v for k,v in row.items() if k != 'sha256'}, 'python-unittest', ctx=ctx)
+
+@participating
+def build_entries(owner, frozen, root, *, ctx, allow_empty=False):
+    sources = {name: value for name, value in frozen['files'].items() if name.startswith('src/mobile_release/') and (name.endswith('.py') or name.endswith('.pem')) and (not value.get('deleted'))}
+    expected = {'lib/' + name.removeprefix('src/'): name for name in sources}
+    dirs = {str(parent) for name in expected for parent in Path(name).parents if str(parent) != '.'}
+    dirs.add('bdist.' + sysconfig.get_platform())
+    entries = inventory(owner, ctx=ctx, allowed_names=set(expected) | dirs, file_roles={name: 'source' for name in expected})
+    found = {name for name, row in entries.items() if row['kind'] == 'file'}
+    require(found == set(expected) or allow_empty and not found, 'unknown/incomplete generated build content')
+    require(all((row['kind'] != 'directory' or name in dirs for name, row in entries.items())), 'unknown build directory')
+    for name, source_name in expected.items():
+        if not found:
+            break
+        require(entries[name]['sha256'] == sources[source_name]['sha256'] == digest(Path(root) / source_name, ctx=ctx, role='source'), 'generated build/source bytes differ')
+    return (entries, expected)
+
+@participating
+def cleanup_build(evidence, *, ctx):
+    evidence = Path(evidence)
+    ctx.require(not any(exists(evidence/name, ctx=ctx) for name in ('final-build-cleanup-inventory.json', 'final-build-cleanup.json')),
+                'build cleanup already attempted; never adopt partial removal')
+    authority = load_frozen(evidence, ctx=ctx)
+    frozen = check_frozen(evidence, ctx=ctx, frozen=authority)
+    config = read_json(evidence / 'CONFIG.json', ctx=ctx)
+    workers = prior_workers(evidence, 'cleanup-generated-build', ctx=ctx, frozen=authority)
+    owner = read_json(evidence / 'BUILD-OWNER.json', ctx=ctx)
+    require(owner['path'] == str(Path(config['source']) / 'build') and owner['tree'] == frozen['proposedTree'], 'build owner binding mismatch')
+    entries, sources = build_entries(owner, frozen, config['source'], ctx=ctx)
+    owners, _ = _read_output_owners(evidence, config, authority, ctx=ctx)
+    egg_entries = egg_info_entries(owners['eggInfo'], frozen, config['source'], ctx=ctx)
+    write_new(evidence / 'final-build-cleanup-inventory.json', {'owner': owner, 'entries': entries, 'sources': sources,
+              'eggInfoOwner': owners['eggInfo'], 'eggInfoEntries': egg_entries, 'workers': workers}, ctx=ctx)
+    require(entries == inventory(owner, ctx=ctx, allowed_names=set(entries), expected_entries=entries,
+                                  file_roles={name: 'source' for name in entries}), 'build inventory drift; retain')
+    authority.recheck(ctx=ctx)
+    delete_inventory(owner, entries, ctx=ctx, file_roles={name: 'source' for name in entries})
+    delete_inventory(owners['eggInfo'], egg_entries, ctx=ctx, file_roles={name: 'record' for name in egg_entries})
+    authority.recheck(ctx=ctx)
+    write_new(evidence / 'final-build-cleanup.json', {'removed': [owner['path'], owners['eggInfo']['path']],
+              'entries': len(entries) + len(egg_entries) + 2, 'sourceAndUnownedCachesTouched': False}, ctx=ctx)
+    print('PASS: removed only exclusive byte-proven build and owned egg-info; source/wheel/evidence retained')
+
+@participating
+def cleanup_wheel(evidence, *, ctx):
+    evidence = Path(evidence)
+    ctx.require(not any(exists(evidence/name, ctx=ctx) for name in ('final-wheel-cleanup-inventory.json', 'final-wheel-cleanup.json')),
+                'wheel cleanup already attempted; never adopt partial removal')
+    authority = load_frozen(evidence, ctx=ctx)
+    frozen = check_frozen(evidence, ctx=ctx, frozen=authority)
+    config = read_json(evidence / 'CONFIG.json', ctx=ctx)
+    workers = prior_workers(evidence, 'cleanup-wheel-installation', ctx=ctx, frozen=authority)
+    owner, _ = authority.read_record(evidence/'WHEEL-OWNER.json', ctx=ctx)
+    output_owner, _ = authority.read_record(evidence/'WHEEL-OUTPUT-OWNER.json', ctx=ctx)
+    complete, _ = authority.read_record(evidence/'WHEEL-COMPLETE.json', ctx=ctx)
+    validate_wheel_complete(complete, ctx=ctx)
+    wheel = wheel_payload(evidence, authority, ctx=ctx)
+    for stage, reference in complete['runtimeCompletions'].items():
+        _, actual = _runtime_chain(evidence, authority, stage, wheel, ctx=ctx)
+        ctx.require(actual == reference, 'sealed runtime producer reference changed')
+    runtime_guard(evidence, authority, 'check', ctx=ctx, wheel=wheel)
+    require(owner['path'] == str(Path(config['owner']) / 'final-wheel-r1') and owner['tree'] == frozen['proposedTree'], 'wheel installation owner binding mismatch')
+    require(complete['status'] == 'PASS_ALL_WHEEL_CHECKS' and complete['tree'] == frozen['proposedTree'], 'wheel checks incomplete')
+    require(complete['ownerSha256'] == digest(evidence / 'WHEEL-OWNER.json', ctx=ctx, role='record') and complete['outputOwnerSha256'] == digest(evidence / 'WHEEL-OUTPUT-OWNER.json', ctx=ctx, role='record'), 'wheel owner record changed')
+    require(inventory(output_owner, ctx=ctx, allowed_names=set(complete['wheelOutputs']),
+                      expected_entries=complete['wheelOutputs']) == complete['wheelOutputs'], 'retained wheel changed')
+    for name, row in complete['tests'].items():
+        bound = read_file(evidence/name, ctx=ctx, role='log', retain=True)
+        require(bound['sha256'] == row['sha256'] and inspect_result('python-unittest', bound.pop('data').decode('utf-8', 'replace'), 0)
+                == {k:v for k,v in row.items() if k != 'sha256'}, 'wheel test evidence changed')
+        authority.bind(bound, ctx=ctx, role='log')
+    entries = inventory(owner, symlink_paths=wheel_links(), ctx=ctx, allowed_names=set(complete['entries']), expected_entries=complete['entries'])
+    require(entries == complete['entries'], 'unknown/changed installation content; retain')
+    write_new(evidence / 'final-wheel-cleanup-inventory.json', {'owner': owner, 'entries': entries, 'workers': workers}, ctx=ctx)
+    require(entries == inventory(owner, symlink_paths=wheel_links(), ctx=ctx, allowed_names=set(entries), expected_entries=entries), 'installation changed before deletion')
+    authority.recheck(ctx=ctx)
+    delete_inventory(owner, entries, ctx=ctx)
+    authority.recheck(ctx=ctx)
+    write_new(evidence / 'final-wheel-cleanup.json', {'removed': owner['path'], 'entries': len(entries), 'wheelPreserved': output_owner['path'], 'sourceAndSharedCachesTouched': False}, ctx=ctx)
+    print('PASS: removed owned sealed installation; retained immutable wheel/source/evidence/shared caches')
+if __name__ == '__main__':
+    choices = {'prepare-wheel', 'seal-wheel', 'produce-wheel', 'guard-inputs', 'guard-wheel-inputs', 'guard-installed-inputs',
+               'create-venv', 'produce-venv', 'install-wheel', 'check-dependencies', 'show-source', 'show-owner', 'empty-final-tmp'}
+    require(len(sys.argv) == 2 and sys.argv[1] in choices, 'usage: owned_outputs.py ' + '|'.join(sorted(choices)))
+    if sys.argv[1] == 'produce-wheel':
+        produce_wheel(EVIDENCE)
+    elif sys.argv[1] == 'produce-venv':
+        produce_venv(EVIDENCE)
+    elif sys.argv[1] in {'create-venv', 'install-wheel', 'check-dependencies'}:
+        run_runtime_producer(EVIDENCE, {'create-venv': 'venv', 'install-wheel': 'install', 'check-dependencies': 'check'}[sys.argv[1]])
+    else:
+        with action('wheel-' + sys.argv[1]) as ctx:
+            if sys.argv[1].startswith('guard-'):
+                guard_inputs(EVIDENCE, ctx=ctx, wheel=sys.argv[1] != 'guard-inputs', installed=sys.argv[1] == 'guard-installed-inputs')
+            elif sys.argv[1] in {'show-source', 'show-owner'}:
+                print(config_load(EVIDENCE, ctx=ctx)['source' if sys.argv[1] == 'show-source' else 'owner'])
+            elif sys.argv[1] == 'empty-final-tmp':
+                from action_io import names
+                config = config_load(EVIDENCE, ctx=ctx)
+                ctx.require(not names(Path(config['tmp']), ctx=ctx), 'Preserve unexpected final temporary outputs')
+                print('PASS: exclusive final tmp is empty')
+            else:
+                (prepare_wheel if sys.argv[1] == 'prepare-wheel' else seal_wheel)(EVIDENCE, ctx=ctx)

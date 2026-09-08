@@ -1,0 +1,443 @@
+"""One-shot prepared complete forest; late native check and guarded cleanup.
+
+The prepare child never requires its future completed row. The parent binds its
+actual successful completion; later consumers require that binding, not the
+future global wrapper exit. Failed/partial stores cannot be repaired or adopted.
+"""
+from pathlib import Path
+import os
+import sys
+
+EVIDENCE = Path(__file__).absolute().parent
+if EVIDENCE.resolve() != EVIDENCE or Path(__file__).is_symlink() or not sys.flags.safe_path:
+    raise RuntimeError('Use trusted regular helper path with Python -P/-I')
+import os
+import stat
+
+def helper_namespace(root, *, ctx=None):
+    """Metadata-only admission before sibling imports; never open cache bytes.
+
+    The initial script/stdlib are runner TCB. This closes incidental helper
+    import candidates, not arbitrary same-user/whole-host interference.
+    """
+    def check(value=True, message='helper namespace'):
+        if ctx is not None:
+            ctx.require(value, message)
+        elif not value:
+            raise RuntimeError(message)
+    root = Path(root)
+    check(root.is_absolute() and str(root) == os.path.normpath(root) and len(root.parts) <= 64,
+          'noncanonical helper import root')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open('/', flags)
+    try:
+        for part in root.parts[1:]:
+            check()
+            new = os.open(part, flags, dir_fd=fd)
+            old, fd = fd, new
+            os.close(old)
+        original = os.fstat(fd)
+        check(original.st_uid == os.getuid() and not original.st_mode & 0o022,
+              'foreign/writable helper namespace')
+        known = set(['action_io.py', 'bindings.py', 'cleanup-build.py', 'cleanup-wheel.py', 'evidence_schemas.py', 'freeze.py', 'frozen_diff.py', 'gate_list.py', 'git_readonly.py', 'native_reader.py', 'observe-owned-workers.py', 'owned_outputs.py', 'prepare-build.py', 'probe-jdk21-signing.py', 'process_gate.py', 'result_protocols.py', 'run-once.sh', 'source_inventory.py', 'verify-all.py', 'verify-frozen-diff.py', 'verify-pins.py', 'verify-process-gate.py', 'verify-result-protocols.py', 'wheel-smoke.sh'])
+        found, count = set(), 0
+        with os.scandir(fd) as iterator:
+            while True:
+                # Reserve the enumeration operation before advancing; even an
+                # EOF probe consumes this finite namespace-admission budget.
+                check(count < 4096, 'helper namespace enumeration cap')
+                count += 1
+                if ctx is not None:
+                    ctx.charge('visited', 1)
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    break
+                name = item.name
+                check(len(os.fsencode(name)) <= 255, 'helper namespace component cap')
+                before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                check(name != '__pycache__' and not name.endswith(('.pyc', '.pyo', '.pyd', '.so', '.pth')),
+                      'unapproved helper bytecode/startup/cache name; payload not read')
+                if name in known:
+                    check(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+                          and before.st_uid == os.getuid() and not before.st_mode & 0o022,
+                          'helper replaced, symlinked, hardlinked or writable')
+                    found.add(name)
+                else:
+                    check(not name.endswith(('.py', '.sh')), 'unknown helper/import source name')
+                    if (stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode)) and name.isidentifier():
+                        check(name == 'wheels' and stat.S_ISDIR(before.st_mode)
+                              and before.st_uid == os.getuid() and stat.S_IMODE(before.st_mode) == 0o700,
+                              'unapproved helper import directory; contents not read')
+                        child = os.open(name, flags, dir_fd=fd)
+                        try:
+                            check(os.fstat(child) == before, 'wheel-data directory replaced')
+                            names = []
+                            with os.scandir(child) as entries:
+                                for entry in entries:
+                                    check(not names, 'unknown wheel-data sibling; payload not read')
+                                    names.append(entry.name)
+                                    check(entry.name == 'mobile_release_kit-0.3.0-py3-none-any.whl',
+                                          'unexpected wheel-data name; payload not read')
+                                    row = os.stat(entry.name, dir_fd=child, follow_symlinks=False)
+                                    check(stat.S_ISREG(row.st_mode) and row.st_nlink == 1 and row.st_uid == os.getuid(),
+                                          'untrusted wheel-data type; payload not read')
+                        finally:
+                            os.close(child)
+                check(os.stat(name, dir_fd=fd, follow_symlinks=False) == before, 'helper namespace entry changed')
+        check(found == known, 'missing reviewed helper')
+        current = os.fstat(fd)
+        check((current.st_dev, current.st_ino, current.st_uid, current.st_mode, current.st_mtime_ns, current.st_ctime_ns) ==
+              (original.st_dev, original.st_ino, original.st_uid, original.st_mode, original.st_mtime_ns, original.st_ctime_ns),
+              'helper namespace changed during admission')
+    finally:
+        os.close(fd)
+
+helper_namespace(EVIDENCE)
+sys.path.insert(0, str(EVIDENCE))
+from action_io import (action, assert_owned, canonical_digest, delete_inventory, exists,
+                       inventory, names, read_file, read_json, require, write_bytes_new,
+                       write_failure, write_new, participating)
+from bindings import (check_frozen, config_load, executable, helper_snapshot,
+                      load_frozen, owner_bindings, validate_inventory_schema, validate_native,
+                      validate_observation, _schema_object, require_authority)
+import evidence_schemas as schema
+from git_readonly import (EMPTY_TREE, Forest, consume_forest, create_view, loose,
+                          git_invocation, proposed_tree, raw_source, recheck_raw, validate_view, view_roles)
+from owned_outputs import active_ledger, completed_row, prior_workers
+
+OWNER = 'FROZEN-DIFF-OWNER.json'
+SEAL = 'FROZEN-DIFF-SEAL.json'
+PREP = 'frozen-diff-preparation-observation.json'
+ANCHOR = 'frozen-diff-raw-head.bin'
+SEAL_FIELDS = {'schemaVersion', 'status', 'stableSha256', 'freezeReference', 'owner',
+               'ownerReference', 'base', 'proposed', 'empty', 'objects', 'inventory',
+               'rawAnchor', 'preparationObservation'}
+
+
+def action_metadata(ctx):
+    # Native records, metadata-view inventories and removals already live in
+    # sourceObservation; final forest observations live once in native. Do not
+    # duplicate them in a second action payload and exhaust shared record work.
+    return {key:value for key,value in ctx.summary().items() if key not in {'native', 'views', 'removals'}}
+
+
+@participating
+def reference(path, *, ctx):
+    value = read_file(path, ctx=ctx, role='record')
+    ctx.require(value['identity']['uid'] == os.getuid() and value['identity']['mode'] == 0o600,
+                'evidence not private/owned')
+    return value
+
+
+@participating
+def _inputs_unchanged(stable, evidence, *, ctx, frozen):
+    require_authority(frozen, evidence, ctx=ctx)
+    config = config_load(evidence, ctx=ctx)
+    ctx.require(stable['configuration'] == {'file': read_file(Path(evidence)/'CONFIG.json', ctx=ctx, role='record'), 'record': config}, 'configuration changed after native read')
+    ctx.require(stable['verificationHelpers'] == helper_snapshot(evidence, ctx=ctx)
+                and stable['ownerBindings'] == owner_bindings(config, evidence, ctx=ctx), 'source owner/helper policy drift')
+    for value in stable['tools']['executables'].values():
+        ctx.require(executable(value['path'], ctx=ctx) == value, 'tool changed after native read')
+    for group in (stable['sourcePhysical'], stable['preservedUserPhysical']):
+        for row in group.values():
+            if row.get('deleted'):
+                ctx.require(not exists(row['path'], ctx=ctx), 'deleted source reappeared')
+            else:
+                ctx.require(read_file(row['path'], ctx=ctx, role='source') == row, 'source bytes/identity changed')
+    for key in ('implementationAcceptance', 'verifierAcceptance'):
+        accepted = stable[key]
+        for row in [accepted['file'], *accepted['references'].values()]:
+            ctx.require(read_file(row['path'], ctx=ctx, role='record') == row, 'accepted review changed')
+    for git in (stable['sourceGit'], stable['preservedUserGit']):
+        recheck_raw({'stable': git}, ctx=ctx)
+    from source_inventory import discover
+    from owned_outputs import execution_outputs
+    for key, git_key, files, root in (
+            ('sourceUniverse', 'sourceGit', stable['files'], config['source']),
+            ('preservedUserUniverse', 'preservedUserGit', stable['preservedUser']['files'], config['rootUserWorktree'])):
+        accepted = stable['discoveryAcceptance']['record']['roots'][root]
+        outputs = execution_outputs(evidence, config, frozen=frozen, ctx=ctx) if root == config['source'] else None
+        current, _ = discover(root, stable[git_key]['indexFormat'].get('entries', {}), accepted, files,
+                              ctx=ctx, output_authorities=outputs)
+        ctx.require(current == stable[key], 'late full source universe/control drift')
+    frozen.recheck(ctx=ctx)
+
+
+@participating
+def _prep_observation(value, *, seal, evidence, stable, ctx, frozen, checked_source=None):
+    require_authority(frozen, evidence, ctx=ctx)
+    ctx.require(set(value) == {'schemaVersion', 'status', 'stableSha256', 'freezeReference',
+                             'ownerReference', 'native', 'sourceObservation', 'action'}
+                and type(value['schemaVersion']) is int and value['schemaVersion'] == 1 and value['status'] == 'PASS'
+                and value['stableSha256'] == seal['stableSha256']
+                and value['freezeReference'] == seal['freezeReference']
+                and value['ownerReference'] == seal['ownerReference'], 'preparation observation binding mismatch')
+    native = value['native']
+    ctx.require(set(native) == {'status', 'batch', 'rootHashes', 'diff', 'inventory'}
+                and native['status'] == 'PASS' and native['inventory'] == seal['inventory'], 'native preparation/readback incomplete')
+    ctx.require(type(native['rootHashes']) is list and len(native['rootHashes']) == 3, 'native root hash list')
+    for row in native['rootHashes']:
+        schema.fields(row, {'oid', 'native'}, ctx=ctx, label='native root hash')
+        schema.digest(row['oid'], ctx=ctx, length=40)
+    rows = [native['batch'], *[row['native'] for row in native['rootHashes']], native['diff']]
+    ctx.require(len(native['rootHashes']) == 3 and [row['oid'] for row in native['rootHashes']] == [seal['base'], seal['proposed'], seal['empty']], 'wrong native root bindings')
+    ctx.require(native['batch']['frames'] == [row for _oid, row in sorted(seal['objects'].items())], 'incomplete native forest consumption')
+    leaf = stable['configuration']['record']['gitLeaf']
+    for index, row in enumerate(rows):
+        builtin = 'cat' if index == 0 else 'diff' if index == 4 else 'hash'
+        command, env = git_invocation(seal['owner']['path'], leaf, builtin, base=seal['base'], proposed=seal['proposed'])
+        out, err = validate_native(row, command=command, environment=env, cwd=seal['owner']['path'], ctx=ctx,
+                                   frames=[v for k,v in sorted(seal['objects'].items())] if index == 0 else None,
+                                   git_policy={'builtin':builtin, 'ownerNonce':seal['owner']['nonce'], 'tool':stable['tools']['executables']['gitLeaf']['file']})
+        if builtin == 'hash':
+            root = (seal['base'], seal['proposed'], seal['empty'])[index-1]
+            ctx.require(out == (root+'\n').encode() and row['stdinBytes'] == seal['objects'][root]['bytes'], 'native prepared root mismatch')
+        if builtin == 'diff':ctx.require(not out and row['stdinBytes'] == 0, 'native diff diagnostics/input')
+    ctx.require(value['sourceObservation'] != frozen['creationObservation'], 'creation observation cannot substitute for actual prepare collection')
+    if checked_source is None:
+        references = []
+        source_record = validate_observation(value['sourceObservation'], seal['stableSha256'], evidence, ctx=ctx, stable=stable, references=references)
+        for bound, role in references:
+            frozen.bind(bound, ctx=ctx, role=role)
+    else:
+        # Immediate result of this action's actual check_frozen, not a persistent
+        # cache. Its file/marker references are already bound in frozen and are
+        # re-read before publication. A later action always takes the full path.
+        source_reference, source_record = checked_source
+        ctx.require(source_reference == value['sourceObservation'] and source_reference == ctx.observations[-1]
+                    and source_record['contextNonce'] == ctx.nonce, 'wrong same-action prepared source observation')
+    metadata = value['action']
+    schema.action_metadata(metadata, ctx=ctx)
+    ctx.require(metadata['nonce'] == source_record['contextNonce'] and metadata['action'] == source_record['action']['action']
+                and metadata['started'] == source_record['action']['started'] and metadata['cutoff'] == source_record['action']['cutoff']
+                and metadata['seconds'] >= source_record['action']['seconds']
+                and metadata['counts']['launches'] == len(source_record['action']['native'])+len(rows)+len(metadata['queries'])
+                and metadata['counts']['views'] == len(source_record['action']['views'])+1
+                and all(metadata['started'] + source_record['action']['seconds'] <= row['started']
+                        and row['cutoff'] <= metadata['cutoff'] for row in rows), 'prepare action native causality mismatch')
+    ctx.require(value['action']['failure'] is None and value['action']['cancelSignal'] is None
+                and value['action']['seconds'] < value['action']['cutoff']-value['action']['started'], 'late/cancelled preparation observation')
+
+
+@participating
+def validate_seal_shape(seal, stable, evidence, *, ctx, preparation_pending=False):
+    ctx.require(type(seal) is dict and set(seal) == SEAL_FIELDS and type(seal['schemaVersion']) is int
+                and seal['schemaVersion'] == 1 and seal['status'] == 'PREPARED_NOT_CHILD_ACCEPTED', 'invalid/incomplete frozen diff seal')
+    schema.digest(seal['stableSha256'], ctx=ctx)
+    schema.owner_record(seal['owner'], ctx=ctx)
+    config = stable['configuration']['record']
+    ctx.require(seal['owner']['path'] == str(Path(config['owner'])/'final-frozen-diff-r1')
+                and seal['owner']['purpose'] == 'exclusive nonwriting Git view; no real source storage'
+                and seal['owner']['tree'] == seal['proposed'] == stable['proposedTree']
+                and seal['base'] == stable['sourceGit']['baseRoot'] and seal['empty'] == EMPTY_TREE, 'seal owner/root scope mismatch')
+    ctx.require(type(seal['objects']) is dict and len(seal['objects']) <= 4096, 'seal forest count')
+    for oid, row in seal['objects'].items():
+        _schema_object(row, ctx)
+        ctx.require(row['oid'] == oid and row['type'] != 'commit', 'seal object path/type')
+    for key in ('base', 'proposed', 'empty'):
+        schema.digest(seal[key], ctx=ctx, length=40)
+        ctx.require(seal[key] in seal['objects'] and seal['objects'][seal[key]]['type'] == 'tree', 'seal root missing/non-tree')
+    for key in ('freezeReference', 'ownerReference'):
+        schema.file_reference(seal[key], ctx=ctx)
+    ctx.require(seal['freezeReference']['path'] == str(Path(evidence)/'final-freeze.json')
+                and seal['ownerReference']['path'] == str(Path(evidence)/OWNER), 'seal original reference scope')
+    if preparation_pending:
+        ctx.require(seal['preparationObservation'] is None, 'future preparation receipt cannot be supplied to producer')
+    else:
+        schema.file_reference(seal['preparationObservation'], ctx=ctx)
+        ctx.require(seal['preparationObservation']['path'] == str(Path(evidence)/PREP), 'seal preparation reference scope')
+    schema.file_reference(seal['rawAnchor'], ctx=ctx, role='commit')
+    ctx.require(seal['rawAnchor']['path'] == str(Path(evidence)/ANCHOR), 'raw anchor evidence scope')
+    validate_inventory_schema(seal['inventory'], ctx=ctx, file_roles=view_roles(seal['inventory']))
+
+
+@participating
+def load_seal(evidence, *, ctx, frozen=None):
+    evidence = Path(evidence)
+    frozen = load_frozen(evidence, ctx=ctx) if frozen is None else require_authority(frozen, evidence, ctx=ctx)
+    seal, seal_reference = frozen.read_record(evidence/SEAL, ctx=ctx)
+    validate_seal_shape(seal, frozen['stable'], evidence, ctx=ctx)
+    ctx.require(seal['stableSha256'] == frozen['stableSha256']
+                and seal['freezeReference'] == read_file(evidence/'final-freeze.json', ctx=ctx, role='record'), 'seal freeze authority mismatch')
+    owner, owner_reference = frozen.read_record(evidence/OWNER, ctx=ctx)
+    ctx.require(seal['ownerReference'] == owner_reference and seal['owner'] == owner, 'frozen owner drift')
+    assert_owned(seal['owner'], ctx=ctx)
+    value, prep_reference = frozen.read_record(evidence/PREP, ctx=ctx)
+    ctx.require(prep_reference == seal['preparationObservation'], 'changed preparation observation')
+    _prep_observation(value, seal=seal, evidence=evidence, stable=frozen['stable'], ctx=ctx, frozen=frozen)
+    anchor = read_file(evidence/ANCHOR, ctx=ctx, role='commit')
+    ctx.require(anchor == seal['rawAnchor'] and anchor['sha256'] == frozen['stable']['sourceGit']['anchor']['sha256'], 'raw commit anchor evidence drift')
+    frozen.bind(anchor, ctx=ctx, role='commit')
+    return seal
+
+
+@participating
+def bind_prepare_completion(evidence, stable, *, ctx, frozen=None):
+    """Controller-only, invoked AFTER actual execute/log/protocol checks PASS."""
+    frozen = load_frozen(evidence, ctx=ctx) if frozen is None else require_authority(frozen, evidence, ctx=ctx)
+    ctx.require(frozen['stable'] == stable, 'controller candidate changed')
+    seal = load_seal(evidence, ctx=ctx, frozen=frozen)
+    ctx.require(inventory(seal['owner'], ctx=ctx, allowed_names=set(seal['inventory']),
+                          file_roles=view_roles(seal['inventory']), expected_entries=seal['inventory']) == seal['inventory'],
+                'completed child store inventory changed')
+    frozen.recheck(ctx=ctx)
+    return {'seal': reference(Path(evidence)/SEAL, ctx=ctx),
+            'preparationObservation': seal['preparationObservation'],
+            'owner': seal['ownerReference'], 'freeze': seal['freezeReference']}
+
+
+@participating
+def predecessor(evidence, stage, *, ctx, frozen=None):
+    ledger, index, frozen = active_ledger(evidence, stage, ctx=ctx, frozen=frozen)
+    matches = [i for i, row in enumerate(ledger['gates']) if row['gate'] == 'prepare-frozen-diff']
+    # Full production routing is exact45. Synthetic copied gate_list explicitly
+    # adjusts only routing/setup while preserving this causal preceding consumer.
+    ctx.require(matches == [3] and index > 3, 'prepare must be unique preceding slot4')
+    row = ledger['gates'][3]
+    completed_row(row, evidence, ctx=ctx, frozen=frozen)
+    ctx.require('preparedEvidence' in row, 'seal cannot replace missing actual prepare completion')
+    seal = load_seal(evidence, ctx=ctx, frozen=frozen)
+    expected = {'seal': reference(Path(evidence)/SEAL, ctx=ctx),
+                'preparationObservation': seal['preparationObservation'],
+                'owner': seal['ownerReference'], 'freeze': seal['freezeReference']}
+    ctx.require(row['preparedEvidence'] == expected, 'completed prepare bindings mismatch')
+    return seal, frozen
+
+
+@participating
+def _read_graph(seal, *, ctx):
+    root = assert_owned(seal['owner'], ctx=ctx)
+    ctx.require(inventory(seal['owner'], ctx=ctx, allowed_names=set(seal['inventory']),
+                          file_roles=view_roles(seal['inventory']), expected_entries=seal['inventory']) == seal['inventory'],
+                'frozen store modified; never regenerate')
+    graph = Forest(ctx)
+    for oid, expected in seal['objects'].items():
+        actual, body, _ = loose(root/'objects'/oid[:2]/oid[2:], oid, ctx=ctx)
+        ctx.require(actual == expected and actual['type'] != 'commit', 'frozen object type/hash changed')
+        graph.add(actual['type'], body, expected=oid)
+    required = set()
+    for oid in (seal['base'], seal['proposed'], seal['empty']):
+        _files, found = graph.traverse(oid)
+        required |= found
+    ctx.require(required == set(graph.objects), 'forest has missing/extraneous objects')
+    validate_view(seal['owner'], graph, ctx=ctx, expected_inventory=seal['inventory'])
+    return graph
+
+
+@participating
+def prepare(evidence, *, ctx):
+    evidence = Path(evidence)
+    config = config_load(evidence, ctx=ctx)
+    destinations = (OWNER, SEAL, PREP, ANCHOR, 'FROZEN-DIFF-FAILURE.json', 'FROZEN-DIFF-CLEANUP.json')
+    ctx.require(not any(exists(evidence/name, ctx=ctx) for name in destinations)
+                and not any(name.startswith(('FROZEN-DIFF-', 'frozen-diff-')) for name in names(evidence, ctx=ctx))
+                and not exists(Path(config['owner'])/'final-frozen-diff-r1', ctx=ctx), 'existing partial/final diff evidence; no adoption')
+    observations, checked = [], []
+    frozen = load_frozen(evidence, ctx=ctx)
+    stable = check_frozen(evidence, ctx=ctx, observations=observations, frozen=frozen, checked_observations=checked)
+    ledger, index, frozen = active_ledger(evidence, 'prepare-frozen-diff', ctx=ctx, frozen=frozen)
+    ctx.require(index == 3, 'prepare not at exact slot4')
+    # No completion check for this RUNNING child; that row cannot yet exist.
+    for row in ledger['gates'][:index]:
+        completed_row(row, evidence, ctx=ctx, frozen=frozen)
+    layout = config['gitLayouts'][config['source']]
+    raw = raw_source(config['source'], branch=layout['branch'], expected_gitdir=layout['gitdir'], expected_common=layout['common'], ctx=ctx)
+    ctx.require(raw['stable'] == stable['sourceGit'], 'raw source differs from frozen projection')
+    graph = raw['graph']
+    proposed, graph = proposed_tree(config['source'], stable['files'], ctx=ctx, graph=graph)
+    ctx.require(proposed == stable['proposedTree'], 'incomplete proposed source forest')
+    owner, view = create_view(Path(config['owner'])/'final-frozen-diff-r1', evidence/OWNER, graph, tree=proposed, ctx=ctx)
+    native = consume_forest(owner, graph, raw['stable']['baseRoot'], proposed, config['gitLeaf'], ctx=ctx)
+    recheck_raw(raw, ctx=ctx)
+    _inputs_unchanged(stable, evidence, ctx=ctx, frozen=frozen)
+    write_bytes_new(evidence/ANCHOR, [raw['anchorBytes']], ctx=ctx, role='commit')
+    owner_ref, frozen_ref = reference(evidence/OWNER, ctx=ctx), read_file(evidence/'final-freeze.json', ctx=ctx, role='record')
+    observation = {'schemaVersion': 1, 'status': 'PASS', 'stableSha256': frozen['stableSha256'],
+                   'freezeReference': frozen_ref, 'ownerReference': owner_ref, 'native': native,
+                   'sourceObservation': observations[-1], 'action': action_metadata(ctx)}
+    seal = {'schemaVersion': 1, 'status': 'PREPARED_NOT_CHILD_ACCEPTED', 'stableSha256': frozen['stableSha256'],
+            'freezeReference': frozen_ref, 'owner': owner, 'ownerReference': owner_ref,
+            'base': raw['stable']['baseRoot'], 'proposed': proposed, 'empty': EMPTY_TREE,
+            'objects': graph.manifest(), 'inventory': native['inventory'],
+            'rawAnchor': read_file(evidence/ANCHOR, ctx=ctx, role='commit'),
+            'preparationObservation': None}
+    validate_seal_shape(seal, stable, evidence, ctx=ctx, preparation_pending=True)
+    _prep_observation(observation, seal=seal, evidence=evidence, stable=stable, ctx=ctx, frozen=frozen, checked_source=checked[-1])
+    frozen.bind(owner_ref, ctx=ctx)
+    frozen.bind(seal['rawAnchor'], ctx=ctx, role='commit')
+    frozen.recheck(ctx=ctx)
+    write_new(evidence/PREP, observation, ctx=ctx)
+    seal['preparationObservation'] = reference(evidence/PREP, ctx=ctx)
+    frozen.bind(seal['preparationObservation'], ctx=ctx)
+    validate_seal_shape(seal, stable, evidence, ctx=ctx)
+    validate_view(owner, graph, ctx=ctx, expected_inventory=native['inventory'])
+    frozen.recheck(ctx=ctx)
+    ctx.check()
+    write_new(evidence/SEAL, seal, ctx=ctx)
+    ctx.check()
+    # Actual child return + parent completed accounting remains mandatory.
+    return {'status': 'PREPARED_NOT_CHILD_ACCEPTED', 'seal': reference(evidence/SEAL, ctx=ctx)}
+
+
+@participating
+def check(evidence, *, ctx):
+    evidence = Path(evidence)
+    seal, frozen = predecessor(evidence, 'diff-check', ctx=ctx)
+    observations = []
+    stable = check_frozen(evidence, ctx=ctx, observations=observations, frozen=frozen)
+    ctx.require(stable == frozen['stable'], 'late stable authority drift')
+    graph = _read_graph(seal, ctx=ctx)
+    native = consume_forest(seal['owner'], graph, seal['base'], seal['proposed'], stable['configuration']['record']['gitLeaf'], ctx=ctx)
+    _inputs_unchanged(stable, evidence, ctx=ctx, frozen=frozen)
+    write_new(evidence/('frozen-diff-check-'+ctx.nonce+'.json'),
+              {'schemaVersion': 1, 'status': 'PASS_NOT_CHILD_ACCEPTED', 'originalSeal': reference(evidence/SEAL, ctx=ctx),
+               'sourceObservation': observations[-1], 'native': native, 'action': action_metadata(ctx)}, ctx=ctx)
+    ctx.check()
+
+
+@participating
+def cleanup(evidence, *, ctx):
+    evidence = Path(evidence)
+    ctx.require(not exists(evidence/'frozen-diff-cleanup-intent.json', ctx=ctx)
+                and not exists(evidence/'FROZEN-DIFF-CLEANUP.json', ctx=ctx), 'cleanup was already attempted; never resume/adopt partial deletion')
+    seal, frozen = predecessor(evidence, 'cleanup-frozen-diff', ctx=ctx)
+    workers = prior_workers(evidence, 'cleanup-frozen-diff', ctx=ctx, frozen=frozen)
+    observations = []
+    stable = check_frozen(evidence, ctx=ctx, observations=observations, frozen=frozen)
+    ctx.require(stable == frozen['stable'], 'cleanup stable binding drift')
+    _read_graph(seal, ctx=ctx)
+    _inputs_unchanged(stable, evidence, ctx=ctx, frozen=frozen)
+    entries = inventory(seal['owner'], ctx=ctx, allowed_names=set(seal['inventory']),
+                        file_roles=view_roles(seal['inventory']), expected_entries=seal['inventory'])
+    ctx.require(entries == seal['inventory'], 'cleanup store drift')
+    write_new(evidence/'frozen-diff-cleanup-intent.json',
+              {'status': 'INTENT_NOT_REMOVED', 'owner': seal['owner'], 'entries': entries,
+               'workers': workers, 'seal': reference(evidence/SEAL, ctx=ctx)}, ctx=ctx)
+    frozen.recheck(ctx=ctx)
+    delete_inventory(seal['owner'], entries, ctx=ctx, file_roles=view_roles(entries))
+    frozen.recheck(ctx=ctx)
+    write_new(evidence/'FROZEN-DIFF-CLEANUP.json', {'status': 'PASS_NOT_FINAL_DELIVERY',
+              'removed': seal['owner']['path'], 'entries': len(entries)+1,
+              'retained': [OWNER, SEAL, PREP, ANCHOR, 'all source/reviews/native observations/wheels'],
+              'workers': workers, 'sourceObservation': observations[-1], 'action': action_metadata(ctx)}, ctx=ctx)
+    ctx.check()
+
+
+def main():
+    require(sys.argv[1:] in (['--prepare'], ['--check'], ['--cleanup']), 'usage: frozen_diff.py --prepare|--check|--cleanup')
+    mode = sys.argv[1][2:]
+    with action('frozen-diff-'+mode) as ctx:
+        try:
+            {'prepare': prepare, 'check': check, 'cleanup': cleanup}[mode](EVIDENCE, ctx=ctx)
+        except BaseException as error:
+            try:
+                write_failure(EVIDENCE/('FROZEN-DIFF-FAILURE-'+ctx.nonce+'.json'), ctx=ctx, phase=mode, error=error)
+            except BaseException:
+                pass
+            raise
+    print('PASS: frozen diff '+mode+'; actual parent completion/global wrapper still required')
+
+
+if __name__ == '__main__':
+    main()

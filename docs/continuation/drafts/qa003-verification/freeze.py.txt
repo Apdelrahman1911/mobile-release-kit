@@ -1,0 +1,53 @@
+"""Identify the proposed issue tree without changing the real index or any ref."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import stat
+import subprocess
+import sys
+import tempfile
+
+root = Path(__file__).resolve().parents[3]
+evidence = Path(__file__).resolve().parent
+def git(*arguments, **keywords):
+    return subprocess.check_output(["git", "-C", str(root), *arguments], **keywords)
+
+paths = sorted({os.fsdecode(value) for value in git("ls-files", "--cached", "--others", "--exclude-standard", "-z").split(b"\0") if value} - {"AGENTS.md"})
+files = {}
+for relative in paths:
+    file = root / relative
+    if not file.exists():
+        files[relative] = {"deleted": True}
+        continue
+    assert not file.is_symlink() and file.is_file(), relative
+    files[relative] = {"sha256": hashlib.sha256(file.read_bytes()).hexdigest(),
+                       "executable": bool(file.stat().st_mode & stat.S_IXUSR)}
+instructions = hashlib.sha256((root / "AGENTS.md").read_bytes()).hexdigest()
+assert instructions == "7a520b569d674ad637be886c400f88d38c294b36f925595ca1f3b479526757eb"
+snapshot = {"head": git("rev-parse", "HEAD").decode().strip(),
+            "branch": git("branch", "--show-current").decode().strip(),
+            "files": files, "userInstructionsSha256": instructions}
+snapshot["verificationHelpers"] = {
+    name: hashlib.sha256((evidence / name).read_bytes()).hexdigest()
+    for name in ("freeze.py", "verify-all.py", "verify-matrix.py", "verify-pins.py",
+                 "wheel-smoke.sh", "probe-jdk21-signing.py", "cleanup-build.py")
+}
+if "--check" in sys.argv:
+    saved = json.loads((evidence / "final-freeze.json").read_text())
+    assert all(saved[key] == value for key, value in snapshot.items()), "Source/HEAD changed after freeze; verification must restart"
+    print(f"PASS: frozen {len(files)}-file source unchanged; user AGENTS.md unchanged")
+else:
+    assert not git("diff", "--cached", "--name-only").strip(), "Unexpected staged user work; do not overwrite it"
+    with tempfile.TemporaryDirectory(prefix="mrk-freeze-index-") as temporary:
+        environment = {**os.environ, "GIT_INDEX_FILE": str(Path(temporary) / "index")}
+        git("read-tree", "HEAD", env=environment)
+        pathspec = b"\0".join(os.fsencode(path) for path in paths) + b"\0"
+        subprocess.run(["git", "-C", str(root), "add", "--pathspec-from-file=-", "--pathspec-file-nul"],
+                       env=environment, input=pathspec, check=True)
+        snapshot["proposedTree"] = git("write-tree", env=environment).decode().strip()
+    (evidence / "final-freeze.json").write_text(json.dumps(snapshot, sort_keys=True, indent=2) + "\n")
+    (evidence / "final-pathspec.nul").write_bytes(b"\0".join(os.fsencode(path) for path in paths) + b"\0")
+    (evidence / "final-status.txt").write_bytes(git("status", "--short"))
+    print(json.dumps({key: value for key, value in snapshot.items() if key != "files"}, indent=2))
+    print(f"Frozen {len(files)} first-party files; AGENTS.md excluded from proposed Git tree")

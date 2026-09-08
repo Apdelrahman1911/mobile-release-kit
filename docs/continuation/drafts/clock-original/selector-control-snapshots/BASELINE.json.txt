@@ -1,0 +1,735 @@
+{
+  "reviewer": "/root/qa006_implementation_review",
+  "atUtc": "2026-09-07T10:25:44.319880+00:00",
+  "tree": "6009247f3627c9825e9ad9c790a57876e09f3726",
+  "computedTree": "6009247f3627c9825e9ad9c790a57876e09f3726",
+  "head": "2beb37336fa8002b69f598fe431082606368310d",
+  "branch": "fix/qa-006-upload-process-fixtures",
+  "firstPartyFiles": 152,
+  "changedPaths": [
+    ".github/workflows/ci.yml",
+    "tests/workflow/test_android_upload_validation.rb",
+    "tests/workflow/test_ios_upload_validation.rb",
+    "tests/workflow/test_native_profile_ci.py",
+    "tests/workflow/test_native_upload_validation.rb",
+    "tests/workflow/upload_process_fixture.rb",
+    "tests/workflow/upload_process_ownership.rb"
+  ],
+  "r6ChangedPaths": [
+    "tests/workflow/test_native_upload_validation.rb",
+    "tests/workflow/upload_process_fixture.rb"
+  ],
+  "bindings": {
+    "PLAN-R6-R2.md": "669c9c4398a9c80a52e2f35a02f0c6338341e4a8c171396057b4e70a235f91a1",
+    "plan-review-r6-r2/PLAN-DECISION.json": "484a59265ec9d79bafc154c0fb296dc061e08f91cba6de2367d9a9f233f1ad09",
+    "implementation-r6/SNAPSHOT.json": "abb6503fe36d442b229ed294a423e6fdabd507a49d4c2628d399c2544fa2226a",
+    "implementation-r6/complete.diff": "2887af02483daa161f58de7a9e0c7d1af711953a3c445cfc4ceb77eb97a7b251",
+    "implementation-r6/r6.diff": "88413fb5c79cb1d2264486708065b4fb5bee1216a7fd040047ab9164518bf299"
+  },
+  "allFilesystemHashesModesMatched": true,
+  "gitTreeRecomputedIndependently": true,
+  "completeDiffAndR6DiffIndependentlyRecomputed": true,
+  "gitTreeObjectLookup": {
+    "exitCode": 128,
+    "stdout": "",
+    "stderr": "fatal: git cat-file: could not get object info"
+  },
+  "rootUserFiles": {
+    ".github/workflows/ci.yml": {
+      "sha256": "eaf8a7beeb39ebb9b10a528099fe9c2dc5ecd7f9e4977a249adf2cf7899aeb08",
+      "executable": false
+    },
+    ".github/workflows/reusable-candidate.yml": {
+      "sha256": "7345b2d7d3f593eff511d0513b9d6e9462809d73f6c088c1a93eeb6f7623a1ab",
+      "executable": false
+    },
+    ".github/workflows/reusable-external-testing.yml": {
+      "sha256": "80adb7e4d5ed73194dcb7cc6a5ae29870f880d09a2a1c24934f05e6c96d5e381",
+      "executable": false
+    },
+    ".github/workflows/reusable-preflight.yml": {
+      "sha256": "3ea467788d381d2759f6ec1b9f49c3af0086c8771a99fabd78b361172e1e2d8e",
+      "executable": false
+    },
+    ".github/workflows/reusable-production-submit.yml": {
+      "sha256": "94623a5ea4c1895c247896a80b72edc3fc8227b07b05792c0b26bb9c55dadd40",
+      "executable": false
+    },
+    ".gitignore": {
+      "sha256": "a474bf17bb6a8a257d0572ed8bcdadeb7bdb6ebf48959fcacc43026329691395",
+      "executable": false
+    },
+    "CHANGELOG.md": {
+      "sha256": "83dc9bd8e8addc222ff4f68b16d9e80553aec1747b9358eb48ad24de18eda1aa",
+      "executable": false
+    },
+    "Gemfile": {
+      "sha256": "a7a87de32023c8ff5ddc3703644e52683a9b007bff33b0beca9fe15c26c51e6b",
+      "executable": false
+    },
+    "Gemfile.lock": {
+      "sha256": "c49efc491e6ecaf86c3213ee51cfa55a2893d2249b9eb6b26ba9748c34f43bb1",
+      "executable": false
+    },
+    "LICENSE": {
+      "sha256": "7d381db63decbfe663092a8537c1a1c1a9121d60ffe5938f401ad1346bdf9148",
+      "executable": false
+    },
+    "README.md": {
+      "sha256": "03fd6bfd308c1d13a9969ff88469df063060dd42fc91f8b62c48f2805e7b1c48",
+      "executable": false
+    },
+    "SECURITY.md": {
+      "sha256": "7f71004da43616bdd70741eaf43f004776c1425791f48fa84c630641d0f064e7",
+      "executable": false
+    },
+    "docs/credentials.md": {
+      "sha256": "46bf09550c89a7ae431071baff0871ffb984bafc6255f4eba82078ee7629a791",
+      "executable": false
+    },
+    "docs/init-recovery.md": {
+      "sha256": "ce707a2aeb152fb026e258e2e7450f6776a049b70a70e2cedaca757126fafa7c",
+      "executable": false
+    },
+    "docs/integration.md": {
+      "sha256": "709e60f7dee313c7ea15682f7e268053abad969a07101f06ba87fe1ae3eaca24",
+      "executable": false
+    },
+    "docs/ios-artifacts.md": {
+      "sha256": "1a2985161d44aa8e5400f5b2e84e58d0597c5bdd7a685b54cffcdcdd8ac7e9ff",
+      "executable": false
+    },
+    "docs/ios-entitlements.md": {
+      "sha256": "1fdba7792e9056339023cacebca8a723fced5dd36f45da4a04737b36c1dff8d8",
+      "executable": false
+    },
+    "docs/ios-profile-authority.md": {
+      "sha256": "93b2aa1df805de13270ecc75fe1de5efb7d893fb461375b8bca7785375896235",
+      "executable": false
+    },
+    "docs/lifecycle.md": {
+      "sha256": "645704a95c24af8c60af9e994e0eb8eb449db4e194d7afdcb63ceb4623397eae",
+      "executable": false
+    },
+    "docs/recovery.md": {
+      "sha256": "ac7661675f91b88d02b239a3185165ca362e728156a85699ed3434b464a4fa6c",
+      "executable": false
+    },
+    "docs/troubleshooting.md": {
+      "sha256": "a3ffa698c09e28d04af023539d29bf16c810ee296fff8867c953a5bd7845bcd4",
+      "executable": false
+    },
+    "docs/upgrading.md": {
+      "sha256": "3c00c2ade92ef8106dea9e310817f6745ea00dd0cb88d536628ee38186a41857",
+      "executable": false
+    },
+    "fastlane/Fastfile": {
+      "sha256": "2e694f1dee8cae899c2f455d1885b408adc5a02b47f26c2f0f7fa6de6fc5e056",
+      "executable": false
+    },
+    "fastlane/android_upload_validation.rb": {
+      "sha256": "f3a53390e774f62846227b6e89b11178feb498c5155d0d0cfb2e09ae4fe89655",
+      "executable": false
+    },
+    "fastlane/apple_asset_upload.rb": {
+      "sha256": "8adeaa461dd9529f2c9e06c6df9e11731d86eb4a144150df48a7cbf2a794e241",
+      "executable": false
+    },
+    "fastlane/apple_create_retry.rb": {
+      "sha256": "0c7259ff5d3371b6684fc4d75fe30ea09b67de3c2ea95b3f102f370748a84042",
+      "executable": false
+    },
+    "fastlane/apple_production.rb": {
+      "sha256": "d852adb3829a6721e7057bfedd3ea50bfcb357de0ec1f9e86d8e562685d4f850",
+      "executable": false
+    },
+    "fastlane/apple_store.rb": {
+      "sha256": "47b663461bd6111d527f30f7d45a2ce3f86fd279e121fc83876135ca4b625f39",
+      "executable": false
+    },
+    "fastlane/ios_upload_validation.rb": {
+      "sha256": "bd19cfd93045facfb19b18bd79c994764ca03a93f21db19bbe8164cb83567b1d",
+      "executable": false
+    },
+    "fastlane/native_upload_validation.rb": {
+      "sha256": "57e41e4988c1abc10f1a2da22d56440d064557dfa28034dfa4b12eea94778cfa",
+      "executable": false
+    },
+    "fastlane/play_store.rb": {
+      "sha256": "34fbff928f670dfaa1729e724327f4594a7f1d47b228cae33b516fdd68deefcd",
+      "executable": false
+    },
+    "fastlane/release_support.rb": {
+      "sha256": "261374b8a7904e8671cc0779d4724fe3c31535138ef1e3920b435f18227668e5",
+      "executable": false
+    },
+    "fastlane/run_lane.rb": {
+      "sha256": "8e420f89aacf4427780f0b087023c44cb55b6ea42aca1a7c822fffe6ebb1278d",
+      "executable": false
+    },
+    "pyproject.toml": {
+      "sha256": "b62b3ab8be1e2136bb9e0fbca7db826066a932a6b5a9c028adf9e79933859b2c",
+      "executable": false
+    },
+    "schemas/candidate.schema.json": {
+      "sha256": "ddf22a4467fc9f6dd50de06d1af50b79eca2d55a42b74566fdcab9a49d9b6e81",
+      "executable": false
+    },
+    "schemas/project.schema.json": {
+      "sha256": "2c59a6a3d0c90188db5800898db2c42612960616f30d84aecf25a4611ec5fbd7",
+      "executable": false
+    },
+    "schemas/receipt.schema.json": {
+      "sha256": "eb1ceaaceeecc01497847dc2857d03aa3e45433e9439b5e49177f4f981e02db7",
+      "executable": false
+    },
+    "schemas/store-operation-intent.schema.json": {
+      "sha256": "d1667baa58d6b61340ad4685ad71c8a4c8d1e550070a6114d38f0c806d24efb2",
+      "executable": false
+    },
+    "src/mobile_release/__init__.py": {
+      "sha256": "557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2",
+      "executable": false
+    },
+    "src/mobile_release/__main__.py": {
+      "sha256": "50fd328dfe5b5339a9958444940e9ce45b9764dbb7b130cc25f3a966ccb706a8",
+      "executable": false
+    },
+    "src/mobile_release/android.py": {
+      "sha256": "523b96f06f7a458baaa5967e560a4f7c592fdc284c4d16f685c0a79cd6e80c95",
+      "executable": false
+    },
+    "src/mobile_release/android_upload_validation.py": {
+      "sha256": "5be3d74272ade8a30938d48e25ffe42a661ff3e142872c17b014dee1641cfd72",
+      "executable": false
+    },
+    "src/mobile_release/cancellation.py": {
+      "sha256": "0ccb846c90608b798ab39c1b63da42336ab0214610a2023ce3c6459d0708d30c",
+      "executable": false
+    },
+    "src/mobile_release/cli.py": {
+      "sha256": "e3584444c9c776de81851091be3a1d3c0f348c713a6d5b8cea98c03c8b9d5d48",
+      "executable": false
+    },
+    "src/mobile_release/config.py": {
+      "sha256": "65a1ff0f3a8e8ccaaad85df690252fc4f0d48748bef9349a658e74832d43f60e",
+      "executable": false
+    },
+    "src/mobile_release/credentials.py": {
+      "sha256": "a4b448f2150da768a33374a6885fdd53022ecb0377119f0a0d435b75b558c820",
+      "executable": false
+    },
+    "src/mobile_release/data/apple-profile-roots.pem": {
+      "sha256": "c704ce9bc7d65280e2893c2235c2434dba8cbce00f659787492714ca441b1e93",
+      "executable": false
+    },
+    "src/mobile_release/discovery.py": {
+      "sha256": "4aefe6e6f0b57ce2a136018ae6b8a9f7a6d7393046562027a87413f9fbc08984",
+      "executable": false
+    },
+    "src/mobile_release/errors.py": {
+      "sha256": "26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853",
+      "executable": false
+    },
+    "src/mobile_release/init_transaction.py": {
+      "sha256": "0be951e0cea1fab95cb5244a04a49099bbb77fe00376cdb86fb06f0526b79bdb",
+      "executable": false
+    },
+    "src/mobile_release/inspection.py": {
+      "sha256": "64f688a06be24ff3bbdbeb0edfaccbf153bdd2e26726a8cf29573b2072a2cd96",
+      "executable": false
+    },
+    "src/mobile_release/ios.py": {
+      "sha256": "3419ce237c1a71c836de7f500d10a8dc1158a91d90b1ffc36c7c3aff47841625",
+      "executable": false
+    },
+    "src/mobile_release/ios_artifacts.py": {
+      "sha256": "07eede745709f32b0349c920e2ea18cfb86b7ed1d35aaee7c548ca2904662e94",
+      "executable": false
+    },
+    "src/mobile_release/ios_der.py": {
+      "sha256": "9ad85b4f36c65d5dc1895fae45ffc3959f0e190e7b183615aa6c0714d8b38ab5",
+      "executable": false
+    },
+    "src/mobile_release/ios_entitlements.py": {
+      "sha256": "3278efadeecbcc09187cc859c03e1e011a8bf2d8f22355f92c03ade140c4951f",
+      "executable": false
+    },
+    "src/mobile_release/ios_plist_binary.py": {
+      "sha256": "1601d3e15467a95348bde537ec6da633c2b4b46e0f7803eb619622b3cab69b2b",
+      "executable": false
+    },
+    "src/mobile_release/ios_profile_auth.py": {
+      "sha256": "77dce490c737f3cb63c58392cfd0f1b054d8b199ef71a6b646828dd89e022202",
+      "executable": false
+    },
+    "src/mobile_release/ios_profile_trust.py": {
+      "sha256": "e813efc8e4218048bae71f04de942493e93e5880f095e5ae68f051d6cf176edf",
+      "executable": false
+    },
+    "src/mobile_release/ios_profiles.py": {
+      "sha256": "d12804a3d5238c7cdb208b97dcd3821be9cb002ba31eb429b7e43c7676fc13e1",
+      "executable": false
+    },
+    "src/mobile_release/ios_upload_validation.py": {
+      "sha256": "2b914576fd795123bd6088711f19d1072801415736f266ebaf39c5d6d4446589",
+      "executable": false
+    },
+    "src/mobile_release/macho.py": {
+      "sha256": "8fb561c41ca958ba9d1fc507b7aecae6a011aa2bb903ec472a80201a6b926d5d",
+      "executable": false
+    },
+    "src/mobile_release/metadata.py": {
+      "sha256": "454c4f8799bd99439e05f1157154dd6b124f301ceb564c01b619b326a9923dc0",
+      "executable": false
+    },
+    "src/mobile_release/preflight.py": {
+      "sha256": "c7c803a30ecaffd608e95259ede3069465370473aa95272e9819c8dca822bcb2",
+      "executable": false
+    },
+    "src/mobile_release/provenance.py": {
+      "sha256": "875afcb7fffd96261ab7794e464e46f53859a22f60cd52d3e4abab46a1b738be",
+      "executable": false
+    },
+    "src/mobile_release/reporting.py": {
+      "sha256": "8fdb0b59967b473390e484d294e41f7c87e2341b468b8e6a2719e50ed7e63544",
+      "executable": false
+    },
+    "src/mobile_release/stores.py": {
+      "sha256": "091082e9ae279a66c9caddcb9ea11c02a40f6ea55a8e6d74acd19ed586f90313",
+      "executable": false
+    },
+    "src/mobile_release/tooling.py": {
+      "sha256": "e7a85d14dd90108db6542c8ee8a40f823baf4b51556ca1a302c87e853f200d5b",
+      "executable": false
+    },
+    "src/mobile_release/workflow.py": {
+      "sha256": "5569ebc822753a76dd669ec9c5edeb2b73298a01ba9392594ee69fc4794b5d9e",
+      "executable": false
+    },
+    "templates/mobile-release.json": {
+      "sha256": "964b703a93624100d0526eff430d7a9897d1a94cf0eac2789af8582c16784fe2",
+      "executable": false
+    },
+    "templates/workflows/mobile-candidate.yml": {
+      "sha256": "830c5e268cf37faebc3c0e2cbf7fa3782eff7e51a6576aefc3d5ebf56f76cca6",
+      "executable": false
+    },
+    "templates/workflows/mobile-external-testing.yml": {
+      "sha256": "39744e15d2a8dcfcdd9607bb58d0d10dfcd5ffaecd70a4d78e94a24e7b8a1754",
+      "executable": false
+    },
+    "templates/workflows/mobile-preflight.yml": {
+      "sha256": "5592b43ae69cf163eb3df4b26265a0b02cb7b5d8978d728092dce14cb9ada1e8",
+      "executable": false
+    },
+    "templates/workflows/mobile-production-submit.yml": {
+      "sha256": "0e079dd06ed60416d3a06c0f777d75caba89fca56aab72b34ff90bc1b2243dd4",
+      "executable": false
+    },
+    "tests/fixtures/README.md": {
+      "sha256": "fb4e43d815d7412c3e2e543efa80505f19c3b53e09ee5d1cc95d6bc2e8924da5",
+      "executable": false
+    },
+    "tests/fixtures/android-release-notes-corpus.json": {
+      "sha256": "c2446fcc3a21e114e27537000534f1664129845e1094235411fc99224477ccf5",
+      "executable": false
+    },
+    "tests/fixtures/apple-profile-authority/README.md": {
+      "sha256": "7ae0c9feb1418ef1302d00a900bae4f9af340ef0bb97f3b8b1eba7863eeb9f86",
+      "executable": false
+    },
+    "tests/fixtures/apple-profile-authority/certificates.json": {
+      "sha256": "53462643fdcf890500f1ea768719c97569ef6df1a1d2a1bedeb8f8af4ba02335",
+      "executable": false
+    },
+    "tests/fixtures/apple-store-contract.json": {
+      "sha256": "49a124957a74b2fb6939aae49a7a989498a1386bc6c07ab2a388373a4f7e397b",
+      "executable": false
+    },
+    "tests/fixtures/candidate-valid.json": {
+      "sha256": "285685846ac73e215aacc77436884e42f3e973a105dc5e40f1add0a020f2e06d",
+      "executable": false
+    },
+    "tests/fixtures/intent-candidate-valid.json": {
+      "sha256": "e56ad77ee3cb4b1d3e12d1a6f5be8f7d0e90497934d1ebbd5bd9312b53362e42",
+      "executable": false
+    },
+    "tests/fixtures/intent-external-valid.json": {
+      "sha256": "dd1bd87070cda83d69c770705cb43b467b55d7a661a6a6413e9dff83c3059275",
+      "executable": false
+    },
+    "tests/fixtures/intent-production-valid.json": {
+      "sha256": "3d06426b102ecbcc1f9ca73c370d1849b891884665c57b3f93259fe5926bbed0",
+      "executable": false
+    },
+    "tests/fixtures/project-valid.json": {
+      "sha256": "458060a8d2217eac131621e28a654497f171f00f91e651250d0ffda7b8faf603",
+      "executable": false
+    },
+    "tests/fixtures/receipt-candidate-valid.json": {
+      "sha256": "375d5b895b62b62842338acff9c8ed9cfafe9a618eb51439d9ebc042d401e183",
+      "executable": false
+    },
+    "tests/fixtures/receipt-external-valid.json": {
+      "sha256": "ef0fc79056e7fd7b7ab79328bdeab7c11bfad7db00d7f59c37853320b10b5c88",
+      "executable": false
+    },
+    "tests/fixtures/receipt-production-valid.json": {
+      "sha256": "7c94fa3c29cbec13004b74651539e805be0ce8624a7918d3659a84781c0d48db",
+      "executable": false
+    },
+    "tests/fixtures/version-parser-corpus.json": {
+      "sha256": "ea93891df11d69965cfbc8add1c545ed45f162412d7e6faff7b8eb97ca07bdbd",
+      "executable": false
+    },
+    "tests/unit/__init__.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "executable": false
+    },
+    "tests/unit/apple_contract_helpers.py": {
+      "sha256": "20fa0f731c78b85bd97cab5431123739c153168077a719920b7d5eeed0643378",
+      "executable": false
+    },
+    "tests/unit/evidence_helpers.py": {
+      "sha256": "39799e87fc3db735077b423113ffd14b7c8ee4a74132c2f33de7a29a584e6608",
+      "executable": false
+    },
+    "tests/unit/helpers.py": {
+      "sha256": "7c93c916fc1274098a5f228c48571ca7e117ee7703fd4d6d3265c8d7a6f5e8ed",
+      "executable": false
+    },
+    "tests/unit/ios_artifact_helpers.py": {
+      "sha256": "93c26a904e32560eb79f27c45e35bf73b2a7129aec4e5597714b1a3394947427",
+      "executable": false
+    },
+    "tests/unit/ios_entitlement_helpers.py": {
+      "sha256": "ebaa7737d18feb4cac1af5b95428a41da7eba92f16db7687936a726ad4e21187",
+      "executable": false
+    },
+    "tests/unit/ios_profile_helpers.py": {
+      "sha256": "82fa6ea5d6ea70f89b0ceecbbaae005ad17e1e30ef09e99171aa683a06c5a463",
+      "executable": false
+    },
+    "tests/unit/test_android_release_notes.py": {
+      "sha256": "50110d68a7f9bbd868af29079624410675f0707717a6393d37060a809cf632ea",
+      "executable": false
+    },
+    "tests/unit/test_android_upload_validation.py": {
+      "sha256": "6e217523fc91a4308fb1ce9da06dd754300d9238d88992532bc61c7e90c65d78",
+      "executable": false
+    },
+    "tests/unit/test_cli_and_build.py": {
+      "sha256": "2730491448f867a0f1f831f3f2965d213895f336326ecf8ed7aeaaadba023510",
+      "executable": false
+    },
+    "tests/unit/test_config_discovery.py": {
+      "sha256": "cbab0cf6b00906a013beca34cecd3e734dbd70c5bed7093a62e02596043af1af",
+      "executable": false
+    },
+    "tests/unit/test_credentials_metadata.py": {
+      "sha256": "b059af01be662c0d8b9376e2f76f28568ff805f3ec44a06d4bd4e84441b6df33",
+      "executable": false
+    },
+    "tests/unit/test_default_cancellation.py": {
+      "sha256": "7d5f8a89f0acf32c7cfc9c77390454b88349ee300f6b230d13325d3c818e1a02",
+      "executable": false
+    },
+    "tests/unit/test_init_transaction.py": {
+      "sha256": "3936d7da37751c5830323f36fb51814f770206d1646cc72378556eddba10298a",
+      "executable": false
+    },
+    "tests/unit/test_inspection_budget.py": {
+      "sha256": "86f7d0c829ead6dacc3bd37bd6291dccb27659783e5828a4d58bde4b8d8ec5ce",
+      "executable": false
+    },
+    "tests/unit/test_ios_artifact.py": {
+      "sha256": "faf7fa598d48725c10279b6ab211c60216832424db99408879a3152ac51f9be3",
+      "executable": false
+    },
+    "tests/unit/test_ios_correspondence.py": {
+      "sha256": "9ff58541e5368557051e1860cf7a8ab45142b50dca6987d2b7685814c7a93f74",
+      "executable": false
+    },
+    "tests/unit/test_ios_entitlements.py": {
+      "sha256": "e065ad53618c2a015c632f2ea7ec4a651b4f54611ffaa07db3ac3d555f2fc360",
+      "executable": false
+    },
+    "tests/unit/test_ios_plist_binary.py": {
+      "sha256": "ee60119ffb41e4c64b50d354c4eac9b0f962412a86a027e5ea4c08b444759ea7",
+      "executable": false
+    },
+    "tests/unit/test_ios_profile_authority.py": {
+      "sha256": "bd09825f7f289f58b495495081b7c9152a12b238940479c2659f186c2903e119",
+      "executable": false
+    },
+    "tests/unit/test_ios_profile_installation.py": {
+      "sha256": "f9ca0e94cf6dbc2b62921b5757adeacc109caab6f0ee12ed91e95c4c37146a02",
+      "executable": false
+    },
+    "tests/unit/test_ios_profile_trust.py": {
+      "sha256": "da4c1812c35c291dc3bf6afed30d114f0c1952cd15ab6e533f994c29d81aa11f",
+      "executable": false
+    },
+    "tests/unit/test_ios_upload_validation.py": {
+      "sha256": "4e8adc3ff3eee88f767c40fa6ca5b3fce40b0fc066fe34186bf07c4ecaaa7cce",
+      "executable": false
+    },
+    "tests/unit/test_macho_native.py": {
+      "sha256": "23773c4444ec74d89905852feed4df1c02de1a1bcb4fc7bcabf1bc939bb197ae",
+      "executable": false
+    },
+    "tests/unit/test_operation_intents.py": {
+      "sha256": "12beb4dffeaf437ebaf7a197d12b72509f9875be5904a072dc683bedf26fcdca",
+      "executable": false
+    },
+    "tests/unit/test_operation_recovery.py": {
+      "sha256": "4cbc98718fb555976c14252daeb658025b563132f2d2cdbaa2a9823e1a9eafda",
+      "executable": false
+    },
+    "tests/unit/test_provenance.py": {
+      "sha256": "c18c6c2b1c8b65042c5ab93f5ec6d099a838e963d3e2a28ff81d7536659df9cb",
+      "executable": false
+    },
+    "tests/workflow/__init__.py": {
+      "sha256": "b6d1eef2733b4325a9cd3f9ecfc8d4a23b3baf079ff22462ae2ab312ec0ff9e2",
+      "executable": false
+    },
+    "tests/workflow/apple_fixture.rb": {
+      "sha256": "31b009612d4d54ccea5319998ccfd2898c70fde0891f5b24e0a22a6e56d93448",
+      "executable": false
+    },
+    "tests/workflow/apple_production_fixture.rb": {
+      "sha256": "f54efad78ec80b1cb4386a639a88971128b14d888000728fd9cba3731209d93f",
+      "executable": false
+    },
+    "tests/workflow/export_apple_contract_fixtures.rb": {
+      "sha256": "7e793ac464183ce2fcfa2fa1089dfcd3af94097bb9eac1e5fef003cedc4f4f09",
+      "executable": false
+    },
+    "tests/workflow/fixtures/version.xcconfig": {
+      "sha256": "ec3c209ebb19ebd7f7b61c20a5b0b3492709483d5856e5b3404c853947246613",
+      "executable": false
+    },
+    "tests/workflow/play_fixture.rb": {
+      "sha256": "f78043bc63cbb450db2a61b25725c6fbb1d0760c33d10b0ce8c880084e36eb61",
+      "executable": false
+    },
+    "tests/workflow/process_fixture.py": {
+      "sha256": "a4875bcce4d6fe995959700235c735f88f6e9e221238d1c912da5c9db8582d4d",
+      "executable": false
+    },
+    "tests/workflow/profile_installation_fixture.py": {
+      "sha256": "421c12ef455afe727d448c7ba8c1ac2d39a23ebb231fd8f6f01fd892953ab66f",
+      "executable": false
+    },
+    "tests/workflow/profile_process_fixture.py": {
+      "sha256": "fc4e3289a9b009b2fac9b8e45509b3f0d1fadcee653c13a7edbc73ed35d696fe",
+      "executable": false
+    },
+    "tests/workflow/profile_resource_fixture.py": {
+      "sha256": "fa8e7f53dc0490a1d29d4bc0dc702ebf861c8c83a0a30a2fa30ecdba64bff7cf",
+      "executable": false
+    },
+    "tests/workflow/run_native_profile_checks.py": {
+      "sha256": "940deb26f251b90a6abea138cc5044c194379efd1336cc0c7b8c8abca10fe0bb",
+      "executable": false
+    },
+    "tests/workflow/test_android_upload_validation.rb": {
+      "sha256": "b0d88afe783b3510d536e13db5a123b33ad8433c7e6b893928089fcf68366182",
+      "executable": false
+    },
+    "tests/workflow/test_apple_asset_upload.rb": {
+      "sha256": "a898a39664fed10c5c199e2f9ce65fa56e998469af40261894c9de4da9b24596",
+      "executable": false
+    },
+    "tests/workflow/test_apple_contract.py": {
+      "sha256": "a06bd7fec1405b07562bb2b3af6ebc2cd8752d20708b7f91c213ced01e70d547",
+      "executable": false
+    },
+    "tests/workflow/test_apple_lanes.rb": {
+      "sha256": "652714dea49a1599633162dc54937f6c96539fa67e464721306691ca128cc580",
+      "executable": false
+    },
+    "tests/workflow/test_apple_production.rb": {
+      "sha256": "ae13ae904f98b8d7bbd3aff237b09fb0a5f55d80c586fbeb39a4b77e89ea084f",
+      "executable": false
+    },
+    "tests/workflow/test_apple_production_lane.rb": {
+      "sha256": "b9349b512de0c58afc205608002aac95c6d3beab5c921153d6387be1a326ea1d",
+      "executable": false
+    },
+    "tests/workflow/test_apple_store.rb": {
+      "sha256": "ac055dd656e90fe9be7851f494c04048e9a8ba1e39afa07d019415f067b42cc3",
+      "executable": false
+    },
+    "tests/workflow/test_contract.py": {
+      "sha256": "58040d4b1c97215be43c4493298d6b6c8bb825848a2de68afa4afca7f54d0f66",
+      "executable": false
+    },
+    "tests/workflow/test_fastlane_contract.py": {
+      "sha256": "dc59a2e0fa48c884062ee849640775510277cdf587196a69145fa640b55450ed",
+      "executable": false
+    },
+    "tests/workflow/test_fastlane_support.rb": {
+      "sha256": "58bc04fccca569bbe8a2f012402e9971618e1cd544d0b51c365decb92dd3e5b2",
+      "executable": false
+    },
+    "tests/workflow/test_ios_upload_validation.rb": {
+      "sha256": "d9ed43a8d874ca8941d4fcaf7751e279c469e4e031689f52c966971745c222c7",
+      "executable": false
+    },
+    "tests/workflow/test_native_profile_ci.py": {
+      "sha256": "86cfde8e65e60a121adb86ec4506a5ce76a929269a24c26dc99a4b60436371e7",
+      "executable": false
+    },
+    "tests/workflow/test_native_upload_validation.rb": {
+      "sha256": "cff14837f3725e5bc6672b69d13f55c284516cd10aa1169b19cbd975beb44d71",
+      "executable": false
+    },
+    "tests/workflow/test_play_lanes.rb": {
+      "sha256": "47c8baa756fd0be54a18d61f27d1537f109ecfb4df22e1b79ac980b1465d4e12",
+      "executable": false
+    },
+    "tests/workflow/test_play_store.rb": {
+      "sha256": "37c97c94a7480b70151d3303e3e8cd697d0f1494d170b533fd9a1bdf59c98254",
+      "executable": false
+    },
+    "tests/workflow/test_profile_processes.py": {
+      "sha256": "f5dfe35ab96a501c492df540b7dd417be9506d1cf4cf6ca90cb22960f87e74b2",
+      "executable": false
+    },
+    "tests/workflow/test_schemas.py": {
+      "sha256": "acaa6c7803b5a8cc61b4edc120594e08d9f0a4fce027f5f97ca5e166c47f2339",
+      "executable": false
+    },
+    "tests/workflow/test_supply_wif.rb": {
+      "sha256": "01e96c3e2318fc11eb2ad06d1e734e29155533a8971fe561e32e80728650ba89",
+      "executable": false
+    },
+    "tests/workflow/test_version_parser_contract.py": {
+      "sha256": "486991cc737ed9e1bf65639031cc9a536e0754d5d37438b241892824d7028bb5",
+      "executable": false
+    },
+    "tests/workflow/test_workflow_attempts.py": {
+      "sha256": "91c29ff171c115b1806289d7cb93bd12945b09499e7131269bcd4ae82dddd44e",
+      "executable": false
+    },
+    "tests/workflow/test_workflow_lifecycle.py": {
+      "sha256": "d5b491632d40520428b4a58cb069093b8cafd420d22b2579faafca24601aa9bb",
+      "executable": false
+    },
+    "tests/workflow/test_workflow_recovery.py": {
+      "sha256": "d5847d5ad5aab79001aa0070811c31c006aa708a97deb13bf02f6b7a252ff9bf",
+      "executable": false
+    },
+    "tests/workflow/test_workflow_yaml.rb": {
+      "sha256": "6e2ad5c07de5b608a7b4942854536dfd543fce7fe50ef18af965fd26470a2ba3",
+      "executable": false
+    },
+    "tests/workflow/test_workflow_zip.py": {
+      "sha256": "935ccc06d8f411a471058eb440eca061be3831d00a7fe342c6e9f25e6da8bfee",
+      "executable": false
+    },
+    "tests/workflow/workflow_harness.py": {
+      "sha256": "c7b4992ce27ba5eea51a51648b8154b6b05d6f4348401af6c83dd42c33723ed5",
+      "executable": false
+    },
+    "AGENTS.md": {
+      "sha256": "7a520b569d674ad637be886c400f88d38c294b36f925595ca1f3b479526757eb",
+      "executable": false
+    },
+    "docs/local-signing.md": {
+      "sha256": "f27c2dd6dd79d3d4f25837910bb75e9f47f2356c8cfe39eba8ed4a43dfb9c541",
+      "executable": false
+    },
+    "src/mobile_release/local_signing.py": {
+      "sha256": "33e4eaf8120ede1780e69dc9addf44e948c2f8f69473eee786be2ce25fa4273b",
+      "executable": false
+    },
+    "src/mobile_release/owned_process.py": {
+      "sha256": "00578a3e8d435848f5ee546514513e098140953225012b3fa1396f0ecdbe55bc",
+      "executable": false
+    },
+    "tests/unit/local_signing_helpers.py": {
+      "sha256": "57a2d805f15dc1e3eb6eb747a26dd8410aa95a3b9de9dfe4dc64ef1056a7109b",
+      "executable": false
+    },
+    "tests/unit/local_signing_persistent.py": {
+      "sha256": "15ffd4717c2808d30d2670cbece06bc9693eb38152a6930e6deaec87fad1a49b",
+      "executable": false
+    },
+    "tests/unit/test_local_signing.py": {
+      "sha256": "c3fa4d3a07fd93f5570b1956cf5d43731fae43deb4ecf2193e7e2e1c2fb1f007",
+      "executable": false
+    },
+    "tests/unit/test_local_signing_composition.py": {
+      "sha256": "b58ec07d0dfc4eec29b653fbdf345cb1e990d83330db48da301d8d325db41125",
+      "executable": false
+    },
+    "tests/unit/test_local_signing_failures.py": {
+      "sha256": "dfbad14a100f7aec1b3ae2a4ce09caeb39ae9e9d832e975292123ade682b4a13",
+      "executable": false
+    },
+    "tests/unit/test_local_signing_native.py": {
+      "sha256": "6adbaf275db90d1fad5d014d72825940239c39447a3ed4d978d4d504d58f8dc3",
+      "executable": false
+    },
+    "tests/unit/test_local_signing_persistent.py": {
+      "sha256": "3fa1c8d63abdd71a6ffa9e34c5981fdfbd804ef28d25792703602319ab4e0b65",
+      "executable": false
+    },
+    "tests/unit/test_local_signing_profile_identity.py": {
+      "sha256": "7a6845d5833f3acc6da94fe55faa0c08ff2603e984628e35a0e30e4817d03b37",
+      "executable": false
+    },
+    "tests/unit/test_local_signing_recovery.py": {
+      "sha256": "32d656d6a0160e5ea47faea859ca90fcba5e58dc0a931baba01c92aacd7e81db",
+      "executable": false
+    },
+    "tests/unit/test_owned_process.py": {
+      "sha256": "437f11ffc540c77759b917eb62a8c2d67c38a4abd38b9958077f884040b06ed6",
+      "executable": false
+    },
+    "tests/unit/test_owned_process_callers.py": {
+      "sha256": "cac469cc1185b5bd8e101c881c6c35ee677507ccb9e641a9ca666f75ff901e32",
+      "executable": false
+    },
+    "tests/unit/test_owned_process_failures.py": {
+      "sha256": "7a0b3a753a5abb8bb5bf3f69a1238a17b1c42d8c5d5dd450af472f20bb993cf2",
+      "executable": false
+    },
+    "tests/workflow/local_signing_crash_fixture.py": {
+      "sha256": "3ff26a4cf841b09bd78d38022a9fa85f08abd47010a41f505af89bb282cdef4c",
+      "executable": false
+    },
+    "tests/workflow/local_signing_fork_fixture.py": {
+      "sha256": "b12c3854604c2139e0d3cc9fa9810ee417e7e6a743c0443ad8a09b4663c29ce2",
+      "executable": false
+    },
+    "tests/workflow/local_signing_handoff_fixture.py": {
+      "sha256": "2cc95bd2a4ddce3567c9bb8b4f5fa281b8d244eebd782bccad22b8645b779cb5",
+      "executable": false
+    },
+    "tests/workflow/local_signing_matrix_contract.py": {
+      "sha256": "9be786c431e708ed75dcc770bb523cd6eaa6948a9404ac2340f3f6b917ae4449",
+      "executable": false
+    },
+    "tests/workflow/local_signing_persistent_fixture.py": {
+      "sha256": "13d03d5c527861de830f2169c3b76276c70844c854747397f024473fa43e2ab6",
+      "executable": false
+    },
+    "tests/workflow/owned_process_fork_fixture.py": {
+      "sha256": "9f60eaf9d073607e55832206442a7f79a38e4677c6575a3986d9a618f1ae1a7c",
+      "executable": false
+    },
+    "tests/workflow/run_local_signing_matrix.py": {
+      "sha256": "ce72e1eb5d8ee640b230fb95a43f277a05a892e2d6d159abf00d1a8fb6a132f4",
+      "executable": false
+    },
+    "tests/workflow/test_local_signing_matrix.py": {
+      "sha256": "be823c888f7ea4dd780f7ae55ad79abeca519b566ac14d66116dbfd111f96097",
+      "executable": false
+    }
+  }
+}

@@ -1,0 +1,286 @@
+"""PROPOSED one-shot ignored-verifier preparation runner; not approved to run.
+
+Requires a separately supplied exact independent safety decision and its trusted
+hash. Neither this runner nor its manifest creates that decision. It never runs
+the final45 dispatcher, first-party product suites, native capture, or a Store.
+"""
+from pathlib import Path
+import argparse
+import hashlib
+import types
+import json
+import os
+import re
+import shutil
+import stat
+import sys
+import time
+
+MAX_RECORD = 4 * 1024**2
+MAX_LOG = 64 * 1024**2
+FREE_FLOOR = 4 * 1024**3
+HEADROOM = 512 * 1024**2
+COMMANDS = [
+    ('pure-regressions', ['{package}/drivers/pure-regressions.py', '{helpers}', '{output}'], True, 103),
+    ('pure-extra', ['{package}/drivers/pure-extra.py', '{helpers}', '{output}'], True, 62),
+    ('original-219', ['{helpers}/verify-frozen-diff.py'], False, 219),
+    ('mapped-25-plus-5', ['{package}/drivers/mapped-proofs-r4.py', '{helpers}'], False, 30),
+    ('integration-controls', ['{package}/drivers/integration-proofs-r4.py', '{helpers}'], False, 5),
+    ('vpg-pr4-additions', ['{package}/drivers/vpg-proofs-r4.py', '{helpers}'], False, 143),
+]
+
+
+def need(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
+def file_identity(info):
+    return {'device': info.st_dev, 'inode': info.st_ino, 'uid': info.st_uid,
+            'mode': stat.S_IMODE(info.st_mode), 'type': stat.S_IFMT(info.st_mode)}
+
+
+def unchanged(before, after):
+    return (file_identity(before) == file_identity(after) and before.st_size == after.st_size
+            and before.st_nlink == after.st_nlink and before.st_mtime_ns == after.st_mtime_ns
+            and before.st_ctime_ns == after.st_ctime_ns)
+
+
+def regular(path, *, limit=MAX_RECORD, retain=False, hardlinks=False, expected=None):
+    path = Path(path)
+    need(path.is_absolute() and '..' not in path.parts and len(path.parts) <= 64
+         and str(path) == os.path.normpath(path), 'noncanonical input')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    parent, fd = os.open('/', flags), None
+    try:
+        for component in path.parts[1:-1]:
+            new = os.open(component, flags, dir_fd=parent)
+            old, parent = parent, new
+            os.close(old)
+        before = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        need(stat.S_ISREG(before.st_mode) and (hardlinks or before.st_nlink == 1) and before.st_size <= limit,
+             'nonregular/hardlinked/over-limit input')
+        if expected is not None:
+            need(expected['path'] == str(path) and expected['identity'] == file_identity(before)
+                 and expected['bytes'] == before.st_size, 'unapproved input identity/length before payload read')
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        opened = os.fstat(fd)
+        need(unchanged(opened, before), 'input replaced during open')
+        digest, size, chunks = hashlib.sha256(), 0, []
+        while True:
+            block = os.read(fd, min(65536, limit-size+1))
+            if not block:
+                break
+            size += len(block)
+            need(size <= limit, 'growing input')
+            digest.update(block)
+            if retain:
+                chunks.append(block)
+        after = os.fstat(fd)
+        need(unchanged(before, after) and unchanged(before, os.stat(path.name, dir_fd=parent, follow_symlinks=False))
+             and size == before.st_size, 'input changed while reading')
+    finally:
+        try:
+            if fd is not None:
+                os.close(fd)
+        finally:
+            os.close(parent)
+    value = {'path': str(path), 'bytes': size, 'sha256': digest.hexdigest(),
+             'identity': file_identity(before)}
+    if expected is not None:
+        need(value == expected, 'input hash changed')
+    return (value, b''.join(chunks)) if retain else value
+
+
+def record(path):
+    binding, body = regular(path, retain=True)
+    def pairs(rows):
+        value = {}
+        for key, item in rows:
+            need(key not in value, 'duplicate record key')
+            value[key] = item
+        return value
+    def no_float(_):
+        raise ValueError('floating point is not used in runner manifests/approval')
+    return json.loads(body, object_pairs_hook=pairs, parse_float=no_float, parse_constant=no_float), binding
+
+
+def write(path, value):
+    body = (json.dumps(value, sort_keys=True, indent=2, allow_nan=False)+'\n').encode()
+    need(len(body) <= MAX_RECORD, 'runner report exceeds bound')
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        view = memoryview(body)
+        while view:
+            count = os.write(fd, view)
+            need(count > 0, 'short runner output')
+            view = view[count:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def check_inputs(manifest, package):
+    for name, expected in manifest['packageFiles'].items():
+        need(not Path(name).is_absolute() and '..' not in Path(name).parts, 'unsafe package relative name')
+        regular(package/name, expected=expected)
+    for expected in manifest['preservationFiles']:
+        regular(expected['path'], limit=16*1024**2, expected=expected)
+    for tool in manifest['prerequisites']:
+        selected = Path(tool['selected'])
+        info = selected.lstat()
+        observed = {'device': info.st_dev, 'inode': info.st_ino, 'uid': info.st_uid,
+                    'mode': stat.S_IMODE(info.st_mode), 'type': stat.S_IFMT(info.st_mode)}
+        need(observed == tool['selectedIdentity'] and str(selected.resolve(strict=True)) == tool['resolved'],
+             'prerequisite selection/symlink drift')
+        # Some immutable platform binaries are legitimately hardlinked. They are
+        # checked by their exact reviewed effective-tool record, never copied.
+        resolved = Path(tool['resolved'])
+        binding = regular(resolved, limit=512*1024**2, hardlinks=True, expected=tool['file'])
+        need(binding == tool['file'], 'effective prerequisite bytes/identity drift')
+
+
+def native_module(name, path, expected):
+    """Compile the authenticated no-follow read itself, never a cached reopen."""
+    need(name == 'reviewed_finite_process_gate' and name not in sys.modules,
+         'unapproved/colliding definition-only bootstrap name')
+    reference, body = regular(path, expected=expected, retain=True)
+    module = types.ModuleType(name)
+    module.__file__, module.__package__, module.__loader__ = reference['path'], '', None
+    module.__spec__ = None
+    exec(compile(body, reference['path'], 'exec', dont_inherit=True), module.__dict__)
+    return module
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--manifest', required=True, type=Path)
+    parser.add_argument('--review', required=True, type=Path)
+    parser.add_argument('--trusted-review-sha256', required=True)
+    parser.add_argument('--output', required=True, type=Path)
+    args = parser.parse_args()
+    need(sys.flags.isolated and sys.dont_write_bytecode, 'use -I -B')
+    manifest, manifest_ref = record(args.manifest)
+    review, review_ref = record(args.review)
+    need(re.fullmatch('[0-9a-f]{64}', args.trusted_review_sha256) is not None
+         and review_ref['sha256'] == args.trusted_review_sha256, 'untrusted/mismatched independent review')
+    need(review['status'] == 'APPROVED_EXACT_FINITE_NATIVE_PROOFS'
+         and review['nativeProofAuthorized'] is True
+         and review['productSuitesAuthorized'] is False and review['finalFreezeAuthorized'] is False
+         and review['manifestSha256'] == manifest_ref['sha256'], 'exact native safety authorization missing')
+    need(manifest['schemaVersion'] == 1 and type(manifest['schemaVersion']) is int
+         and manifest['status'] == 'FROZEN_PROPOSED_NOT_EXECUTED'
+         and manifest['sourceCacheExecutionApproval'] is False,
+         'not the exact preparation-only proposal')
+    need(type(manifest['helperNames']) is list and len(manifest['helperNames']) == 28
+         and len(set(manifest['helperNames'])) == 28
+         and all(type(name) is str and '/' not in name and name not in {'.', '..'} for name in manifest['helperNames'])
+         and {'current28/'+name for name in manifest['helperNames']} ==
+             {name for name in manifest['packageFiles'] if name.startswith('current28/')}, 'incomplete/unsafe helper inventory')
+    need(len(manifest['commands']) == len(COMMANDS), 'changed finite command inventory')
+    for item, (name, tail, pure, count) in zip(manifest['commands'], COMMANDS, strict=True):
+        need(set(item) == {'id', 'argv', 'pureOnly', 'cases', 'outerSeconds', 'resultPrefix'}
+             and item['id'] == name and item['argv'] == ['{python}', '-I', '-B', '-u', *tail]
+             and item['pureOnly'] is pure and item['outerSeconds'] == 900 and type(item['outerSeconds']) is int
+             and type(item['cases']) is list and len(item['cases']) == len(set(item['cases'])) == count
+             and item['resultPrefix'] == ('pure-extra-run-' if name == 'pure-extra' else 'pure-run-' if pure else 'verifier-proof-'),
+             'undeclared/product/native command or case inventory')
+    package = args.manifest.parent
+    need(package == Path(manifest['packageRoot']) and package.resolve() == package
+         and Path(__file__).absolute() == package/'drivers/run-finite-proofs-r4.py', 'runner/package scope')
+    check_inputs(manifest, package)
+    need(shutil.disk_usage(package).free >= FREE_FLOOR+HEADROOM, 'BLOCKED low disk; no preparation launched')
+    output = args.output
+    need(output.is_absolute() and output.parent == Path(manifest['outputParent'])
+         and output.parent.resolve() == output.parent and not output.exists() and not output.is_symlink(),
+         'runner output must be an exclusively new reviewed sibling namespace')
+    output.mkdir(mode=0o700)
+    for name in ('home', 'tmp'):
+        (output/name).mkdir(mode=0o700)
+    owner = {'scope': 'IGNORED VERIFIER PREPARATION ONLY; NOT PRODUCT ACCEPTANCE',
+             'path': str(output), 'uid': os.getuid(), 'device': output.stat().st_dev,
+             'inode': output.stat().st_ino, 'nonce': os.urandom(24).hex(),
+             'manifest': manifest_ref, 'independentReview': review_ref}
+    write(output/'OWNER.json', owner)
+    # No helper module, process query or child is loaded before exact approval.
+    process = native_module('reviewed_finite_process_gate', package/'current29/process_gate.py',
+                            manifest['packageFiles']['current29/process_gate.py'])
+    outcomes = []
+    status = 'FAIL_NOT_PRODUCT_ACCEPTANCE'
+    try:
+        with process.cancellation_flag() as pending:
+            for declaration in manifest['commands']:
+                need(shutil.disk_usage(output).free >= FREE_FLOOR+HEADROOM,
+                     'disk floor/headroom exhausted; later commands blocked')
+                check_inputs(manifest, package)
+                name = declaration['id']
+                need(re.fullmatch('[a-z0-9-]+', name) is not None, 'unsafe command ID')
+                area = output/name
+                area.mkdir(mode=0o700)
+                helpers = area/'helpers'
+                helpers.mkdir(mode=0o700)
+                results = area/'output'
+                results.mkdir(mode=0o700)
+                for relative in manifest['helperNames']:
+                    data_ref, data = regular(package/'current28'/relative, retain=True)
+                    target = helpers/relative
+                    with target.open('xb') as stream:
+                        stream.write(data)
+                    target.chmod(data_ref['identity']['mode'])
+                replacements = {'{python}': manifest['python'], '{package}': str(package),
+                                '{helpers}': str(helpers), '{output}': str(results)}
+                command = []
+                for argument in declaration['argv']:
+                    for token, value in replacements.items():
+                        argument = argument.replace(token, value)
+                    need('{' not in argument and '}' not in argument, 'unknown command expansion')
+                    command.append(argument)
+                need(command[:3] == [manifest['python'], '-I', '-B']
+                     and declaration['outerSeconds'] == 900, 'unreviewed interpreter/outer limit')
+                environment = {'PATH': manifest['toolPath'], 'HOME': str(output/'home'), 'TMPDIR': str(output/'tmp'),
+                               'LC_ALL': 'C', 'PYTHONDONTWRITEBYTECODE': '1', 'PIP_NO_INDEX': '1',
+                               'PIP_DISABLE_PIP_VERSION_CHECK': '1', 'PYTHONUNBUFFERED': '1'}
+                row = process.execute(command, cwd=area, environment=environment, log=area/'outer.log',
+                                      pending=pending, seconds=900, combined_limit=MAX_LOG,
+                                      free_floor=FREE_FLOOR, headroom=HEADROOM)
+                row['id'] = name
+                outcomes.append(row)
+                write(area/'ACTUAL-OUTER-COMPLETION.json', row)
+                row['logReference'] = regular(area/'outer.log', limit=MAX_LOG)
+                roots = list((results if declaration['pureOnly'] else helpers).glob(declaration['resultPrefix']+'*'))
+                roots = [root for root in roots if root.is_dir() and not root.is_symlink()]
+                need(len(roots) == 1, 'no unique genuine proof result root')
+                result_path = roots[0]/'RESULTS.json'
+                result_ref, body = regular(result_path, retain=True)
+                result = json.loads(body)
+                row['resultReference'] = result_ref
+                row['actualCaseCounts'] = result['counts']
+                need(row['status'] == 'PASS' and row['ownership'] == 'reaped' and row['exitCode'] == 0,
+                     'actual outer child did not complete successfully; later commands blocked')
+                need([item['case'] for item in result['cases']] == declaration['cases']
+                     and all(item['status'] == 'PASS' for item in result['cases'])
+                     and type(result['counts']['PASS']) is int and type(result['counts']['FAIL']) is int
+                     and result['counts'] == {'PASS': len(declaration['cases']), 'FAIL': 0},
+                     'incomplete/failing/incorrectly scoped preparation case results')
+                if declaration['pureOnly']:
+                    need(result['forbiddenAttempts'] == [], 'pure proof attempted forbidden native/network/signal work')
+                else:
+                    need(result['allDirectChildrenReaped'] is True and result['unresolved'] == []
+                         and result['resourceBlocked'] is None, 'unresolved actual proof resources')
+                check_inputs(manifest, package)
+                need(shutil.disk_usage(output).free >= FREE_FLOOR, 'retained disk floor violated')
+                write(area/'RECONCILED-PREPARATION-RESULT.json', row)
+            need(pending.signal is None, 'runner cancellation pending')
+        need(pending.signal is None, 'runner cancellation during restoration')
+        status = 'COMPLETE_PREPARATION_RESULTS_AWAIT_INDEPENDENT_ACCEPTANCE'
+        return 0
+    finally:
+        write(output/'RUNNER-RESULTS.json', {'status': status, 'commands': outcomes,
+              'allRequiredCommands': len(manifest['commands']), 'attemptedCommands': len(outcomes),
+              'productGatePasses': 0, 'acceptanceGranted': False, 'commitPushOrFinalFreezeAuthorized': False,
+              'disposition': 'retained evidence/fixtures; no historical or shared deletion; unknown resources are never adopted',
+              'owner': owner})
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

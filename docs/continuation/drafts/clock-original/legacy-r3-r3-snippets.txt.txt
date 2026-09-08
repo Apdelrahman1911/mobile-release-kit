@@ -1,0 +1,320 @@
+# Frozen exact rejected function bodies; test-only in-memory old-publication mutant.
+# These snippets are never imported and contain no module entry point.
+
+# Exact contract.py:356-406
+def validate_sender_result(value, route, sender_pid):
+    keys = {"primary", "cleanupErrors", "signals", "queries", "marker", "child", "parentChange",
+            "unknown", "flags", "controlEof", "ownedAttempts", "lowFdReplacement", "isolationAccepted", "terminal"}
+    need(type(value) is dict and set(value) == keys, "sender-final-shape")
+    need(value["primary"] is None and value["cleanupErrors"] == [] and value["unknown"] is False
+         and value["flags"] == [] and type(value["ownedAttempts"]) is int and value["ownedAttempts"] == 1
+         and value["controlEof"] is False, "sender-final-failure")
+    marker_ok(value["marker"], False)
+    need(type(value["queries"]) is list and len(value["queries"]) == 2, "external-query-count")
+    for query, kind in zip(value["queries"], ("pid", "pgid")):
+        need(type(query) is dict and set(query) == {"kind", "signal", "target", "returned", "errno"}
+             and query["kind"] == kind and type(query["signal"]) is int and query["signal"] == 0
+             and type(query["returned"]) is bool, "external-query-shape")
+        need((query["returned"] is False and type(query["errno"]) is int and query["errno"] == errno.EPERM) if route.fenced else
+             (query["returned"] is True and query["errno"] is None), "external-query-oracle")
+    need(value["isolationAccepted"] is route.fenced, "isolation-negative-control")
+    child = value["child"]
+    need(type(child) is dict and child.get("role") == "inside" and child.get("owner") == sender_pid
+         and positive_pid(child.get("pid")) and child.get("group") == child.get("pid")
+         and child.get("exitCode") == -9 and type(child.get("status")) is int
+         and child.get("status") & 0x7f == 9 and child.get("authorized") is False
+         and child.get("terminal") is True and child.get("unknown") is False
+         and child.get("stdout", {}).get("eof") is True and child.get("stderr", {}).get("eof") is True
+         and child.get("closed") == [True, True, True], "owned-child-terminal-proof")
+    need(any(w == {"pid": child["pid"], "status": child["status"]} for w in child.get("waits", [])),
+         "owned-child-real-wait")
+    need(type(value["signals"]) is list and len(value["signals"]) == 3, "owned-signal-count")
+    for observation, operation in zip(value["signals"], ("usr1-pid", "usr1-group", "kill-group")):
+        need(type(observation) is dict and set(observation) == {"operation", "owner", "pid", "target", "signal", "priorWait", "returned",
+                                                               "errno", "authorizedAt", "seen", "ackCounter"}, "owned-signal-shape")
+        need(observation["operation"] == operation and observation["priorWait"] == [0, 0]
+             and type(observation["priorWait"]) is list and all(type(v) is int for v in observation["priorWait"])
+             and observation["returned"] is True and observation["errno"] is None
+             and observation["owner"] == sender_pid and observation["pid"] == child["pid"], "owned-signal-proof")
+    need(value["signals"][0]["ackCounter"] == 1 and value["signals"][1]["ackCounter"] == 2,
+         "owned-distinct-acknowledgments")
+    if route.loss:
+        change = value["parentChange"]
+        need(type(change) is dict and set(change) == {"before", "after"}
+             and positive_pid(change["before"]) and type(change["after"]) is int and change["after"] > 0
+             and change["after"] != change["before"] and value["lowFdReplacement"] is True,
+              "loss-parent-change")
+        need(value["terminal"] == dict(mode="kernel-close-on-immediate-exit", resultChannel="R",
+                                       controlClosed=True, ordinaryClosed=[True, True, True],
+                                       resultEof="required-root-observation", senderExitStatus="not-waitable-by-root"),
+             "loss-terminal-protocol")
+        need(value["terminal"]["controlClosed"] is True and all(v is True for v in value["terminal"]["ordinaryClosed"]),
+             "loss-terminal-types")
+    else:
+        need(value["parentChange"] is None and value["lowFdReplacement"] is False
+             and value["terminal"] is None, "ordinary-parent-change")
+
+
+# Exact reconcile.py:140-344
+def route_terminal(c, root_identity, records, attempts, frames, independent, root_signals):
+    """Complete direct/descendant terminal proof BEFORE an orphan observer exists.
+
+    A loss route returns awaiting-absence, never an invented orphan wait or clean
+    subtree. The exact same proof is mandatory again during final reconciliation.
+    """
+    route, ev = ROUTES[c["row"]], Events(c, frames)
+    need(type(records) is list and len(records) == 2, "root-record-count")
+    outside, relay = records[:2]
+    need(outside["pid"] == c["external"]["pid"] and relay["pid"] != outside["pid"], "root-handle-binding")
+    root_pid, root_session, uid = c["rootPid"], root_identity["session"], c["uid"]
+    outside_c = dict(c, external=None, channels=None)
+    child(outside, pid=outside["pid"], owner=root_pid, group=outside["pid"], role="outside",
+          argv=fixed_argv(outside_c, "root", "outside", root_pid), c=outside_c, exit_code=0)
+    child(relay, pid=relay["pid"], owner=root_pid, group=relay["pid"], role="relay",
+          argv=fixed_argv(c, "root", "route", root_pid), c=c,
+          exit_code=-9 if route.loss == "kill" else 0, terminal=route.loss == "kill")
+    need(len(attempts) == 2, "root-attempt-count")
+    acquisition(attempts[0], outside_c, "root", "outside", root_pid, "Popen")
+    acquisition(attempts[1], c, "root", "route", root_pid, "Popen",
+                pass_fds=() if not c["channels"] else (c["channels"]["c"], c["channels"]["r"]))
+    ready_out = ev.one("outside", "ready", outside["pid"])["data"]
+    shape(ready_out, "identity marker counter entry", "outside-ready-shape")
+    identity(ready_out["identity"], pid=outside["pid"], parent=root_pid, group=outside["pid"], session=root_session, uid=uid)
+    validate_entry(ready_out["entry"], outside_c, "outside", ready_out["identity"])
+    marker_ok(ready_out["marker"], True)
+    need(type(ready_out["counter"]) is int and ready_out["counter"] == 0, "outside-counter")
+    pong = ev.one("outside", "pong", outside["pid"])["data"]
+    need(exact(pong, ready_out), "outside-after-query-responsive")
+    end = ev.one("outside", "end", outside["pid"])["data"]
+    need(exact(end, dict(ready_out, reason="private-control-eof", primary=None, flags=[])), "outside-eof-exit")
+    for label, record in (("outside.stdout", outside["stdout"]), ("route.stdout", relay["stdout"])):
+        decoded = [loads(line) for line in record["raw"].encode().splitlines()]
+        need(exact(decoded, [v["frame"] for v in frames if v["stream"] == label]), "captured-event-agreement")
+
+    sender_parent, sender_pid = root_pid, relay["pid"]
+    python_final, ruby_pid = None, None
+    multi = c["row"] in {"multi-hop", "no-fence-multi-hop"}
+    if route.entry == "python_relay.py":
+        parent_ready = ev.one("python-relay", "ready", relay["pid"])["data"]
+        shape(parent_ready, "identity python channels entry", "python-ready-shape")
+        identity(parent_ready["identity"], pid=relay["pid"], parent=root_pid, group=relay["pid"], session=root_session, uid=uid)
+        validate_entry(parent_ready["entry"], c, "python-relay", parent_ready["identity"])
+        need(type(parent_ready["python"]) is str and parent_ready["python"].startswith("3.11.")
+             and parent_ready["channels"] is None, "python-tool-channels")
+        token = "hop" if multi else "sender"
+        acquisition(ev.one("python-relay", "attempt", relay["pid"])["data"], c, "python-relay", token, relay["pid"], "Popen")
+        acquired = ev.one("python-relay", "acquired", relay["pid"])["data"]
+        shape(acquired, "pid token method passFds session", "python-acquired-shape")
+        need(positive_pid(acquired["pid"]) and acquired["pid"] not in {root_pid, outside["pid"], relay["pid"]}
+             and acquired["token"] == token and acquired["method"] == "Popen" and acquired["passFds"] == []
+             and acquired["session"] is (c["row"] == "python-new-session"), "python-acquired-binding")
+        python_final = ev.one("python-relay", "final", relay["pid"])["data"]
+        shape(python_final, "primary cleanupErrors child forwarded actualDirectWait unknown flags", "python-final-shape")
+        need(python_final["primary"] is None and python_final["cleanupErrors"] == [] and python_final["flags"] == []
+             and python_final["actualDirectWait"] is True and python_final["unknown"] is False, "python-final-failure")
+        child(python_final["child"], pid=acquired["pid"], owner=relay["pid"],
+              group=None, role="relay", argv=fixed_argv(c, "python-relay", token, relay["pid"]), c=c, exit_code=0, raw=False)
+        shape(python_final["forwarded"], "stdout stderr", "python-forward-shape")
+        for label in ("stdout", "stderr"):
+            need(type(python_final["forwarded"][label]) is int
+                 and python_final["forwarded"][label] == python_final["child"][label]["retainedBytes"], "python-forward-count")
+        sender_pid, sender_parent = acquired["pid"], relay["pid"]
+        if multi:
+            ruby_pid = acquired["pid"]
+            bash = ev.one("bash", "exec", ruby_pid)["data"]
+            shape(bash, "parent bashVersion target chargedBy transition clockSample", "bash-exec-shape")
+            need(bash["parent"] == relay["pid"] and type(bash["bashVersion"]) is str and bash["bashVersion"].startswith("3.2.")
+                  and bash["target"] == "ruby_relay.rb" and bash["chargedBy"] == "python-relay:hop", "bash-exec-binding")
+            need(bash["transition"] == "precharged-exec-only-trampoline" and bash["clockSample"] is None,
+                 "bash-no-local-monotonic-claim")
+    elif route.entry == "ruby_relay.rb":
+        ruby_pid = relay["pid"]
+
+    if ruby_pid is not None:
+        ruby_ready = ev.one("ruby-relay", "ready", ruby_pid)["data"]
+        shape(ruby_ready, "identity ruby open3Path channels method entry", "ruby-ready-shape")
+        method = {"ruby-spawn": "Process.spawn", "ruby-fork-exec": "fork/exec", "parent-exit": "Open3-no-block"}.get(c["row"], "Open3-block")
+        identity(ruby_ready["identity"], pid=ruby_pid, parent=relay["pid"] if multi else root_pid,
+                  group=ruby_pid, session=root_session, uid=uid)
+        validate_entry(ruby_ready["entry"], c, "ruby-relay", ruby_ready["identity"])
+        need(type(ruby_ready["ruby"]) is str and ruby_ready["ruby"].startswith("ruby 3.3.12 ")
+             and ruby_ready["open3Path"] == OPEN3 and ruby_ready["channels"] == c["channels"]
+             and ruby_ready["method"] == method, "ruby-tool-channels")
+        acquisition(ev.one("ruby-relay", "attempt", ruby_pid)["data"], c, "ruby-relay", "sender", ruby_pid, method,
+                    pass_fds=() if not c["channels"] else (c["channels"]["c"], c["channels"]["r"]))
+        acquired = ev.one("ruby-relay", "acquired", ruby_pid)["data"]
+        shape(acquired, "pid identity method passFds inheritedCopiesClosed waiterOwnership", "ruby-acquired-shape")
+        need(positive_pid(acquired["pid"]) and acquired["pid"] not in {root_pid, outside["pid"], relay["pid"], ruby_pid}
+             and acquired["identity"] == ruby_ready["identity"] and acquired["method"] == method
+             and acquired["passFds"] == c["channels"] and acquired["inheritedCopiesClosed"] is True
+             and acquired["waiterOwnership"] == ("Open3-detached-no-signal-authority" if method.startswith("Open3")
+                                                 else "sole-Process.waitpid2"), "ruby-acquired-binding")
+        sender_pid, sender_parent = acquired["pid"], ruby_pid
+        if c["row"] == "ruby-fork-exec":
+            fork = ev.one("ruby-fork", "exec", sender_pid)["data"]
+            need(fork == dict(parent=ruby_pid, target="sender.py", chargedBy="ruby-relay:sender"), "ruby-fork-exec-binding")
+        if route.loss:
+            loss = ev.one("ruby-relay", "loss-ready", ruby_pid)["data"]
+            shape(loss, "pid streams inheritedCopiesClosed senderWait method", "ruby-loss-shape")
+            need(loss["pid"] == sender_pid and loss["inheritedCopiesClosed"] is True
+                 and loss["senderWait"] is None and loss["method"] == method, "ruby-loss-binding")
+            ruby_streams(loss["streams"])
+            need(all(v["bytes"] == 0 for v in loss["streams"]), "loss-ordinary-output-not-empty")
+            if route.loss == "exit":
+                loss_exit = ev.one("ruby-relay", "loss-exit", ruby_pid)["data"]
+                need(loss_exit == dict(normalExit=0, noBlock=True, senderWait=None, streams=loss["streams"]), "ruby-normal-parent-exit")
+        else:
+            final = ev.one("ruby-relay", "final", ruby_pid)["data"]
+            shape(final, "primary cleanupErrors status childPid streams method blockEnsureReturned actualDetachedJoin unknown flags", "ruby-final-shape")
+            need(final["primary"] is None and final["cleanupErrors"] == [] and final["flags"] == []
+                 and final["unknown"] is False and final["childPid"] == sender_pid and final["method"] == method
+                 and final["blockEnsureReturned"] is (method == "Open3-block")
+                 and final["actualDetachedJoin"] is (method == "Open3-block"), "ruby-real-returned-join")
+            need(exact(final["status"], dict(pid=sender_pid, raw=0, exitCode=0, signaled=False, signal=None, success=True)), "ruby-actual-status")
+            ruby_streams(final["streams"])
+
+    ready = ev.one("sender", "ready", sender_pid)["data"]
+    shape(ready, "identity channels python singleThreaded entry", "sender-ready-shape")
+    sender_session = sender_pid if c["row"] == "python-new-session" else root_session
+    identity(ready["identity"], pid=sender_pid, parent=sender_parent, group=sender_pid, session=sender_session, uid=uid)
+    validate_entry(ready["entry"], c, "sender", ready["identity"])
+    need(ready["channels"] == c["channels"] and ready["singleThreaded"] is True
+         and type(ready["python"]) is str and ready["python"].startswith("3.11."), "sender-tool-channels")
+    acquisition(ev.one("sender", "attempt", sender_pid)["data"], c, "sender", "inside", sender_pid, "Popen")
+    final = ev.one("sender", "final", sender_pid)["data"]
+    validate_sender_result(final, route, sender_pid)
+    need(final["controlEof"] is False and type(final["ownedAttempts"]) is int, "sender-live-root-at-commit")
+    inside = final["child"]
+    raw = child(inside, pid=inside["pid"], owner=sender_pid, group=inside["pid"], role="inside",
+                argv=fixed_argv(c, "sender", "inside", sender_pid), c=c, exit_code=-9, terminal=True)
+    need(inside["pid"] not in {root_pid, outside["pid"], relay["pid"], sender_pid, ruby_pid}, "inside-distinct-identity")
+    sequences, inside_frames = {}, []
+    for line in raw.splitlines():
+        need(len(line) <= FRAME_CAP, "inside-frame-cap")
+        frame = validate_frame(loads(line), c, sequences)
+        need(frame["actor"] == "inside" and frame["pid"] == inside["pid"] and frame["kind"] in {"ready", "pong"}, "inside-frame")
+        value = frame["data"]
+        shape(value, "identity marker counter entry", "inside-data-shape")
+        identity(value["identity"], pid=inside["pid"], parent=sender_pid, group=inside["pid"], session=sender_session, uid=uid)
+        validate_entry(value["entry"], c, "inside", value["identity"])
+        marker_ok(value["marker"], False)
+        need(type(value["counter"]) is int and value["counter"] in {0, 1, 2}, "inside-counter-type")
+        inside_frames.append(frame)
+    need(len(inside_frames) >= 3 and inside_frames[0]["kind"] == "ready" and inside_frames[0]["data"]["counter"] == 0
+         and all(v["kind"] == "pong" for v in inside_frames[1:])
+         and any(v["data"]["counter"] == 1 for v in inside_frames) and inside_frames[-1]["data"]["counter"] == 2,
+         "inside-distinct-real-acks")
+    queries = ev.all("sender", "query")
+    signals = ev.all("sender", "signal")
+    need([v["data"] for v in queries] == final["queries"] and all(v["pid"] == sender_pid for v in queries), "query-final-agreement")
+    need([v["data"] for v in signals] == final["signals"] and all(v["pid"] == sender_pid for v in signals), "signal-final-agreement")
+    for index, observation in enumerate(final["queries"]):
+        need(observation["target"] == (outside["pid"] if index == 0 else -outside["pid"])
+             and type(observation["target"]) is int, "external-exact-zero-target")
+    for index, observation in enumerate(final["signals"]):
+        shape(observation, "operation owner pid target signal priorWait returned errno authorizedAt seen ackCounter", "signal-shape")
+        need(type(observation["signal"]) is int and observation["signal"] == (9 if index == 2 else 30)
+             and all(type(observation[k]) is int for k in ("owner", "pid", "target"))
+             and observation["target"] == (inside["pid"] if index == 0 else -inside["pid"])
+             and observation["seen"] == [] and number(observation["authorizedAt"])
+             and c["start"] <= observation["authorizedAt"] < c["work"], "signal-real-dispatch")
+
+    if route.loss:
+        loss_ready = ev.one("sender", "loss-ready", sender_pid)["data"]
+        need(loss_ready == dict(identity=ready["identity"], ordinaryStreamsClosed=True, lowFdReplacement=True,
+                               channels=c["channels"]), "sender-loss-ready")
+        change = ev.one("sender", "parent-changed", sender_pid)["data"]
+        need(change == final["parentChange"] and change["before"] == sender_parent, "parent-loss-actual-change")
+        need(independent is not None and independent["eof"] is True, "pre-observation-independent-eof")
+        independent_raw = stream(independent)
+        need(exact([loads(line) for line in independent_raw.splitlines()],
+                   [v["frame"] for v in frames if v["stream"] == "independent"]), "independent-event-agreement")
+    else:
+        need(independent is None, "ordinary-no-independent-channel")
+    if route.loss == "kill":
+        need(type(root_signals) is list and len(root_signals) == 1, "deliberate-relay-signal-count")
+        signal = root_signals[0]
+        need(signal["operation"] == "kill-relay" and signal["owner"] == root_pid and signal["pid"] == relay["pid"]
+             and signal["target"] == relay["pid"] and signal["signal"] == 9 and signal["priorWait"] == [0, 0]
+             and signal["returned"] is True and signal["errno"] is None and signal["seen"] == [], "deliberate-owned-relay-kill")
+    else:
+        need(root_signals == [], "unexpected-root-signal")
+    # Bind every relay's claimed forwarding metadata to the independently
+    # captured outer bytes, preserving each real line's original JSON encoding.
+    route_lines = relay["stdout"]["raw"].encode().splitlines(keepends=True)
+    if python_final is not None:
+        forwarded_raw = b"".join(line for line in route_lines if loads(line)["actor"] != "python-relay")
+        claimed = python_final["child"]["stdout"]
+        need(len(forwarded_raw) == claimed["retainedBytes"]
+             and hashlib.sha256(forwarded_raw).hexdigest() == claimed["sha256"], "python-actual-forwarded-bytes")
+    if ruby_pid is not None:
+        forwarded_raw = b"".join(line for line in route_lines if loads(line)["actor"] in {"sender", "ruby-fork"})
+        # `final` below is the sender final, so select the Ruby event explicitly.
+        ruby_record = next(v["frame"]["data"] for v in frames if v["frame"]["actor"] == "ruby-relay"
+                           and v["frame"]["kind"] == ("loss-ready" if route.loss else "final"))
+        claimed = ruby_record["streams"][0]
+        need(len(forwarded_raw) == claimed["bytes"] and hashlib.sha256(forwarded_raw).hexdigest() == claimed["sha256"],
+             "ruby-actual-forwarded-bytes")
+    ev.complete()
+    return dict(senderPid=sender_pid, senderParent=sender_parent, senderSession=sender_session,
+                acquisitions=route.acquisitions, execs=route.execs,
+                subtreeDisposition="awaiting-absence" if route.loss else "resolved",
+                isolationAccepted=route.fenced, expectedNegative=not route.fenced,
+                senderExitStatus="not-waitable-by-root" if route.loss else "actual-owner-wait")
+
+
+# Exact reconcile.py:375-416
+def reconcile(c, root_identity, records, attempts, frames, independent, orphan_absent, root_signals, observations=()):
+    """Route proof is necessary, plus every actual bounded observer's own record."""
+    need(type(records) is list and type(attempts) is list and len(records) >= 2 and len(attempts) >= 2,
+         "root-complete-records")
+    proof = route_terminal(c, root_identity, records[:2], attempts[:2], frames, independent, root_signals)
+    route = ROUTES[c["row"]]
+    if not route.loss:
+        need(len(records) == len(attempts) == 2 and orphan_absent is None and not observations,
+             "ordinary-no-orphan-claim")
+        return proof
+    final_transport(True, independent["eof"], orphan_absent)
+    need(type(observations) is list and len(records) == len(attempts) == len(observations) + 2
+         and 1 <= len(observations) <= 3, "loss-observer-count")
+    sender_pid = proof["senderPid"]
+    sender_final = next(v["frame"]["data"] for v in frames if v["frame"]["actor"] == "sender" and v["frame"]["kind"] == "final")
+    excluded = {c["rootPid"], records[0]["pid"], records[1]["pid"], sender_pid, sender_final["child"]["pid"]}
+    excluded.update(v["frame"]["pid"] for v in frames)
+    observed = None
+    prior_disposition = None
+    for index, (query_child, attempt, item) in enumerate(zip(records[2:], attempts[2:], observations), 1):
+        need(observed is None or observed["absent"] is False, "query-after-absence")
+        expected_argv = [PS, "-p", str(sender_pid), "-o", "pid=,ppid=,pgid=,stat="]
+        shape(attempt, "token argv acquisitions execs before method session group passFds query queryWindow", "query-attempt-shape")
+        need(exact({k: v for k, v in attempt.items() if k not in {"before", "queryWindow"}},
+                   dict(token=f"query-{index}", argv=expected_argv, acquisitions=1, execs=1, method="Popen",
+                        session=False, group=False, passFds=[], query=True))
+             and number(attempt["before"]), "query-charged-bounded-argv")
+        need(type(query_child["pid"]) is int and query_child["pid"] not in excluded
+             and type(query_child["exitCode"]) is int and query_child["exitCode"] in (0, 1), "observer-role-separation")
+        raw = child(query_child, pid=query_child["pid"], owner=c["rootPid"], group=None, role="query-child",
+                    argv=expected_argv, c=c, exit_code=query_child["exitCode"])
+        query_timing(query_child, attempt, item, c, sender_pid)
+        admitted = query_child["query"]["window"]["admitted"]
+        need(prior_disposition is None or admitted >= prior_disposition, "query-observation-order")
+        prior_disposition = query_child["query"]["dispositionObservedAt"]
+        observed = query_result(raw, b"", query_child["exitCode"],
+                                dict(pid=sender_pid, parent=sender_final["parentChange"]["after"], group=sender_pid))
+        need(exact(item["observation"], observed), "query-actual-result-agreement")
+    need(observed is not None and observed["absent"] is True, "actual-bounded-orphan-absence")
+    proof.update(acquisitions=route.acquisitions + len(observations), execs=route.execs + len(observations),
+                 subtreeDisposition="resolved")
+    return proof
+
+
+# Exact sender.py:67-75
+def publish_loss(emitter, value, exit_code, completion):
+    """Transport commit only; kernel exit supplies R EOF, not an orphan wait."""
+    terminate = os._exit
+    try:
+        emitter.emit("final", value, cleanup=True)
+        completion()
+    except BaseException:
+        terminate(1)
+    terminate(exit_code)

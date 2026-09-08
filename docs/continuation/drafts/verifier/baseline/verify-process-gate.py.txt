@@ -1,0 +1,243 @@
+"""Owned synthetic controller proofs, independent of first-party/Store gates."""
+from pathlib import Path
+import json
+import os
+import select
+import signal
+import subprocess
+import sys
+import time
+EVIDENCE = Path(__file__).absolute().parent
+if EVIDENCE.resolve() != EVIDENCE or Path(__file__).is_symlink() or (not sys.flags.safe_path):
+    raise RuntimeError('Use trusted regular helper path with Python -P/-I')
+import os
+import stat
+
+def helper_namespace(root, *, ctx=None):
+    """Metadata-only admission before sibling imports; never open cache bytes.
+
+    The initial script/stdlib are runner TCB. This closes incidental helper
+    import candidates, not arbitrary same-user/whole-host interference.
+    """
+    def check(value=True, message='helper namespace'):
+        if ctx is not None:
+            ctx.require(value, message)
+        elif not value:
+            raise RuntimeError(message)
+    root = Path(root)
+    check(root.is_absolute() and str(root) == os.path.normpath(root) and len(root.parts) <= 64,
+          'noncanonical helper import root')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open('/', flags)
+    try:
+        for part in root.parts[1:]:
+            check()
+            new = os.open(part, flags, dir_fd=fd)
+            old, fd = fd, new
+            os.close(old)
+        original = os.fstat(fd)
+        check(original.st_uid == os.getuid() and not original.st_mode & 0o022,
+              'foreign/writable helper namespace')
+        known = set(['action_io.py', 'bindings.py', 'cleanup-build.py', 'cleanup-wheel.py', 'evidence_schemas.py', 'freeze.py', 'frozen_diff.py', 'gate_list.py', 'git_readonly.py', 'native_reader.py', 'observe-owned-workers.py', 'owned_outputs.py', 'prepare-build.py', 'probe-jdk21-signing.py', 'process_gate.py', 'result_protocols.py', 'run-once.sh', 'source_inventory.py', 'verify-all.py', 'verify-frozen-diff.py', 'verify-pins.py', 'verify-process-gate.py', 'verify-result-protocols.py', 'wheel-smoke.sh'])
+        found, count = set(), 0
+        with os.scandir(fd) as iterator:
+            while True:
+                # Reserve the enumeration operation before advancing; even an
+                # EOF probe consumes this finite namespace-admission budget.
+                check(count < 4096, 'helper namespace enumeration cap')
+                count += 1
+                if ctx is not None:
+                    ctx.charge('visited', 1)
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    break
+                name = item.name
+                check(len(os.fsencode(name)) <= 255, 'helper namespace component cap')
+                before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                check(name != '__pycache__' and not name.endswith(('.pyc', '.pyo', '.pyd', '.so', '.pth')),
+                      'unapproved helper bytecode/startup/cache name; payload not read')
+                if name in known:
+                    check(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+                          and before.st_uid == os.getuid() and not before.st_mode & 0o022,
+                          'helper replaced, symlinked, hardlinked or writable')
+                    found.add(name)
+                else:
+                    check(not name.endswith(('.py', '.sh')), 'unknown helper/import source name')
+                    if (stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode)) and name.isidentifier():
+                        check(name == 'wheels' and stat.S_ISDIR(before.st_mode)
+                              and before.st_uid == os.getuid() and stat.S_IMODE(before.st_mode) == 0o700,
+                              'unapproved helper import directory; contents not read')
+                        child = os.open(name, flags, dir_fd=fd)
+                        try:
+                            check(os.fstat(child) == before, 'wheel-data directory replaced')
+                            names = []
+                            with os.scandir(child) as entries:
+                                for entry in entries:
+                                    check(not names, 'unknown wheel-data sibling; payload not read')
+                                    names.append(entry.name)
+                                    check(entry.name == 'mobile_release_kit-0.3.0-py3-none-any.whl',
+                                          'unexpected wheel-data name; payload not read')
+                                    row = os.stat(entry.name, dir_fd=child, follow_symlinks=False)
+                                    check(stat.S_ISREG(row.st_mode) and row.st_nlink == 1 and row.st_uid == os.getuid(),
+                                          'untrusted wheel-data type; payload not read')
+                        finally:
+                            os.close(child)
+                check(os.stat(name, dir_fd=fd, follow_symlinks=False) == before, 'helper namespace entry changed')
+        check(found == known, 'missing reviewed helper')
+        current = os.fstat(fd)
+        check((current.st_dev, current.st_ino, current.st_uid, current.st_mode, current.st_mtime_ns, current.st_ctime_ns) ==
+              (original.st_dev, original.st_ino, original.st_uid, original.st_mode, original.st_mtime_ns, original.st_ctime_ns),
+              'helper namespace changed during admission')
+    finally:
+        os.close(fd)
+
+helper_namespace(EVIDENCE)
+sys.path.insert(0, str(EVIDENCE))
+from bindings import digest, require, write_new
+from process_gate import cancellation_flag, execute, numeric_snapshot, classify_group, COMBINED_BYTES, FREE_FLOOR, DISPATCH_HEADROOM
+
+def main(ctx):
+    directory = EVIDENCE / 'process-controller-proof'
+    directory.mkdir(mode=448)
+    real_popen, real_killpg = (subprocess.Popen, os.killpg)
+    children, requests, results = ([], [], [])
+    scenario, extra_fds = ('', ())
+
+    class ObservedChild(real_popen):
+
+        def __init__(self, command, *args, **kwargs):
+            self.gate = command[0] == sys.executable
+            self.injected = False
+            if self.gate and scenario == 'unknown-acquisition':
+                raise RuntimeError('injected unknown native acquisition; no fixture child created')
+            if self.gate:
+                kwargs['pass_fds'] = extra_fds
+            super().__init__(command, *args, **kwargs)
+            children.append(self)
+            if self.gate and scenario == 'unknown-acquisition-after-child':
+                raise RuntimeError('injected fault after actual native child creation, before publication')
+
+        def poll(self):
+            if self.gate and scenario == 'late-zero-exit' and (not self.injected):
+                self.injected = True
+                time.sleep(0.1)
+            value = super().poll()
+            if self.gate and value is not None and (not self.injected):
+                self.injected = True
+                if scenario == 'reap-cancellation':
+                    os.kill(os.getpid(), signal.SIGINT)
+                elif scenario == 'unknown-reap':
+                    raise RuntimeError('injected fault after actual native reap, before publication')
+            return value
+
+    def guarded_killpg(pid, number):
+        matches = [child for child in children if child.pid == pid]
+        require(len(matches) == 1 and matches[0].returncode is None, 'STALE SIGNAL VETOED')
+        requests.append({'pid': pid, 'signal': number, 'stillReserved': True, 'kind': 'gate' if matches[0].gate else 'numeric-query'})
+        return real_killpg(pid, number)
+    control_read, control_write = os.pipe()
+    status_read, status_write = os.pipe()
+    status_open = True
+    descendant_group = None
+    subprocess.Popen, os.killpg = (ObservedChild, guarded_killpg)
+    try:
+        cases = [('success', 'pass', 5), ('timeout', f'import os;os.read({control_read},1)', 0.06), ('reap-cancellation', 'pass', 5), ('late-zero-exit', 'pass', 0.03), ('nonzero', 'raise SystemExit(7)', 5), ('unknown-acquisition', 'pass', 5), ('unknown-acquisition-after-child', 'pass', 5), ('unknown-reap', 'pass', 5), ('log-collision', 'pass', 5)]
+        for scenario, code, timeout in cases:
+            extra_fds = (control_read,)
+            log = directory / f'{scenario}.log'
+            before_children, before_signals = (len(children), len(requests))
+            if scenario == 'log-collision':
+                log.write_text('existing proof collision; must not overwrite\n')
+            with cancellation_flag() as pending:
+                value = execute([sys.executable, '-I', '-B', '-u', '-c', code], cwd=directory, environment={'PATH': '/usr/bin:/bin'}, log=log, pending=pending, seconds=timeout, combined_limit=COMBINED_BYTES, free_floor=FREE_FLOOR, headroom=DISPATCH_HEADROOM)
+            value['scenario'] = scenario
+            write_new(directory / f'{scenario}.json', value, ctx=ctx)
+            if scenario == 'success':
+                require(value['status'] == 'PASS' and value['groupProof']['status'] == 'CLEAR', 'success proof failed')
+            else:
+                require(value['status'] == 'FAIL', 'adverse control unexpectedly passed')
+            if scenario == 'timeout':
+                require(value['timedOut'] and value['stopSignalSent'] and (value['ownership'] == 'reaped'), 'timeout stop/reap incomplete')
+            elif scenario == 'reap-cancellation':
+                require(value['cancelSignal'] == signal.SIGINT and value['exitCode'] == 0, 'late reap cancellation lost')
+            elif scenario == 'late-zero-exit':
+                require(value['timedOut'] and value['exitCode'] == 0, 'original completion deadline renewed')
+            elif scenario in {'unknown-acquisition', 'unknown-acquisition-after-child', 'unknown-reap'}:
+                require(value['ownership'] == 'unknown', 'ambiguous ownership adopted')
+            elif scenario == 'log-collision':
+                require(value['ownership'] == 'unstarted' and value['errorPhase'] == 'log-open' and (len(children) == before_children), 'log collision spawned/overwrote')
+            if scenario != 'timeout':
+                require(len(requests) == before_signals, 'adverse control tried a stale signal')
+            results.append(value)
+        scenario = 'same-group-descendant'
+        extra_fds = (control_read, status_write)
+        code = f'import os\npid=os.fork()\nif pid: os._exit(0)\nos.write({status_write},str(os.getpid()).encode()+b"\\n")\nos.read({control_read},1)\nos._exit(0)\n'
+        with cancellation_flag() as pending:
+            value = execute([sys.executable, '-I', '-B', '-u', '-c', code], cwd=directory, environment={'PATH': '/usr/bin:/bin'}, log=directory / f'{scenario}.log', pending=pending, seconds=5, group_seconds=0.15, combined_limit=COMBINED_BYTES, free_floor=FREE_FLOOR, headroom=DISPATCH_HEADROOM)
+        value['scenario'] = scenario
+        descendant_group = {'pid': value['pid'], 'uid': value['uid']}
+        write_new(directory / f'{scenario}.json', value, ctx=ctx)
+        require(value['status'] == 'FAIL' and value['ownership'] == 'reaped' and (value['exitCode'] == 0), 'exit0 with same-group live descendant accepted')
+        require(value['output']['eof'] is False and value['groupProof']['status'] == 'UNKNOWN'
+                and value.get('errorPhase') == 'collect', 'reaped leader with held pipe was not retained as unresolved EOF')
+        actual_query, actual_rows = numeric_snapshot()
+        require(actual_rows is not None, 'independent descendant numeric observation unavailable')
+        live = classify_group(actual_rows, group=value['pid'], uid=value['uid'])
+        require(live['status'] == 'LIVE', 'fixture did not actually retain its same-group descendant')
+        value['independentLiveObservation'] = {'query': actual_query, 'group': live}
+        require(not value['stopSignalSent'] and len([row for row in requests if row['kind'] == 'gate']) == 1, 'post-reap descendant signal attempted')
+        os.close(status_write)
+        status_open = False
+        require(select.select([status_read], [], [], 2)[0], 'owned descendant did not report readiness')
+        ready = os.read(status_read, 128)
+        require(ready.strip().isdigit(), 'invalid owned descendant readiness')
+        os.close(control_write)
+        control_write = None
+        require(select.select([status_read], [], [], 2)[0] and os.read(status_read, 128) == b'', 'owned descendant did not close completion pipe')
+        deadline = time.monotonic() + 2
+        while True:
+            query, rows = numeric_snapshot()
+            require(rows is not None, 'descendant cleanup numeric query unknown')
+            observation = classify_group(rows, group=value['pid'], uid=value['uid'])
+            if observation['status'] == 'CLEAR':
+                break
+            require(time.monotonic() < deadline, 'owned descendant remained live after independent EOF cleanup')
+            time.sleep(0.02)
+        value['independentPipeCleanup'] = {'eof': True, 'query': query, 'group': observation}
+        results.append(value)
+    finally:
+        subprocess.Popen, os.killpg = (real_popen, real_killpg)
+        if control_write is not None:
+            os.close(control_write)
+        if status_open:
+            os.close(status_write)
+        os.close(control_read)
+        os.close(status_read)
+        for child in children:
+            if child.returncode is None:
+                child.wait(timeout=3)
+        cleanup = None
+        if descendant_group is not None:
+            cutoff = time.monotonic() + 2
+            while True:
+                query, rows = numeric_snapshot()
+                require(rows is not None, 'final owned descendant readback unknown')
+                cleanup = {'query': query, **classify_group(rows, group=descendant_group['pid'], uid=descendant_group['uid'])}
+                if cleanup['status'] == 'CLEAR':
+                    break
+                require(time.monotonic() < cutoff, 'owned descendant remains after closed control pipe')
+                time.sleep(0.02)
+        write_new(directory / 'owned-cleanup.json', {'directChildren': [{'pid': child.pid, 'exitCode': child.returncode, 'gate': child.gate} for child in children], 'signalRequests': requests, 'allControlDescriptorsClosed': True, 'descendantReadback': cleanup}, ctx=ctx)
+    require(all((child.returncode is not None for child in children)), 'unresolved controller proof children')
+    require(len([row for row in requests if row['kind'] == 'gate']) == 1, 'unexpected gate stop request count')
+    result = {'results': results, 'signalRequests': requests, 'allDirectChildrenReaped': True, 'actualDirectChildren': len(children), 'processGateSha256': digest(EVIDENCE / 'process_gate.py', ctx=ctx, role='source'), 'limitation': 'The independently pipe-owned descendant proof does not establish arbitrary escaped-process containment'}
+    write_new(EVIDENCE / 'final-process-controller-proof.json', result, ctx=ctx)
+    print(json.dumps(result, indent=2))
+if __name__ == '__main__':
+    from action_io import action
+    with action('verify-process-gate.py') as ctx:
+        main(ctx)
+    import runpy
+    added = runpy.run_path(str(EVIDENCE/'verify-frozen-diff.py'), run_name='preparation_verifier_proofs')
+    added['main'](EVIDENCE)

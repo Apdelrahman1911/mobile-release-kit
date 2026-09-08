@@ -1,0 +1,370 @@
+"""Finite synthetic fault route; only the named actual operation is injected.
+
+Not a product test, Store call, general fault framework or final dispatcher.
+The parent owns newly created fixture paths and checks the actual failed gate.
+"""
+from pathlib import Path
+from contextlib import ExitStack
+import hashlib
+import json
+import os
+import signal
+import sys
+from unittest.mock import patch
+
+assert len(sys.argv) == 4
+E = Path(sys.argv[1])
+MODE, VARIANT = sys.argv[2:]
+import stat
+
+def helper_namespace(root, *, ctx=None):
+    """Metadata-only admission before sibling imports; never open cache bytes.
+
+    The initial script/stdlib are runner TCB. This closes incidental helper
+    import candidates, not arbitrary same-user/whole-host interference.
+    """
+    def check(value=True, message='helper namespace'):
+        if ctx is not None:
+            ctx.require(value, message)
+        elif not value:
+            raise RuntimeError(message)
+    root = Path(root)
+    check(root.is_absolute() and str(root) == os.path.normpath(root) and len(root.parts) <= 64,
+          'noncanonical helper import root')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open('/', flags)
+    try:
+        for part in root.parts[1:]:
+            check()
+            new = os.open(part, flags, dir_fd=fd)
+            old, fd = fd, new
+            os.close(old)
+        original = os.fstat(fd)
+        check(original.st_uid == os.getuid() and not original.st_mode & 0o022,
+              'foreign/writable helper namespace')
+        known = set(['action_io.py', 'bindings.py', 'cleanup-build.py', 'cleanup-wheel.py', 'evidence_schemas.py', 'freeze.py', 'frozen_diff.py', 'gate_list.py', 'git_readonly.py', 'native_reader.py', 'observe-owned-workers.py', 'owned_outputs.py', 'prepare-build.py', 'probe-jdk21-signing.py', 'process_gate.py', 'result_protocols.py', 'run-once.sh', 'source_inventory.py', 'verify-all.py', 'verify-frozen-diff.py', 'verify-pins.py', 'verify-process-gate.py', 'verify-result-protocols.py', 'wheel-smoke.sh'])
+        found, count = set(), 0
+        with os.scandir(fd) as iterator:
+            while True:
+                # Reserve the enumeration operation before advancing; even an
+                # EOF probe consumes this finite namespace-admission budget.
+                check(count < 4096, 'helper namespace enumeration cap')
+                count += 1
+                if ctx is not None:
+                    ctx.charge('visited', 1)
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    break
+                name = item.name
+                check(len(os.fsencode(name)) <= 255, 'helper namespace component cap')
+                before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                check(name != '__pycache__' and not name.endswith(('.pyc', '.pyo', '.pyd', '.so', '.pth')),
+                      'unapproved helper bytecode/startup/cache name; payload not read')
+                if name in known:
+                    check(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+                          and before.st_uid == os.getuid() and not before.st_mode & 0o022,
+                          'helper replaced, symlinked, hardlinked or writable')
+                    found.add(name)
+                else:
+                    check(not name.endswith(('.py', '.sh')), 'unknown helper/import source name')
+                    if (stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode)) and name.isidentifier():
+                        check(name == 'wheels' and stat.S_ISDIR(before.st_mode)
+                              and before.st_uid == os.getuid() and stat.S_IMODE(before.st_mode) == 0o700,
+                              'unapproved helper import directory; contents not read')
+                        child = os.open(name, flags, dir_fd=fd)
+                        try:
+                            check(os.fstat(child) == before, 'wheel-data directory replaced')
+                            names = []
+                            with os.scandir(child) as entries:
+                                for entry in entries:
+                                    check(not names, 'unknown wheel-data sibling; payload not read')
+                                    names.append(entry.name)
+                                    check(entry.name == 'mobile_release_kit-0.3.0-py3-none-any.whl',
+                                          'unexpected wheel-data name; payload not read')
+                                    row = os.stat(entry.name, dir_fd=child, follow_symlinks=False)
+                                    check(stat.S_ISREG(row.st_mode) and row.st_nlink == 1 and row.st_uid == os.getuid(),
+                                          'untrusted wheel-data type; payload not read')
+                        finally:
+                            os.close(child)
+                check(os.stat(name, dir_fd=fd, follow_symlinks=False) == before, 'helper namespace entry changed')
+        check(found == known, 'missing reviewed helper')
+        current = os.fstat(fd)
+        check((current.st_dev, current.st_ino, current.st_uid, current.st_mode, current.st_mtime_ns, current.st_ctime_ns) ==
+              (original.st_dev, original.st_ino, original.st_uid, original.st_mode, original.st_mtime_ns, original.st_ctime_ns),
+              'helper namespace changed during admission')
+    finally:
+        os.close(fd)
+
+helper_namespace(E)
+sys.path.insert(0, str(E))
+import action_io as io
+import bindings
+import frozen_diff as diff
+import git_readonly as git
+import process_gate as pg
+
+CONFIG = json.loads((E/'CONFIG.json').read_text())
+assert CONFIG['scope'].startswith('SYNTHETIC PREPARATION')
+AREA = E.parent.parent
+ROOT = Path(CONFIG['owner'])/'final-frozen-diff-r1'
+TMP = Path(CONFIG['tmp'])
+ORIGINAL_OBSERVATION = Path(json.loads((E/'final-freeze.json').read_text())['creationObservation']['path'])
+REAL_OPEN, REAL_CLOSE, REAL_MKDIR, REAL_FSYNC, REAL_UNLINK = os.open, os.close, os.mkdir, os.fsync, os.unlink
+REAL_DUP = os.dup
+REAL_WRITE, REAL_LOOSE, REAL_CONSUME, REAL_SIGNAL = io.write_bytes_new, git.loose, diff.consume_forest, signal.signal
+REAL_READ, REAL_OWNER = io.read_file, git.create_owned
+DESCRIPTORS, HITS, REMOVED = {}, [], []
+CONTEXT = None
+SAVED = {}
+ACTIVE_WRITES, VIEW_OWNERS = [], []
+ROOT_CREATED = False
+
+
+def absolute(path, kwargs):
+    path = Path(path)
+    return path if path.is_absolute() else DESCRIPTORS.get(kwargs.get('dir_fd'), Path.cwd())/path
+
+
+def opening(path, flags, *args, **kwargs):
+    actual = absolute(path, kwargs)
+    fd = REAL_OPEN(path, flags, *args, **kwargs)
+    DESCRIPTORS[fd] = actual
+    return fd
+
+
+def closing(fd):
+    try:
+        return REAL_CLOSE(fd)
+    finally:
+        DESCRIPTORS.pop(fd, None)
+
+
+def duplicating(fd):
+    new = REAL_DUP(fd)
+    if fd in DESCRIPTORS:
+        DESCRIPTORS[new] = DESCRIPTORS[fd]
+    return new
+
+
+def fault(label):
+    assert not HITS, 'named fault injected twice'
+    HITS.append(label)
+    raise OSError('R4-R2 named actual operation: '+label)
+
+
+def matches(path, target):
+    return path == E/'FROZEN-DIFF-OWNER.json' if target == 'owner' else \
+           path == E/'frozen-diff-raw-head.bin' if target == 'anchor' else \
+            path == E/'frozen-diff-preparation-observation.json' if target == 'prep' else \
+            path == E/'FROZEN-DIFF-SEAL.json' if target == 'seal' else \
+            path.parent == E and path.name.startswith('native-observation-') and path.suffix == '.json' and path != ORIGINAL_OBSERVATION if target == 'collection' else \
+            path.is_relative_to(ROOT/'objects') and len(path.relative_to(ROOT/'objects').parts) == 2 if target == 'object' else False
+
+
+def writing(path, blocks, **kwargs):
+    target = VARIANT.split('-', 1)[0]
+    selected = not HITS and matches(Path(path), target)
+    if selected and VARIANT.endswith('-write-before'):
+        fault(VARIANT)
+    ACTIVE_WRITES.append(Path(path))
+    try:
+        result = REAL_WRITE(path, blocks, **kwargs)
+    finally:
+        assert ACTIVE_WRITES.pop() == Path(path)
+    if selected and VARIANT.endswith('-write-after'):
+        fault(VARIANT)
+    return result
+
+
+def syncing(fd):
+    path = DESCRIPTORS.get(fd, Path('/no-owned-descriptor'))
+    target = VARIANT.split('-', 1)[0]
+    selected = False
+    if '-dir-fsync-' in VARIANT:
+        selected = (ROOT_CREATED and path == ROOT.parent) if target == 'root' else \
+                   bool(ACTIVE_WRITES and matches(ACTIVE_WRITES[-1], target) and path == ACTIVE_WRITES[-1].parent)
+    elif '-fsync' in VARIANT:
+        selected = matches(path, target)
+    selected = selected and not HITS
+    if selected and not VARIANT.endswith('-after'):
+        fault(VARIANT)
+    result = REAL_FSYNC(fd)
+    if selected and VARIANT.endswith('-after'):
+        fault(VARIANT)
+    return result
+
+
+def making(path, *args, **kwargs):
+    global ROOT_CREATED
+    selected = absolute(path, kwargs) == ROOT and not HITS
+    if selected and VARIANT == 'root-mkdir-before':
+        fault(VARIANT)
+    result = REAL_MKDIR(path, *args, **kwargs)
+    if absolute(path, kwargs) == ROOT:
+        ROOT_CREATED = True
+    if selected and VARIANT == 'root-mkdir-after':
+        fault(VARIANT)
+    return result
+
+
+def loose(path, *args, **kwargs):
+    if not HITS and VARIANT == 'object-readback-before' and Path(path).is_relative_to(ROOT/'objects'):
+        fault(VARIANT)
+    result = REAL_LOOSE(path, *args, **kwargs)
+    if not HITS and VARIANT == 'object-readback' and Path(path).is_relative_to(ROOT/'objects'):
+        fault(VARIANT)
+    return result
+
+
+def reading(path, **kwargs):
+    target = VARIANT.split('-', 1)[0]
+    selected = not HITS and '-readback-' in VARIANT and target != 'object' and matches(Path(path), target)
+    if selected and VARIANT.endswith('-before'):
+        fault(VARIANT)
+    result = REAL_READ(path, **kwargs)
+    if selected and VARIANT.endswith('-after'):
+        fault(VARIANT)
+    return result
+
+
+def creating_owner(root, marker, tree, purpose, **kwargs):
+    selected = Path(root).parent == TMP and Path(root).name.startswith('metadata-')
+    if selected:
+        VIEW_OWNERS.append(str(root))
+    label = 'source' if len(VIEW_OWNERS) == 1 else 'user' if len(VIEW_OWNERS) == 2 else 'invalid'
+    if selected and not HITS and VARIANT == label+'-view-owner-before':
+        fault(VARIANT)
+    result = REAL_OWNER(root, marker, tree, purpose, **kwargs)
+    if selected and not HITS and VARIANT == label+'-view-owner-after':
+        fault(VARIANT)
+    return result
+
+
+def consume(*args, **kwargs):
+    result = REAL_CONSUME(*args, **kwargs)
+    if not HITS and VARIANT == 'post-diff-cancel':
+        HITS.append(VARIANT)
+        kwargs['ctx'].pending.signal = signal.SIGTERM
+    return result
+
+
+def restoring(number, handler):
+    value = REAL_SIGNAL(number, handler)
+    if not isinstance(handler, pg.Interrupted) and CONTEXT is not None and not HITS:
+        if VARIANT == 'restoration-fault':
+            fault(VARIANT)
+        if VARIANT == 'restoration-cancel':
+            HITS.append(VARIANT)
+            CONTEXT.pending.signal = signal.SIGTERM
+    return value
+
+
+def unlinking(path, *args, **kwargs):
+    actual = absolute(path, kwargs)
+    owned = actual.is_relative_to(ROOT)
+    if owned and VARIANT == 'cleanup-partial-failure' and REMOVED:
+        fault(VARIANT)
+    result = REAL_UNLINK(path, *args, **kwargs)
+    if owned:
+        REMOVED.append(str(actual))
+        if len(REMOVED) == 1 and VARIANT in {'cleanup-partial-cancel', 'cleanup-partial-substitution'}:
+            HITS.append(VARIANT)
+            if VARIANT.endswith('cancel'):
+                CONTEXT.pending.signal = signal.SIGTERM
+            else:
+                later = next(name for name in SAVED if name not in REMOVED)
+                target = Path(later)
+                target.rename(AREA/'retained-replaced-original')
+                target.write_bytes(b'FOREIGN SUBSTITUTED FIXTURE; NEVER REMOVE\n')
+                SAVED[later]['substituted'] = True
+    return result
+
+
+assert MODE in {'prepare', 'cleanup'}
+if MODE == 'cleanup':
+    seal = json.loads((E/'FROZEN-DIFF-SEAL.json').read_text())
+    for name, row in sorted(seal['inventory'].items(), key=lambda item: (len(Path(item[0]).parts), item[0]), reverse=True):
+        if row['kind'] == 'file':
+            path = ROOT/name
+            SAVED[str(path)] = {'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'bytes': path.stat().st_size}
+    assert len(SAVED) >= 2
+    (AREA/'cleanup-neighbor-canary').write_bytes(b'UNRELATED NEIGHBOR; MUST SURVIVE\n')
+
+error, first, summary = None, None, None
+with ExitStack() as stack:
+    for owner, attribute, replacement in ((os, 'open', opening), (os, 'close', closing), (os, 'dup', duplicating), (os, 'mkdir', making),
+            (os, 'fsync', syncing), (os, 'unlink', unlinking), (io, 'write_bytes_new', writing),
+            (git, 'write_bytes_new', writing), (diff, 'write_bytes_new', writing), (git, 'loose', loose),
+            (io, 'read_file', reading), (bindings, 'read_file', reading), (diff, 'read_file', reading),
+            (git, 'read_file', reading), (git, 'create_owned', creating_owner),
+            (diff, 'consume_forest', consume), (signal, 'signal', restoring)):
+        stack.enter_context(patch.object(owner, attribute, replacement))
+    try:
+        with io.action('actual-vpg-'+MODE) as ctx:
+            CONTEXT = ctx
+            (diff.prepare if MODE == 'prepare' else diff.cleanup)(E, ctx=ctx)
+    except (io.ActionFailure, OSError) as problem:
+        error = {'type': type(problem).__name__, 'message': str(problem)}
+        first = {'type': type(ctx.first_error).__name__, 'message': str(ctx.first_error)}
+        summary = ctx.summary()
+    else:
+        raise AssertionError('named fault never reached; operation unexpectedly succeeded')
+
+assert HITS == [VARIANT] or VARIANT.startswith('collision-'), (VARIANT, HITS)
+assert CONTEXT.state == 'closed' and CONTEXT.failure is not None and not DESCRIPTORS
+try:
+    io.write_failure(E/('FROZEN-DIFF-FAILURE-'+CONTEXT.nonce+'.json'), ctx=CONTEXT, phase=MODE, error=CONTEXT.first_error)
+    diagnostic = 'retained using original closed failed context/counters'
+except BaseException as problem:
+    diagnostic = {'type': type(problem).__name__, 'message': str(problem)}
+
+if MODE == 'cleanup':
+    assert len(REMOVED) == 1, REMOVED
+    retained = []
+    for path, expected in SAVED.items():
+        current = Path(path)
+        if path in REMOVED:
+            assert not current.exists()
+        elif expected.get('substituted'):
+            assert current.read_bytes() == b'FOREIGN SUBSTITUTED FIXTURE; NEVER REMOVE\n'
+            assert hashlib.sha256((AREA/'retained-replaced-original').read_bytes()).hexdigest() == expected['sha256']
+            retained.append(path)
+        else:
+            assert current.is_file() and hashlib.sha256(current.read_bytes()).hexdigest() == expected['sha256']
+            retained.append(path)
+    assert (AREA/'cleanup-neighbor-canary').read_bytes() == b'UNRELATED NEIGHBOR; MUST SURVIVE\n'
+    assert not (E/'FROZEN-DIFF-CLEANUP.json').exists() and (E/'frozen-diff-cleanup-intent.json').is_file()
+    # The real one-shot consumer, not a helper stub, refuses a new attempt.
+    try:
+        with io.action('actual-partial-cleanup-adoption-denied') as new_ctx:
+            diff.cleanup(E, ctx=new_ctx)
+    except io.ActionFailure as problem:
+        assert 'cleanup was already attempted' in str(problem)
+        repeated = {'type': type(problem).__name__, 'message': str(problem), 'nativeLaunches': len(new_ctx.native)}
+    else:
+        raise AssertionError('partial cleanup was adopted')
+    assert not new_ctx.native and not new_ctx.removals
+else:
+    retained, repeated = [], None
+    if (E/('FROZEN-DIFF-FAILURE-'+CONTEXT.nonce+'.json')).is_file():
+        try:
+            with io.action('actual-failed-prepare-adoption-denied') as new_ctx:
+                diff.prepare(E, ctx=new_ctx)
+        except io.ActionFailure as problem:
+            assert 'no adoption' in str(problem)
+            repeated = {'type': type(problem).__name__, 'message': str(problem), 'nativeLaunches': len(new_ctx.native)}
+        else:
+            raise AssertionError('failed prepare evidence adopted')
+        assert not new_ctx.native
+
+record = {'scope': 'EXPECTED FAILED ACTUAL VERIFIER OPERATION; not product/acceptance', 'variant': VARIANT,
+          'error': error, 'firstError': first, 'faultHits': HITS, 'action': summary,
+          'actualArtifactRemovals': REMOVED, 'remainingFilesPreserved': retained, 'repeatAttempt': repeated,
+           'diagnostic': diagnostic, 'allActualNativeChildrenReaped': all(row['ownership'] == 'reaped' for row in CONTEXT.native),
+           'allActualQueriesReaped': all(row['ownership'] == 'reaped' for row in CONTEXT.queries),
+           'allInterceptedDescriptorsClosed': not DESCRIPTORS}
+(E/'VPG-EXPECTED-FAILURE.json').write_text(json.dumps(record, indent=2, sort_keys=True)+'\n')
+assert record['allActualNativeChildrenReaped']
+assert record['allActualQueriesReaped']
+raise SystemExit(7)

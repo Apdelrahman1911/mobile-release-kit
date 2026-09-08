@@ -1,0 +1,961 @@
+{
+  "schemaVersion": 1,
+  "kind": "unapplied-issue-source-snapshot",
+  "baseCommit": "2beb37336fa8002b69f598fe431082606368310d",
+  "expectedSourceTree": "6009247f3627c9825e9ad9c790a57876e09f3726",
+  "snapshotFileCount": 152,
+  "changedPaths": [
+    {
+      "status": "M",
+      "path": ".github/workflows/ci.yml"
+    },
+    {
+      "status": "M",
+      "path": "tests/workflow/test_android_upload_validation.rb"
+    },
+    {
+      "status": "M",
+      "path": "tests/workflow/test_ios_upload_validation.rb"
+    },
+    {
+      "status": "M",
+      "path": "tests/workflow/test_native_profile_ci.py"
+    },
+    {
+      "status": "M",
+      "path": "tests/workflow/test_native_upload_validation.rb"
+    },
+    {
+      "status": "A",
+      "path": "tests/workflow/upload_process_fixture.rb"
+    },
+    {
+      "status": "A",
+      "path": "tests/workflow/upload_process_ownership.rb"
+    }
+  ],
+  "patch": {
+    "path": "patches/qa006.patch",
+    "bytes": 140836,
+    "sha256": "d82a15df29edcf1da11c94b8a9ef1bc168d792f2015f9a7bb178d416bf016514",
+    "format": "git-full-index-unified-zero",
+    "applyRequirements": "Fresh exact clean base tree/files; --index --unidiff-zero; verify complete resulting tree/files; no partial, three-way, or fuzzy recovery"
+  },
+  "files": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "bytes": 9580,
+      "sha256": "1b635c29874d7beb81fac58538fb20b8000971fd743aba9f408a55ebdf9b5905",
+      "gitMode": "100644"
+    },
+    {
+      "path": ".github/workflows/reusable-candidate.yml",
+      "bytes": 76050,
+      "sha256": "7345b2d7d3f593eff511d0513b9d6e9462809d73f6c088c1a93eeb6f7623a1ab",
+      "gitMode": "100644"
+    },
+    {
+      "path": ".github/workflows/reusable-external-testing.yml",
+      "bytes": 40530,
+      "sha256": "80adb7e4d5ed73194dcb7cc6a5ae29870f880d09a2a1c24934f05e6c96d5e381",
+      "gitMode": "100644"
+    },
+    {
+      "path": ".github/workflows/reusable-preflight.yml",
+      "bytes": 14031,
+      "sha256": "3ea467788d381d2759f6ec1b9f49c3af0086c8771a99fabd78b361172e1e2d8e",
+      "gitMode": "100644"
+    },
+    {
+      "path": ".github/workflows/reusable-production-submit.yml",
+      "bytes": 43211,
+      "sha256": "94623a5ea4c1895c247896a80b72edc3fc8227b07b05792c0b26bb9c55dadd40",
+      "gitMode": "100644"
+    },
+    {
+      "path": ".gitignore",
+      "bytes": 547,
+      "sha256": "a474bf17bb6a8a257d0572ed8bcdadeb7bdb6ebf48959fcacc43026329691395",
+      "gitMode": "100644"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "bytes": 8291,
+      "sha256": "5bead55ce16d1c797d98b30daf876ad9fcd016ac8d93a1a75c344d853209979b",
+      "gitMode": "100644"
+    },
+    {
+      "path": "Gemfile",
+      "bytes": 306,
+      "sha256": "a7a87de32023c8ff5ddc3703644e52683a9b007bff33b0beca9fe15c26c51e6b",
+      "gitMode": "100644"
+    },
+    {
+      "path": "Gemfile.lock",
+      "bytes": 16020,
+      "sha256": "c49efc491e6ecaf86c3213ee51cfa55a2893d2249b9eb6b26ba9748c34f43bb1",
+      "gitMode": "100644"
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 1088,
+      "sha256": "7d381db63decbfe663092a8537c1a1c1a9121d60ffe5938f401ad1346bdf9148",
+      "gitMode": "100644"
+    },
+    {
+      "path": "README.md",
+      "bytes": 16242,
+      "sha256": "fd350919bd851be1966d9db9f101690083a1bfe430fd3484c21dc8031b56235e",
+      "gitMode": "100644"
+    },
+    {
+      "path": "SECURITY.md",
+      "bytes": 9871,
+      "sha256": "68a317d2e4b6f6c0444b660cc213bb235d0f59e6dc88ab2feb32dc05bee5d635",
+      "gitMode": "100644"
+    },
+    {
+      "path": "docs/credentials.md",
+      "bytes": 15373,
+      "sha256": "1e111b908a5e3d03ebd884c5e8d50f335cf0c83c0dfe777aee2cc7b9d475bb05",
+      "gitMode": "100644"
+    },
+    {
+      "path": "docs/init-recovery.md",
+      "bytes": 6856,
+      "sha256": "ce707a2aeb152fb026e258e2e7450f6776a049b70a70e2cedaca757126fafa7c",
+      "gitMode": "100644"
+    },
+    {
+      "path": "docs/integration.md",
+      "bytes": 21269,
+      "sha256": "be6bc36d9733f242940b3698f997914bea52363e833d74dfc68941a16b7cc267",
+      "gitMode": "100644"
+    },
+    {
+      "path": "docs/ios-artifacts.md",
+      "bytes": 8289,
+      "sha256": "1a2985161d44aa8e5400f5b2e84e58d0597c5bdd7a685b54cffcdcdd8ac7e9ff",
+      "gitMode": "100644"
+    },
+    {
+      "path": "docs/ios-entitlements.md",
+      "bytes": 9249,
+      "sha256": "1fdba7792e9056339023cacebca8a723fced5dd36f45da4a04737b36c1dff8d8",
+      "gitMode": "100644"
+    },
+    {
+      "path": "docs/ios-profile-authority.md",
+      "bytes": 11786,
+      "sha256": "f022bee138a2464fd701618383b3c2266c9483d70eb6973d7f0a429062fd1d31",
+      "gitMode": "100644"
+    },
+    {
+      "path": "docs/lifecycle.md",
+      "bytes": 14489,
+      "sha256": "645704a95c24af8c60af9e994e0eb8eb449db4e194d7afdcb63ceb4623397eae",
+      "gitMode": "100644"
+    },
+    {
+      "path": "docs/recovery.md",
+      "bytes": 16983,
+      "sha256": "ac7661675f91b88d02b239a3185165ca362e728156a85699ed3434b464a4fa6c",
+      "gitMode": "100644"
+    },
+    {
+      "path": "docs/troubleshooting.md",
+      "bytes": 12392,
+      "sha256": "260b3f1c05c7fba0deaf07aa3dce30c57f57a91eb0ed204a212feb8b2353177f",
+      "gitMode": "100644"
+    },
+    {
+      "path": "docs/upgrading.md",
+      "bytes": 8874,
+      "sha256": "7b577419727500708a7ed564dcf70f1a5e0e52fc34c00a5c95ba6b26346c301a",
+      "gitMode": "100644"
+    },
+    {
+      "path": "fastlane/Fastfile",
+      "bytes": 100613,
+      "sha256": "2e694f1dee8cae899c2f455d1885b408adc5a02b47f26c2f0f7fa6de6fc5e056",
+      "gitMode": "100644"
+    },
+    {
+      "path": "fastlane/android_upload_validation.rb",
+      "bytes": 4052,
+      "sha256": "f3a53390e774f62846227b6e89b11178feb498c5155d0d0cfb2e09ae4fe89655",
+      "gitMode": "100644"
+    },
+    {
+      "path": "fastlane/apple_asset_upload.rb",
+      "bytes": 4326,
+      "sha256": "8adeaa461dd9529f2c9e06c6df9e11731d86eb4a144150df48a7cbf2a794e241",
+      "gitMode": "100644"
+    },
+    {
+      "path": "fastlane/apple_create_retry.rb",
+      "bytes": 9551,
+      "sha256": "0c7259ff5d3371b6684fc4d75fe30ea09b67de3c2ea95b3f102f370748a84042",
+      "gitMode": "100644"
+    },
+    {
+      "path": "fastlane/apple_production.rb",
+      "bytes": 65160,
+      "sha256": "d852adb3829a6721e7057bfedd3ea50bfcb357de0ec1f9e86d8e562685d4f850",
+      "gitMode": "100644"
+    },
+    {
+      "path": "fastlane/apple_store.rb",
+      "bytes": 14201,
+      "sha256": "47b663461bd6111d527f30f7d45a2ce3f86fd279e121fc83876135ca4b625f39",
+      "gitMode": "100644"
+    },
+    {
+      "path": "fastlane/ios_upload_validation.rb",
+      "bytes": 5753,
+      "sha256": "bd19cfd93045facfb19b18bd79c994764ca03a93f21db19bbe8164cb83567b1d",
+      "gitMode": "100644"
+    },
+    {
+      "path": "fastlane/native_upload_validation.rb",
+      "bytes": 2841,
+      "sha256": "57e41e4988c1abc10f1a2da22d56440d064557dfa28034dfa4b12eea94778cfa",
+      "gitMode": "100644"
+    },
+    {
+      "path": "fastlane/play_store.rb",
+      "bytes": 43244,
+      "sha256": "34fbff928f670dfaa1729e724327f4594a7f1d47b228cae33b516fdd68deefcd",
+      "gitMode": "100644"
+    },
+    {
+      "path": "fastlane/release_support.rb",
+      "bytes": 12738,
+      "sha256": "261374b8a7904e8671cc0779d4724fe3c31535138ef1e3920b435f18227668e5",
+      "gitMode": "100644"
+    },
+    {
+      "path": "fastlane/run_lane.rb",
+      "bytes": 1057,
+      "sha256": "8e420f89aacf4427780f0b087023c44cb55b6ea42aca1a7c822fffe6ebb1278d",
+      "gitMode": "100644"
+    },
+    {
+      "path": "pyproject.toml",
+      "bytes": 1669,
+      "sha256": "b62b3ab8be1e2136bb9e0fbca7db826066a932a6b5a9c028adf9e79933859b2c",
+      "gitMode": "100644"
+    },
+    {
+      "path": "schemas/candidate.schema.json",
+      "bytes": 24186,
+      "sha256": "ddf22a4467fc9f6dd50de06d1af50b79eca2d55a42b74566fdcab9a49d9b6e81",
+      "gitMode": "100644"
+    },
+    {
+      "path": "schemas/project.schema.json",
+      "bytes": 12407,
+      "sha256": "2c59a6a3d0c90188db5800898db2c42612960616f30d84aecf25a4611ec5fbd7",
+      "gitMode": "100644"
+    },
+    {
+      "path": "schemas/receipt.schema.json",
+      "bytes": 58517,
+      "sha256": "eb1ceaaceeecc01497847dc2857d03aa3e45433e9439b5e49177f4f981e02db7",
+      "gitMode": "100644"
+    },
+    {
+      "path": "schemas/store-operation-intent.schema.json",
+      "bytes": 84822,
+      "sha256": "d1667baa58d6b61340ad4685ad71c8a4c8d1e550070a6114d38f0c806d24efb2",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/__init__.py",
+      "bytes": 144,
+      "sha256": "557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/__main__.py",
+      "bytes": 115,
+      "sha256": "50fd328dfe5b5339a9958444940e9ce45b9764dbb7b130cc25f3a966ccb706a8",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/android.py",
+      "bytes": 22676,
+      "sha256": "a8a4989de9a3e428d9b697c233296c694f4da89a15f57590063a4fc3cbeb6fc7",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/android_upload_validation.py",
+      "bytes": 6295,
+      "sha256": "5be3d74272ade8a30938d48e25ffe42a661ff3e142872c17b014dee1641cfd72",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/cancellation.py",
+      "bytes": 4292,
+      "sha256": "ce5b00883e68918924e287b690aa6147731aef7b36b28bd4e24b020e80f8e662",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/cli.py",
+      "bytes": 57009,
+      "sha256": "4859503590dc63ed458a755e25b3d8b37fb28522dda9ecf2c38172fc0a29e4aa",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/config.py",
+      "bytes": 26964,
+      "sha256": "65a1ff0f3a8e8ccaaad85df690252fc4f0d48748bef9349a658e74832d43f60e",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/credentials.py",
+      "bytes": 79550,
+      "sha256": "6f332ef8a7854514f601032f63e2ac7e930cf8cd9bae9a3c1086e577eb01c32d",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/data/apple-profile-roots.pem",
+      "bytes": 4539,
+      "sha256": "c704ce9bc7d65280e2893c2235c2434dba8cbce00f659787492714ca441b1e93",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/discovery.py",
+      "bytes": 14059,
+      "sha256": "d541e452637722d5813250f42b701262a18b598ff263e2070a8c0fa679b5e183",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/errors.py",
+      "bytes": 749,
+      "sha256": "26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/init_transaction.py",
+      "bytes": 44833,
+      "sha256": "0be951e0cea1fab95cb5244a04a49099bbb77fe00376cdb86fb06f0526b79bdb",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/inspection.py",
+      "bytes": 766,
+      "sha256": "64f688a06be24ff3bbdbeb0edfaccbf153bdd2e26726a8cf29573b2072a2cd96",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/ios.py",
+      "bytes": 50894,
+      "sha256": "d5b1ee5feda91e76179580c20bf2a8a3017f2e70e5c010a80ec2b864c67470fc",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/ios_artifacts.py",
+      "bytes": 32858,
+      "sha256": "07eede745709f32b0349c920e2ea18cfb86b7ed1d35aaee7c548ca2904662e94",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/ios_der.py",
+      "bytes": 5132,
+      "sha256": "9ad85b4f36c65d5dc1895fae45ffc3959f0e190e7b183615aa6c0714d8b38ab5",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/ios_entitlements.py",
+      "bytes": 23224,
+      "sha256": "3278efadeecbcc09187cc859c03e1e011a8bf2d8f22355f92c03ade140c4951f",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/ios_plist_binary.py",
+      "bytes": 8499,
+      "sha256": "1601d3e15467a95348bde537ec6da633c2b4b46e0f7803eb619622b3cab69b2b",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/ios_profile_auth.py",
+      "bytes": 9576,
+      "sha256": "77dce490c737f3cb63c58392cfd0f1b054d8b199ef71a6b646828dd89e022202",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/ios_profile_trust.py",
+      "bytes": 9102,
+      "sha256": "e813efc8e4218048bae71f04de942493e93e5880f095e5ae68f051d6cf176edf",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/ios_profiles.py",
+      "bytes": 14221,
+      "sha256": "bd202da48edfbe864446e9431b4421e3b1567f4c8c418df54e20ee997b6c693e",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/ios_upload_validation.py",
+      "bytes": 7171,
+      "sha256": "2b914576fd795123bd6088711f19d1072801415736f266ebaf39c5d6d4446589",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/macho.py",
+      "bytes": 23183,
+      "sha256": "8fb561c41ca958ba9d1fc507b7aecae6a011aa2bb903ec472a80201a6b926d5d",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/metadata.py",
+      "bytes": 24548,
+      "sha256": "454c4f8799bd99439e05f1157154dd6b124f301ceb564c01b619b326a9923dc0",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/preflight.py",
+      "bytes": 46683,
+      "sha256": "f6d579ac86ebfdcb1637236859b6d939d5e15eb1b14889d0b4963065f4d07473",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/provenance.py",
+      "bytes": 191176,
+      "sha256": "875afcb7fffd96261ab7794e464e46f53859a22f60cd52d3e4abab46a1b738be",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/reporting.py",
+      "bytes": 5932,
+      "sha256": "8fdb0b59967b473390e484d294e41f7c87e2341b468b8e6a2719e50ed7e63544",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/stores.py",
+      "bytes": 29555,
+      "sha256": "091082e9ae279a66c9caddcb9ea11c02a40f6ea55a8e6d74acd19ed586f90313",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/tooling.py",
+      "bytes": 4741,
+      "sha256": "e7a85d14dd90108db6542c8ee8a40f823baf4b51556ca1a302c87e853f200d5b",
+      "gitMode": "100644"
+    },
+    {
+      "path": "src/mobile_release/workflow.py",
+      "bytes": 93089,
+      "sha256": "5569ebc822753a76dd669ec9c5edeb2b73298a01ba9392594ee69fc4794b5d9e",
+      "gitMode": "100644"
+    },
+    {
+      "path": "templates/mobile-release.json",
+      "bytes": 895,
+      "sha256": "964b703a93624100d0526eff430d7a9897d1a94cf0eac2789af8582c16784fe2",
+      "gitMode": "100644"
+    },
+    {
+      "path": "templates/workflows/mobile-candidate.yml",
+      "bytes": 1369,
+      "sha256": "830c5e268cf37faebc3c0e2cbf7fa3782eff7e51a6576aefc3d5ebf56f76cca6",
+      "gitMode": "100644"
+    },
+    {
+      "path": "templates/workflows/mobile-external-testing.yml",
+      "bytes": 2140,
+      "sha256": "39744e15d2a8dcfcdd9607bb58d0d10dfcd5ffaecd70a4d78e94a24e7b8a1754",
+      "gitMode": "100644"
+    },
+    {
+      "path": "templates/workflows/mobile-preflight.yml",
+      "bytes": 557,
+      "sha256": "5592b43ae69cf163eb3df4b26265a0b02cb7b5d8978d728092dce14cb9ada1e8",
+      "gitMode": "100644"
+    },
+    {
+      "path": "templates/workflows/mobile-production-submit.yml",
+      "bytes": 2871,
+      "sha256": "0e079dd06ed60416d3a06c0f777d75caba89fca56aab72b34ff90bc1b2243dd4",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/fixtures/README.md",
+      "bytes": 1679,
+      "sha256": "fb4e43d815d7412c3e2e543efa80505f19c3b53e09ee5d1cc95d6bc2e8924da5",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/fixtures/android-release-notes-corpus.json",
+      "bytes": 4963,
+      "sha256": "c2446fcc3a21e114e27537000534f1664129845e1094235411fc99224477ccf5",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/fixtures/apple-profile-authority/README.md",
+      "bytes": 1613,
+      "sha256": "7ae0c9feb1418ef1302d00a900bae4f9af340ef0bb97f3b8b1eba7863eeb9f86",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/fixtures/apple-profile-authority/certificates.json",
+      "bytes": 7921,
+      "sha256": "53462643fdcf890500f1ea768719c97569ef6df1a1d2a1bedeb8f8af4ba02335",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/fixtures/apple-store-contract.json",
+      "bytes": 206481,
+      "sha256": "49a124957a74b2fb6939aae49a7a989498a1386bc6c07ab2a388373a4f7e397b",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/fixtures/candidate-valid.json",
+      "bytes": 3907,
+      "sha256": "285685846ac73e215aacc77436884e42f3e973a105dc5e40f1add0a020f2e06d",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/fixtures/intent-candidate-valid.json",
+      "bytes": 4096,
+      "sha256": "e56ad77ee3cb4b1d3e12d1a6f5be8f7d0e90497934d1ebbd5bd9312b53362e42",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/fixtures/intent-external-valid.json",
+      "bytes": 5226,
+      "sha256": "dd1bd87070cda83d69c770705cb43b467b55d7a661a6a6413e9dff83c3059275",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/fixtures/intent-production-valid.json",
+      "bytes": 5828,
+      "sha256": "3d06426b102ecbcc1f9ca73c370d1849b891884665c57b3f93259fe5926bbed0",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/fixtures/project-valid.json",
+      "bytes": 1762,
+      "sha256": "458060a8d2217eac131621e28a654497f171f00f91e651250d0ffda7b8faf603",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/fixtures/receipt-candidate-valid.json",
+      "bytes": 3363,
+      "sha256": "375d5b895b62b62842338acff9c8ed9cfafe9a618eb51439d9ebc042d401e183",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/fixtures/receipt-external-valid.json",
+      "bytes": 4116,
+      "sha256": "ef0fc79056e7fd7b7ab79328bdeab7c11bfad7db00d7f59c37853320b10b5c88",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/fixtures/receipt-production-valid.json",
+      "bytes": 4352,
+      "sha256": "7c94fa3c29cbec13004b74651539e805be0ce8624a7918d3659a84781c0d48db",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/fixtures/version-parser-corpus.json",
+      "bytes": 1616,
+      "sha256": "ea93891df11d69965cfbc8add1c545ed45f162412d7e6faff7b8eb97ca07bdbd",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/__init__.py",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/apple_contract_helpers.py",
+      "bytes": 6012,
+      "sha256": "20fa0f731c78b85bd97cab5431123739c153168077a719920b7d5eeed0643378",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/evidence_helpers.py",
+      "bytes": 13817,
+      "sha256": "39799e87fc3db735077b423113ffd14b7c8ee4a74132c2f33de7a29a584e6608",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/helpers.py",
+      "bytes": 5108,
+      "sha256": "7c93c916fc1274098a5f228c48571ca7e117ee7703fd4d6d3265c8d7a6f5e8ed",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/ios_artifact_helpers.py",
+      "bytes": 9959,
+      "sha256": "93c26a904e32560eb79f27c45e35bf73b2a7129aec4e5597714b1a3394947427",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/ios_entitlement_helpers.py",
+      "bytes": 20996,
+      "sha256": "fdbf60961784ee704b41374c3e87be83a6a1e3f39486903abcd9c22232237282",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/ios_profile_helpers.py",
+      "bytes": 3153,
+      "sha256": "82fa6ea5d6ea70f89b0ceecbbaae005ad17e1e30ef09e99171aa683a06c5a463",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/test_android_release_notes.py",
+      "bytes": 12761,
+      "sha256": "50110d68a7f9bbd868af29079624410675f0707717a6393d37060a809cf632ea",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/test_android_upload_validation.py",
+      "bytes": 13471,
+      "sha256": "6e217523fc91a4308fb1ce9da06dd754300d9238d88992532bc61c7e90c65d78",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/test_cli_and_build.py",
+      "bytes": 68591,
+      "sha256": "92ecbfa9be06890cecd8f78ba3f493bd72beb8fc7988963dfa218572f065e8ac",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/test_config_discovery.py",
+      "bytes": 17318,
+      "sha256": "cbab0cf6b00906a013beca34cecd3e734dbd70c5bed7093a62e02596043af1af",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/test_credentials_metadata.py",
+      "bytes": 23510,
+      "sha256": "baf8016f6ce5a541647a2ff74a7d449170f0a3d25050abb03338cd648ea787f8",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/test_default_cancellation.py",
+      "bytes": 15194,
+      "sha256": "cba526163b143275a6cb25612d016773e6897187a633c9a83b52265ab35670f2",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/test_init_transaction.py",
+      "bytes": 54654,
+      "sha256": "13e9e14d6cb9d7e6195d73f7ef2cf0e57ee4ffac7652b9b6c7c107025384fd84",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/test_inspection_budget.py",
+      "bytes": 14126,
+      "sha256": "86f7d0c829ead6dacc3bd37bd6291dccb27659783e5828a4d58bde4b8d8ec5ce",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/test_ios_artifact.py",
+      "bytes": 30919,
+      "sha256": "faf7fa598d48725c10279b6ab211c60216832424db99408879a3152ac51f9be3",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/test_ios_correspondence.py",
+      "bytes": 38866,
+      "sha256": "9ff58541e5368557051e1860cf7a8ab45142b50dca6987d2b7685814c7a93f74",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/test_ios_entitlements.py",
+      "bytes": 39193,
+      "sha256": "357c89f67cfabb4fddf6502cdd83b7a277618127eb6314d2e66520fff9cc52cb",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/test_ios_plist_binary.py",
+      "bytes": 12206,
+      "sha256": "ee60119ffb41e4c64b50d354c4eac9b0f962412a86a027e5ea4c08b444759ea7",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/test_ios_profile_authority.py",
+      "bytes": 12521,
+      "sha256": "35427a9a112f8d591aef828e8be2d424d16b8566e55bc4e1e217bb02b63f9863",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/test_ios_profile_installation.py",
+      "bytes": 24319,
+      "sha256": "1070ebe99c3f64e6fc92eb9631932e37bfa4e8736a62d6d5e9397d906ae05754",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/test_ios_profile_trust.py",
+      "bytes": 10223,
+      "sha256": "da4c1812c35c291dc3bf6afed30d114f0c1952cd15ab6e533f994c29d81aa11f",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/test_ios_upload_validation.py",
+      "bytes": 16871,
+      "sha256": "4e8adc3ff3eee88f767c40fa6ca5b3fce40b0fc066fe34186bf07c4ecaaa7cce",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/test_macho_native.py",
+      "bytes": 20190,
+      "sha256": "23773c4444ec74d89905852feed4df1c02de1a1bcb4fc7bcabf1bc939bb197ae",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/test_operation_intents.py",
+      "bytes": 27136,
+      "sha256": "12beb4dffeaf437ebaf7a197d12b72509f9875be5904a072dc683bedf26fcdca",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/test_operation_recovery.py",
+      "bytes": 60274,
+      "sha256": "8e86290e2a5066fac8cc7dfa3ff04ac1d98fd75f162a0da244eb2947a6c6c8fb",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/unit/test_provenance.py",
+      "bytes": 9963,
+      "sha256": "c18c6c2b1c8b65042c5ab93f5ec6d099a838e963d3e2a28ff81d7536659df9cb",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/__init__.py",
+      "bytes": 49,
+      "sha256": "b6d1eef2733b4325a9cd3f9ecfc8d4a23b3baf079ff22462ae2ab312ec0ff9e2",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/apple_fixture.rb",
+      "bytes": 7343,
+      "sha256": "31b009612d4d54ccea5319998ccfd2898c70fde0891f5b24e0a22a6e56d93448",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/apple_production_fixture.rb",
+      "bytes": 22847,
+      "sha256": "f54efad78ec80b1cb4386a639a88971128b14d888000728fd9cba3731209d93f",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/export_apple_contract_fixtures.rb",
+      "bytes": 7067,
+      "sha256": "7e793ac464183ce2fcfa2fa1089dfcd3af94097bb9eac1e5fef003cedc4f4f09",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/fixtures/version.xcconfig",
+      "bytes": 219,
+      "sha256": "ec3c209ebb19ebd7f7b61c20a5b0b3492709483d5856e5b3404c853947246613",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/play_fixture.rb",
+      "bytes": 8348,
+      "sha256": "f78043bc63cbb450db2a61b25725c6fbb1d0760c33d10b0ce8c880084e36eb61",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/process_fixture.py",
+      "bytes": 9834,
+      "sha256": "a4875bcce4d6fe995959700235c735f88f6e9e221238d1c912da5c9db8582d4d",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/profile_installation_fixture.py",
+      "bytes": 15894,
+      "sha256": "c5808bc890d3c78791fa9b6e4901e4b15e0e70fd5a32c8dcb249aecbcad95c42",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/profile_process_fixture.py",
+      "bytes": 17720,
+      "sha256": "74cd394ab28ee5cf03d421522a21448e81565ab7911423a594642d919e4a87ed",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/profile_resource_fixture.py",
+      "bytes": 15973,
+      "sha256": "46eee2bd044e24c62355fbde1e124f4df98deb889b76a84fb5ce14ab973582d5",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/run_native_profile_checks.py",
+      "bytes": 2199,
+      "sha256": "1cc9c86ea0ce5378468889b49d3a5215ded68250d28106d2b0f1c2adcc7e3cb7",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_android_upload_validation.rb",
+      "bytes": 11704,
+      "sha256": "4c411f713e8f944546b4fc0bdef31ff9f5834e6bcdb4cd6a4b13eadc12840fc9",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_apple_asset_upload.rb",
+      "bytes": 8039,
+      "sha256": "a898a39664fed10c5c199e2f9ce65fa56e998469af40261894c9de4da9b24596",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_apple_contract.py",
+      "bytes": 11032,
+      "sha256": "a06bd7fec1405b07562bb2b3af6ebc2cd8752d20708b7f91c213ced01e70d547",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_apple_lanes.rb",
+      "bytes": 28449,
+      "sha256": "652714dea49a1599633162dc54937f6c96539fa67e464721306691ca128cc580",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_apple_production.rb",
+      "bytes": 49377,
+      "sha256": "ae13ae904f98b8d7bbd3aff237b09fb0a5f55d80c586fbeb39a4b77e89ea084f",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_apple_production_lane.rb",
+      "bytes": 11562,
+      "sha256": "b9349b512de0c58afc205608002aac95c6d3beab5c921153d6387be1a326ea1d",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_apple_store.rb",
+      "bytes": 6813,
+      "sha256": "ac055dd656e90fe9be7851f494c04048e9a8ba1e39afa07d019415f067b42cc3",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_contract.py",
+      "bytes": 42220,
+      "sha256": "58040d4b1c97215be43c4493298d6b6c8bb825848a2de68afa4afca7f54d0f66",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_fastlane_contract.py",
+      "bytes": 7446,
+      "sha256": "dc59a2e0fa48c884062ee849640775510277cdf587196a69145fa640b55450ed",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_fastlane_support.rb",
+      "bytes": 9657,
+      "sha256": "58bc04fccca569bbe8a2f012402e9971618e1cd544d0b51c365decb92dd3e5b2",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_ios_upload_validation.rb",
+      "bytes": 11835,
+      "sha256": "02676c26be8af9e63e5af1cdb5bacccf90c0517c98f1c7b17c141f1949546c83",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_native_profile_ci.py",
+      "bytes": 6084,
+      "sha256": "707f84e3d5d37a3eb01c7f58ca8e24b164b973c36671adc0f9b5de4c15009c53",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_native_upload_validation.rb",
+      "bytes": 12053,
+      "sha256": "661d81ba83e83ad70dd1ea3cb4a49421056460c46a1f608f8d5862f1b7d49a4f",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_play_lanes.rb",
+      "bytes": 46835,
+      "sha256": "47c8baa756fd0be54a18d61f27d1537f109ecfb4df22e1b79ac980b1465d4e12",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_play_store.rb",
+      "bytes": 49675,
+      "sha256": "37c97c94a7480b70151d3303e3e8cd697d0f1494d170b533fd9a1bdf59c98254",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_profile_processes.py",
+      "bytes": 13554,
+      "sha256": "2a2312af4fe55ae6dfc9ea0a05080205ff88812dc34611083402b434de88c725",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_schemas.py",
+      "bytes": 28421,
+      "sha256": "acaa6c7803b5a8cc61b4edc120594e08d9f0a4fce027f5f97ca5e166c47f2339",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_supply_wif.rb",
+      "bytes": 1614,
+      "sha256": "01e96c3e2318fc11eb2ad06d1e734e29155533a8971fe561e32e80728650ba89",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_version_parser_contract.py",
+      "bytes": 2008,
+      "sha256": "486991cc737ed9e1bf65639031cc9a536e0754d5d37438b241892824d7028bb5",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_workflow_attempts.py",
+      "bytes": 16066,
+      "sha256": "91c29ff171c115b1806289d7cb93bd12945b09499e7131269bcd4ae82dddd44e",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_workflow_lifecycle.py",
+      "bytes": 14426,
+      "sha256": "d5b491632d40520428b4a58cb069093b8cafd420d22b2579faafca24601aa9bb",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_workflow_recovery.py",
+      "bytes": 88054,
+      "sha256": "d5847d5ad5aab79001aa0070811c31c006aa708a97deb13bf02f6b7a252ff9bf",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_workflow_yaml.rb",
+      "bytes": 1799,
+      "sha256": "6e2ad5c07de5b608a7b4942854536dfd543fce7fe50ef18af965fd26470a2ba3",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/test_workflow_zip.py",
+      "bytes": 12113,
+      "sha256": "935ccc06d8f411a471058eb440eca061be3831d00a7fe342c6e9f25e6da8bfee",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/upload_process_fixture.rb",
+      "bytes": 69943,
+      "sha256": "0dbdec86b0cae49390b7848e31af1a7e828030fb72f2d18b3d248ff757b2407b",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/upload_process_ownership.rb",
+      "bytes": 42960,
+      "sha256": "9e223355957d897dffc0233a814a0954298e37277d5e2ca0c0187be556af1bdf",
+      "gitMode": "100644"
+    },
+    {
+      "path": "tests/workflow/workflow_harness.py",
+      "bytes": 6886,
+      "sha256": "c7b4992ce27ba5eea51a51648b8154b6b05d6f4348401af6c83dd42c33723ed5",
+      "gitMode": "100644"
+    }
+  ],
+  "delivered": false,
+  "completeVerification": false,
+  "scope": "Complete proposed product tree only; does not include handoff docs."
+}

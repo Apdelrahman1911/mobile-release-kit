@@ -1,0 +1,758 @@
+"""Ignored single-threaded ownership primitives; definitions only at import."""
+
+from __future__ import annotations
+
+import errno
+import fcntl
+import hashlib
+import os
+from pathlib import Path
+import select
+import signal
+import stat
+import subprocess
+import time
+
+from contract import (BASE, CAPTURE_CAP, CHUNK, ExternalReference, Failure, FRAME_CAP, QueryWindow, TERMINAL_COMMIT_CAP,
+                      PS, PYTHON, ROUTES, SCRIPTS, STREAM_CAP, argv_matches, command, dumps, envelope, failure, fixed_argv,
+                      loads, need, positive_pid, signal_scope, validate_context, validate_external, validate_entry)
+
+
+def now():
+    return time.monotonic()
+
+
+def remaining(deadline):
+    value = deadline - now()
+    need(value > 0, "deadline")
+    return value
+
+
+def digest(path):
+    value = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        while block := stream.read(CHUNK):
+            value.update(block)
+    return value.hexdigest()
+
+
+def clean_environment(c):
+    p = Path(c["scratch"])
+    return {"HOME": str(p / "home"), "TMPDIR": str(p / "tmp"),
+            "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+
+
+def read_context(raw, cancel=None):
+    c = validate_context(loads(raw.encode()))
+    if cancel is not None:
+        cancel.check()
+    remaining(min(c["work"], c["outer"]))
+    need(not (BASE / "__pycache__").exists(), "unexpected-script-bytecode")
+    for name in SCRIPTS:
+        path = BASE / name
+        need(stat.S_ISREG(path.lstat().st_mode) and digest(path) == c["scripts"][name], "script-drift", name=name)
+    need(digest(Path(c["scratch"]) / "policy.sb") == c["policySha256"], "policy-drift")
+    if cancel is not None:
+        cancel.check()
+    remaining(min(c["work"], c["outer"]))
+    return c
+
+
+def fd_identity(fd, direction):
+    info = os.fstat(fd)
+    need(stat.S_ISFIFO(info.st_mode) and fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == direction,
+         "pipe-direction")
+    return [info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode), direction]
+
+
+def write_bytes(fd, raw, deadline, checkpoint=lambda: None):
+    need(type(raw) is bytes and len(raw) <= STREAM_CAP, "write-size")
+    os.set_blocking(fd, False)
+    view = memoryview(raw)
+    while view:
+        checkpoint()
+        if not select.select([], [fd], [], min(remaining(deadline), 0.02))[1]:
+            continue
+        checkpoint()  # select may have blocked while cancellation/control/time changed.
+        remaining(deadline)
+        try:
+            n = os.write(fd, view[:CHUNK])
+        except BlockingIOError:
+            continue
+        need(type(n) is int and 0 < n <= min(CHUNK, len(view)), "invalid-write-count")
+        view = view[n:]
+    checkpoint()
+    remaining(deadline)
+
+
+def terminal_pipe(fd, expected_identity):
+    """Metadata ONLY for this already-owned R writer; never discover/adopt a fd."""
+    need(type(fd) is int and fd > 2 and type(expected_identity) is tuple
+         and len(expected_identity) == 4 and all(type(v) is int for v in expected_identity),
+         "terminal-owned-pipe-binding")
+    need(tuple(fd_identity(fd, os.O_WRONLY)) == expected_identity, "terminal-result-custody")
+    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    need(type(flags) is int and flags & os.O_ACCMODE == os.O_WRONLY
+         and flags & os.O_NONBLOCK != 0, "terminal-pipe-not-nonblocking")
+    capacity = os.fpathconf(fd, "PC_PIPE_BUF")
+    need(type(capacity) is int and capacity >= TERMINAL_COMMIT_CAP, "terminal-pipe-atomic-bound")
+
+
+def atomic_terminal_commit(fd, raw, expected_identity, deadline, checkpoint):
+    """Commit or immediate own failure exit; success has NO returning finalizer.
+
+    A last checkpoint admits one nonblocking Python os.write API invocation, not
+    one kernel syscall. CPython's internal EINTR retry after a returning flag-only
+    handler is part of that invocation. Returned EINTR/short/unknown outcomes are
+    never retried here. Only zero-byte EAGAIN may re-enter the ORIGINAL budget.
+    A full return commits irreversibly: the only next call is fixed own exit0.
+    """
+    terminate = os._exit
+    try:
+        need(type(raw) is bytes and 0 < len(raw) <= TERMINAL_COMMIT_CAP
+             and raw.endswith(b"\n") and raw.count(b"\n") == 1, "terminal-commit-byte-bound")
+        size = len(raw)
+        checkpoint()
+        remaining(deadline)
+        terminal_pipe(fd, expected_identity)
+    except BaseException:
+        terminate(1)
+    while True:
+        try:
+            checkpoint()
+            ready = select.select([], [fd], [], min(remaining(deadline), 0.02))[1]
+            checkpoint()  # Also when readiness is false after a blocking select.
+            remaining(deadline)
+            if not ready:
+                continue
+            terminal_pipe(fd, expected_identity)  # Identity, direction, flags AND this fd's PIPE_BUF.
+            remaining(deadline)
+            checkpoint()  # Final admission of ONE whole nonblocking API invocation.
+        except BaseException:
+            terminate(1)
+        try:
+            count = os.write(fd, raw)
+        except BlockingIOError as exc:
+            # POSIX <=PIPE_BUF/O_NONBLOCK EAGAIN is all-or-none. An explicitly
+            # reported partial write or another errno is NOT retry authority.
+            if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK) and type(getattr(exc, "characters_written", 0)) is int \
+                    and getattr(exc, "characters_written", 0) == 0:
+                continue
+            terminate(1)
+        except BaseException:
+            terminate(1)
+        # Deliberately outside the exception scope: no postcommit callback,
+        # handler restoration, serialization, return, or failure conversion.
+        if type(count) is int and count == size:
+            terminate(0)
+        terminate(1)
+
+
+class Cancellation:
+    def __init__(self):
+        self.seen = []
+        self.installed, self.restore_errors = {}, []
+        self.original = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM, signal.SIGCHLD)}
+        self.mask = set(signal.pthread_sigmask(signal.SIG_BLOCK, set()))
+        need(not self.mask & {signal.SIGINT, signal.SIGTERM, signal.SIGCHLD}, "initial-signal-mask")
+        need(self.original[signal.SIGCHLD] == signal.SIG_DFL, "initial-sigchld")
+        try:
+            for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGCHLD):
+                handler = signal.SIG_DFL if sig == signal.SIGCHLD else self.handler
+                signal.signal(sig, handler)
+                self.installed[sig] = handler
+        except BaseException:
+            self.restore()
+            raise
+
+    def handler(self, sig, _frame):
+        self.seen.append(int(sig))  # Flag only; never raise through acquisition.
+
+    def check(self):
+        pending = signal.sigpending() & {signal.SIGINT, signal.SIGTERM}
+        need(not self.seen and not pending, "cancelled", seen=list(self.seen), pending=sorted(map(int, pending)))
+
+    def restore(self):
+        # Every owned handler has one attempt, even when another restoration fails.
+        for sig in list(self.installed):
+            expected = self.installed.pop(sig)
+            try:
+                need(signal.getsignal(sig) == expected, "handler-custody-changed", signal=int(sig))
+                signal.signal(sig, self.original[sig])
+            except BaseException as exc:
+                self.restore_errors.append(failure(exc))
+        return list(self.restore_errors)
+
+
+class WorkGuard:
+    """No emission/recursion: the owner observes its actual control at dispatch."""
+    def __init__(self, c, cancel, control=None):
+        self.c, self.cancel, self.control = c, cancel, control
+
+    def check(self):
+        self.cancel.check()
+        remaining(min(self.c["work"], self.c["outer"]))
+        if self.control is not None:
+            self.control.read()
+            need(not self.control.eof and not self.control.failed, "owner-control-eof-or-failure")
+        # Control read can be fallible/slow; commands remain buffered for the phase owner.
+        self.cancel.check()
+        remaining(min(self.c["work"], self.c["outer"]))
+
+    def disposition(self):
+        # Required already-owned cleanup is not ordinary work, even on cancellation.
+        remaining(min(self.c["disposition"], self.c["outer"]))
+
+    def completion(self):
+        self.cancel.check()
+        self.disposition()
+
+    def entry(self, actor):
+        self.check()
+        actual = identity()
+        self.check()
+        result = dict(version=1, actor=actor, identity=actual,
+                      contextSha256=hashlib.sha256(dumps(self.c)).hexdigest(), admittedAt=now(),
+                      work=self.c["work"], disposition=self.c["disposition"], outer=self.c["outer"],
+                      controlRole="C" if actor == "sender" and ROUTES[self.c["row"]].loss else "stdin",
+                      controlEof=False, controlFailed=None, cancelled=False)
+        validate_entry(result, self.c, actor, actual)
+        self.check()
+        return result
+
+
+class CaptureBudget:
+    def __init__(self):
+        self.retained, self.observed, self.exceeded = 0, 0, False
+
+    @property
+    def available(self):
+        return CAPTURE_CAP - self.retained
+
+
+class Reader:
+    def __init__(self, fd, budget=None):
+        self.fd, self.budget = fd, budget
+        self.raw, self.pending = bytearray(), bytearray()
+        self.eof, self.closed, self.failed = False, False, None
+        self.observed = 0
+        self.identity = fd_identity(fd, os.O_RDONLY)
+        os.set_blocking(fd, False)
+
+    def read(self):
+        if self.eof or self.failed:
+            return
+        allowance = STREAM_CAP - len(self.raw)
+        if self.budget:
+            allowance = min(allowance, self.budget.available)
+        try:
+            data = os.read(self.fd, min(CHUNK, allowance + 1))
+        except BlockingIOError:
+            return
+        except OSError as exc:
+            self.failed = failure(exc)
+            raise
+        if not data:
+            self.eof = True  # Only this real zero-length read establishes EOF.
+            return
+        self.observed += len(data)
+        kept = data[:allowance]
+        self.raw.extend(kept)
+        self.pending.extend(kept)
+        if self.budget:
+            self.budget.observed += len(data)
+            self.budget.retained += len(kept)
+        if len(kept) != len(data):
+            self.failed = dict(code="capture-cap", observed=self.observed, retained=len(self.raw))
+            if self.budget:
+                self.budget.exceeded = True
+            raise Failure("capture-cap")
+
+    def frames(self):
+        frames = []
+        while b"\n" in self.pending:
+            line, _, tail = self.pending.partition(b"\n")
+            self.pending[:] = tail
+            need(len(line) <= FRAME_CAP, "frame-cap")
+            frames.append(loads(bytes(line)))
+        need(len(self.pending) <= FRAME_CAP, "frame-cap")
+        if self.eof:
+            need(not self.pending, "trailing-partial-frame")
+        return frames
+
+    def take_line(self, deadline, checkpoint=lambda: None):
+        while True:
+            checkpoint()
+            self.read()
+            if b"\n" in self.pending:
+                raw, _, tail = self.pending.partition(b"\n")
+                self.pending[:] = tail
+                need(len(raw) <= FRAME_CAP, "frame-cap")
+                return bytes(raw)
+            need(not self.eof and not self.failed, "control-eof-or-failure")
+            need(len(self.pending) <= FRAME_CAP, "frame-cap")
+            select.select([self.fd], [], [], min(remaining(deadline), 0.02))
+
+    def record(self):
+        return dict(eof=self.eof, observedBytes=self.observed, retainedBytes=len(self.raw),
+                    sha256=hashlib.sha256(self.raw).hexdigest(), failed=self.failed,
+                    raw=bytes(self.raw).decode("utf-8", errors="backslashreplace"))
+
+
+class Emitter:
+    def __init__(self, c, actor, fd=1, *, guard):
+        self.c, self.actor, self.fd, self.sequence = c, actor, fd, 0
+        self.guard = guard
+
+    def encode(self, kind, data):
+        self.sequence += 1
+        raw = dumps(envelope(self.c, self.actor, os.getpid(), self.sequence, kind, data))
+        need(len(raw) <= FRAME_CAP, "emitted-frame-cap")
+        return raw
+
+    def emit(self, kind, data, *, cleanup=False):
+        raw = self.encode(kind, data)
+        write_bytes(self.fd, raw, min(self.c["disposition"] if cleanup else self.c["work"], self.c["outer"]),
+                    self.guard.disposition if cleanup else self.guard.check)
+
+
+def marker(c):
+    try:
+        with (Path(c["scratch"]) / "marker").open("rb") as stream:
+            raw = stream.read(129)
+        return {"readable": True, "matches": hashlib.sha256(raw).hexdigest() == c["markerSha256"], "errno": None}
+    except OSError as exc:
+        return {"readable": False, "matches": False, "errno": exc.errno}
+
+
+def identity():
+    return dict(pid=os.getpid(), parent=os.getppid(), group=os.getpgrp(), session=os.getsid(0), uid=os.getuid())
+
+
+class Child:
+    """A real Popen object plus sole-waiter custody, never a reconstructed PID."""
+    role = "unusable"
+
+    def __init__(self, registry):
+        self.registry, self.owner = registry, os.getpid()
+        self.handle, self.pid, self.group = None, None, None
+        self.status, self.terminal, self.authorized, self.unknown = None, False, False, False
+        self.out, self.err = None, None
+        self.closed, self.waits = [False, False, False], []
+        self.streams, self.identities = [], []
+        self.argv, self.attempted, self.signals = None, False, []
+        self.custody_known, self.capture_errors = False, []
+        self.close_attempted, self.close_errors = [False, False, False], []
+
+    def publish(self, handle):
+        self.handle = handle  # No checkpoint or metadata before strong publication.
+        self.pid = handle.pid
+        self.streams = [handle.stdin, handle.stdout, handle.stderr]
+        self.identities = [None, None, None]
+        valid = positive_pid(self.pid) and self.pid not in {self.owner, self.registry.c["rootPid"]}
+        self.custody_known, self.authorized = valid, valid
+        self.closed[0] = handle.stdin is None  # Query uses DEVNULL, not a control pipe.
+
+    def adopt(self, handle, budget):
+        if self.handle is None:
+            self.publish(handle)
+        need(self.handle is handle and self.custody_known, "adoption-handle-custody")
+        for index, (stream, mode) in enumerate(zip(self.streams, (os.O_WRONLY, os.O_RDONLY, os.O_RDONLY))):
+            if stream is not None:
+                self.identities[index] = fd_identity(stream.fileno(), mode)
+        self.out = Reader(handle.stdout.fileno(), budget)
+        self.err = Reader(handle.stderr.fileno(), budget)
+
+    def observe(self):
+        need(self.handle is not None and self.status is None and self.custody_known
+             and self.owner == os.getpid() and any(obj is self for obj in self.registry.children), "wait-not-owned")
+        if type(self) is QueryChild:
+            self.window.validate(self.registry.c)
+            remaining(min(self.window.disposition, self.registry.c["outer"]))
+        prior = self.authorized
+        self.authorized = False  # Revoke BEFORE a syscall that may reap.
+        try:
+            pid, status = os.waitpid(self.pid, os.WNOHANG)
+            need(type(pid) is int and type(status) is int and (pid, status) == (0, 0)
+                 or type(pid) is int and type(status) is int and pid == self.pid and status >= 0
+                    and (os.WIFEXITED(status) or os.WIFSIGNALED(status)),
+                 "wrong-wait-result", returnedPid=pid, returnedStatus=status)
+        except BaseException as exc:
+            self.unknown = True
+            self.custody_known = False
+            self.waits.append(dict(error=failure(exc)))
+            raise
+        if pid == 0:
+            if self.waits and self.waits[-1].get("pid") == 0:
+                self.waits[-1]["count"] += 1
+            else:
+                self.waits.append(dict(pid=0, status=0, count=1))
+            self.authorized = prior and not self.terminal
+        else:
+            self.waits.append(dict(pid=pid, status=status))
+            self.status = status
+            self.handle.returncode = os.waitstatus_to_exitcode(status)
+            self.custody_known = False
+            if type(self) is QueryChild:
+                self.status_observed = now()
+        return pid, status
+
+    def close(self, index):
+        if self.closed[index]:
+            return
+        need(not self.close_attempted[index], "ambiguous-child-close-not-retryable", index=index)
+        self.close_attempted[index] = True
+        need(len(self.streams) == 3, "unpublished-child-stream")
+        stream = self.streams[index]
+        if stream is None:
+            self.closed[index] = True
+            return
+        # A fresh returned stream still has one owned close if its metadata failed.
+        if self.identities[index] is not None:
+            need(fd_identity(stream.fileno(), os.O_WRONLY if index == 0 else os.O_RDONLY) == self.identities[index],
+                 "close-custody")
+        stream.close()
+        self.closed[index] = True
+
+    def record(self):
+        return dict(role=self.role, owner=self.owner, pid=self.pid, group=self.group,
+                    status=self.status, exitCode=None if self.status is None else os.waitstatus_to_exitcode(self.status),
+                    authorized=self.authorized, terminal=self.terminal, unknown=self.unknown,
+                    closed=list(self.closed), waits=self.waits, argv=self.argv,
+                    stdout=None if self.out is None else self.out.record(),
+                    stderr=None if self.err is None else self.err.record())
+
+
+class OutsideChild(Child):
+    role = "outside"
+
+
+class InsideChild(Child):
+    role = "inside"
+
+
+class RelayChild(Child):
+    role = "relay"
+
+
+class QueryChild(Child):
+    role = "query-child"
+
+    def __init__(self, registry, window, queried_pid):
+        super().__init__(registry)
+        need(type(window) is QueryWindow and positive_pid(queried_pid), "query-slot-binding")
+        window.validate(registry.c)
+        self._window, self.queried_pid = window, queried_pid
+        self.returned_at = self.first_complete = self.status_observed = self.disposition_observed = None
+        self.primary, self.errors = None, []
+
+    @property
+    def window(self):
+        return self._window
+
+    def remember(self, exc):
+        if self.primary is None:
+            self.primary = failure(exc)
+        else:
+            self.errors.append(failure(exc))
+
+    def complete_capture(self):
+        complete = (self.status is not None and self.out is not None and self.err is not None
+                    and self.out.eof and self.err.eof and not self.out.failed and not self.err.failed)
+        if complete and self.first_complete is None:
+            self.first_complete = now()  # First actual conjunction, never backdated.
+        return complete
+
+    def record(self):
+        value = super().record()
+        value["query"] = dict(window=self.window.record(), queriedSenderPid=self.queried_pid,
+                              returnedAt=self.returned_at, statusObservedAt=self.status_observed,
+                              firstCompleteAt=self.first_complete, dispositionObservedAt=self.disposition_observed,
+                              primary=self.primary, cleanupErrors=list(self.errors),
+                              captureErrors=list(self.capture_errors), closeAttempts=list(self.close_attempted),
+                              closeErrors=list(self.close_errors), custodyKnown=self.custody_known,
+                              disposalSignals=list(self.signals))
+        return value
+
+
+class Registry:
+    def __init__(self, c, cancel, actor, emitter=None, budget=None, control=None):
+        self.c, self.cancel, self.actor, self.emitter, self.budget = c, cancel, actor, emitter, budget
+        self.children, self.attempts, self.errors = [], [], []
+        self.guard = WorkGuard(c, cancel, control)
+
+    def check(self):
+        self.guard.check()
+
+    def pending_query(self, window, queried_pid):
+        need(self.actor == "root" and ROUTES[self.c["row"]].loss, "query-owner")
+        child = QueryChild(self, window, queried_pid)
+        self.children.append(child)
+        return child
+
+    def acquire(self, cls, token, argv, *, session=False, group=False, pass_fds=(), query=False, execs=1, slot=None):
+        need(cls in (OutsideChild, InsideChild, RelayChild, QueryChild), "acquisition-type")
+        limits = {"root": {"outside", "route", "query-1", "query-2", "query-3"},
+                  "sender": {"inside"}, "python-relay": {"sender", "hop"}}
+        need(token in limits[self.actor] and token not in {a["token"] for a in self.attempts}, "acquisition-token")
+        need(type(query) is bool and query == (cls is QueryChild), "query-acquisition-role")
+        if query:
+            need(self.actor == "root" and ROUTES[self.c["row"]].loss and type(argv) is list
+                 and len(argv) == 5 and argv[:2] == [PS, "-p"]
+                 and type(argv[2]) is str and argv[2].isdigit() and int(argv[2]) > 1
+                 and argv[3:] == ["-o", "pid=,ppid=,pgid=,stat="]
+                  and not session and not group and not pass_fds and execs == 1, "query-fixed-argv")
+            need(type(slot) is QueryChild and slot.registry is self and slot.owner == os.getpid()
+                 and any(obj is slot for obj in self.children) and not slot.attempted
+                 and slot.queried_pid == int(argv[2]), "query-pending-slot")
+            slot.window.validate(self.c)
+        else:
+            need(slot is None, "ordinary-slot-not-supplied")
+            argv_matches(argv, fixed_argv(self.c, self.actor, token, os.getpid()), self.c)
+            need(execs == (2 if token in {"route", "hop"} else 1), "acquisition-exec-charge")
+            need(session is (self.c["row"] == "python-new-session" and self.actor == "python-relay")
+                 and group is (not session), "acquisition-process-layout")
+            expected_pass = (() if self.actor != "root" or token != "route" or not self.c["channels"] else
+                             (self.c["channels"]["c"], self.c["channels"]["r"]))
+            need(tuple(pass_fds) == expected_pass, "acquisition-descriptor-layout")
+        if query:
+            self.cancel.check()
+            remaining(min(slot.window.work, self.c["outer"]))
+        else:
+            self.check()
+        need(not self.errors and not any(c.close_errors or c.capture_errors or c.unknown for c in self.children),
+             "registry-prior-custody-failure")
+        need(not subprocess._active, "popen-implicit-reaper")
+        options = dict(stdin=subprocess.DEVNULL if query else subprocess.PIPE,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
+                       close_fds=True, pass_fds=pass_fds, env=clean_environment(self.c),
+                       cwd=self.c["scratch"], start_new_session=session, process_group=0 if group else None)
+        event = dict(token=token, argv=argv, acquisitions=1, execs=execs, before=now(), method="Popen",
+                     session=session, group=group, passFds=list(pass_fds), query=query)
+        if query:
+            event["queryWindow"] = slot.window.record()
+        self.attempts.append(event)  # Charged before dispatch, including failure.
+        child = slot if query else cls(self)
+        if not query:
+            self.children.append(child)
+        child.argv, child.attempted = list(argv), True
+        if self.emitter:
+            self.emitter.emit("attempt", event)
+        try:
+            if query:
+                self.cancel.check()
+                remaining(min(slot.window.work, self.c["outer"]))
+            else:
+                self.check()  # Final check AFTER all potentially blocking bookkeeping.
+            handle = subprocess.Popen(argv, **options)
+            child.publish(handle)
+            if query:
+                child.returned_at = now()
+            need(child.custody_known, "returned-child-pid")
+            if query:
+                remaining(min(child.window.work, self.c["outer"]))
+                self.cancel.check()
+            child.adopt(handle, self.budget)
+            if query:
+                self.cancel.check()
+                remaining(min(child.window.work, self.c["outer"]))
+            else:
+                self.check()
+        except BaseException as exc:
+            # Capture/setup failure is not ECHILD. Retain known reservation for
+            # exactly this QueryChild's original disposal, never a scalar target.
+            child.capture_errors.append(failure(exc))
+            if child.handle is None or not child.custody_known:
+                child.unknown = True
+                child.authorized = False
+            raise
+        return child
+
+    def close_known(self, child, indexes):
+        for index in indexes:
+            if child.handle is not None and not child.closed[index] and not child.close_attempted[index]:
+                try:
+                    child.close(index)
+                except BaseException as exc:
+                    item = failure(exc)
+                    child.close_errors.append(item)
+                    self.errors.append(item)
+                    if type(child) is QueryChild:
+                        child.errors.append(item)
+
+    def dispose_query(self, child):
+        """Only the original typed slot; capture errors do not revoke kernel custody."""
+        need(type(child) is QueryChild and child.registry is self and child.owner == os.getpid()
+             and any(v is child for v in self.children), "query-disposal-custody")
+        cutoff = min(child.window.disposition, self.c["outer"])
+        failed_wait, empty_select_failed = False, False
+        self.close_known(child, (0,))
+        try:
+            while now() < cutoff:
+                for reader in (child.out, child.err):
+                    if now() >= cutoff:
+                        break
+                    if reader is not None and not reader.eof and not reader.failed:
+                        try:
+                            reader.read()
+                        except BaseException as exc:
+                            reader.failed = reader.failed or failure(exc)
+                            child.errors.append(failure(exc))
+                # Poll before work expiry. At/after expiry only the original once-
+                # terminal QueryChild dispatch can run, after its sole live wait.
+                if child.status is None and child.custody_known and not failed_wait and now() < cutoff:
+                    try:
+                        if now() >= child.window.work and not child.terminal:
+                            signal_owned(child, "kill-query")
+                        else:
+                            child.observe()
+                    except BaseException as exc:
+                        child.errors.append(failure(exc))
+                        # An observed terminal status is not wait uncertainty.
+                        failed_wait = child.status is None and not child.custody_known
+                complete = child.complete_capture()
+                if complete or (child.status is not None and (child.out is None or child.err is None
+                                  or child.out.failed or child.err.failed)):
+                    break
+                if child.handle is None or (not child.custody_known and child.status is None):
+                    break
+                pending = [r.fd for r in (child.out, child.err) if r is not None and not r.eof and not r.failed]
+                try:
+                    # Invalid capture-fd selection may fail; a fixed empty select
+                    # can still admit remaining owned disposition. No busy retry.
+                    select.select(pending, [], [], min(0.02, max(0, cutoff - now())))
+                except BaseException as exc:
+                    child.errors.append(failure(exc))
+                    if empty_select_failed:
+                        break
+                    try:
+                        select.select([], [], [], min(0.02, max(0, cutoff - now())))
+                    except BaseException as secondary:
+                        child.errors.append(failure(secondary))
+                        empty_select_failed = True
+                        break
+        except BaseException as exc:
+            child.errors.append(failure(exc))
+        finally:
+            # Even read/select/wait failure cannot skip another known close.
+            self.close_known(child, (0, 1, 2))
+            child.authorized = False
+            child.disposition_observed = now()
+            child.unknown = (child.handle is None or child.status is None or not child.complete_capture()
+                             or not all(child.closed) or bool(child.close_errors))
+        return (not child.unknown and not child.errors and child.primary is None
+                and not child.capture_errors and child.disposition_observed < cutoff)
+
+    def cleanup(self, *, extra_readers=(), deadline=None):
+        cutoff = min(self.c["disposition"], self.c["outer"],
+                     self.c["disposition"] if deadline is None else deadline)
+        ordinary = [child for child in self.children if type(child) is not QueryChild]
+        for child in ordinary:
+            child.authorized = False
+            self.close_known(child, (0,))
+        reads = [r for child in ordinary for r in (child.out, child.err) if r is not None] + list(extra_readers)
+        failed_waits = set()
+        try:
+            while now() < cutoff:
+                for reader in reads:
+                    if now() >= cutoff:
+                        break
+                    if not reader.eof and not reader.failed:
+                        try:
+                            reader.read()
+                        except BaseException as exc:
+                            reader.failed = reader.failed or failure(exc)
+                            self.errors.append(failure(exc))
+                for child in ordinary:
+                    if child.status is None and child.custody_known and id(child) not in failed_waits and now() < cutoff:
+                        try:
+                            child.observe()
+                        except BaseException as exc:
+                            failed_waits.add(id(child))
+                            self.errors.append(failure(exc))
+                pending = [r for r in reads if not r.eof and not r.failed]
+                wait_pending = [v for v in ordinary if v.status is None and v.custody_known and id(v) not in failed_waits]
+                if not pending and not wait_pending:
+                    break
+                try:
+                    select.select([r.fd for r in pending], [], [], min(0.02, max(0, cutoff - now())))
+                except BaseException as exc:
+                    self.errors.append(failure(exc))
+                    break
+        except BaseException as exc:
+            self.errors.append(failure(exc))
+        finally:
+            for child in ordinary:
+                self.close_known(child, (1, 2))
+                child.unknown = (child.handle is None or child.status is None or child.out is None or child.err is None
+                                 or not child.out.eof or not child.err.eof or bool(child.out.failed) or bool(child.err.failed)
+                                 or not all(child.closed) or bool(child.close_errors))
+        # Closing root's R never synthesizes the independent writer's EOF.
+        return (not self.errors and all(not v.unknown and all(v.closed) for v in ordinary)
+                and all(r.eof and not r.failed and (not r.pending or r.pending.endswith(b"\n"))
+                        for r in extra_readers))
+
+
+
+def query_external(ref, c, checkpoint):
+    """Exactly two signal-ZERO syscalls. No supplied signal and no cleanup path."""
+    validate_external(ref, c, os.getpid(), os.getpgrp())
+    results = []
+    for kind, target in (("pid", ref.pid), ("pgid", -ref.group)):
+        result = dict(kind=kind, signal=0, target=target, returned=False, errno=None)
+        checkpoint()  # Separately recheck after marker IO and before EACH zero probe.
+        try:
+            os.kill(target, 0)
+            result["returned"] = True
+        except OSError as exc:
+            result["errno"] = exc.errno
+        results.append(result)
+    return results
+
+
+def signal_owned(child, operation):
+    """The only nonzero syscall, protected by type, registry and sole waiter."""
+    need(type(child) in (InsideChild, RelayChild, QueryChild), "nonzero-handle-type")
+    registry = child.registry
+    c = registry.c
+    if type(child) is QueryChild:
+        child.window.validate(c)
+        need(operation == "kill-query" and now() >= child.window.work, "query-kill-before-original-timeout")
+        remaining(min(child.window.disposition, c["outer"]))
+        # No new work is admitted after cancellation. This one already-owned,
+        # time-bounded observer disposition does not create further work.
+    else:
+        registry.check()
+    signal_scope(child.role, operation, child.owner, os.getpid(),
+                 any(obj is child for obj in registry.children), child.authorized and child.custody_known and not child.unknown,
+                 child.terminal, child.status, child.pid, child.group, os.getpgrp(), c["rootPid"], c["row"])
+    oldmask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+    try:
+        if type(child) is not QueryChild:
+            registry.cancel.check()
+        need(child.observe() == (0, 0), "nonzero-target-not-live")
+        if type(child) is QueryChild:
+            remaining(min(child.window.disposition, c["outer"]))
+        else:
+            registry.check()  # Sole wait may have blocked; recheck control/time/flags.
+        terminal = operation in {"kill-group", "kill-relay", "kill-query"}
+        if terminal:
+            child.authorized, child.terminal = False, True  # Irrevocable before dispatch.
+        number = signal.SIGKILL if terminal else signal.SIGUSR1
+        target = -child.group if operation in {"usr1-group", "kill-group"} else child.pid
+        result = dict(operation=operation, owner=os.getpid(), pid=child.pid, target=target,
+                      signal=int(number), priorWait=[0, 0], returned=False, errno=None,
+                      authorizedAt=now(), seen=list(registry.cancel.seen), ackCounter=None)
+        child.signals.append(result)
+        if type(child) is QueryChild:
+            remaining(min(child.window.disposition, c["outer"]))
+        else:
+            registry.check()
+        try:
+            os.kill(target, number)
+            result["returned"] = True
+        except OSError as exc:
+            result["errno"] = exc.errno
+        return result
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, oldmask)

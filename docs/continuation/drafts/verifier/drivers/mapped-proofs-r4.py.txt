@@ -1,0 +1,297 @@
+"""Versioned original25 migration v4; historical results are never relabelled.
+
+Only accepted-source/config/routing setup and emitted numeric text are synthetic.
+Worker classification, prior_workers, inventories and guarded deletion are real.
+This is preparation, not final45 gates, Store activity or implementation acceptance.
+"""
+from pathlib import Path
+import hashlib
+import importlib.util
+import json
+import os
+import shutil
+import sys
+from unittest.mock import patch
+
+HERE = Path(__file__).absolute().parent
+assert len(sys.argv) == 2, 'usage: mapped-proofs-r4.py PREPARED_HELPERS'
+HELPERS = Path(sys.argv[1]).absolute()
+assert HELPERS.resolve() == HELPERS and HELPERS.is_dir()
+HISTORICAL = Path('/ORIGINAL_REPOSITORY/.mobile-release/remediation/QA-006/verification-correction-r3-r3/preparation-r14/prove-corrections-v4.py')
+import stat
+
+def helper_namespace(root, *, ctx=None):
+    """Metadata-only admission before sibling imports; never open cache bytes.
+
+    The initial script/stdlib are runner TCB. This closes incidental helper
+    import candidates, not arbitrary same-user/whole-host interference.
+    """
+    def check(value=True, message='helper namespace'):
+        if ctx is not None:
+            ctx.require(value, message)
+        elif not value:
+            raise RuntimeError(message)
+    root = Path(root)
+    check(root.is_absolute() and str(root) == os.path.normpath(root) and len(root.parts) <= 64,
+          'noncanonical helper import root')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open('/', flags)
+    try:
+        for part in root.parts[1:]:
+            check()
+            new = os.open(part, flags, dir_fd=fd)
+            old, fd = fd, new
+            os.close(old)
+        original = os.fstat(fd)
+        check(original.st_uid == os.getuid() and not original.st_mode & 0o022,
+              'foreign/writable helper namespace')
+        known = set(['action_io.py', 'bindings.py', 'cleanup-build.py', 'cleanup-wheel.py', 'evidence_schemas.py', 'freeze.py', 'frozen_diff.py', 'gate_list.py', 'git_readonly.py', 'native_reader.py', 'observe-owned-workers.py', 'owned_outputs.py', 'prepare-build.py', 'probe-jdk21-signing.py', 'process_gate.py', 'result_protocols.py', 'run-once.sh', 'source_inventory.py', 'verify-all.py', 'verify-frozen-diff.py', 'verify-pins.py', 'verify-process-gate.py', 'verify-result-protocols.py', 'wheel-smoke.sh'])
+        found, count = set(), 0
+        with os.scandir(fd) as iterator:
+            while True:
+                # Reserve the enumeration operation before advancing; even an
+                # EOF probe consumes this finite namespace-admission budget.
+                check(count < 4096, 'helper namespace enumeration cap')
+                count += 1
+                if ctx is not None:
+                    ctx.charge('visited', 1)
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    break
+                name = item.name
+                check(len(os.fsencode(name)) <= 255, 'helper namespace component cap')
+                before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                check(name != '__pycache__' and not name.endswith(('.pyc', '.pyo', '.pyd', '.so', '.pth')),
+                      'unapproved helper bytecode/startup/cache name; payload not read')
+                if name in known:
+                    check(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+                          and before.st_uid == os.getuid() and not before.st_mode & 0o022,
+                          'helper replaced, symlinked, hardlinked or writable')
+                    found.add(name)
+                else:
+                    check(not name.endswith(('.py', '.sh')), 'unknown helper/import source name')
+                    if (stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode)) and name.isidentifier():
+                        check(name == 'wheels' and stat.S_ISDIR(before.st_mode)
+                              and before.st_uid == os.getuid() and stat.S_IMODE(before.st_mode) == 0o700,
+                              'unapproved helper import directory; contents not read')
+                        child = os.open(name, flags, dir_fd=fd)
+                        try:
+                            check(os.fstat(child) == before, 'wheel-data directory replaced')
+                            names = []
+                            with os.scandir(child) as entries:
+                                for entry in entries:
+                                    check(not names, 'unknown wheel-data sibling; payload not read')
+                                    names.append(entry.name)
+                                    check(entry.name == 'mobile_release_kit-0.3.0-py3-none-any.whl',
+                                          'unexpected wheel-data name; payload not read')
+                                    row = os.stat(entry.name, dir_fd=child, follow_symlinks=False)
+                                    check(stat.S_ISREG(row.st_mode) and row.st_nlink == 1 and row.st_uid == os.getuid(),
+                                          'untrusted wheel-data type; payload not read')
+                        finally:
+                            os.close(child)
+                check(os.stat(name, dir_fd=fd, follow_symlinks=False) == before, 'helper namespace entry changed')
+        check(found == known, 'missing reviewed helper')
+        current = os.fstat(fd)
+        check((current.st_dev, current.st_ino, current.st_uid, current.st_mode, current.st_mtime_ns, current.st_ctime_ns) ==
+              (original.st_dev, original.st_ino, original.st_uid, original.st_mode, original.st_mtime_ns, original.st_ctime_ns),
+              'helper namespace changed during admission')
+    finally:
+        os.close(fd)
+
+helper_namespace(HELPERS)
+sys.path.insert(0, str(HELPERS))
+import action_io as initial_io
+import process_gate as initial_pg
+with initial_io.action('source-only-initial-proof-loader') as initial_ctx:
+    initial_reference = initial_io.read_file(HELPERS/'verify-frozen-diff.py', ctx=initial_ctx, role='source')
+    p = initial_pg.source_module(HELPERS/'verify-frozen-diff.py', initial_reference, ctx=initial_ctx)
+suite = p.Proofs(HELPERS)
+mapping = []
+
+
+def case(old, new, callback, reason='Same obligation through current context-aware consumers'):
+    mapping.append({'historicalCase': old, 'newCase': new, 'migration': reason})
+    return suite.case(new, callback)
+
+
+def fail(callback):
+    try:
+        callback()
+    except (p.io.ActionFailure, OSError, ValueError) as error:
+        return {'errorType': type(error).__name__, 'message': str(error)}
+    raise AssertionError('expected denial did not occur')
+
+
+def actual_table(area):
+    query, rows = p.pg.numeric_snapshot()
+    with p.io.action('retain-real-numeric-table') as ctx:
+        p.io.write_new(area/'ACTUAL-QUERY.json', {'query':query, 'rows':rows}, ctx=ctx)
+    assert query['ownership'] == 'reaped' and query['status'] == 'PARSED' and rows is not None, query
+    return {'query':query, 'rowCount':len(rows), 'signalsAuthorized':False}
+
+
+def unknown_group(area):
+    # Actual malformed query, not a mocked numeric_snapshot return.
+    with patch.object(p.pg, 'PS_COMMAND', [suite.python,'-I','-B','-u','-c',"print('malformed actual numeric query')"]):
+        with p.pg.cancellation_flag() as pending:
+            value = p.pg.execute([suite.python,'-I','-B','-c','pass'], cwd=area,
+                                 environment={'PATH':'/usr/bin:/bin'}, log=area/'out.log', pending=pending,
+                                 combined_limit=p.pg.COMBINED_BYTES, free_floor=p.pg.FREE_FLOOR, headroom=p.pg.DISPATCH_HEADROOM)
+    assert value['ownership']=='reaped' and value['exitCode']==0 and value['status']=='FAIL'
+    assert not value['stopSignalSent'] and value['groupProof']['status']=='UNKNOWN'
+    return value
+
+
+def classifications(area):
+    result=[]
+    before_signals=len(suite.signals)
+    for label, pid, group, uid, state, expected in (
+            ('absent',321,999,os.getuid(),'S','CLEAR'),
+            ('zombie',321,320,os.getuid(),'Z+','CLEAR'),
+            ('live',321,320,os.getuid(),'S','LIVE'),
+            ('foreign',321,320,os.getuid()+1,'S','UNKNOWN'),
+            ('reused',320,320,os.getuid(),'Z','UNKNOWN')):
+        query, rows=suite.query(f"print('{pid} 1 {group} {uid} {state}')")
+        assert rows is not None
+        value=p.pg.classify_group(rows,group=320,uid=os.getuid())
+        assert value['status']==expected
+        result.append({'case':label,'query':query,'actual':value})
+    assert len(suite.signals)==before_signals, 'classification acquired forbidden signal authority'
+    return {'classifications':result,'actualSignalRequests':0}
+
+
+def helper_drift(area):
+    code=area/'code';code.mkdir(mode=0o700)
+    for name in p.bindings.HELPERS|p.bindings.STATIC_RECORDS:
+        shutil.copy2(HELPERS/name,code/name)
+    with p.io.action('mapped-helper-baseline') as ctx:
+        old=p.bindings.helper_snapshot(code,ctx=ctx)
+    result=[]
+    for name in ('verify-process-gate.py','observe-owned-workers.py','result_protocols.py'):
+        target=code/name;original=target.read_bytes()
+        target.write_bytes(original+b'\n# synthetic mutation; never executed\n')
+        with p.io.action('mapped-helper-drift') as ctx:
+            changed=p.bindings.helper_snapshot(code,ctx=ctx)
+        assert changed!=old and changed[name]!=old[name]
+        result.append({'helper':name,'before':old[name],'changed':changed[name]})
+        target.write_bytes(original)
+    (code/'unreviewed-helper.py').write_text('pass\n')
+    def reject():
+        with p.io.action('mapped-unbound-helper') as ctx:
+            p.bindings.helper_snapshot(code,ctx=ctx)
+    denied=fail(reject)
+    (code/'unreviewed-helper.py').unlink()
+    with p.io.action('mapped-helper-restored') as ctx:
+        assert p.bindings.helper_snapshot(code,ctx=ctx)==old
+    return {'helperMutations':result,'unexpectedHelper':denied,'restoredExactly':True}
+
+
+def owner_drift(area):
+    parent,user,evidence=area/'parent',area/'user',area/'evidence'
+    for path in (parent,user,evidence):path.mkdir(mode=0o700)
+    source,tmp=parent/'source',parent/'final-tmp-r1'
+    source.mkdir(mode=0o700);tmp.mkdir(mode=0o700)
+    (user/'AGENTS.md').write_text('Synthetic fixture instructions only.\n')
+    with p.io.action('mapped-owner-setup') as ctx:
+        config={'owner':str(parent),'source':str(source),'tmp':str(tmp),'rootUserWorktree':str(user),
+                'sourceUserAgentsSha256':p.io.digest(user/'AGENTS.md',ctx=ctx,role='source'),'expectedSourceHead':'1'*40}
+        workspace={'purpose':'synthetic owner proof','baseCommit':'1'*40,'parent':str(parent),
+                   'parentDevice':parent.stat().st_dev,'parentInode':parent.stat().st_ino,'worktree':str(source),
+                   'tmp':str(tmp),'rootWorktree':str(user),'nonce':'1'*48,'sourceDevice':source.stat().st_dev,
+                   'sourceInode':source.stat().st_ino,'sourceStatus':'synthetic','rootUserAgentsSha256':config['sourceUserAgentsSha256']}
+        p.io.write_new(area/'WORKSPACE.json',workspace,ctx=ctx)
+        p.io.write_new(evidence/'FINAL-TMP-OWNER.json',{'path':str(tmp),'device':tmp.stat().st_dev,
+                       'inode':tmp.stat().st_ino,'purpose':'synthetic','createdUtc':'fixture-only'},ctx=ctx)
+        p.io.write_new(evidence/'OWNERSHIP-BASELINE.json',{'purpose':'synthetic',
+                       'ancestries':{str(path):p.io.ancestry(path,ctx=ctx) for path in (parent,source,user,tmp,evidence)}},ctx=ctx)
+        original=p.bindings.owner_bindings(config,evidence,ctx=ctx)
+    saved=parent/'saved-tmp';tmp.rename(saved);tmp.mkdir(mode=0o700)
+    def reject():
+        with p.io.action('mapped-owner-denial') as ctx:
+            p.bindings.owner_bindings(config,evidence,ctx=ctx)
+    replacement=fail(reject)
+    tmp.rmdir();tmp.symlink_to(saved,target_is_directory=True)
+    symlink=fail(reject)
+    tmp.unlink();saved.rename(tmp)
+    with p.io.action('mapped-owner-restored') as ctx:
+        assert p.bindings.owner_bindings(config,evidence,ctx=ctx)==original
+    return {'replacement':replacement,'symlink':symlink,'restoredExactly':True}
+
+
+def source_tree(area):
+    configured=json.loads((HELPERS/'CONFIG.json').read_text())
+    root,head,tree,files=suite.clone_actual_repo(area,configured['source'])
+    assert head==configured['expectedSourceHead']
+    return {'head':head,'sourceFiles':len(files),'computedTree':tree,'actualOriginal':configured['source'],
+            'fixtureCopy':str(root),'scope':'read-only actual raw source; native Git sees owned copied storage only',
+            'accepted':False}
+
+
+def changed_tool(area):
+    evidence,config,_logical=suite.full_fixture(area)
+    tools=Path(config['owner'])/'fixture-tools';tools.mkdir(mode=0o700)
+    copy=tools/'cat'
+    # Byte copy only; do not try to reproduce protected macOS system chflags.
+    shutil.copyfile('/bin/cat',copy);copy.chmod(0o755)
+    config['path']=str(tools)+':'+config['path']
+    with p.io.action('pre-use-fixture-config') as ctx:
+        (evidence/'CONFIG.json').unlink();p.io.write_new(evidence/'CONFIG.json',config,ctx=ctx)
+        approval=p.io.read_json(evidence/'ACCEPTED-VERIFIER.json',ctx=ctx)
+        approval['helpers']=p.bindings.helper_snapshot(evidence,ctx=ctx)
+        (evidence/'ACCEPTED-VERIFIER.json').unlink();p.io.write_new(evidence/'ACCEPTED-VERIFIER.json',approval,ctx=ctx)
+    with p.io.action('pre-use-initial-collection') as ctx:
+        collected=p.bindings.collect(evidence,ctx=ctx)
+        freeze={'schemaVersion':1,'stable':collected['stable'],'stableSha256':collected['stableSha256'],
+                'creationObservation':collected['observation']}
+        p.io.write_new(evidence/'final-freeze.json',freeze,ctx=ctx)
+    before=hashlib.sha256(copy.read_bytes()).hexdigest()
+    with copy.open('ab') as stream:stream.write(b'fixture changed bytes MUST NOT BE EXECUTED')
+    children=len(suite.children)
+    try:
+        with p.io.action('pre-use-reject-changed-tool') as ctx:p.bindings.check_frozen(evidence,ctx=ctx)
+    except p.io.ActionFailure as error:
+        assert 'frozen tool changed before native execution' in str(error),str(error)
+    else:raise AssertionError('changed tool accepted')
+    assert len(suite.children)==children,'changed effective tool rejected after native acquisition'
+    return {'status':'REJECTED_BEFORE_NATIVE','beforeSha256':before,'afterSha256':hashlib.sha256(copy.read_bytes()).hexdigest(),
+            'nativeChildrenAfterDrift':0,'ownedToolCopy':str(copy),'sourceToolSha256':hashlib.sha256(Path('/bin/cat').read_bytes()).hexdigest()}
+
+
+try:
+    with suite.track():
+        for name,variant in (('ledger-success','positive'),('ledger-last-return-cancel','last-return'),
+                ('ledger-final-save-cancel','final-save'),('ledger-restoration-cancel','restoration'),
+                ('ledger-log-collision','log-collision'),('ledger-storage-failure','storage')):
+            case(name,name,lambda area,v=variant:suite.ledger_case(area,v))
+        case('numeric-actual-table','numeric-actual-table',actual_table)
+        case('numeric-malformed','numeric-malformed',lambda a:suite.query_bad(a,"print('unexpected row')"))
+        case('numeric-empty','numeric-empty',lambda a:suite.query_bad(a,'pass'))
+        case('numeric-unknown-state','numeric-recognized-indeterminate',lambda a:suite.state(a,'?','INDETERMINATE'),
+             'Historical invalid-state expectation is obsolete and NOT relabelled PASS; actual query now parses ?, matching target is INDETERMINATE, never CLEAR')
+        case('numeric-valid-fixture','numeric-valid-fixture',lambda a:suite.state(a,'S','LIVE'))
+        case('numeric-output-bound','numeric-output-bound',lambda a:suite.query_bad(a,"import os;os.write(1,b'x'*1000000)",cap=4096))
+        case('numeric-original-deadline','numeric-original-deadline',lambda a:suite.query_bad(a,'import time;time.sleep(10)',seconds=0.03))
+        case('group-observation-unknown','group-observation-unknown',unknown_group,'Actual malformed numeric child replaces historical canned UNKNOWN snapshot')
+        case('numeric-group-classifications','numeric-group-classifications',classifications,'Actual numeric children feed every classifier control')
+        case('omitted-helper-mutations-now-bound','omitted-helper-mutations-now-bound',helper_drift)
+        case('owner-replacement-and-symlink','owner-replacement-and-symlink',owner_drift)
+        for variant in ('positive','unknown','changed-source','root-symlink','root-replacement'):
+            name='owned-build-'+variant
+            case(name,name,lambda a,v=variant:suite.legacy_cleanup(a,'build-'+v),'Real run_gates + actual prior_workers + guarded build cleanup; no canned CLEAR')
+        for variant in ('unknown','changed-wheel'):
+            name='owned-wheel-'+variant
+            case(name,name,lambda a,v=variant:suite.legacy_cleanup(a,'wheel-'+v),'Real run_gates + actual prior_workers + guarded wheel cleanup; no canned CLEAR')
+        case('read-only-source-tree-control','read-only-source-tree-control',source_tree,'Raw actual source closure and native owned copied metadata view; never native real Git storage')
+        assert len(mapping)==25 and len({row['historicalCase'] for row in mapping})==25
+        for variant in ('target-indeterminate','unrelated-indeterminate','malformed'):
+            suite.case('added-worker-'+variant,lambda a,v=variant:suite.worker_delete(a,v))
+        suite.case('added-owned-wheel-positive',lambda a:suite.legacy_cleanup(a,'wheel-positive'))
+        suite.case('added-changed-tool-before-native',changed_tool)
+finally:
+    result=suite.finish()
+    (HELPERS.parent/'MAPPING.json').write_text(json.dumps({'historicalDriverSha256':hashlib.sha256(HISTORICAL.read_bytes()).hexdigest(),
+        'newDriverSha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),'mappedObligations':mapping,'addedCases':[row['case'] for row in result['cases'] if row['case'].startswith('added-')],
+        'actualCounts':result['counts'],'actualResults':str(suite.root/'RESULTS.json'),'scope':'PREPARATION; history preserved, no final45 or first-party acceptance'},indent=2,sort_keys=True)+'\n')
+print(json.dumps({'retainedRoot':result['retainedRoot'],'counts':result['counts'],'allDirectChildrenReaped':result['allDirectChildrenReaped']},sort_keys=True),flush=True)
+raise SystemExit(0 if result['counts']['FAIL']==0 else 1)

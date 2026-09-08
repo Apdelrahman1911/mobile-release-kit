@@ -1,0 +1,311 @@
+"""Independent bounded source discovery and an owned data-only Git worktree.
+
+Gitignore matching selects names; it never approves an input. Ordinary unknown
+payloads and excluded private inputs are never opened. Fresh mirrors carry only
+empty placeholders and independently permitted .gitignore bytes.
+"""
+from pathlib import Path
+import hashlib
+import os
+import stat
+
+import evidence_schemas as schema
+from action_io import (LIMITS, _identity, _unchanged, ancestry, canonical_digest, close_fd,
+                       directory, identity, mkdir_new, names_fd, read_file, decode_json,
+                       participating, write_bytes_new)
+
+POLICY_VERSION = 'qa006-verifier-r4-r3-v1'
+CLASSIFICATION = {
+    'schemaVersion': 1,
+    'rootGit': 'root .git only; separately descriptor/raw-index bound; nested .git forbidden',
+    'componentDirectories': ['__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache', '.venv', 'venv',
+                             'build', 'dist', '.bundle', '.mobile-release', '.mobile-release-init-prepare',
+                             '.mobile-release-init', '.mobile-release-init-cleanup'],
+    'directorySuffixes': ['.egg-info', '.xcarchive', '.dSYM'],
+    'fileSuffixes': ['.pyc', '.pyo', '.pyd', '.aab', '.apk', '.ipa', '.jks', '.keystore', '.p12',
+                     '.p8', '.mobileprovision', '.env'],
+    'rootDirectories': ['vendor/bundle', 'fastlane/screenshots', 'fastlane/test_output', 'release/private'],
+    'rootFiles': ['fastlane/report.xml', 'fastlane/Preview.html'],
+    'unreadNonconsumableNames': ['.DS_Store'],
+    'structuralAncestors': ['vendor', 'release', 'fastlane'],
+    'executionOwnedOutputs': ['build', 'src/mobile_release_kit.egg-info'],
+    'executionPolicy': 'sensitive exclusions absent unless exact same-invocation owned producer authority; no general exceptions',
+    'preservationPolicy': 'do not read excluded private/generated contents; never grants execution permission',
+    'reasons': {'caches': 'may contain executable bytecode', 'venvs': 'unreviewed executables/dependencies',
+                'bundle': 'local configuration/vendor inputs', 'native': 'private binaries and signing assets',
+                'evidence': 'private working evidence, independently bound helpers only',
+                'outputs': 'generated non-source; ownership and exact producer required before consumption'},
+}
+
+
+def exclusion(name, *, directory_entry):
+    """Exact component/root/suffix rules, never substring or arbitrary ignore."""
+    parts = Path(name).parts
+    if parts[-1] == '.gitignore':
+        return None
+    if name == '.git':
+        return 'raw-git'
+    if '.git' in parts:
+        return 'forbidden-nested-git'
+    if parts[-1] in CLASSIFICATION['unreadNonconsumableNames']:
+        return 'nonconsumable'
+    if name in CLASSIFICATION['rootFiles'] or name in CLASSIFICATION['rootDirectories']:
+        return 'excluded'
+    if directory_entry and (parts[-1] in CLASSIFICATION['componentDirectories'] or
+                            any(parts[-1].endswith(s) for s in CLASSIFICATION['directorySuffixes'])):
+        return 'excluded'
+    if not directory_entry and any(parts[-1].endswith(s) for s in CLASSIFICATION['fileSuffixes']):
+        return 'excluded'
+    return None
+
+
+def name_excluded(name):
+    parts = Path(name).parts
+    return any(exclusion('/'.join(parts[:i + 1]), directory_entry=i < len(parts) - 1) is not None
+               for i in range(len(parts)))
+
+
+@participating
+def policy_digest(*, ctx):
+    return canonical_digest(CLASSIFICATION, ctx=ctx)
+
+
+@participating
+def validate_acceptance(value, config, *, ctx):
+    schema.fields(value, {'schemaVersion', 'policyVersion', 'classification', 'roots'}, ctx=ctx, label='discovery acceptance')
+    ctx.require(type(value['schemaVersion']) is int and value['schemaVersion'] == 1
+                and value['policyVersion'] == POLICY_VERSION,
+                'discovery policy/version mismatch')
+    schema.same(value['classification'], CLASSIFICATION, ctx=ctx)
+    schema.fields(value['roots'], {config['source'], config['rootUserWorktree']}, ctx=ctx, label='discovery roots')
+    for root, row in value['roots'].items():
+        schema.fields(row, {'role', 'snapshot', 'structuralDirectories', 'additionalControls', 'agents'},
+                      ctx=ctx, label='discovery root')
+        ctx.require(row['role'] == ('execution' if root == config['source'] else 'preservation'), 'discovery root role')
+        schema.file_reference(row['snapshot'], ctx=ctx)
+        dirs = row['structuralDirectories']
+        ctx.require(type(dirs) is list and dirs == sorted(set(dirs)) and len(dirs) <= LIMITS['inventory'],
+                    'permitted directory list')
+        for name in dirs:
+            schema.relative(name, ctx=ctx)
+            ctx.require(not name_excluded(name) and exclusion(name, directory_entry=True) is None,
+                        'permitted directory intersects exclusion')
+        ctx.require(type(row['additionalControls']) is dict, 'additional controls mapping')
+        ctx.require(len(row['additionalControls']) <= LIMITS['names'], 'additional controls count')
+        for name, control in row['additionalControls'].items():
+            schema.relative(name, ctx=ctx)
+            ctx.require(Path(name).name == '.gitignore', 'non-control additional input')
+            schema.fields(control, {'bytes', 'sha256', 'mode', 'tracked'}, ctx=ctx, label='additional ignore control')
+            schema.integer(control['bytes'], ctx=ctx, label='control size', maximum=LIMITS['blob'])
+            schema.integer(control['mode'], ctx=ctx, label='control mode', maximum=0o7777)
+            schema.digest(control['sha256'], ctx=ctx)
+            ctx.require(type(control['tracked']) is bool, 'control tracked flag')
+        if row['agents'] is not None:
+            schema.file_reference(row['agents'], ctx=ctx, role='source')
+            ctx.require(row['agents']['path'] == str(Path(root)/'AGENTS.md'), 'AGENTS scope')
+            ctx.require(row['role'] == 'preservation' and row['agents']['sha256'] == config['sourceUserAgentsSha256'],
+                        'only separately reviewed user AGENTS permitted')
+    return value
+
+
+@participating
+def load_acceptance(evidence, config, *, ctx):
+    path = Path(evidence)/'DISCOVERY-ACCEPTANCE.json'
+    bound = read_file(path, ctx=ctx, role='record', retain=True)
+    value = validate_acceptance(decode_json(bound.pop('data'), ctx=ctx), config, ctx=ctx)
+    logical, references = {}, {}
+    from bindings import _schema_logical
+    for root, row in value['roots'].items():
+        reference = row['snapshot']
+        original = read_file(reference['path'], ctx=ctx, role='record', retain=True)
+        data = original.pop('data')
+        ctx.require(original == reference, 'independently reviewed logical snapshot changed')
+        saved = decode_json(data, ctx=ctx)
+        selected = {key: saved[key] for key in ('head', 'branch', 'files')}
+        _schema_logical(selected, ctx)
+        logical[root] = selected
+        references[root] = reference
+        required_dirs = {str(parent) for name in selected['files'] for parent in Path(name).parents if str(parent) != '.'}
+        for name in row['additionalControls']:
+            ctx.require(name not in selected['files'], 'additional control duplicates accepted source')
+            required_dirs |= {str(parent) for parent in Path(name).parents if str(parent) != '.'}
+        ctx.require(required_dirs <= set(row['structuralDirectories']), 'accepted structural ancestors missing')
+    return {'record': value, 'file': bound, 'references': references}, logical
+
+
+@participating
+def discover(root, tracked, accepted, logical, *, ctx, output_authorities=None):
+    root = Path(root)
+    schema.absolute(str(root), ctx=ctx)
+    ctx.require(type(tracked) is dict and type(logical) is dict, 'discovery raw/accepted inputs')
+    ctx.require(type(accepted) is dict and accepted.get('role') in {'execution', 'preservation'},
+                'discovery must name its reviewed execution/preservation role')
+    for name in set(tracked) | set(logical):
+        schema.relative(name, ctx=ctx)
+        ctx.require(not name_excluded(name), 'tracked/accepted source intersects fixed excluded region: ' + name)
+    permitted = set(accepted['structuralDirectories']) | set(CLASSIFICATION['structuralAncestors'])
+    allowed_outputs = {} if output_authorities is None else output_authorities
+    ctx.require(type(allowed_outputs) is dict and set(allowed_outputs) <= set(CLASSIFICATION['executionOwnedOutputs']),
+                'unknown execution output authority')
+    entries, controls, bodies = {}, {}, {}
+    root_identity = identity(root, ctx=ctx)
+    ctx.require(root_identity['type'] == stat.S_IFDIR, 'discovery root must be directory')
+    def walk(fd, prefix, depth):
+        ctx.require(depth <= LIMITS['fsDepth'], 'discovery depth exceeded')
+        for name in names_fd(fd, ctx=ctx):
+            rel = prefix + name
+            schema.relative(rel, ctx=ctx)
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            ctx.check()
+            kind = 'directory' if stat.S_ISDIR(info.st_mode) else 'file' if stat.S_ISREG(info.st_mode) else 'unsupported'
+            classified = exclusion(rel, directory_entry=kind == 'directory')
+            ctx.require(classified != 'forbidden-nested-git', 'unsupported nested Git boundary')
+            if classified == 'raw-git':
+                ctx.require(kind in {'directory', 'file'}, 'root Git locator type')
+                continue  # its exact layout/identity/bytes are separately raw-bound
+            if classified is not None:
+                if accepted['role'] == 'preservation':
+                    continue  # never read the user's excluded private contents
+                ctx.require(kind in {'directory', 'file'}, 'symlink/special excluded execution input')
+                if classified == 'nonconsumable':
+                    ctx.require(kind == 'file' and info.st_nlink == 1, 'nonconsumable entry type')
+                    continue
+                ctx.require(rel in allowed_outputs, 'unowned excluded execution input: ' + rel)
+                expected = allowed_outputs[rel]
+                # Validation derives these exact records from genuine producers;
+                # a caller-supplied inventory is never independently authoritative.
+                ctx.require(expected['identity'] == _identity(info), 'authorized execution output replaced')
+                continue
+            ctx.require(kind != 'unsupported' and (kind != 'file' or info.st_nlink == 1), 'linked/special source entry')
+            ctx.require(len(entries) < LIMITS['inventory'], 'source universe count')
+            if kind == 'directory':
+                ctx.require(rel in permitted, 'unapproved structural directory: ' + rel)
+                entries[rel] = {'kind': kind, 'identity': _identity(info)}
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                try:
+                    ctx.require(_identity(os.fstat(child)) == _identity(info), 'source directory substituted')
+                    walk(child, rel + '/', depth + 1)
+                finally:
+                    close_fd(child, ctx)
+            else:
+                if rel == 'AGENTS.md':
+                    ctx.require(accepted['agents'] is not None, 'unapproved AGENTS appeared')
+                    reference = read_file(root/rel, ctx=ctx, role='source')
+                    ctx.require(reference == accepted['agents'], 'separately bound AGENTS changed')
+                elif name == '.gitignore':
+                    extra = accepted['additionalControls'].get(rel)
+                    ctx.require(rel in logical or extra is not None, 'unapproved ignore control; no payload read')
+                    original = read_file(root/rel, ctx=ctx, role='source', retain=True)
+                    body = original.pop('data')
+                    if extra is None:
+                        expected = logical[rel]
+                        ctx.require(not expected.get('deleted') and original['sha256'] == expected['sha256']
+                                    and bool(original['identity']['mode'] & 0o100) == expected['executable'], 'accepted ignore control changed')
+                    else:
+                        ctx.require({'bytes': original['bytes'], 'sha256': original['sha256'], 'mode': original['identity']['mode'],
+                                     'tracked': rel in tracked} == extra, 'independently bound additional control changed')
+                    controls[rel] = {'file': original, 'tracked': rel in tracked}
+                    bodies[rel] = body
+                else:
+                    ctx.require(rel in logical and not logical[rel].get('deleted'), 'unreviewed ordinary source; no payload read: ' + rel)
+                entries[rel] = {'kind': kind, 'identity': _identity(info)}
+            after = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            ctx.require(_identity(info) == _identity(after), 'source entry identity/mode changed during inventory')
+    with directory(root, ctx=ctx) as fd:
+        ctx.require(_identity(os.fstat(fd)) == root_identity, 'source root descriptor identity')
+        walk(fd, '', 0)
+    ctx.require(identity(root, ctx=ctx) == root_identity, 'source root changed')
+    for name, row in logical.items():
+        ctx.require((name in entries) == (not row.get('deleted')), 'accepted source existence changed: ' + name)
+    ctx.require(('AGENTS.md' in entries) == (accepted['agents'] is not None), 'bound AGENTS missing/appeared')
+    universe = {'schemaVersion': 1, 'root': str(root), 'rootIdentity': root_identity, 'policyVersion': POLICY_VERSION,
+                'classification': {'policy': CLASSIFICATION, 'role': accepted['role']},
+                'policySha256': policy_digest(ctx=ctx), 'entries': entries, 'controls': controls}
+    validate_universe(universe, ctx=ctx)
+    return universe, bodies
+
+
+@participating
+def validate_universe(value, *, ctx):
+    schema.fields(value, {'schemaVersion', 'root', 'rootIdentity', 'policyVersion', 'classification', 'policySha256', 'entries', 'controls'},
+                  ctx=ctx, label='source universe')
+    ctx.require(type(value['schemaVersion']) is int and value['schemaVersion'] == 1 and value['policyVersion'] == POLICY_VERSION,
+                'source universe version')
+    schema.absolute(value['root'], ctx=ctx)
+    schema.identity(value['rootIdentity'], ctx=ctx, kind=stat.S_IFDIR)
+    schema.fields(value['classification'], {'policy', 'role'}, ctx=ctx, label='classification')
+    schema.same(value['classification']['policy'], CLASSIFICATION, ctx=ctx)
+    ctx.require(value['classification']['role'] in {'execution', 'preservation'}
+                and value['policySha256'] == policy_digest(ctx=ctx), 'universe classification authority')
+    ctx.require(type(value['entries']) is dict and len(value['entries']) <= LIMITS['inventory'] and type(value['controls']) is dict,
+                'universe entry/control maps')
+    for name, row in value['entries'].items():
+        schema.relative(name, ctx=ctx)
+        schema.fields(row, {'kind', 'identity'}, ctx=ctx, label='universe entry')
+        ctx.require(row['kind'] in ('file', 'directory'), 'universe entry kind')
+        schema.identity(row['identity'], ctx=ctx, kind=stat.S_IFREG if row['kind'] == 'file' else stat.S_IFDIR)
+        ctx.require(exclusion(name, directory_entry=row['kind'] == 'directory') is None, 'excluded universe entry')
+        for parent in Path(name).parents:
+            if str(parent) != '.':
+                ctx.require(str(parent) in value['entries'] and value['entries'][str(parent)]['kind'] == 'directory',
+                            'universe missing/non-directory ancestor')
+    for name, row in value['controls'].items():
+        schema.fields(row, {'file', 'tracked'}, ctx=ctx, label='universe control')
+        schema.file_reference(row['file'], ctx=ctx, role='source')
+        ctx.require(name in value['entries'] and Path(name).name == '.gitignore' and type(row['tracked']) is bool
+                    and row['file']['path'] == str(Path(value['root'])/name)
+                    and row['file']['identity'] == value['entries'][name]['identity'], 'control/universe relationship')
+    ctx.require({name for name in value['entries'] if Path(name).name == '.gitignore'} == set(value['controls']),
+                'complete control inventory')
+
+
+@participating
+def materialize_mirror(view_root, universe, bodies, *, ctx):
+    validate_universe(universe, ctx=ctx)
+    root = Path(view_root)/'worktree'
+    mirror_identity = mkdir_new(root, ctx=ctx)
+    ctx.require(set(bodies) == set(universe['controls']), 'mirror control byte inventory')
+    for name, row in sorted(universe['entries'].items(), key=lambda item: (len(Path(item[0]).parts), item[0])):
+        path = root/name
+        if row['kind'] == 'directory':
+            mkdir_new(path, ctx=ctx)
+        else:
+            body = bodies.get(name, b'')
+            if name in bodies:
+                control = universe['controls'][name]['file']
+                ctx.bytes(len(body), 'source', hashing=True)
+                ctx.require(len(body) == control['bytes'] and hashlib.sha256(body).hexdigest() == control['sha256'],
+                            'mirror ignore bytes not accepted')
+            write_bytes_new(path, [body], ctx=ctx, role='source' if name in bodies else 'record')
+            with directory(path.parent, ctx=ctx) as fd:
+                before = os.stat(path.name, dir_fd=fd, follow_symlinks=False)
+                ctx.require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1, 'mirror placeholder replaced')
+                leaf = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                try:
+                    ctx.require(_unchanged(before, os.fstat(leaf)), 'mirror leaf descriptor mismatch')
+                    os.fchmod(leaf, 0o700 if row['identity']['mode'] & 0o100 else 0o600)
+                    ctx.check()
+                finally:
+                    close_fd(leaf, ctx)
+    return {'path': str(root), 'identity': mirror_identity, 'universeSha256': canonical_digest(universe, ctx=ctx),
+            'nonce': os.urandom(24).hex()}
+
+
+@participating
+def validate_mirror(record, universe, entries, *, view_root, ctx):
+    schema.fields(record, {'path', 'identity', 'universeSha256', 'nonce'}, ctx=ctx, label='mirror')
+    schema.identity(record['identity'], ctx=ctx, kind=stat.S_IFDIR)
+    schema.digest(record['nonce'], ctx=ctx, length=48)
+    ctx.require(record['path'] == str(Path(view_root)/'worktree') and entries['worktree']['identity'] == record['identity']
+                and record['universeSha256'] == canonical_digest(universe, ctx=ctx), 'mirror source/view scope')
+    expected = {'worktree'} | {'worktree/' + name for name in universe['entries']}
+    ctx.require({name for name in entries if name == 'worktree' or name.startswith('worktree/')} == expected, 'mirror exact name set')
+    for name, original in universe['entries'].items():
+        row = entries['worktree/' + name]
+        ctx.require(row['kind'] == original['kind'], 'mirror file/directory semantics')
+        if row['kind'] == 'file':
+            control = universe['controls'].get(name)
+            ctx.require(bool(row['identity']['mode'] & 0o100) == bool(original['identity']['mode'] & 0o100), 'mirror executable semantics')
+            ctx.require(row['bytes'] == (control['file']['bytes'] if control else 0)
+                        and row['sha256'] == (control['file']['sha256'] if control else hashlib.sha256(b'').hexdigest()),
+                        'mirror contains noncontrol payload/changed ignore')

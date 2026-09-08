@@ -1,0 +1,97 @@
+"""Run documented gates against an independently reviewed, frozen issue tree."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import signal
+import sys
+import time
+
+root = Path(__file__).resolve().parents[3]
+evidence = Path(__file__).resolve().parent
+sys.path.insert(0, str(root / 'src'))
+from mobile_release.owned_process import ProcessError, reap_group
+python_bin = root / ".mobile-release/remediation/MRK-002/venv/bin"
+environment = dict(os.environ)
+environment.update({"PATH": str(python_bin) + os.pathsep + environment["PATH"],
+                    "PYTHONSAFEPATH": "1", "MOBILE_RELEASE_REQUIRE_RUBY_CONTRACTS": "1",
+                    "MOBILE_RELEASE_TEST_PYTHON": str(python_bin / "python"),
+                    "BUNDLE_FROZEN": "true", "FASTLANE_HIDE_CHANGELOG": "true",
+                    "FASTLANE_OPT_OUT_USAGE": "true", "FASTLANE_SKIP_UPDATE_CHECK": "true"})
+commands = [
+    ("freeze-before", ["python3", str(evidence / "freeze.py"), "--check"]),
+    ("editable-install", ["python3", "-m", "pip", "install", "-e", ".[test]"]),
+    ("bundle-install", ["bundle", "install"]),
+    ("bundle-check", ["bundle", "check"]),
+    ("python-full", ["python3", "-m", "unittest", "discover", "-s", "tests", "-v"]),
+    ("init-transactions", ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_init_transaction.py", "-v"]),
+    ("ios-entitlements", ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_ios_entitlements.py", "-v"]),
+    ("ios-profile-authority", ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_ios_profile_*.py", "-v"]),
+    ("default-cancellation", ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_default_cancellation.py", "-v"]),
+    ("local-signing", ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_local_signing*.py", "-v"]),
+    ("owned-process", ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_owned_process*.py", "-v"]),
+    ("native-profile-gate", ["python3", "-I", "tests/workflow/run_native_profile_checks.py"]),
+    ("profile-process-containment", ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_profile_processes.py", "-v"]),
+    ("native-ci-aggregate", ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_native_profile_ci.py", "-v"]),
+    ("ios-binary-plist", ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_ios_plist_binary.py", "-v"]),
+    ("ios-native-correspondence", ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_macho_native.py", "-v"]),
+    ("ruby-support", ["ruby", "-I.", "tests/workflow/test_fastlane_support.rb"]),
+    ("ruby-native-capture", ["ruby", "tests/workflow/test_native_upload_validation.rb"]),
+    *[("ruby-" + name, ["bundle", "exec", "ruby", f"tests/workflow/test_{name}.rb"])
+      for name in ("play_store", "play_lanes", "apple_store", "apple_lanes", "apple_production",
+                   "apple_production_lane", "apple_asset_upload", "ios_upload_validation", "android_upload_validation")],
+    ("ruby-workflow-yaml", ["ruby", "tests/workflow/test_workflow_yaml.rb"]),
+    ("ruby-supply-wif", ["bundle", "exec", "ruby", "tests/workflow/test_supply_wif.rb"]),
+    ("fastfile-validate", ["bundle", "exec", "ruby", "fastlane/run_lane.rb", "--validate"]),
+    ("actionlint", ["actionlint", "-no-color", "-ignore", 'property "workflow_(repository|sha|ref)" is not defined in object type',
+                    *[str(path.relative_to(root)) for path in sorted((root / ".github/workflows").glob("*.yml"))],
+                    *[str(path.relative_to(root)) for path in sorted((root / "templates/workflows").glob("*.yml"))]]),
+    ("dependency-pins", ["python3", str(evidence / "verify-pins.py")]),
+    ("wheel-install", ["bash", str(evidence / "wheel-smoke.sh")]),
+    ("matrix-contracts", ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_local_signing_matrix.py", "-v"]),
+    ("matrix-prepare", ["python3", str(evidence / "verify-matrix.py"), "--prepare"]),
+    *[(f"matrix-source-wheel-{shard:02d}", ["python3", str(evidence / "verify-matrix.py"), "--shard", str(shard)])
+      for shard in range(16)],
+    ("matrix-complete-union", ["python3", str(evidence / "verify-matrix.py"), "--reconcile"]),
+    ("matrix-owned-cleanup", ["python3", str(evidence / "verify-matrix.py"), "--cleanup"]),
+    ("build-owned-cleanup", ["python3", str(evidence / "cleanup-build.py")]),
+    ("pip-check", ["python3", "-m", "pip", "check"]),
+    ("jdk21-signature-policy", ["python3", str(evidence / "probe-jdk21-signing.py")]),
+    ("diff-check", ["python3", "-c", "import json,subprocess,sys; saved=json.load(open(sys.argv[1])); subprocess.run(['git','diff','--check'],check=True); subprocess.run(['git','diff','--check',saved['head'],saved['proposedTree']],check=True)", str(evidence / "final-freeze.json")]),
+    ("freeze-after", ["python3", str(evidence / "freeze.py"), "--check"]),
+]
+results = []
+for name, command in commands:
+    print(f"RUN {name}: {command!r}", flush=True)
+    log = evidence / f"final-{name}.log"
+    started = time.monotonic()
+    with log.open("wb") as output:
+        try:
+            child = subprocess.Popen(command, cwd=root, env=environment, stdout=output,
+                                     stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                code = child.wait(timeout=900)
+            except subprocess.TimeoutExpired:
+                code = 124
+            finally:
+                # Only a still-unreaped leader reserves signalling authority.
+                # After normal wait(), merely prove the group is absent; never
+                # signal a potentially recycled numeric PGID.
+                try:
+                    reap_group(child)
+                except ProcessError:
+                    code = 125
+                    output.write(b'\nFAIL: gate process-group cleanup could not be confirmed\n')
+        except OSError:
+            code = 125
+    row = {"gate": name, "command": command, "status": "PASS" if code == 0 else "FAIL",
+           "exitCode": code, "seconds": round(time.monotonic() - started, 3),
+           "log": log.name, "logSha256": hashlib.sha256(log.read_bytes()).hexdigest()}
+    results.append(row)
+    (evidence / "final-verification.json").write_text(json.dumps(results, indent=2) + "\n")
+    print(f"{row['status']} {name} ({row['seconds']}s)", flush=True)
+    if code:
+        print(log.read_text(errors="replace")[-12000:], flush=True)
+        raise SystemExit(code)
+print(f"PASS: all {len(results)} gates on unchanged frozen source", flush=True)

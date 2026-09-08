@@ -1,0 +1,156 @@
+# R3-R4 complete per-obligation matrix
+
+All66 prior Python method obligations (including original24) remain. Six test
+bodies are adapted;60 remain structurally identical. Shared loss fixture/schema
+changes are explicit. All93 current methods are authored/AST-parsed, **not run**
+at this author freeze. Ruby002 is a separate root-observed actual40-case pass;
+no historical-pass transfer and no native proof. See `TEST-OBLIGATIONS.json` for
+body AST hashes, full method identities and the independent Ruby case binding.
+
+## All66 inherited Python obligations
+
+| ID | Original / current lines | Method / dangerous obligation | Current body |
+| --- | --- | --- | --- |
+| PY-OLD-001 | 302–313 / 306–317 | `PureContracts.test_matrix_and_entry_argv_against_independent_literals` | unchanged |
+| PY-OLD-002 | 315–321 / 319–325 | `PureContracts.test_all_fixed_route_success_structures` | unchanged |
+| PY-OLD-003 | 323–337 / 327–341 | `PureContracts.test_every_route_rejects_frame_binding_and_actual_capture_substitution` | unchanged |
+| PY-OLD-004 | 339–342 / 343–346 | `PureContracts.test_loss_terminal_conjunction_is_not_a_footer_or_exit_claim` | unchanged |
+| PY-OLD-005 | 344–357 / 348–361 | `PureContracts.test_loss_routes_reject_retained_writer_and_query_role_substitution` | unchanged |
+| PY-OLD-006 | 359–370 / 363–374 | `PureContracts.test_malformed_json_duplicate_overflow_nonfinite_and_nested_unknown` | unchanged |
+| PY-OLD-007 | 372–378 / 376–382 | `PureContracts.test_no_fence_controls_cannot_satisfy_positive_isolation` | unchanged |
+| PY-OLD-008 | 380–392 / 384–396 | `PureContracts.test_original_full_interval_count_and_byte_reserves` | unchanged |
+| PY-OLD-009 | 394–403 / 398–407 | `PureContracts.test_ps_empty_selection_is_distinct_from_zombie_error_and_reuse` | unchanged |
+| PY-OLD-010 | 405–415 / 409–419 | `PureContracts.test_frame_sequence_wrong_nonce_and_incomplete_eof` | unchanged |
+| PY-OLD-011 | 417–430 / 421–434 | `PureContracts.test_child_wait_and_full_entire_terminal_types_fail_closed` | unchanged |
+| PY-OLD-012 | 432–445 / 436–449 | `PureContracts.test_wrong_script_or_policy_hash_rejected_before_any_native` | unchanged |
+| PY-OLD-013 | 447–457 / 451–461 | `PureContracts.test_independent_channel_direction_identity_and_route_mismatches` | unchanged |
+| PY-OLD-014 | 459–469 / 463–473 | `PureContracts.test_reader_overflow_is_not_eof_or_reusable_capacity` | unchanged |
+| PY-OLD-015 | 473–483 / 477–487 | `OwnershipDispatch.test_fixed_spawn_guards_reject_program_and_descriptor_substitution` | unchanged |
+| PY-OLD-016 | 520–526 / 524–530 | `OwnershipDispatch.test_real_guard_dispatch_reserves_and_revokes_before_terminal` | unchanged |
+| PY-OLD-017 | 528–544 / 532–548 | `OwnershipDispatch.test_reaped_unknown_unregistered_and_wrong_owners_never_dispatch` | unchanged |
+| PY-OLD-018 | 546–559 / 550–563 | `OwnershipDispatch.test_query_child_and_queried_pid_cannot_swap_roles` | unchanged |
+| PY-OLD-019 | 561–568 / 565–572 | `OwnershipDispatch.test_external_reference_has_only_two_zero_syscalls` | unchanged |
+| PY-OLD-020 | 572–586 / 576–590 | `TerminalProtocol.test_cancelled_query_uses_original_timeout_and_only_actual_query_handle` | unchanged |
+| PY-OLD-021 | 588–604 / 592–608 | `TerminalProtocol.test_partial_query_acquisition_is_disposed_and_original_error_retained` | unchanged |
+| PY-OLD-022 | 606–613 / 610–617 | `TerminalProtocol.test_closefd_false_requires_actual_descriptor_close` | unchanged |
+| PY-OLD-023 | 615–626 / 619–630 | `TerminalProtocol.test_closefd_true_no_double_close_and_errors_retained` | unchanged |
+| PY-OLD-024 | 628–647 / 632–643 | `TerminalProtocol.test_final_write_failure_cannot_publish_second_frame_or_run_finalizers` | adapted to actual revised consumer |
+| PY-OLD-025 | 891–906 / 893–908 | `OriginalQueryWindow.test_actual_timely_observer_reconciles_with_original_route` | unchanged |
+| PY-OLD-026 | 908–922 / 910–924 | `OriginalQueryWindow.test_late_successful_wait_and_eof_is_retained_but_never_success` | unchanged |
+| PY-OLD-027 | 924–939 / 926–941 | `OriginalQueryWindow.test_late_popen_return_keeps_actual_handle_and_original_disposition` | unchanged |
+| PY-OLD-028 | 941–956 / 943–958 | `OriginalQueryWindow.test_original_early_once_and_late_kill_boundaries` | unchanged |
+| PY-OLD-029 | 958–987 / 960–989 | `OriginalQueryWindow.test_wait_cutoff_jump_and_lost_custody_veto_every_signal` | unchanged |
+| PY-OLD-030 | 989–1001 / 991–1003 | `OriginalQueryWindow.test_no_returned_handle_never_acquires_wait_or_signal_custody` | unchanged |
+| PY-OLD-031 | 1003–1038 / 1005–1040 | `OriginalQueryWindow.test_primary_and_secondary_read_select_wait_close_errors_survive` | unchanged |
+| PY-OLD-032 | 1040–1059 / 1042–1061 | `OriginalQueryWindow.test_query_window_mutations_reject_in_full_reconciler` | unchanged |
+| PY-OLD-033 | 1061–1084 / 1063–1086 | `OriginalQueryWindow.test_late_eof_completion_and_returned_invalid_pid_never_mint_success` | unchanged |
+| PY-OLD-034 | 1086–1102 / 1088–1104 | `OriginalQueryWindow.test_nonterminal_or_malformed_wait_is_retained_without_authority_or_serialization_failure` | unchanged |
+| PY-OLD-035 | 1104–1120 / 1106–1122 | `OriginalQueryWindow.test_capture_setup_failure_prohibits_later_registry_acquisition` | unchanged |
+| PY-OLD-036 | 1132–1147 / 1134–1149 | `DispatchCheckpoints.test_actual_registry_spends_attempt_but_rejects_post_emit_dispatch` | unchanged |
+| PY-OLD-037 | 1149–1164 / 1151–1166 | `DispatchCheckpoints.test_both_external_zero_probes_observe_separate_current_checkpoints` | unchanged |
+| PY-OLD-038 | 1166–1178 / 1168–1180 | `DispatchCheckpoints.test_work_write_rechecks_after_backpressured_select` | unchanged |
+| PY-OLD-039 | 1180–1195 / 1182–1197 | `DispatchCheckpoints.test_disposition_write_is_not_work_and_never_renews_endpoint` | unchanged |
+| PY-OLD-040 | 1197–1214 / 1199–1216 | `DispatchCheckpoints.test_ordinary_signal_rechecks_cancel_time_control_after_actual_wait` | unchanged |
+| PY-OLD-041 | 1218–1235 / 1220–1237 | `CapableEntry.test_actual_entry_preserves_buffered_commands_and_original_clock` | unchanged |
+| PY-OLD-042 | 1237–1253 / 1239–1255 | `CapableEntry.test_script_or_policy_io_cannot_spend_free_entry_time` | unchanged |
+| PY-OLD-043 | 1255–1270 / 1257–1272 | `CapableEntry.test_entry_forgery_semantics_reject_on_every_fixed_route` | unchanged |
+| PY-OLD-044 | 1272–1291 / 1274–1293 | `CapableEntry.test_nested_inside_entry_and_bash_claim_are_independently_reconciled` | unchanged |
+| PY-OLD-045 | 1295–1325 / 1297–1327 | `FreshDescriptorCustody.test_each_fresh_endpoint_metadata_and_flag_fault_keeps_both_closes` | unchanged |
+| PY-OLD-046 | 1327–1350 / 1329–1352 | `FreshDescriptorCustody.test_endpoint_substitution_and_ambiguous_close_cannot_be_retried` | unchanged |
+| PY-OLD-047 | 1352–1404 / 1354–1406 | `FreshDescriptorCustody.test_input_fstat_write_fsync_and_close_failures_retain_pending_file` | unchanged |
+| PY-OLD-048 | 1406–1414 / 1408–1416 | `FreshDescriptorCustody.test_child_stream_identity_substitution_cannot_close_replacement` | unchanged |
+| PY-OLD-049 | 1418–1449 / 1420–1451 | `IndependentSubtreeProof.test_actual_cleanup_requires_genuine_complete_independent_eof` | unchanged |
+| PY-OLD-050 | 1451–1461 / 1453–1463 | `IndependentSubtreeProof.test_direct_children_reaped_never_erases_unknown_subtree` | unchanged |
+| PY-OLD-051 | 1474–1510 / 1476–1512 | `IndependentSubtreeProof.test_malicious_complete_capture_rejected_before_any_query` | unchanged |
+| PY-OLD-052 | 1512–1524 / 1514–1526 | `IndependentSubtreeProof.test_complete_preproof_admits_first_observer_without_circular_absence` | unchanged |
+| PY-OLD-053 | 1560–1592 / 1671–1692 | `TerminalFinalization.test_preparation_binds_reference_inventory_to_independent_code_decision` | adapted to actual revised consumer |
+| PY-OLD-054 | 1594–1622 / 1694–1722 | `TerminalFinalization.test_actual_row_run_rechecks_after_reconciliation_and_channel_finalization` | unchanged |
+| PY-OLD-055 | 1630–1652 / 1733–1758 | `TerminalFinalization.test_actual_controller_run_rechecks_preservation_result_and_manifest_work` | adapted to actual revised consumer |
+| PY-OLD-056 | 1654–1666 / 1760–1774 | `TerminalFinalization.test_controller_first_error_survives_two_final_write_errors` | adapted to actual revised consumer |
+| PY-OLD-057 | 1668–1702 / 1776–1810 | `TerminalFinalization.test_actual_evidence_write_retains_partial_and_independent_close_errors` | unchanged |
+| PY-OLD-058 | 1704–1737 / 1812–1845 | `TerminalFinalization.test_actual_main_returns_failure_after_terminal_output_and_restoration` | adapted to actual revised consumer |
+| PY-OLD-059 | 1739–1756 / 1847–1864 | `TerminalFinalization.test_owned_handler_restorations_are_independent_and_do_not_overwrite_foreign` | unchanged |
+| PY-OLD-060 | 1758–1796 / 1866–1904 | `TerminalFinalization.test_actual_scratch_preservation_failure_cannot_delete_remaining_inputs` | unchanged |
+| PY-OLD-061 | 1798–1815 / 1906–1923 | `TerminalFinalization.test_scratch_disposition_receipt_failure_stops_later_rows` | unchanged |
+| PY-OLD-062 | 1887–1903 / 1995–2011 | `WorkerTerminalGates.test_actual_sender_main_final_output_and_completion_cannot_publish_success` | unchanged |
+| PY-OLD-063 | 1905–1920 / 2013–2028 | `WorkerTerminalGates.test_marker_io_and_second_probe_cannot_admit_later_work` | unchanged |
+| PY-OLD-064 | 1922–1950 / 2030–2058 | `WorkerTerminalGates.test_actual_python_relay_main_finalization_with_real_cleanup_methods` | unchanged |
+| PY-OLD-065 | 1952–1987 / 2060–2095 | `WorkerTerminalGates.test_actual_canary_main_end_and_handler_finalization` | unchanged |
+| PY-OLD-066 | 1989–2007 / 2097–2106 | `WorkerTerminalGates.test_loss_terminal_gate_failure_retains_one_frame_and_failure_only_exit` | adapted to actual revised consumer |
+
+## All27 new Python obligations
+
+| ID | Current lines | Method / dangerous obligation |
+| --- | --- | --- |
+| PY-NEW-001 | 2749–2778 | `IndependentEntryPaths.test_all_eleven_route_entries_and_every_constructed_hop_match_independent_plan_literals` |
+| PY-NEW-002 | 2780–2790 | `IndependentEntryPaths.test_old_ruby_base_and_old_bash_exec_literals_each_independently_fail` |
+| PY-NEW-003 | 2400–2413 | `LossCommitRegression.test_actual_producer_raw_eof_query_and_reconcile_success_both_routes` |
+| PY-NEW-004 | 2415–2425 | `LossCommitRegression.test_cancellation_before_commit_cannot_admit_query_or_cleanup` |
+| PY-NEW-005 | 2507–2513 | `LossCommitRegression.test_complete_commit_still_requires_actual_independent_eof_and_reader_success` |
+| PY-NEW-006 | 2427–2435 | `LossCommitRegression.test_full_admitted_atomic_commit_is_irreversible_but_not_an_orphan_wait` |
+| PY-NEW-007 | 2481–2488 | `LossCommitRegression.test_nonwrite_eagain_does_not_authorize_a_commit_retry` |
+| PY-NEW-008 | 2515–2531 | `LossCommitRegression.test_old_publication_mutant_falsely_passes_old_cross_owner_contract_but_not_corrected_one` |
+| PY-NEW-009 | 2455–2466 | `LossCommitRegression.test_pipe_custody_actual_nonblocking_and_same_fd_atomic_capacity` |
+| PY-NEW-010 | 2490–2505 | `LossCommitRegression.test_primary_secondary_unknown_and_exit_proposal_cannot_produce_commit` |
+| PY-NEW-011 | 2468–2479 | `LossCommitRegression.test_provisional_and_atomic_write_errors_never_retry_or_forge_completed_bytes` |
+| PY-NEW-012 | 2447–2453 | `LossCommitRegression.test_sender_and_root_original_deadlines_and_independent_root_cancellation` |
+| PY-NEW-013 | 2437–2445 | `LossCommitRegression.test_zero_byte_eagain_retries_only_with_the_same_complete_commit_and_budget` |
+| PY-NEW-014 | 2809–2819 | `SelectorRegression.test_actual_pinned_control_bytes_parse_without_following_any_selected_leaf` |
+| PY-NEW-015 | 2842–2866 | `SelectorRegression.test_fixed_approval_reference_and_control_tampering_fails_before_any_selected_read` |
+| PY-NEW-016 | 2868–2923 | `SelectorRegression.test_hash_bound_control_schema_inventory_path_index_and_identity_adversaries` |
+| PY-NEW-017 | 2925–2950 | `SelectorRegression.test_hash_bound_duplicate_json_keys_and_malformed_reference_rows` |
+| PY-NEW-018 | 2952–2982 | `SelectorRegression.test_immutable_authority_reuses_original_rows_and_final_selector_drift_rejects_before_reads` |
+| PY-NEW-019 | 2984–3004 | `SelectorRegression.test_original_selected_source_index_modes_and_agents_drift_cannot_rebaseline` |
+| PY-NEW-020 | 3006–3026 | `SelectorRegression.test_preparation_and_final_reference_checks_keep_original_cancellation_and_cutoff` |
+| PY-NEW-021 | 2821–2840 | `SelectorRegression.test_real_preparation_all_reference_barrier_and_final_record_exact_scope` |
+| PY-NEW-022 | 2535–2562 | `TerminalRawRegression.test_final_and_commit_serialization_cancellation_deadline_and_oversize_precede_writes` |
+| PY-NEW-023 | 2673–2686 | `TerminalRawRegression.test_forged_absence_or_incomplete_observation_rejects_against_actual_query_record` |
+| PY-NEW-024 | 2573–2640 | `TerminalRawRegression.test_mutated_terminal_protocol_rejects_before_observer_or_scratch_admission` |
+| PY-NEW-025 | 2688–2709 | `TerminalRawRegression.test_ordinary_routes_reject_commit_and_keep_real_parent_status_contract` |
+| PY-NEW-026 | 2564–2571 | `TerminalRawRegression.test_partial_provisional_success_still_uses_full_single_atomic_commit` |
+| PY-NEW-027 | 2642–2671 | `TerminalRawRegression.test_valid_commit_is_not_absence_and_incorrect_actual_query_cannot_resolve_subtree` |
+
+## All40 Ruby obligations — root actual002 evidence
+
+| ID | Driver lines | Case | Obligation |
+| --- | --- | --- | --- |
+| RB-001 | 210-228 | `dispatch-after-charge/ruby-spawn/cancel` | Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once. |
+| RB-002 | 210-228 | `dispatch-after-charge/ruby-spawn/expired` | Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once. |
+| RB-003 | 210-228 | `dispatch-after-charge/ruby-spawn/eof` | Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once. |
+| RB-004 | 210-228 | `dispatch-after-charge/ruby-fork-exec/cancel` | Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once. |
+| RB-005 | 210-228 | `dispatch-after-charge/ruby-fork-exec/expired` | Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once. |
+| RB-006 | 210-228 | `dispatch-after-charge/ruby-fork-exec/eof` | Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once. |
+| RB-007 | 210-228 | `dispatch-after-charge/ruby-open3/cancel` | Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once. |
+| RB-008 | 210-228 | `dispatch-after-charge/ruby-open3/expired` | Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once. |
+| RB-009 | 210-228 | `dispatch-after-charge/ruby-open3/eof` | Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once. |
+| RB-010 | 210-228 | `dispatch-after-charge/parent-exit/cancel` | Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once. |
+| RB-011 | 210-228 | `dispatch-after-charge/parent-exit/expired` | Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once. |
+| RB-012 | 210-228 | `dispatch-after-charge/parent-exit/eof` | Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once. |
+| RB-013 | 230-251 | `temporary-close-before-published-writer/ruby-spawn` | Input writer is published before a failing temporary close, closes before wait, all endpoints receive one close, original error survives, ambiguous custody selects fictional own exit72. |
+| RB-014 | 230-251 | `temporary-close-before-published-writer/ruby-fork-exec` | Input writer is published before a failing temporary close, closes before wait, all endpoints receive one close, original error survives, ambiguous custody selects fictional own exit72. |
+| RB-015 | 253-268 | `fresh-pipe-publication/0/stat_error` | Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure. |
+| RB-016 | 253-268 | `fresh-pipe-publication/0/flag_error` | Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure. |
+| RB-017 | 253-268 | `fresh-pipe-publication/1/stat_error` | Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure. |
+| RB-018 | 253-268 | `fresh-pipe-publication/1/flag_error` | Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure. |
+| RB-019 | 253-268 | `fresh-pipe-publication/2/stat_error` | Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure. |
+| RB-020 | 253-268 | `fresh-pipe-publication/2/flag_error` | Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure. |
+| RB-021 | 253-268 | `fresh-pipe-publication/3/stat_error` | Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure. |
+| RB-022 | 253-268 | `fresh-pipe-publication/3/flag_error` | Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure. |
+| RB-023 | 253-268 | `fresh-pipe-publication/4/stat_error` | Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure. |
+| RB-024 | 253-268 | `fresh-pipe-publication/4/flag_error` | Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure. |
+| RB-025 | 253-268 | `fresh-pipe-publication/5/stat_error` | Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure. |
+| RB-026 | 253-268 | `fresh-pipe-publication/5/flag_error` | Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure. |
+| RB-027 | 270-285 | `backpressured-work-write/cancel` | Changed owner state after fictional select rejects before the first output write. |
+| RB-028 | 270-285 | `backpressured-work-write/expired` | Changed owner state after fictional select rejects before the first output write. |
+| RB-029 | 270-285 | `backpressured-work-write/eof` | Changed owner state after fictional select rejects before the first output write. |
+| RB-030 | 287-304 | `returned-child-stream-adoption/2` | Actual method custody survives first/second stream adoption failure; fictional writer closes before the one fake wait; all six endpoints close independently; primary error is retained. |
+| RB-031 | 287-304 | `returned-child-stream-adoption/4` | Actual method custody survives first/second stream adoption failure; fictional writer closes before the one fake wait; all six endpoints close independently; primary error is retained. |
+| RB-032 | 306-327 | `substituted-descriptor-veto-and-no-retry` | Substituted fictional identity is never closed, a second close is vetoed, and later pipe acquisition is forbidden. |
+| RB-033 | 329-344 | `disposition-write-is-not-new-work` | Cancellation does not abandon owned disposition; original disposition cutoff cannot be renewed. |
+| RB-034 | 346-367 | `fork-exec-frame-post-emission/cancel` | Direct real method with fake stdio/group calls rejects after exec-frame emission, returns only fictional own exit71, and retains reopened STDIN as the control object; real exec stays denied. |
+| RB-035 | 346-367 | `fork-exec-frame-post-emission/expired` | Direct real method with fake stdio/group calls rejects after exec-frame emission, returns only fictional own exit71, and retains reopened STDIN as the control object; real exec stays denied. |
+| RB-036 | 346-367 | `fork-exec-frame-post-emission/eof` | Direct real method with fake stdio/group calls rejects after exec-frame emission, returns only fictional own exit71, and retains reopened STDIN as the control object; real exec stays denied. |
+| RB-037 | 369-384 | `actual-run-terminal-emission/cancel` | Late/cancelled final emission makes actual run return1; exactly one fictional acquisition and wait, no retry. |
+| RB-038 | 369-384 | `actual-run-terminal-emission/expired` | Late/cancelled final emission makes actual run return1; exactly one fictional acquisition and wait, no retry. |
+| RB-039 | 386-405 | `independent-handler-restoration-and-terminal-failure` | First fake restoration failure/deadline advancement cannot skip TERM restoration; actual return fails and retains the initial restoration error. |
+| RB-040 | 407-423 | `capable-entry-and-buffered-phase-command` | Admission records fictional identity/original time without consuming a buffered command; original work-cutoff expiry rejects. |

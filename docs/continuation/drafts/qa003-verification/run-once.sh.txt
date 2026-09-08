@@ -1,0 +1,16 @@
+#!/bin/bash
+set -euo pipefail
+set -o noclobber
+cd -- /ORIGINAL_REPOSITORY
+test ! -e /ORIGINAL_REPOSITORY/.mobile-release/remediation/QA-003-final-r4/final-verification.json
+test ! -e /ORIGINAL_REPOSITORY/.mobile-release/remediation/QA-003-final-r4/final-run.log
+test ! -e /ORIGINAL_REPOSITORY/.mobile-release/remediation/QA-003-final-r4/final-run.exit
+exec 9> /ORIGINAL_REPOSITORY/.mobile-release/remediation/QA-003-final-r4/final-run.log
+if TMPDIR=/ORIGINAL_HOME/Projects/.mrk-qa003-final-r4-h08ub1x0/tmp /ORIGINAL_REPOSITORY/.mobile-release/remediation/MRK-002/venv/bin/python -B /ORIGINAL_REPOSITORY/.mobile-release/remediation/QA-003-final-r4/verify-all.py >&9 2>&1 9>&-; then
+  status=0
+else
+  status=$?
+fi
+exec 9>&-
+printf '%s\n' "$status" > /ORIGINAL_REPOSITORY/.mobile-release/remediation/QA-003-final-r4/final-run.exit
+exit "$status"

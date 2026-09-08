@@ -1,0 +1,1833 @@
+{
+  "addedPython": [
+    {
+      "bodyAstSha256": "5012259d8ec03b6465064deb38c929f2e65ba1e90a941a3623374b0357f73b37",
+      "id": "PY-NEW-001",
+      "lines": [
+        2749,
+        2778
+      ],
+      "method": "IndependentEntryPaths.test_all_eleven_route_entries_and_every_constructed_hop_match_independent_plan_literals",
+      "obligation": "all eleven route entries and every constructed hop match independent plan literals",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "40c17cd563c1b846eef5e6411244ef43bcc6acf14daafbabfd9ed7de2b5e318a",
+      "id": "PY-NEW-002",
+      "lines": [
+        2780,
+        2790
+      ],
+      "method": "IndependentEntryPaths.test_old_ruby_base_and_old_bash_exec_literals_each_independently_fail",
+      "obligation": "old ruby base and old bash exec literals each independently fail",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "12fd323785ceb727c057a1c4f17cfbd2a6329815895e2a2cc8e2482797902e26",
+      "id": "PY-NEW-003",
+      "lines": [
+        2400,
+        2413
+      ],
+      "method": "LossCommitRegression.test_actual_producer_raw_eof_query_and_reconcile_success_both_routes",
+      "obligation": "actual producer raw eof query and reconcile success both routes",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "f40b9a22814bc50aaab0270fe1d20796416d99976a72565e1a64bf999b70d9b5",
+      "id": "PY-NEW-004",
+      "lines": [
+        2415,
+        2425
+      ],
+      "method": "LossCommitRegression.test_cancellation_before_commit_cannot_admit_query_or_cleanup",
+      "obligation": "cancellation before commit cannot admit query or cleanup",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "981d317e126d4798a8de0e494ed828cd9b6abbdabe7486979415792c931f1b39",
+      "id": "PY-NEW-005",
+      "lines": [
+        2507,
+        2513
+      ],
+      "method": "LossCommitRegression.test_complete_commit_still_requires_actual_independent_eof_and_reader_success",
+      "obligation": "complete commit still requires actual independent eof and reader success",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "f8f149aacb47db4e1661b4ef2fdfbd4639246e6d439ad33035aec53ec86a3603",
+      "id": "PY-NEW-006",
+      "lines": [
+        2427,
+        2435
+      ],
+      "method": "LossCommitRegression.test_full_admitted_atomic_commit_is_irreversible_but_not_an_orphan_wait",
+      "obligation": "full admitted atomic commit is irreversible but not an orphan wait",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "014b2398ed58a4b48ee719ae523bd47f6b0b3f76eac460cf38f5cf885dc4c21a",
+      "id": "PY-NEW-007",
+      "lines": [
+        2481,
+        2488
+      ],
+      "method": "LossCommitRegression.test_nonwrite_eagain_does_not_authorize_a_commit_retry",
+      "obligation": "nonwrite eagain does not authorize a commit retry",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "06b1d9fb164dfab4cf4e4b7bdf35bc41b9abd5838f97ecbfbe542d79ace949e9",
+      "id": "PY-NEW-008",
+      "lines": [
+        2515,
+        2531
+      ],
+      "method": "LossCommitRegression.test_old_publication_mutant_falsely_passes_old_cross_owner_contract_but_not_corrected_one",
+      "obligation": "old publication mutant falsely passes old cross owner contract but not corrected one",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "29172b1433f1c7a6e05a71dbde2d50f598142d7fbead39c51a54679fa978a3aa",
+      "id": "PY-NEW-009",
+      "lines": [
+        2455,
+        2466
+      ],
+      "method": "LossCommitRegression.test_pipe_custody_actual_nonblocking_and_same_fd_atomic_capacity",
+      "obligation": "pipe custody actual nonblocking and same fd atomic capacity",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "eed624aadca54902e79b8f015e3643fdfe3dc840dbbadc6db305cf6977d326e1",
+      "id": "PY-NEW-010",
+      "lines": [
+        2490,
+        2505
+      ],
+      "method": "LossCommitRegression.test_primary_secondary_unknown_and_exit_proposal_cannot_produce_commit",
+      "obligation": "primary secondary unknown and exit proposal cannot produce commit",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "8688998a122e3504b7a3dace0f0287319e532cc79a4a524a35fb8e0402b2560d",
+      "id": "PY-NEW-011",
+      "lines": [
+        2468,
+        2479
+      ],
+      "method": "LossCommitRegression.test_provisional_and_atomic_write_errors_never_retry_or_forge_completed_bytes",
+      "obligation": "provisional and atomic write errors never retry or forge completed bytes",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "d0dfa1fd1df96274ccc5755aa379864ad02fd4c607767503f00efc43edba0add",
+      "id": "PY-NEW-012",
+      "lines": [
+        2447,
+        2453
+      ],
+      "method": "LossCommitRegression.test_sender_and_root_original_deadlines_and_independent_root_cancellation",
+      "obligation": "sender and root original deadlines and independent root cancellation",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "ca4a2e562bea434c912bee6b7f39cbce4e3a2a9eb25f96edd02d330972ad3dc3",
+      "id": "PY-NEW-013",
+      "lines": [
+        2437,
+        2445
+      ],
+      "method": "LossCommitRegression.test_zero_byte_eagain_retries_only_with_the_same_complete_commit_and_budget",
+      "obligation": "zero byte eagain retries only with the same complete commit and budget",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "691877fce11e17408f1f882fe2563f1c9589a8361dd1c8dbc8af20e28d5be7ec",
+      "id": "PY-NEW-014",
+      "lines": [
+        2809,
+        2819
+      ],
+      "method": "SelectorRegression.test_actual_pinned_control_bytes_parse_without_following_any_selected_leaf",
+      "obligation": "actual pinned control bytes parse without following any selected leaf",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "278d8099aec1e323130bb9b389618ebf4c7a2c6f5b05df75946016fd2f1fde88",
+      "id": "PY-NEW-015",
+      "lines": [
+        2842,
+        2866
+      ],
+      "method": "SelectorRegression.test_fixed_approval_reference_and_control_tampering_fails_before_any_selected_read",
+      "obligation": "fixed approval reference and control tampering fails before any selected read",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "248429f0c21e29f162ce050ee21575bd61a5ba82c3f789609c481449a0fc902f",
+      "id": "PY-NEW-016",
+      "lines": [
+        2868,
+        2923
+      ],
+      "method": "SelectorRegression.test_hash_bound_control_schema_inventory_path_index_and_identity_adversaries",
+      "obligation": "hash bound control schema inventory path index and identity adversaries",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "988daf5a963f9ac5261bf587db7aad10a61190b7075b09628525876be3bd7b31",
+      "id": "PY-NEW-017",
+      "lines": [
+        2925,
+        2950
+      ],
+      "method": "SelectorRegression.test_hash_bound_duplicate_json_keys_and_malformed_reference_rows",
+      "obligation": "hash bound duplicate json keys and malformed reference rows",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "b46250de5f25c586b726f9c9e1da1020e263d814f8cb1a6c167ab7943fb03dd5",
+      "id": "PY-NEW-018",
+      "lines": [
+        2952,
+        2982
+      ],
+      "method": "SelectorRegression.test_immutable_authority_reuses_original_rows_and_final_selector_drift_rejects_before_reads",
+      "obligation": "immutable authority reuses original rows and final selector drift rejects before reads",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "8be3e67140c33660654c743ee8c070d1f62326b6d8da9dfee4275d975697a395",
+      "id": "PY-NEW-019",
+      "lines": [
+        2984,
+        3004
+      ],
+      "method": "SelectorRegression.test_original_selected_source_index_modes_and_agents_drift_cannot_rebaseline",
+      "obligation": "original selected source index modes and agents drift cannot rebaseline",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "c09f6ecc65a65ff00eeb34f80325ad2a01e3a2aed89ed10bf34cad1da0793282",
+      "id": "PY-NEW-020",
+      "lines": [
+        3006,
+        3026
+      ],
+      "method": "SelectorRegression.test_preparation_and_final_reference_checks_keep_original_cancellation_and_cutoff",
+      "obligation": "preparation and final reference checks keep original cancellation and cutoff",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "e84e2aad0661528a67d52a17ccb9a6d772453827df610db730434c83432f376a",
+      "id": "PY-NEW-021",
+      "lines": [
+        2821,
+        2840
+      ],
+      "method": "SelectorRegression.test_real_preparation_all_reference_barrier_and_final_record_exact_scope",
+      "obligation": "real preparation all reference barrier and final record exact scope",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "311c903c301e463e83fb510b62a501210e65e1917db17a0246a3ea328d4619aa",
+      "id": "PY-NEW-022",
+      "lines": [
+        2535,
+        2562
+      ],
+      "method": "TerminalRawRegression.test_final_and_commit_serialization_cancellation_deadline_and_oversize_precede_writes",
+      "obligation": "final and commit serialization cancellation deadline and oversize precede writes",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "4a6347a5627eadfb71235b905df5c4efd4bf1884275fe9273888f3fddd926878",
+      "id": "PY-NEW-023",
+      "lines": [
+        2673,
+        2686
+      ],
+      "method": "TerminalRawRegression.test_forged_absence_or_incomplete_observation_rejects_against_actual_query_record",
+      "obligation": "forged absence or incomplete observation rejects against actual query record",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "6896dee1390a7c51dc629fb7b1b076a536abbdf1a40efc26404c45eb3a002430",
+      "id": "PY-NEW-024",
+      "lines": [
+        2573,
+        2640
+      ],
+      "method": "TerminalRawRegression.test_mutated_terminal_protocol_rejects_before_observer_or_scratch_admission",
+      "obligation": "mutated terminal protocol rejects before observer or scratch admission",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "8ea5b97678aad6b34c52cbdf7392c48022fb032926fb7fa504fc5e2825e49dbd",
+      "id": "PY-NEW-025",
+      "lines": [
+        2688,
+        2709
+      ],
+      "method": "TerminalRawRegression.test_ordinary_routes_reject_commit_and_keep_real_parent_status_contract",
+      "obligation": "ordinary routes reject commit and keep real parent status contract",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "767d14dc9ef827bec6f488314b5a6b03a02d0ca9a2e46d7e06c4fed8b01736bf",
+      "id": "PY-NEW-026",
+      "lines": [
+        2564,
+        2571
+      ],
+      "method": "TerminalRawRegression.test_partial_provisional_success_still_uses_full_single_atomic_commit",
+      "obligation": "partial provisional success still uses full single atomic commit",
+      "status": "AUTHORED_NOT_EXECUTED"
+    },
+    {
+      "bodyAstSha256": "0350de00ec92fa951428f89ce62ae9ca8e30518343505958f449bf79994a31a8",
+      "id": "PY-NEW-027",
+      "lines": [
+        2642,
+        2671
+      ],
+      "method": "TerminalRawRegression.test_valid_commit_is_not_absence_and_incorrect_actual_query_cannot_resolve_subtree",
+      "obligation": "valid commit is not absence and incorrect actual query cannot resolve subtree",
+      "status": "AUTHORED_NOT_EXECUTED"
+    }
+  ],
+  "addedPythonMethods": 27,
+  "allInheritedReferencesRetained": 26,
+  "currentPythonMethods": 93,
+  "originalPythonMethods": 66,
+  "priorOriginal24Preserved": true,
+  "pythonCurrentExecution": "NOT_EXECUTED_AT_AUTHOR_FREEZE",
+  "referenceRows": 46,
+  "retainedPython": [
+    {
+      "currentBodyAstSha256": "1ff5efb3b99567e76dd1cbc1d257eb28ef26e3cac33a3d0e6380719ba43a17dd",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        306,
+        317
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-001",
+      "method": "PureContracts.test_matrix_and_entry_argv_against_independent_literals",
+      "obligation": "matrix and entry argv against independent literals",
+      "oldLines": [
+        302,
+        313
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "5b5696a0cbbd779c4bb15996f84cabf22b7193a365773fd3ae2b1e97ac4c5537",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        319,
+        325
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-002",
+      "method": "PureContracts.test_all_fixed_route_success_structures",
+      "obligation": "all fixed route success structures",
+      "oldLines": [
+        315,
+        321
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "a057370dd4efd7822a09303176ef6a6adbf10f0c2ad4b6aaa2d147fbe5944ebf",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        327,
+        341
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-003",
+      "method": "PureContracts.test_every_route_rejects_frame_binding_and_actual_capture_substitution",
+      "obligation": "every route rejects frame binding and actual capture substitution",
+      "oldLines": [
+        323,
+        337
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "9eab3d7cc3aab226c9c1a6f3e76f9dafadd4191eaaba96add215ace608ecb809",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        343,
+        346
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-004",
+      "method": "PureContracts.test_loss_terminal_conjunction_is_not_a_footer_or_exit_claim",
+      "obligation": "loss terminal conjunction is not a footer or exit claim",
+      "oldLines": [
+        339,
+        342
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "889f433de5a3fcd9d9432fac2caa0455257ca0dce0db1bb5cec4d2b65cd3fc7a",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        348,
+        361
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-005",
+      "method": "PureContracts.test_loss_routes_reject_retained_writer_and_query_role_substitution",
+      "obligation": "loss routes reject retained writer and query role substitution",
+      "oldLines": [
+        344,
+        357
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "5e43347fa1528c29fc05cca870043c65f453d3dc5e3ceced2463fb33fd09dc67",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        363,
+        374
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-006",
+      "method": "PureContracts.test_malformed_json_duplicate_overflow_nonfinite_and_nested_unknown",
+      "obligation": "malformed json duplicate overflow nonfinite and nested unknown",
+      "oldLines": [
+        359,
+        370
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "59f7e60a4b580de0e6d16eabdd3d2ba4e32f8fa05e429681754c38227d992c61",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        376,
+        382
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-007",
+      "method": "PureContracts.test_no_fence_controls_cannot_satisfy_positive_isolation",
+      "obligation": "no fence controls cannot satisfy positive isolation",
+      "oldLines": [
+        372,
+        378
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "190a74d4a028f1371a13784e235d3e34aec5fbffa4c891621b79981c70966680",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        384,
+        396
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-008",
+      "method": "PureContracts.test_original_full_interval_count_and_byte_reserves",
+      "obligation": "original full interval count and byte reserves",
+      "oldLines": [
+        380,
+        392
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "76a72f3da68dcf45332d0807c045f417eb87f16176c9b5ddfab591a58e2beb86",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        398,
+        407
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-009",
+      "method": "PureContracts.test_ps_empty_selection_is_distinct_from_zombie_error_and_reuse",
+      "obligation": "ps empty selection is distinct from zombie error and reuse",
+      "oldLines": [
+        394,
+        403
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "3bf92c9fb935daa06c8c100d7f87c5e9f8526e05c654569ba9994b44561c227d",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        409,
+        419
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-010",
+      "method": "PureContracts.test_frame_sequence_wrong_nonce_and_incomplete_eof",
+      "obligation": "frame sequence wrong nonce and incomplete eof",
+      "oldLines": [
+        405,
+        415
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "f7f4322a0386d06e31b1087dfa48ce1ac24212efdb08a57ef8b8ac611270583b",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        421,
+        434
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-011",
+      "method": "PureContracts.test_child_wait_and_full_entire_terminal_types_fail_closed",
+      "obligation": "child wait and full entire terminal types fail closed",
+      "oldLines": [
+        417,
+        430
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "57488f10defa347a8b81b895e83316769e3032db7265cfabbe821dc8ef87010a",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        436,
+        449
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-012",
+      "method": "PureContracts.test_wrong_script_or_policy_hash_rejected_before_any_native",
+      "obligation": "wrong script or policy hash rejected before any native",
+      "oldLines": [
+        432,
+        445
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "7a81973a783d7fef7fb63831c45af9a609c0e0cc7c106b11092f827830154eb2",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        451,
+        461
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-013",
+      "method": "PureContracts.test_independent_channel_direction_identity_and_route_mismatches",
+      "obligation": "independent channel direction identity and route mismatches",
+      "oldLines": [
+        447,
+        457
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "23dab0468b1fa8bc88817bc2b470859441dd551ef8636026f2b3c0822ff1088a",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        463,
+        473
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-014",
+      "method": "PureContracts.test_reader_overflow_is_not_eof_or_reusable_capacity",
+      "obligation": "reader overflow is not eof or reusable capacity",
+      "oldLines": [
+        459,
+        469
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "dc3281d868e006740b661b63679333fade06ad2a9f0dc325e31b3fbccc26e3fa",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        477,
+        487
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-015",
+      "method": "OwnershipDispatch.test_fixed_spawn_guards_reject_program_and_descriptor_substitution",
+      "obligation": "fixed spawn guards reject program and descriptor substitution",
+      "oldLines": [
+        473,
+        483
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "66d57c855c433e95d46798ee2a600bb39b14f24ab4474d12a782887a5a991268",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        524,
+        530
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-016",
+      "method": "OwnershipDispatch.test_real_guard_dispatch_reserves_and_revokes_before_terminal",
+      "obligation": "real guard dispatch reserves and revokes before terminal",
+      "oldLines": [
+        520,
+        526
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "4d48f15906175815b85d900859d7a47581d433d96443f338ff8f8271b3ccdd0d",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        532,
+        548
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-017",
+      "method": "OwnershipDispatch.test_reaped_unknown_unregistered_and_wrong_owners_never_dispatch",
+      "obligation": "reaped unknown unregistered and wrong owners never dispatch",
+      "oldLines": [
+        528,
+        544
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "f01bf09b9c997d107e59f2f0966e0d722dd35e2c16185a31948e377f92870cb3",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        550,
+        563
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-018",
+      "method": "OwnershipDispatch.test_query_child_and_queried_pid_cannot_swap_roles",
+      "obligation": "query child and queried pid cannot swap roles",
+      "oldLines": [
+        546,
+        559
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "611a5b6d04124c4d82467a56be16fc9b2c1426f154512c9f54052bf774843c86",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        565,
+        572
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-019",
+      "method": "OwnershipDispatch.test_external_reference_has_only_two_zero_syscalls",
+      "obligation": "external reference has only two zero syscalls",
+      "oldLines": [
+        561,
+        568
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "d232abf7ffa534fe79d823ba902336c96d2c353382ffa61156749ba92789ae63",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        576,
+        590
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-020",
+      "method": "TerminalProtocol.test_cancelled_query_uses_original_timeout_and_only_actual_query_handle",
+      "obligation": "cancelled query uses original timeout and only actual query handle",
+      "oldLines": [
+        572,
+        586
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "ef707f3f60e85bf841a668d63013e85acbe726ef60a81aa5ec968ebbd9cae843",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        592,
+        608
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-021",
+      "method": "TerminalProtocol.test_partial_query_acquisition_is_disposed_and_original_error_retained",
+      "obligation": "partial query acquisition is disposed and original error retained",
+      "oldLines": [
+        588,
+        604
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "8cc0582486b06a66c6328b178b855b71e6ba98ce3f5bde2deefc4597575430e2",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        610,
+        617
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-022",
+      "method": "TerminalProtocol.test_closefd_false_requires_actual_descriptor_close",
+      "obligation": "closefd false requires actual descriptor close",
+      "oldLines": [
+        606,
+        613
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "b9f4e39667e0ff6b6d2ba2aba044095d5c0c280f5773d02a0339dff329ebf588",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        619,
+        630
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-023",
+      "method": "TerminalProtocol.test_closefd_true_no_double_close_and_errors_retained",
+      "obligation": "closefd true no double close and errors retained",
+      "oldLines": [
+        615,
+        626
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "60b825145bb9ea4d15fba7d8cd02d8d57a908476158a17371014b8d5f830fb3c",
+      "currentBodyIdentical": false,
+      "currentLines": [
+        632,
+        643
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-024",
+      "method": "TerminalProtocol.test_final_write_failure_cannot_publish_second_frame_or_run_finalizers",
+      "obligation": "final write failure cannot publish second frame or run finalizers",
+      "oldLines": [
+        628,
+        647
+      ],
+      "original24": true,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "d6ffee3b5e71163644819c55f657a918aeeb62352f0af9d82fed029535fcf9c2",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        893,
+        908
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-025",
+      "method": "OriginalQueryWindow.test_actual_timely_observer_reconciles_with_original_route",
+      "obligation": "actual timely observer reconciles with original route",
+      "oldLines": [
+        891,
+        906
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "a3fe28a2f8b9e867a4b15780ff1566b8707be14a0fef1cddbcb06a32d4c96fb7",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        910,
+        924
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-026",
+      "method": "OriginalQueryWindow.test_late_successful_wait_and_eof_is_retained_but_never_success",
+      "obligation": "late successful wait and eof is retained but never success",
+      "oldLines": [
+        908,
+        922
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "03cb275c7d5470a8580ce86944feca9dd06d32e9386ca5f96b6607e38cd0dd9c",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        926,
+        941
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-027",
+      "method": "OriginalQueryWindow.test_late_popen_return_keeps_actual_handle_and_original_disposition",
+      "obligation": "late popen return keeps actual handle and original disposition",
+      "oldLines": [
+        924,
+        939
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "bdff2fcb0cd77e1aba1e52657f652dc79714e5e78d36115b9847bb3b15df718d",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        943,
+        958
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-028",
+      "method": "OriginalQueryWindow.test_original_early_once_and_late_kill_boundaries",
+      "obligation": "original early once and late kill boundaries",
+      "oldLines": [
+        941,
+        956
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "09f213e45c815630da7a43cdfc17f4a27ccc17b09e0b2c38884ddfcdb18865d4",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        960,
+        989
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-029",
+      "method": "OriginalQueryWindow.test_wait_cutoff_jump_and_lost_custody_veto_every_signal",
+      "obligation": "wait cutoff jump and lost custody veto every signal",
+      "oldLines": [
+        958,
+        987
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "49c588c1bc1e0438d78d19ebbcbf5effad3aa34c9510d6467adb5f737d1a1a68",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        991,
+        1003
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-030",
+      "method": "OriginalQueryWindow.test_no_returned_handle_never_acquires_wait_or_signal_custody",
+      "obligation": "no returned handle never acquires wait or signal custody",
+      "oldLines": [
+        989,
+        1001
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "812eb73eb0ca11dc5abab4ae3e37e394e82b9caef9ba765546fc2ba981456505",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1005,
+        1040
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-031",
+      "method": "OriginalQueryWindow.test_primary_and_secondary_read_select_wait_close_errors_survive",
+      "obligation": "primary and secondary read select wait close errors survive",
+      "oldLines": [
+        1003,
+        1038
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "f00ba05adf295b1b4fa5b4dcaca0cc300146e026e256bc9a94c095bccf692558",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1042,
+        1061
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-032",
+      "method": "OriginalQueryWindow.test_query_window_mutations_reject_in_full_reconciler",
+      "obligation": "query window mutations reject in full reconciler",
+      "oldLines": [
+        1040,
+        1059
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "5326c29c523d699a30b39b3b81cc3ae93b93bfd972bb866891d546ed3753363c",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1063,
+        1086
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-033",
+      "method": "OriginalQueryWindow.test_late_eof_completion_and_returned_invalid_pid_never_mint_success",
+      "obligation": "late eof completion and returned invalid pid never mint success",
+      "oldLines": [
+        1061,
+        1084
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "2abe9817e31e8cd1cba1f159923b5c45fae8fa5bfaee38a93f41b38419c14992",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1088,
+        1104
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-034",
+      "method": "OriginalQueryWindow.test_nonterminal_or_malformed_wait_is_retained_without_authority_or_serialization_failure",
+      "obligation": "nonterminal or malformed wait is retained without authority or serialization failure",
+      "oldLines": [
+        1086,
+        1102
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "9b4393cdd3981bec8c5b88dfafd52ba1d6abf3772bcc5ff0d89fc0c6a4c76e73",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1106,
+        1122
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-035",
+      "method": "OriginalQueryWindow.test_capture_setup_failure_prohibits_later_registry_acquisition",
+      "obligation": "capture setup failure prohibits later registry acquisition",
+      "oldLines": [
+        1104,
+        1120
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "6307087de038af5d419c7ee26783cd5e09372bab14c855ac5edfaccd3f5aa222",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1134,
+        1149
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-036",
+      "method": "DispatchCheckpoints.test_actual_registry_spends_attempt_but_rejects_post_emit_dispatch",
+      "obligation": "actual registry spends attempt but rejects post emit dispatch",
+      "oldLines": [
+        1132,
+        1147
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "909d0e24a1a9a5900897392c453aa6456980d03c0b0f73f837c4398f7a8fe73b",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1151,
+        1166
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-037",
+      "method": "DispatchCheckpoints.test_both_external_zero_probes_observe_separate_current_checkpoints",
+      "obligation": "both external zero probes observe separate current checkpoints",
+      "oldLines": [
+        1149,
+        1164
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "ec78e4a926bb3caf8717d440c5a0adb4e121ce1fb476ead319df008c5844f9e1",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1168,
+        1180
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-038",
+      "method": "DispatchCheckpoints.test_work_write_rechecks_after_backpressured_select",
+      "obligation": "work write rechecks after backpressured select",
+      "oldLines": [
+        1166,
+        1178
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "88f07deb5b5707b01dc3676198053adcd1d7a86f9c14157ffb3897d31db72776",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1182,
+        1197
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-039",
+      "method": "DispatchCheckpoints.test_disposition_write_is_not_work_and_never_renews_endpoint",
+      "obligation": "disposition write is not work and never renews endpoint",
+      "oldLines": [
+        1180,
+        1195
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "50e7be7d7de79781569225cba471e2255286c6e6cb54059114170df55b94ee49",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1199,
+        1216
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-040",
+      "method": "DispatchCheckpoints.test_ordinary_signal_rechecks_cancel_time_control_after_actual_wait",
+      "obligation": "ordinary signal rechecks cancel time control after actual wait",
+      "oldLines": [
+        1197,
+        1214
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "fe0258327e28f198fd6c78bbe77bf22998f55b4a63608b00a2b9f8ec99b276bf",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1220,
+        1237
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-041",
+      "method": "CapableEntry.test_actual_entry_preserves_buffered_commands_and_original_clock",
+      "obligation": "actual entry preserves buffered commands and original clock",
+      "oldLines": [
+        1218,
+        1235
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "1e0b539fe86e60c1601171464db20c3d833e7d1bba3f17bf2b39651f5f775887",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1239,
+        1255
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-042",
+      "method": "CapableEntry.test_script_or_policy_io_cannot_spend_free_entry_time",
+      "obligation": "script or policy io cannot spend free entry time",
+      "oldLines": [
+        1237,
+        1253
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "2d4780aba7ca01881300cf922cc516100501ffb31a2c20207b67af3635a40d1e",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1257,
+        1272
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-043",
+      "method": "CapableEntry.test_entry_forgery_semantics_reject_on_every_fixed_route",
+      "obligation": "entry forgery semantics reject on every fixed route",
+      "oldLines": [
+        1255,
+        1270
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "3c0dd5617eef0cf29cd50971e265195e8156708236f610e22d4e0250ce62eeea",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1274,
+        1293
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-044",
+      "method": "CapableEntry.test_nested_inside_entry_and_bash_claim_are_independently_reconciled",
+      "obligation": "nested inside entry and bash claim are independently reconciled",
+      "oldLines": [
+        1272,
+        1291
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "e738c88bf5ac982529ec05cee34d46fc8282147cb4e36bab0fa2f3612260ab2b",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1297,
+        1327
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-045",
+      "method": "FreshDescriptorCustody.test_each_fresh_endpoint_metadata_and_flag_fault_keeps_both_closes",
+      "obligation": "each fresh endpoint metadata and flag fault keeps both closes",
+      "oldLines": [
+        1295,
+        1325
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "f9a3ec8f4473f799c9125de54a56053ffc5dd6daa149c17d4ac9e5b3bb84835d",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1329,
+        1352
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-046",
+      "method": "FreshDescriptorCustody.test_endpoint_substitution_and_ambiguous_close_cannot_be_retried",
+      "obligation": "endpoint substitution and ambiguous close cannot be retried",
+      "oldLines": [
+        1327,
+        1350
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "e2f6dc239f298f62074a407998f4b8f1b06b7a56f2f585da05052997f7195f5b",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1354,
+        1406
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-047",
+      "method": "FreshDescriptorCustody.test_input_fstat_write_fsync_and_close_failures_retain_pending_file",
+      "obligation": "input fstat write fsync and close failures retain pending file",
+      "oldLines": [
+        1352,
+        1404
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "f745db76679aa34ad87e4ac4388c08dad417bc6ee2216ee8e627c2e97e994665",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1408,
+        1416
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-048",
+      "method": "FreshDescriptorCustody.test_child_stream_identity_substitution_cannot_close_replacement",
+      "obligation": "child stream identity substitution cannot close replacement",
+      "oldLines": [
+        1406,
+        1414
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "0a772b4d5ce377e3db94464a94bbfeb5e579aeda2187253ea69bfdf18d7ad875",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1420,
+        1451
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-049",
+      "method": "IndependentSubtreeProof.test_actual_cleanup_requires_genuine_complete_independent_eof",
+      "obligation": "actual cleanup requires genuine complete independent eof",
+      "oldLines": [
+        1418,
+        1449
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "1514a0b39e6902010f29bd81f5cdc50de643cc861e169abca8f0bd54aabf7582",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1453,
+        1463
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-050",
+      "method": "IndependentSubtreeProof.test_direct_children_reaped_never_erases_unknown_subtree",
+      "obligation": "direct children reaped never erases unknown subtree",
+      "oldLines": [
+        1451,
+        1461
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "689273d3136f2119a95bf9a8236d2b1e861dbbdab62029295c9e2e2ee6c2ca6d",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1476,
+        1512
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-051",
+      "method": "IndependentSubtreeProof.test_malicious_complete_capture_rejected_before_any_query",
+      "obligation": "malicious complete capture rejected before any query",
+      "oldLines": [
+        1474,
+        1510
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "0e46832d92905aedc3ce4bd25db475fde277428a77f09fa27b35f6adc1d07eed",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1514,
+        1526
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-052",
+      "method": "IndependentSubtreeProof.test_complete_preproof_admits_first_observer_without_circular_absence",
+      "obligation": "complete preproof admits first observer without circular absence",
+      "oldLines": [
+        1512,
+        1524
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "b2bb19880be413cc6455273afec4f0889745c37160e80494a1388d1e7f842a97",
+      "currentBodyIdentical": false,
+      "currentLines": [
+        1671,
+        1692
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-053",
+      "method": "TerminalFinalization.test_preparation_binds_reference_inventory_to_independent_code_decision",
+      "obligation": "preparation binds reference inventory to independent code decision",
+      "oldLines": [
+        1560,
+        1592
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "ea1e00cb140c4c29893c0c12a66068a10108faab4e370500df68e86099eacea6",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1694,
+        1722
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-054",
+      "method": "TerminalFinalization.test_actual_row_run_rechecks_after_reconciliation_and_channel_finalization",
+      "obligation": "actual row run rechecks after reconciliation and channel finalization",
+      "oldLines": [
+        1594,
+        1622
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "924078b4703851fd92c17b5b280b08152decd8be50371c6ca9543910c75b24e5",
+      "currentBodyIdentical": false,
+      "currentLines": [
+        1733,
+        1758
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-055",
+      "method": "TerminalFinalization.test_actual_controller_run_rechecks_preservation_result_and_manifest_work",
+      "obligation": "actual controller run rechecks preservation result and manifest work",
+      "oldLines": [
+        1630,
+        1652
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "ab0a09f3be5ef91aa2137fa2f07a213efb983ee1b8efcd97151b9b1242dd02c9",
+      "currentBodyIdentical": false,
+      "currentLines": [
+        1760,
+        1774
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-056",
+      "method": "TerminalFinalization.test_controller_first_error_survives_two_final_write_errors",
+      "obligation": "controller first error survives two final write errors",
+      "oldLines": [
+        1654,
+        1666
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "7d9f7a80acb4a196b44926dbeab5e585b0afcbeae5ac3ce96c2813e816bbab05",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1776,
+        1810
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-057",
+      "method": "TerminalFinalization.test_actual_evidence_write_retains_partial_and_independent_close_errors",
+      "obligation": "actual evidence write retains partial and independent close errors",
+      "oldLines": [
+        1668,
+        1702
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "d367d5266d0bea39f9c0ebc23346d8cd054219ef3684080925c443333345e059",
+      "currentBodyIdentical": false,
+      "currentLines": [
+        1812,
+        1845
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-058",
+      "method": "TerminalFinalization.test_actual_main_returns_failure_after_terminal_output_and_restoration",
+      "obligation": "actual main returns failure after terminal output and restoration",
+      "oldLines": [
+        1704,
+        1737
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "e015436b25eccf67692ad8c34d795e2b14c245675f633df6eb3319576ac00535",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1847,
+        1864
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-059",
+      "method": "TerminalFinalization.test_owned_handler_restorations_are_independent_and_do_not_overwrite_foreign",
+      "obligation": "owned handler restorations are independent and do not overwrite foreign",
+      "oldLines": [
+        1739,
+        1756
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "e8d01e830fffb29bed0b8ebee1baa4649c4a0bae688f0836b78beb5b228e681c",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1866,
+        1904
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-060",
+      "method": "TerminalFinalization.test_actual_scratch_preservation_failure_cannot_delete_remaining_inputs",
+      "obligation": "actual scratch preservation failure cannot delete remaining inputs",
+      "oldLines": [
+        1758,
+        1796
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "7811a4502bb3256ed8440877f064d392266b40a5fcf8c9baeaa69da953750706",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1906,
+        1923
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-061",
+      "method": "TerminalFinalization.test_scratch_disposition_receipt_failure_stops_later_rows",
+      "obligation": "scratch disposition receipt failure stops later rows",
+      "oldLines": [
+        1798,
+        1815
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "dc65a87127159286e21c68d2d850a9c13076b95d887ea53d1f62dcac5f7c6005",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        1995,
+        2011
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-062",
+      "method": "WorkerTerminalGates.test_actual_sender_main_final_output_and_completion_cannot_publish_success",
+      "obligation": "actual sender main final output and completion cannot publish success",
+      "oldLines": [
+        1887,
+        1903
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "49d0b018a8b0bc84b74ecf0097fb610b673c46cce26737842c1c12f5caf3f6a9",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        2013,
+        2028
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-063",
+      "method": "WorkerTerminalGates.test_marker_io_and_second_probe_cannot_admit_later_work",
+      "obligation": "marker io and second probe cannot admit later work",
+      "oldLines": [
+        1905,
+        1920
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "a186ce9d0f172b312a9546de2c54c2f27a0373acacad91c0341bf13ea3c0d731",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        2030,
+        2058
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-064",
+      "method": "WorkerTerminalGates.test_actual_python_relay_main_finalization_with_real_cleanup_methods",
+      "obligation": "actual python relay main finalization with real cleanup methods",
+      "oldLines": [
+        1922,
+        1950
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "e614c7b2f3260d7faf9b6a5ca43da7b87d88cdb3ce48147a059a47beb820dc53",
+      "currentBodyIdentical": true,
+      "currentLines": [
+        2060,
+        2095
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-065",
+      "method": "WorkerTerminalGates.test_actual_canary_main_end_and_handler_finalization",
+      "obligation": "actual canary main end and handler finalization",
+      "oldLines": [
+        1952,
+        1987
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    },
+    {
+      "currentBodyAstSha256": "04df3fa2f1e8da31d98e433fcb3958478526a5284f29254340f5440b4cf53ebe",
+      "currentBodyIdentical": false,
+      "currentLines": [
+        2097,
+        2106
+      ],
+      "fixtureCaveat": "Shared loss frames now require actual commitment; selector finalization uses real immutable authority. Historical pass is not transferred.",
+      "id": "PY-OLD-066",
+      "method": "WorkerTerminalGates.test_loss_terminal_gate_failure_retains_one_frame_and_failure_only_exit",
+      "obligation": "loss terminal gate failure retains one frame and failure only exit",
+      "oldLines": [
+        1989,
+        2007
+      ],
+      "original24": false,
+      "status": "CURRENT_SOURCE_OBLIGATION_PRESENT_EXECUTION_PENDING"
+    }
+  ],
+  "rubyActualOuter": {
+    "bytes": 267,
+    "mode": 384,
+    "sha256": "ea3fd481a94a34b66bb8f40d81e3ff7b380cd4d7028bae0ff8dedfb0b52217f5"
+  },
+  "rubyCaseAuthority": {
+    "bytes": 13911,
+    "mode": 420,
+    "sha256": "4e9c610e319e7fe450fbdc1d21d8d8bdfbfc80746c3e9dc232d894ce542a66b7"
+  },
+  "rubyCases": [
+    {
+      "driverLines": "210-228",
+      "name": "dispatch-after-charge/ruby-spawn/cancel",
+      "number": 1,
+      "obligation": "Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "210-228",
+      "name": "dispatch-after-charge/ruby-spawn/expired",
+      "number": 2,
+      "obligation": "Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "210-228",
+      "name": "dispatch-after-charge/ruby-spawn/eof",
+      "number": 3,
+      "obligation": "Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "210-228",
+      "name": "dispatch-after-charge/ruby-fork-exec/cancel",
+      "number": 4,
+      "obligation": "Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "210-228",
+      "name": "dispatch-after-charge/ruby-fork-exec/expired",
+      "number": 5,
+      "obligation": "Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "210-228",
+      "name": "dispatch-after-charge/ruby-fork-exec/eof",
+      "number": 6,
+      "obligation": "Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "210-228",
+      "name": "dispatch-after-charge/ruby-open3/cancel",
+      "number": 7,
+      "obligation": "Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "210-228",
+      "name": "dispatch-after-charge/ruby-open3/expired",
+      "number": 8,
+      "obligation": "Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "210-228",
+      "name": "dispatch-after-charge/ruby-open3/eof",
+      "number": 9,
+      "obligation": "Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "210-228",
+      "name": "dispatch-after-charge/parent-exit/cancel",
+      "number": 10,
+      "obligation": "Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "210-228",
+      "name": "dispatch-after-charge/parent-exit/expired",
+      "number": 11,
+      "obligation": "Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "210-228",
+      "name": "dispatch-after-charge/parent-exit/eof",
+      "number": 12,
+      "obligation": "Failure retains the attempt charge; no fictional spawn/wait/own-exit is admitted; every acquired fake endpoint closes once.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "230-251",
+      "name": "temporary-close-before-published-writer/ruby-spawn",
+      "number": 13,
+      "obligation": "Input writer is published before a failing temporary close, closes before wait, all endpoints receive one close, original error survives, ambiguous custody selects fictional own exit72.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "230-251",
+      "name": "temporary-close-before-published-writer/ruby-fork-exec",
+      "number": 14,
+      "obligation": "Input writer is published before a failing temporary close, closes before wait, all endpoints receive one close, original error survives, ambiguous custody selects fictional own exit72.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "253-268",
+      "name": "fresh-pipe-publication/0/stat_error",
+      "number": 15,
+      "obligation": "Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "253-268",
+      "name": "fresh-pipe-publication/0/flag_error",
+      "number": 16,
+      "obligation": "Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "253-268",
+      "name": "fresh-pipe-publication/1/stat_error",
+      "number": 17,
+      "obligation": "Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "253-268",
+      "name": "fresh-pipe-publication/1/flag_error",
+      "number": 18,
+      "obligation": "Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "253-268",
+      "name": "fresh-pipe-publication/2/stat_error",
+      "number": 19,
+      "obligation": "Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "253-268",
+      "name": "fresh-pipe-publication/2/flag_error",
+      "number": 20,
+      "obligation": "Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "253-268",
+      "name": "fresh-pipe-publication/3/stat_error",
+      "number": 21,
+      "obligation": "Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "253-268",
+      "name": "fresh-pipe-publication/3/flag_error",
+      "number": 22,
+      "obligation": "Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "253-268",
+      "name": "fresh-pipe-publication/4/stat_error",
+      "number": 23,
+      "obligation": "Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "253-268",
+      "name": "fresh-pipe-publication/4/flag_error",
+      "number": 24,
+      "obligation": "Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "253-268",
+      "name": "fresh-pipe-publication/5/stat_error",
+      "number": 25,
+      "obligation": "Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "253-268",
+      "name": "fresh-pipe-publication/5/flag_error",
+      "number": 26,
+      "obligation": "Both fresh endpoints are retained before either metadata operation; only already-returned pairs close once; no acquisition/wait after metadata failure.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "270-285",
+      "name": "backpressured-work-write/cancel",
+      "number": 27,
+      "obligation": "Changed owner state after fictional select rejects before the first output write.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "270-285",
+      "name": "backpressured-work-write/expired",
+      "number": 28,
+      "obligation": "Changed owner state after fictional select rejects before the first output write.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "270-285",
+      "name": "backpressured-work-write/eof",
+      "number": 29,
+      "obligation": "Changed owner state after fictional select rejects before the first output write.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "287-304",
+      "name": "returned-child-stream-adoption/2",
+      "number": 30,
+      "obligation": "Actual method custody survives first/second stream adoption failure; fictional writer closes before the one fake wait; all six endpoints close independently; primary error is retained.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "287-304",
+      "name": "returned-child-stream-adoption/4",
+      "number": 31,
+      "obligation": "Actual method custody survives first/second stream adoption failure; fictional writer closes before the one fake wait; all six endpoints close independently; primary error is retained.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "306-327",
+      "name": "substituted-descriptor-veto-and-no-retry",
+      "number": 32,
+      "obligation": "Substituted fictional identity is never closed, a second close is vetoed, and later pipe acquisition is forbidden.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "329-344",
+      "name": "disposition-write-is-not-new-work",
+      "number": 33,
+      "obligation": "Cancellation does not abandon owned disposition; original disposition cutoff cannot be renewed.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "346-367",
+      "name": "fork-exec-frame-post-emission/cancel",
+      "number": 34,
+      "obligation": "Direct real method with fake stdio/group calls rejects after exec-frame emission, returns only fictional own exit71, and retains reopened STDIN as the control object; real exec stays denied.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "346-367",
+      "name": "fork-exec-frame-post-emission/expired",
+      "number": 35,
+      "obligation": "Direct real method with fake stdio/group calls rejects after exec-frame emission, returns only fictional own exit71, and retains reopened STDIN as the control object; real exec stays denied.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "346-367",
+      "name": "fork-exec-frame-post-emission/eof",
+      "number": 36,
+      "obligation": "Direct real method with fake stdio/group calls rejects after exec-frame emission, returns only fictional own exit71, and retains reopened STDIN as the control object; real exec stays denied.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "369-384",
+      "name": "actual-run-terminal-emission/cancel",
+      "number": 37,
+      "obligation": "Late/cancelled final emission makes actual run return1; exactly one fictional acquisition and wait, no retry.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "369-384",
+      "name": "actual-run-terminal-emission/expired",
+      "number": 38,
+      "obligation": "Late/cancelled final emission makes actual run return1; exactly one fictional acquisition and wait, no retry.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "386-405",
+      "name": "independent-handler-restoration-and-terminal-failure",
+      "number": 39,
+      "obligation": "First fake restoration failure/deadline advancement cannot skip TERM restoration; actual return fails and retains the initial restoration error.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    },
+    {
+      "driverLines": "407-423",
+      "name": "capable-entry-and-buffered-phase-command",
+      "number": 40,
+      "obligation": "Admission records fictional identity/original time without consuming a buffered command; original work-cutoff expiry rejects.",
+      "outerChunk": "6c0ee0",
+      "status": "ROOT_EXECUTED_RUBY002_PASS_PURE_ONLY"
+    }
+  ],
+  "runtimeFiles": 9,
+  "schemaVersion": 1,
+  "scope": "Exact R3-R4 authoring obligations, not product coverage or native verification"
+}

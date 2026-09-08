@@ -1,0 +1,455 @@
+"""Finite R4-R2 file-only controls. Never native/Store/product acceptance.
+
+The audit hook is installed before importing current helpers. A forbidden child,
+network or signal attempt fails the entire run; expected action rejections must
+happen before such attempts. Fresh fixture bytes/results are retained.
+"""
+from pathlib import Path
+import copy
+import hashlib
+import importlib.util
+import json
+import os
+import signal
+import stat
+import sys
+import traceback
+from unittest.mock import patch
+
+BASE = Path(__file__).absolute().parent
+assert len(sys.argv) in (1, 3), 'usage: pure-regressions.py [PREPARED_HELPERS OUTPUT_PARENT]'
+HELPERS = Path(sys.argv[1]).absolute() if len(sys.argv) == 3 else BASE.parent/'verification-final-r1'
+OUTPUT = Path(sys.argv[2]).absolute() if len(sys.argv) == 3 else BASE
+assert HELPERS.resolve() == HELPERS and OUTPUT.resolve() == OUTPUT and OUTPUT.is_dir()
+ROOT = OUTPUT/('pure-run-'+os.urandom(12).hex())
+ROOT.mkdir(mode=0o700)
+ATTEMPTS = []
+
+
+def audit(event, args):
+    if event in {'subprocess.Popen', 'os.system', 'os.posix_spawn', 'os.fork', 'os.forkpty', 'os.exec',
+                 'os.kill', 'os.killpg', 'socket.connect', 'socket.connect_ex', 'socket.bind', 'socket.getaddrinfo'}:
+        ATTEMPTS.append(event)
+        raise RuntimeError('DENIED file-only proof: '+event)
+
+
+sys.addaudithook(audit)
+import stat
+
+def helper_namespace(root, *, ctx=None):
+    """Metadata-only admission before sibling imports; never open cache bytes.
+
+    The initial script/stdlib are runner TCB. This closes incidental helper
+    import candidates, not arbitrary same-user/whole-host interference.
+    """
+    def check(value=True, message='helper namespace'):
+        if ctx is not None:
+            ctx.require(value, message)
+        elif not value:
+            raise RuntimeError(message)
+    root = Path(root)
+    check(root.is_absolute() and str(root) == os.path.normpath(root) and len(root.parts) <= 64,
+          'noncanonical helper import root')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open('/', flags)
+    try:
+        for part in root.parts[1:]:
+            check()
+            new = os.open(part, flags, dir_fd=fd)
+            old, fd = fd, new
+            os.close(old)
+        original = os.fstat(fd)
+        check(original.st_uid == os.getuid() and not original.st_mode & 0o022,
+              'foreign/writable helper namespace')
+        known = set(['action_io.py', 'bindings.py', 'cleanup-build.py', 'cleanup-wheel.py', 'evidence_schemas.py', 'freeze.py', 'frozen_diff.py', 'gate_list.py', 'git_readonly.py', 'native_reader.py', 'observe-owned-workers.py', 'owned_outputs.py', 'prepare-build.py', 'probe-jdk21-signing.py', 'process_gate.py', 'result_protocols.py', 'run-once.sh', 'source_inventory.py', 'verify-all.py', 'verify-frozen-diff.py', 'verify-pins.py', 'verify-process-gate.py', 'verify-result-protocols.py', 'wheel-smoke.sh'])
+        found, count = set(), 0
+        with os.scandir(fd) as iterator:
+            while True:
+                # Reserve the enumeration operation before advancing; even an
+                # EOF probe consumes this finite namespace-admission budget.
+                check(count < 4096, 'helper namespace enumeration cap')
+                count += 1
+                if ctx is not None:
+                    ctx.charge('visited', 1)
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    break
+                name = item.name
+                check(len(os.fsencode(name)) <= 255, 'helper namespace component cap')
+                before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                check(name != '__pycache__' and not name.endswith(('.pyc', '.pyo', '.pyd', '.so', '.pth')),
+                      'unapproved helper bytecode/startup/cache name; payload not read')
+                if name in known:
+                    check(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+                          and before.st_uid == os.getuid() and not before.st_mode & 0o022,
+                          'helper replaced, symlinked, hardlinked or writable')
+                    found.add(name)
+                else:
+                    check(not name.endswith(('.py', '.sh')), 'unknown helper/import source name')
+                    if (stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode)) and name.isidentifier():
+                        check(name == 'wheels' and stat.S_ISDIR(before.st_mode)
+                              and before.st_uid == os.getuid() and stat.S_IMODE(before.st_mode) == 0o700,
+                              'unapproved helper import directory; contents not read')
+                        child = os.open(name, flags, dir_fd=fd)
+                        try:
+                            check(os.fstat(child) == before, 'wheel-data directory replaced')
+                            names = []
+                            with os.scandir(child) as entries:
+                                for entry in entries:
+                                    check(not names, 'unknown wheel-data sibling; payload not read')
+                                    names.append(entry.name)
+                                    check(entry.name == 'mobile_release_kit-0.3.0-py3-none-any.whl',
+                                          'unexpected wheel-data name; payload not read')
+                                    row = os.stat(entry.name, dir_fd=child, follow_symlinks=False)
+                                    check(stat.S_ISREG(row.st_mode) and row.st_nlink == 1 and row.st_uid == os.getuid(),
+                                          'untrusted wheel-data type; payload not read')
+                        finally:
+                            os.close(child)
+                check(os.stat(name, dir_fd=fd, follow_symlinks=False) == before, 'helper namespace entry changed')
+        check(found == known, 'missing reviewed helper')
+        current = os.fstat(fd)
+        check((current.st_dev, current.st_ino, current.st_uid, current.st_mode, current.st_mtime_ns, current.st_ctime_ns) ==
+              (original.st_dev, original.st_ino, original.st_uid, original.st_mode, original.st_mtime_ns, original.st_ctime_ns),
+              'helper namespace changed during admission')
+    finally:
+        os.close(fd)
+
+helper_namespace(HELPERS)
+sys.path.insert(0, str(HELPERS))
+import action_io as io
+import evidence_schemas as schema
+import source_inventory as discovery
+import process_gate as pg
+import native_reader as native
+import bindings
+import owned_outputs
+
+RESULTS = []
+
+
+def case(name, operation):
+    area = ROOT/name
+    area.mkdir(mode=0o700)
+    try:
+        value = operation(area)
+        row = {'case': name, 'status': 'PASS', 'evidence': value}
+    except BaseException as error:
+        row = {'case': name, 'status': 'FAIL', 'type': type(error).__name__, 'traceback': traceback.format_exc()}
+    RESULTS.append(row)
+    (area/'RESULT.json').write_text(json.dumps(row, sort_keys=True, indent=2)+'\n')
+    print(row['status'], name, flush=True)
+
+
+def poisoned(area, operation):
+    original = None
+    try:
+        with io.action('same-action-caught-failure', pending=pg.Interrupted()) as ctx:
+            try:
+                operation(ctx)
+            except BaseException as error:
+                original = error
+            assert original is not None and ctx.first_error is not None, 'participating error was not latched before catch'
+            first = ctx.first_error
+            attempts = len(ATTEMPTS)
+            rejected = []
+            for name, later in [
+                ('read', lambda: io.identity(area, ctx=ctx)),
+                ('write', lambda: io.write_new(area/'FORBIDDEN.json', {}, ctx=ctx)),
+                ('native', lambda: native.run(['/never-execute-file-only-proof'], cwd=area, environment={}, ctx=ctx)),
+                ('query', lambda: pg.numeric_snapshot(ctx=ctx)),
+                ('delete', lambda: io.delete_inventory({}, {}, ctx=ctx)),
+            ]:
+                try:
+                    later()
+                except io.ActionFailure:
+                    rejected.append(name)
+                else:
+                    raise AssertionError('failed action permitted '+name)
+            assert len(ATTEMPTS) == attempts and ctx.first_error is first and not (area/'FORBIDDEN.json').exists()
+    except io.ActionFailure:
+        assert original is not None
+    assert ctx.state == 'closed' and len(ctx.secondary_errors) <= 16
+    return {'firstError': type(ctx.first_error).__name__, 'allLaterOperationsDenied': rejected,
+            'counts': ctx.counts, 'failure': ctx.failure, 'closed': True, 'nativeAttempts': 0}
+
+
+def io_fault(area, variant):
+    value = area/'value'
+    value.write_bytes(b'\xff' if variant == 'decode' else b'owned fixture')
+    if variant == 'decode':
+        return poisoned(area, lambda ctx: io.bounded_text(value, ctx=ctx))
+    if variant == 'identity-missing':
+        return poisoned(area, lambda ctx: io.identity(area/'missing', ctx=ctx))
+    if variant == 'read-missing':
+        return poisoned(area, lambda ctx: io.read_file(area/'missing', ctx=ctx))
+    if variant == 'generator-throw':
+        def operation(ctx):
+            with io.directory(area, ctx=ctx):
+                raise OSError('injected generator body failure')
+        return poisoned(area, operation)
+    if variant == 'generator-close':
+        def operation(ctx):
+            @io.participating_generator
+            def generator(*, ctx):
+                yield 'real entry'
+            actual = generator(ctx=ctx)
+            assert next(actual) == 'real entry'
+            actual.close()
+            ctx.check()
+        return poisoned(area, operation)
+    real_open, real_close, real_scan = os.open, os.close, os.scandir
+    opened, closed = [], []
+    hit = False
+    def op(path, *args, **kwargs):
+        nonlocal hit
+        if variant == 'open' and Path(path).name == 'value':
+            hit = True
+            raise OSError('injected descriptor open failure')
+        fd = real_open(path, *args, **kwargs)
+        opened.append(fd)
+        return fd
+    def cl(fd):
+        nonlocal hit
+        real_close(fd)
+        closed.append(fd)
+        if variant == 'close' and not hit:
+            hit = True
+            raise OSError('injected close failure after actual disposition')
+    def scan(fd):
+        iterator = real_scan(fd)
+        class Failing:
+            def __iter__(self):
+                return self
+            def __next__(self):
+                nonlocal hit
+                entry = next(iterator)
+                hit = True
+                raise OSError('injected scandir iteration failure')
+            def close(self):
+                iterator.close()
+        return Failing()
+    def fail(*args, **kwargs):
+        nonlocal hit
+        hit = True
+        raise OSError('injected '+variant+' failure')
+    function = (lambda ctx: io.names(area, ctx=ctx)) if variant == 'iteration' else \
+               (lambda ctx: io.write_new(area/'new.json', {'x': 1}, ctx=ctx)) if variant in {'write', 'fsync'} else \
+               (lambda ctx: io.replace_ledger(area/'pending', area/'ledger', {'x': 1}, ctx=ctx)) if variant == 'rename' else \
+               (lambda ctx: io.read_file(value, ctx=ctx))
+    with patch.object(os, 'open', op), patch.object(os, 'close', cl):
+        replacement = patch.object(os, 'scandir', scan) if variant == 'iteration' else \
+                      patch.object(os, {'read': 'read', 'write': 'write', 'fsync': 'fsync', 'rename': 'replace'}[variant], fail) if variant in {'read', 'write', 'fsync', 'rename'} else patch.object(os, 'open', op)
+        with replacement:
+            result = poisoned(area, function)
+    assert hit and sorted(opened) == sorted(closed), (opened, closed)
+    return {**result, 'everyAcquiredDescriptorClosed': True, 'descriptorCount': len(opened)}
+
+
+def normal_absence(area):
+    with io.action('intentional-absence', pending=pg.Interrupted()) as ctx:
+        assert not io.exists(area/'missing', ctx=ctx)
+        assert not io.exists(area/'missing'/'nested', ctx=ctx)
+        io.write_new(area/'allowed.json', {'ordinary': True}, ctx=ctx)
+        assert ctx.failure is None
+    try:
+        io.read_json(area/'allowed.json', ctx=ctx)
+    except io.ActionFailure:
+        pass
+    else:
+        raise AssertionError('closed success context revived')
+    return {'absenceIsNormal': True, 'closedContextDenied': True}
+
+
+def restoration(area):
+    calls, restored = [], []
+    prior = {signal.SIGINT: 'original-int', signal.SIGTERM: 'original-term'}
+    def change(number, handler):
+        calls.append(number)
+        if isinstance(handler, pg.Interrupted):
+            return prior[number]
+        restored.append(number)
+        if number == signal.SIGTERM:
+            raise OSError('injected first restore failure')
+    actual = None
+    with patch.object(signal, 'signal', change):
+        try:
+            with io.action('handler-restoration') as actual:
+                io.write_new(area/'before-restore.json', {'fixture': True}, ctx=actual)
+        except OSError:
+            pass
+        else:
+            raise AssertionError('restoration error accepted')
+    assert actual.state == 'closed' and actual.failure is not None and restored == [signal.SIGTERM, signal.SIGINT]
+    return {'bothRestoresAttempted': True, 'authorityRevoked': True, 'actualSignalCalls': 0}
+
+
+def sample_gate():
+    query = {'ownership': 'reaped', 'pid': 54321, 'exitCode': 0, 'stopSignalSent': False, 'status': 'PARSED',
+             'command': list(pg.DEFAULT_PS_COMMAND), 'bytes': 10, 'scope': pg.GROUP_SCOPE, 'seconds': 0.01,
+             'stdoutSha256': hashlib.sha256(b'1 0 1 0 Z\n').hexdigest(), 'stderrSha256': hashlib.sha256(b'').hexdigest(),
+             'started': 100.0, 'cutoff': 102.0, 'secondsLimit': 2.0, 'byteLimit': pg.PS_BYTES, 'rowCount': 1}
+    group = {'status': 'CLEAR', 'scope': pg.GROUP_SCOPE, 'observations': [{'query': query, 'status': 'CLEAR', 'matches': []}],
+             'signalsAuthorized': False, 'started': 100.0, 'cutoff': 103.0, 'secondsLimit': 3.0}
+    return {'status': 'PASS', 'command': ['/schema-fixture-only'], 'cwd': str(ROOT), 'ownership': 'reaped', 'uid': os.getuid(),
+            'pid': 54320, 'exitCode': 0, 'stopSignalSent': False, 'timedOut': False, 'cancelSignal': None,
+            'workSecondsLimit': 900, 'groupSecondsLimit': 3.0, 'groupProof': group, 'seconds': 0.5,
+            'gate': 'schema-fixture', 'protocol': 'command', 'log': 'final-schema-fixture.log', 'logSha256': '0'*64,
+            'protocolResult': {'protocol': 'command', 'status': 'PASS'},
+            'output': {'stream':'stdout+stderr','byteLimit':pg.COMBINED_BYTES,'observedBytes':0,'retainedBytes':0,
+                       'sha256':'0'*64,'overflow':False,'digestComplete':True,'eof':True,'completeWrites':True,'pipeClosed':True,
+                       'selectorClosed':True,'logClosed':True,'logSynced':True,'parentClosed':True,
+                       'freeFloorBytes':pg.FREE_FLOOR,'dispatchHeadroomBytes':pg.DISPATCH_HEADROOM,
+                       'diskChecks':2,'minimumFreeBytes':pg.FREE_FLOOR+pg.DISPATCH_HEADROOM,
+                       'acquisitionFreeBytes':pg.FREE_FLOOR+pg.DISPATCH_HEADROOM}}
+
+
+def malformed(area, path, bad):
+    value = sample_gate()
+    node = value
+    for key in path[:-1]:
+        node = node[key]
+    if bad == '__DELETE__':
+        del node[path[-1]]
+    else:
+        node[path[-1]] = bad
+    return poisoned(area, lambda ctx: schema.completed_gate(value, ctx=ctx))
+
+
+def source_case(area, variant):
+    root, neighbor = area/'source', area/'neighbor'
+    root.mkdir(); neighbor.mkdir()
+    (root/'module.py').write_bytes(b'FIXTURE = True\n')
+    (root/'.gitignore').write_bytes(b'*.secret\n')
+    logical = {p.name: {'sha256': hashlib.sha256(p.read_bytes()).hexdigest(), 'executable': False} for p in root.iterdir()}
+    accepted = {'role': 'execution', 'structuralDirectories': [], 'additionalControls': {}, 'agents': None}
+    forbidden = []
+    if variant == 'unknown-module':
+        path = root/'unknown.py'; path.write_bytes(b'NEVER READ'); forbidden.append(path)
+    elif variant == 'self-hiding-control':
+        (root/'new').mkdir(); accepted['structuralDirectories'] = ['new']
+        path = root/'new/.gitignore'; path.write_bytes(b'*\n'); forbidden.append(path)
+        (root/'new/hidden.py').write_bytes(b'NEVER READ')
+    elif variant == 'control-symlink':
+        (root/'.gitignore').unlink(); path = neighbor/'control'; path.write_bytes(b'NEVER READ'); forbidden.append(path)
+        (root/'.gitignore').symlink_to(path)
+    elif variant == 'directory-symlink':
+        path = neighbor/'payload'; path.write_bytes(b'NEVER READ'); forbidden.append(path)
+        (root/'nested').symlink_to(neighbor, target_is_directory=True)
+    elif variant in {'cache', 'nested-git', 'unknown-directory', 'bundler', 'venv', 'private'}:
+        relative = {'cache': '__pycache__', 'nested-git': 'nested/.git', 'unknown-directory': 'new',
+                    'bundler': '.bundle', 'venv': '.venv', 'private': 'release/private'}[variant]
+        target = root/relative; target.mkdir(parents=True)
+        (target/'never-read').write_bytes(b'NEVER READ')
+        forbidden.append(target/'never-read')
+        accepted['structuralDirectories'] = ['nested'] if variant == 'nested-git' else []
+    elif variant == 'preserved-cache':
+        accepted['role'] = 'preservation'
+        (root/'__pycache__').mkdir(); path = root/'__pycache__/never.pyc'; path.write_bytes(b'NEVER READ'); forbidden.append(path)
+    elif variant == 'additional-approved-control':
+        (root/'allowed').mkdir(); path = root/'allowed/.gitignore'; path.write_bytes(b'.gitignore\n')
+        accepted['structuralDirectories'] = ['allowed']
+        accepted['additionalControls']['allowed/.gitignore'] = {'bytes': path.stat().st_size, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                                                                 'mode': stat.S_IMODE(path.stat().st_mode), 'tracked': False}
+    real_open, real_close = os.open, os.close
+    descriptor_paths, reads = {}, []
+    def op(path, flags, *args, **kwargs):
+        p = Path(path)
+        actual = p if p.is_absolute() else descriptor_paths.get(kwargs.get('dir_fd'), area)/p
+        assert actual not in forbidden, 'unapproved/private payload opened'
+        reads.append(str(actual))
+        fd = real_open(path, flags, *args, **kwargs); descriptor_paths[fd] = actual
+        return fd
+    def cl(fd):
+        try:
+            return real_close(fd)
+        finally:
+            descriptor_paths.pop(fd, None)
+    positive = variant in {'positive', 'preserved-cache', 'additional-approved-control'}
+    with patch.object(os, 'open', op), patch.object(os, 'close', cl):
+        if positive:
+            with io.action('discovery-pure-positive', pending=pg.Interrupted()) as ctx:
+                value, bodies = discovery.discover(root, {n: {} for n in logical}, accepted, logical, ctx=ctx)
+            result = {'positive': True, 'universe': value, 'controlNames': sorted(bodies)}
+        else:
+            result = poisoned(area, lambda ctx: discovery.discover(root, {n: {} for n in logical}, accepted, logical, ctx=ctx))
+    assert not descriptor_paths
+    return {**result, 'forbiddenPayloads': [str(p) for p in forbidden], 'forbiddenPayloadOpens': 0}
+
+
+def excluded_tracked(area, name):
+    with io.action('tracked-exclusion-pure', pending=pg.Interrupted()) as ctx:
+        assert discovery.name_excluded(name), name
+    accepted = {'role': 'execution', 'structuralDirectories': [], 'additionalControls': {}, 'agents': None}
+    return poisoned(area, lambda ctx: discovery.discover(area, {name: {}}, accepted, {}, ctx=ctx))
+
+
+def quota(area, query):
+    def operation(ctx):
+        ctx.charge('launches', io.LIMITS['launches'])
+        if query:
+            pg.numeric_snapshot(ctx=ctx)
+        else:
+            native.run(['/never-execute-quota-proof'], cwd=area, environment={}, ctx=ctx)
+    return poisoned(area, operation)
+
+
+def main():
+    for variant in ('decode', 'identity-missing', 'read-missing', 'generator-throw', 'generator-close', 'open', 'read',
+                    'write', 'fsync', 'rename', 'close', 'iteration'):
+        case('poison-'+variant, lambda area, v=variant: io_fault(area, v))
+    case('normal-absence-closed-context', normal_absence)
+    case('restoration-revocation', restoration)
+    for index, body in enumerate((b'1e999', b'-1e999', b'NaN', b'Infinity', b'-Infinity', b'{"x":1,"x":2}', b'"\xff"')):
+        case('json-reject-'+str(index), lambda area, b=body: poisoned(area, lambda ctx: io.decode_json(b, ctx=ctx)))
+    def positives(area):
+        with io.action('exact-schema-positive', pending=pg.Interrupted()) as ctx:
+            schema.completed_gate(sample_gate(), ctx=ctx)
+            assert io.decode_json(b'[1e308,-1e308,0.0]', ctx=ctx) == [1e308, -1e308, 0.0]
+        return {'schemaOnlySyntheticRecord': True, 'notAnActualGateCompletion': True}
+    case('schema-genuine-shape-positive', positives)
+    mutations = [(('pid',), True), (('uid',), False), (('exitCode',), False), (('seconds',), float('inf')),
+                 (('seconds',), -1), (('seconds',), True), (('workSecondsLimit',), 901),
+                 (('stopSignalSent',), 0), (('timedOut',), 0), (('log',), '../foreign.log'),
+                 (('protocolResult', 'extra'), True), (('groupProof', 'signalsAuthorized'), 0),
+                 (('groupProof', 'secondsLimit'), float('nan')), (('groupProof', 'cutoff'), -1),
+                 (('groupProof', 'observations'), []), (('groupProof', 'observations', 0, 'matches'), [{'pid': True}]),
+                 (('groupProof', 'observations', 0, 'query', 'rowCount'), 0),
+                 (('groupProof', 'observations', 0, 'query', 'rowCount'), 100),
+                 (('groupProof', 'observations', 0, 'query', 'bytes'), True),
+                 (('groupProof', 'observations', 0, 'query', 'cutoff'), float('inf')),
+                 (('groupProof', 'observations', 0, 'query', 'scope'), 'wrong'),
+                 (('groupProof', 'observations', 0, 'query', 'command'), ['/unapproved']),
+                 (('groupProof', 'observations', 0, 'query', 'stdoutSha256'), 'bad'),
+                 (('groupProof', 'observations', 0, 'query', 'stderrSha256'), '1'*64),
+                 (('groupProof', 'observations', 0, 'query', 'started'), 99.0),
+                 (('groupProof', 'observations', 0, 'query', 'secondsLimit'), 0),
+                 (('groupProof', 'observations', 0, 'query', 'seconds'), 2.0),
+                 (('groupProof', 'observations', 0, 'query', 'extra'), 'unapproved'),
+                 (('groupProof', 'observations', 0, 'query', 'scope'), '__DELETE__')]
+    for index, (path, bad) in enumerate(mutations):
+        case('schema-negative-'+str(index), lambda area, p=path, b=bad: malformed(area, p, b))
+    for variant in ('positive', 'unknown-module', 'self-hiding-control', 'control-symlink', 'directory-symlink',
+                    'cache', 'nested-git', 'unknown-directory', 'bundler', 'venv', 'private', 'preserved-cache', 'additional-approved-control'):
+        case('discovery-'+variant, lambda area, v=variant: source_case(area, v))
+    excluded = [name+'/file.py' for name in discovery.CLASSIFICATION['componentDirectories']]
+    excluded += ['generated'+suffix+'/file.py' for suffix in discovery.CLASSIFICATION['directorySuffixes']]
+    excluded += ['file'+suffix for suffix in discovery.CLASSIFICATION['fileSuffixes']]
+    excluded += [name+'/file.py' for name in discovery.CLASSIFICATION['rootDirectories']]
+    excluded += discovery.CLASSIFICATION['rootFiles'] + ['.git/file.py', 'nested/.git/file.py', '.DS_Store']
+    for index, name in enumerate(excluded):
+        case('tracked-exclusion-'+str(index), lambda area, n=name: excluded_tracked(area, n))
+    case('query-budget-before-acquisition', lambda area: quota(area, True))
+    case('native-budget-before-acquisition', lambda area: quota(area, False))
+    report = {'scope': 'FILE_ONLY_REGRESSION; NO native/product/Store/implementation acceptance',
+              'counts': {state: sum(r['status'] == state for r in RESULTS) for state in ('PASS', 'FAIL')},
+              'cases': RESULTS, 'forbiddenAttempts': ATTEMPTS,
+              'helpers': {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(HELPERS.glob('*.py'))},
+              'retainedFixtureRoot': str(ROOT), 'buildOrBackgroundWorkersStarted': 0}
+    (ROOT/'RESULTS.json').write_text(json.dumps(report, sort_keys=True, indent=2)+'\n')
+    print(json.dumps({'counts': report['counts'], 'forbiddenAttempts': ATTEMPTS, 'retainedRoot': str(ROOT)}), flush=True)
+    return 1 if report['counts']['FAIL'] or ATTEMPTS else 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

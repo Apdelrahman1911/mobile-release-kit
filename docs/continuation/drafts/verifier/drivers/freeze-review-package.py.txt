@@ -1,0 +1,315 @@
+"""File-only authoring of one immutable proposed R4-R2 review package.
+
+No helper/product module is executed. AST evaluation below is restricted to
+literal finite case-registration fragments with inert callbacks; it is an
+inventory, not a proof run. A denying audit hook covers native/network/signals.
+"""
+from pathlib import Path
+from contextlib import nullcontext
+from types import SimpleNamespace
+import ast
+import difflib
+import hashlib
+import importlib.util
+import json
+import os
+import shutil
+import stat
+import sys
+
+BASE = Path(__file__).absolute().parent
+QA = BASE.parent
+HELPERS = QA/'verification-final-r1'
+PACKAGE = QA/'verifier-implementation-package-r4-r2'
+ATTEMPTS = []
+
+
+def audit(event, arguments):
+    if event in {'subprocess.Popen', 'os.system', 'os.posix_spawn', 'os.fork', 'os.forkpty', 'os.exec',
+                 'os.kill', 'os.killpg', 'socket.connect', 'socket.connect_ex', 'socket.bind', 'socket.getaddrinfo'}:
+        ATTEMPTS.append(event)
+        raise RuntimeError('DENIED package authoring: '+event)
+
+
+sys.addaudithook(audit)
+spec = importlib.util.spec_from_file_location('pure_runner_primitives', BASE/'run-finite-proofs-r4.py')
+primitive = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(primitive)  # definitions only; main/native_module are never called
+
+
+def parse(path):
+    return ast.parse(path.read_bytes(), filename=str(path))
+
+
+def assignments(tree, names):
+    return [node for node in tree.body if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id in names for target in node.targets)
+            or isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) and node.target.id in names]
+
+
+def execute_fragment(nodes, namespace):
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), 'inert-case-inventory-only', 'exec'), namespace)
+
+
+class Inventory:
+    def __init__(self, *_):
+        self.names = []
+    def case(self, name, callback):
+        assert type(name) is str and name not in self.names
+        self.names.append(name)
+    def track(self):
+        return nullcontext()
+    def __getattr__(self, name):
+        return lambda *_args, **_kwargs: None
+
+
+def case_inventory(path, mode):
+    tree, suite = parse(path), Inventory()
+    namespace = {node.name: (lambda *_a, **_k: None) for node in tree.body if isinstance(node, ast.FunctionDef)}
+    namespace.update(suite=suite, io=SimpleNamespace(LIMITS=limits), discovery=SimpleNamespace(CLASSIFICATION=classification),
+                     case=suite.case, mapping=[])
+    if mode == 'original':
+        main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+        body = next(node for node in main.body if isinstance(node, ast.Try)).body
+    elif mode in {'mapped', 'integration', 'vpg'}:
+        if mode == 'vpg':
+            names = {target.id for node in tree.body if isinstance(node, ast.Assign) for target in node.targets
+                     if isinstance(target, ast.Name) and target.id.endswith('_CASES')}
+            execute_fragment(assignments(tree, names), namespace)
+        if mode == 'mapped':
+            def mapped(old, new, callback, reason=None):
+                namespace['mapping'].append({'historicalCase': old, 'newCase': new, 'reason': reason})
+                suite.case(new, callback)
+            namespace['case'] = mapped
+        body = next(node for node in tree.body if isinstance(node, ast.Try)).body
+    else:
+        main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+        body = []
+        for node in main.body:
+            if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'report' for t in node.targets):
+                break
+            body.append(node)
+    execute_fragment(body, namespace)
+    return suite.names, namespace
+
+
+def bind(path, *, hardlinks=False, limit=4*1024**2):
+    return primitive.regular(Path(path).absolute(), hardlinks=hardlinks, limit=limit)
+
+
+def write(path, value):
+    primitive.write(path, value)
+
+
+assert sys.flags.isolated and sys.dont_write_bytecode
+assert not PACKAGE.exists() and not PACKAGE.is_symlink(), 'never overwrite/adopt a partial or frozen package'
+helper_ast = parse(HELPERS/'bindings.py')
+helper_values = {}
+execute_fragment(assignments(helper_ast, {'HELPERS', 'STATIC_RECORDS', 'TOOL_NAMES'}), helper_values)
+helper_names = sorted(helper_values['HELPERS'] | helper_values['STATIC_RECORDS'])
+assert len(helper_names) == 28
+numeric = {}
+execute_fragment(assignments(parse(HELPERS/'action_io.py'), {'KIB', 'MIB', 'CHUNK', 'LIMITS', 'ROLES'}), numeric)
+limits = numeric['LIMITS']
+classes = {}
+execute_fragment(assignments(parse(HELPERS/'source_inventory.py'), {'CLASSIFICATION'}), classes)
+classification = classes['CLASSIFICATION']
+
+commands, inventories = [], {}
+paths = {'pure-regressions': (BASE/'pure-regressions.py', 'pure'),
+         'pure-extra': (BASE/'pure-extra.py', 'pure'),
+         'original-219': (HELPERS/'verify-frozen-diff.py', 'original'),
+         'mapped-25-plus-5': (BASE/'mapped-proofs-r4.py', 'mapped'),
+         'integration-controls': (BASE/'integration-proofs-r4.py', 'integration'),
+         'vpg-pr4-additions': (BASE/'vpg-proofs-r4.py', 'vpg')}
+for name, tail, pure, expected in primitive.COMMANDS:
+    names, namespace = case_inventory(*paths[name])
+    assert len(names) == expected, (name, len(names), expected)
+    inventories[name] = {'cases': names, 'count': len(names), 'status': 'DECLARED_NOT_EXECUTED'}
+    if name == 'mapped-25-plus-5':
+        inventories[name]['historicalMapping'] = namespace['mapping']
+    if name == 'vpg-pr4-additions':
+        inventories[name]['vpg06Cases'] = namespace['PREPARE_CASES']
+    commands.append({'id': name, 'argv': ['{python}', '-I', '-B', '-u', *tail], 'pureOnly': pure,
+                     'cases': names, 'outerSeconds': 900,
+                     'resultPrefix': 'pure-extra-run-' if name == 'pure-extra' else 'pure-run-' if pure else 'verifier-proof-'})
+
+schema_tree = parse(BASE/'vpg-schema-child.txt')
+schema_namespace = {}
+execute_fragment(assignments(schema_tree, {'MUTATIONS'}), schema_namespace)
+schema_cases = [row[0] for row in schema_namespace['MUTATIONS']]
+assert len(schema_cases) == 67 and len(set(schema_cases)) == 67
+inventories['full-schema-inner'] = {'cases': ['genuine-full-predecessor-positive', *schema_cases,
+                                            'genuine-restored-predecessor-positive'], 'count': 69,
+                                  'status': 'DECLARED_NOT_EXECUTED'}
+
+baseline = json.loads((BASE/'BASELINE.json').read_text())
+preserved = [row for source in baseline['source'].values() for row in source['files'].values()] + baseline['metadata']
+for row in preserved:
+    primitive.regular(row['path'], limit=16*1024**2, expected=row)
+assert all(not (HELPERS/name).exists() and not (HELPERS/name).is_symlink() for name in baseline['realFinalAbsent'])
+for old in baseline['helpers']:
+    actual = bind(BASE/'before25'/Path(old['path']).name)
+    assert actual['sha256'] == old['sha256'] and actual['bytes'] == old['bytes']
+
+config = json.loads((HELPERS/'CONFIG.json').read_text())
+tool_paths = {str(Path(sys.executable).absolute()), config['python'], config['gitLeaf']}
+for name in helper_values['TOOL_NAMES'] - {'gitLeaf', 'python'}:
+    selected = name if name.startswith('/') else shutil.which(name, path=config['path'])
+    assert selected, ('missing static prerequisite', name)
+    tool_paths.add(selected)
+python_home = Path('/ORIGINAL_REPOSITORY/.mobile-release/remediation/MRK-002/runtime/python')
+for relative in ('lib/python3.11/ensurepip/__init__.py', 'lib/python3.11/ensurepip/__main__.py',
+                 'lib/python3.11/venv/__init__.py', 'lib/python3.11/venv/__main__.py',
+                 'lib/python3.11/ensurepip/_bundled/pip-24.0-py3-none-any.whl',
+                 'lib/python3.11/ensurepip/_bundled/setuptools-79.0.1-py3-none-any.whl'):
+    tool_paths.add(str(python_home/relative))
+prerequisites = []
+for path in sorted(tool_paths):
+    path = Path(path)
+    resolved = path.resolve(strict=True)
+    prerequisites.append({'selected': str(path), 'selectedIdentity': primitive.file_identity(path.lstat()),
+                          'resolved': str(resolved), 'file': bind(resolved, hardlinks=True, limit=512*1024**2)})
+
+driver_names = ['pure-regressions.py', 'pure-extra.py', 'mapped-proofs-r4.py', 'integration-proofs-r4.py',
+                'vpg-proofs-r4.py', 'vpg-lifecycle-child.txt', 'vpg-schema-child.txt', 'run-finite-proofs-r4.py',
+                'freeze-review-package.py']
+ast_results, reads, imports = [], [], []
+for path in [HELPERS/name for name in helper_names if name.endswith('.py')] + [BASE/name for name in driver_names]:
+    tree = parse(path)
+    ast_results.append({'path': str(path), 'sha256': bind(path)['sha256'], 'lines': len(path.read_text().splitlines())})
+    if path.parent == HELPERS:
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                imports.append({'file': path.name, 'line': node.lineno, 'text': ast.get_source_segment(path.read_text(), node)})
+            if isinstance(node, ast.Call):
+                name = node.func.id if isinstance(node.func, ast.Name) else node.func.attr if isinstance(node.func, ast.Attribute) else ''
+                if name == 'digest' and (path.name == 'evidence_schemas.py' or not node.args
+                        or isinstance(node.func, ast.Attribute) and ast.unparse(node.func.value) == 'schema'):
+                    continue
+                if name in {'digest', 'read_file', 'bounded_text', 'write_bytes_new'}:
+                    role = next((ast.unparse(item.value) for item in node.keywords if item.arg == 'role'), None)
+                    reads.append({'file': path.name, 'line': node.lineno, 'call': name, 'role': role,
+                                  'argument': ast.unparse(node.args[0]) if node.args else None})
+                    assert name != 'digest' or role is not None, ('unmigrated digest caller', path, node.lineno)
+
+core = parse(HELPERS/'verify-frozen-diff.py')
+legacy = next(node for node in ast.walk(core) if isinstance(node, ast.FunctionDef) and node.name == 'legacy_cleanup')
+generated = next(node.func.value.value for node in ast.walk(legacy) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Attribute) and node.func.attr == 'replace'
+                 and isinstance(node.func.value, ast.Constant) and isinstance(node.func.value.value, str)
+                 and node.func.value.value.startswith('import sys,os,json'))
+generated = generated.replace('@EVIDENCE@', repr('/SYNTHETIC/evidence')).replace('@VARIANT@', repr('wheel-positive')).replace('@AREA@', repr('/SYNTHETIC/area'))
+generated_ast = ast.parse(generated, filename='synthetic-producer.txt (not executed)')
+nested = next(node for node in ast.walk(generated_ast) if isinstance(node, ast.Assign)
+              and any(isinstance(target, ast.Name) and target.id == 'tests' for target in node.targets))
+nested_values = {'venv': Path('/SYNTHETIC/venv')}
+execute_fragment([nested], nested_values)
+for label, source in nested_values['tests'].items():
+    ast.parse(source, filename=label+' (not executed)')
+
+old_numeric = {}
+execute_fragment(assignments(parse(BASE/'before25/action_io.py'), {'KIB', 'MIB', 'CHUNK', 'LIMITS', 'ROLES'}), old_numeric)
+assert limits == old_numeric['LIMITS'] and numeric['ROLES'] == old_numeric['ROLES'], 'fixed verifier quotas must not change'
+package_data = ast.literal_eval(next(node.value for node in core.body if isinstance(node, ast.Assign)
+                   and any(isinstance(target, ast.Name) and target.id == 'SYNTHETIC_PACKAGE' for target in node.targets)))
+prior = ['VERIFIER-CORRECTION-PLAN-R4-R2.md', 'verifier-plan-review-r4-r2/DECISION.json',
+         'verifier-plan-review-r4-r2/PLAN-REVIEW.md', 'verifier-implementation-review-r3-r3/IMPLEMENTATION-REVIEW.md',
+         'verifier-implementation-review-r3-r3/DECISION.json',
+         'verifier-implementation-package-r3-r3/ACTUAL-SOURCE-APPLICABILITY-FAILURE.json',
+         'verification-correction-r3-r3/preparation-r14/prove-corrections-v4.py']
+prior_refs = [bind(QA/name) for name in prior]
+pure_results = {}
+for name, count in (('pure-regressions', 103), ('pure-extra', 62)):
+    last = json.loads((BASE/(name+'-r2.stdout')).read_text().splitlines()[-1])
+    result_path = Path(last['retainedRoot'])/'RESULTS.json'
+    report = json.loads(result_path.read_text())
+    assert report['counts'] == {'PASS': count, 'FAIL': 0} and report['forbiddenAttempts'] == []
+    assert (BASE/(name+'-r2.exit')).read_text() == '0\n' and (BASE/(name+'-r2.stderr')).stat().st_size == 0
+    expected_helpers = {path.name: bind(path)['sha256'] for path in HELPERS.glob('*.py')}
+    assert report['helpers'] == expected_helpers, 'pure results no longer bind current helper bytes'
+    pure_results[name] = {'counts': report['counts'], 'actualExit': 0, 'forbiddenAttempts': [],
+                          'result': bind(result_path), 'stdout': bind(BASE/(name+'-r2.stdout')),
+                          'stderr': bind(BASE/(name+'-r2.stderr')), 'exit': bind(BASE/(name+'-r2.exit')),
+                          'historicalR1Preserved': True, 'notProductGatePasses': True}
+
+PACKAGE.mkdir(mode=0o700)
+for name in ('current28', 'drivers', 'notes'):
+    (PACKAGE/name).mkdir(mode=0o700)
+for name in helper_names:
+    shutil.copy2(HELPERS/name, PACKAGE/'current28'/name)
+for name in driver_names:
+    shutil.copy2(BASE/name, PACKAGE/'drivers'/name)
+for name in ('IMPLEMENTATION.md', 'COVERAGE.md'):
+    shutil.copy2(BASE/name, PACKAGE/'notes'/name)
+
+changes = []
+for name in sorted(set(helper_names) | {Path(row['path']).name for row in baseline['helpers']}):
+    before = BASE/'before25'/name
+    after = PACKAGE/'current28'/name
+    old = before.read_text().splitlines(keepends=True) if before.is_file() else []
+    new = after.read_text().splitlines(keepends=True) if after.is_file() else []
+    if old != new:
+        changes.extend(difflib.unified_diff(old, new, fromfile='rejected-before25/'+name, tofile='proposed-current28/'+name))
+with (PACKAGE/'DIFF.patch').open('x') as stream:
+    stream.write(''.join(changes))
+write(PACKAGE/'PURE-RESULTS.json', pure_results)
+write(PACKAGE/'CASE-INVENTORY.json', {'scope': 'AST registration only; callbacks never executed', 'inventories': inventories})
+write(PACKAGE/'STATIC-AUDIT.json', {'scope': 'file-only authoring; no native/product acceptance',
+      'parsedFiles': ast_results, 'helperImports': imports, 'roleCallsites': reads,
+      'generatedProducer': {'astParsed': True, 'sha256': hashlib.sha256(generated.encode()).hexdigest(),
+                            'placeholderBindings': {'evidence': '/SYNTHETIC/evidence', 'area': '/SYNTHETIC/area', 'variant': 'wheel-positive'},
+                            'nestedUnittestSources': {k: hashlib.sha256(v.encode()).hexdigest() for k, v in nested_values['tests'].items()},
+                            'executed': False},
+      'fixedQuotasUnchanged': limits, 'syntheticPackage': {name: {'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+                                                        for name, data in package_data.items()},
+      'priorReferences': prior_refs, 'forbiddenAttempts': ATTEMPTS, 'backgroundBuildOrNativeWorkersStarted': 0})
+write(PACKAGE/'PRESERVATION.json', {'status': 'EXACT_NAMED_BINDINGS_PRESERVED_NOT_CLEAN_GIT_ASSERTION',
+      'counts': {name: len(source['files']) for name, source in baseline['source'].items()},
+      'metadataAndUserInstructions': len(baseline['metadata']), 'files': preserved,
+      'baseline': bind(BASE/'BASELINE.json'), 'uncreatedRealFinalNames': baseline['realFinalAbsent'],
+      'cachePayloadsRead': 0, 'cacheDeletionOrRelocationAuthorized': False})
+
+package_files = {}
+for path in sorted(PACKAGE.rglob('*')):
+    if path.is_file():
+        package_files[str(path.relative_to(PACKAGE))] = bind(path)
+manifest = {'schemaVersion': 1, 'status': 'FROZEN_PROPOSED_NOT_EXECUTED', 'packageRoot': str(PACKAGE),
+            'outputParent': str(QA), 'scope': 'IGNORED QA-006 R4-R2 PREPARATION ONLY; NOT FINAL OR PRODUCT ACCEPTANCE',
+            'sourceCacheExecutionApproval': False,
+            'snapshot': {'toolkitVersion': '0.3.0', 'headMain': '2beb37336fa8002b69f598fe431082606368310d',
+                         'qa006ProposedTree': '6009247f3627c9825e9ad9c790a57876e09f3726',
+                         'preservedQa003Tree': '387856e314cb3475c20509fb70f5a8c3708a87af'},
+            'python': str(Path(sys.executable).absolute()), 'toolPath': config['path'],
+            'packageFiles': package_files, 'helperNames': helper_names, 'preservationFiles': preserved,
+            'prerequisites': prerequisites, 'commands': commands,
+            'resourcePolicy': {'freeFloorBytes': 4*1024**3, 'perFixtureHeadroomBytes': 512*1024**2,
+                               'outerSecondsPerCommand': 900, 'outerCombinedLogBytes': 64*1024**2,
+                               'limits': limits, 'matrixGuaranteedToFitCurrentFreeSpace': False,
+                               'diskPolicy': 'stop later fixtures/commands below reserve/floor; no historical deletion or quota increases',
+                               'workerPolicy': 'real Popen wait/recorded-owned stop only; unknown/unresolved blocks later acquisition; no guessed PID authority',
+                               'retention': 'all failed/raw/evidence fixtures retained until separate exact ownership disposition'},
+            'nativeFamilies': {'git': 'fixed pure Git builtin argv from bound git_readonly.py; owned copied storage only',
+                               'queries': ['/bin/ps', '-axo', 'pid=,ppid=,pgid=,uid=,stat='],
+                               'python': 'bound utility/fresh owned fixture venv; exact helper programs and explicitly declared synthetic inline strings',
+                               'producer': 'exact bundled pip24.0/setuptools79.0.1; no-index/no-deps/no-build-isolation/no-compile; tiny declared source only',
+                               'toolProbes': 'only bound tool_bindings version/path queries; no Gradle/Xcode builds or native capture',
+                               'shellSyntax': [['{bound-bash}', '-n', '{prepared-helpers}/run-once.sh'],
+                                               ['{bound-bash}', '-n', '{prepared-helpers}/wheel-smoke.sh']]},
+            'denied': ['real final freeze/dispatcher', 'first-party Python/Ruby/workflow/Store/product suites',
+                       'QA-007 production capture', 'Gradle/Xcode/native signing or compilation',
+                       'dependency resolution/network', 'real Git index/ref mutation', 'historical fixture adoption/deletion',
+                       'inheritance/archive helper modification'],
+            'approval': 'separate exact independent actual-code safety decision AND approved launch required; author manifest grants neither',
+            'resultsAcceptance': 'separate independent acceptance after all actual proof results; harness rejection PASS is never product gate PASS'}
+write(PACKAGE/'FINITE-PROOFS.json', manifest)
+primitive.check_inputs(manifest, PACKAGE)
+assert not ATTEMPTS
+write(PACKAGE/'FROZEN-SNAPSHOT.json', {'status': 'FROZEN_FOR_INDEPENDENT_REVIEW_NOT_APPROVED',
+      'manifest': bind(PACKAGE/'FINITE-PROOFS.json'), 'files': package_files,
+      'nativeExecuted': False, 'finalFreezeAuthorized': False, 'implementationAccepted': False,
+      'firstPartyOrProductGatePasses': 0, 'ready': False, 'forbiddenAttempts': ATTEMPTS})
+print(json.dumps({'package': str(PACKAGE), 'manifest': bind(PACKAGE/'FINITE-PROOFS.json'),
+                  'caseCounts': {name: len(value['cases']) for name, value in inventories.items()},
+                  'pureCounts': {name: value['counts'] for name, value in pure_results.items()},
+                  'nativeExecuted': False, 'accepted': False, 'forbiddenAttempts': ATTEMPTS}, sort_keys=True))
