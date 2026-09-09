@@ -66,6 +66,8 @@ _DIAGNOSTIC_OPERATIONS = frozenset({"process-groups-linux", "kernel-groups-libra
                                     "kernel-groups-count", "kernel-groups-fill",
                                     "mac-original-credentials", "cleanup-batch",
                                     "network-tcp4", "network-udp4", "network-tcp6", "network-udp6"})
+_TOOL_DIAGNOSTIC_ROLES = frozenset({"python", "ruby", "sudo", "true", "sandbox-exec", "ps",
+                                    "compiler", "linker", "signature-tool", "unspecified"})
 
 
 def _observer_error_fields(value: object) -> dict | None:
@@ -188,6 +190,27 @@ def _launcher_error(data: bytes, python: Path, script: Path) -> dict | None:
     return None
 
 
+def _ruby_launch_error(result: CapturedRun, ruby: Path) -> dict | None:
+    """Exact fixed-launch failure diagnosis, never a substitute accepted result."""
+    if (result.returncode != 71 or result.stdout or not result.waited
+            or not result.stdout_eof or not result.stderr_eof or not result.domain_finality
+            or result.timed_out or result.cancelled or result.cleanup_errors
+            or result.primary_error != "command exited 71"
+            or result.persisted != (0, len(result.stderr))):
+        return None
+    for number, message in ((errno.EPERM, "Operation not permitted"),
+                            (errno.EACCES, "Permission denied"),
+                            (errno.ENOENT, "No such file or directory"),
+                            (errno.ENOEXEC, "Exec format error"),
+                            (errno.ENOMEM, "Cannot allocate memory"),
+                            (errno.E2BIG, "Argument list too long"),
+                            (errno.ETXTBSY, "Text file busy")):
+        expected = f"sandbox-exec: execvp() of '{ruby}' failed: {message}\n".encode()
+        if result.stderr == expected:
+            return {"operation": "sandbox-execvp", "role": "ruby", "errno": number}
+    return None  # No byte-count guess, sandbox_apply guess, or raw stderr.
+
+
 @dataclasses.dataclass(frozen=True)
 class CapturedRun:
     stdout: bytes
@@ -264,18 +287,49 @@ def _remaining(deadline: float) -> float:
     return left
 
 
+def _tool_stat_note(info, uid: int, gid: int, *, role: str) -> dict:
+    """One supplied stat observation; POSIX bits are not ACL/sandbox authority."""
+    kind = next((name for name, check in (("regular", stat.S_ISREG), ("directory", stat.S_ISDIR),
+                                         ("symlink", stat.S_ISLNK), ("fifo", stat.S_ISFIFO),
+                                         ("socket", stat.S_ISSOCK), ("character", stat.S_ISCHR),
+                                         ("block", stat.S_ISBLK)) if check(info.st_mode)), "other")
+    return {"role": role if isinstance(role, str) and role in _TOOL_DIAGNOSTIC_ROLES else "unspecified",
+            "kind": kind, "mode": format(stat.S_IMODE(info.st_mode), "04o"),
+            "root_owned": info.st_uid == 0, "subject_owned": info.st_uid == uid,
+            "subject_group": info.st_gid == gid, "setuid": bool(info.st_mode & stat.S_ISUID),
+            "setgid": bool(info.st_mode & stat.S_ISGID), "owner_execute": bool(info.st_mode & 0o100),
+            "group_execute": bool(info.st_mode & 0o010), "other_execute": bool(info.st_mode & 0o001)}
+
+
 def _admit_executable(path: Path, uid: int, gid: int, *, root_owned: bool = False,
-                      non_set_id: bool = True) -> dict:
+                      non_set_id: bool = True, role: str = "unspecified") -> dict:
     """Check a fixed provider/system executable, not a subject-selected tool."""
-    info = path.stat()
+    try:
+        info = path.stat()
+    except BaseException as exc:
+        exc._ci_observation = {"tool_stat_failure": {
+            "role": role if isinstance(role, str) and role in _TOOL_DIAGNOSTIC_ROLES else "unspecified",
+            "observed": False}}
+        raise  # Original identity, errno and cause; no replacement stat or inode.
+    note = _tool_stat_note(info, uid, gid, role=role)
+    note["failed_predicates"] = [name for name, failed in (
+        ("not-regular", not stat.S_ISREG(info.st_mode)),
+        ("no-execute-bit", not info.st_mode & 0o111),
+        ("subject-owned", info.st_uid == uid),
+        ("world-writable", bool(info.st_mode & 0o002)),
+        ("subject-group-writable", info.st_gid == gid and bool(info.st_mode & 0o020)),
+        ("root-role-not-root-owned", root_owned and info.st_uid != 0),
+        ("root-role-group-or-world-writable", root_owned and bool(info.st_mode & 0o022)),
+        ("set-id-forbidden", non_set_id and bool(info.st_mode & (stat.S_ISUID | stat.S_ISGID)))) if failed]
     if (not stat.S_ISREG(info.st_mode) or not info.st_mode & 0o111
             or info.st_uid == uid or info.st_mode & 0o002
             or info.st_gid == gid and info.st_mode & 0o020
             or root_owned and (info.st_uid != 0 or info.st_mode & 0o022)
             or non_set_id and info.st_mode & (stat.S_ISUID | stat.S_ISGID)):
-        raise SessionError("fixed executable permission/identity contract failed")
-    return {"root_owned": info.st_uid == 0, "setuid": bool(info.st_mode & stat.S_ISUID),
-            "setgid": bool(info.st_mode & stat.S_ISGID)}
+        failure = SessionError("fixed executable permission/identity contract failed")
+        failure._ci_observation = {"tool": note}
+        raise failure
+    return note
 
 
 def _small_command(argv: list[str], seconds: float = 10.0,
@@ -577,11 +631,11 @@ def _observer_toolchain(uid: int, gid: int, *, deadline: float) -> dict:
             if stat.S_ISDIR(info.st_mode):
                 pending.append(target)
     clang, linker = (_canonical((toolchain / "usr/bin" / name).resolve(strict=True)) for name in ("clang", "ld"))
-    for path in (clang, linker):
+    for role, path in (("compiler", clang), ("linker", linker)):
         if not _under(path, toolchain):
             raise SessionError("compiler/linker resolves outside selected toolchain")
-        _admit_executable(path, uid, gid, root_owned=True)
-    _admit_executable(Path("/usr/bin/codesign"), uid, gid, root_owned=True)
+        _admit_executable(path, uid, gid, root_owned=True, role=role)
+    _admit_executable(Path("/usr/bin/codesign"), uid, gid, root_owned=True, role="signature-tool")
 
     def digest(path: Path, maximum: int) -> str:
         before = checked(path)
@@ -1183,18 +1237,29 @@ class Session:
                                  deadline=self.deadline)
             if raw != b"MRK_NSS_ABSENT\n" or _domain(self.platform, self.uid, collision=True, deadline=self.deadline):
                 raise SessionError("numeric identity collision or incomplete admission")
-            tools = {"python": _admit_executable(self.python, self.uid, self.gid),
-                     "sudo": _admit_executable(Path("/usr/bin/sudo"), self.uid, self.gid,
-                                               root_owned=True, non_set_id=False),
-                     "true": _admit_executable(Path("/usr/bin/true"), self.uid, self.gid, root_owned=True)}
+            tools = {}
+            tools_note = {"name": "fixed-entry-tools", "ok": False, "tools": tools}
+            self.admission_results.append(tools_note)
+            roles = [("python", self.python, {}),
+                     ("sudo", Path("/usr/bin/sudo"), {"root_owned": True, "non_set_id": False}),
+                     ("true", Path("/usr/bin/true"), {"root_owned": True})]
             if self.platform == "darwin":
-                tools["sandbox-exec"] = _admit_executable(Path("/usr/bin/sandbox-exec"), self.uid, self.gid,
-                                                         root_owned=True)
                 # Only root's census executes this original system ps.  Record
                 # actual image metadata without presuming why sandboxed exec failed.
-                tools["ps"] = _admit_executable(Path("/bin/ps"), self.uid, self.gid,
-                                                root_owned=True, non_set_id=False)
-            self.admission_results.append({"name": "fixed-entry-tools", "ok": True, "tools": tools})
+                roles += [("sandbox-exec", Path("/usr/bin/sandbox-exec"), {"root_owned": True}),
+                          ("ps", Path("/bin/ps"), {"root_owned": True, "non_set_id": False})]
+            for role, path, options in roles:
+                try:
+                    tools[role] = _admit_executable(path, self.uid, self.gid, role=role, **options)
+                except BaseException as exc:
+                    tools_note["failed_role"] = role
+                    # Admission's own rejection carries the same successful stat,
+                    # never a replacement read or invented metadata on stat error.
+                    observation = getattr(exc, "_ci_observation", None)
+                    if isinstance(exc, SessionError) and isinstance(observation, dict) and set(observation) == {"tool"}:
+                        tools[role] = observation["tool"]
+                    raise
+            tools_note["ok"] = True
             os.chown(self.work, self.uid, self.gid)
             for name in ("home", "tmp", "config", "cache"):
                 p = self.work / name
@@ -1373,8 +1438,30 @@ class Session:
         launcher_error = _launcher_error(result.stderr, self.python, self.entry)
         if launcher_error is not None:
             row["launcher_error"] = launcher_error
+        if self.platform == "darwin" and name == "ruby-numerical-identity":
+            ruby_error = _ruby_launch_error(result, self.ruby)
+            if ruby_error is not None:
+                row["launcher_error"] = ruby_error
         self.admission_results.append(row)
         return row
+
+    def _ruby_path_metadata(self) -> None:
+        """Observe the already-canonical provider path; grant no access or launch."""
+        row = {"name": "ruby-path-metadata", "ok": False,
+               "semantics": "posix-mode-bits-only", "entries": []}
+        self.admission_results.append(row)
+        _remaining(self.deadline)
+        parents = tuple(self.ruby.parents)
+        if len(parents) > 32:
+            raise SessionError("fixed Ruby ancestor metadata exceeds bound")
+        for index, path in enumerate((self.ruby, *parents)):
+            row["unobserved_index"] = index
+            _remaining(self.deadline)
+            info = path.stat()
+            row["entries"].append({"index": index, **_tool_stat_note(info, self.uid, self.gid, role="ruby")})
+            del row["unobserved_index"]
+            _remaining(self.deadline)
+        row["ok"] = True
 
     def _preflight(self) -> None:
         listeners, addresses = [], []
@@ -1433,6 +1520,7 @@ class Session:
             os.chown(self.outside_write, 0, 0)
             self.outside_write.chmod(0o400)
             native_note["ok"] = True
+            self._ruby_path_metadata()  # Observation only; the actual probe still decides.
             ruby = self._run([str(self.ruby), "-e", f"abort unless Process.uid == {self.uid} && Process.gid == {self.gid}; puts 'MRK_RUBY_NUMERIC_OK'"],
                              cwd=self.work, env={}, seconds=10, latch=False)
             ruby_note = self._note_capture("ruby-numerical-identity", ruby)

@@ -435,60 +435,216 @@ class CISandboxPureTests(unittest.TestCase):
                 fake_signal.signal.assert_not_called()
 
         uid = gid = 60001
-        for owner, group, mode, root_owned, non_set_id, allowed in (
-            (1001, 1001, 0o755, False, True, True),  # Provider Python need not be root-owned.
-            (0, 0, 0o755, True, True, True),  # Fixed sandbox-exec/true role.
-            (uid, 0, 0o755, False, True, False), (0, gid, 0o775, False, True, False),
-            (0, 0, 0o757, False, True, False), (0, 0, 0o644, False, True, False),
-            (0, 0, 0o4755, True, True, False), (0, 0, 0o2755, False, True, False),
-            (1001, 0, 0o755, True, True, False), (0, 0, 0o775, True, True, False),
-            (0, 0, 0o4755, True, False, True),  # Negative sudo role may be set-ID.
+        for owner, group, mode, root_owned, non_set_id, kind, rejected in (
+            (1001, 1001, 0o755, False, True, stat.S_IFREG, ()),  # Provider Python need not be root-owned.
+            (0, 0, 0o755, True, True, stat.S_IFREG, ()),  # Fixed sandbox-exec/true role.
+            (uid, 0, 0o755, False, True, stat.S_IFREG, ("subject-owned",)),
+            (0, gid, 0o775, False, True, stat.S_IFREG, ("subject-group-writable",)),
+            (0, 0, 0o757, False, True, stat.S_IFREG, ("world-writable",)),
+            (0, 0, 0o644, False, True, stat.S_IFREG, ("no-execute-bit",)),
+            (0, 0, 0o4755, True, True, stat.S_IFREG, ("set-id-forbidden",)),
+            (0, 0, 0o2755, False, True, stat.S_IFREG, ("set-id-forbidden",)),
+            (1001, 0, 0o755, True, True, stat.S_IFREG, ("root-role-not-root-owned",)),
+            (0, 0, 0o775, True, True, stat.S_IFREG, ("root-role-group-or-world-writable",)),
+            (0, 0, 0o4755, True, False, stat.S_IFREG, ()),  # Negative sudo role may be set-ID.
+            (0, 0, 0o755, True, True, stat.S_IFDIR, ("not-regular",)),
+            (uid, gid, 0o6666, True, True, stat.S_IFIFO,
+             ("not-regular", "no-execute-bit", "subject-owned", "world-writable", "subject-group-writable",
+              "root-role-not-root-owned", "root-role-group-or-world-writable", "set-id-forbidden")),
         ):
-            with self.subTest(executable=(owner, group, mode, root_owned, non_set_id)), \
-                 patch.object(Path, "stat", return_value=SimpleNamespace(st_uid=owner, st_gid=group,
-                                                                          st_mode=stat.S_IFREG | mode)):
-                if allowed:
+            snapshot = SimpleNamespace(st_uid=owner, st_gid=group, st_mode=kind | mode)
+            expected = {"role": "python", "kind": {stat.S_IFREG: "regular", stat.S_IFDIR: "directory", stat.S_IFIFO: "fifo"}[kind],
+                        "mode": format(mode, "04o"), "root_owned": owner == 0, "subject_owned": owner == uid,
+                        "subject_group": group == gid, "setuid": bool(mode & stat.S_ISUID), "setgid": bool(mode & stat.S_ISGID),
+                        "owner_execute": bool(mode & 0o100), "group_execute": bool(mode & 0o010),
+                        "other_execute": bool(mode & 0o001), "failed_predicates": list(rejected)}
+            with self.subTest(executable=(owner, group, mode, root_owned, non_set_id, kind)), \
+                 patch.object(Path, "stat", side_effect=[snapshot, AssertionError("no diagnostic restat may replace the decision")]) as query:
+                if not rejected:
                     flags = self.module._admit_executable(Path("/synthetic/tool"), uid, gid,
-                                                         root_owned=root_owned, non_set_id=non_set_id)
-                    self.assertEqual(flags, {"root_owned": owner == 0, "setuid": bool(mode & stat.S_ISUID),
-                                             "setgid": bool(mode & stat.S_ISGID)})
+                                                         root_owned=root_owned, non_set_id=non_set_id, role="python")
+                    self.assertEqual(flags, expected)
                 else:
-                    with self.assertRaisesRegex(self.module.SessionError, "permission/identity contract"):
+                    with self.assertRaisesRegex(self.module.SessionError, "permission/identity contract") as caught:
                         self.module._admit_executable(Path("/synthetic/tool"), uid, gid,
-                                                     root_owned=root_owned, non_set_id=non_set_id)
+                                                     root_owned=root_owned, non_set_id=non_set_id, role="python")
+                    self.assertEqual(caught.exception._ci_observation, {"tool": expected})
+                    self.assertNotIn("/synthetic/tool", json.dumps(self.module._exception_notes(caught.exception)))
+                    self.assertNotIn(str(uid), json.dumps(caught.exception._ci_observation))
+                query.assert_called_once_with()
+
+        for kind, label in ((stat.S_IFREG, "regular"), (stat.S_IFDIR, "directory"), (stat.S_IFLNK, "symlink"),
+                            (stat.S_IFIFO, "fifo"), (stat.S_IFSOCK, "socket"), (stat.S_IFCHR, "character"),
+                            (stat.S_IFBLK, "block"), (0, "other")):
+            snapshot = SimpleNamespace(st_uid=0, st_gid=0, st_mode=kind | 0o755)
+            note = self.module._tool_stat_note(snapshot, uid, gid, role="ruby")
+            self.assertEqual((note["role"], note["kind"], note["mode"]), ("ruby", label, "0755"))
+            self.assertEqual(set(note), {"role", "kind", "mode", "root_owned", "subject_owned", "subject_group",
+                                        "setuid", "setgid", "owner_execute", "group_execute", "other_execute"})
+            self.assertTrue(all(type(value) is bool for key, value in note.items() if key not in {"role", "kind", "mode"}))
+        snapshot = SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFREG | 0o755)
+        for role in ("python", "ruby", "sudo", "true", "sandbox-exec", "ps", "compiler", "linker", "signature-tool", "unspecified"):
+            self.assertEqual(self.module._tool_stat_note(snapshot, uid, gid, role=role)["role"], role)
+        for invalid_role in ("synthetic-private-role-canary", None, 7):
+            self.assertEqual(self.module._tool_stat_note(snapshot, uid, gid, role=invalid_role)["role"], "unspecified")
+        for role in ("python", "compiler", "synthetic-private-role-canary"):
+            original = OSError(errno.EACCES, "synthetic-private-stat-message", "/synthetic/private-stat-canary")
+            cause = ValueError("synthetic-private-original-cause")
+            original.__cause__ = cause
+            original_args = original.args
+            with patch.object(Path, "stat", side_effect=original) as query:
+                with self.assertRaises(OSError) as caught:
+                    self.module._admit_executable(Path("/synthetic/private-stat-canary"), uid, gid, role=role)
+            self.assertIs(caught.exception, original)
+            self.assertIs(original.__cause__, cause)
+            self.assertEqual((original.args, original.errno, original.filename),
+                             (original_args, errno.EACCES, "/synthetic/private-stat-canary"))
+            query.assert_called_once_with()
+            observation = {"tool_stat_failure": {"role": role if role in {"python", "compiler"} else "unspecified", "observed": False}}
+            self.assertEqual(original._ci_observation, observation)  # No successful stat, so no fabricated inode.
+            notes = self.module._exception_notes(original)
+            self.assertEqual((notes[0]["exception"], notes[0]["errno"], notes[0]["observation"]),
+                             ("PermissionError", errno.EACCES, observation))
+            self.assertNotIn("synthetic-private", json.dumps(notes))
 
         # The actual admission caller must select the different fixed roles,
-        # not merely have a permission helper that could enforce them.
-        session = session_double(self.module, "darwin")
-        session.admitted = False
-        session.process_observer = None
+        # retain each original stat incrementally, and never present a later
+        # tool's refusal as though earlier metadata had not been observed.
 
         class GrantBoundary(RuntimeError):
             pass
 
-        def tool_state(path):
-            if path not in {session.python, Path("/usr/bin/sudo"), Path("/usr/bin/true"),
-                            Path("/usr/bin/sandbox-exec"), Path("/bin/ps")}:
-                raise AssertionError("unexpected tool stat")
-            owner = 1001 if path == session.python else 0
-            mode = 0o4755 if path in {Path("/usr/bin/sudo"), Path("/bin/ps")} else 0o755
-            return SimpleNamespace(st_uid=owner, st_gid=0, st_mode=stat.S_IFREG | mode)
-
         admit_executable = self.module._admit_executable
-        with patch.multiple(self.module, _readonly_tree=Mock(), _domain=Mock(return_value=set()),
-                            _small_command=Mock(return_value=b"MRK_NSS_ABSENT\n"),
-                            time=SimpleNamespace(monotonic=lambda: 0.0),
-                            os=SimpleNamespace(chown=Mock(side_effect=GrantBoundary),
-                                               path=SimpleNamespace(basename=os.path.basename))), \
-             patch.object(session, "_headroom", Mock()), patch.object(Path, "stat", tool_state), \
-             patch.object(self.module, "_admit_executable", wraps=admit_executable) as tools:
-            with self.assertRaises(GrantBoundary):
-                session.admit()
-        roles = {c.args[0]: c.kwargs for c in tools.call_args_list}
-        self.assertEqual(roles, {session.python: {}, Path("/usr/bin/sudo"): {"root_owned": True, "non_set_id": False},
-                                Path("/usr/bin/true"): {"root_owned": True},
-                                Path("/usr/bin/sandbox-exec"): {"root_owned": True},
-                                Path("/bin/ps"): {"root_owned": True, "non_set_id": False}})
+        for case in ("grant-boundary", "later-rejection", "later-stat-error"):
+            with self.subTest(incremental_tools=case):
+                session = session_double(self.module, "darwin")
+                session.admitted = False
+                session.process_observer = None
+                expected_roles = {session.python: {"role": "python"},
+                                  Path("/usr/bin/sudo"): {"role": "sudo", "root_owned": True, "non_set_id": False},
+                                  Path("/usr/bin/true"): {"role": "true", "root_owned": True},
+                                  Path("/usr/bin/sandbox-exec"): {"role": "sandbox-exec", "root_owned": True},
+                                  Path("/bin/ps"): {"role": "ps", "root_owned": True, "non_set_id": False}}
+                seen = []
+                original = OSError(errno.EACCES, "synthetic-private-stat-message", "/synthetic/private-stat-canary")
+
+                def tool_state(path):
+                    self.assertIn(path, expected_roles)
+                    row = next(n for n in session.admission_results if n["name"] == "fixed-entry-tools")
+                    self.assertFalse(row["ok"])
+                    self.assertEqual(list(row["tools"]), [expected_roles[p]["role"] for p in seen])
+                    seen.append(path)
+                    if case == "later-stat-error" and path == Path("/usr/bin/sudo"):
+                        raise original
+                    owner = 1001 if path == session.python else 0
+                    mode = 0o4755 if path in {Path("/usr/bin/sudo"), Path("/bin/ps")} else 0o755
+                    if case == "later-rejection" and path == Path("/usr/bin/true"):
+                        mode = 0o777
+                    return SimpleNamespace(st_uid=owner, st_gid=0, st_mode=stat.S_IFREG | mode)
+
+                chown = Mock(side_effect=GrantBoundary)
+                with patch.multiple(self.module, _readonly_tree=Mock(), _domain=Mock(return_value=set()),
+                                    _small_command=Mock(return_value=b"MRK_NSS_ABSENT\n"),
+                                    subprocess=SimpleNamespace(), signal=SimpleNamespace(),
+                                    time=SimpleNamespace(monotonic=lambda: 0.0),
+                                    os=SimpleNamespace(chown=chown, path=SimpleNamespace(basename=os.path.basename))), \
+                     patch.object(session, "_headroom", Mock()), patch.object(Path, "stat", tool_state), \
+                     patch.object(Path, "mkdir", side_effect=AssertionError("no admission allocation is permitted")), \
+                     patch.object(self.module, "_admit_executable", wraps=admit_executable) as tools:
+                    expected_error = GrantBoundary if case == "grant-boundary" else OSError if case == "later-stat-error" else self.module.SessionError
+                    with self.assertRaises(expected_error) as caught:
+                        session.admit()
+                count = {"grant-boundary": 5, "later-rejection": 3, "later-stat-error": 2}[case]
+                self.assertEqual(seen, list(expected_roles)[:count])  # No second stat or skipped fixed role.
+                self.assertEqual({c.args[0]: c.kwargs for c in tools.call_args_list}, dict(list(expected_roles.items())[:count]))
+                row = next(n for n in session.admission_results if n["name"] == "fixed-entry-tools")
+                self.assertEqual(row["ok"], case == "grant-boundary")
+                self.assertEqual(row["tools"]["python"]["mode"], "0755")
+                self.assertFalse(row["tools"]["python"]["root_owned"])
+                self.assertFalse(session.admitted)
+                self.assertIsNone(session.process_observer)
+                self.assertEqual(session.failure, "native isolation admission failed; no product command permitted")
+                if case == "grant-boundary":
+                    chown.assert_called_once_with(session.work, session.uid, session.gid)
+                    self.assertNotIn("failed_role", row)
+                else:
+                    chown.assert_not_called()
+                    self.assertEqual(row["failed_role"], "true" if case == "later-rejection" else "sudo")
+                    if case == "later-rejection":
+                        self.assertEqual(row["tools"]["true"], caught.exception._ci_observation["tool"])
+                        self.assertEqual(row["tools"]["true"]["failed_predicates"],
+                                         ["world-writable", "root-role-group-or-world-writable"])
+                    else:
+                        self.assertIs(caught.exception, original)
+                        self.assertEqual(list(row["tools"]), ["python"])
+                        self.assertEqual(original._ci_observation, {"tool_stat_failure": {"role": "sudo", "observed": False}})
+                self.assertNotIn("synthetic-private", json.dumps(session.admission_results))
+
+        # Ruby's pre-probe metadata is bounded observation only: even unusable
+        # POSIX bits or a nonregular type cannot introduce a new permission gate.
+        for case in ("regular", "permissive-bits", "nonregular", "maximum-depth", "too-deep", "stat-error", "initial-expiry", "late-stat"):
+            with self.subTest(ruby_metadata=case):
+                session = session_double(self.module)
+                session.admitted = False
+                session.ruby = Path("/synthetic/private-ruby-canary/bin/ruby")
+                if case in {"maximum-depth", "too-deep"}:
+                    session.ruby = Path("/").joinpath(*(f"p{i}" for i in range(31 if case == "maximum-depth" else 32)), "ruby")
+                session.deadline = 1.0
+                paths = [session.ruby, *session.ruby.parents]
+                seen, clock = [], SimpleNamespace(now=1.0 if case == "initial-expiry" else 0.0)
+                original = OSError(errno.EACCES, "synthetic-private-ruby-message", "/synthetic/private-ruby-canary")
+
+                def observed(path):
+                    self.assertLess(len(seen), 33)
+                    self.assertEqual(path, paths[len(seen)])
+                    seen.append(path)
+                    if case == "stat-error" and len(seen) == 2:
+                        raise original
+                    if case == "late-stat" and len(seen) == 2:
+                        clock.now = 1.0
+                    owner, group, mode = (session.uid, session.gid, 0o6666) if case == "permissive-bits" else (0, 0, 0o755)
+                    kind = stat.S_IFIFO if case == "nonregular" else stat.S_IFREG if path == session.ruby else stat.S_IFDIR
+                    return SimpleNamespace(st_uid=owner, st_gid=group, st_mode=kind | mode)
+
+                no_launch = Mock(side_effect=AssertionError("metadata observation grants no process role"))
+                with patch.multiple(self.module, os=SimpleNamespace(), subprocess=SimpleNamespace(), signal=SimpleNamespace(),
+                                    time=SimpleNamespace(monotonic=lambda: clock.now),
+                                    _admit_executable=Mock(side_effect=AssertionError("Ruby metadata is not new tool admission"))), \
+                     patch.object(session, "_run", no_launch), patch.object(Path, "stat", observed), \
+                     patch.object(Path, "resolve", side_effect=AssertionError("constructor already supplied the canonical path")), \
+                     patch.object(Path, "iterdir", side_effect=AssertionError("no provider enumeration is permitted")):
+                    if case in {"regular", "permissive-bits", "nonregular", "maximum-depth"}:
+                        session._ruby_path_metadata()
+                    else:
+                        with self.assertRaises(OSError if case == "stat-error" else self.module.SessionError) as caught:
+                            session._ruby_path_metadata()
+                        if case == "stat-error":
+                            self.assertIs(caught.exception, original)
+                        if "expiry" in case or case == "late-stat":
+                            self.assertIsInstance(caught.exception, self.module.DeadlineExpired)
+                no_launch.assert_not_called()
+                self.assertEqual(len(session.admission_results), 1)
+                row = session.admission_results[0]
+                self.assertEqual((row["name"], row["semantics"]), ("ruby-path-metadata", "posix-mode-bits-only"))
+                self.assertEqual(row["ok"], case in {"regular", "permissive-bits", "nonregular", "maximum-depth"})
+                self.assertEqual(seen, paths[:0 if case in {"too-deep", "initial-expiry"} else 2 if case in {"stat-error", "late-stat"} else len(paths)])
+                self.assertEqual(len(row["entries"]), len(seen) - (case == "stat-error"))
+                for index, item in enumerate(row["entries"]):
+                    self.assertEqual((item["index"], item["role"]), (index, "ruby"))
+                    self.assertEqual(set(item), {"index", "role", "kind", "mode", "root_owned", "subject_owned", "subject_group",
+                                                "setuid", "setgid", "owner_execute", "group_execute", "other_execute"})
+                    if case == "permissive-bits":
+                        self.assertEqual(item["mode"], "6666")
+                        self.assertTrue(item["subject_owned"] and item["subject_group"] and item["setuid"] and item["setgid"])
+                        self.assertFalse(item["owner_execute"] or item["group_execute"] or item["other_execute"])
+                if case == "stat-error":
+                    self.assertEqual(row["unobserved_index"], 1)
+                else:
+                    self.assertNotIn("unobserved_index", row)
+                self.assertFalse(session.admitted)
+                self.assertIsNone(session.failure)
+                self.assertEqual(session.deadline, 1.0)
+                self.assertNotIn("private-ruby-canary", json.dumps(row))
 
     def test_environment_never_inherits_ambient_or_overrides_fixed_boundaries(self):
         session = session_double(self.module)
@@ -1033,6 +1189,72 @@ class CISandboxPureTests(unittest.TestCase):
                             data.replace(text.encode(), b"localized-or-unknown-message")):
                 self.assertIsNone(self.module._launcher_error(changed, session.python, session.entry))
 
+        # Explain only a completely collected failure from the actual fixed
+        # Darwin Ruby admission role. A known launcher line cannot grant success
+        # or replace the original failure, including its output accounting.
+        literal_errors = ((errno.EPERM, "Operation not permitted"), (errno.EACCES, "Permission denied"),
+                          (errno.ENOENT, "No such file or directory"), (errno.ENOEXEC, "Exec format error"),
+                          (errno.ENOMEM, "Cannot allocate memory"), (errno.E2BIG, "Argument list too long"),
+                          (errno.ETXTBSY, "Text file busy"))
+        session = session_double(self.module, "darwin")
+        session.ruby = Path("/synthetic/private-launch-canary/bin/ruby")
+        session.failure = "earlier immutable failure"
+
+        def failed_capture(stderr):
+            return self.module.CapturedRun(b"", stderr, 71, True, True, True, True, False, False,
+                                           0.01, "command exited 71", (), (0, len(stderr)))
+
+        def noted(result, *, platform="darwin", name="ruby-numerical-identity"):
+            session.platform = platform
+            before = len(session.admission_results)
+            with patch.multiple(self.module, os=SimpleNamespace(), subprocess=SimpleNamespace(),
+                                signal=SimpleNamespace(), socket=SimpleNamespace()), \
+                 patch.object(Path, "stat", side_effect=AssertionError("capture diagnostics may not restat tools")), \
+                 patch.object(Path, "resolve", side_effect=AssertionError("capture diagnostics may not resolve tools")):
+                row = session._note_capture(name, result)
+            self.assertIs(row, session.admission_results[-1])
+            self.assertEqual(len(session.admission_results), before + 1)
+            self.assertFalse(row["ok"])
+            self.assertFalse(row["subject_ok"])
+            self.assertFalse(result.ok)
+            self.assertEqual(session.failure, "earlier immutable failure")
+            public = json.dumps(row)
+            self.assertNotIn("private-launch-canary", public)
+            self.assertNotIn("sandbox-exec: execvp()", public)
+            self.assertNotIn("unpublished-extra-diagnostic", public)
+            return row
+
+        for number, message in literal_errors:
+            data = f"sandbox-exec: execvp() of '{session.ruby}' failed: {message}\n".encode()
+            with self.subTest(ruby_launcher_errno=number):
+                result = failed_capture(data)
+                row = noted(result)
+                self.assertEqual(row["launcher_error"], {"operation": "sandbox-execvp", "role": "ruby", "errno": number})
+                self.assertEqual(row["error_count"], 1)
+                self.assertEqual(row["persisted"], [0, len(data)])
+                self.assertEqual(result.primary_error, "command exited 71")
+        data = f"sandbox-exec: execvp() of '{session.ruby}' failed: Operation not permitted\n".encode()
+        malformed = (b"", data[:-1], data + b"unpublished-extra-diagnostic\n", b"prefix " + data,
+                     data + data, data.replace(str(session.ruby).encode(), b"/synthetic/other/bin/ruby"),
+                     data.replace(b"Operation not permitted", b"localized-or-unknown-message"),
+                     data.replace(b"\n", b"\r\n"), data + b"\0", b"\xff" + data,
+                     b"sandbox-exec: sandbox_apply: Operation not permitted\n")
+        for index, raw in enumerate(malformed):
+            with self.subTest(ruby_launcher_text=index):
+                self.assertNotIn("launcher_error", noted(failed_capture(raw)))
+        for changed in ({"returncode": 72}, {"returncode": None}, {"stdout": b"unexpected stdout"},
+                        {"waited": False}, {"stdout_eof": False}, {"stderr_eof": False}, {"domain_finality": False},
+                        {"timed_out": True}, {"cancelled": True}, {"cleanup_errors": ("synthetic close ambiguity",)},
+                        {"primary_error": "per-stream or whole-attempt persisted-output limit"}, {"primary_error": None},
+                        {"persisted": (0, len(data) - 1)}, {"persisted": (0, len(data) + 1)},
+                        {"persisted": (0, None)}, {"persisted": (1, len(data))}):
+            with self.subTest(ruby_launcher_receipt=changed):
+                self.assertNotIn("launcher_error", noted(dataclasses.replace(failed_capture(data), **changed)))
+        for platform, name in (("linux", "ruby-numerical-identity"), ("darwin", "native-isolation"),
+                               ("darwin", "ruby-numerical-identity-extra")):
+            with self.subTest(ruby_launcher_role=(platform, name)):
+                self.assertNotIn("launcher_error", noted(failed_capture(data), platform=platform, name=name))
+
     def test_admission_listener_teardown_attempts_every_owned_close_and_retains_primary(self):
         session = session_double(self.module)
         primary = self.module.SessionError("synthetic admission failure")
@@ -1117,6 +1339,7 @@ class CISandboxPureTests(unittest.TestCase):
              patch.object(session, "ensure_idle", return_value=None), \
              patch.object(session, "_run", side_effect=primary) as run, \
              patch.object(Path, "read_bytes", read_positive), \
+             patch.object(Path, "stat", side_effect=AssertionError("failed native prefix cannot inspect Ruby metadata")), \
              patch.object(Path, "chmod", side_effect=AssertionError("failed admission cannot adopt output")) as chmod:
             with self.assertRaises(BaseExceptionGroup) as caught:
                 session._preflight()
@@ -1137,7 +1360,7 @@ class CISandboxPureTests(unittest.TestCase):
         class AfterNative(RuntimeError):
             pass
 
-        for case in ("ordered", "waited", "stdout_eof", "stderr_eof", "domain_finality", "outside-error"):
+        for case in ("ordered", "waited", "stdout_eof", "stderr_eof", "domain_finality", "outside-error", "ruby-metadata-error"):
             with self.subTest(native_boundary=case):
                 session = session_double(self.module)
                 rig = _Collection(self.module, session, stdout=(b"MRK_NATIVE_ISOLATION_OK\n",))
@@ -1145,9 +1368,29 @@ class CISandboxPureTests(unittest.TestCase):
                 outside_error = OSError(errno.EIO, "synthetic unknown receiver") if case == "outside-error" else None
                 native_run = session._run
                 stop = AfterNative("end of the explicitly inert native-prefix test")
+                metadata_error = OSError(errno.EACCES, "synthetic Ruby metadata observation failure")
+                ruby_paths = [session.ruby, *session.ruby.parents]
+                metadata_seen = []
+
+                def ruby_metadata(path):
+                    self.assertEqual(path, ruby_paths[len(metadata_seen)])
+                    metadata_seen.append(path)
+                    self.assertEqual(len([e for e in events if e[0] == "outside-observation"]), 4)
+                    events.append(("ruby-metadata", len(metadata_seen) - 1))
+                    if case == "ruby-metadata-error":
+                        raise metadata_error
+                    # Deliberately nonexecutable, subject-owned and writable:
+                    # observing these bits must not introduce a new Ruby gate.
+                    return SimpleNamespace(st_uid=session.uid, st_gid=session.gid, st_mode=stat.S_IFREG | 0o6666)
 
                 def collect_prefix(argv, **kwargs):
                     if "--probe" not in argv:
+                        self.assertEqual(argv, [str(session.ruby), "-e",
+                            f"abort unless Process.uid == {session.uid} && Process.gid == {session.gid}; puts 'MRK_RUBY_NUMERIC_OK'"])
+                        self.assertEqual(kwargs, {"cwd": session.work, "env": {}, "seconds": 10, "latch": False})
+                        self.assertEqual(metadata_seen, ruby_paths)
+                        self.assertTrue(next(n for n in session.admission_results if n["name"] == "ruby-path-metadata")["ok"])
+                        events.append(("ruby-probe",))
                         raise stop
                     self.assertEqual([e[1] for e in events if e[0] == "positive-consumed"], list(range(4)))
                     result = native_run(argv, **kwargs)
@@ -1160,8 +1403,11 @@ class CISandboxPureTests(unittest.TestCase):
                      patch.object(self.module.os, "chown", create=True) as chown, \
                      patch.object(self.module.os, "readlink", return_value="synthetic-namespace", create=True), \
                      patch.object(self.module, "_small_command", return_value=b"MRK_OUTSIDE_WRITE_POSITIVE\n"), \
+                     patch.object(self.module, "_admit_executable", side_effect=AssertionError("Ruby metadata grants no new admission role")), \
                      patch.object(session, "_run", side_effect=collect_prefix), \
                      patch.object(Path, "read_bytes", read_positive), \
+                     patch.object(Path, "stat", ruby_metadata), \
+                     patch.object(Path, "resolve", side_effect=AssertionError("no provider path resolution is permitted")), \
                      patch.object(Path, "chmod") as chmod:
                     with self.assertRaises(BaseExceptionGroup) as caught:
                         session._preflight()
@@ -1169,23 +1415,35 @@ class CISandboxPureTests(unittest.TestCase):
                 note = next(n for n in session.admission_results if n["name"] == "native-isolation")
                 self.assertEqual([entry for entry in closed if entry[0] == "listener"],
                                  [("listener", index) for index in range(4)])
-                if case in {"ordered", "outside-error"}:
+                if case in {"ordered", "outside-error", "ruby-metadata-error"}:
                     self.assertEqual(len(seen), 4)
                     for event_name in ("wait-original", "unregister-eof", "domain"):
                         self.assertLess(max(i for i, event in enumerate(events) if event[0] == event_name), seen[0])
                     self.assertIsNone(session._active)
                 else:
                     self.assertEqual(seen, [])
-                if case == "ordered":
-                    self.assertEqual(caught.exception.exceptions, (stop,))
+                if case in {"ordered", "ruby-metadata-error"}:
+                    self.assertEqual(caught.exception.exceptions, (stop if case == "ordered" else metadata_error,))
                     self.assertTrue(note["ok"])
                     self.assertEqual([c.args for c in chown.call_args_list],
                                      [(session.outside_write, session.uid, session.gid), (session.outside_write, 0, 0)])
                     chmod.assert_called_once_with(0o400)
+                    metadata_note = next(n for n in session.admission_results if n["name"] == "ruby-path-metadata")
+                    self.assertEqual(metadata_note["ok"], case == "ordered")
+                    if case == "ordered":
+                        self.assertEqual(metadata_seen, ruby_paths)
+                        self.assertLess(max(i for i, e in enumerate(events) if e[0] == "ruby-metadata"), events.index(("ruby-probe",)))
+                    else:
+                        self.assertEqual(metadata_seen, [session.ruby])
+                        self.assertEqual(metadata_note["entries"], [])
+                        self.assertEqual(metadata_note["unobserved_index"], 0)
+                        self.assertNotIn(("ruby-probe",), events)
                 else:
                     self.assertFalse(note["ok"])
                     chown.assert_called_once_with(session.outside_write, session.uid, session.gid)
                     chmod.assert_not_called()
+                    self.assertEqual(metadata_seen, [])
+                    self.assertFalse(any(n["name"] == "ruby-path-metadata" for n in session.admission_results))
 
     def test_collection_keeps_streams_separate_waits_and_persists_short_writes(self):
         rig = _Collection(self.module, stdout=(b"out-1", b"out-2"), stderr=(b"err-1",))
@@ -2081,7 +2339,8 @@ class CISandboxPureTests(unittest.TestCase):
                                          "sdk_settings_sha256": hashlib.sha256(files[settings]).hexdigest()})
                         self.assertEqual([c.args for c in role.call_args_list],
                                          [(clang, 60001, 60001), (linker, 60001, 60001), (Path("/usr/bin/codesign"), 60001, 60001)])
-                        self.assertTrue(all(c.kwargs == {"root_owned": True} for c in role.call_args_list))
+                        self.assertEqual([c.kwargs for c in role.call_args_list],
+                                         [{"root_owned": True, "role": name} for name in ("compiler", "linker", "signature-tool")])
                     else:
                         with self.assertRaises(self.module.SessionError):
                             self.module._observer_toolchain(60001, 60001, deadline=1.0)
