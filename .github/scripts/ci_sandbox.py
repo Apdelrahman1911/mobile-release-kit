@@ -58,8 +58,12 @@ class DeadlineExpired(SessionError):
     """The original, never renewed aggregate budget expired."""
 
 
+_DIAGNOSTIC_OPERATIONS = frozenset({"process-groups-linux", "kernel-groups-library",
+                                    "kernel-groups-count", "kernel-groups-fill"})
+
+
 def _exception_notes(error: BaseException) -> list[dict]:
-    """Bounded public diagnostics: classes/own-source lines, never messages."""
+    """Bounded classes/own-source lines/errno/operation, never messages."""
     notes, pending, seen = [], [error], set()
     while pending and len(notes) < 32:
         current = pending.pop()
@@ -74,6 +78,12 @@ def _exception_notes(error: BaseException) -> list[dict]:
         name = type(current).__name__
         row = {"exception": name if name.isascii() and name.isidentifier() and len(name) <= 80 else "Exception",
                "lines": sorted(set(lines))[:16]}
+        number = current.errno if isinstance(current, OSError) else None
+        if type(number) is int and 0 < number < 4096:
+            row["errno"] = number
+        operation = getattr(current, "_ci_operation", None)
+        if isinstance(operation, str) and operation in _DIAGNOSTIC_OPERATIONS:
+            row["operation"] = operation
         observation = getattr(current, "_ci_observation", None)
         if observation is not None:
             row["observation"] = observation
@@ -86,7 +96,7 @@ def _exception_notes(error: BaseException) -> list[dict]:
 
 
 def _child_exception_notes(data: bytes) -> list[dict]:
-    """Extract only our bounded class/line diagnostics; never publish stderr."""
+    """Extract only our bounded diagnostic fields; never publish stderr."""
     notes = []
     for line in data[-16384:].splitlines():
         if not line.startswith(b"MRK_SANDBOX_ERROR="):
@@ -104,10 +114,30 @@ def _child_exception_notes(data: bytes) -> list[dict]:
             if (isinstance(name, str) and name.isascii() and name.isidentifier() and len(name) <= 80
                     and isinstance(lines, list) and len(lines) <= 16
                     and all(type(n) is int and 0 < n < 1_000_000 for n in lines)):
-                notes.append({"exception": name, "lines": lines})
+                note = {"exception": name, "lines": lines}
+                number, operation = row.get("errno"), row.get("operation")
+                if type(number) is int and 0 < number < 4096:
+                    note["errno"] = number
+                if isinstance(operation, str) and operation in _DIAGNOSTIC_OPERATIONS:
+                    note["operation"] = operation
+                notes.append(note)
         if len(notes) >= 32:
             break
     return notes[:32]
+
+
+def _launcher_error(data: bytes, python: Path, script: Path) -> dict | None:
+    """Recognize only exact CPython errors for these two admitted own paths.
+
+    No byte-count guess, arbitrary substring, raw path, or stderr is published.
+    Unknown/localized errors remain unclassified, never silently successful.
+    """
+    for number, message in ((errno.ENOENT, "No such file or directory"),
+                            (errno.EACCES, "Permission denied")):
+        expected = f"{python}: can't open file '{script}': [Errno {number}] {message}\n".encode()
+        if data == expected:
+            return {"code": "python-script-open", "errno": number}
+    return None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -531,6 +561,10 @@ class Session:
             mounted.append(p)
         cmd += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/run", "--tmpfs", "/tmp",
                 "--dir", "/dev/shm", "--tmpfs", "/dev/shm"]
+        # bubblewrap0.9 bind operations can auto-create ancestors0700.  This is
+        # an empty namespace-local directory, NOT a bind of the owner task root;
+        # its control/fixture directories remain absent from the subject view.
+        cmd += ["--perms", "0755", "--dir", str(self.root)]
         for p in (*self.tool_prefixes, self.source, self.inputs, self.bootstrap):
             if not any(_under(p, existing) for existing in mounted):
                 cmd += ["--ro-bind", str(p), str(p)]
@@ -818,6 +852,9 @@ class Session:
                "cancelled": result.cancelled, "persisted": list(result.persisted),
                "error_count": len(result.cleanup_errors) + (result.primary_error is not None),
                "exceptions": _child_exception_notes(result.stderr)}
+        launcher_error = _launcher_error(result.stderr, self.python, self.entry)
+        if launcher_error is not None:
+            row["launcher_error"] = launcher_error
         self.admission_results.append(row)
         return row
 
@@ -1214,10 +1251,56 @@ def _loss_owner(data: dict) -> None:
     os._exit(23)
 
 
+def _process_groups(platform: str) -> list[int]:
+    """Observe actual process groups, not Darwin's NSS user-access-group API.
+
+    Modern Darwin CPython os.getgroups() resolves the extended libc alias,
+    which queries passwd/directory membership and is not changed by setgroups.
+    The public unversioned POSIX getgroups uses gid_t (uint32) and returns the
+    kernel list, including its mandatory first effective-GID entry.  No NSS,
+    Mach service, named account, runtime discovery, or observation fallback.
+    """
+    if platform not in {"linux", "darwin"}:
+        raise SessionError("unsupported process-group observation platform")
+    operation = "process-groups-linux" if platform == "linux" else "kernel-groups-library"
+    try:
+        if platform == "linux":
+            return os.getgroups()
+        # Local import: Linux and pure caller setup need not load any library.
+        import ctypes
+        library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        getgroups = library.getgroups
+        getgroups.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_uint32)]
+        getgroups.restype = ctypes.c_int
+        operation = "kernel-groups-count"
+        ctypes.set_errno(0)
+        count = getgroups(0, None)
+        if count < 0:
+            raise OSError(ctypes.get_errno(), "kernel group-count observation failed")
+        if not 1 <= count <= 256:
+            raise SessionError("native group-count bound is unsupported")
+        groups = (ctypes.c_uint32 * count)()
+        operation = "kernel-groups-fill"
+        ctypes.set_errno(0)
+        filled = getgroups(count, groups)
+        if filled < 0:
+            raise OSError(ctypes.get_errno(), "kernel group-list observation failed")
+        if filled != count:
+            raise SessionError("native group count changed during observation")
+        return list(groups)
+    except BaseException as exc:
+        exc._ci_operation = operation
+        raise
+
+
 def _probe_leaf(data: dict) -> None:
     uid, gid = data["uid"], data["gid"]
-    if (os.getuid(), os.geteuid(), os.getgid(), os.getegid()) != (uid, uid, gid, gid) or os.getgroups():
-        raise SessionError("numerical credentials or cleared groups failed")
+    if (os.getuid(), os.geteuid(), os.getgid(), os.getegid()) != (uid, uid, gid, gid):
+        raise SessionError("numerical credentials differ")
+    # CPython clears groups before setregid/setreuid.  Darwin stores EGID as
+    # groups[0], so primary-only[gid] (not []) proves no additional groups.
+    if _process_groups(data["platform"]) != ([] if data["platform"] == "linux" else [gid]):
+        raise SessionError("process retains unexpected groups")
     # Check before opening any probe descriptors.  No inherited socket or extra FD.
     for fd in range(1024):
         try:
@@ -1229,6 +1312,11 @@ def _probe_leaf(data: dict) -> None:
         if fd > 2 or stat.S_ISSOCK(mode):
             raise SessionError("unexpected inherited descriptor")
     if data["platform"] == "linux":
+        root = Path(data["work"]).parent
+        state = root.stat()
+        if (state.st_uid != 0 or stat.S_IMODE(state.st_mode) != 0o755
+                or set(os.listdir(root)) != {"source", "inputs", "bootstrap", "work"}):
+            raise SessionError("namespace task root has unexpected ownership/mode/topology")
         if os.getresuid() != (uid, uid, uid) or os.getresgid() != (gid, gid, gid):
             raise SessionError("saved numerical credentials differ")
         status = Path("/proc/self/status").read_text()

@@ -443,8 +443,11 @@ class CISandboxPureTests(unittest.TestCase):
 
     def test_linux_namespace_setup_precedes_numeric_drop_without_popen_demotion(self):
         session = session_double(self.module)
-        with patch.object(Path, "exists", return_value=True):
+        umask = Mock(side_effect=AssertionError("namespace modes must not change controller umask"))
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(self.module, "os", SimpleNamespace(umask=umask)):
             argv, kwargs = session._argv([str(session.python), "--synthetic"], 180)
+        umask.assert_not_called()
         self.assertEqual(kwargs, {})
         self.assertEqual(argv[0], "/usr/bin/bwrap")
         self.assertNotIn("--unshare-user", argv)
@@ -458,6 +461,18 @@ class CISandboxPureTests(unittest.TestCase):
         self.assertEqual([argv[i + 1] for i, a in enumerate(argv) if a == "--cap-add"],
                          ["CAP_SETUID", "CAP_SETGID", "CAP_SETPCAP"])
         self.assertEqual(argv[argv.index("--cap-drop") + 1], "ALL")
+        # bwrap's implicit bind-parent creation need not make a traversable
+        # directory; set the synthetic namespace root's mode explicitly AFTER
+        # the fresh /tmp mount and BEFORE binding any task inputs beneath it.
+        root_mode = argv.index("--perms")
+        self.assertEqual(argv[root_mode:root_mode + 4], ["--perms", "0755", "--dir", str(session.root)])
+        self.assertEqual(argv.count("--perms"), 1)
+        tmp_mount = next(i for i, arg in enumerate(argv) if arg == "--tmpfs" and argv[i + 1] == "/tmp")
+        self.assertLess(tmp_mount, root_mode)
+        for source in (session.source, session.inputs, session.bootstrap):
+            bind = next(i for i, arg in enumerate(argv) if arg == "--ro-bind" and argv[i + 1] == str(source))
+            self.assertLess(root_mode, bind)
+            self.assertLess(bind, drop)
         writable = [tuple(argv[i + 1:i + 3]) for i, a in enumerate(argv) if a == "--bind"]
         self.assertEqual(writable, [(str(session.work), str(session.work))])
         for denied in (session.control, session.runner_home, session.runner_temp):
@@ -467,6 +482,117 @@ class CISandboxPureTests(unittest.TestCase):
             self.module.SessionError, "broad OS bind",
         ):
             session._argv([str(session.python)], 180)
+
+    def test_kernel_group_api_is_bounded_typed_and_never_falls_back_to_nss(self):
+        uid = gid = 60001
+        cases = ((1, 1, [gid], None), (2, 2, [gid, gid + 1], None),
+                 (-1, None, [], OSError), (0, None, [], self.module.SessionError),
+                 (257, None, [], self.module.SessionError),
+                 (1, -1, [], OSError), (2, 1, [gid], self.module.SessionError))
+        for count, filled, groups, failure in cases:
+            with self.subTest(count=count, filled=filled):
+                arrays = []
+
+                class UInt32:
+                    def __mul__(self, size):
+                        def allocate():
+                            array = [0] * size
+                            arrays.append(array)
+                            return array
+                        return allocate
+
+                def getgroups(size, array):
+                    if array is None:
+                        self.assertEqual(size, 0)
+                        return count
+                    self.assertEqual(size, count)
+                    self.assertIs(array, arrays[0])
+                    array[:len(groups)] = groups
+                    return filled
+
+                getter = Mock(side_effect=getgroups)
+                library = SimpleNamespace(getgroups=getter)
+                scalar, integer, pointer = UInt32(), object(), object()
+                fake_ctypes = SimpleNamespace(CDLL=Mock(return_value=library), c_uint32=scalar,
+                                              c_int=integer, POINTER=Mock(return_value=pointer),
+                                              set_errno=Mock(), get_errno=Mock(return_value=22))
+                nss = Mock(side_effect=AssertionError("Darwin must not call NSS-backed os.getgroups"))
+                with patch.dict(sys.modules, {"ctypes": fake_ctypes}), \
+                     patch.object(self.module, "os", SimpleNamespace(getgroups=nss)):
+                    if failure is None:
+                        self.assertEqual(self.module._process_groups("darwin"), groups)
+                    else:
+                        with self.assertRaises(failure) as caught:
+                            self.module._process_groups("darwin")
+                        self.assertEqual(caught.exception._ci_operation,
+                                         "kernel-groups-fill" if 1 <= count <= 256 else "kernel-groups-count")
+                        if failure is OSError:
+                            self.assertEqual(caught.exception.errno, 22)
+                            fake_ctypes.get_errno.assert_called_once_with()
+                fake_ctypes.CDLL.assert_called_once_with("/usr/lib/libSystem.B.dylib", use_errno=True)
+                fake_ctypes.POINTER.assert_called_once_with(scalar)
+                self.assertEqual(getter.argtypes, [integer, pointer])
+                self.assertIs(getter.restype, integer)
+                self.assertEqual(getter.call_args_list[0].args, (0, None))
+                admitted_count = 1 <= count <= 256
+                self.assertEqual(len(arrays), int(admitted_count))
+                self.assertEqual(getter.call_count, 2 if admitted_count else 1)
+                self.assertEqual([c.args for c in fake_ctypes.set_errno.call_args_list],
+                                 [(0,)] * getter.call_count)
+                nss.assert_not_called()
+
+        for missing in ("module", "library", "symbol"):
+            with self.subTest(missing=missing):
+                loader = Mock(side_effect=OSError(2, "synthetic unavailable library")) if missing == "library" else Mock(return_value=SimpleNamespace())
+                fake_ctypes = None if missing == "module" else SimpleNamespace(CDLL=loader)
+                nss = Mock(side_effect=AssertionError("no NSS or alternate-library fallback"))
+                expected = {"module": ModuleNotFoundError, "library": OSError, "symbol": AttributeError}[missing]
+                with patch.dict(sys.modules, {"ctypes": fake_ctypes}), \
+                     patch.object(self.module, "os", SimpleNamespace(getgroups=nss)):
+                    with self.assertRaises(expected) as caught:
+                        self.module._process_groups("darwin")
+                    self.assertEqual(caught.exception._ci_operation, "kernel-groups-library")
+                nss.assert_not_called()
+                if missing == "module":
+                    loader.assert_not_called()
+                else:
+                    loader.assert_called_once_with("/usr/lib/libSystem.B.dylib", use_errno=True)
+
+        nss = Mock(return_value=[])
+        loader = Mock(side_effect=AssertionError("Linux must not load the Darwin library"))
+        with patch.dict(sys.modules, {"ctypes": SimpleNamespace(CDLL=loader)}), \
+             patch.object(self.module, "os", SimpleNamespace(getgroups=nss)):
+            self.assertEqual(self.module._process_groups("linux"), [])
+            with self.assertRaises(self.module.SessionError):
+                self.module._process_groups("unsupported")
+        nss.assert_called_once_with()
+        loader.assert_not_called()
+
+        # Exercise only the early credential branch of the real probe body.
+        # A private exception stops even valid cases before their first FD
+        # observation; every later OS/socket/process API is absent, not real.
+        class DescriptorBoundary(RuntimeError):
+            pass
+
+        for platform, groups, admitted in (("linux", [], True), ("linux", [gid], False),
+                                          ("darwin", [gid], True), ("darwin", [], False),
+                                          ("darwin", [gid, gid + 1], False), ("darwin", [gid, gid], False)):
+            with self.subTest(platform=platform, groups=groups):
+                fstat = Mock(side_effect=DescriptorBoundary)
+                fake_os = SimpleNamespace(getuid=lambda: uid, geteuid=lambda: uid,
+                                          getgid=lambda: gid, getegid=lambda: gid, fstat=fstat)
+                with patch.dict(sys.modules, {"ctypes": None}), \
+                     patch.multiple(self.module, os=fake_os, socket=SimpleNamespace(),
+                                    subprocess=SimpleNamespace(), signal=SimpleNamespace(),
+                                    _small_command=Mock(side_effect=AssertionError("no native metadata invocation"))), \
+                     patch.object(self.module, "_process_groups", return_value=groups) as query:
+                    with self.assertRaises(DescriptorBoundary if admitted else self.module.SessionError):
+                        self.module._probe_leaf({"platform": platform, "uid": uid, "gid": gid})
+                query.assert_called_once_with(platform)
+                if admitted:
+                    fstat.assert_called_once_with(0)
+                else:
+                    fstat.assert_not_called()
 
     def test_macos_numeric_launch_and_literal_policies_keep_distinct_write_roles(self):
         session = session_double(self.module, "darwin")
@@ -656,15 +782,40 @@ class CISandboxPureTests(unittest.TestCase):
         self.assertEqual(len(notes), 32)
         self.assertTrue(all(set(n) == {"exception", "lines"} and len(n["lines"]) <= 16 for n in notes))
         self.assertNotIn(str(primary), json.dumps(notes))
+        annotated = OSError(22, str(primary), "/synthetic/private")
+        annotated._ci_operation = "kernel-groups-fill"
+        self.assertEqual(self.module._exception_notes(annotated),
+                         [{"exception": "OSError", "lines": [], "errno": 22, "operation": "kernel-groups-fill"}])
+        for invalid_errno in (True, 0, -1, 4096, "22"):
+            annotated.errno = invalid_errno
+            annotated._ci_operation = str(primary)
+            self.assertEqual(self.module._exception_notes(annotated), [{"exception": "OSError", "lines": []}])
         rows = [{"exception": "OSError", "lines": [7, 9], "message": str(primary), "path": "/synthetic/private"},
                 {"exception": "Invalid Name", "lines": [7]}, {"exception": "OSError", "lines": [True]},
                 {"exception": "OSError", "lines": [0]}, {"exception": "OSError", "lines": list(range(1, 18))}]
         prefix = b"MRK_SANDBOX_ERROR="
         payload = b"untrusted raw diagnostic\n" + prefix + b"not-json\n" + prefix + json.dumps(rows).encode() + b"\n"
         self.assertEqual(self.module._child_exception_notes(payload), [{"exception": "OSError", "lines": [7, 9]}])
-        repeated = prefix + json.dumps([rows[0]] * 80).encode() + b"\n"
+        safe_fields = {"exception": "OSError", "lines": [7], "errno": 22, "operation": "kernel-groups-count"}
+        record = safe_fields | {"message": str(primary), "path": "/synthetic/private"}
+        self.assertEqual(self.module._child_exception_notes(prefix + json.dumps([record]).encode()), [safe_fields])
+        for invalid_errno in (True, 0, -1, 4096, "22"):
+            invalid = record | {"errno": invalid_errno, "operation": str(primary)}
+            self.assertEqual(self.module._child_exception_notes(prefix + json.dumps([invalid]).encode()),
+                             [{"exception": "OSError", "lines": [7]}])
+        repeated = prefix + json.dumps([{"exception": "OSError", "lines": []}] * 80).encode() + b"\n"
         self.assertEqual(len(self.module._child_exception_notes(repeated)), 32)
         self.assertEqual(self.module._child_exception_notes(payload + b"x" * 16384), [])
+        session = session_double(self.module)
+        for number, text in ((2, "No such file or directory"), (13, "Permission denied")):
+            data = f"{session.python}: can't open file '{session.entry}': [Errno {number}] {text}\n".encode()
+            self.assertEqual(self.module._launcher_error(data, session.python, session.entry),
+                             {"code": "python-script-open", "errno": number})
+            for changed in (b"prefix " + data, data + b"extra diagnostics\n",
+                            data.replace(str(session.python).encode(), b"/other/python"),
+                            data.replace(str(session.entry).encode(), b"/other/script"),
+                            data.replace(text.encode(), b"localized-or-unknown-message")):
+                self.assertIsNone(self.module._launcher_error(changed, session.python, session.entry))
 
     def test_admission_listener_teardown_attempts_every_owned_close_and_retains_primary(self):
         session = session_double(self.module)

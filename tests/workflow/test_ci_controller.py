@@ -11,6 +11,7 @@ import copy
 from contextlib import redirect_stdout
 import dataclasses
 import io
+import json
 import os
 from pathlib import Path
 import stat
@@ -197,6 +198,43 @@ class CICoordinatorFilesystemTests(unittest.TestCase):
 
 
 class CICoordinatorResultTests(unittest.TestCase):
+    def test_failed_ruby_diagnostics_keep_only_source_known_ids_and_locations(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        step = controller.Step("ruby-native-capture", parser="minitest")
+        known, assertion = controller.ruby_expected_ids(ROOT, step.id)[:2]
+        private = "private-fixture-value-must-not-be-published"
+        text = (f"1) Error:\n{known}:\nRuntimeError: {private}\n"
+                f" /private/{private}/source/tests/workflow/test_native_upload_validation.rb:42:in method\n"
+                f"2) Failure:\n{assertion} [/private/{private}/source/tests/workflow/test_native_upload_validation.rb:45]:\n"
+                "UnknownSuite#test_private_value:\n"
+                f" /private/{private}/private_fixture.rb:17\n"
+                "13 runs, 100 assertions, 1 failures, 1 errors, 0 skips\n"
+                'MRK_CHECK_RESULT={"details":{},"details":{}}\n'
+                'MRK_CHECK_RESULT={"details":null}\n'
+                'MRK_CHECK_RESULT={"details":{"error":NaN}}\n')
+        captured = SimpleNamespace(returncode=7, waited=True, stdout_eof=True, stderr_eof=True,
+                                   domain_finality=True, timed_out=False, cancelled=False,
+                                   stdout=text.encode(), stderr=b"",
+                                   persisted=(len(text), 0), duration=0.2, cleanup_errors=())
+        details = controller.failure_details(captured, step, paths)
+        self.assertEqual(details["returncode"], 7)
+        self.assertEqual(details["failed_tests"], sorted([known, assertion]))
+        self.assertEqual(details["ruby_locations"], [("tests/workflow/test_native_upload_validation.rb", 42),
+                                                    ("tests/workflow/test_native_upload_validation.rb", 45)])
+        self.assertEqual(details["minitest_observations"], [[13, 100, 1, 1, 0]])
+        for hidden in (private, "UnknownSuite", "test_private_value", "private_fixture.rb", "/private/"):
+            self.assertNotIn(hidden, json.dumps(details))
+        # Malformed diagnostic text or unavailable diagnostic source cannot
+        # replace the actual failed command's status with a parser exception.
+        with patch.object(controller, "ruby_expected_ids", side_effect=controller.VerificationError("RUBY_STATIC_INVENTORY")):
+            unavailable = controller.failure_details(captured, step, paths)
+        self.assertEqual(unavailable["returncode"], 7)
+        self.assertTrue(unavailable["ruby_diagnostics_unavailable"])
+        self.assertNotIn("failed_tests", unavailable)
+        with patch.object(controller, "strict_json", side_effect=RecursionError):
+            self.assertEqual(controller.failure_details(captured)["returncode"], 7)
+
     def test_every_ruby_suite_requires_its_exact_class_and_method_completion_inventory(self):
         controller = controller_module()
         paths = fixture_paths(controller)

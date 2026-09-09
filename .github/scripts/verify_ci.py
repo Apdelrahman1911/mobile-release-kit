@@ -650,7 +650,7 @@ def strict_json(text: str):
     return json.loads(text, object_pairs_hook=pairs, parse_constant=constant)
 
 
-def failure_details(result) -> dict:
+def failure_details(result, step: Step | None = None, paths: Paths | None = None) -> dict:
     """Public-safe observations only; never forward raw child diagnostics."""
     value = {"returncode": result.returncode, "waited": result.waited,
              "stdout_eof": result.stdout_eof, "stderr_eof": result.stderr_eof,
@@ -669,6 +669,8 @@ def failure_details(result) -> dict:
             continue
         try:
             data = strict_json(line.split("=", 1)[1])
+            if type(data) is not dict or type(data.get("details")) is not dict:
+                continue
             detail = data["details"]
             code = detail.get("error")
             if type(code) is str and re.fullmatch(r"[A-Z][A-Z0-9_]{0,79}", code):
@@ -678,8 +680,30 @@ def failure_details(result) -> dict:
                 and set(row) == {"file", "line"} and type(row["file"]) is str
                 and re.fullmatch(r"(?:tests/|src/|\.github/scripts/)[A-Za-z0-9_./-]{1,180}", row["file"])
                 and ".." not in Path(row["file"]).parts and type(row["line"]) is int and 0 < row["line"] < 1000000][-16:]
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError, VerificationError, RecursionError):
             pass
+    if step is not None and paths is not None and step.parser == "minitest":
+        try:
+            expected = set(ruby_expected_ids(paths.source, step.id))
+            text = result.stdout.decode("utf-8", "replace")
+            # Only source-known test IDs and first-party relative locations.
+            # Exception messages, assertion values and raw captures stay private.
+            failed = re.findall(r"(?m)^([A-Za-z0-9_:]+#test_[A-Za-z0-9_]+)(?: \[[^\r\n]{1,512}\])?:\s*$", text)
+            value["failed_tests"] = sorted(expected.intersection(failed))
+            allowed = {"tests/workflow/" + row[1] for row in RUBY_SUITES}
+            allowed.update("tests/workflow/" + name for name in
+                           ("upload_process_fixture.rb", "upload_process_ownership.rb"))
+            allowed.update("fastlane/" + name for name in
+                           ("native_upload_validation.rb", "ios_upload_validation.rb",
+                            "android_upload_validation.rb", "release_support.rb"))
+            locations = re.findall(r"((?:tests/workflow|fastlane)/[A-Za-z0-9_]+\.rb):([1-9][0-9]{0,5})", text)
+            value["ruby_locations"] = sorted({(name, int(line)) for name, line in locations
+                                                if name in allowed})[:32]
+            footers = re.findall(r"(?m)^(\d{1,9}) runs, (\d{1,9}) assertions, (\d{1,9}) failures, "
+                                 r"(\d{1,9}) errors, (\d{1,9}) skips\s*$", text)
+            value["minitest_observations"] = [list(map(int, row)) for row in footers[:2]]
+        except (VerificationError, OSError, UnicodeError):
+            value["ruby_diagnostics_unavailable"] = True
     return value
 
 
@@ -770,11 +794,11 @@ def perform_step(step: Step, paths: Paths, session, checks, inventory: dict,
                             output_limit=(16 if "install" in step.id or step.id == "source-dependencies" else 8) * 1024**2,
                             cpu_seconds=300 if step.id in {"bundle-install", "wheel-build", "python-full"} else 180)
         if not value.ok:
-            return CheckResult(False, failure_details(value), "COMMAND_EXIT_OR_FINALITY")
+            return CheckResult(False, failure_details(value, step, paths), "COMMAND_EXIT_OR_FINALITY")
         try:
             return parse_capture(step, value, paths, platform, checks)
         except VerificationError as exc:
-            return CheckResult(False, failure_details(value), exc.code)
+            return CheckResult(False, failure_details(value, step, paths), exc.code)
     if step.kind != "inspection":
         raise VerificationError("UNKNOWN_GATE_KIND")
     details = {}
