@@ -156,6 +156,106 @@ module UploadProcessFixture
     PROCESS_OBSERVER_SELECTION.nil? ? {} : {PROCESS_OBSERVER_KEY => PROCESS_OBSERVER_SELECTION}
   end
 
+  def owned_fixture_directory(directory)
+    unless directory.is_a?(String) && directory.bytesize.between?(1, 4096) &&
+           directory == File.absolute_path(directory) && File.realpath(directory) == directory
+      raise Failure.new("fixture-cleanup", "fixture directory is not canonical")
+    end
+    value = File.lstat(directory) # A link is not an owned case directory.
+    unless value.directory? && value.uid == Process.uid && (value.mode & 0o7777) == 0o700
+      raise Failure.new("fixture-cleanup", "fixture directory is not private and owned")
+    end
+    value
+  end
+
+  def driver_environment(directory)
+    owned_fixture_directory(directory)
+    process_observer_environment.merge("TMPDIR" => directory, "TMP" => directory, "TEMP" => directory)
+  end
+
+  def fixture_directory_identity(value)
+    %i[dev ino mode uid gid nlink size mtime ctime].map { |name| value.public_send(name) }
+  end
+
+  # Pin the no-follow directory identity before streaming bounded entry names.
+  # The enumerator's borrowed descriptor must match BEFORE any names are read;
+  # no content/PID records are opened and no recursive traversal is performed.
+  def fixture_entry_names(directory)
+    expected = fixture_directory_identity(owned_fixture_directory(directory))
+    File.open(directory, File::RDONLY | File::NOFOLLOW | File::NONBLOCK) do |pin|
+      raise Failure.new("fixture-cleanup", "fixture directory changed before enumeration") unless fixture_directory_identity(pin.stat) == expected
+      Dir.open(directory, encoding: Encoding::BINARY) do |entries|
+        borrowed = IO.for_fd(entries.fileno, autoclose: false) # Dir owns this FD; never close it through IO.
+        raise Failure.new("fixture-cleanup", "fixture directory enumeration changed identity") unless fixture_directory_identity(borrowed.stat) == expected
+        names = []
+        entries.each_child do |name|
+          unless names.length < 256 && name.is_a?(String) && name.bytesize.between?(1, 255) &&
+                 /\A[\x20-\x7e]+\z/.match?(name) && !name.include?("/") && !%w[. ..].include?(name) && !names.include?(name)
+            raise Failure.new("fixture-cleanup", "fixture directory listing is oversized or ambiguous")
+          end
+          names << name
+        end
+        unless [pin.stat, borrowed.stat, owned_fixture_directory(directory)].all? { |value| fixture_directory_identity(value) == expected }
+          raise Failure.new("fixture-cleanup", "fixture directory changed during enumeration")
+        end
+        names
+      end
+    end
+  rescue SystemCallError, IOError, ArgumentError
+    raise Failure.new("fixture-cleanup", "fixture directory enumeration failed")
+  end
+
+  def assert_fixture_cleanup!(directory, root:, layout:)
+    names = fixture_entry_names(directory)
+    case layout
+    when :driver
+      raise Failure.new("fixture-cleanup", "unresolved observer scratch prevents fixture removal") if names.any? { |name| name.start_with?("mrk-process-observation-") }
+    when :joined_case
+      # Direct scratch belongs to independently joined SAME-VM reservations.
+      # Those reservations do not cover a nested driver's observer children.
+      names.grep(/\Anative-process-/).each do |name|
+        nested = fixture_entry_names(File.join(directory, name))
+        raise Failure.new("fixture-cleanup", "nested observer scratch prevents case removal") if nested.any? { |entry| entry.start_with?("mrk-process-observation-") }
+      end
+    when :probe
+      prefix = /\A(?:ownership-(?:capture|run)-|setup-(?:capture|run|ownership)-|observation-native-)/
+      raise Failure.new("fixture-cleanup", "retained proof case prevents probe removal") if names.any? { |name| prefix.match?(name) }
+    else
+      raise Failure.new("fixture-cleanup", "unknown fixed fixture cleanup layout")
+    end
+    true
+  rescue Exception
+    (@unresolved_roots ||= {})[root] = true
+    raise
+  end
+
+  def remove_fixture_directory(directory, root:, layout:)
+    assert_fixture_cleanup!(directory, root: root, layout: layout)
+    FileUtils.remove_entry(directory)
+  rescue Exception
+    (@unresolved_roots ||= {})[root] = true
+    raise
+  end
+
+  # Shared only with the native raw-proof collector and its inert contract.
+  # A caught raw failure may not later clear the retained-evidence latch.
+  module RawCaptureCleanup
+    def check_raw_capture_scratch!(directory)
+      UploadProcessFixture.assert_fixture_cleanup!(directory, root: @root, layout: :driver)
+    rescue Exception
+      @retain_raw_evidence = true
+      raise
+    end
+
+    def finish_raw_proof_copies!
+      if UploadProcessFixture.cleanup_unresolved?(@root)
+        @retain_raw_evidence = true
+        raise Failure.new("fixture-cleanup", "raw observer cleanup remains unresolved")
+      end
+      @retain_raw_evidence = false
+    end
+  end
+
   def validate_process_observer_path(path, darwin:)
     return nil if path.nil? && !darwin
     unless darwin && path.is_a?(String) && path.ascii_only? && path.bytesize.between?(1, 4096) &&
@@ -366,7 +466,7 @@ module UploadProcessFixture
         File.open(File.join(directory, "driver.stdout"), "w") do |output|
           File.open(File.join(directory, "driver.stderr"), "w") do |errors|
             scope.active do
-              child.start(process_observer_environment, RbConfig.ruby, File.realpath(__FILE__), "driver", directory,
+              child.start(driver_environment(directory), RbConfig.ruby, File.realpath(__FILE__), "driver", directory,
                           in: File::NULL, out: output, err: errors, unsetenv_others: true, pgroup: true)
               killed = false
               wait_until(DRIVER_LIMIT, "driver") do
@@ -451,28 +551,31 @@ module UploadProcessFixture
         raise
       ensure
         scope.cleanup do
-          begin
-            child.stop
-            cleaned = true if child.phase == :unstarted
-            if directory && !cleaned
-              # EOF stops native workers. Marker PIDs authorize observation only.
-              owner_path = File.join(directory, "owner.json")
-              if File.file?(owner_path)
-                owner = read_json(owner_path)
-                native_deadline ||= clock + CLEANUP_LIMIT
-                unless no_native_child?(mode, owner, result, proof)
-                  dead!(owner.fetch("leader"), owner.fetch("group"), deadline: native_deadline)
-                  dead!(owner["child"], owner.fetch("group"), deadline: native_deadline) if owner["child"]
-                end
-                cleaned = true
+          child.stop
+          cleaned = true if child.phase == :unstarted
+          if directory && !cleaned
+            # EOF stops native workers. Marker PIDs authorize observation only.
+            owner_path = File.join(directory, "owner.json")
+            if File.file?(owner_path)
+              owner = read_json(owner_path)
+              native_deadline ||= clock + CLEANUP_LIMIT
+              unless no_native_child?(mode, owner, result, proof)
+                dead!(owner.fetch("leader"), owner.fetch("group"), deadline: native_deadline)
+                dead!(owner["child"], owner.fetch("group"), deadline: native_deadline) if owner["child"]
               end
+              cleaned = true
             end
-          ensure
-            FileUtils.remove_entry(directory) if directory && cleaned
-            if directory && !cleaned
-              (@unresolved_roots ||= {})[root] = true
-              warn "Fixture ownership/cleanup unresolved; preserve #{directory}"
-            end
+          end
+        end
+        # Independent cleanup collection preserves an earlier stop/primary error
+        # if the deletion veto also fails. Even already-cleaned native workers do
+        # not prove finality for a separate observer spawned inside the driver.
+        scope.cleanup do
+          if directory && cleaned && child.complete?
+            remove_fixture_directory(directory, root: root, layout: :driver)
+          elsif directory
+            (@unresolved_roots ||= {})[root] = true
+            warn "Fixture ownership/cleanup unresolved; preserve #{directory}"
           end
         end
       end
@@ -1472,6 +1575,9 @@ module UploadProcessFixture
     validate_request!(platform, mode, input.fetch("parameters"))
     observe_signals = input.fetch("observeSignals", false)
     validate_signal_observation!(platform, mode, observe_signals)
+    unless Dir.tmpdir == directory
+      raise Failure.new("fixture-input", "driver temporary directory is not its owned case root")
+    end
     return NativeSignalProbe.execute_driver(directory, mode) if observe_signals
     return NativePrimaryProbe.new(directory, mode).execute if NATIVE_PRIMARY_PROOFS.key?(mode)
     return NativeSetupDriver.new(directory, mode).execute if platform == "native"
@@ -1855,6 +1961,7 @@ module UploadProcessFixture
         assert_equal "live", fixture.parse_process_observer(line.call(maximum), "", 0, *maximum.take(2), uid: 4_294_967_295, gid: gid)
       end
       assert_process_observer_routing(line)
+      assert_process_observer_cleanup
     end
 
     def assert_process_observer_routing(line)
@@ -1896,13 +2003,25 @@ module UploadProcessFixture
       File.stub(:lstat, ->(*) { raise Errno::ENOENT }) do
         assert_raises(Failure) { fixture.validate_process_observer_path(path, darwin: true) }
       end
-      original = ENV[PROCESS_OBSERVER_KEY]
+      canaries = {PROCESS_OBSERVER_KEY => path + "-canary", "TMPDIR" => "/synthetic-ambient-tmpdir",
+                  "TMP" => "/synthetic-ambient-tmp", "TEMP" => "/synthetic-ambient-temp",
+                  "GOOGLE_APPLICATION_CREDENTIALS" => "/synthetic-credential-canary", "BUNDLE_GEMFILE" => "/synthetic-config-canary"}
+      original = canaries.keys.to_h { |key| [key, ENV[key]] }
       expected_environment = PROCESS_OBSERVER_SELECTION.nil? ? {} : {PROCESS_OBSERVER_KEY => PROCESS_OBSERVER_SELECTION}
       begin
-        ENV[PROCESS_OBSERVER_KEY] = path + "-canary"
+        canaries.each { |key, value| ENV[key] = value }
         assert_equal expected_environment, fixture.process_observer_environment
+        owned = "/synthetic-owned-case"
+        File.stub(:realpath, ->(value) { value }) do
+          File.stub(:lstat, metadata.new(Process.uid, 1, 0o40700, :directory)) do
+            actual = fixture.driver_environment(owned)
+            expected = expected_environment.merge("TMPDIR" => owned, "TMP" => owned, "TEMP" => owned)
+            assert_equal expected.keys.sort, actual.keys.sort # Never print unrelated ambient values on failure.
+            assert_equal expected, actual
+          end
+        end
       ensure
-        original.nil? ? ENV.delete(PROCESS_OBSERVER_KEY) : ENV[PROCESS_OBSERVER_KEY] = original
+        original.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
       end
 
       calls, replies = [], []
@@ -1952,6 +2071,306 @@ module UploadProcessFixture
               end
               assert_empty calls # An exhausted budget cannot acquire a new observer.
             end
+          end
+        end
+      end
+    end
+
+    # All directory handles, enumeration, removal and run acquisition here are
+    # inert doubles. The actual lifetime *entrypoint* is replaced; only its
+    # in-memory first-error/cleanup collector is reused, without trap setup.
+    def assert_process_observer_cleanup
+      fixture = UploadProcessFixture
+      saved_roots = fixture.instance_variable_get(:@unresolved_roots)
+      fixture.instance_variable_set(:@unresolved_roots, {})
+      root, driver = "/synthetic-proof-root", "/synthetic-proof-root/native-process-fixed"
+      removed, visited = [], []
+      listings = {root => [], driver => []}
+      reader = lambda do |path|
+        visited << path
+        value = listings.fetch(path)
+        raise value if value.is_a?(Exception)
+        value
+      end
+      FileUtils.stub(:remove_entry, ->(path) { removed << path }) do
+        fixture.stub(:fixture_entry_names, reader) do
+          listings[driver] = ["mrk-process-observation-retained"]
+          assert_raises(Failure) { fixture.remove_fixture_directory(driver, root: root, layout: :driver) }
+          assert_empty removed
+          assert fixture.cleanup_unresolved?(root)
+          listing_error = IOError.new("synthetic listing failure")
+          listings[driver] = listing_error
+          error = assert_raises(IOError) { fixture.remove_fixture_directory(driver, root: root, layout: :driver) }
+          assert_same listing_error, error
+          assert_empty removed
+          listings[root] = ["mrk-process-observation-owned-here", "native-process-fixed"]
+          listings[driver] = ["mrk-process-observation-owned-by-driver"]
+          visited.clear
+          assert_raises(Failure) { fixture.remove_fixture_directory(root, root: root, layout: :joined_case) }
+          assert_equal [root, driver], visited
+          assert_empty removed
+          listings[driver] = ["owner.json"]
+          fixture.remove_fixture_directory(root, root: root, layout: :joined_case)
+          assert_equal [root], removed # Direct scratch is covered only by the caller's original reservations.
+          removed.clear
+          %w[ownership-capture- ownership-run- setup-capture- setup-run- setup-ownership- observation-native-].each do |prefix|
+            listings[root] = [prefix + "retained"]
+            visited.clear
+            assert_raises(Failure) { fixture.remove_fixture_directory(root, root: root, layout: :probe) }
+            assert_equal [root], visited # Never recursively inspect a retained proof case.
+          end
+          assert_empty removed
+          listings[root] = ["input.json", "setup-progress.json"]
+          fixture.remove_fixture_directory(root, root: root, layout: :probe)
+          assert_equal [root], removed
+          removed.clear
+
+          collector = Object.new.extend(RawCaptureCleanup)
+          collector.instance_variable_set(:@root, root)
+          collector.instance_variable_set(:@retain_raw_evidence, false)
+          listings[driver] = ["mrk-process-observation-retained"]
+          assert_raises(Failure) { collector.check_raw_capture_scratch!(driver) }
+          assert collector.instance_variable_get(:@retain_raw_evidence)
+          assert_raises(Failure) { collector.finish_raw_proof_copies! }
+          assert collector.instance_variable_get(:@retain_raw_evidence)
+          assert_empty removed
+          fixture.instance_variable_set(:@unresolved_roots, {})
+          listings[driver] = []
+          collector.check_raw_capture_scratch!(driver)
+          collector.finish_raw_proof_copies!
+          refute collector.instance_variable_get(:@retain_raw_evidence)
+          assert_run_cleanup_veto_with_doubles(root, driver, listings, removed)
+        end
+      end
+      assert_bounded_fixture_enumeration
+      assert_driver_temp_precondition
+    ensure
+      fixture.instance_variable_set(:@unresolved_roots, saved_roots) if fixture
+    end
+
+    def assert_run_cleanup_veto_with_doubles(root, directory, listings, removed)
+      fixture = UploadProcessFixture
+      scope_type = Struct.new(:cleanup_depth) do
+        def cleanup
+          self.cleanup_depth += 1
+          yield
+        ensure
+          self.cleanup_depth -= 1
+        end
+      end
+      child_type = Struct.new(:phase, :status, :stop_error, :starts) do
+        def start(environment, *arguments, **options)
+          self.starts << [environment, arguments, options]
+          self.phase = :reaped
+        end
+        def poll = status
+        def stop
+          raise stop_error if stop_error
+        end
+        def complete? = phase == :reaped
+      end
+      owner = {"phase" => "no-native-child", "nativeSpawnAttempts" => 0}
+      [false, true].each do |residue|
+        [false, true].each do |with_primary|
+          removed.clear
+          fixture.instance_variable_set(:@unresolved_roots, {})
+          listings[directory] = residue ? ["mrk-process-observation-retained"] : []
+          active_error = with_primary ? IOError.new("synthetic original active failure") : nil
+          stop_error = with_primary ? IOError.new("synthetic independent stop failure") : nil
+          child = child_type.new(:unstarted, Struct.new(:exitstatus).new(1), stop_error, [])
+          frame = Lifetime.new(scope_type.new(0))
+          result = {"kind" => "setup-fixture-fault", "nativeSpawnAttempts" => 0, "ownedDescriptorsClosed" => true}
+          result.define_singleton_method(:merge) { |*| raise active_error } if with_primary
+          lifetime = lambda do |&body|
+            value = nil
+            begin
+              value = body.call(frame)
+            rescue Exception => error
+              frame.remember(error)
+            end
+            raise frame.primary if frame.primary
+            value
+          end
+          fake_directory = Struct.new(:uid, :mode) { def directory? = true }.new(Process.uid, 0o40700)
+          observed_error = nil
+          File.stub(:realpath, ->(path) { path }) do
+            File.stub(:lstat, fake_directory) do
+              File.stub(:open, ->(*, **, &block) { block.call(Object.new) }) do
+                File.stub(:file?, false) do
+                  Dir.stub(:mktmpdir, directory) do
+                    OwnedChild.stub(:new, child) do
+                      fixture.stub(:lifetime, lifetime) do
+                        fixture.stub(:atomic_json, nil) do
+                          fixture.stub(:read_json, ->(path) { File.basename(path) == "owner.json" ? owner : result }) do
+                            fixture.stub(:clock, 0.0) do
+                              fixture.stub(:wait_until, ->(*, &block) { assert block.call }) do
+                                fixture.stub(:warn, nil) do
+                                  begin
+                                    fixture.run(platform: "native", root: root, parameters: {}, mode: "native-setup-second-pipe")
+                                  rescue Exception => error
+                                    observed_error = error
+                                  end
+                                end
+                              end
+                            end
+                          end
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+          assert_equal 1, child.starts.length
+          assert_equal fixture.process_observer_environment.merge("TMPDIR" => directory, "TMP" => directory, "TEMP" => directory), child.starts.first[0]
+          assert_equal true, child.starts.first[2].fetch(:unsetenv_others)
+          assert_equal true, child.starts.first[2].fetch(:pgroup)
+          errors = frame.instance_variable_get(:@cleanup_errors)
+          if with_primary
+            assert_same active_error, observed_error
+            assert_same stop_error, errors.first
+          elsif residue
+            assert_instance_of Failure, observed_error
+          else
+            assert_nil observed_error
+          end
+          if residue
+            assert_empty removed # Active path already set cleaned=true in every vector.
+            assert fixture.cleanup_unresolved?(root)
+            assert_equal "fixture-cleanup", errors.last.kind
+          else
+            assert_equal [directory], removed
+          end
+          assert_equal (with_primary ? 1 : 0) + (residue ? 1 : 0), errors.length
+        end
+      end
+    end
+
+    def assert_bounded_fixture_enumeration
+      fixture = UploadProcessFixture
+      path = "/synthetic-enumeration-root"
+      type = Struct.new(:dev, :ino, :mode, :uid, :gid, :nlink, :size, :mtime, :ctime) do
+        def directory? = (mode & 0o170000) == 0o40000
+      end
+      metadata = type.new(1, 2, 0o40700, Process.uid, Process.gid, 2, 64, 1, 1)
+      pin = Struct.new(:stat).new(metadata)
+      borrowed = Struct.new(:stat).new(metadata)
+      names, reads, closed = [], 0, []
+      listing_error = close_error = mutate = nil
+      entries = Object.new
+      entries.define_singleton_method(:fileno) { 987_654 } # Never a real FD; IO.for_fd is fully replaced below.
+      entries.define_singleton_method(:each_child) do |&block|
+        raise listing_error if listing_error
+        names.each do |name|
+          reads += 1
+          block.call(name)
+        end
+        metadata.ctime += 1 if mutate
+      end
+      file_open = lambda do |name, flags, &block|
+        assert_equal path, name
+        assert_equal File::RDONLY | File::NOFOLLOW | File::NONBLOCK, flags
+        begin
+          block.call(pin)
+        ensure
+          closed << :pin
+          raise IOError, "synthetic pin close failure" if close_error == :pin
+        end
+      end
+      dir_open = lambda do |name, encoding:, &block|
+        assert_equal path, name
+        assert_equal Encoding::BINARY, encoding
+        begin
+          block.call(entries)
+        ensure
+          closed << :directory
+          raise IOError, "synthetic enumerator close failure" if close_error == :directory
+        end
+      end
+      File.stub(:realpath, path) do
+        File.stub(:lstat, ->(*) { metadata }) do
+          File.stub(:open, file_open) do
+            Dir.stub(:open, dir_open) do
+              IO.stub(:for_fd, lambda { |fd, autoclose:| assert_equal 987_654, fd; assert_equal false, autoclose; borrowed }) do
+                names = ["a" * 255]
+                assert_equal names, fixture.fixture_entry_names(path)
+                assert_equal [:directory, :pin], closed
+                names = Array.new(258) { |index| "entry-#{index}" }
+                reads = 0
+                assert_raises(Failure) { fixture.fixture_entry_names(path) }
+                assert_equal 257, reads # Bounded DURING enumeration, not after Dir.children allocation.
+                [["a" * 256], ["same", "same"], [".."], ["a/b"], ["a\0b"], ["a\nb"]].each do |bad|
+                  names, closed = bad, []
+                  assert_raises(Failure) { fixture.fixture_entry_names(path) }
+                  assert_equal [:directory, :pin], closed
+                end
+                names, closed, listing_error = [], [], IOError.new("synthetic listing failure")
+                assert_raises(Failure) { fixture.fixture_entry_names(path) }
+                assert_equal [:directory, :pin], closed
+                listing_error = nil
+                %i[pin directory].each do |fault|
+                  closed, close_error = [], fault
+                  assert_raises(Failure) { fixture.fixture_entry_names(path) }
+                  assert_equal [:directory, :pin], closed
+                end
+                close_error = nil
+                borrowed.stat = metadata.dup
+                borrowed.stat.ino += 1
+                names, reads, closed = ["must-not-be-read"], 0, []
+                assert_raises(Failure) { fixture.fixture_entry_names(path) }
+                assert_equal 0, reads
+                assert_equal [:directory, :pin], closed
+                borrowed.stat = metadata
+                pin.stat = metadata.dup
+                pin.stat.ino += 1
+                reads, closed = 0, []
+                assert_raises(Failure) { fixture.fixture_entry_names(path) }
+                assert_equal 0, reads
+                assert_equal [:pin], closed
+                pin.stat = metadata
+                mutate, closed = true, []
+                assert_raises(Failure) { fixture.fixture_entry_names(path) }
+                assert_equal [:directory, :pin], closed
+                mutate = nil
+                [0o120700, 0o40777].each do |bad_mode|
+                  metadata.mode, closed = bad_mode, []
+                  assert_raises(Failure) { fixture.fixture_entry_names(path) }
+                  assert_empty closed # Rejected before acquiring either descriptor.
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+
+    def assert_driver_temp_precondition
+      fixture = UploadProcessFixture
+      directory, mode = "/synthetic-driver-root", "native-setup-second-pipe"
+      input = {"platform" => "native", "parameters" => {}, "mode" => mode}
+      reads, acquired = 0, []
+      temporary = directory
+      native = Object.new
+      native.define_singleton_method(:execute) { :synthetic_driver_only }
+      factory = ->(*arguments) { acquired << arguments; native }
+      fixture.stub(:read_json, ->(*) { input }) do
+        Dir.stub(:tmpdir, -> { reads += 1; temporary }) do
+          NativeSetupDriver.stub(:new, factory) do
+            input["mode"] = "invalid-case"
+            assert_raises(Failure) { fixture.driver(directory) }
+            input["mode"], input["observeSignals"] = mode, true
+            assert_raises(Failure) { fixture.driver(directory) }
+            assert_equal 0, reads # Both input validations precede the actual temp precondition.
+            assert_empty acquired
+            input.delete("observeSignals")
+            temporary = "/synthetic-wrong-root"
+            error = assert_raises(Failure) { fixture.driver(directory) }
+            assert_equal "fixture-input", error.kind
+            assert_empty acquired
+            temporary = directory
+            assert_equal :synthetic_driver_only, fixture.driver(directory)
+            assert_equal [[directory, mode]], acquired
           end
         end
       end

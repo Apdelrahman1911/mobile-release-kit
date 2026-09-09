@@ -1,8 +1,8 @@
 """Pure hosted-owner regressions, not native isolation or process evidence.
 
 Only inert definitions are loaded. Collection uses synthetic paths, in-memory
-files, original-child doubles, a bounded fake clock and a fake selector. Neither
-Session construction's resource path nor any native entry point is executed.
+files, original-child doubles, a bounded fake clock and a fake selector. No
+Session construction resource effect or native entry point is executed.
 The helper's OS/process/signal namespaces are replaced, not shared stdlib APIs.
 """
 from __future__ import annotations
@@ -56,6 +56,9 @@ def session_double(module, platform="linux"):
     session.tool_prefixes = (session.python.parent.parent, session.ruby.parent.parent)
     session.runner_home = Path("/home/runner")
     session.runner_temp = Path("/home/runner/work/_temp")
+    session.ruby_prefix = session.ruby.parent.parent
+    session.ruby_ancestors = ()  # Bound explicitly in tests that exercise the Mac-only metadata role.
+    session._ruby_ancestor_states = ()
     session.entry = session.bootstrap / "ci_sandbox.py"
     session.policy = session.bootstrap / "subject.sb"
     session.cleanup_policy = session.bootstrap / "cleanup.sb"
@@ -875,6 +878,12 @@ class CISandboxPureTests(unittest.TestCase):
     def test_macos_numeric_launch_and_literal_policies_keep_distinct_write_roles(self):
         session = session_double(self.module, "darwin")
         session.runner_home = Path('/Users/runner"quote\n')
+        session.ruby = session.runner_home / "tools/ruby/bin/ruby"
+        session.ruby_prefix = session.ruby.parent.parent
+        session.tool_prefixes = (session.python.parent.parent, session.ruby_prefix)
+        # This is deliberately a pure escaping/renderer input, not canonical
+        # admission. The actual ancestor binding has its own metadata tests.
+        session.ruby_ancestors = (session.runner_home, session.ruby_prefix.parent)
         argv, kwargs = session._argv([str(session.ruby), "--synthetic"], 120)
         self.assertEqual(kwargs, {"user": session.uid, "group": session.gid, "extra_groups": []})
         self.assertEqual(argv[:7], [str(session.python), "-I", "-S", "-B", str(session.entry), "--enter", "darwin"])
@@ -909,6 +918,24 @@ class CISandboxPureTests(unittest.TestCase):
         self.assertNotIn(str(session.outside_write), cleanup)
         self.assertNotIn("(subpath " + json.dumps(str(session.fixture_controls)), positive)
         self.assertNotIn(str(session.runner_home), subject)  # Escaped literal, never raw policy text.
+        q = lambda value: json.dumps(str(value), ensure_ascii=True)
+        exclusions = "\n  ".join(f"(require-not (subpath {q(path)}))" for path in session.tool_prefixes)
+        private = " ".join(f"(subpath {q(path)})" for path in (session.runner_home, session.runner_temp, session.control))
+        common = ("(version 1)\n(allow default)\n(deny network*)\n(deny mach-lookup)\n"
+                  f"(deny file-read* (require-all (require-any {private})\n  {exclusions}))\n")
+        old_subject = (common + "(deny signal (require-not (target same-sandbox)))\n"
+                       f"(deny file-write* (require-all (require-not (subpath {q(session.work)})) "
+                       '(require-not (literal "/dev/null"))))\n')
+        self.assertEqual(cleanup, common + '(deny file-write* (require-not (literal "/dev/null")))\n')
+        self.assertEqual(positive, common + f"(deny file-write* (require-all (require-not (literal {q(session.outside_write)})) "
+                         '(require-not (literal "/dev/null"))))\n')
+        for ancestor in session.ruby_ancestors:
+            clause = f"(allow file-read-metadata (literal {q(ancestor)}))\n"
+            self.assertEqual(subject.count(clause), 1)
+            subject = subject.replace(clause, "")
+            self.assertNotIn(clause, cleanup)
+            self.assertNotIn(clause, positive)
+        self.assertEqual(subject, old_subject)  # No other widening or changed write/signal/network role.
 
     def test_finality_access_guard_and_close_fail_without_adopting_or_resetting(self):
         for case in ("busy", "owned", "remaining", "unknown"):
@@ -1371,6 +1398,10 @@ class CISandboxPureTests(unittest.TestCase):
                 session = session_double(self.module, platform)
                 if platform == "darwin":
                     session.runner_home = Path("/Users/runner")
+                    session.ruby = session.runner_home / "tools/ruby/bin/ruby"
+                    session.ruby_prefix = session.ruby.parent.parent
+                    session.ruby_ancestors = (session.runner_home, session.ruby_prefix.parent)
+                    session.tool_prefixes = (session.python.parent.parent, session.ruby_prefix)
                 rig = _Collection(self.module, session, stdout=(b"MRK_NATIVE_ISOLATION_OK\n",))
                 rig.snapshot_rows = {(rig.child.pid, rig.child.pid): ((session.uid,) * 3, (session.gid,) * 3, 65536)}
                 created, closed, events, cleanup = [], [], rig.events, {}
@@ -1444,6 +1475,9 @@ class CISandboxPureTests(unittest.TestCase):
                     if platform == "darwin":
                         self.assertEqual((data["home_canary"], data["home_socket"]),
                             (str(session.runner_home / f".{session.root.name}-home-read"), str(session.runner_home / f".{session.root.name}-home-socket")))
+                        self.assertEqual((data["ruby_prefix"], data["ruby_executable"], data["home_sibling"]),
+                            (str(session.ruby_prefix), str(session.ruby), str(session.ruby_prefix.parent / f".{session.root.name}-ancestor-read")))
+                        self.assertNotIn("ruby_ancestors", data)  # Child derives finite literals, never accepts a reader list.
                         self.assertNotIn("runtime_executables", data)
                         self.assertLess(events.index(("home-positive",)), events.index(("write-positive",)))
                     else:
@@ -3007,7 +3041,10 @@ class CISandboxPureTests(unittest.TestCase):
         for platform in ("linux", "darwin"):
             data = {"platform": platform, "uid": uid, "gid": gid,
                     "runtime_executables": ["/synthetic/python/bin/python", "/synthetic/ruby/bin/ruby"],
-                    "home_canary": "/Users/runner/.synthetic-home-canary", "home_socket": "/Users/runner/.synthetic-home-socket",
+                    "runner_home": "/Users/runner", "ruby_prefix": "/Users/runner/tools/ruby",
+                    "ruby_executable": "/Users/runner/tools/ruby/bin/ruby",
+                    "home_canary": "/Users/runner/.mrk-pure-fixture-home-read", "home_socket": "/Users/runner/.mrk-pure-fixture-home-socket",
+                    "home_sibling": "/Users/runner/tools/.mrk-pure-fixture-ancestor-read",
                     "work": "/tmp/mrk-pure-fixture/work", "host_net": "host-net", "host_pid": "host-pid"}
             seen = []
 
@@ -3103,6 +3140,8 @@ class CISandboxPureTests(unittest.TestCase):
             with self.subTest(home_unknown_finality=case):
                 session = session_double(self.module, "darwin")
                 session.runner_home = Path("/Users/runner")
+                session.ruby_prefix = session.runner_home / "tools/ruby"
+                session.ruby_ancestors = (session.runner_home, session.ruby_prefix.parent)
                 session.deadline = 1.0
                 session.failure = "earlier immutable failure"
                 session.domain_finality = True
@@ -3115,17 +3154,21 @@ class CISandboxPureTests(unittest.TestCase):
                 listener_error = OSError(errno.EIO, "synthetic original HOME listener close")
                 canary_error = OSError(errno.EIO, "synthetic original HOME canary close")
                 pin_error = OSError(errno.EIO, "synthetic original HOME pin close")
+                sibling_error = OSError(errno.EIO, "synthetic original sibling close")
+                sibling_pin_error = OSError(errno.EIO, "synthetic original sibling parent close")
                 listener = SimpleNamespace(close=Mock(side_effect=listener_error if case == "independent-close-errors" else None))
                 session._home_state = {"pin": 101, "original": original, "change_attempted": True, "prepared": True,
                     "expected_mode": 0o751, "canary_fd": 102, "canary_name": f".{session.root.name}-home-read",
                     "canary_identity": canary, "canary_mode": 0o444, "canary_create_attempted": True, "listener": listener,
                     "socket_name": f".{session.root.name}-home-socket", "socket_identity": endpoint, "socket_mode": 0o666,
-                    "socket_bind_attempted": True, "closed": False}
+                    "socket_bind_attempted": True, "sibling_pin": 103, "sibling_parent_original": original,
+                    "sibling_parent_mode": 0o755, "sibling_fd": 104, "sibling_name": f".{session.root.name}-ancestor-read",
+                    "sibling_create_attempted": True, "sibling_identity": canary, "sibling_mode": 0o444, "closed": False}
 
                 def close(fd):
-                    self.assertIn(fd, (101, 102))
+                    self.assertIn(fd, (101, 102, 103, 104))
                     if case == "independent-close-errors":
-                        raise canary_error if fd == 102 else pin_error
+                        raise {101: pin_error, 102: canary_error, 103: sibling_pin_error, 104: sibling_error}[fd]
 
                 closed = Mock(side_effect=close)
                 denied = Mock(side_effect=AssertionError("unknown ownership/finality cannot change HOME state"))
@@ -3142,14 +3185,14 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertTrue(session._home_state["closed"])
                     self.assertEqual(session._close_home_boundary(), [])
                 denied.assert_not_called()
-                self.assertEqual(sorted(c.args[0] for c in closed.call_args_list), [101, 102])
+                self.assertEqual(sorted(c.args[0] for c in closed.call_args_list), [101, 102, 103, 104])
                 listener.close.assert_called_once_with()
                 self.assertEqual(session.failure, "earlier immutable failure")
                 self.assertEqual(session.deadline, 1.0)
                 if case in {"unknown", "independent-close-errors"}:
                     self.assertIn(primary, failures)
                 if case == "independent-close-errors":
-                    self.assertTrue(all(error in failures for error in (listener_error, canary_error, pin_error)))
+                    self.assertTrue(all(error in failures for error in (listener_error, canary_error, pin_error, sibling_error, sibling_pin_error)))
 
     def test_provider_fixed_write_and_home_read_stat_socket_controls_require_real_specific_denials(self):
         executables = ["/synthetic/python/bin/python", "/synthetic/ruby/bin/ruby"]
@@ -3189,17 +3232,26 @@ class CISandboxPureTests(unittest.TestCase):
 
         home = Path("/Users/runner")
         canary, address = home / ".mrk-pure-fixture-home-read", home / ".mrk-pure-fixture-home-socket"
+        ruby_prefix = home / "tools/ruby"
+        ruby = ruby_prefix / "bin/ruby"
+        ancestors = (home, ruby_prefix.parent)
+        sibling = ruby_prefix.parent / ".mrk-pure-fixture-ancestor-read"
         cases = ("eacces", "eperm", "read-missing", "read-permitted", "stat-missing", "stat-readonly", "stat-permitted",
-                 "socket-missing", "socket-unknown", "socket-permitted", "socket-close-error")
+                 "socket-missing", "socket-unknown", "socket-permitted", "socket-close-error", "ancestor-missing",
+                 "ancestor-file", "ancestor-writable", "ancestor-subject-group", "resolve-missing", "resolve-alias",
+                 "sibling-binding", "ruby-binding", "sibling-read-missing", "sibling-read-permitted", "sibling-read-close-error",
+                 "sibling-stat-missing", "sibling-stat-permitted")
         for case in cases:
             with self.subTest(home_mandatory_control=case):
                 events = []
+                read_close_error = OSError(errno.EIO, "synthetic sibling denial descriptor close")
 
                 def denied(path, operation):
-                    self.assertEqual(path, canary)
+                    self.assertIn(path, (canary, sibling))
+                    operation = operation if path == canary else "sibling-" + operation
                     events.append((operation,))
-                    if case == operation + "-permitted":
-                        return b"synthetic literal is readable" if operation == "read" else SimpleNamespace(st_mode=stat.S_IFREG | 0o444)
+                    if case == operation + "-permitted" or case == "sibling-read-close-error" and operation == "sibling-read":
+                        return b"synthetic literal is readable" if operation in {"read", "sibling-read"} else SimpleNamespace(st_mode=stat.S_IFREG | 0o444)
                     number = errno.EPERM if case == "eperm" else errno.ENOENT if case == operation + "-missing" else errno.EROFS if case == "stat-readonly" and operation == "stat" else errno.EACCES
                     raise OSError(number, "synthetic HOME canary permission result")
 
@@ -3215,35 +3267,60 @@ class CISandboxPureTests(unittest.TestCase):
                     close=Mock(side_effect=OSError(errno.EIO, "synthetic HOME endpoint close") if case == "socket-close-error" else None))
                 factory = Mock(return_value=endpoint)
                 data = {"platform": "darwin", "home_canary": str(canary), "home_socket": str(address),
-                        "runner_home": str(home), "work": "/private/tmp/mrk-pure-fixture/work"}
+                        "runner_home": str(home), "work": "/private/tmp/mrk-pure-fixture/work", "uid": 60001, "gid": 60001,
+                        "ruby_prefix": str(ruby_prefix), "ruby_executable": str(ruby), "home_sibling": str(sibling)}
+                if case == "sibling-binding":
+                    data["home_sibling"] = "/unrelated/private-fixture"
+                if case == "ruby-binding":
+                    data["ruby_executable"] = "/other/provider/bin/ruby"
 
                 def opened(path, flags):
                     self.assertEqual(flags, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
                     result = denied(path, "read")
                     self.assertIsInstance(result, bytes)
-                    return 302
+                    return 302 if path == canary else 303
 
                 def metadata(path, *, follow_symlinks):
                     self.assertFalse(follow_symlinks)
+                    if path in ancestors:
+                        events.append(("ancestor", path))
+                        if path == ancestors[-1] and case == "ancestor-missing":
+                            raise FileNotFoundError(errno.ENOENT, "synthetic required ancestor metadata unavailable")
+                        mode = stat.S_IFREG | 0o755 if case == "ancestor-file" and path == ancestors[-1] else stat.S_IFDIR | (
+                            0o777 if case == "ancestor-writable" and path == ancestors[-1] else 0o751 if path == home else 0o755)
+                        return SimpleNamespace(st_mode=mode, st_uid=1001,
+                            st_gid=60001 if case == "ancestor-subject-group" and path == ancestors[-1] else 20)
                     return denied(path, "stat")
 
+                def resolved(path, *, strict):
+                    self.assertEqual((path, strict), (ruby, True))
+                    self.assertEqual(events, [("ancestor", p) for p in ancestors])
+                    events.append(("resolve",))
+                    if case == "resolve-missing":
+                        raise FileNotFoundError(errno.ENOENT, "synthetic selected Ruby resolution failure")
+                    return ruby.with_name("other-ruby") if case == "resolve-alias" else ruby
+
                 def read(fd, count):
-                    self.assertEqual((fd, count), (302, len(self.module._HOME_READ_BYTES) + 1))
+                    self.assertIn(fd, (302, 303))
+                    self.assertEqual(count, len(self.module._HOME_READ_BYTES if fd == 302 else self.module._ANCESTOR_READ_BYTES) + 1)
                     return b"synthetic readable bytes"
 
-                closed = Mock()
+                closed = Mock(side_effect=read_close_error if case == "sibling-read-close-error" else None)
                 constants = {k: getattr(os, k) for k in ("O_RDONLY", "O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC")}
                 with patch.multiple(self.module, os=SimpleNamespace(**constants, fsencode=os.fsencode,
                                         open=opened, stat=metadata, read=read, close=closed), sys=SimpleNamespace(platform="darwin"),
                                     socket=SimpleNamespace(AF_UNIX=1, SOCK_STREAM=1, socket=factory),
                                     subprocess=SimpleNamespace(), signal=SimpleNamespace()), \
                      patch.object(Path, "read_bytes", side_effect=AssertionError("the known-path probe uses only its bounded descriptor")), \
+                     patch.object(Path, "resolve", resolved), \
                      patch.object(Path, "stat", side_effect=AssertionError("the known-path probe must not follow links")):
                     if case in {"eacces", "eperm"}:
                         self.module._probe_provider_boundaries(data)
                     else:
-                        with self.assertRaises((self.module.SessionError, OSError, BaseExceptionGroup)):
+                        with self.assertRaises((self.module.SessionError, OSError, BaseExceptionGroup)) as caught:
                             self.module._probe_provider_boundaries(data)
+                        if case == "sibling-read-close-error":
+                            self.assertIn(read_close_error, caught.exception.exceptions)
                 if factory.called:
                     factory.assert_called_once_with(1, 1)
                     endpoint.close.assert_called_once_with()
@@ -3253,34 +3330,58 @@ class CISandboxPureTests(unittest.TestCase):
                     endpoint.close.assert_not_called()
                 if case == "read-permitted":
                     closed.assert_called_once_with(302)
+                elif case in {"sibling-read-permitted", "sibling-read-close-error"}:
+                    closed.assert_called_once_with(303)
                 else:
                     closed.assert_not_called()
                 if case in {"eacces", "eperm"}:
-                    self.assertEqual(events, [("read",), ("stat",), ("connect",)])
+                    self.assertEqual(events, [("ancestor", p) for p in ancestors] +
+                                     [("resolve",), ("read",), ("stat",), ("sibling-read",), ("sibling-stat",), ("connect",)])
+                elif case in {"sibling-binding", "ruby-binding"}:
+                    self.assertEqual(events, [])
+                elif case.startswith("ancestor-"):
+                    self.assertEqual(events, [("ancestor", p) for p in ancestors])
+                elif case.startswith("resolve-"):
+                    self.assertEqual(events, [("ancestor", p) for p in ancestors] + [("resolve",)])
+                elif case.startswith("socket-"):
+                    factory.assert_called_once_with(1, 1)
+                    self.assertEqual(events[-1], ("connect",))
+                else:
+                    operation = "sibling-read" if case.startswith("sibling-read-") else "sibling-stat" if case.startswith("sibling-stat-") else case.split("-", 1)[0]
+                    self.assertIn((operation,), events)
 
     def test_home_search_preparation_and_terminal_restore_keep_original_handles_and_uncertain_effects(self):
-        cases = ("750", "751", "755", "home-mode", "home-owner", "home-group", "home-name", "open-home",
+        cases = ("750", "751", "755", "deepest-home", "home-mode", "home-owner", "home-group", "home-name", "open-home",
                  "change-before-effect", "change-after-effect", "canary-collision", "canary-stat-error", "canary-links", "canary-subject-group",
                  "canary-short-write", "canary-mode-after-effect", "socket-collision", "socket-subject-group", "socket-mode-after-effect",
                  "manifest-error", "late-preparation", "close-name-drift", "close-mode-drift", "canary-replaced", "canary-group-drift", "socket-group-drift",
-                 "restore-after-effect", "three-close-errors")
+                 "restore-after-effect", "all-close-errors", "sibling-parent-open", "sibling-parent-drift", "sibling-replaced",
+                 "sibling-collision", "sibling-create-after-effect", "sibling-stat-error", "sibling-subject-group",
+                 "sibling-short-write", "sibling-mode-after-effect")
         for case in cases:
             with self.subTest(home_pin_lifecycle=case):
                 session = session_double(self.module, "darwin")
                 session.admitted = False
                 session.process_observer = None
                 session.runner_home = Path("/Users/runner")
-                session.ruby = session.runner_home / "tools/ruby/bin/ruby"
+                session.ruby = session.runner_home / ("ruby/bin/ruby" if case == "deepest-home" else "tools/ruby/bin/ruby")
+                session.ruby_prefix = session.ruby.parent.parent
+                sibling_parent = session.ruby_prefix.parent
+                session.ruby_ancestors = (session.runner_home,) if case == "deepest-home" else (session.runner_home, sibling_parent)
                 session.tool_prefixes = (session.python.parent.parent, session.ruby.parent.parent)
                 session.deadline = 1.0
                 canary_name, socket_name = f".{session.root.name}-home-read", f".{session.root.name}-home-socket"
                 canary_path, socket_path = session.runner_home / canary_name, session.runner_home / socket_name
+                sibling_name = f".{session.root.name}-ancestor-read"
+                sibling_path = sibling_parent / sibling_name
                 original_mode = int(case, 8) if case in {"750", "751", "755"} else 0o777 if case == "home-mode" else 0o750
                 clock = SimpleNamespace(now=0.0, closing=False)
                 events, nodes, captured_cleanup = [], {}, []
                 live_fds = {}
+                acquired = []
                 original_error = OSError(errno.EIO, "synthetic private HOME operation")
                 close_errors = {101: OSError(errno.EIO, "synthetic pin close"), 102: OSError(errno.EIO, "synthetic canary close"),
+                                103: OSError(errno.EIO, "synthetic sibling parent close"), 104: OSError(errno.EIO, "synthetic sibling close"),
                                 "listener": OSError(errno.EIO, "synthetic listener close")}
 
                 def node(inode, kind, mode, *, uid=0, gid=0, links=1, size=0):
@@ -3290,46 +3391,73 @@ class CISandboxPureTests(unittest.TestCase):
                 home_node = node(11, stat.S_IFDIR, original_mode,
                                  uid=session.uid if case == "home-owner" else 1001,
                                  gid=session.gid if case == "home-group" else 20, links=2)
+                parent_node = home_node if case == "deepest-home" else node(14, stat.S_IFDIR, 0o755, uid=1001, gid=20, links=2)
+                session._ruby_ancestor_states = tuple(SimpleNamespace(**(home_node if p == session.runner_home else parent_node))
+                                                       for p in session.ruby_ancestors)
 
                 def named_home(path):
-                    self.assertEqual(path, session.runner_home)
-                    result = dict(home_node)
-                    if case == "home-name" or clock.closing and case == "close-name-drift":
+                    self.assertIn(path, (session.runner_home, sibling_parent))
+                    result = dict(home_node if path == session.runner_home else parent_node)
+                    if path == session.runner_home and (case == "home-name" or clock.closing and case == "close-name-drift"):
+                        result["st_ino"] += 1
+                    if path == sibling_parent and clock.closing and case == "sibling-parent-drift":
                         result["st_ino"] += 1
                     return SimpleNamespace(**result)
 
                 def opened(path, flags, mode=None, *, dir_fd=None):
                     events.append(("open", str(path), flags, mode, dir_fd))
-                    if path == session.runner_home:
+                    if path == session.runner_home and 101 not in acquired:
                         self.assertEqual((flags, mode, dir_fd), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, None, None))
                         if case == "open-home":
                             raise original_error
                         live_fds[101] = home_node
+                        acquired.append(101)
                         return 101
-                    self.assertEqual((path, flags, mode, dir_fd), (canary_name,
-                        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, 101))
+                    if path == sibling_parent:
+                        self.assertEqual((flags, mode, dir_fd), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, None, None))
+                        self.assertTrue(session._home_state["prepared"])
+                        self.assertIn(("ancestors", session._home_state["expected_mode"]), events)
+                        if case == "sibling-parent-open":
+                            raise original_error
+                        self.assertNotIn(103, acquired)
+                        live_fds[103] = parent_node
+                        acquired.append(103)
+                        return 103
+                    self.assertIn(path, (canary_name, sibling_name))
+                    is_sibling = path == sibling_name
+                    fd = 104 if is_sibling else 102
+                    self.assertEqual((flags, mode, dir_fd),
+                        (os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, 103 if is_sibling else 101))
                     self.assertTrue(session._home_state["prepared"])
-                    self.assertTrue(session._home_state["canary_create_attempted"])
-                    if case == "canary-collision":
-                        nodes[canary_name] = node(91, stat.S_IFREG, 0o444, uid=1001)
-                        raise FileExistsError(errno.EEXIST, "synthetic foreign existing canary name")
-                    self.assertNotIn(canary_name, nodes)
-                    nodes[canary_name] = node(12, stat.S_IFREG, 0o600, gid=session.gid if case == "canary-subject-group" else 20,
-                                              links=2 if case == "canary-links" else 1)
-                    live_fds[102] = nodes[canary_name]
-                    return 102
+                    self.assertTrue(session._home_state["sibling_create_attempted" if is_sibling else "canary_create_attempted"])
+                    if case == ("sibling-collision" if is_sibling else "canary-collision"):
+                        nodes[path] = node(91, stat.S_IFREG, 0o444, uid=1001)
+                        raise FileExistsError(errno.EEXIST, "synthetic foreign existing file name")
+                    self.assertNotIn(path, nodes)
+                    nodes[path] = node(15 if is_sibling else 12, stat.S_IFREG, 0o600,
+                        gid=session.gid if case == ("sibling-subject-group" if is_sibling else "canary-subject-group") else 20,
+                        links=2 if not is_sibling and case == "canary-links" else 1)
+                    if is_sibling and case == "sibling-create-after-effect":
+                        raise original_error  # Created name, but no returned FD/verified identity.
+                    live_fds[fd] = nodes[path]
+                    acquired.append(fd)
+                    return fd
 
                 def fstat(fd):
                     self.assertIn(fd, live_fds)
                     if fd == 102 and case == "canary-stat-error" and not clock.closing:
                         raise original_error
+                    if fd == 104 and case == "sibling-stat-error" and not clock.closing:
+                        raise original_error
                     return SimpleNamespace(**live_fds[fd])
 
                 def metadata(name, *, dir_fd, follow_symlinks):
-                    self.assertEqual((dir_fd, follow_symlinks), (101, False))
-                    self.assertIn(name, (canary_name, socket_name))
+                    self.assertEqual((dir_fd, follow_symlinks), (103 if name == sibling_name else 101, False))
+                    self.assertIn(name, (canary_name, socket_name, sibling_name))
                     result = dict(nodes[name])
                     if clock.closing and case == "canary-replaced" and name == canary_name:
+                        result["st_ino"] += 1
+                    if clock.closing and case == "sibling-replaced" and name == sibling_name:
                         result["st_ino"] += 1
                     if clock.closing and (case == "canary-group-drift" and name == canary_name
                                           or case == "socket-group-drift" and name == socket_name):
@@ -3338,25 +3466,29 @@ class CISandboxPureTests(unittest.TestCase):
 
                 def fchmod(fd, mode):
                     self.assertIn(fd, live_fds)
-                    self.assertIn((fd, mode), {(101, 0o751), (101, original_mode), (102, 0o444)})
+                    self.assertIn((fd, mode), {(101, 0o751), (101, original_mode), (102, 0o444), (104, 0o444)})
                     if fd == 101 and not clock.closing:
                         self.assertTrue(session._home_state["change_attempted"])
                     if fd == 102:
                         self.assertIsNone(session._home_state["canary_mode"])
+                    if fd == 104:
+                        self.assertIsNone(session._home_state["sibling_mode"])
                     events.append(("fchmod", fd, mode, clock.closing))
                     if case == "change-before-effect" and fd == 101 and not clock.closing:
                         raise original_error
                     live_fds[fd]["st_mode"] = stat.S_IFMT(live_fds[fd]["st_mode"]) | mode
                     if (case == "change-after-effect" and fd == 101 and not clock.closing
                             or case == "canary-mode-after-effect" and fd == 102
+                            or case == "sibling-mode-after-effect" and fd == 104
                             or case == "restore-after-effect" and fd == 101 and clock.closing):
                         raise original_error
 
                 def write(fd, data):
-                    self.assertEqual((fd, data), (102, self.module._HOME_READ_BYTES))
-                    self.assertIsNotNone(session._home_state["canary_identity"])
-                    count = len(data) - 1 if case == "canary-short-write" else len(data)
-                    nodes[canary_name]["st_size"] = count
+                    self.assertIn(fd, (102, 104))
+                    self.assertEqual(data, self.module._HOME_READ_BYTES if fd == 102 else self.module._ANCESTOR_READ_BYTES)
+                    self.assertIsNotNone(session._home_state["canary_identity" if fd == 102 else "sibling_identity"])
+                    count = len(data) - 1 if case == ("canary-short-write" if fd == 102 else "sibling-short-write") else len(data)
+                    nodes[canary_name if fd == 102 else sibling_name]["st_size"] = count
                     return count
 
                 def socket_chmod(path, mode, *, follow_symlinks):
@@ -3370,8 +3502,8 @@ class CISandboxPureTests(unittest.TestCase):
 
                 def unlink(name, *, dir_fd):
                     self.assertTrue(clock.closing)
-                    self.assertEqual(dir_fd, 101)
-                    self.assertIn(name, (canary_name, socket_name))
+                    self.assertEqual(dir_fd, 103 if name == sibling_name else 101)
+                    self.assertIn(name, (canary_name, socket_name, sibling_name))
                     self.assertIn(name, nodes)
                     self.assertEqual(nodes[name]["st_uid"], 0)  # Never the collision's pre-existing file.
                     events.append(("unlink", name))
@@ -3381,7 +3513,7 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertIn(fd, live_fds)
                     events.append(("close", fd))
                     del live_fds[fd]
-                    if case == "three-close-errors":
+                    if case == "all-close-errors":
                         raise close_errors[fd]
 
                 def bind(address):
@@ -3396,7 +3528,7 @@ class CISandboxPureTests(unittest.TestCase):
 
                 def listener_close():
                     events.append(("listener-close",))
-                    if case == "three-close-errors":
+                    if case == "all-close-errors":
                         raise close_errors["listener"]
 
                 listener = SimpleNamespace(settimeout=Mock(), bind=Mock(side_effect=bind), listen=Mock(),
@@ -3406,7 +3538,7 @@ class CISandboxPureTests(unittest.TestCase):
                 def manifest(path, data, mode):
                     self.assertEqual((path, mode), (session.bootstrap / "home-control.json", 0o444))
                     self.assertEqual(json.loads(data), {"home": str(session.runner_home), "uid": session.uid,
-                                                       "gid": session.gid, "deadline": session.deadline})
+                                                       "gid": session.gid, "deadline": session.deadline, "ruby_prefix": str(session.ruby_prefix)})
                     events.append(("manifest",))
                     if case == "manifest-error":
                         raise original_error
@@ -3419,6 +3551,23 @@ class CISandboxPureTests(unittest.TestCase):
                     events.append(("domain", clock.closing))
                     return set()
 
+                def canonical(value):
+                    self.assertIn(Path(value), (*session.ruby_ancestors, session.ruby_prefix, session.ruby))
+                    return Path(value)
+
+                def checked_ancestors(*, home_mode=None):
+                    # The actual binding/recheck body is tested independently;
+                    # this lifetime fixture pins its exact two caller boundaries.
+                    self.module._remaining(session.deadline)
+                    if home_mode is None:
+                        self.assertIsNone(session._home_state)
+                        self.assertFalse(acquired)
+                    else:
+                        self.assertTrue(session._home_state["prepared"])
+                        self.assertEqual(home_mode, stat.S_IMODE(home_node["st_mode"]))
+                        self.assertNotIn(103, acquired)
+                    events.append(("ancestors", home_mode))
+
                 finalize = session._close_home_boundary
 
                 def finalization():
@@ -3430,15 +3579,17 @@ class CISandboxPureTests(unittest.TestCase):
                 fake_os = SimpleNamespace(**constants, geteuid=lambda: 0, fsencode=os.fsencode,
                     open=opened, fstat=fstat, stat=metadata, fchmod=fchmod, write=write, fsync=Mock(),
                     chmod=socket_chmod, unlink=unlink, close=close, path=SimpleNamespace(basename=os.path.basename))
-                prepared = case in {"750", "751", "755", "close-name-drift", "close-mode-drift", "canary-replaced", "canary-group-drift", "socket-group-drift",
-                                    "restore-after-effect", "three-close-errors"}
+                prepared = case in {"750", "751", "755", "deepest-home", "close-name-drift", "close-mode-drift", "canary-replaced", "canary-group-drift", "socket-group-drift",
+                                    "restore-after-effect", "all-close-errors", "sibling-parent-drift", "sibling-replaced"}
                 with patch.multiple(self.module, os=fake_os, sys=SimpleNamespace(platform="darwin"),
                                     socket=SimpleNamespace(AF_UNIX=1, SOCK_STREAM=1, socket=factory),
                                     subprocess=SimpleNamespace(), signal=SimpleNamespace(), _domain=domain,
-                                    _private_file=Mock(side_effect=manifest), time=SimpleNamespace(monotonic=lambda: clock.now)), \
+                                    _private_file=Mock(side_effect=manifest), _canonical=canonical,
+                                    time=SimpleNamespace(monotonic=lambda: clock.now)), \
                      patch.object(Path, "lstat", named_home), \
                      patch.object(Path, "stat", side_effect=AssertionError("HOME pin must not follow paths")), \
                      patch.object(Path, "chmod", side_effect=AssertionError("HOME permission changes require the original pin")), \
+                     patch.object(session, "_check_ruby_ancestors", side_effect=checked_ancestors), \
                      patch.object(session, "_headroom", Mock()), \
                      patch.object(session, "_close_home_boundary", side_effect=finalization) as final:
                     if prepared:
@@ -3454,9 +3605,12 @@ class CISandboxPureTests(unittest.TestCase):
                         self.assertTrue(session._home_state["prepared"])
                         self.assertEqual(session._home_state["pin"], 101)
                         self.assertEqual(session._home_state["canary_fd"], 102)
+                        self.assertEqual(session._home_state["sibling_pin"], 103)
+                        self.assertEqual(session._home_state["sibling_fd"], 104)
                         self.assertIs(session._home_state["listener"], listener)
                         self.assertEqual(session._home_state["canary_identity"].st_gid, 20)
                         self.assertEqual(session._home_state["socket_identity"].st_gid, 20)
+                        self.assertEqual(session._home_state["sibling_identity"].st_gid, 20)
                         self.assertEqual(stat.S_IMODE(home_node["st_mode"]), 0o751 if original_mode == 0o750 else original_mode)
                     clock.closing = True
                     if case == "close-mode-drift":
@@ -3473,19 +3627,20 @@ class CISandboxPureTests(unittest.TestCase):
                 self.assertEqual(session.failure, "earlier immutable failure")
                 self.assertEqual(session.deadline, 1.0)
                 self.assertEqual(live_fds, {})
-                self.assertEqual(sum(e == ("close", 101) for e in events), int(case != "open-home"))
-                self.assertLessEqual(sum(e == ("close", 102) for e in events), 1)
+                self.assertEqual(sorted(e[1] for e in events if e[0] == "close"), sorted(acquired))
+                self.assertEqual(len(acquired), len(set(acquired)))
                 self.assertEqual(listener.close.call_count, factory.call_count)
                 note = next(n for n in session.admission_results if n["name"] == "home-boundary-finalization")
-                if case in {"750", "751", "755"}:
+                if case in {"750", "751", "755", "deepest-home"}:
                     self.assertEqual(captured_cleanup, [])
                     self.assertTrue(note["ok"])
-                    self.assertEqual(note["restored"], case == "750")
+                    self.assertEqual(note["restored"], case in {"750", "deepest-home"})
                     self.assertTrue(note["canary_removed"] and note["socket_removed"])
+                    self.assertTrue(note["sibling_removed"])
                     self.assertEqual(nodes, {})
                     self.assertEqual(stat.S_IMODE(home_node["st_mode"]), original_mode)
                     home_changes = [e for e in events if e[0] == "fchmod" and e[1] == 101]
-                    self.assertEqual(home_changes, [("fchmod", 101, 0o751, False), ("fchmod", 101, 0o750, True)] if case == "750" else [])
+                    self.assertEqual(home_changes, [("fchmod", 101, 0o751, False), ("fchmod", 101, 0o750, True)] if case in {"750", "deepest-home"} else [])
                 if case in {"change-after-effect", "late-preparation", "close-name-drift", "close-mode-drift"}:
                     self.assertTrue(captured_cleanup)
                     self.assertFalse(note["ok"] or note["restored"])
@@ -3502,7 +3657,17 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertIn(original_error, captured_cleanup)
                     self.assertFalse(note["restored"])
                     self.assertFalse(any(e[0] == "unlink" for e in events))
-                if case == "three-close-errors":
+                if case in {"sibling-parent-drift", "sibling-replaced", "sibling-collision", "sibling-create-after-effect",
+                            "sibling-stat-error", "sibling-subject-group", "sibling-mode-after-effect"}:
+                    self.assertNotIn(("unlink", sibling_name), events)
+                    self.assertIn(sibling_name, nodes)
+                    self.assertTrue(captured_cleanup)
+                if case in {"sibling-parent-drift", "sibling-replaced"}:
+                    self.assertTrue(note["restored"] and note["canary_removed"] and note["socket_removed"])
+                    self.assertFalse(note["sibling_removed"])  # One drift does not suppress other eligible owned cleanup.
+                if case in {"sibling-collision", "sibling-create-after-effect", "sibling-stat-error", "sibling-subject-group"}:
+                    self.assertIn("sibling", note["unverified_creation"])
+                if case == "all-close-errors":
                     self.assertTrue(all(error in captured_cleanup for error in close_errors.values()))
 
     def test_linux_provider_wrapper_keeps_collision_writer_import_and_partial_preparation_gates(self):
@@ -3649,21 +3814,29 @@ class CISandboxPureTests(unittest.TestCase):
             "canary-subject-group": (202, "st_gid", 60001), "canary-mode": (202, "st_mode", stat.S_IFREG | 0o644),
             "canary-links": (202, "st_nlink", 2), "canary-type": (202, "st_mode", stat.S_IFSOCK | 0o444),
             "canary-size": (202, "st_size", 1),
+            "sibling-owner": (203, "st_uid", 1001), "sibling-subject-group": (203, "st_gid", 60001),
+            "sibling-links": (203, "st_nlink", 2), "sibling-mode": (203, "st_mode", stat.S_IFREG | 0o644),
         }
         cases = ("valid", "wrong-platform", "wrong-uid", "effective-uid", "effective-gid", "manifest-open", "canary-open",
                  "manifest-short", "manifest-tail", "manifest-key", "manifest-bool-uid", "manifest-wrong-gid", "extra-groups",
                  "invalid-deadline", "expired-deadline", "canary-bytes", "canary-tail", "connect-error", "send-error",
-                 "send-late", "close-late", "three-close-errors", *metadata_cases)
+                 "send-late", "close-late", "all-close-errors", "sibling-open", "sibling-bytes", "sibling-tail",
+                 "sibling-stat-error", "sibling-name-drift", "prefix-binding", *metadata_cases)
         for case in cases:
             with self.subTest(fixed_home_control=case):
                 home, bootstrap = Path("/Users/runner"), Path("/private/tmp/mrk-pure-fixture/bootstrap")
                 entry, manifest = bootstrap / "ci_sandbox.py", bootstrap / "home-control.json"
                 canary, address = home / ".mrk-pure-fixture-home-read", home / ".mrk-pure-fixture-home-socket"
+                ruby_prefix = home / "tools/ruby"
+                sibling = ruby_prefix.parent / ".mrk-pure-fixture-ancestor-read"
                 clock, events, live, acquired, reads = SimpleNamespace(now=0.0), [], set(), [], {}
                 body_error = OSError(errno.EIO, "synthetic fixed HOME control operation")
                 close_errors = {201: OSError(errno.EIO, "synthetic manifest close"), 202: OSError(errno.EIO, "synthetic canary close"),
+                                203: OSError(errno.EIO, "synthetic sibling close"),
                                 "peer": OSError(errno.EIO, "synthetic HOME positive peer close")}
-                data = {"home": str(home), "uid": 60001, "gid": 60001, "deadline": 100.0}
+                data = {"home": str(home), "ruby_prefix": str(ruby_prefix), "uid": 60001, "gid": 60001, "deadline": 100.0}
+                if case == "prefix-binding":
+                    data["ruby_prefix"] = "/outside-home/ruby"
                 if case == "manifest-key":
                     data["path"] = "/not-an-accepted-reader-interface"
                 if case == "manifest-bool-uid":
@@ -3673,19 +3846,23 @@ class CISandboxPureTests(unittest.TestCase):
                 if case in {"invalid-deadline", "expired-deadline"}:
                     data["deadline"] = True if case == "invalid-deadline" else 0.0
                 raw = json.dumps(data).encode()
-                nodes = {201: dict(st_mode=stat.S_IFREG | 0o444, st_uid=0, st_gid=0, st_nlink=1, st_size=len(raw)),
-                         202: dict(st_mode=stat.S_IFREG | 0o444, st_uid=0, st_gid=20, st_nlink=1, st_size=len(self.module._HOME_READ_BYTES))}
+                nodes = {201: dict(st_dev=7, st_ino=201, st_mode=stat.S_IFREG | 0o444, st_uid=0, st_gid=0, st_nlink=1, st_size=len(raw)),
+                         202: dict(st_dev=7, st_ino=202, st_mode=stat.S_IFREG | 0o444, st_uid=0, st_gid=20, st_nlink=1, st_size=len(self.module._HOME_READ_BYTES)),
+                         203: dict(st_dev=7, st_ino=203, st_mode=stat.S_IFREG | 0o444, st_uid=0, st_gid=20, st_nlink=1, st_size=len(self.module._ANCESTOR_READ_BYTES))}
                 if case in metadata_cases:
                     fd, key, value = metadata_cases[case]
                     nodes[fd][key] = value
 
                 def opened(path, flags):
                     self.assertEqual(flags, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-                    expected = manifest if not acquired else canary
+                    self.assertLess(len(acquired), 3)
+                    expected = (manifest, canary, sibling)[len(acquired)]
                     self.assertEqual(path, expected)
-                    fd = 201 if path == manifest else 202
+                    fd = 201 + len(acquired)
+                    if fd != 201:
+                        self.assertIn(("named-stat", fd), events)
                     events.append(("open", fd))
-                    if case == ("manifest-open" if fd == 201 else "canary-open"):
+                    if case == {201: "manifest-open", 202: "canary-open", 203: "sibling-open"}[fd]:
                         raise body_error
                     acquired.append(fd)
                     live.add(fd)
@@ -3696,18 +3873,31 @@ class CISandboxPureTests(unittest.TestCase):
                     events.append(("fstat", fd))
                     return SimpleNamespace(**nodes[fd])
 
+                def named_metadata(path, *, follow_symlinks):
+                    self.assertFalse(follow_symlinks)
+                    self.assertIn(path, (canary, sibling))
+                    fd = 202 if path == canary else 203
+                    events.append(("named-stat", fd))
+                    if path == sibling and case == "sibling-stat-error":
+                        raise body_error
+                    value = dict(nodes[fd])
+                    if path == sibling and case == "sibling-name-drift":
+                        value["st_ino"] += 1
+                    return SimpleNamespace(**value)
+
                 def read(fd, size):
                     self.assertIn(fd, live)
                     count = reads.get(fd, 0)
                     self.assertLess(count, 2)
                     reads[fd] = count + 1
-                    self.assertEqual(size, (16385 if fd == 201 else len(self.module._HOME_READ_BYTES) + 1) if count == 0 else 1)
+                    literal = self.module._HOME_READ_BYTES if fd == 202 else self.module._ANCESTOR_READ_BYTES
+                    self.assertEqual(size, (16385 if fd == 201 else len(literal) + 1) if count == 0 else 1)
                     events.append(("read", fd, size))
                     if count:
-                        return b"x" if case == ("manifest-tail" if fd == 201 else "canary-tail") else b""
+                        return b"x" if case == {201: "manifest-tail", 202: "canary-tail", 203: "sibling-tail"}[fd] else b""
                     if fd == 201:
                         return raw[:-1] if case == "manifest-short" else raw
-                    return b"wrong\n" if case == "canary-bytes" else self.module._HOME_READ_BYTES
+                    return b"wrong\n" if case == ("canary-bytes" if fd == 202 else "sibling-bytes") else literal
 
                 def close(fd):
                     self.assertIn(fd, live)
@@ -3715,12 +3905,12 @@ class CISandboxPureTests(unittest.TestCase):
                     events.append(("close", fd))
                     if case == "close-late" and fd == 201:
                         clock.now = 100.0
-                    if case == "three-close-errors":
+                    if case == "all-close-errors":
                         raise close_errors[fd]
 
                 def canonical(value):
-                    self.assertEqual(value, str(home))
-                    return home
+                    self.assertIn(value, (str(home), data["ruby_prefix"]))
+                    return Path(value)
 
                 def own_entry(path):
                     self.assertEqual(path, entry)
@@ -3728,7 +3918,8 @@ class CISandboxPureTests(unittest.TestCase):
 
                 def connect(value):
                     self.assertEqual(value, str(address))
-                    self.assertEqual(reads, {201: 2, 202: 2})
+                    self.assertEqual(reads, {201: 2, 202: 2, 203: 2})
+                    self.assertIn(("named-stat", 203), events)
                     events.append(("connect",))
                     if case == "connect-error":
                         raise body_error
@@ -3743,14 +3934,14 @@ class CISandboxPureTests(unittest.TestCase):
 
                 def peer_close():
                     events.append(("peer-close",))
-                    if case == "three-close-errors":
+                    if case == "all-close-errors":
                         raise close_errors["peer"]
 
                 peer = SimpleNamespace(settimeout=Mock(), connect=Mock(side_effect=connect), sendall=Mock(side_effect=send),
                                        close=Mock(side_effect=peer_close))
                 factory, limits = Mock(return_value=peer), Mock()
                 constants = {k: getattr(os, k) for k in ("O_RDONLY", "O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC")}
-                fake_os = SimpleNamespace(**constants, open=opened, fstat=metadata, read=read, close=close, fsencode=os.fsencode,
+                fake_os = SimpleNamespace(**constants, open=opened, fstat=metadata, stat=named_metadata, read=read, close=close, fsencode=os.fsencode,
                     getuid=lambda: 0 if case == "wrong-uid" else 60001, geteuid=lambda: 0 if case == "effective-uid" else 60001,
                     getgid=lambda: 60001, getegid=lambda: 0 if case == "effective-gid" else 60001)
                 output = io.StringIO()
@@ -3769,9 +3960,9 @@ class CISandboxPureTests(unittest.TestCase):
                     else:
                         with self.assertRaises((self.module.SessionError, BaseExceptionGroup)) as caught:
                             self.module._home_positive()
-                        if case == "three-close-errors":
-                            self.assertEqual(caught.exception.exceptions, (close_errors["peer"], close_errors[202], close_errors[201]))
-                        if case in {"manifest-open", "canary-open", "connect-error", "send-error"}:
+                        if case == "all-close-errors":
+                            self.assertEqual(caught.exception.exceptions, (close_errors["peer"], close_errors[203], close_errors[202], close_errors[201]))
+                        if case in {"manifest-open", "canary-open", "sibling-open", "sibling-stat-error", "connect-error", "send-error"}:
                             self.assertIs(caught.exception.exceptions[0], body_error)
                 self.assertEqual(live, set())
                 self.assertEqual([e[1] for e in events if e[0] == "close"], list(reversed(acquired)))
@@ -3787,7 +3978,7 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertTrue(all(0 < c.args[0] <= 2 for c in peer.settimeout.call_args_list))
                     self.assertLess(events.index(("peer-close",)), events.index(("close", 202)))
                 if case == "valid":
-                    self.assertEqual(reads, {201: 2, 202: 2})
+                    self.assertEqual(reads, {201: 2, 202: 2, 203: 2})
                     peer.connect.assert_called_once_with(str(address))
                     peer.sendall.assert_called_once_with(self.module._HOME_SOCKET_BYTES)
 
@@ -3805,7 +3996,8 @@ class CISandboxPureTests(unittest.TestCase):
 
     def test_root_home_positive_uses_genuine_fixed_child_collection_finality_and_exact_delivery_eof(self):
         genuine_collection = self.module._small_command
-        cases = ("valid", "fragmented", "missing-state", "unprepared", "missing-listener", "busy", "pin-drift",
+        cases = ("valid", "fragmented", "missing-state", "unprepared", "missing-listener", "sibling-unowned", "sibling-mode",
+                 "busy", "pin-drift", "ancestor-drift", "sibling-pin-drift",
                  "pre-domain", "post-domain", "nonzero", "stderr", "wait-error", "stdout-held", "stderr-held",
                  "collection-close-error", "wrong-footer", "accept-error", "wrong-token", "excess-token", "held-delivery",
                  "accepted-close-error", "body-and-close-errors", "late-close")
@@ -3866,6 +4058,8 @@ class CISandboxPureTests(unittest.TestCase):
                 session._home_state = None if case == "missing-state" else {
                     "prepared": case != "unprepared", "listener": None if case == "missing-listener" else listener,
                     "expected_mode": 0o751,
+                    "sibling_identity": None if case == "sibling-unowned" else object(),
+                    "sibling_mode": 0o600 if case == "sibling-mode" else 0o444,
                 }
 
                 def domain(platform, uid, *, deadline):
@@ -3882,10 +4076,27 @@ class CISandboxPureTests(unittest.TestCase):
                     if case == "pin-drift":
                         raise pin_error
 
+                def ancestors(*, home_mode):
+                    self.assertEqual(home_mode, 0o751)
+                    self.assertEqual(rig.domain_calls, 1)
+                    self.assertTrue(session.domain_finality)
+                    rig.events.append(("ancestor-check",))
+                    if case == "ancestor-drift":
+                        raise pin_error
+
+                def sibling_pin(mode):
+                    self.assertEqual(mode, 0o751)
+                    self.assertEqual(rig.domain_calls, 1)
+                    rig.events.append(("sibling-pin-check",))
+                    if case == "sibling-pin-drift":
+                        raise pin_error
+
                 def collect(argv, seconds, **kwargs):
                     self.assertEqual(argv, [str(session.python), "-I", "-S", "-B", str(session.entry), "--home-positive"])
                     self.assertEqual((seconds, kwargs), (10, {"user": session.uid, "group": session.gid, "deadline": session.deadline}))
                     self.assertIn(("pin-check",), rig.events)
+                    self.assertIn(("ancestor-check",), rig.events)
+                    self.assertIn(("sibling-pin-check",), rig.events)
                     return genuine_collection(argv, seconds, **kwargs)
 
                 metadata = Mock(side_effect=collect)
@@ -3893,6 +4104,8 @@ class CISandboxPureTests(unittest.TestCase):
                      patch.object(self.module, "_domain", side_effect=domain), \
                      patch.object(self.module, "socket", SimpleNamespace()), \
                      patch.object(session, "_check_home_pin", side_effect=pin), \
+                     patch.object(session, "_check_ruby_ancestors", side_effect=ancestors), \
+                     patch.object(session, "_check_ruby_sibling_pin", side_effect=sibling_pin), \
                      patch.object(Path, "stat", side_effect=AssertionError("all HOME metadata is owned by the substituted pin check")), \
                      patch.object(Path, "lstat", side_effect=AssertionError("no actual HOME path observation is permitted")), \
                      patch.object(Path, "read_bytes", side_effect=AssertionError("the root HOME control may not read paths")):
@@ -3903,14 +4116,15 @@ class CISandboxPureTests(unittest.TestCase):
                             session._home_positive_control()
                         if case == "body-and-close-errors":
                             self.assertEqual(caught.exception.exceptions, (body_error, close_error))
-                        if case == "pin-drift":
+                        if case in {"pin-drift", "ancestor-drift", "sibling-pin-drift"}:
                             self.assertIs(caught.exception, pin_error)
                 notes = [n for n in session.admission_results if n["name"] == "home-DAC-and-delivery-positive"]
                 self.assertEqual(notes, [{"name": "home-DAC-and-delivery-positive", "ok": True}] if case in {"valid", "fragmented"} else [])
                 listener.close.assert_not_called()  # Root listener stays in Session's custody until owned finalization.
                 if case not in {"missing-state", "missing-listener"}:
                     self.assertIs(session._home_state["listener"], listener)
-                preaccept = {"missing-state", "unprepared", "missing-listener", "busy", "pin-drift", "pre-domain", "post-domain",
+                preaccept = {"missing-state", "unprepared", "missing-listener", "sibling-unowned", "sibling-mode", "busy",
+                             "pin-drift", "ancestor-drift", "sibling-pin-drift", "pre-domain", "post-domain",
                              "nonzero", "stderr", "wait-error", "stdout-held", "stderr-held", "collection-close-error", "wrong-footer"}
                 if case in preaccept:
                     listener.accept.assert_not_called()
@@ -4220,3 +4434,177 @@ class CISandboxPureTests(unittest.TestCase):
             tail = b"".join(f"\tfrom {source}:{line}\n".encode() for line in range(1, 12))
             self.assertEqual(len(diagnose(valid + tail)["frames"]), 8)
             self.assertEqual(diagnose(valid + tail + b"private-message-canary\x1b\n"), unclassified)
+
+    def test_ruby_runtime_metadata_ancestors_are_finite_exact_and_bound_before_policy_publication(self):
+        home, prefix, root = Path("/Users/runner"), Path("/Users/runner/tools/rubies/3.3.12"), Path("/private/tmp/mrk-pure-fixture")
+        expected = (home, home / "tools", home / "tools/rubies")
+        with patch.multiple(self.module, os=SimpleNamespace(fsencode=os.fsencode), subprocess=SimpleNamespace(),
+                            socket=SimpleNamespace(), signal=SimpleNamespace(),
+                            _canonical=Mock(side_effect=AssertionError("lexical derivation may not resolve paths"))), \
+             patch.object(Path, "resolve", side_effect=AssertionError("lexical derivation may not resolve paths")), \
+             patch.object(Path, "stat", side_effect=AssertionError("lexical derivation may not inspect the host")), \
+             patch.object(Path, "lstat", side_effect=AssertionError("lexical derivation may not inspect the host")):
+            self.assertEqual(self.module._ruby_ancestor_paths(home, prefix), expected)
+            self.assertIs(type(self.module._ruby_ancestor_paths(home, prefix)), tuple)
+            self.assertEqual(self.module._ruby_sibling_path(home, prefix, root), expected[-1] / ".mrk-pure-fixture-ancestor-read")
+            self.assertEqual(self.module._ruby_ancestor_paths(home, home / "ruby"), (home,))
+            self.assertEqual(self.module._ruby_sibling_path(home, home / "ruby", root), home / ".mrk-pure-fixture-ancestor-read")
+            components = [f"part{i}" for i in range(15)]
+            deep = home.joinpath(*components, "ruby")
+            self.assertEqual(self.module._ruby_ancestor_paths(home, deep),
+                             tuple(home.joinpath(*components[:i]) for i in range(16)))
+            for bad_home, bad_prefix in ((Path("Users/runner"), prefix), (home, Path("tools/ruby")), (home, home),
+                                         (home, Path("/other/provider/ruby")), (home, home / "../ruby"),
+                                         (home / "../runner", prefix), (Path("/Users/runnér"), Path("/Users/runnér/ruby")),
+                                         (home, home / ("x" * 4097)), (home, deep.parent / "extra/ruby")):
+                with self.subTest(ancestor_derivation=(bad_home, bad_prefix)), self.assertRaises(self.module.SessionError):
+                    self.module._ruby_ancestor_paths(bad_home, bad_prefix)
+            for bad_root in (Path("relative-root"), Path("/private/tmp/mrk.dot"), Path("/private/tmp") / ("x" * 81)):
+                with self.subTest(sibling_name_binding=bad_root), self.assertRaises(self.module.SessionError):
+                    self.module._ruby_sibling_path(home, prefix, bad_root)
+
+        # Exercise the real binder, its canonical resolver and later recheck
+        # against complete in-memory metadata. No constructor allocation,
+        # descriptor operation, host metadata query or timer can be performed.
+        python, ruby = Path("/fixture-tools/python/bin/python"), prefix / "bin/ruby"
+        original = {path: SimpleNamespace(st_dev=1, st_ino=800 + i, st_uid=1001, st_gid=20,
+                    st_mode=stat.S_IFDIR | (0o750 if path == home else 0o755)) for i, path in enumerate(expected)}
+        state = {"nodes": dict(original), "case": "valid", "calls": {}, "clock_calls": 0}
+        events, bound, allocations = [], [], []
+
+        def reset(case="valid"):
+            state.update(nodes=dict(original), case=case, calls={}, clock_calls=0)
+
+        def observed(path):
+            self.assertIn(path, expected)
+            count = state["calls"].get(path, 0) + 1
+            state["calls"][path] = count
+            info = state["nodes"][path]
+            if path == expected[-1]:
+                fields = {"ancestor-file": {"st_mode": stat.S_IFREG | 0o755},
+                          "subject-owner": {"st_uid": 60001}, "subject-group": {"st_gid": 60001},
+                          "world-write": {"st_mode": stat.S_IFDIR | 0o757},
+                          "unsearchable": {"st_mode": stat.S_IFDIR | 0o750}}
+                if state["case"] == "identity-drift" and count == 2:
+                    return SimpleNamespace(**(vars(info) | {"st_ino": info.st_ino + 1}))
+                if state["case"] == "mode-drift" and count == 2:
+                    return SimpleNamespace(**(vars(info) | {"st_mode": stat.S_IFDIR | 0o751}))
+                if state["case"] == "metadata-error":
+                    raise FileNotFoundError(errno.ENOENT, "synthetic required ancestor disappeared")
+                info = SimpleNamespace(**(vars(info) | fields.get(state["case"], {})))
+            return info
+
+        known = {*expected, prefix, ruby, python, python.parent.parent, root, root.parent, home / "work/_temp"}
+
+        def resolved(path, *, strict):
+            self.assertTrue(strict)
+            self.assertIn(path, known)
+            events.append(("resolve", path))
+            return path / "alias" if state["case"] == "canonical-alias" and path == expected[-1] else path
+
+        def clock():
+            state["clock_calls"] += 1
+            return 100.0 if state["case"] == "deadline" and state["clock_calls"] >= 4 else 1.0
+
+        def root_metadata(path):
+            self.assertIn(path, (root, root.parent))
+            return SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | (0o1777 if path == root.parent else 0o755))
+
+        class BeforeAllocation(Exception):
+            pass
+
+        def allocation_boundary(path, *, mode):
+            self.assertEqual(len(bound), 1, "binding must complete before the first attempted allocation")
+            self.assertEqual((path, mode), (root.parent / "mrk-ci-identity-reservation", 0o700))
+            self.assertEqual(bound[0].ruby_ancestors, expected)
+            self.assertEqual(bound[0].ruby_prefix, prefix)
+            self.assertFalse(hasattr(bound[0], "policy"), "no policy may have been published")
+            allocations.append(path)
+            raise BeforeAllocation("inert stop before reservation creation")
+
+        forbidden = Mock(side_effect=AssertionError("ancestor binding must have no resource effects"))
+        fake_signal = SimpleNamespace(ITIMER_REAL=0, SIGCHLD=17, SIG_DFL=0,
+            getitimer=Mock(return_value=(0.0, 0.0)), getsignal=Mock(return_value=0), signal=forbidden, setitimer=forbidden)
+        with patch.multiple(self.module, os=SimpleNamespace(geteuid=lambda: 0), sys=SimpleNamespace(platform="darwin"),
+                            subprocess=SimpleNamespace(), socket=SimpleNamespace(), signal=fake_signal,
+                            time=SimpleNamespace(monotonic=clock), secrets=SimpleNamespace(randbelow=lambda n: 1),
+                            _private_file=forbidden, _readonly_tree=forbidden), \
+             patch.object(Path, "resolve", resolved), patch.object(Path, "lstat", observed), \
+             patch.object(Path, "stat", root_metadata), patch.object(Path, "mkdir", allocation_boundary), \
+             patch.object(Path, "chmod", forbidden), patch.object(Path, "read_bytes", forbidden), \
+             patch.object(Path, "read_text", forbidden), patch.object(Path, "open", forbidden):
+            for case in ("valid", "prefix-missing", "prefix-ambiguous", "ancestor-file", "subject-owner", "subject-group",
+                         "world-write", "unsearchable", "canonical-alias", "identity-drift", "mode-drift", "metadata-error", "deadline"):
+                with self.subTest(actual_ancestor_binding=case):
+                    reset(case)
+                    session = session_double(self.module, "darwin")
+                    session.runner_home, session.ruby = home, ruby
+                    session.tool_prefixes = (python.parent.parent, prefix)
+                    if case == "prefix-missing":
+                        session.tool_prefixes = (python.parent.parent,)
+                    elif case == "prefix-ambiguous":
+                        session.tool_prefixes += (prefix.parent,)
+                    for name in ("ruby_prefix", "ruby_ancestors", "_ruby_ancestor_states"):
+                        delattr(session, name)
+                    if case != "valid":
+                        failure_type = FileNotFoundError if case == "metadata-error" else self.module.SessionError
+                        with self.assertRaises(failure_type):
+                            session._bind_ruby_ancestors()
+                        for name in ("ruby_prefix", "ruby_ancestors", "_ruby_ancestor_states"):
+                            self.assertFalse(hasattr(session, name), "failed partial inventory must never be published")
+                    else:
+                        session._bind_ruby_ancestors()
+                        self.assertEqual((session.ruby_prefix, session.ruby_ancestors), (prefix, expected))
+                        self.assertIs(type(session.ruby_ancestors), tuple)
+                        self.assertIs(type(session._ruby_ancestor_states), tuple)
+                        self.assertEqual(state["calls"], {path: 2 for path in expected})
+                        baseline = session._ruby_ancestor_states
+                        self.assertEqual(tuple(self.module._home_node(s) for s in baseline),
+                                         tuple(self.module._home_node(original[p]) for p in expected))
+                        session._check_ruby_ancestors()
+                        state["nodes"][home] = SimpleNamespace(**(vars(original[home]) | {"st_mode": stat.S_IFDIR | 0o751}))
+                        session._check_ruby_ancestors(home_mode=0o751)
+                        with self.assertRaises(self.module.SessionError):
+                            session._check_ruby_ancestors()  # An implicit mode exception is forbidden.
+                        state["nodes"][home] = original[home]
+                        session._check_ruby_ancestors(home_mode=0o750)
+                        self.assertIs(session._ruby_ancestor_states, baseline)
+                        self.assertEqual(stat.S_IMODE(baseline[0].st_mode), 0o750)
+                        for drift in ("tuple", "state-count", "identity", "mode", "canonical-alias", "deadline"):
+                            with self.subTest(actual_ancestor_recheck=drift):
+                                reset(drift)
+                                session.ruby_ancestors, session._ruby_ancestor_states = expected, baseline
+                                if drift == "tuple":
+                                    session.ruby_ancestors = expected[:-1]
+                                elif drift == "state-count":
+                                    session._ruby_ancestor_states = baseline[:-1]
+                                elif drift in {"identity", "mode"}:
+                                    key, value = ("st_ino", 999) if drift == "identity" else ("st_mode", stat.S_IFDIR | 0o751)
+                                    state["nodes"][expected[-1]] = SimpleNamespace(**(vars(original[expected[-1]]) | {key: value}))
+                                with self.assertRaises(self.module.SessionError):
+                                    session._check_ruby_ancestors()
+                        reset()
+                        session.ruby_ancestors, session._ruby_ancestor_states = expected, baseline
+                        session._check_ruby_ancestors()
+                    self.assertEqual(session.deadline, 100.0)
+
+            # Call the actual constructor only through its pre-allocation phase.
+            # A real binder failure must reach no allocation; successful binding
+            # must precede the first intercepted create, not just policy writing.
+            original_bind = self.module.Session._bind_ruby_ancestors
+
+            def bind_then_record(instance):
+                original_bind(instance)
+                bound.append(instance)
+
+            with patch.object(self.module.Session, "_bind_ruby_ancestors", bind_then_record):
+                for case in ("subject-group", "valid"):
+                    reset(case)
+                    with self.subTest(constructor_before_allocation=case), self.assertRaises(
+                            self.module.SessionError if case == "subject-group" else BeforeAllocation):
+                        self.module.Session("darwin", root, python=python, ruby=ruby, runner_home=home,
+                            runner_temp=home / "work/_temp", tool_prefixes=(python.parent.parent, prefix), deadline=100.0)
+                    self.assertEqual(len(allocations), 0 if case == "subject-group" else 1)
+            self.assertEqual(len(bound), 1)
+            self.assertEqual(bound[0].deadline, 100.0)
+            forbidden.assert_not_called()

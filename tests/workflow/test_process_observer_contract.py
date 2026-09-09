@@ -230,13 +230,17 @@ class ProcessObserverContractTests(unittest.TestCase):
             with self.subTest(module=module.__name__), \
                  patch.object(profile, "command", return_value=["fixed-fixture", "driver"]), \
                  patch.object(module, "observer_environment", return_value={fixture.OBSERVER_VARIABLE: self.selected}), \
-                 patch.dict(fixture.os.environ, {"PATH": "/usr/bin", "DYLD_INSERT_LIBRARIES": "fictional-canary"}, clear=True), \
+                 patch.dict(fixture.os.environ, {"PATH": "/usr/bin", "DYLD_INSERT_LIBRARIES": "fictional-canary",
+                                                 "TMPDIR": "/foreign", "TMP": "/foreign", "TEMP": "/foreign"}, clear=True), \
                  patch.object(module.subprocess, "Popen", side_effect=NoSpawn) as spawn:
                 with self.assertRaises(NoSpawn):
                     module.run_case(Path("/unused"), "success")
-                expected = {"PATH", fixture.OBSERVER_VARIABLE} | ({"PYTHONPATH"} if module is fixture else set())
+                expected = {"PATH", fixture.OBSERVER_VARIABLE} | ({"PYTHONPATH"} if module is fixture else {"TMPDIR", "TMP", "TEMP"})
                 self.assertEqual(set(spawn.call_args.kwargs["env"]), expected)
                 self.assertEqual(spawn.call_args.kwargs["env"][fixture.OBSERVER_VARIABLE], self.selected)
+                if module is profile:
+                    self.assertEqual(spawn.call_args.kwargs["env"], {"PATH": "/usr/bin", fixture.OBSERVER_VARIABLE: self.selected,
+                                                                   "TMPDIR": "/unused", "TMP": "/unused", "TEMP": "/unused"})
 
     def test_native_zombie_probe_keeps_original_handle_unreaped_until_production_cleanup(self):
         # Static regression guard only. Native behavior is still required in CI.

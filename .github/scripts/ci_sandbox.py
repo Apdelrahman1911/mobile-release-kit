@@ -36,7 +36,10 @@ JAVA_LIMITS = (
     "-XX:CompressedClassSpaceSize=128m -XX:ReservedCodeCacheSize=128m"
 )
 _HOME_READ_BYTES = b"MRK_SYNTHETIC_HOME_READ\n"
+_ANCESTOR_READ_BYTES = b"MRK_SYNTHETIC_ANCESTOR_READ\n"
 _HOME_SOCKET_BYTES = b"MRK_SYNTHETIC_HOME_SOCKET\n"
+_CENSUS_PASSES = 8
+_CENSUS_PAUSE = 0.01
 _ENV_KEYS = frozenset("""
 PATH LANG LC_ALL TZ HOME USER LOGNAME TMPDIR TMP TEMP XDG_CONFIG_HOME
 XDG_CACHE_HOME CI TERM PYTHONSAFEPATH PYTHONDONTWRITEBYTECODE PYTHONNOUSERSITE
@@ -62,6 +65,10 @@ class SessionError(RuntimeError):
 
 class DeadlineExpired(SessionError):
     """An owning, never renewed absolute budget expired."""
+
+
+class _CensusUnstable(SessionError):
+    """An incomplete Linux pass; only finality may discard it and resnapshot."""
 
 
 _DIAGNOSTIC_OPERATIONS = frozenset({"process-groups-linux", "kernel-groups-library",
@@ -420,6 +427,37 @@ def _home_paths(home: Path, root: Path) -> tuple[Path, Path]:
     return canary, endpoint
 
 
+def _ruby_ancestor_paths(home: Path, ruby_prefix: Path) -> tuple[Path, ...]:
+    """Pure, bounded strict ancestors; native identity checks belong to admission."""
+    for path in (home, ruby_prefix):
+        if (not path.is_absolute() or ".." in path.parts or path == Path("/")
+                or any(not 32 <= ord(c) < 127 for c in str(path)) or len(str(path).encode()) > 4096):
+            raise SessionError("invalid fixed Ruby ancestor binding")
+    if ruby_prefix == home or not _under(ruby_prefix, home):
+        raise SessionError("selected Ruby prefix must lie strictly beneath HOME")
+    ancestors, current = [], ruby_prefix.parent
+    while True:
+        ancestors.append(current)
+        if len(ancestors) > 16:
+            raise SessionError("selected Ruby ancestor inventory exceeds fixed bound")
+        if current == home:
+            break
+        current = current.parent
+    return tuple(reversed(ancestors))
+
+
+def _ruby_sibling_path(home: Path, ruby_prefix: Path, root: Path) -> Path:
+    """One synthetic sibling beneath every literal, outside the Ruby prefix."""
+    ancestors = _ruby_ancestor_paths(home, ruby_prefix)
+    if (not root.is_absolute() or ".." in root.parts
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", root.name)):
+        raise SessionError("invalid fixed Ruby sibling binding")
+    sibling = ancestors[-1] / f".{root.name}-ancestor-read"
+    if len(str(sibling).encode()) > 4096:
+        raise SessionError("fixed Ruby sibling pathname exceeds bound")
+    return sibling
+
+
 def _admit_executable(path: Path, uid: int, gid: int, *, root_owned: bool = False,
                       non_set_id: bool = True, role: str = "unspecified") -> dict:
     """Check a fixed provider/system executable, not a subject-selected tool."""
@@ -567,32 +605,63 @@ def _linux_snapshot(*, deadline: float | None = None) -> dict[tuple[int, int], t
         if deadline is not None:
             _remaining(deadline)
         task = root / str(pid) / "task"
-        tids = sorted(int(p.name) for p in task.iterdir() if p.name.isdecimal())
-        if not tids or len(rows) + len(tids) > 131072:
-            raise SessionError("thread census size")
-        for tid in tids:
-            if deadline is not None:
-                _remaining(deadline)
-            base = task / str(tid)
-            before = (base / "stat").read_bytes()
-            raw = (base / "status").read_bytes()
-            after = (base / "stat").read_bytes()
-            if max(len(before), len(raw), len(after)) > 65536:
-                raise SessionError("process metadata size")
-            # stat field 22 is after the final ')' of the command field.
-            births = [s[s.rfind(b")") + 2:].split()[19] for s in (before, after)]
-            if births[0] != births[1]:
-                raise SessionError("process identity changed during census")
-            fields = dict(line.split(b":", 1) for line in raw.splitlines() if b":" in line)
-            uids = tuple(int(v) for v in fields[b"Uid"].split())
-            gids = tuple(int(v) for v in fields[b"Gid"].split())
-            if len(uids) != 4 or len(gids) != 4:
-                raise SessionError("incomplete process credentials")
-            rows[(pid, tid)] = (uids, gids, int(births[0]))
-        if tids != sorted(int(p.name) for p in task.iterdir() if p.name.isdecimal()):
-            raise SessionError("thread churn during complete census")
+        try:
+            tids = sorted(int(p.name) for p in task.iterdir() if p.name.isdecimal())
+            if not tids:
+                raise _CensusUnstable("enumerated process has no observable threads")
+            if len(rows) + len(tids) > 131072:
+                raise SessionError("thread census size")
+            for tid in tids:
+                if deadline is not None:
+                    _remaining(deadline)
+                base = task / str(tid)
+                before = (base / "stat").read_bytes()
+                raw = (base / "status").read_bytes()
+                after = (base / "stat").read_bytes()
+                if max(len(before), len(raw), len(after)) > 65536:
+                    raise SessionError("process metadata size")
+                # stat field22 follows the final ')' of the command field.
+                # Validate BOTH identities and credentials before classifying a
+                # difference. Malformed data can never be retried as absence.
+                births = []
+                for entry in (before, after):
+                    marker = entry.rfind(b") ")
+                    tail = entry[marker + 2:].split() if marker >= 0 else []
+                    if len(tail) <= 19 or not tail[19].isdigit():
+                        raise SessionError("malformed process birth metadata")
+                    birth = int(tail[19])
+                    if birth >= 2**64:
+                        raise SessionError("process birth metadata exceeds unsigned64")
+                    births.append(birth)
+                fields = {}
+                for line in raw.splitlines():
+                    if b":" not in line:
+                        continue
+                    key, value = line.split(b":", 1)
+                    if key in {b"Uid", b"Gid"}:
+                        if key in fields:
+                            raise SessionError("duplicate process credentials")
+                        fields[key] = value.split()
+                if (set(fields) != {b"Uid", b"Gid"}
+                        or any(len(values) != 4 or any(not v.isdigit() for v in values)
+                               for values in fields.values())):
+                    raise SessionError("incomplete or malformed process credentials")
+                uids, gids = (tuple(int(v) for v in fields[key]) for key in (b"Uid", b"Gid"))
+                if any(value >= 2**32 for values in (uids, gids) for value in values):
+                    raise SessionError("process credentials exceed unsigned32")
+                if births[0] != births[1]:
+                    raise _CensusUnstable("process identity changed during census")
+                rows[(pid, tid)] = (uids, gids, births[0])
+            if tids != sorted(int(p.name) for p in task.iterdir() if p.name.isdecimal()):
+                raise _CensusUnstable("thread churn during complete census")
+        except OSError as exc:
+            if exc.errno != errno.ENOENT:
+                raise
+            # Only a path beneath an already enumerated PID/TID may disappear.
+            # Root enumeration failures below remain fatal, never empty passes.
+            raise _CensusUnstable("enumerated process metadata disappeared") from exc
     if pids != sorted(int(p.name) for p in root.iterdir() if p.name.isdecimal()):
-        raise SessionError("process churn during complete census")
+        raise _CensusUnstable("process churn during complete census")
     if deadline is not None:
         _remaining(deadline)
     return rows
@@ -622,8 +691,24 @@ def _mac_snapshot(*, deadline: float | None = None) -> dict[tuple[int, int], tup
     return rows
 
 
-def _snapshot(platform: str, *, deadline: float | None = None):
-    return _linux_snapshot(deadline=deadline) if platform == "linux" else _mac_snapshot(deadline=deadline)
+def _snapshot(platform: str, *, deadline: float | None = None, retry_churn: bool = False):
+    if platform != "linux":
+        return _mac_snapshot(deadline=deadline)  # Darwin observation is unchanged.
+    if not retry_churn:
+        return _linux_snapshot(deadline=deadline)
+    if deadline is None:
+        raise SessionError("finality resnapshot requires its original finite cutoff")
+    for attempt in range(_CENSUS_PASSES):
+        _remaining(deadline)
+        try:
+            rows = _linux_snapshot(deadline=deadline)
+        except _CensusUnstable:
+            if attempt == _CENSUS_PASSES - 1:
+                raise
+            time.sleep(min(_CENSUS_PAUSE, _remaining(deadline)))
+        else:
+            _remaining(deadline)
+            return rows
 
 
 def _domain(platform: str, uid: int, *, collision: bool = False, deadline: float | None = None) -> set[int]:
@@ -632,7 +717,7 @@ def _domain(platform: str, uid: int, *, collision: bool = False, deadline: float
     for _ in range(2):
         if deadline is not None:
             _remaining(deadline)
-        for (pid, _), (uids, gids, _) in _snapshot(platform, deadline=deadline).items():
+        for (pid, _), (uids, gids, _) in _snapshot(platform, deadline=deadline, retry_churn=not collision).items():
             if uid in uids or (collision and uid in gids):
                 occupied.add(pid)
     if deadline is not None:
@@ -909,6 +994,10 @@ class Session:
         for tool in (self.python, self.ruby):
             if not any(_under(tool, p) for p in self.tool_prefixes):
                 raise SessionError("runtime outside admitted tool prefixes")
+        if platform == "darwin":
+            # Policy publication is exclusive and happens before HOME effects.
+            # Bind its one finite metadata allowance now; never rewrite policy.
+            self._bind_ruby_ancestors()
         # Claim the sole job-wide reservation with create-only ordinary APIs.
         self.reservation = self.root.parent / "mrk-ci-identity-reservation"
         self.reservation.mkdir(mode=0o700)
@@ -969,6 +1058,50 @@ class Session:
         if self.closed or (self.failure and not allow_failure):
             raise SessionError(self.failure or "session already closed")
 
+    def _bind_ruby_ancestors(self) -> None:
+        """Canonical selected runtime ancestry, with no subject-writable member."""
+        if self.platform != "darwin":
+            raise SessionError("Ruby ancestor binding belongs only to the native Mac policy")
+        prefix = self.ruby.parent.parent
+        if [p for p in self.tool_prefixes if _under(self.ruby, p)] != [prefix]:
+            raise SessionError("selected Ruby prefix is missing or ambiguous")
+        ancestors = _ruby_ancestor_paths(self.runner_home, prefix)
+        _remaining(self.deadline)
+        if _canonical(prefix) != prefix:
+            raise SessionError("selected Ruby prefix changed its canonical binding")
+        states = []
+        for path in ancestors:
+            _remaining(self.deadline)
+            before = path.lstat()
+            _remaining(self.deadline)
+            _canonical(path)
+            _remaining(self.deadline)
+            after = path.lstat()
+            _remaining(self.deadline)
+            mode = stat.S_IMODE(after.st_mode)
+            if (not stat.S_ISDIR(after.st_mode) or after.st_uid == self.uid or after.st_gid == self.gid
+                    or mode & 0o002 or not mode & 0o001 and not (path == self.runner_home and mode == 0o750)
+                    or _home_node(before) != _home_node(after) or stat.S_IMODE(before.st_mode) != mode):
+                raise SessionError("selected Ruby ancestor identity/traversal/mode is unsafe")
+            states.append(after)
+        self.ruby_prefix, self.ruby_ancestors = prefix, ancestors
+        self._ruby_ancestor_states = tuple(states)
+
+    def _check_ruby_ancestors(self, *, home_mode: int | None = None) -> None:
+        """No policy/runtime ancestry drift; HOME's sole owned mode change is known."""
+        if (self.ruby_ancestors != _ruby_ancestor_paths(self.runner_home, self.ruby_prefix)
+                or len(self._ruby_ancestor_states) != len(self.ruby_ancestors)):
+            raise SessionError("selected Ruby ancestor inventory lost its binding")
+        for path, original in zip(self.ruby_ancestors, self._ruby_ancestor_states):
+            _remaining(self.deadline)
+            _canonical(path)
+            _remaining(self.deadline)
+            current = path.lstat()
+            mode = home_mode if path == self.runner_home and home_mode is not None else stat.S_IMODE(original.st_mode)
+            if _home_node(current) != _home_node(original) or stat.S_IMODE(current.st_mode) != mode:
+                raise SessionError("selected Ruby ancestor identity/mode drifted")
+            _remaining(self.deadline)
+
     def _write_policy(self) -> None:
         # JSON ASCII string escaping is also a valid SBPL string literal.
         q = lambda p: json.dumps(str(p), ensure_ascii=True)
@@ -976,7 +1109,8 @@ class Session:
         private = " ".join(f"(subpath {q(p)})" for p in (self.runner_home, self.runner_temp, self.control))
         common = ("(version 1)\n(allow default)\n(deny network*)\n(deny mach-lookup)\n"
                   f"(deny file-read* (require-all (require-any {private})\n  {exclusions}))\n")
-        subject = (common + "(deny signal (require-not (target same-sandbox)))\n"
+        metadata = "".join(f"(allow file-read-metadata (literal {q(p)}))\n" for p in self.ruby_ancestors)
+        subject = (common + metadata + "(deny signal (require-not (target same-sandbox)))\n"
                    f"(deny file-write* (require-all (require-not (subpath {q(self.work)})) "
                    '(require-not (literal "/dev/null"))))\n')
         # Fixed trusted cleanup runs as U.  No same-sandbox rule prevents its
@@ -1461,6 +1595,24 @@ class Session:
             raise SessionError("owned HOME pin/path identity or mode drifted")
         _remaining(self.deadline)
 
+    def _check_ruby_sibling_pin(self, home_mode: int) -> None:
+        """Separate parent-FD custody, even when the sibling's parent is HOME."""
+        state = self._home_state
+        parent = self.ruby_ancestors[-1]
+        _remaining(self.deadline)
+        _canonical(parent)
+        _remaining(self.deadline)
+        pinned = os.fstat(state["sibling_pin"])
+        _remaining(self.deadline)
+        named = parent.lstat()
+        mode = home_mode if parent == self.runner_home else state["sibling_parent_mode"]
+        if (state["sibling_parent_original"] is None
+                or _home_node(pinned) != _home_node(state["sibling_parent_original"])
+                or _home_node(named) != _home_node(pinned)
+                or stat.S_IMODE(pinned.st_mode) != mode or stat.S_IMODE(named.st_mode) != mode):
+            raise SessionError("owned Ruby sibling parent pin/path identity or mode drifted")
+        _remaining(self.deadline)
+
     def _prepare_home_boundary(self) -> None:
         """One disposable-VM HOME search bit; retain all custody before effects."""
         if (self.platform != "darwin" or sys.platform != "darwin" or os.geteuid() != 0
@@ -1469,14 +1621,19 @@ class Session:
         if not _under(self.ruby, self.runner_home):
             raise SessionError("reviewed HOME preparation requires selected Ruby beneath HOME")
         self.ensure_idle()
+        self._check_ruby_ancestors()
         canary, endpoint = _home_paths(self.runner_home, self.root)
-        if any(_under(p, prefix) for p in (canary, endpoint) for prefix in self.tool_prefixes):
+        sibling = _ruby_sibling_path(self.runner_home, self.ruby_prefix, self.root)
+        if any(_under(p, prefix) for p in (canary, endpoint, sibling) for prefix in self.tool_prefixes):
             raise SessionError("synthetic HOME controls overlap a runtime exclusion")
         state = {"pin": None, "original": None, "change_attempted": False, "prepared": False,
                  "expected_mode": None, "canary_fd": None, "canary_name": canary.name,
                  "canary_create_attempted": False, "canary_identity": None, "canary_mode": 0o600,
                  "listener": None, "socket_name": endpoint.name, "socket_bind_attempted": False,
-                 "socket_identity": None, "socket_mode": None, "closed": False}
+                 "socket_identity": None, "socket_mode": None, "sibling_pin": None,
+                 "sibling_parent_original": None, "sibling_parent_mode": None,
+                 "sibling_fd": None, "sibling_name": sibling.name, "sibling_create_attempted": False,
+                 "sibling_identity": None, "sibling_mode": 0o600, "closed": False}
         self._home_state = state
         note = {"name": "home-search-preparation", "ok": False, "change_attempted": False,
                 "change_verified": False}
@@ -1505,6 +1662,27 @@ class Session:
         note["change_verified"] = state["change_attempted"]
         note["prepared_mode"] = format(state["expected_mode"], "04o")
 
+        # An independent descriptor owns this parent. Never alias HOME's FD or
+        # change an ancestor mode to make the new synthetic control usable.
+        self._check_ruby_ancestors(home_mode=state["expected_mode"])
+        parent = self.ruby_ancestors[-1]
+        _remaining(self.deadline)
+        before = parent.lstat()
+        _remaining(self.deadline)
+        state["sibling_pin"] = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        _remaining(self.deadline)
+        pinned = os.fstat(state["sibling_pin"])
+        state["sibling_parent_original"] = pinned
+        state["sibling_parent_mode"] = stat.S_IMODE(pinned.st_mode)
+        _remaining(self.deadline)
+        expected_parent = self._ruby_ancestor_states[-1]
+        expected_mode = state["expected_mode"] if parent == self.runner_home else stat.S_IMODE(expected_parent.st_mode)
+        if (not stat.S_ISDIR(pinned.st_mode) or _home_node(pinned) != _home_node(expected_parent)
+                or _home_node(before) != _home_node(pinned) or stat.S_IMODE(before.st_mode) != expected_mode
+                or state["sibling_parent_mode"] != expected_mode):
+            raise SessionError("synthetic Ruby sibling parent lost its admitted identity/mode")
+        self._check_ruby_sibling_pin(state["expected_mode"])
+
         _remaining(self.deadline)
         state["canary_create_attempted"] = True
         state["canary_fd"] = os.open(canary.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -1532,6 +1710,35 @@ class Session:
             raise SessionError("synthetic HOME file persistence/mode is not verified")
         state["canary_mode"] = 0o444
         self._check_home_pin(state["expected_mode"])
+
+        self._check_ruby_sibling_pin(state["expected_mode"])
+        _remaining(self.deadline)
+        state["sibling_create_attempted"] = True
+        state["sibling_fd"] = os.open(sibling.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                     0o600, dir_fd=state["sibling_pin"])
+        _remaining(self.deadline)
+        created = os.fstat(state["sibling_fd"])
+        _remaining(self.deadline)
+        if (not stat.S_ISREG(created.st_mode) or created.st_uid != 0 or created.st_gid == self.gid
+                or created.st_nlink != 1 or stat.S_IMODE(created.st_mode) != 0o600 or created.st_size):
+            raise SessionError("new synthetic Ruby sibling lacks exclusive creation identity")
+        state["sibling_identity"] = created
+        if os.write(state["sibling_fd"], _ANCESTOR_READ_BYTES) != len(_ANCESTOR_READ_BYTES):
+            raise SessionError("synthetic Ruby sibling write was incomplete")
+        _remaining(self.deadline)
+        os.fsync(state["sibling_fd"])
+        _remaining(self.deadline)
+        state["sibling_mode"] = None
+        os.fchmod(state["sibling_fd"], 0o444)
+        _remaining(self.deadline)
+        current = os.fstat(state["sibling_fd"])
+        _remaining(self.deadline)
+        if (_home_node(current) != _home_node(created) or current.st_nlink != 1
+                or stat.S_IMODE(current.st_mode) != 0o444 or current.st_size != len(_ANCESTOR_READ_BYTES)):
+            raise SessionError("synthetic Ruby sibling persistence/mode is not verified")
+        state["sibling_mode"] = 0o444
+        self._check_ruby_sibling_pin(state["expected_mode"])
+
         state["listener"] = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         state["listener"].settimeout(min(2, _remaining(self.deadline)))
         _remaining(self.deadline)
@@ -1556,6 +1763,7 @@ class Session:
         state["listener"].listen(8)
         _remaining(self.deadline)
         _private_file(self.bootstrap / "home-control.json", json.dumps({"home": str(self.runner_home),
+                      "ruby_prefix": str(self.ruby_prefix),
                       "uid": self.uid, "gid": self.gid, "deadline": self.deadline}).encode(), 0o444)
         _remaining(self.deadline)
         note["ok"] = True  # Preparation only; genuine mandatory controls still follow.
@@ -1563,10 +1771,13 @@ class Session:
     def _home_positive_control(self) -> None:
         """Trusted fixed U code outside policy proves DAC is not the negative."""
         state = self._home_state
-        if state is None or not state["prepared"] or state["listener"] is None:
+        if (state is None or not state["prepared"] or state["listener"] is None
+                or state["sibling_identity"] is None or state["sibling_mode"] != 0o444):
             raise SessionError("owned HOME controls are not prepared")
         self.ensure_idle()
+        self._check_ruby_ancestors(home_mode=state["expected_mode"])
         self._check_home_pin(state["expected_mode"])
+        self._check_ruby_sibling_pin(state["expected_mode"])
         raw = _small_command([str(self.python), "-I", "-S", "-B", str(self.entry), "--home-positive"],
                              10, user=self.uid, group=self.gid, deadline=self.deadline)
         if raw != b"MRK_HOME_POSITIVE_OK\n":
@@ -1609,11 +1820,13 @@ class Session:
         state["closed"] = True
         errors = []
         note = {"name": "home-boundary-finalization", "ok": False, "restored": False,
-                "canary_removed": False, "socket_removed": False, "unverified_creation": []}
+                "canary_removed": False, "socket_removed": False, "sibling_removed": False,
+                "unverified_creation": []}
         self.admission_results.append(note)
         for kind, attempt_key, identity_key in (
                 ("canary", "canary_create_attempted", "canary_identity"),
-                ("socket", "socket_bind_attempted", "socket_identity")):
+                ("socket", "socket_bind_attempted", "socket_identity"),
+                ("sibling", "sibling_create_attempted", "sibling_identity")):
             if state[attempt_key] and state[identity_key] is None:
                 note["unverified_creation"].append(kind)
                 errors.append(SessionError("synthetic HOME creation after-effect lacks owned identity"))
@@ -1659,8 +1872,22 @@ class Session:
                     _remaining(self.deadline)
                 except BaseException as exc:
                     errors.append(exc)
+            if state["sibling_identity"] is not None:
+                try:
+                    self._check_home_pin(final_mode)
+                    self._check_ruby_sibling_pin(final_mode)
+                    current = os.stat(state["sibling_name"], dir_fd=state["sibling_pin"], follow_symlinks=False)
+                    _remaining(self.deadline)
+                    if (_home_node(current) != _home_node(state["sibling_identity"]) or current.st_nlink != 1
+                            or state["sibling_mode"] is None or stat.S_IMODE(current.st_mode) != state["sibling_mode"]):
+                        raise SessionError("synthetic Ruby sibling replacement/mode forbids removal")
+                    os.unlink(state["sibling_name"], dir_fd=state["sibling_pin"])
+                    note["sibling_removed"] = True
+                    _remaining(self.deadline)
+                except BaseException as exc:
+                    errors.append(exc)
         # Local resource closure is always safe, even when no path mutation is.
-        for key in ("listener", "canary_fd", "pin"):
+        for key in ("listener", "sibling_fd", "canary_fd", "sibling_pin", "pin"):
             owned, state[key] = state[key], None
             if owned is None:
                 continue
@@ -1907,6 +2134,8 @@ class Session:
             else:
                 canary, endpoint = _home_paths(self.runner_home, self.root)
                 data["home_canary"], data["home_socket"] = str(canary), str(endpoint)
+                data["ruby_prefix"], data["ruby_executable"] = str(self.ruby_prefix), str(self.ruby)
+                data["home_sibling"] = str(_ruby_sibling_path(self.runner_home, self.ruby_prefix, self.root))
             base = [str(self.python), "-I", "-S", "-B", str(self.entry)]
             good = self._run([*base, "--probe", json.dumps(data)], cwd=self.work, env={}, seconds=30, latch=False)
             native_note = self._note_capture("native-isolation", good)
@@ -2037,16 +2266,20 @@ class Session:
             raise SessionError("lost-owner negative control has no genuine owner observation")
         observed_child = int(fields[1])  # Observation only; never signal authority.
         errors = self._cleanup()
+        # Observation may raise next; never lose earlier independent cleanup
+        # diagnostics or copy them again at the ordinary unsuccessful tail.
+        self.cleanup_errors.extend(errors)
         cutoff = min(self.deadline, time.monotonic() + 5)
         while time.monotonic() < cutoff:
-            rows = _snapshot(self.platform, deadline=cutoff)
+            rows = _snapshot(self.platform, deadline=cutoff, retry_churn=True)
             if all(pid != observed_child for pid, _ in rows) and not _domain(self.platform, self.uid, deadline=cutoff):
                 break
             time.sleep(min(0.05, _remaining(cutoff)))
         else:
-            errors.append("lost-owner platform cleanup remained unknown or incomplete")
+            reason = "lost-owner platform cleanup remained unknown or incomplete"
+            errors.append(reason)
+            self.cleanup_errors.append(reason)
         if errors:
-            self.cleanup_errors.extend(errors)
             raise SessionError("lost-owner native admission cleanup failed")
         self.admission_results.append({"name": "supervisor-loss", "ok": True,
                                        "subject_owner_exit": 23, "subject_child_wait": "unavailable",
@@ -2195,24 +2428,37 @@ def _home_positive() -> None:
         if len(raw) != state.st_size or os.read(fd, 1):
             raise SessionError("fixed HOME manifest read is incomplete")
         data = json.loads(raw)
-        if (not isinstance(data, dict) or set(data) != {"home", "uid", "gid", "deadline"}
+        if (not isinstance(data, dict) or set(data) != {"home", "ruby_prefix", "uid", "gid", "deadline"}
                 or type(data["uid"]) is not int or type(data["gid"]) is not int
                 or (data["uid"], data["gid"]) != (os.getuid(), os.getgid())
-                or not isinstance(data["home"], str) or _process_groups("darwin") != [os.getgid()]):
+                or not isinstance(data["home"], str) or not isinstance(data["ruby_prefix"], str)
+                or _process_groups("darwin") != [os.getgid()]):
             raise SessionError("fixed HOME manifest lacks numerical owner binding")
         deadline = data["deadline"]
         _remaining(deadline)
         home = _canonical(data["home"])
+        _remaining(deadline)
+        prefix = _canonical(data["ruby_prefix"])
+        _remaining(deadline)
         canary, endpoint = _home_paths(home, bootstrap.parent)
-        fd = os.open(canary, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-        fds.append(fd)
-        state = os.fstat(fd)
-        if (not stat.S_ISREG(state.st_mode) or state.st_uid != 0 or state.st_gid == os.getgid()
-                or state.st_nlink != 1 or stat.S_IMODE(state.st_mode) != 0o444
-                or state.st_size != len(_HOME_READ_BYTES)):
-            raise SessionError("synthetic HOME canary lacks exact DAC-positive state")
-        if os.read(fd, len(_HOME_READ_BYTES) + 1) != _HOME_READ_BYTES or os.read(fd, 1):
-            raise SessionError("synthetic HOME canary was not genuinely read")
+        sibling = _ruby_sibling_path(home, prefix, bootstrap.parent)
+        for path, expected in ((canary, _HOME_READ_BYTES), (sibling, _ANCESTOR_READ_BYTES)):
+            _remaining(deadline)
+            named = os.stat(path, follow_symlinks=False)  # Genuine known-name metadata positive.
+            _remaining(deadline)
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            fds.append(fd)  # Custody precedes every subsequent fallible operation.
+            _remaining(deadline)
+            state = os.fstat(fd)
+            _remaining(deadline)
+            if (not stat.S_ISREG(state.st_mode) or state.st_uid != 0 or state.st_gid == os.getgid()
+                    or state.st_nlink != 1 or stat.S_IMODE(state.st_mode) != 0o444
+                    or state.st_size != len(expected) or _home_node(named) != _home_node(state)
+                    or named.st_nlink != 1 or stat.S_IMODE(named.st_mode) != 0o444 or named.st_size != len(expected)):
+                raise SessionError("synthetic HOME/sibling file lacks exact DAC-positive state")
+            if os.read(fd, len(expected) + 1) != expected or os.read(fd, 1):
+                raise SessionError("synthetic HOME/sibling file was not genuinely read")
+            _remaining(deadline)
         peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         peer.settimeout(min(2, _remaining(deadline)))
         peer.connect(str(endpoint))
@@ -2713,30 +2959,48 @@ def _probe_provider_boundaries(data: dict) -> None:
         return
     if data["platform"] != "darwin":
         raise SessionError("unsupported fixed provider boundary platform")
-    canary, endpoint = _home_paths(Path(data["runner_home"]), Path(data["work"]).parent)
-    if (data["home_canary"], data["home_socket"]) != (str(canary), str(endpoint)):
+    home, prefix = Path(data["runner_home"]), Path(data["ruby_prefix"])
+    ancestors = _ruby_ancestor_paths(home, prefix)
+    ruby = Path(data["ruby_executable"])
+    if not ruby.is_absolute() or ".." in ruby.parts or ruby.parent.parent != prefix:
+        raise SessionError("Ruby metadata control lost the selected executable binding")
+    root = Path(data["work"]).parent
+    canary, endpoint = _home_paths(home, root)
+    sibling = _ruby_sibling_path(home, prefix, root)
+    if (data["home_canary"], data["home_socket"], data["home_sibling"]) != (str(canary), str(endpoint), str(sibling)):
         raise SessionError("HOME boundary controls differ from fixed session names")
-    for operation in ("read", "metadata"):
-        fd, errors = None, []
-        try:
-            if operation == "read":
-                fd = os.open(canary, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-                os.read(fd, len(_HOME_READ_BYTES) + 1)
-            else:
-                os.stat(canary, follow_symlinks=False)
-            raise SessionError("synthetic HOME known-path access was permitted")
-        except OSError as exc:
-            if exc.errno not in {errno.EACCES, errno.EPERM}:
-                errors.append(exc)
-        except BaseException as exc:
-            errors.append(exc)
-        if fd is not None:
+    # Each literal must actually permit its one directory inode's metadata.
+    # Neither fake Ruby receipts nor successful denied-file opens can stand in
+    # for these positives in the original/fork-exec/detached native routes.
+    for ancestor in ancestors:
+        state = os.stat(ancestor, follow_symlinks=False)
+        if (not stat.S_ISDIR(state.st_mode) or state.st_uid == data["uid"] or state.st_gid == data["gid"]
+                or state.st_mode & 0o002 or not state.st_mode & 0o001):
+            raise SessionError("literal Ruby ancestor metadata/traversal positive failed")
+    if ruby.resolve(strict=True) != ruby:
+        raise SessionError("selected Ruby path did not resolve strictly under the final policy")
+    for target, expected in ((canary, _HOME_READ_BYTES), (sibling, _ANCESTOR_READ_BYTES)):
+        for operation in ("read", "metadata"):
+            fd, errors = None, []
             try:
-                os.close(fd)
+                if operation == "read":
+                    fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+                    os.read(fd, len(expected) + 1)
+                else:
+                    os.stat(target, follow_symlinks=False)
+                raise SessionError("synthetic HOME/sibling known-path access was permitted")
+            except OSError as exc:
+                if exc.errno not in {errno.EACCES, errno.EPERM}:
+                    errors.append(exc)
             except BaseException as exc:
                 errors.append(exc)
-        if errors:
-            raise BaseExceptionGroup("known-path HOME denial/owned close failed", errors)
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except BaseException as exc:
+                    errors.append(exc)
+            if errors:
+                raise BaseExceptionGroup("known-path HOME/sibling denial/owned close failed", errors)
     peer, errors = None, []
     try:
         peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

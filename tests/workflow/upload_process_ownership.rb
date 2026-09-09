@@ -638,8 +638,8 @@ module UploadProcessFixture
                 "failures" => failures}
       @records << record
       progress
-      FileUtils.remove_entry(@case_root) # All actual reservations/native workers proved stopped.
       raise Failure.new("ownership-probe", JSON.generate(record)) unless failures.empty?
+      UploadProcessFixture.remove_fixture_directory(@case_root, root: @directory, layout: :joined_case)
     ensure
       @active = false
       published_trace&.disable
@@ -836,9 +836,9 @@ module UploadProcessFixture
                 "preservedDirectories" => preserved.length, "failures" => failures}
       @records << record
       UploadProcessFixture.atomic_json(File.join(@directory, "setup-progress.json"), @records)
+      raise Failure.new("setup-probe", JSON.generate(record)) unless failures.empty?
       # No real native acquisition is possible through this probe's spawn veto.
       FileUtils.remove_entry(@case_root)
-      raise Failure.new("setup-probe", JSON.generate(record)) unless failures.empty?
     end
 
     def execute
@@ -1010,7 +1010,7 @@ module UploadProcessFixture
       record(failures, "originalErrorKind" => error.is_a?(Failure) ? error.kind : nil,
              "preservedBeforeIndependentProof" => preserved.length, "registryUnresolvedBeforeProof" => unresolved,
              "knownNativeIdentities" => identities, "independentRealDeathProof" => true)
-      FileUtils.remove_entry(root) # Only after real, restored observations proved both identities stopped.
+      UploadProcessFixture.remove_fixture_directory(root, root: @directory, layout: :joined_case)
     ensure
       @active = false
     end
@@ -1053,7 +1053,7 @@ module UploadProcessFixture
       ensure
         scope.cleanup do
           if directory && complete
-            FileUtils.remove_entry(directory)
+            remove_fixture_directory(directory, root: root, layout: :probe)
           elsif directory
             (@unresolved_roots ||= {})[root] = true
             warn "Preserve ownership probe failure: #{directory}"

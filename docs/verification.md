@@ -83,15 +83,25 @@ permission preparation is not a substitute for native controls.
 On the disposable macOS VM, the selected Ruby may be beneath runner HOME with
 mode `0750`. The owner pins that exact directory and may add only other-search
 (`0750` to `0751`), not read/list/write permission or group membership. The
-mandatory sandbox policy is unchanged. Before product execution, fixed
-outside-policy controls must access a synthetic readable HOME file and a named
-local socket; sandboxed children and descendants must be denied file reads,
-metadata and socket access, with no outside delivery. No real private file or
-runner socket is probed. This demonstrates the effective privacy boundary
-despite the necessary directory traversal. A successful Ruby launch alone is
-insufficient.
+subject policy permits only inode metadata for the exact canonical strict
+ancestors of the selected Ruby prefix within HOME (at most16 directories).
+These exact `file-read-metadata` literals do not grant contents, listing, xattrs
+or access to descendants; the broad private-read denial remains. Cleanup and
+write-positive policies do not gain these exceptions.
 
-The HOME directory pin and synthetic fixtures remain owned by this attempt.
+Before product execution, fixed outside-policy controls must access synthetic
+readable files in HOME and beside the selected Ruby prefix, plus a named HOME
+socket. Under the actual subject policy, original/fork-exec/detached controls
+must obtain each allowed ancestor's metadata and resolve the selected Ruby path,
+while being denied both synthetic files' reads/metadata, HOME/temp listing and
+socket access, with no outside delivery. The sibling file lies beneath every
+allowed ancestor but outside all admitted runtime prefixes, detecting accidental
+subtree grants. No real private file or runner socket is probed. Policy text or
+a successful Ruby launch alone cannot establish this effective boundary; the
+ordinary Ruby numerical-identity command must also genuinely succeed.
+
+The HOME and sibling-parent directory pins and synthetic fixtures remain owned
+by this attempt; no other ancestor's permissions are changed.
 Restoration of its original mode and removal of its fixtures require genuine
 process finality and matching current identities/permissions; drift or unknown
 cleanup remains failure and is left to disposal of this VM. These narrow
@@ -123,8 +133,9 @@ by the test identity. Root-owning installed files alone is insufficient if their
 parent names can be replaced. Completed installations/build inputs are frozen
 only after producer finality. Original runner HOME/temp/control contents remain
 inaccessible to product code; only explicitly admitted, non-subject-writable
-runtime prefixes are exposed. The search-only compatibility preparation above
-does not exempt other HOME content or metadata from the mandatory policy.
+runtime prefixes are exposed. Beyond the exact ancestor inode metadata described
+above, the search-only preparation does not exempt unrelated HOME content or
+metadata from the mandatory policy.
 
 Linux uses distribution-provided `bwrap` for PID/network/IPC/UTS separation and
 read-only mounts, followed by `setpriv` for the numeric credential drop, cleared
@@ -155,6 +166,14 @@ stream EOFs, bounded and reconciled persisted bytes, and an empty reserved-ident
 process domain. A PASS-shaped footer, closed stream, or discovered PID cannot
 replace those facts. The first error stays latched; write/close/cleanup failures
 remain failures even when a previously written result looked successful.
+
+Linux process finality uses two complete process/thread credential censuses.
+Only known disappearance or membership/birth-identity churn permits discarding
+an incomplete pass and starting afresh: at most8 pass invocations per census,
+under the caller's unchanged absolute cutoff. No partial row set proves absence.
+Initial UID/GID collision admission remains strict and never retries away an
+observed collision. Root-enumeration failures, permission/I/O errors, malformed
+credentials, bounds and deadline expiry remain failures, not process death.
 
 Only the still-owned direct child may be stopped by the root collector. macOS's
 fixed cleanup helper runs as the reserved unprivileged identity, not as a root
@@ -196,6 +215,20 @@ indeterminate states: they prove neither readiness nor death, and never renew a
 deadline. A genuine zombie remains a zombie even when its exit flag is set.
 Fixture readiness still needs the independent worker/pipe/marker handshake.
 No fixture selector or test canary is added to a production validator environment.
+
+Clean profile and Ruby fixture-driver environments also bind `TMPDIR`, `TMP`
+and `TEMP` to their existing canonical owned case directory. They do not inherit
+ambient temporary paths, HOME or configuration. Native assertions check the
+actual profile scratch parent and Ruby temporary root; system temporary paths
+and a writable working directory are not required.
+
+An unknown observer child may leave private capture scratch. Native worker death
+does not authorize deleting it: normal/raw driver cleanup and known outer probe
+parents veto removal on residual observer scratch or uncertain bounded directory
+enumeration, retaining the original error and unresolved evidence. Only the
+independent probes' own original-child reservations or genuine zero-spawn proof
+authorize their intentional direct-scratch cleanup. No marker supplies process
+ownership, and a residual nested driver cannot be erased by outer teardown.
 
 Source and wheel use separate build copies and venvs. Wheel checks must establish
 installed import locations, metadata/RECORD, packaged schemas/templates/Fastlane

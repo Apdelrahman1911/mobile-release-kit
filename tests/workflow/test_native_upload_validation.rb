@@ -5,6 +5,7 @@ require "minitest/mock"
 require_relative "upload_process_fixture"
 
 class NativeUploadValidationTest < Minitest::Test
+  include UploadProcessFixture::RawCaptureCleanup
   PROOF_FILES = %w[
     tests/workflow/upload_process_fixture.rb
     tests/workflow/upload_process_ownership.rb
@@ -495,7 +496,7 @@ class NativeUploadValidationTest < Minitest::Test
         assert_equal interpreter, dispatch_file_identity(RbConfig.ruby, limit: 32 * 1024 * 1024)
       end
     end
-    @retain_raw_evidence = false # Includes successful outer lifetime finalization.
+    finish_raw_proof_copies! # Includes successful outer lifetime finalization and no unresolved raw scratch.
   end
 
   def new_raw_case(label, mode)
@@ -533,7 +534,7 @@ class NativeUploadValidationTest < Minitest::Test
 
   def raw_dispatch(copy, directory, fixture, literal)
     {"argv" => [RbConfig.ruby, fixture, "driver", directory], "cwd" => Dir.pwd,
-     "environment" => UploadProcessFixture.process_observer_environment,
+     "environment" => UploadProcessFixture.driver_environment(directory),
      "options" => {"unsetenv_others" => true, "pgroup" => true, "stdin" => File::NULL,
                    "stdout" => File.join(directory, "driver.stdout"), "stderr" => File.join(directory, "driver.stderr")},
      "copyRoot" => copy, "literalCase" => literal,
@@ -713,6 +714,7 @@ class NativeUploadValidationTest < Minitest::Test
             [output, errors].compact.each { |file| attempt.call { file.close unless file.closed? } }
             observed[:streams_closed] = output && errors && [output, errors].all?(&:closed?)
             attempt.call { observe_raw_native(directory, observed) } unless literal
+            attempt.call { check_raw_capture_scratch!(directory) }
             attempt.call { recheck_raw_dispatch(observed) }
             attempt.call { write_capture_record(observed) }
           end
@@ -796,6 +798,7 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal [RbConfig.ruby, dispatch.fetch("fixture").fetch("path"), "driver", directory], dispatch.fetch("argv")
     expected_environment = UploadProcessFixture::PROCESS_OBSERVER_SELECTION.nil? ? {} :
       {UploadProcessFixture::PROCESS_OBSERVER_KEY => UploadProcessFixture::PROCESS_OBSERVER_SELECTION}
+    expected_environment.merge!("TMPDIR" => directory, "TMP" => directory, "TEMP" => directory)
     assert_equal expected_environment, dispatch.fetch("environment")
     assert_equal Dir.pwd, dispatch.fetch("cwd")
     assert_equal({"unsetenv_others" => true, "pgroup" => true, "stdin" => File::NULL,

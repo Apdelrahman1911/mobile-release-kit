@@ -195,6 +195,7 @@ def driver(root, directory, mode, parent):
         assert native[:4] == [sys.executable, "-I", "-S", "-B"]
         assert expected_parent == os.getpid()
         assert path.is_dir() and (path.stat().st_mode & 0o777) == 0o700
+        assert path.parent == root, "profile scratch escaped the owned fixture directory"
         assert (path / "cms.der").read_bytes() == b"fictional-profile-canary"
         assert (path / "cms.der").stat().st_mode & 0o777 == 0o600
         scratches.append(path)
@@ -293,7 +294,7 @@ def driver(root, directory, mode, parent):
 
 
 def run_case(root: Path, mode: str) -> dict:
-    environment = {"PATH": os.environ["PATH"]}
+    environment = {"PATH": os.environ["PATH"], "TMPDIR": str(root), "TMP": str(root), "TEMP": str(root)}
     environment.update(observer_environment())
     process = subprocess.Popen(command("driver", root, root, mode), env=environment,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
