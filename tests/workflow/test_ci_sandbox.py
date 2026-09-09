@@ -3984,3 +3984,239 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertEqual(events, [])
                 else:
                     self.assertEqual(events[:2], [("nonblocking",)] if case == "setblocking-error" else [("nonblocking",), ("accept",)])
+
+    def test_ruby_startup_diagnostic_requires_the_exact_failed_capture_without_changing_admission(self):
+        session = session_double(self.module, "darwin")
+        session.ruby = Path("/synthetic/private-ruby-diagnostic/bin/ruby")
+        session.failure = "earlier immutable failure"
+        session.admitted = False
+        raw = b"synthetic unpublished unknown startup text\n"
+        result = self.module.CapturedRun(b"", raw, 1, True, True, True, True, False, False,
+                                         0.01, "command exited 1", (), (0, len(raw)))
+        original = dataclasses.asdict(result)
+        unclassified = {"semantics": "stderr-tokens-only", "classification": "unclassified"}
+
+        def noted(capture, *, platform="darwin", name="ruby-numerical-identity"):
+            session.platform = platform
+            before = len(session.admission_results)
+            record = session._note_capture(name, capture)
+            self.assertIs(record, session.admission_results[-1])
+            self.assertEqual(len(session.admission_results), before + 1)
+            self.assertFalse(record["ok"])
+            self.assertEqual(record["subject_ok"], capture.ok)
+            self.assertFalse(session.admitted)
+            self.assertEqual(session.failure, "earlier immutable failure")
+            public = json.dumps(record)
+            self.assertNotIn("private-ruby-diagnostic", public)
+            self.assertNotIn("synthetic unpublished", public)
+            return record
+
+        with patch.multiple(self.module, os=SimpleNamespace(), subprocess=SimpleNamespace(),
+                            socket=SimpleNamespace(), signal=SimpleNamespace()), \
+             patch.object(session, "_run", side_effect=AssertionError("a capture observation cannot start another command")), \
+             patch.object(Path, "stat", side_effect=AssertionError("a capture observation cannot inspect provider files")), \
+             patch.object(Path, "resolve", side_effect=AssertionError("a capture observation cannot resolve provider paths")), \
+             patch.object(Path, "read_bytes", side_effect=AssertionError("only the already captured bytes are authority")), \
+             patch.object(Path, "read_text", side_effect=AssertionError("only the already captured bytes are authority")):
+            self.assertEqual(self.module._ruby_startup_error(result, session.ruby), unclassified)
+            row = noted(result)
+            self.assertEqual(row["ruby_startup_error"], unclassified)
+            self.assertEqual(row["persisted"], [0, len(raw)])
+            self.assertEqual(row["error_count"], 1)
+            self.assertFalse(result.ok)
+            for changed in ({"returncode": 0}, {"returncode": 71}, {"returncode": None}, {"returncode": True},
+                            {"returncode": 1.0}, {"stdout": b"unexpected stdout"}, {"waited": False},
+                            {"stdout_eof": False}, {"stderr_eof": False}, {"domain_finality": False},
+                            {"timed_out": True}, {"cancelled": True}, {"cleanup_errors": ("synthetic close ambiguity",)},
+                            {"primary_error": None}, {"primary_error": "command exited 71"},
+                            {"primary_error": "per-stream or whole-attempt persisted-output limit"},
+                            {"persisted": (0, len(raw) - 1)}, {"persisted": (0, len(raw) + 1)},
+                            {"persisted": (0, None)}, {"persisted": (1, len(raw))}):
+                with self.subTest(startup_receipt=changed):
+                    capture = dataclasses.replace(result, **changed)
+                    self.assertIsNone(self.module._ruby_startup_error(capture, session.ruby))
+                    self.assertNotIn("ruby_startup_error", noted(capture))
+            # These values cannot arise from a genuine CapturedRun producer;
+            # an equal-looking value is nevertheless not the required fact.
+            for changed in ({"stdout": ""}, {"stdout": bytearray()}, {"stderr": bytearray(raw)}, {"stderr": raw.decode()},
+                            {"waited": 1}, {"stdout_eof": 1}, {"stderr_eof": 1}, {"domain_finality": 1},
+                            {"timed_out": 0}, {"cancelled": 0}, {"cleanup_errors": []}, {"persisted": [0, len(raw)]},
+                            {"persisted": (False, len(raw))}, {"persisted": (0.0, len(raw))},
+                            {"persisted": (0, float(len(raw)))}, {"persisted": None}):
+                with self.subTest(startup_typed_receipt=changed):
+                    self.assertIsNone(self.module._ruby_startup_error(dataclasses.replace(result, **changed), session.ruby))
+            for platform, name in (("linux", "ruby-numerical-identity"), ("darwin", "native-isolation"),
+                                   ("darwin", "ruby-numerical-identity-extra")):
+                with self.subTest(startup_capture_role=(platform, name)):
+                    self.assertNotIn("ruby_startup_error", noted(result, platform=platform, name=name))
+            success = dataclasses.replace(result, returncode=0, primary_error=None)
+            self.assertTrue(success.ok)
+            self.assertNotIn("ruby_startup_error", noted(success))
+            # Exit71 remains the separate exact launcher observation. Neither
+            # classifier can silently redefine it as an exit1 startup failure.
+            launcher = f"sandbox-exec: execvp() of '{session.ruby}' failed: Permission denied\n".encode()
+            old_capture = dataclasses.replace(result, stderr=launcher, returncode=71, primary_error="command exited 71",
+                                              persisted=(0, len(launcher)))
+            old = {"operation": "sandbox-execvp", "role": "ruby", "errno": errno.EACCES}
+            self.assertEqual(self.module._ruby_launch_error(old_capture, session.ruby), old)
+            self.assertIsNone(self.module._ruby_startup_error(old_capture, session.ruby))
+            row = noted(old_capture)
+            self.assertEqual(row["launcher_error"], old)
+            self.assertNotIn("ruby_startup_error", row)
+        self.assertEqual(dataclasses.asdict(result), original)
+
+    def test_ruby_startup_tokens_and_frames_are_finite_bound_to_the_selected_provider_and_never_raw(self):
+        session = session_double(self.module, "darwin")
+        session.ruby = Path("/synthetic/private-ruby-diagnostic/bin/ruby")
+        library = session.ruby.parent.parent / "lib/ruby/3.3.0"
+        session.failure = "earlier immutable failure"
+        session.admitted = False
+
+        def diagnose(raw):
+            capture = self.module.CapturedRun(b"", raw, 1, True, True, True, True, False, False,
+                                              0.01, "command exited 1", (), (0, len(raw)))
+            before = dataclasses.asdict(capture)
+            note = self.module._ruby_startup_error(capture, session.ruby)
+            row = session._note_capture("ruby-numerical-identity", capture)
+            self.assertEqual(row["ruby_startup_error"], note)
+            self.assertFalse(capture.ok or row["ok"] or row["subject_ok"] or session.admitted)
+            self.assertEqual(capture.primary_error, "command exited 1")
+            self.assertEqual(dataclasses.asdict(capture), before)
+            self.assertEqual(session.failure, "earlier immutable failure")
+            self.assertEqual(note["semantics"], "stderr-tokens-only")
+            self.assertLessEqual(set(note), {"semantics", "classification", "exception", "errno", "operation", "frames"})
+            for frame in note.get("frames", []):
+                self.assertEqual(set(frame), {"role", "line"})
+                self.assertIs(type(frame["line"]), int)
+                self.assertTrue(0 < frame["line"] < 1_000_000)
+            public = json.dumps(row)
+            for private in ("private-ruby-diagnostic", "private-message-canary", "private-function-canary",
+                            "private-path-canary", "private-frame-canary", "private-operation-canary", "0xDEADBEEF"):
+                self.assertNotIn(private, public)
+            return note
+
+        common = {"semantics": "stderr-tokens-only", "classification": "recognized"}
+        errnos = (("Errno::EPERM", 1, "Operation not permitted"), ("Errno::ENOENT", 2, "No such file or directory"),
+                  ("Errno::ENOEXEC", 8, "Exec format error"), ("Errno::ENOMEM", 12, "Cannot allocate memory"),
+                  ("Errno::EACCES", 13, "Permission denied"), ("Errno::ENOTDIR", 20, "Not a directory"))
+        plain = ("LoadError", "ArgumentError", "RuntimeError", "ThreadError", "SecurityError", "SyntaxError",
+                 "NameError", "TypeError", "NoMemoryError")
+        frames = ((str(library / "rubygems.rb"), "rubygems", 12),
+                  (str(library / "rubygems/defaults.rb"), "rubygems-defaults", 13),
+                  (str(library / "rubygems/path_support.rb"), "rubygems-path-support", 14),
+                  (str(library / "rubygems/core_ext/kernel_require.rb"), "rubygems-kernel-require", 15),
+                  (str(library / "bundled_gems.rb"), "bundled-gems", 16),
+                  (f"<internal:{library / 'rubygems/core_ext/kernel_require.rb'}>", "rubygems-kernel-require", 17),
+                  ("<internal:gem_prelude>", "gem-prelude", 18), ("<internal:prelude>", "ruby-prelude", 19),
+                  ("-e", "numerical-probe", 1))
+        with patch.multiple(self.module, os=SimpleNamespace(), subprocess=SimpleNamespace(),
+                            socket=SimpleNamespace(), signal=SimpleNamespace()), \
+             patch.object(session, "_run", side_effect=AssertionError("no diagnostic command may run")), \
+             patch.object(Path, "stat", side_effect=AssertionError("no diagnostic metadata query may run")), \
+             patch.object(Path, "resolve", side_effect=AssertionError("no diagnostic provider resolution may run")), \
+             patch.object(Path, "read_bytes", side_effect=AssertionError("no diagnostic file read may run")), \
+             patch.object(Path, "read_text", side_effect=AssertionError("no diagnostic file read may run")):
+            for exception, number, message in errnos:
+                with self.subTest(startup_errno_token=exception):
+                    # The number follows only this exact finite symbolic class,
+                    # not the message's number or an arbitrary native address.
+                    raw = f"{session.ruby}: private-message-canary 999 0xDEADBEEF ({exception})\n".encode()
+                    self.assertEqual(diagnose(raw), common | {"exception": exception, "errno": number, "frames": []})
+                    bare = f"{message} @ rb_check_realpath_internal - /private-path-canary ({exception})\n".encode()
+                    self.assertEqual(diagnose(bare), common | {"exception": exception, "errno": number,
+                                                            "operation": "rb_check_realpath_internal", "frames": []})
+            for exception in plain:
+                with self.subTest(startup_non_errno_token=exception):
+                    raw = f"{session.ruby.name}: Permission denied private-message-canary ({exception})\n".encode()
+                    self.assertEqual(diagnose(raw), common | {"exception": exception, "frames": []})
+            raw = f"{session.ruby}: private-message-canary @ rb_check_realpath_internal - /private-path-canary (RuntimeError)\n".encode()
+            self.assertEqual(diagnose(raw), common | {"exception": "RuntimeError", "operation": "rb_check_realpath_internal", "frames": []})
+            for operation in ("private-operation-canary", "rb_check_realpath_internal_extra", "realpath"):
+                raw = f"{session.ruby}: private-message-canary @ {operation} - /private-path-canary (RuntimeError)\n".encode()
+                self.assertEqual(diagnose(raw), common | {"exception": "RuntimeError", "frames": []})
+            for source, role, line in frames:
+                with self.subTest(startup_fixed_frame=role):
+                    raw = f"{source}:{line}:in `private-function-canary': private-message-canary (LoadError)\n".encode()
+                    self.assertEqual(diagnose(raw), common | {"exception": "LoadError", "frames": [{"role": role, "line": line}]})
+            source = str(library / "rubygems.rb")
+            header = f"{source}:1: private-message-canary (RuntimeError)\n"
+            tails = [f"\tfrom {source}:{line}:in 'private-function-canary'\n" for line in range(1, 13)]
+            limited = diagnose((header + "".join(tails)).encode())
+            self.assertEqual(limited, common | {"exception": "RuntimeError",
+                             "frames": [{"role": "rubygems", "line": line} for line in range(1, 9)]})
+            # A recognized fixed header does not claim that every tail is known.
+            # A familiar basename at another prefix never becomes a frame role.
+            foreign = f"/private-frame-canary/lib/ruby/3.3.0/rubygems.rb:27:in `private-function-canary'"
+            tail = (f"\tfrom {foreign}\n\tfrom {source}:1\n\tfrom {source}:999999\n"
+                    "\tfrom <internal:private-frame-canary>:22\n\tfrom -e:2\n"
+                    "private-message-canary unknown surrounding text\n")
+            self.assertEqual(diagnose((header + tail).encode()), common | {"exception": "RuntimeError", "frames": [
+                {"role": "rubygems", "line": 1}, {"role": "rubygems", "line": 999999}]})
+
+    def test_ruby_startup_parser_rejects_foreign_tokens_framing_controls_and_complete_input_overflow(self):
+        ruby = Path("/synthetic/private-ruby-diagnostic/bin/ruby")
+        source = ruby.parent.parent / "lib/ruby/3.3.0/rubygems.rb"
+        common = {"semantics": "stderr-tokens-only", "classification": "recognized", "exception": "RuntimeError", "frames": []}
+        unclassified = {"semantics": "stderr-tokens-only", "classification": "unclassified"}
+
+        def diagnose(raw):
+            capture = self.module.CapturedRun(b"", raw, 1, True, True, True, True, False, False,
+                                              0.01, "command exited 1", (), (0, len(raw)))
+            note = self.module._ruby_startup_error(capture, ruby)
+            self.assertFalse(capture.ok)
+            public = json.dumps(note)
+            for private in ("private-ruby-diagnostic", "private-message-canary", "private-frame-canary", "ForeignPrivateError"):
+                self.assertNotIn(private, public)
+            return note
+
+        valid = f"{ruby}: private-message-canary (RuntimeError)\n".encode()
+        malformed = [b"", valid[:-1], b"prefix " + valid, b"\n" + valid, valid.replace(b"\n", b"\r\n"),
+                     valid.replace(b"private-message-canary", b"\xff"), valid + b"\x80\n", valid + "\u00e9\n".encode(),
+                     valid.replace(b"RuntimeError)", b"RuntimeError) suffix"), valid.replace(b"(RuntimeError)", b"RuntimeError"),
+                     valid.replace(b"(RuntimeError)", b"((RuntimeError))"), valid.replace(b"(RuntimeError)", b"()"),
+                     valid.replace(b"private-message-canary", b""), b"arbitrary message (RuntimeError)\n",
+                     f"/private-frame-canary/bin/ruby: private-message-canary (RuntimeError)\n".encode(),
+                     f"/private-frame-canary/lib/ruby/3.3.0/rubygems.rb:1: private-message-canary (RuntimeError)\n".encode(),
+                     f"<internal:/private-frame-canary/kernel_require.rb>:1: private-message-canary (RuntimeError)\n".encode(),
+                     b"<internal:private-frame-canary>:1: private-message-canary (RuntimeError)\n",
+                     b"-e:2: private-message-canary (RuntimeError)\n"]
+        for exception in ("ForeignPrivateError", "Errno::EIO", "Errno::EACCES_PRIVATE", "Errno::13", "IOError", "runtimeerror"):
+            malformed.append(valid.replace(b"RuntimeError", exception.encode()))
+        for line in ("0", "01", "-1", "+1", "1000000", "1.0", " 1"):
+            malformed.append(f"{source}:{line}: private-message-canary (RuntimeError)\n".encode())
+        for name in ("", "f" * 129, "embedded`quote", "embedded'quote"):
+            malformed.append(f"{source}:1:in `{name}': private-message-canary (RuntimeError)\n".encode())
+        for control in (*range(0, 9), *range(11, 32), 127):
+            malformed.append(valid.replace(b"private-message-canary", b"private-message-canary" + bytes([control])))
+        malformed += [valid.replace(b"private-message-canary", b"private\tmessage-canary"),
+                      valid + f"\tfrom {source}:2\t\n".encode(), valid + b"\tunknown-private-tail\n",
+                      b"Permission denied @ rb_check_realpath_internal - /private-message-canary (Errno::EPERM)\n",
+                      b"Permission denied @ rb_check_realpath_internal -  (Errno::EACCES)\n",
+                      b"Permission denied @ private-operation-canary - /private-message-canary (Errno::EACCES)\n"]
+        with patch.multiple(self.module, os=SimpleNamespace(), subprocess=SimpleNamespace(),
+                            socket=SimpleNamespace(), signal=SimpleNamespace()), \
+             patch.object(Path, "stat", side_effect=AssertionError("no diagnostic metadata query may run")), \
+             patch.object(Path, "resolve", side_effect=AssertionError("no diagnostic provider resolution may run")), \
+             patch.object(Path, "read_bytes", side_effect=AssertionError("no diagnostic file read may run")), \
+             patch.object(Path, "read_text", side_effect=AssertionError("no diagnostic file read may run")):
+            self.assertEqual(diagnose(valid), common)
+            for index, raw in enumerate(malformed):
+                with self.subTest(startup_malformed=index):
+                    self.assertEqual(diagnose(raw), unclassified)
+            prefix, suffix = f"{ruby}: ".encode(), b" (RuntimeError)\n"
+            exact = prefix + b"x" * (16384 - len(prefix) - len(suffix)) + suffix
+            self.assertEqual(len(exact), 16384)
+            self.assertEqual(diagnose(exact), common)
+            over = prefix + b"x" * (16385 - len(prefix) - len(suffix)) + suffix
+            self.assertEqual(len(over), 16385)
+            self.assertEqual(diagnose(over), unclassified)
+            bounded_frame = f"{source}:999999:in `{'f' * 128}': private-message-canary (RuntimeError)\n".encode()
+            self.assertEqual(diagnose(bounded_frame), common | {"frames": [{"role": "rubygems", "line": 999999}]})
+            sixty_four = valid + b"private-message-canary unknown tail\n" * 63
+            self.assertEqual(diagnose(sixty_four), common)
+            self.assertEqual(diagnose(sixty_four + b"private-message-canary extra tail\n"), unclassified)
+            # Validation covers the whole captured envelope, even after the
+            # eighth recognized frame. A truncated-prefix success is forbidden.
+            tail = b"".join(f"\tfrom {source}:{line}\n".encode() for line in range(1, 12))
+            self.assertEqual(len(diagnose(valid + tail)["frames"]), 8)
+            self.assertEqual(diagnose(valid + tail + b"private-message-canary\x1b\n"), unclassified)

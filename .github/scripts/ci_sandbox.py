@@ -213,6 +213,108 @@ def _ruby_launch_error(result: CapturedRun, ruby: Path) -> dict | None:
     return None  # No byte-count guess, sandbox_apply guess, or raw stderr.
 
 
+def _ruby_startup_error(result: CapturedRun, ruby: Path) -> dict | None:
+    """Closed tokens from an owned failed capture, not native-cause evidence.
+
+    This never resolves/reads a provider path, runs Ruby again, or changes the
+    failed result. Unknown surrounding text is not an understood stack trace.
+    """
+    if (type(result.returncode) is not int or result.returncode != 1
+            or type(result.stdout) is not bytes or result.stdout != b""
+            or type(result.stderr) is not bytes or result.waited is not True
+            or result.stdout_eof is not True or result.stderr_eof is not True
+            or result.domain_finality is not True or result.timed_out is not False
+            or result.cancelled is not False or type(result.cleanup_errors) is not tuple or result.cleanup_errors
+            or result.primary_error != "command exited 1"
+            or type(result.persisted) is not tuple or len(result.persisted) != 2
+            or any(type(n) is not int for n in result.persisted)
+            or result.persisted != (0, len(result.stderr))):
+        return None
+    note = {"semantics": "stderr-tokens-only", "classification": "unclassified"}
+    data = result.stderr
+    if not 0 < len(data) <= 16 * 1024 or not data.endswith(b"\n"):
+        return note
+    try:
+        # The fixed clean locale and admitted paths use this finite grammar;
+        # unsupported encodings/formatting remain unclassified, never forwarded.
+        raw = data.decode("ascii")
+    except UnicodeDecodeError:
+        return note
+    lines = raw[:-1].split("\n")
+    if (not 1 <= len(lines) <= 64 or any(ord(c) < 32 and c not in "\n\t" or ord(c) == 127 for c in raw)
+            or any("\t" in line and (index == 0 or not line.startswith("\tfrom ") or "\t" in line[1:])
+                   for index, line in enumerate(lines))):
+        return note
+
+    # Only these portable Darwin errno values; never infer one from message text
+    # or use a Linux-specific number for a differently numbered native error.
+    errnos = {"Errno::EPERM": 1, "Errno::ENOENT": 2, "Errno::ENOEXEC": 8,
+              "Errno::ENOMEM": 12, "Errno::EACCES": 13, "Errno::ENOTDIR": 20}
+    classes = set(errnos) | {"LoadError", "ArgumentError", "RuntimeError", "ThreadError",
+                            "SecurityError", "SyntaxError", "NameError", "TypeError", "NoMemoryError"}
+    library = ruby.parent.parent / "lib/ruby/3.3.0"  # The workflow's fixed Ruby3.3 provider.
+    sources = {str(library / name): role for name, role in (
+        ("rubygems.rb", "rubygems"), ("rubygems/defaults.rb", "rubygems-defaults"),
+        ("rubygems/path_support.rb", "rubygems-path-support"),
+        ("rubygems/core_ext/kernel_require.rb", "rubygems-kernel-require"),
+        ("bundled_gems.rb", "bundled-gems"))}
+    sources.update({"<internal:gem_prelude>": "gem-prelude", "<internal:prelude>": "ruby-prelude",
+                    f"<internal:{library / 'rubygems/core_ext/kernel_require.rb'}>": "rubygems-kernel-require",
+                    "-e": "numerical-probe"})
+
+    def fixed_frame(line: str, *, header: bool = False) -> tuple[dict, str] | None:
+        for source, role in sources.items():
+            prefix = source + ":"
+            if not line.startswith(prefix):
+                continue
+            pattern = r"([1-9][0-9]{0,5})(?::in [`'][^`'\t\n]{1,128}')?"
+            if header:
+                pattern += r": (.*)"
+            match = re.fullmatch(pattern, line[len(prefix):])
+            if match is None or role == "numerical-probe" and int(match[1]) != 1:
+                return None
+            return {"role": role, "line": int(match[1])}, match[2] if header else ""
+        return None
+
+    body, frames, bare = lines[0], [], True
+    first = fixed_frame(body, header=True)
+    if first is not None:
+        frames.append(first[0])
+        body, bare = first[1], False
+    else:
+        for prefix in (str(ruby) + ": ", ruby.name + ": "):
+            if body.startswith(prefix):
+                body, bare = body[len(prefix):], False
+                break
+    match = re.fullmatch(r"(.+) \(([^()]+)\)", body)
+    if match is None or match[2] not in classes:
+        return note
+    exception, message = match[2], match[1]
+    if bare:
+        # Ruby can fail before a source frame exists. Admit only this exact
+        # native-error spelling, not a class-looking suffix in arbitrary text.
+        messages = {"Errno::EPERM": "Operation not permitted", "Errno::ENOENT": "No such file or directory",
+                    "Errno::ENOEXEC": "Exec format error", "Errno::ENOMEM": "Cannot allocate memory",
+                    "Errno::EACCES": "Permission denied", "Errno::ENOTDIR": "Not a directory"}
+        prefix = messages.get(exception, "") + " @ rb_check_realpath_internal - "
+        if exception not in messages or not message.startswith(prefix) or not message[len(prefix):]:
+            return note
+    note.update(classification="recognized", exception=exception, frames=frames)
+    if exception in errnos:
+        note["errno"] = errnos[exception]
+    if re.search(r" @ rb_check_realpath_internal - .+", message):
+        note["operation"] = "rb_check_realpath_internal"
+    for line in lines[1:]:
+        if not line.startswith("\tfrom "):
+            continue
+        frame = fixed_frame(line[len("\tfrom "):])
+        if frame is not None and frame[0] not in frames:
+            frames.append(frame[0])
+            if len(frames) == 8:
+                break
+    return note
+
+
 @dataclasses.dataclass(frozen=True)
 class CapturedRun:
     stdout: bytes
@@ -1730,6 +1832,9 @@ class Session:
             ruby_error = _ruby_launch_error(result, self.ruby)
             if ruby_error is not None:
                 row["launcher_error"] = ruby_error
+            startup_error = _ruby_startup_error(result, self.ruby)
+            if startup_error is not None:
+                row["ruby_startup_error"] = startup_error
         self.admission_results.append(row)
         return row
 

@@ -4,6 +4,7 @@ Imported only by the original controller, never by the copied child entry.
 This changes permission bits, not runtime contents, owners, installation paths,
 links, ACLs or signatures. The caller has already completed identity collision
 admission and must not launch any subject after an exception or incomplete report.
+Access ACLs remain unsupported; valid directory defaults are preserved exactly.
 There is no command-line entrypoint, process execution or import-time operation.
 """
 from __future__ import annotations
@@ -16,6 +17,7 @@ import os
 from pathlib import PurePosixPath
 import posixpath
 import stat
+import struct
 import sys
 import time
 
@@ -23,8 +25,11 @@ import time
 MAX_NODES = 100_000
 MAX_DEPTH = 64
 MAX_OPEN = 72
+MAX_ACL_BYTES = 4096
+MAX_DEFAULT_ACL_BYTES = 8 * 1024**2
 ROLES = ("python", "ruby", "jdk")
 ACL_NAMES = ("system.posix_acl_access", "system.posix_acl_default")
+_ACL_UNCHECKED = object()
 
 
 class ProviderRuntimeError(RuntimeError):
@@ -36,6 +41,53 @@ def _snapshot(info):
             info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
+def _acl_shape(value):
+    """Recognize bounded Linux POSIX-v2 data; never expose its qualifiers.
+
+    This validates an inheritance template, not an access-ACL evaluator or
+    transformer. Linux UAPI uses a little-endian version followed by HH/I
+    entries; named users/groups must be unique and ordered within their class.
+    """
+    if type(value) is not bytes:
+        return "non-bytes", "unknown"
+    if len(value) > MAX_ACL_BYTES:
+        return "over-bound", "over-bound"
+    if len(value) < 4 or (len(value) - 4) % 8:
+        return "malformed", "unknown"
+    count = (len(value) - 4) // 8
+    category = ("0" if count == 0 else "1-4" if count <= 4 else
+                "5-16" if count <= 16 else "17-64" if count <= 64 else "65-511")
+    if struct.unpack_from("<I", value)[0] != 2:
+        return "unknown-version", category
+    entries = tuple(struct.iter_unpack("<HHI", value[4:]))
+    invalid = ("invalid-entries", category)
+    if (len(entries) < 3 or entries[0][0] != 0x01 or entries[-1][0] != 0x20
+            or any(tag not in {0x01, 0x02, 0x04, 0x08, 0x10, 0x20} or perm > 7
+                   or (qualifier == 0xFFFFFFFF) != (tag not in {0x02, 0x08})
+                   for tag, perm, qualifier in entries)):
+        return invalid
+    index, named = 1, False
+    for tag, following in ((0x02, 0x04), (0x08, None)):
+        previous = -1
+        while index < len(entries) and entries[index][0] == tag:
+            qualifier = entries[index][2]
+            if qualifier <= previous:
+                return invalid
+            previous, named = qualifier, True
+            index += 1
+        if following is not None:
+            if index >= len(entries) or entries[index][0] != following:
+                return invalid
+            index += 1
+    if index < len(entries) and entries[index][0] == 0x10:
+        index += 1
+    elif named:
+        return invalid
+    if index != len(entries) - 1:
+        return invalid
+    return "linux-posix-v2", category
+
+
 @dataclass
 class _Node:
     role: str
@@ -45,6 +97,7 @@ class _Node:
     children: tuple[str, ...] = ()
     link: str | None = None
     target: str | None = None
+    default_acl: bytes | None = None
 
 
 class _Preparation:
@@ -119,23 +172,55 @@ class _Preparation:
             raise BaseExceptionGroup("provider operation and descriptor close failed", failures)
         self.clock()
 
-    def acl_absent(self, fd):
-        for name in ACL_NAMES:
+    def note_acl_failure(self, condition, attribute, presence, value=None):
+        if "condition" not in self.report:
+            shape = (_acl_shape(value) if presence == "present" else
+                     ("absent", "0") if presence == "absent" else ("unknown", "unknown"))
+            self.report["acl"] = {"attribute": attribute, "presence": presence,
+                                  "format": shape[0], "entries": shape[1]}
+        self.note_failure(condition)
+
+    def acl_state(self, fd, *, directory, expected=_ACL_UNCHECKED):
+        """Access must be absent; only a directory default may be preserved.
+
+        A default controls new-child inheritance, not existing-node authority.
+        No provider nodes are created after preparation. Rechecks compare the
+        original bytes OR absence, never silently adopt a changed baseline.
+        """
+        for attribute, name in zip(("access", "default"), ACL_NAMES):
             self.clock()
             self.operation = "acl-query"
+            present = True
             try:
-                os.getxattr(fd, name)
+                value = os.getxattr(fd, name)
             except OSError as exc:
                 if exc.errno != errno.ENODATA:
-                    self.note_failure("acl-unknown")
+                    self.note_acl_failure("acl-unknown", attribute, "unknown")
                     raise
+                present, value = False, None
             except BaseException:
-                self.note_failure("acl-query")
+                self.note_acl_failure("acl-query", attribute, "unknown")
                 raise
-            else:
-                # Even an empty/malformed xattr is not known ACL absence.
-                self.refuse("acl-present")
             self.clock()
+            if attribute == "access":
+                if not present:
+                    continue
+                self.note_acl_failure("acl-present", attribute, "present", value)
+                self.refuse("acl-present")
+            if (expected is not _ACL_UNCHECKED
+                    and (present != (expected is not None) or value != expected)):
+                self.note_acl_failure("default-acl-drift", attribute,
+                                      "present" if present else "absent", value)
+                self.refuse("default-acl-drift")
+            if present:
+                if not directory:
+                    self.note_acl_failure("default-acl-not-directory", attribute, "present", value)
+                    self.refuse("default-acl-not-directory")
+                if _acl_shape(value)[0] != "linux-posix-v2":
+                    self.note_acl_failure("default-acl-format", attribute, "present", value)
+                    self.refuse("default-acl-format")
+            self.clock()
+            return value
 
     def observed(self, fd, expected):
         current = _snapshot(self.call("descriptor-stat", os.fstat, fd))
@@ -176,7 +261,14 @@ class _Preparation:
 
     def inventory(self, node, fd):
         self.observed(fd, node.state)
-        self.acl_absent(fd)  # Includes unchanged directories and regular files.
+        default = self.acl_state(fd, directory=stat.S_ISDIR(node.state[2]))
+        if default is not None:
+            if self.report["default_acl_bytes"] + len(default) > MAX_DEFAULT_ACL_BYTES:
+                self.note_acl_failure("default-acl-byte-bound", "default", "present", default)
+                self.refuse("default-acl-byte-bound")
+            node.default_acl = default
+            self.report["default_acl_bytes"] += len(default)
+            self.report["default_acl_nodes"] += 1
         if node.prepared_mode != stat.S_IMODE(node.state[2]):
             self.count("planned")
         if stat.S_ISDIR(node.state[2]):
@@ -261,7 +353,7 @@ class _Preparation:
             self.refuse("external-target-drift")
         with self.handle(path) as fd:
             self.observed(fd, current)
-            self.acl_absent(fd)
+            self.acl_state(fd, directory=False, expected=_ACL_UNCHECKED if initial else None)
             self.observed(fd, current)
         if initial:
             if path in self.external and self.external[path][1] != current:
@@ -275,7 +367,7 @@ class _Preparation:
     def change(self, node):
         with self.node_handle(node) as fd:
             self.observed(fd, node.state)
-            self.acl_absent(fd)
+            self.acl_state(fd, directory=stat.S_ISDIR(node.state[2]), expected=node.default_acl)
             self.observed(fd, node.state)
             self.clock()
             self.operation = "chmod"
@@ -291,7 +383,7 @@ class _Preparation:
                         *node.state[3:8], changed[8])
             if changed != expected:
                 self.refuse("chmod-aftereffect")
-            self.acl_absent(fd)
+            self.acl_state(fd, directory=stat.S_ISDIR(node.state[2]), expected=node.default_acl)
             self.observed(fd, changed)
             node.state = changed
             self.count("confirmed")
@@ -329,7 +421,7 @@ class _Preparation:
                     continue
                 with self.node_handle(node) as fd:
                     self.observed(fd, node.state)
-                    self.acl_absent(fd)
+                    self.acl_state(fd, directory=stat.S_ISDIR(node.state[2]), expected=node.default_acl)
                     if stat.S_ISDIR(node.state[2]) and self.children(fd) != node.children:
                         self.refuse("directory-membership-drift")
                     self.observed(fd, node.state)
@@ -356,7 +448,8 @@ def protect_selected_runtimes(prefixes, *, uid, gid, deadline, report):
     if type(report) is not dict or report != {"name": "provider-runtime-permissions", "ok": False}:
         raise ProviderRuntimeError("invalid-report")
     report.update(phase="arguments", inventoried=0, planned=0, attempted=0, confirmed=0,
-                  errors=0, roles={role: {k: 0 for k in ("inventoried", "planned", "attempted", "confirmed")}
+                  errors=0, default_acl_bytes=0, default_acl_nodes=0,
+                  roles={role: {k: 0 for k in ("inventoried", "planned", "attempted", "confirmed")}
                                    for role in ROLES})
     preparation = _Preparation(uid, gid, deadline, report)
     try:

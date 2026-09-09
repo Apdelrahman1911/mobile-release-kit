@@ -72,9 +72,13 @@ numeric test identity. After setup and identity-collision checks, the disposable
 Linux VM inventories only its selected Python/Ruby/JDK prefixes and removes
 write bits that would let that identity modify them. It does not change owners,
 runtime bytes, installation paths, signatures, cache parents or other versions.
-Unknown ACLs, unsafe links, changed identities and partial preparation fail
-admission. Existing executable/runtime checks and read-only mounts remain
-mandatory; permission preparation is not a substitute for native controls.
+Every access ACL, unknown ACL query, unsafe link, changed identity and partial
+preparation fails admission. A validated bounded Linux default ACL may remain on
+an ordinary directory: it governs new-child inheritance, not current access.
+Its exact bytes (or absence) must remain unchanged through preparation and final
+recheck; no provider nodes are created afterwards. No ACL is rewritten or removed.
+Existing executable/runtime checks and read-only mounts remain mandatory;
+permission preparation is not a substitute for native controls.
 
 On the disposable macOS VM, the selected Ruby may be beneath runner HOME with
 mode `0750`. The owner pins that exact directory and may add only other-search
@@ -213,6 +217,11 @@ finality, persisted-byte totals and cleanup status. They are observations of thi
 attempt, not transferable execution permissions. Retain the workflow/run URL and
 actual Actions job outcome; a late publication failure invalidates an earlier
 success-shaped summary. Later gates after failure stay `UNEXECUTED`.
+
+Failure diagnostics may identify the fixed ACL attribute or whitelisted Ruby
+startup tokens from already captured stderr. They disclose no raw ACL entries,
+messages or paths. Ruby tokens are observations, not proof of an operating-system
+cause, and never change a failed admission result into success.
 
 Do not upload raw captures, writable-directory globs, private Store data or signing
 assets. Reuse evidence only for the exact applicable source/configuration/toolchain.

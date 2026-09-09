@@ -15,6 +15,7 @@ import os
 from pathlib import Path, PurePosixPath
 import posixpath
 import stat
+import struct
 import sys
 from types import SimpleNamespace
 import unittest
@@ -22,6 +23,13 @@ from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
+ACL_UNDEFINED = 0xFFFFFFFF
+ACL_BASE = ((0x01, 7, ACL_UNDEFINED), (0x04, 5, ACL_UNDEFINED), (0x20, 5, ACL_UNDEFINED))
+
+
+def _default_acl(entries=ACL_BASE, *, version=2):
+    """Only synthetic Linux UAPI bytes; no ACL library, names or native queries."""
+    return struct.pack("<I", version) + b"".join(struct.pack("<HHI", *entry) for entry in entries)
 
 
 @functools.lru_cache(maxsize=1)
@@ -244,9 +252,27 @@ class ProviderRuntimeContractTests(unittest.TestCase):
         tree.nodes["/synthetic/providers/jdk/bin/java"].st_nlink = 2
         tree.add("/synthetic/providers/unselected-version", kind=stat.S_IFDIR, mode=0o777)
         tree.add("/synthetic/providers/unselected-version/tool", mode=0o777)
+        tree.acls["/synthetic/providers/python", "system.posix_acl_default"] = _default_acl()
+        tree.acls["/synthetic/providers/python/bin", "system.posix_acl_default"] = _default_acl(
+            (*ACL_BASE[:2], (0x10, 5, ACL_UNDEFINED), ACL_BASE[-1]))
+        tree.acls["/synthetic/providers/jdk/bin", "system.posix_acl_default"] = _default_acl((
+            ACL_BASE[0], *((0x02, 4, qualifier) for qualifier in range(507)),
+            ACL_BASE[1], (0x10, 5, ACL_UNDEFINED), ACL_BASE[-1],
+        ))  # 511 complete entries / 4092 bytes: the largest aligned allowed value.
+        # Named U/G entries govern future inheritance, not this directory's
+        # current access. Its access ACL stays genuinely absent throughout.
+        tree.acls[ruby_bin, "system.posix_acl_default"] = _default_acl((
+            ACL_BASE[0], (0x02, 7, tree.uid), (0x02, 4, tree.uid + 1), ACL_BASE[1],
+            (0x08, 7, tree.gid), (0x10, 7, ACL_UNDEFINED), ACL_BASE[-1],
+        ))
+        original_acls = tree.acls.copy()
+        retained_bytes = sum(map(len, original_acls.values()))
         original = {path: vars(node).copy() for path, node in tree.nodes.items()}
 
-        tree.protect(self.module)
+        # A boundary-sized retained inventory succeeds; repeated pre/post/final
+        # observations must neither consume new storage nor adopt a new state.
+        with patch.object(self.module, "MAX_DEFAULT_ACL_BYTES", retained_bytes):
+            tree.protect(self.module)
 
         self.assertTrue(tree.report["ok"])
         self.assertEqual(tree.report["phase"], "complete")
@@ -272,6 +298,12 @@ class ProviderRuntimeContractTests(unittest.TestCase):
             self.assertEqual({role: row[field] for role, row in tree.report["roles"].items()},
                              {"python": 2, "ruby": 1, "jdk": 0})
         self.assertEqual(tree.report["errors"], 0)
+        self.assertEqual(tree.acls, original_acls)
+        self.assertEqual((tree.report["default_acl_nodes"], tree.report["default_acl_bytes"]),
+                         (len(original_acls), retained_bytes))
+        self.assertNotIn(str(tree.uid), repr(tree.report))
+        for value in original_acls.values():
+            self.assertNotIn(repr(value), repr(tree.report))
         self.assert_closed_once(tree)
 
     def test_late_invalid_node_prevents_every_previously_planned_change(self):
@@ -332,19 +364,24 @@ class ProviderRuntimeContractTests(unittest.TestCase):
         self.assert_closed_once(tree)
 
     def test_acl_absence_requires_enodata_on_unchanged_and_external_authority_nodes(self):
-        for target_kind in ("unchanged", "external"):
-            for attribute, result, condition in (
+        for target_kind in ("unchanged-file", "unchanged-directory", "external"):
+            cases = [
                 ("system.posix_acl_access", b"", "acl-present"),
-                ("system.posix_acl_default", b"synthetic-unsupported-acl", "acl-present"),
+                ("system.posix_acl_access", _default_acl(), "acl-present"),
+                ("system.posix_acl_access", _default_acl((ACL_BASE[0], (0x02, 7, 60001), ACL_BASE[1],
+                                                        (0x10, 7, ACL_UNDEFINED), ACL_BASE[-1])), "acl-present"),
                 ("system.posix_acl_access", OSError(errno.EACCES, "synthetic ACL permission unknown"), "acl-unknown"),
                 ("system.posix_acl_default", OSError(errno.ENOTSUP, "synthetic ACL support unknown"), "acl-unknown"),
-            ):
+            ]
+            if target_kind != "unchanged-directory":
+                cases.append(("system.posix_acl_default", _default_acl(), "default-acl-not-directory"))
+            for attribute, result, condition in cases:
                 with self.subTest(target=target_kind, attribute=attribute, condition=condition):
                     tree = _ProviderTree()
                     python = "/synthetic/providers/python/bin/python"
                     tree.nodes[python].st_mode = stat.S_IFREG | 0o777
-                    if target_kind == "unchanged":
-                        target = "/synthetic/providers/jdk/bin/java"
+                    if target_kind.startswith("unchanged"):
+                        target = "/synthetic/providers/jdk/bin" + ("/java" if target_kind == "unchanged-file" else "")
                     else:
                         tree.add("/synthetic/external", kind=stat.S_IFDIR)
                         target = "/synthetic/external/library.so"
@@ -359,10 +396,140 @@ class ProviderRuntimeContractTests(unittest.TestCase):
                     if isinstance(result, OSError):
                         self.assertIs(caught.exception, result)
                     self.assertEqual(tree.report["condition"], condition)
+                    diagnostic = tree.report["acl"]
+                    self.assertEqual(set(diagnostic), {"attribute", "presence", "format", "entries"})
+                    self.assertEqual(diagnostic["attribute"], "access" if attribute.endswith("access") else "default")
+                    self.assertEqual(diagnostic["presence"], "unknown" if isinstance(result, OSError) else "present")
+                    if isinstance(result, OSError):
+                        self.assertEqual((diagnostic["format"], diagnostic["entries"]), ("unknown", "unknown"))
+                    self.assertNotIn(target, repr(tree.report))
+                    self.assertNotIn("synthetic ACL", repr(tree.report))
+                    self.assertNotIn("60001", repr(tree.report))
                     self.assertIn(("acl", target, attribute), tree.events)
                     self.assertFalse(tree.report["ok"])
                     self.assertFalse(any(event[0] == "fchmod" for event in tree.events))
                     self.assertEqual(stat.S_IMODE(tree.nodes[python].st_mode), 0o777)
+                    self.assert_closed_once(tree)
+
+    def test_malformed_directory_defaults_are_refused_before_any_prefix_mutation(self):
+        owner, group, other = ACL_BASE
+        user, named_group, mask = (0x02, 7, 60001), (0x08, 7, 60001), (0x10, 7, ACL_UNDEFINED)
+        valid = _default_acl()
+        cases = [
+            ("non-bytes", bytearray(valid), "non-bytes"),
+            ("empty-value", b"", "malformed"),
+            ("short-header", b"\x02\x00", "malformed"),
+            ("version", _default_acl(version=3), "unknown-version"),
+            ("endian", struct.pack(">I", 2) + valid[4:], "unknown-version"),
+            ("truncated-record", valid[:-1], "malformed"),
+            ("byte-bound", b"\x02\x00\x00\x00" + b"\0" * 4093, "over-bound"),
+        ]
+        for name, rows in (
+            ("empty", ()), ("missing-owner", (group, other)),
+            ("missing-group", (owner, other)), ("missing-other", (owner, group)),
+            ("unknown-tag", (owner, (0x40, 7, ACL_UNDEFINED), group, other)),
+            ("permission", (owner, (0x04, 8, ACL_UNDEFINED), other)),
+            ("qualified-base", ((0x01, 7, 60001), group, other)),
+            ("undefined-user", (owner, (0x02, 7, ACL_UNDEFINED), group, mask, other)),
+            ("undefined-group", (owner, group, (0x08, 7, ACL_UNDEFINED), mask, other)),
+            ("duplicate-owner", (owner, owner, group, other)),
+            ("duplicate-user", (owner, user, user, group, mask, other)),
+            ("unordered-users", (owner, (0x02, 7, 60002), user, group, mask, other)),
+            ("duplicate-group", (owner, group, named_group, named_group, mask, other)),
+            ("unordered-groups", (owner, group, (0x08, 7, 60002), named_group, mask, other)),
+            ("user-without-mask", (owner, user, group, other)),
+            ("group-without-mask", (owner, group, named_group, other)),
+            ("user-after-group", (owner, group, user, mask, other)),
+            ("duplicate-mask", (owner, group, mask, mask, other)),
+            ("other-before-group", (owner, other, group)),
+        ):
+            cases.append((name, _default_acl(rows), "invalid-entries"))
+        for name, value, category in cases:
+            with self.subTest(default_acl=name):
+                tree = _ProviderTree()
+                python = "/synthetic/providers/python/bin/python"
+                tree.nodes[python].st_mode = stat.S_IFREG | 0o777
+                tree.acls["/synthetic/providers/python", "system.posix_acl_default"] = valid
+                target = "/synthetic/providers/jdk/zz-default-directory"
+                tree.add(target, kind=stat.S_IFDIR)
+                tree.acls[target, "system.posix_acl_default"] = value
+                with self.assertRaises(self.module.ProviderRuntimeError):
+                    tree.protect(self.module)
+                self.assertEqual((tree.report["condition"], tree.report["role"]), ("default-acl-format", "jdk"))
+                diagnostic = tree.report["acl"]
+                self.assertEqual(set(diagnostic), {"attribute", "presence", "format", "entries"})
+                self.assertEqual((diagnostic["attribute"], diagnostic["presence"], diagnostic["format"]),
+                                 ("default", "present", category))
+                self.assertIn(diagnostic["entries"], {"unknown", "over-bound", "0", "1-4", "5-16", "17-64", "65-511"})
+                self.assertEqual((tree.report["default_acl_nodes"], tree.report["default_acl_bytes"]), (1, len(valid)))
+                self.assertEqual((tree.report["attempted"], tree.report["confirmed"], tree.report["errors"]), (0, 0, 1))
+                self.assertFalse(tree.report["ok"])
+                self.assertFalse(any(event[0] == "fchmod" for event in tree.events))
+                self.assertEqual(stat.S_IMODE(tree.nodes[python].st_mode), 0o777)
+                self.assertNotIn("60001", repr(tree.report))
+                self.assertNotIn(target, repr(tree.report))
+                self.assert_closed_once(tree)
+
+    def test_default_acl_state_cannot_be_adopted_before_after_or_during_final_recheck(self):
+        original = _default_acl()
+        different = _default_acl(((0x01, 5, ACL_UNDEFINED), *ACL_BASE[1:]))
+        transitions = (("appearance", None, original), ("disappearance", original, None),
+                       ("changed-bytes", original, different), ("malformed-bytes", original, b"\0"))
+        for phase in ("before", "after", "final-changed", "final-unchanged", "final-external"):
+            # A file cannot have an admitted present default baseline; the
+            # independent initial-file cases reject that state before mutation.
+            cases = transitions[:1] if phase == "final-external" else transitions
+            for transition, initial, replacement in cases:
+                with self.subTest(phase=phase, transition=transition):
+                    tree = _ProviderTree()
+                    changed = "/synthetic/providers/python/bin"
+                    tree.nodes[changed].st_mode = stat.S_IFDIR | 0o777
+                    target = changed
+                    if phase == "final-unchanged":
+                        target = "/synthetic/providers/jdk/bin"
+                    elif phase == "final-external":
+                        tree.add("/synthetic/external", kind=stat.S_IFDIR)
+                        target = "/synthetic/external/library.so"
+                        tree.add(target, mode=0o644)
+                        link = "/synthetic/providers/jdk/external.so"
+                        tree.add(link, kind=stat.S_IFLNK, target=target)
+                        tree.resolutions[link] = target
+                    key = target, "system.posix_acl_default"
+                    if initial is not None:
+                        tree.acls[key] = initial
+                    injected = False
+
+                    def drift(operation, path, detail):
+                        nonlocal injected
+                        if injected:
+                            return
+                        acl_query = operation == "acl" and path == target and detail == key[1]
+                        if (phase == "before" and tree.report["phase"] == "mutation" and acl_query
+                                or phase == "after" and operation == "fchmod" and path == changed
+                                or phase.startswith("final") and tree.report["phase"] == "recheck" and acl_query):
+                            injected = True
+                            if replacement is None:
+                                tree.acls.pop(key, None)
+                            else:
+                                tree.acls[key] = replacement
+
+                    tree.after = drift
+                    with self.assertRaises(self.module.ProviderRuntimeError):
+                        tree.protect(self.module)
+                    self.assertTrue(injected)
+                    self.assertEqual(tree.report["condition"], "default-acl-drift")
+                    self.assertEqual(tree.report["phase"], "recheck" if phase.startswith("final") else "mutation")
+                    self.assertEqual((tree.report["attempted"], tree.report["confirmed"]),
+                                     (int(phase != "before"), int(phase.startswith("final"))))
+                    self.assertEqual((tree.report["default_acl_nodes"], tree.report["default_acl_bytes"]),
+                                     (int(initial is not None), len(initial) if initial is not None else 0))
+                    self.assertEqual((tree.report["acl"]["attribute"], tree.report["acl"]["presence"]),
+                                     ("default", "present" if replacement is not None else "absent"))
+                    self.assertEqual(stat.S_IMODE(tree.nodes[changed].st_mode), 0o777 if phase == "before" else 0o775)
+                    if phase == "final-unchanged":
+                        self.assertEqual(stat.S_IMODE(tree.nodes[target].st_mode), 0o755)
+                    self.assertEqual(tree.acls.get(key), replacement)
+                    self.assertFalse(tree.report["ok"])
                     self.assert_closed_once(tree)
 
     def test_unsupported_external_links_fail_before_any_internal_permission_change(self):
@@ -619,7 +786,8 @@ class ProviderRuntimeContractTests(unittest.TestCase):
     def test_inventory_depth_and_descriptor_bounds_fail_before_permission_changes(self):
         for constant, limit, condition in (("MAX_NODES", 5, "inventory-bound"),
                                             ("MAX_DEPTH", 4, "path-depth-or-length"),
-                                            ("MAX_OPEN", 2, "descriptor-bound")):
+                                            ("MAX_OPEN", 2, "descriptor-bound"),
+                                            ("MAX_DEFAULT_ACL_BYTES", 3 * len(_default_acl()) - 1, "default-acl-byte-bound")):
             with self.subTest(bound=constant):
                 tree = _ProviderTree()
                 tree.nodes["/synthetic/providers/python/bin/python"].st_mode = stat.S_IFREG | 0o777
@@ -628,10 +796,19 @@ class ProviderRuntimeContractTests(unittest.TestCase):
                     for component in ("a", "b", "c", "d", "e"):
                         path /= component
                         tree.add(path, kind=stat.S_IFDIR)
+                elif constant == "MAX_DEFAULT_ACL_BYTES":
+                    for _role, path in tree.prefixes:
+                        tree.acls[str(path), "system.posix_acl_default"] = _default_acl()
                 with patch.object(self.module, constant, limit), self.assertRaises(self.module.ProviderRuntimeError):
                     tree.protect(self.module)
                 self.assertEqual(tree.report["condition"], condition)
                 self.assertFalse(tree.report["ok"])
                 self.assertEqual((tree.report["attempted"], tree.report["confirmed"]), (0, 0))
                 self.assertFalse(any(event[0] == "fchmod" for event in tree.events))
+                if constant == "MAX_DEFAULT_ACL_BYTES":
+                    self.assertEqual(tree.report["role"], "jdk")
+                    self.assertEqual((tree.report["default_acl_nodes"], tree.report["default_acl_bytes"]),
+                                     (2, 2 * len(_default_acl())))
+                    self.assertEqual(tree.report["acl"], {"attribute": "default", "presence": "present",
+                                                        "format": "linux-posix-v2", "entries": "1-4"})
                 self.assert_closed_once(tree)
