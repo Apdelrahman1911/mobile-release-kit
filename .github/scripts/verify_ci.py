@@ -32,6 +32,8 @@ DISK_RESERVE = 4 * 1024**3 + 512 * 1024**2
 RUBY_SUITES = (
     ("ruby-support", "test_fastlane_support.rb", 12),
     ("ruby-native-capture", "test_native_upload_validation.rb", 13),
+    # Separate process: proof instrumentation never changes the original suite.
+    ("ruby-native-signal-observation", "test_native_signal_observation.rb", 1),
     ("ruby-play_store", "test_play_store.rb", 0),
     ("ruby-play_lanes", "test_play_lanes.rb", 0),
     ("ruby-apple_store", "test_apple_store.rb", 0),
@@ -45,7 +47,8 @@ RUBY_SUITES = (
     ("ruby-supply-wif", "test_supply_wif.rb", 0),
 )
 NATIVE_RUBY_IDS = (
-    "ruby-native-capture", "ruby-ios_upload_validation", "ruby-android_upload_validation",
+    "ruby-native-capture", "ruby-native-signal-observation",
+    "ruby-ios_upload_validation", "ruby-android_upload_validation",
 )
 _BEFORE_TESTS = (
     "source-copy", "source-environment", "source-dependencies", "bundler",
@@ -222,7 +225,8 @@ def catalog(paths: Paths, platform: str, *, deadline: float) -> tuple[Step, ...]
             count = ruby_literal_tests(paths.source / "tests/workflow" / filename)
         command(name, (*paths.bundle, "exec", paths.ruby, paths.source / "tests/workflow" / filename,
                         *(("--verbose",) if name != "ruby-supply-wif" else ())),
-                seconds=180 if name == "ruby-native-capture" else 300 if name in NATIVE_RUBY_IDS else 180,
+                seconds=180 if name in {"ruby-native-capture", "ruby-native-signal-observation"}
+                else 300 if name in NATIVE_RUBY_IDS else 180,
                 parser="supply" if name == "ruby-supply-wif" else "minitest", tests=count)
     command("fastfile", (*paths.bundle, "exec", paths.ruby, paths.source / "fastlane/run_lane.rb", "--validate"), seconds=180)
     workflow_paths = sorted((paths.source / ".github/workflows").glob("*.yml"))

@@ -7,10 +7,13 @@ The helper's OS/process/signal namespaces are replaced, not shared stdlib APIs.
 """
 from __future__ import annotations
 
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, redirect_stdout
 import dataclasses
+import errno
 import functools
+import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -71,6 +74,7 @@ def session_double(module, platform="linux"):
     session.admission_results = []
     session._handlers = {}
     session._active = None
+    session.process_observer = session.bootstrap / "process-observer" if platform == "darwin" else None
     return session
 
 
@@ -90,6 +94,7 @@ class _Stream:
 class _Child:
     def __init__(self, rig):
         self.rig = rig
+        self.pid = 4242  # Inert identity: never passed to a real process API.
         self.stdout, self.stderr = _Stream(rig, 0), _Stream(rig, 1)
         self.stopped = None
 
@@ -114,6 +119,7 @@ class _Child:
 
     def wait(self, *, timeout):
         self.rig.events.append(("wait-original", timeout))
+        self.rig.events.append(("wait-budget", timeout, self.rig.now))
         if self.rig.unreapable:
             raise TimeoutError("synthetic unknown original wait")
         if self.rig.wait_error:
@@ -172,6 +178,8 @@ class _Collection:
         self.domain_calls, self.final_domain = 0, {}
         self.cancel_at = self.final_time = None
         self.cancel_on_finality = False
+        self.snapshot_rows = self.snapshot_error = None
+        self.snapshot_advance = 0.0
         self.child, self.selector = _Child(self), _Selector(self)
 
     def monotonic(self):
@@ -184,20 +192,34 @@ class _Collection:
             self.session.cancelled = True
         return value
 
-    def domain(self, platform, uid):
+    def domain(self, platform, uid, *, collision=False, deadline=None):
         if (platform, uid) != (self.session.platform, self.session.uid):
             raise AssertionError("wrong synthetic identity domain")
         self.domain_calls += 1
         self.events.append(("domain", self.domain_calls))
+        self.events.append(("domain-deadline", self.domain_calls, deadline))
+        if deadline is not None:
+            self.module._remaining(deadline)
         if self.domain_calls == 1:
             return {}
         if self.cancel_on_finality:
             self.session.cancelled = True
         if self.final_time is not None:
             self.now = self.final_time
+        if deadline is not None:
+            self.module._remaining(deadline)
         if isinstance(self.final_domain, BaseException):
             raise self.final_domain
         return self.final_domain
+
+    def mac_snapshot(self, *, deadline=None):
+        self.events.append(("root-snapshot", deadline, self.session._active))
+        self.now += self.snapshot_advance
+        if self.snapshot_error is not None:
+            raise self.snapshot_error
+        if self.snapshot_rows is None:
+            raise AssertionError("native census is forbidden; this case needs explicit synthetic rows")
+        return self.snapshot_rows
 
     def popen(self, command, **kwargs):
         self.events.append(("popen", tuple(command), kwargs))
@@ -257,8 +279,9 @@ class _Collection:
         if fd - 100 in self.fd_close_errors:
             raise OSError("synthetic capture close")
 
-    def cleanup(self):
+    def cleanup(self, *, deadline=None):
         self.events.append(("cleanup",))
+        self.events.append(("cleanup-deadline", deadline))
         return list(self.cleanup_diagnostics)
 
     @contextmanager
@@ -270,6 +293,7 @@ class _Collection:
         fake_os = SimpleNamespace(**constants, open=self.open, read=self.read,
                                   write=self.write, fsync=self.fsync, fstat=self.fstat,
                                   close=self.close, set_blocking=lambda *_: None,
+                                  geteuid=lambda: 0,
                                   path=SimpleNamespace(basename=os.path.basename))
         with ExitStack() as stack:
             stack.enter_context(patch.multiple(
@@ -279,7 +303,7 @@ class _Collection:
                 time=SimpleNamespace(monotonic=self.monotonic), signal=SimpleNamespace(),
                 _domain=self.domain, _canonical=Path,
                 _small_command=Mock(side_effect=AssertionError("native metadata is forbidden")),
-                _mac_snapshot=Mock(side_effect=AssertionError("native census is forbidden")),
+                _mac_snapshot=self.mac_snapshot,
             ))
             stack.enter_context(patch.object(self.session, "_headroom", Mock()))
             stack.enter_context(patch.object(self.session, "_cleanup", self.cleanup))
@@ -331,6 +355,13 @@ class CISandboxPureTests(unittest.TestCase):
             with self.assertRaisesRegex(self.module.SessionError, "original aggregate deadline"):
                 session._guard()
         self.assertEqual(session.deadline, 100.0)
+        with patch.object(self.module, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+            self.assertEqual(self.module._remaining(10.25), 0.25)
+            with self.assertRaises(self.module.DeadlineExpired):
+                self.module._remaining(10.0)
+            for invalid in (None, True, float("nan"), float("inf")):
+                with self.subTest(deadline=invalid), self.assertRaises(self.module.SessionError):
+                    self.module._remaining(invalid)
 
     def test_constructor_rejects_early_guards_before_allocation_or_timer_ownership(self):
         kwargs = dict(platform="linux", root=Path("/tmp/mrk-pure-fixture"),
@@ -338,23 +369,28 @@ class CISandboxPureTests(unittest.TestCase):
                       runner_home="/home/runner", runner_temp="/home/runner/work/_temp",
                       tool_prefixes=("/fixture-tools/python", "/fixture-tools/ruby"), deadline=20.0)
         cases = (
-            ({"platform": "darwin"}, 0, (0.0, 0.0)),
-            ({}, 1000, (0.0, 0.0)),
-            ({"deadline": 0.0}, 0, (0.0, 0.0)),
-            ({"deadline": 3301.0}, 0, (0.0, 0.0)),
-            ({}, 0, (1.0, 0.0)),
+            ({"platform": "darwin"}, 0, (0.0, 0.0), 0),
+            ({}, 1000, (0.0, 0.0), 0),
+            ({"deadline": 0.0}, 0, (0.0, 0.0), 0),
+            ({"deadline": 3301.0}, 0, (0.0, 0.0), 0),
+            ({}, 0, (1.0, 0.0), 0),
+            ({}, 0, (0.0, 0.0), 1),  # Ignored SIGCHLD cannot retain wait ownership.
+            ({}, 0, (0.0, 0.0), object()),  # Nor may an external reaper handler.
         )
-        for changed, euid, timer in cases:
-            with self.subTest(changed=changed, euid=euid, timer=timer):
+        for changed, euid, timer, disposition in cases:
+            with self.subTest(changed=changed, euid=euid, timer=timer, disposition=disposition):
                 canonical = Mock(side_effect=AssertionError("resource path must not be entered"))
                 fake_signal = SimpleNamespace(ITIMER_REAL=0, getitimer=Mock(return_value=timer),
-                                              setitimer=Mock(), signal=Mock())
+                                              setitimer=Mock(), signal=Mock(), SIGCHLD=17, SIG_DFL=0,
+                                              getsignal=Mock(return_value=disposition))
                 with patch.multiple(self.module, _canonical=canonical,
                                     os=SimpleNamespace(geteuid=lambda: euid),
                                     sys=SimpleNamespace(platform="linux"), signal=fake_signal,
                                     time=SimpleNamespace(monotonic=lambda: 0.0)):
-                    with self.assertRaises(self.module.SessionError):
+                    with self.assertRaises(self.module.SessionError) as caught:
                         self.module.Session(**(kwargs | changed))
+                    if disposition != 0:
+                        self.assertIn("default SIGCHLD", str(caught.exception))
                 canonical.assert_not_called()
                 fake_signal.setitimer.assert_not_called()
                 fake_signal.signal.assert_not_called()
@@ -379,7 +415,8 @@ class CISandboxPureTests(unittest.TestCase):
                     raise AssertionError("unexpected constructor stat outside the two synthetic roots")
 
                 fake_signal = SimpleNamespace(ITIMER_REAL=0, getitimer=lambda _: (0.0, 0.0),
-                                              setitimer=Mock(), signal=Mock())
+                                              setitimer=Mock(), signal=Mock(), SIGCHLD=17, SIG_DFL=0,
+                                              getsignal=Mock(return_value=0))
                 with patch.multiple(self.module, _canonical=Path,
                                     os=SimpleNamespace(geteuid=lambda: 0),
                                     sys=SimpleNamespace(platform="linux"), signal=fake_signal,
@@ -396,6 +433,62 @@ class CISandboxPureTests(unittest.TestCase):
                 write.assert_not_called()
                 fake_signal.setitimer.assert_not_called()
                 fake_signal.signal.assert_not_called()
+
+        uid = gid = 60001
+        for owner, group, mode, root_owned, non_set_id, allowed in (
+            (1001, 1001, 0o755, False, True, True),  # Provider Python need not be root-owned.
+            (0, 0, 0o755, True, True, True),  # Fixed sandbox-exec/true role.
+            (uid, 0, 0o755, False, True, False), (0, gid, 0o775, False, True, False),
+            (0, 0, 0o757, False, True, False), (0, 0, 0o644, False, True, False),
+            (0, 0, 0o4755, True, True, False), (0, 0, 0o2755, False, True, False),
+            (1001, 0, 0o755, True, True, False), (0, 0, 0o775, True, True, False),
+            (0, 0, 0o4755, True, False, True),  # Negative sudo role may be set-ID.
+        ):
+            with self.subTest(executable=(owner, group, mode, root_owned, non_set_id)), \
+                 patch.object(Path, "stat", return_value=SimpleNamespace(st_uid=owner, st_gid=group,
+                                                                          st_mode=stat.S_IFREG | mode)):
+                if allowed:
+                    flags = self.module._admit_executable(Path("/synthetic/tool"), uid, gid,
+                                                         root_owned=root_owned, non_set_id=non_set_id)
+                    self.assertEqual(flags, {"root_owned": owner == 0, "setuid": bool(mode & stat.S_ISUID),
+                                             "setgid": bool(mode & stat.S_ISGID)})
+                else:
+                    with self.assertRaisesRegex(self.module.SessionError, "permission/identity contract"):
+                        self.module._admit_executable(Path("/synthetic/tool"), uid, gid,
+                                                     root_owned=root_owned, non_set_id=non_set_id)
+
+        # The actual admission caller must select the different fixed roles,
+        # not merely have a permission helper that could enforce them.
+        session = session_double(self.module, "darwin")
+        session.admitted = False
+        session.process_observer = None
+
+        class GrantBoundary(RuntimeError):
+            pass
+
+        def tool_state(path):
+            if path not in {session.python, Path("/usr/bin/sudo"), Path("/usr/bin/true"),
+                            Path("/usr/bin/sandbox-exec"), Path("/bin/ps")}:
+                raise AssertionError("unexpected tool stat")
+            owner = 1001 if path == session.python else 0
+            mode = 0o4755 if path in {Path("/usr/bin/sudo"), Path("/bin/ps")} else 0o755
+            return SimpleNamespace(st_uid=owner, st_gid=0, st_mode=stat.S_IFREG | mode)
+
+        admit_executable = self.module._admit_executable
+        with patch.multiple(self.module, _readonly_tree=Mock(), _domain=Mock(return_value=set()),
+                            _small_command=Mock(return_value=b"MRK_NSS_ABSENT\n"),
+                            time=SimpleNamespace(monotonic=lambda: 0.0),
+                            os=SimpleNamespace(chown=Mock(side_effect=GrantBoundary),
+                                               path=SimpleNamespace(basename=os.path.basename))), \
+             patch.object(session, "_headroom", Mock()), patch.object(Path, "stat", tool_state), \
+             patch.object(self.module, "_admit_executable", wraps=admit_executable) as tools:
+            with self.assertRaises(GrantBoundary):
+                session.admit()
+        roles = {c.args[0]: c.kwargs for c in tools.call_args_list}
+        self.assertEqual(roles, {session.python: {}, Path("/usr/bin/sudo"): {"root_owned": True, "non_set_id": False},
+                                Path("/usr/bin/true"): {"root_owned": True},
+                                Path("/usr/bin/sandbox-exec"): {"root_owned": True},
+                                Path("/bin/ps"): {"root_owned": True, "non_set_id": False}})
 
     def test_environment_never_inherits_ambient_or_overrides_fixed_boundaries(self):
         session = session_double(self.module)
@@ -419,6 +512,33 @@ class CISandboxPureTests(unittest.TestCase):
         for values in invalid:
             with self.subTest(values=list(values)), self.assertRaises(self.module.SessionError):
                 session._environment(values)
+
+        observer_key = "MOBILE_RELEASE_TEST_PROCESS_OBSERVER"
+        for platform in ("linux", "darwin"):
+            session = session_double(self.module, platform)
+            session.process_observer = None
+            fixed_path = session.bootstrap / "process-observer"
+            with patch.object(self.module, "os", SimpleNamespace(environ={observer_key: "/ambient/observer"})):
+                self.assertNotIn(observer_key, session._environment({}))
+                with self.assertRaises(self.module.SessionError):
+                    session._environment({observer_key: str(fixed_path)})
+            if platform == "darwin":
+                # Even a malformed admitted object cannot downgrade a public
+                # product call to system ps when the owner selector is missing.
+                with patch.object(self.module, "time", SimpleNamespace(monotonic=lambda: 0.0)), \
+                     patch.object(session, "_run", side_effect=AssertionError("missing admission must forbid launch")) as run:
+                    with self.assertRaisesRegex(self.module.SessionError, "observer admission is missing"):
+                        session.run([str(session.python)], cwd=session.work, env={}, seconds=1)
+                    run.assert_not_called()
+                session.process_observer = fixed_path
+                self.assertEqual(session._environment({})[observer_key], str(fixed_path))
+                self.assertEqual(session._environment({observer_key: str(fixed_path)})[observer_key], str(fixed_path))
+                for value in ("/ambient/observer", str(session.work / "process-observer"), ""):
+                    with self.assertRaises(self.module.SessionError):
+                        session._environment({observer_key: value})
+            session.process_observer = session.work / "unreviewed-observer"
+            with self.assertRaisesRegex(self.module.SessionError, "fixed owner binding"):
+                session._environment({})
 
     def test_environment_search_and_input_paths_cannot_cross_domains(self):
         session = session_double(self.module)
@@ -760,13 +880,15 @@ class CISandboxPureTests(unittest.TestCase):
         rig.stream_close_errors = {0}
         with rig.scope():
             with self.assertRaises(BaseExceptionGroup) as caught:
-                small_command(["/synthetic/metadata"], seconds=1)
+                small_command(["/synthetic/metadata"], seconds=10, deadline=0.25)
         group = caught.exception
         self.assertIs(group.exceptions[0], primary)
         self.assertEqual(len(group.exceptions), 2)
         self.assertIsInstance(group.exceptions[1], OSError)
         self.assertIn(("kill-original",), rig.events)
-        self.assertIn(("wait-original", 2), rig.events)
+        budget = next(e for e in rig.events if e[0] == "wait-budget")
+        self.assertGreater(budget[1], 0)
+        self.assertLessEqual(budget[1], 0.25 - budget[2] + 0.001001)
         self.assertIn(("stream-close", 0), rig.events)
         self.assertIn(("stream-close", 1), rig.events)
         self.assertNotIn(("selector-close",), rig.events)
@@ -775,6 +897,100 @@ class CISandboxPureTests(unittest.TestCase):
                           "stderr_eof": False, "stdout_bytes": 0, "stderr_bytes": 0,
                           "error_count": 2, "exceptions": []})
         self.assertEqual(rig.domain_calls, 0)
+
+        rig = _Collection(self.module)
+        rig.now = 0.25
+        with rig.scope(), self.assertRaises(self.module.DeadlineExpired):
+            small_command(["/synthetic/metadata"], deadline=0.25)
+        self.assertFalse(any(e[0] == "popen" for e in rig.events))
+
+        for case in ("success", "timeout", "launch-consumed-cutoff", "poll-error", "kill-error", "late-wait-error"):
+            with self.subTest(metadata=case):
+                rig = _Collection(self.module)
+                late_error = OSError(errno.EACCES, "synthetic permission error after launch")
+                with rig.scope(), ExitStack() as changes:
+                    if case == "timeout":
+                        rig.hold = {0}
+                        rig.exit_at = float("inf")
+                    elif case == "launch-consumed-cutoff":
+                        original_launch = rig.popen
+
+                        def delayed_launch(*args, **kwargs):
+                            child = original_launch(*args, **kwargs)
+                            rig.now = 0.25
+                            return child
+
+                        changes.enter_context(patch.object(self.module.subprocess, "Popen", delayed_launch))
+                    elif case in {"poll-error", "kill-error"}:
+                        rig.selector_error = primary
+                        rig.exit_at = float("inf")
+                        changes.enter_context(patch.object(rig.child, "poll" if case == "poll-error" else "kill",
+                                                           side_effect=late_error))
+                        # An independently completed original can still be
+                        # waited even if the stop attempt itself reported error.
+                        owned_wait = changes.enter_context(patch.object(rig.child, "wait", return_value=-9))
+                    elif case == "late-wait-error":
+                        owned_wait = changes.enter_context(patch.object(rig.child, "wait", side_effect=[late_error, 0]))
+                    if case == "success":
+                        self.assertEqual(small_command(["/synthetic/metadata"], deadline=0.25, return_pid=True),
+                                         (b"PASS\n", rig.child.pid))
+                        self.assertIn(("unregister-eof", 0), rig.events)
+                        self.assertIn(("unregister-eof", 1), rig.events)
+                    else:
+                        with self.assertRaises(BaseExceptionGroup) as failed:
+                            small_command(["/synthetic/metadata"], deadline=0.25)
+                        observation = failed.exception._ci_observation
+                        self.assertTrue(observation["waited"])
+                        if case in {"poll-error", "kill-error"}:
+                            self.assertEqual(failed.exception.exceptions, (primary, late_error))
+                            owned_wait.assert_called_once()
+                        elif case == "late-wait-error":
+                            self.assertEqual(failed.exception.exceptions, (late_error,))
+                            self.assertEqual(owned_wait.call_count, 2)
+                        else:
+                            self.assertTrue(any(isinstance(e, self.module.DeadlineExpired)
+                                                for e in failed.exception.exceptions))
+                        if case == "launch-consumed-cutoff":
+                            self.assertNotIn(("selector-acquire",), rig.events)
+                    if case in {"poll-error", "kill-error", "late-wait-error"}:
+                        self.assertTrue(all(0 <= call.kwargs["timeout"] <= 0.25
+                                            for call in owned_wait.call_args_list))
+                for event in (("stream-close", 0), ("stream-close", 1)):
+                    self.assertIn(event, rig.events)
+                if case not in {"poll-error", "kill-error", "launch-consumed-cutoff"}:
+                    self.assertIn(("selector-close",), rig.events)
+                for _, allowance, recorded_now in (e for e in rig.events if e[0] == "wait-budget"):
+                    # The fake clock advances one bookkeeping tick on read.
+                    self.assertLessEqual(allowance, max(0.0, 0.25 - recorded_now + 0.001001))
+                self.assertLess(rig.now, 0.3)  # No fresh ten-second metadata budget.
+
+        tagged = {"code": "GROUP_COUNT", "errno": 1, "library_close_failed": True}
+        raw_tag = b"MRK_PROCESS_V1 error GROUP_COUNT_1_AND_CLOSE\n"
+        self.assertEqual(self.module._observer_error_note(raw_tag), tagged)
+        self.assertEqual(self.module._observer_error_note(b"MRK_PROCESS_V1 error SELF_QUERY\n"),
+                         {"code": "SELF_QUERY", "errno": None, "library_close_failed": False})
+        for invalid in (b"prefix " + raw_tag, raw_tag + b"extra\n", raw_tag[:-1],
+                        b"MRK_PROCESS_V1 error UNKNOWN_PRIVATE_VALUE\n",
+                        b"MRK_PROCESS_V1 error GROUP_COUNT_4096\n", b"MRK_PROCESS_V1 error GROUP_SYMBOL_1\n"):
+            self.assertIsNone(self.module._observer_error_note(invalid))
+        for value in (tagged | {"errno": True}, tagged | {"private": "must-not-propagate"},
+                      tagged | {"library_close_failed": 1}, tagged | {"code": "unknown"}):
+            self.assertIsNone(self.module._observer_error_fields(value))
+        rig = _Collection(self.module, stdout=(raw_tag,))
+        rig.exit_at, rig.exitcode = 0.0, 3
+        with rig.scope(), self.assertRaises(BaseExceptionGroup) as caught:
+            small_command(["/synthetic/metadata"], deadline=0.25)
+        self.assertEqual(caught.exception._ci_observation["returncode"], 3)
+        self.assertTrue(caught.exception._ci_observation["waited"])
+        self.assertEqual(caught.exception._ci_observation["observer_error"], tagged)
+        record = {"exception": "ExceptionGroup", "lines": [7], "observation": {
+            "observer_error": tagged, "raw_output": "synthetic-private-canary"}, "message": "synthetic-private-canary"}
+        payload = b"MRK_SANDBOX_ERROR=" + json.dumps([record]).encode()
+        self.assertEqual(self.module._child_exception_notes(payload), [{"exception": "ExceptionGroup", "lines": [7],
+                         "observation": {"observer_error": tagged}}])
+        record["observation"]["observer_error"] = tagged | {"errno": True}
+        self.assertEqual(self.module._child_exception_notes(b"MRK_SANDBOX_ERROR=" + json.dumps([record]).encode()),
+                         [{"exception": "ExceptionGroup", "lines": [7]}])
 
         many = ExceptionGroup("synthetic-private-group-message", [ValueError(str(primary)) for _ in range(80)])
         with patch.object(self.module, "os", SimpleNamespace(path=SimpleNamespace(basename=os.path.basename))):
@@ -821,12 +1037,15 @@ class CISandboxPureTests(unittest.TestCase):
         session = session_double(self.module)
         primary = self.module.SessionError("synthetic admission failure")
         cleanup = {0: OSError("synthetic listener zero close"), 2: OSError("synthetic listener two close")}
-        created, closed = [], []
+        created, closed, events = [], [], []
+        outside_error = None
 
         class Endpoint:
-            def __init__(self, role, index):
+            def __init__(self, role, index, family, kind):
                 self.role, self.index = role, index
+                self.family, self.type = family, kind
                 self.address = None
+                self.nonblocking = False
 
             def settimeout(self, _seconds):
                 pass
@@ -844,13 +1063,25 @@ class CISandboxPureTests(unittest.TestCase):
                 pass
 
             def accept(self):
-                return Endpoint("accepted", self.index), ("synthetic-peer", 1)
+                if self.nonblocking:
+                    raise BlockingIOError(errno.EAGAIN, "synthetic empty listener")
+                events.append(("positive-consumed", self.index))
+                return Endpoint("accepted", self.index, self.family, self.type), ("synthetic-peer", 1)
 
             def sendto(self, _data, _address):
-                pass
+                return len(_data)
 
             def recv(self, _size):
+                if self.nonblocking:
+                    raise BlockingIOError(errno.EWOULDBLOCK, "synthetic empty listener")
+                events.append(("positive-consumed", self.index))
                 return b"owned-control"
+
+            def setblocking(self, blocking):
+                self.nonblocking = not blocking
+                events.append(("outside-observation", self.index))
+                if outside_error is not None and self.index == 0:
+                    raise outside_error
 
             def close(self):
                 closed.append((self.role, self.index))
@@ -863,10 +1094,10 @@ class CISandboxPureTests(unittest.TestCase):
             def __exit__(self, *_exception):
                 self.close()
 
-        def socket_factory(_family, _kind):
+        def socket_factory(family, kind):
             if len(created) >= 8:
                 raise AssertionError("only four synthetic listener/positive pairs are admitted")
-            endpoint = Endpoint("listener" if len(created) % 2 == 0 else "positive", len(created) // 2)
+            endpoint = Endpoint("listener" if len(created) % 2 == 0 else "positive", len(created) // 2, family, kind)
             created.append(endpoint)
             return endpoint
 
@@ -899,6 +1130,62 @@ class CISandboxPureTests(unittest.TestCase):
         self.assertEqual(len([entry for entry in closed if entry[0] == "accepted"]), 2)
         fake_os.chown.assert_called_once_with(session.outside_write, session.uid, session.gid)
         chmod.assert_not_called()
+
+        # Invoke the actual original-handle collector under its complete fake
+        # dependencies, then the actual outside-receiver check.  A private stop
+        # at the next Ruby probe keeps this a caller-order test, not admission.
+        class AfterNative(RuntimeError):
+            pass
+
+        for case in ("ordered", "waited", "stdout_eof", "stderr_eof", "domain_finality", "outside-error"):
+            with self.subTest(native_boundary=case):
+                session = session_double(self.module)
+                rig = _Collection(self.module, session, stdout=(b"MRK_NATIVE_ISOLATION_OK\n",))
+                created, closed, events, cleanup = [], [], rig.events, {}
+                outside_error = OSError(errno.EIO, "synthetic unknown receiver") if case == "outside-error" else None
+                native_run = session._run
+                stop = AfterNative("end of the explicitly inert native-prefix test")
+
+                def collect_prefix(argv, **kwargs):
+                    if "--probe" not in argv:
+                        raise stop
+                    self.assertEqual([e[1] for e in events if e[0] == "positive-consumed"], list(range(4)))
+                    result = native_run(argv, **kwargs)
+                    self.assertTrue(result.ok, result)
+                    return dataclasses.replace(result, **{case: False}) if case in {
+                        "waited", "stdout_eof", "stderr_eof", "domain_finality",
+                    } else result
+
+                with rig.scope(), patch.object(self.module, "socket", fake_socket), \
+                     patch.object(self.module.os, "chown", create=True) as chown, \
+                     patch.object(self.module.os, "readlink", return_value="synthetic-namespace", create=True), \
+                     patch.object(self.module, "_small_command", return_value=b"MRK_OUTSIDE_WRITE_POSITIVE\n"), \
+                     patch.object(session, "_run", side_effect=collect_prefix), \
+                     patch.object(Path, "read_bytes", read_positive), \
+                     patch.object(Path, "chmod") as chmod:
+                    with self.assertRaises(BaseExceptionGroup) as caught:
+                        session._preflight()
+                seen = [i for i, event in enumerate(events) if event[0] == "outside-observation"]
+                note = next(n for n in session.admission_results if n["name"] == "native-isolation")
+                self.assertEqual([entry for entry in closed if entry[0] == "listener"],
+                                 [("listener", index) for index in range(4)])
+                if case in {"ordered", "outside-error"}:
+                    self.assertEqual(len(seen), 4)
+                    for event_name in ("wait-original", "unregister-eof", "domain"):
+                        self.assertLess(max(i for i, event in enumerate(events) if event[0] == event_name), seen[0])
+                    self.assertIsNone(session._active)
+                else:
+                    self.assertEqual(seen, [])
+                if case == "ordered":
+                    self.assertEqual(caught.exception.exceptions, (stop,))
+                    self.assertTrue(note["ok"])
+                    self.assertEqual([c.args for c in chown.call_args_list],
+                                     [(session.outside_write, session.uid, session.gid), (session.outside_write, 0, 0)])
+                    chmod.assert_called_once_with(0o400)
+                else:
+                    self.assertFalse(note["ok"])
+                    chown.assert_called_once_with(session.outside_write, session.uid, session.gid)
+                    chmod.assert_not_called()
 
     def test_collection_keeps_streams_separate_waits_and_persists_short_writes(self):
         rig = _Collection(self.module, stdout=(b"out-1", b"out-2"), stderr=(b"err-1",))
@@ -1065,3 +1352,1316 @@ class CISandboxPureTests(unittest.TestCase):
         with self.assertRaises(self.module.SessionError):
             _Collection(self.module, session).collect(latch=False)
         self.assertEqual(session.failure, "command exited 9")
+
+    def test_mac_original_credentials_precede_any_reap_and_all_censuses_keep_the_cutoff(self):
+        for case in ("live", "zombie", "missing", "saved-uid", "saved-gid", "census-error", "census-expired"):
+            with self.subTest(original_observation=case):
+                session = session_double(self.module, "darwin")
+                session.deadline = 0.5
+                session._admitting = True
+                rig = _Collection(self.module, session)
+                uids, gids = (session.uid,) * 3, (session.gid,) * 3
+                if case == "saved-uid":
+                    uids = (session.uid, session.uid, 0)
+                if case == "saved-gid":
+                    gids = (session.gid, session.gid, 0)
+                rig.snapshot_rows = {(rig.child.pid, rig.child.pid): (uids, gids, 65536)}
+                if case == "zombie":
+                    rig.exit_at = 0.0  # Original has exited, but no owner poll/wait has occurred.
+                elif case == "missing":
+                    rig.snapshot_rows = {}
+                elif case == "census-error":
+                    rig.snapshot_error = OSError(errno.EIO, "synthetic root census failure")
+                elif case == "census-expired":
+                    rig.snapshot_advance = 0.6
+                result = rig.collect()
+                observed = [(i, event) for i, event in enumerate(rig.events) if event[0] == "root-snapshot"]
+                self.assertEqual(len(observed), 1)
+                index, event = observed[0]
+                self.assertEqual(event[1], 0.5)
+                self.assertIs(event[2], rig.child)  # Strong original-handle custody, not just a PID match.
+                self.assertTrue(any(e[0] == "popen" for e in rig.events[:index]))
+                self.assertTrue(all(index < i for i, e in enumerate(rig.events) if e[0] in {"poll", "wait-original"}))
+                self.assertEqual(result.ok, case in {"live", "zombie"}, result)
+                self.assertTrue(all(e[2] == 0.5 for e in rig.events if e[0] == "domain-deadline"))
+                for _, allowance, recorded_now in (e for e in rig.events if e[0] == "wait-budget"):
+                    self.assertLessEqual(allowance, max(0.0, 0.5 - recorded_now + 0.001001))
+                if case not in {"live", "zombie"}:
+                    self.assertEqual(session.failure, result.primary_error)
+                    self.assertTrue(any(e[0] == "cleanup" for e in rig.events))
+                    self.assertTrue(all(e[1] == 0.5 for e in rig.events if e[0] == "cleanup-deadline"))
+                    self.assertEqual(result.timed_out, case == "census-expired")
+                    notes = next(n["exceptions"] for n in session.admission_results
+                                 if n["name"] == "collector-exception")
+                    self.assertEqual(notes[0]["operation"], "mac-original-credentials")
+                    if case != "census-expired":
+                        self.assertTrue(result.waited and result.finality)
+                        self.assertFalse(result.ok)  # A later empty cleanup census cannot repair observation.
+                    with self.assertRaises(self.module.SessionError):
+                        rig.collect()
+
+        # Literal process rows are parser inputs only. No /bin/ps or real
+        # process-table read is reachable; the observer's own PID is synthetic.
+        raw = (b"1 0 0 0 0 0 0 64 S\n"
+               b"4242 60001 60001 60001 60001 60001 60001 0 Z\n"
+               b"9999 0 0 0 0 0 0 4 R\n")
+        clock = SimpleNamespace(now=0.0)
+        metadata = Mock(return_value=(raw, 9999))
+        with patch.multiple(self.module, _small_command=metadata,
+                            os=SimpleNamespace(), subprocess=SimpleNamespace(), signal=SimpleNamespace(),
+                            time=SimpleNamespace(monotonic=lambda: clock.now)):
+            rows = self.module._mac_snapshot(deadline=0.5)
+            self.assertEqual(rows[(4242, 4242)], ((60001,) * 3, (60001,) * 3, 0))
+            self.assertEqual(rows[(1, 1)][2], 64 * 1024)
+            self.assertNotIn((9999, 9999), rows)
+            metadata.assert_called_once_with(
+                ["/bin/ps", "-axo", "pid=,ruid=,uid=,svuid=,rgid=,gid=,svgid=,rss=,stat="],
+                return_pid=True, deadline=0.5,
+            )
+            for malformed in (raw + raw.splitlines(keepends=True)[1], b"4242 60001 incomplete\n",
+                              raw.replace(b"60001", b"unknown", 1)):
+                metadata.return_value = (malformed, 9999)
+                with self.assertRaises(self.module.SessionError):
+                    self.module._mac_snapshot(deadline=0.5)
+
+            def consumed_census(*_args, **_kwargs):
+                clock.now = 0.5
+                return raw, 9999
+
+            metadata.side_effect = consumed_census
+            with self.assertRaises(self.module.DeadlineExpired):
+                self.module._mac_snapshot(deadline=0.5)
+
+        # Exercise the actual routing/two-pass census wrapper, not the
+        # collector rig's domain double, with the same absolute endpoint.
+        for platform in ("linux", "darwin"):
+            linux, mac = Mock(return_value=rows), Mock(return_value=rows)
+            with patch.multiple(self.module, _linux_snapshot=linux, _mac_snapshot=mac,
+                                time=SimpleNamespace(monotonic=lambda: 0.0)):
+                self.assertEqual(self.module._domain(platform, 60001, deadline=0.5), {4242})
+            selected, other = (linux, mac) if platform == "linux" else (mac, linux)
+            self.assertEqual([c.kwargs for c in selected.call_args_list], [{"deadline": 0.5}] * 2)
+            other.assert_not_called()
+
+        # Linux's source-only /proc substitute also must check the deadline
+        # after its last metadata read. Unknown paths never reach the host FS.
+        base = Path("/proc/4242/task/4242")
+        status = b"Uid:\t60001 60001 60001 60001\nGid:\t60001 60001 60001 60001\n"
+        birth = b"4242 (synthetic task) S " + b"0 " * 18 + b"99 0\n"
+        for expired in (False, True):
+            clock = SimpleNamespace(now=0.0)
+
+            def children(path):
+                if path == Path("/proc"):
+                    return [Path("/proc/4242")]
+                if path == base.parent:
+                    return [base]
+                raise AssertionError("unexpected synthetic census directory")
+
+            def read_row(path):
+                if path == base / "stat":
+                    return birth
+                if path == base / "status":
+                    if expired:
+                        clock.now = 0.5
+                    return status
+                raise AssertionError("unexpected synthetic census file")
+
+            with patch.multiple(self.module, os=SimpleNamespace(), subprocess=SimpleNamespace(),
+                                signal=SimpleNamespace(), time=SimpleNamespace(monotonic=lambda: clock.now)), \
+                 patch.object(Path, "iterdir", children), patch.object(Path, "read_bytes", read_row):
+                if expired:
+                    with self.assertRaises(self.module.DeadlineExpired):
+                        self.module._linux_snapshot(deadline=0.5)
+                else:
+                    self.assertEqual(self.module._linux_snapshot(deadline=0.5),
+                                     {(4242, 4242): ((60001,) * 4, (60001,) * 4, 99)})
+
+    def test_network_local_enqueue_never_substitutes_for_outside_non_delivery(self):
+        endpoints = [(2, 1, "127.0.0.1", 42001), (2, 2, "127.0.0.1", 42002),
+                     (10, 1, "::1", 42003), (10, 2, "::1", 42004)]
+        for platform, case, allowed in (
+            ("linux", "valid", True), ("linux", "udp-denied", True),
+            ("linux", "partial-udp", False), ("linux", "tcp-connect", False),
+            ("linux", "unknown-errno", False), ("linux", "close-error", False),
+            ("linux", "no-loopback", False), ("linux", "extra-interface", False),
+            ("linux", "invalid-index", False), ("linux", "wrong-interface", False),
+            ("darwin", "valid", True), ("darwin", "udp-enqueued", False),
+            ("darwin", "connection-refused", False),
+        ):
+            with self.subTest(subject_network=(platform, case)):
+                streams = []
+                interfaces = {"no-loopback": [], "extra-interface": [(1, "lo"), (2, "eth0")],
+                              "invalid-index": [(0, "lo")], "wrong-interface": [(1, "eth0")]}.get(case, [(1, "lo")])
+
+                def make_socket(family, kind):
+                    self.assertIn((family, kind), {(2, 1), (2, 2), (10, 1), (10, 2)})
+                    connect_error = None if case == "tcp-connect" else OSError(
+                        errno.ECONNREFUSED if platform == "linux" or case == "connection-refused" else errno.EPERM,
+                        "synthetic connect outcome",
+                    )
+                    send_error = (OSError(errno.EIO, "synthetic unknown send") if case == "unknown-errno" else
+                                  OSError(errno.EACCES, "synthetic send denial")
+                                  if case == "udp-denied" or platform == "darwin" and case != "udp-enqueued" else None)
+                    stream = SimpleNamespace(
+                        settimeout=Mock(), connect=Mock(side_effect=connect_error),
+                        sendto=Mock(return_value=1 if case == "partial-udp" else len(b"must-not-escape"),
+                                    side_effect=send_error),
+                        close=Mock(side_effect=OSError(errno.EIO, "synthetic close") if case == "close-error" else None),
+                    )
+                    streams.append(stream)
+                    return stream
+
+                sockets = SimpleNamespace(AF_INET=2, AF_INET6=10, SOCK_STREAM=1, SOCK_DGRAM=2,
+                                          socket=Mock(side_effect=make_socket), if_nameindex=Mock(return_value=interfaces))
+                with patch.multiple(self.module, socket=sockets, os=SimpleNamespace(), subprocess=SimpleNamespace(),
+                                    signal=SimpleNamespace()):
+                    if allowed:
+                        self.module._probe_network(platform, endpoints)
+                        self.assertEqual(len(streams), 4)
+                    else:
+                        with self.assertRaises((self.module.SessionError, BaseExceptionGroup)):
+                            self.module._probe_network(platform, endpoints)
+                for stream in streams:
+                    stream.settimeout.assert_called_once_with(0.5)
+                    stream.close.assert_called_once_with()
+                if platform == "darwin":
+                    sockets.if_nameindex.assert_not_called()
+                elif case in {"no-loopback", "extra-interface", "invalid-index", "wrong-interface"}:
+                    sockets.socket.assert_not_called()
+                if allowed:
+                    for stream, (_, kind, host, port) in zip(streams, endpoints):
+                        if kind == 1:
+                            stream.connect.assert_called_once_with((host, port))
+                            stream.sendto.assert_not_called()
+                        else:
+                            stream.sendto.assert_called_once_with(b"must-not-escape", (host, port))
+                            stream.connect.assert_not_called()
+
+        sockets = SimpleNamespace(AF_INET=2, AF_INET6=10, SOCK_STREAM=1, SOCK_DGRAM=2,
+                                  socket=Mock(side_effect=AssertionError("no real receiver creation")))
+        for case in ("empty", "zero-datagram", "data-datagram", "accepted-tcp", "accepted-close", "receiver-error",
+                     "receiver-unknown-blocking", "setblocking-eagain", "expired", "last-receive-expired", "inventory"):
+            with self.subTest(outside_network=case):
+                clock = SimpleNamespace(now=1.0 if case == "expired" else 0.0)
+                accepted = SimpleNamespace(close=Mock(side_effect=OSError(errno.EIO, "synthetic accepted close")
+                                                      if case == "accepted-close" else None))
+                listeners = []
+                for family, kind, _host, _port in endpoints:
+                    listeners.append(SimpleNamespace(
+                        family=family, type=kind, setblocking=Mock(), close=Mock(),
+                        accept=Mock(side_effect=BlockingIOError(errno.EAGAIN, "synthetic empty TCP")),
+                        recv=Mock(side_effect=BlockingIOError(errno.EWOULDBLOCK, "synthetic empty UDP")),
+                    ))
+                if case in {"zero-datagram", "data-datagram"}:
+                    listeners[1].recv.side_effect = None
+                    listeners[1].recv.return_value = b"" if case == "zero-datagram" else b"x"
+                elif case in {"accepted-tcp", "accepted-close"}:
+                    listeners[0].accept.side_effect = None
+                    listeners[0].accept.return_value = (accepted, ("synthetic-peer", 1))
+                elif case == "receiver-error":
+                    listeners[1].recv.side_effect = OSError(errno.EIO, "synthetic unknown receiver")
+                elif case == "receiver-unknown-blocking":
+                    listeners[1].recv.side_effect = BlockingIOError(errno.EIO, "synthetic unknown blocking state")
+                elif case == "setblocking-eagain":
+                    listeners[0].setblocking.side_effect = BlockingIOError(errno.EAGAIN, "synthetic setup failure")
+                elif case == "last-receive-expired":
+
+                    def last_receive(_size):
+                        clock.now = 1.0
+                        raise BlockingIOError(errno.EAGAIN, "synthetic empty but late")
+
+                    listeners[-1].recv.side_effect = last_receive
+                elif case == "inventory":
+                    listeners.pop()
+                with patch.multiple(self.module, socket=sockets, os=SimpleNamespace(), subprocess=SimpleNamespace(),
+                                    signal=SimpleNamespace(), time=SimpleNamespace(monotonic=lambda: clock.now)):
+                    if case == "empty":
+                        self.module._outside_network_empty(listeners, deadline=1.0)
+                    elif case == "inventory":
+                        with self.assertRaises(self.module.SessionError):
+                            self.module._outside_network_empty(listeners, deadline=1.0)
+                    else:
+                        with self.assertRaises(BaseExceptionGroup) as caught:
+                            self.module._outside_network_empty(listeners, deadline=1.0)
+                        if case == "accepted-close":
+                            self.assertEqual(len(caught.exception.exceptions), 2)
+                            self.assertIsInstance(caught.exception.exceptions[0], self.module.SessionError)
+                            self.assertIsInstance(caught.exception.exceptions[1], OSError)
+                        if "expired" in case:
+                            self.assertTrue(all(isinstance(e, self.module.DeadlineExpired) for e in caught.exception.exceptions))
+                for listener in listeners:
+                    listener.close.assert_not_called()  # Original listeners remain in _preflight's custody.
+                    if case not in {"expired", "inventory"}:
+                        listener.setblocking.assert_called_once_with(False)
+                if case in {"accepted-tcp", "accepted-close"}:
+                    accepted.close.assert_called_once_with()
+                else:
+                    accepted.close.assert_not_called()
+        sockets.socket.assert_not_called()
+
+    def test_cleanup_routes_only_fixed_unprivileged_batches_and_requires_fresh_finality(self):
+        for case, aggregate, enclosing in (
+            ("sequence", 100.0, None), ("sequence", 12.0, None), ("sequence", 100.0, 11.5),
+            ("empty", 100.0, None), ("bad-ack", 100.0, None), ("ack-at-cutoff", 100.0, None),
+            ("unknown-census", 100.0, None), ("oversized", 100.0, None),
+            ("helper-wait-error", 100.0, None), ("enclosing-expired", 100.0, 10.0),
+        ):
+            with self.subTest(root_cleanup=(case, aggregate, enclosing)):
+                session = session_double(self.module, "darwin")
+                session.deadline = aggregate
+                clock = SimpleNamespace(now=10.0)
+                cutoff = min(aggregate, 14.0, enclosing if enclosing is not None else aggregate)
+                censuses, batches, sleeps = [], [], []
+                root_kill = Mock(side_effect=AssertionError("root has no discovered-process signal role"))
+
+                def census(platform, uid, *, deadline):
+                    self.assertEqual((platform, uid, deadline), ("darwin", session.uid, cutoff))
+                    self.module._remaining(deadline)
+                    index = len(censuses)
+                    if index > 2:
+                        raise AssertionError("finite synthetic census inventory exhausted")
+                    if case == "unknown-census" and index == 1:
+                        raise OSError(errno.EIO, "synthetic final census unknown")
+                    rows = (set() if case == "empty" else set(range(10000, 14097)) if case == "oversized" else
+                            ({4242, 4343}, {4343}, set())[index])
+                    censuses.append(set(rows))
+                    return rows
+
+                def batch(argv, seconds, **kwargs):
+                    batches.append((argv, seconds, kwargs))
+                    self.assertEqual(seconds, 4)
+                    self.assertEqual(kwargs, {"user": session.uid, "group": session.gid, "deadline": cutoff})
+                    self.module._remaining(kwargs["deadline"])
+                    if case == "helper-wait-error":
+                        raise ExceptionGroup("synthetic original metadata wait failure", [TimeoutError("not waited")])
+                    if case == "ack-at-cutoff":
+                        clock.now = cutoff
+                    return b"not-the-batch-ack\n" if case == "bad-ack" else b"MRK_CLEANUP_BATCH_ATTEMPTED\n"
+
+                def sleep(seconds):
+                    sleeps.append(seconds)
+                    clock.now += seconds
+
+                with patch.multiple(self.module, _domain=census, _small_command=batch,
+                                    os=SimpleNamespace(kill=root_kill), subprocess=SimpleNamespace(),
+                                    signal=SimpleNamespace(),
+                                    time=SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep)):
+                    errors = session._cleanup(deadline=enclosing)
+                root_kill.assert_not_called()
+                self.assertEqual(errors == [], case in {"sequence", "empty"}, errors)
+                if case == "sequence":
+                    self.assertEqual(censuses, [{4242, 4343}, {4343}, set()])
+                    self.assertEqual(len(batches), 2)
+                    self.assertEqual(sleeps, [0.1, 0.1])
+                    for (argv, _seconds, _kwargs), kind, targets in zip(batches, ("TERM", "KILL"), ([4242, 4343], [4343])):
+                        self.assertEqual(argv, [str(session.python), "-I", "-S", "-B", str(session.entry),
+                                               "--enter", "darwin", str(session.uid), str(session.gid), "10",
+                                               str(session.cleanup_policy), str(session.python), "-I", "-S", "-B",
+                                               str(session.entry), "--cleanup-batch", str(session.uid), str(session.gid),
+                                               kind, json.dumps(targets), repr(cutoff)])
+                elif case in {"empty", "oversized", "enclosing-expired"}:
+                    self.assertEqual(batches, [])
+                elif case == "ack-at-cutoff":
+                    self.assertEqual(censuses, [{4242, 4343}])
+                    self.assertEqual(errors, ["numerical cleanup DeadlineExpired"])
+                    self.assertEqual(sleeps, [])  # Receipt alone never proves an empty domain.
+                elif case == "helper-wait-error":
+                    self.assertEqual(errors, ["numerical cleanup ExceptionGroup"])
+
+        cases = ("TERM", "KILL", "esrch", "eperm", "unknown-errno", "initial-expiry", "between-targets-expiry",
+                 "after-last-expiry", "wrong-platform", "uid-range", "bool-uid", "gid-mismatch", "root-euid",
+                 "missing-primary-group", "extra-group", "empty-targets", "tuple-targets", "duplicate-targets",
+                 "bool-target", "zero-target", "negative-target", "one-target", "large-target", "self-target",
+                 "oversized-targets", "wrong-signal", "numeric-signal")
+        for case in cases:
+            with self.subTest(numeric_cleanup=case):
+                uid = gid = 60001
+                actual = (uid, uid, gid, gid)
+                groups, targets, kind = [gid], [4242, 4343], "KILL" if case == "KILL" else "TERM"
+                clock = SimpleNamespace(now=1.0 if case == "initial-expiry" else 0.0)
+                if case == "uid-range":
+                    uid = gid = 59999
+                elif case == "bool-uid":
+                    uid = True
+                elif case == "gid-mismatch":
+                    gid += 1
+                elif case == "root-euid":
+                    actual = (uid, 0, gid, gid)
+                elif case == "missing-primary-group":
+                    groups = []
+                elif case == "extra-group":
+                    groups = [gid, 0]
+                target_cases = {"empty-targets": [], "tuple-targets": (4242,), "duplicate-targets": [4242, 4242],
+                                "bool-target": [True], "zero-target": [0], "negative-target": [-1], "one-target": [1],
+                                "large-target": [2**31], "self-target": [9999],
+                                "oversized-targets": list(range(10000, 14097))}
+                targets = target_cases.get(case, targets)
+                if case == "wrong-signal":
+                    kind = "HUP"
+                elif case == "numeric-signal":
+                    kind = 15
+
+                def kernel_signal(pid, signum):
+                    self.assertIn((pid, signum), {(4242, 15), (4343, 15), (4242, 9), (4343, 9)})
+                    if case in {"esrch", "eperm", "unknown-errno"}:
+                        raise OSError({"esrch": errno.ESRCH, "eperm": errno.EPERM, "unknown-errno": errno.EIO}[case],
+                                      "synthetic kernel signal result")
+                    if case == "between-targets-expiry" or case == "after-last-expiry" and pid == 4343:
+                        clock.now = 1.0
+
+                kill = Mock(side_effect=kernel_signal)
+                no_census = Mock(side_effect=AssertionError("the numerical helper has no census role"))
+                no_metadata = Mock(side_effect=AssertionError("the numerical helper cannot invoke metadata tools"))
+                fake_os = SimpleNamespace(getuid=lambda: actual[0], geteuid=lambda: actual[1],
+                                          getgid=lambda: actual[2], getegid=lambda: actual[3], getpid=lambda: 9999, kill=kill)
+                output = io.StringIO()
+                with patch.multiple(self.module, os=fake_os, sys=SimpleNamespace(platform="linux" if case == "wrong-platform" else "darwin"),
+                                    signal=SimpleNamespace(SIGTERM=15, SIGKILL=9), subprocess=SimpleNamespace(),
+                                    _process_groups=Mock(return_value=groups), _domain=no_census, _small_command=no_metadata,
+                                    time=SimpleNamespace(monotonic=lambda: clock.now)), redirect_stdout(output):
+                    if case in {"TERM", "KILL", "esrch"}:
+                        self.module._cleanup_numeric(uid, gid, kind, targets, 1.0)
+                    else:
+                        with self.assertRaises((self.module.SessionError, OSError)) as caught:
+                            self.module._cleanup_numeric(uid, gid, kind, targets, 1.0)
+                        self.assertEqual(caught.exception._ci_operation, "cleanup-batch")
+                        if case in {"eperm", "unknown-errno"}:
+                            self.assertEqual(caught.exception.errno, errno.EPERM if case == "eperm" else errno.EIO)
+                no_census.assert_not_called()
+                no_metadata.assert_not_called()
+                if case in {"TERM", "KILL", "esrch"}:
+                    self.assertEqual(output.getvalue(), "MRK_CLEANUP_BATCH_ATTEMPTED\n")
+                    self.assertEqual([c.args for c in kill.call_args_list], [(4242, 9 if kind == "KILL" else 15),
+                                                                          (4343, 9 if kind == "KILL" else 15)])
+                else:
+                    self.assertEqual(output.getvalue(), "")
+                    count = 2 if case == "after-last-expiry" else 1 if case in {"eperm", "unknown-errno", "between-targets-expiry"} else 0
+                    self.assertEqual(kill.call_count, count)
+
+    def test_sudo_denial_requires_launch_denial_or_nonzero_wait_and_independent_cleanup(self):
+        fixed = ["/usr/bin/sudo", "-n", "-u", "root", "/usr/bin/true"]
+        for number in (errno.EPERM, errno.EACCES, errno.ENOENT, errno.EIO):
+            with self.subTest(sudo_launch_errno=number):
+                original = OSError(number, "synthetic fixed-tool launch error")
+                launch = Mock(side_effect=original)
+                with patch.multiple(self.module, subprocess=SimpleNamespace(Popen=launch, DEVNULL=-3),
+                                    os=SimpleNamespace(), signal=SimpleNamespace()):
+                    if number in {errno.EPERM, errno.EACCES}:
+                        self.module._sudo_denial()
+                    else:
+                        with self.assertRaises(OSError) as caught:
+                            self.module._sudo_denial()
+                        self.assertIs(caught.exception, original)
+                launch.assert_called_once_with(fixed, stdin=-3, stdout=-3, stderr=-3, close_fds=True)
+
+        for case in ("nonzero", "negative", "zero", "missing-wait", "bool-wait", "first-wait-eperm", "first-wait-timeout",
+                     "poll-eacces", "kill-eperm", "cleanup-wait-eacces", "cleanup-wait-missing", "two-cleanup-errors"):
+            with self.subTest(sudo_original=case):
+                first_error = OSError(errno.EPERM, "synthetic first wait denied after launch")
+                stop_error = OSError(errno.EACCES, "synthetic original stop error after launch")
+                final_error = OSError(errno.EACCES, "synthetic original final wait error after launch")
+                first = {"negative": -9, "zero": 0, "missing-wait": None, "bool-wait": True,
+                         "first-wait-eperm": first_error, "first-wait-timeout": TimeoutError("synthetic unknown wait")}.get(case, 1)
+                last = final_error if case in {"cleanup-wait-eacces", "two-cleanup-errors"} else None if case == "cleanup-wait-missing" else 1
+                child = SimpleNamespace(wait=Mock(side_effect=[first, last]),
+                                        poll=Mock(return_value=None if case == "kill-eperm" else 1,
+                                                  side_effect=stop_error if case in {"poll-eacces", "two-cleanup-errors"} else None),
+                                        kill=Mock(side_effect=first_error if case == "kill-eperm" else None))
+                launch = Mock(return_value=child)
+                with patch.multiple(self.module, subprocess=SimpleNamespace(Popen=launch, DEVNULL=-3),
+                                    os=SimpleNamespace(), signal=SimpleNamespace()):
+                    if case in {"nonzero", "negative"}:
+                        self.module._sudo_denial()
+                    else:
+                        with self.assertRaises(BaseExceptionGroup) as caught:
+                            self.module._sudo_denial()
+                        if case == "first-wait-eperm":
+                            self.assertEqual(caught.exception.exceptions, (first_error,))
+                        elif case == "two-cleanup-errors":
+                            self.assertEqual(caught.exception.exceptions, (stop_error, final_error))
+                launch.assert_called_once_with(fixed, stdin=-3, stdout=-3, stderr=-3, close_fds=True)
+                self.assertEqual([c.kwargs for c in child.wait.call_args_list], [{"timeout": 3}, {"timeout": 2}])
+                child.poll.assert_called_once_with()
+                if case == "kill-eperm":
+                    child.kill.assert_called_once_with()
+                else:
+                    child.kill.assert_not_called()
+
+    def test_observer_artifact_and_exclusive_copy_keep_identity_deadlines_and_all_close_errors(self):
+        path = Path("/synthetic/private/observer-artifact")
+        payload = b"inert observer image, never executed"
+        read_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+        for case in ("source", "frozen", "open-link", "nonregular", "multiple-links", "wrong-owner", "wrong-group",
+                     "setuid", "setgid", "group-write", "world-write", "nonexecutable", "empty", "oversized",
+                     "changed-inode", "changed-name", "changed-time", "truncated", "grew", "read-error", "close-error",
+                     "read-and-close-error", "read-expiry", "close-expiry", "initial-expiry"):
+            with self.subTest(observer_artifact=case):
+                uid = gid = 0 if case == "frozen" else 60001
+                mode = 0o555 if case == "frozen" else 0o755
+                state = dict(st_dev=7, st_ino=11, st_mode=stat.S_IFREG | mode, st_uid=uid, st_gid=gid,
+                             st_nlink=1, st_size=len(payload), st_mtime_ns=101, st_ctime_ns=102)
+                changes = {"nonregular": {"st_mode": stat.S_IFIFO | 0o755}, "multiple-links": {"st_nlink": 2},
+                           "wrong-owner": {"st_uid": uid + 1}, "wrong-group": {"st_gid": gid + 1},
+                           "setuid": {"st_mode": stat.S_IFREG | 0o4755}, "setgid": {"st_mode": stat.S_IFREG | 0o2755},
+                           "group-write": {"st_mode": stat.S_IFREG | 0o775}, "world-write": {"st_mode": stat.S_IFREG | 0o757},
+                           "nonexecutable": {"st_mode": stat.S_IFREG | 0o644}, "empty": {"st_size": 0},
+                           "oversized": {"st_size": 16 * self.module.MiB + 1}}
+                before = SimpleNamespace(**(state | changes.get(case, {})))
+                after = SimpleNamespace(**(vars(before) | ({"st_ino": 12} if case == "changed-inode" else
+                                                           {"st_mtime_ns": 103} if case == "changed-time" else {})))
+                named = SimpleNamespace(**(vars(before) | ({"st_ino": 13} if case == "changed-name" else {})))
+                clock = SimpleNamespace(now=1.0 if case == "initial-expiry" else 0.0)
+                data = payload[:-1] if case == "truncated" else payload + b"x" if case == "grew" else payload
+                chunks = [data[:7], data[7:], b""]
+                read_error = OSError(errno.EIO, "synthetic artifact read")
+                close_error = OSError(errno.EIO, "synthetic artifact close")
+
+                def read(fd, size):
+                    self.assertEqual(fd, 101)
+                    self.assertTrue(0 < size <= 65536)
+                    if case in {"read-error", "read-and-close-error"}:
+                        raise read_error
+                    if case == "read-expiry":
+                        clock.now = 1.0
+                    return chunks.pop(0)
+
+                def close(fd):
+                    self.assertEqual(fd, 101)
+                    if case in {"close-error", "read-and-close-error"}:
+                        raise close_error
+                    if case == "close-expiry":
+                        clock.now = 1.0
+
+                opened = Mock(return_value=101, side_effect=OSError(errno.ELOOP, "synthetic no-follow link")
+                              if case == "open-link" else None)
+                closed, reads = Mock(side_effect=close), Mock(side_effect=read)
+                metadata = Mock(side_effect=[before, after])
+                constants = {k: getattr(os, k) for k in ("O_RDONLY", "O_NOFOLLOW", "O_CLOEXEC", "O_NONBLOCK")}
+                with patch.multiple(self.module, os=SimpleNamespace(**constants, open=opened, read=reads,
+                                                                   fstat=metadata, close=closed),
+                                    subprocess=SimpleNamespace(), signal=SimpleNamespace(),
+                                    time=SimpleNamespace(monotonic=lambda: clock.now)), \
+                     patch.object(Path, "lstat", return_value=named), \
+                     patch.object(Path, "stat", side_effect=AssertionError("unexpected artifact filesystem query")):
+                    if case in {"source", "frozen"}:
+                        self.assertEqual(self.module._observer_artifact(path, uid, gid, deadline=1.0), (payload, mode))
+                    else:
+                        with self.assertRaises(BaseExceptionGroup) as caught:
+                            self.module._observer_artifact(path, uid, gid, deadline=1.0)
+                        if case == "read-and-close-error":
+                            self.assertEqual(caught.exception.exceptions, (read_error, close_error))
+                        if "expiry" in case:
+                            self.assertTrue(all(isinstance(e, self.module.DeadlineExpired) for e in caught.exception.exceptions))
+                if case == "initial-expiry":
+                    opened.assert_not_called()
+                else:
+                    opened.assert_called_once_with(path, read_flags)
+                if case in {"initial-expiry", "open-link"}:
+                    closed.assert_not_called()
+                    metadata.assert_not_called()
+                else:
+                    closed.assert_called_once_with(101)
+                    self.assertTrue(all(c.args == (101,) for c in metadata.call_args_list))
+                if case in changes or case in {"initial-expiry", "open-link"}:
+                    reads.assert_not_called()
+
+        # Root's existing copy primitive must really use exclusive no-follow
+        # creation and independently close after partial writes/permission errors.
+        # Every descriptor here is synthetic; no filesystem path is opened.
+        for case in ("success", "collision", "partial-write-error", "write-and-close-error", "mode-error"):
+            with self.subTest(observer_copy=case):
+                persisted = bytearray()
+                write_error = OSError(errno.EIO, "synthetic interrupted copy write")
+                close_error = OSError(errno.EIO, "synthetic copy close")
+
+                def write(fd, data):
+                    self.assertEqual(fd, 202)
+                    count = min(2, len(data))
+                    persisted.extend(data[:count])
+                    if case in {"partial-write-error", "write-and-close-error"}:
+                        raise write_error
+                    return count
+
+                opened = Mock(return_value=202, side_effect=FileExistsError(errno.EEXIST, "synthetic bootstrap collision")
+                              if case == "collision" else None)
+                writes = Mock(side_effect=write)
+                closed = Mock(side_effect=close_error if case == "write-and-close-error" else None)
+                chmod = Mock(side_effect=OSError(errno.EIO, "synthetic immutable-mode failure") if case == "mode-error" else None)
+                fsync = Mock()
+                constants = {k: getattr(os, k) for k in ("O_WRONLY", "O_CREAT", "O_EXCL", "O_NOFOLLOW", "O_CLOEXEC")}
+                fake_os = SimpleNamespace(**constants, open=opened, write=writes, fsync=fsync, fchmod=chmod, close=closed)
+                with patch.object(self.module, "os", fake_os):
+                    if case == "success":
+                        self.module._private_file(path, payload, 0o555)
+                    elif case == "collision":
+                        with self.assertRaises(FileExistsError):
+                            self.module._private_file(path, payload, 0o555)
+                    else:
+                        with self.assertRaises(BaseExceptionGroup) as caught:
+                            self.module._private_file(path, payload, 0o555)
+                        if case == "write-and-close-error":
+                            self.assertEqual(caught.exception.exceptions, (write_error, close_error))
+                opened.assert_called_once_with(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o555)
+                if case == "collision":
+                    writes.assert_not_called()
+                    closed.assert_not_called()
+                    chmod.assert_not_called()
+                    self.assertEqual(persisted, b"")
+                else:
+                    closed.assert_called_once_with(202)
+                    if case in {"success", "mode-error"}:
+                        self.assertEqual(persisted, payload)
+                        fsync.assert_called_once_with(202)
+                        chmod.assert_called_once_with(202, 0o555)
+                    else:
+                        self.assertEqual(persisted, payload[:2])
+                        fsync.assert_not_called()
+                        chmod.assert_not_called()
+
+    def test_observer_signature_metadata_requires_complete_unprivileged_singletons(self):
+        path = Path("/synthetic/private/process-observer-build")
+        for arch in ("arm64", "x86_64"):
+            for flags, label in ((2, "adhoc"), (0x20002, "adhoc,linker-signed")):
+                lines = [f"Executable={path}", f"Identifier={path.name}", f"Format=Mach-O thin ({arch})",
+                         f"CodeDirectory v=20400 size=200 flags=0x{flags:x}({label}) hashes=2+0 location=embedded",
+                         "Signature=adhoc", "TeamIdentifier=not set", "Page size=4096", "Hash type=sha256 size=32",
+                         "Hash choices=sha256", "CDHash=" + "a" * 40, "CMSDigest=" + "b" * 64,
+                         "CMSDigestType=2", "Info.plist=not bound", "Sealed Resources=none", "Internal requirements=none"]
+                raw = ("\n".join(lines) + "\n").encode()
+                # These are admitted grammar fixtures, not claims about a real
+                # codesign invocation. Original wait/EOF and entitlement probes
+                # are independently required by the preparation caller.
+                self.assertEqual(self.module._observer_signature_metadata(b"", raw, path, arch),
+                                 {"signature": "adhoc", "flags": flags, "architecture": arch})
+                for omitted in range(6):
+                    incomplete = ("\n".join(line for i, line in enumerate(lines) if i != omitted) + "\n").encode()
+                    with self.subTest(architecture=arch, omitted=omitted), self.assertRaises(self.module.SessionError):
+                        self.module._observer_signature_metadata(b"", incomplete, path, arch)
+        cases = (
+            (b"unexpected stdout", raw), (b"", b""), (b"", raw[:-1]), (b"", raw + b"x" * 16384 + b"\n"),
+            (b"", raw + b"\xff\n"), (b"", raw.replace(b"\n", b"\r\n", 1)), (b"", raw + b"\0\n"),
+            (b"", raw.replace(b"Signature=adhoc", b"Signature=Developer ID")),
+            (b"", raw.replace(b"TeamIdentifier=not set", b"TeamIdentifier=synthetic-team")),
+            (b"", raw + b"Authority=synthetic-authority\n"), (b"", raw + b"PlatformIdentifier=1\n"),
+            (b"", raw + b"Entitlements=unknown\n"), (b"", raw + b"Page size=16384\n"),
+            (b"", raw + ("CDHash=" + "c" * 40 + "\n").encode()),
+            (b"", raw + ("CMSDigest=" + "d" * 64 + "\n").encode()),
+            (b"", raw + b"Internal requirements count=0 size=12\n"),
+            (b"", raw + b"Signature=adhoc\n"),
+            (b"", raw.replace(b"flags=0x20002(adhoc,linker-signed)", b"flags=0x0(adhoc)")),
+            (b"", raw.replace(b"flags=0x20002(adhoc,linker-signed)", b"flags=0x20002(adhoc)")),
+            (b"", raw.replace(b"size=200 flags=", b"size=0 flags=")),
+            (b"", raw.replace(b"hashes=2+0", b"hashes=0+0")),
+            (b"", raw.replace(b"hashes=2+0", b"hashes=2+33")),
+            (b"", raw.replace(b"v=20400", b"v=1")), (b"", raw.replace(b"location=embedded", b"location=detached")),
+        )
+        for index, (stdout, stderr) in enumerate(cases):
+            with self.subTest(signature_case=index), self.assertRaises((self.module.SessionError, UnicodeDecodeError)):
+                self.module._observer_signature_metadata(stdout, stderr, path, "x86_64")
+        for candidate, arch in ((path.parent / "other", "x86_64"), (path, "arm64"), (path, "unknown")):
+            with self.subTest(path=candidate, arch=arch), self.assertRaises(self.module.SessionError):
+                self.module._observer_signature_metadata(b"", raw, candidate, arch)
+
+        source = Path("/synthetic/private/source/.github/scripts/ci_process_observer.c")
+        canary = "synthetic-private-compiler-message-not-for-publication"
+        own = f"{source}:7:9: error: {canary}\n".encode()
+        foreign = f"/synthetic/private/SDK/header.h:1:2: warning: {canary}\n".encode()
+        expected = {"file": ".github/scripts/ci_process_observer.c", "line": 7, "column": 9, "severity": "error"}
+        self.assertEqual(self.module._observer_build_notes(own + foreign, source), [expected])
+        self.assertEqual(self.module._observer_build_notes(foreign, source), [{"category": "unclassified-compiler-diagnostics"}])
+        self.assertEqual(self.module._observer_build_notes(b"clang: error: " + canary.encode(), source), [{"category": "clang-driver"}])
+        self.assertEqual(self.module._observer_build_notes(b"", source), [])
+        self.assertEqual(self.module._observer_build_notes(own * 20, source), [expected] * 16)
+        self.assertNotIn(canary, json.dumps(self.module._observer_build_notes(own + foreign, source)))
+        with self.assertRaises(self.module.SessionError) as caught:
+            self.module._observer_signature_metadata(b"", raw + f"{canary}=private\n".encode(), path, "x86_64")
+        self.assertEqual(caught.exception._ci_observation, {"signature_field": "unclassified"})
+
+    def test_observer_toolchain_binds_readonly_provider_inventory_and_complete_hashes(self):
+        xcode = Path("/Applications/Xcode_26.3.app/Contents/Developer")
+        toolchain = xcode / "Toolchains/XcodeDefault.xctoolchain"
+        sdk_alias = xcode / "Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+        sdk = sdk_alias.parent / "MacOSX26.4.sdk"
+        clang, linker = (toolchain / "usr/bin" / name for name in ("clang", "ld"))
+        settings = sdk / "SDKSettings.json"
+        for case in ("valid", "sdk-escape", "link-escape", "link-owner", "ancestor-owner", "world-write", "subject-group-write",
+                     "setid-compiler", "nonexec-linker", "codesign-write", "settings-version", "settings-changed",
+                     "compiler-changed", "oversized-compiler", "read-expiry", "initial-expiry"):
+            with self.subTest(observer_toolchain=case):
+                settings_data = {"Version": "26.4", "CanonicalName": "not-macos" if case == "settings-version" else "macosx26.4"}
+                files = {clang: b"inert compiler image", linker: b"inert linker image",
+                         settings: json.dumps(settings_data).encode(), Path("/usr/bin/codesign"): b"inert signature-tool image"}
+                directories = {toolchain: [toolchain / "usr"], toolchain / "usr": [clang.parent],
+                               clang.parent: [clang, linker], sdk: [settings]}
+                clock = SimpleNamespace(now=1.0 if case == "initial-expiry" else 0.0)
+                opened, streams = [], []
+
+                def resolve(path, *, strict=False):
+                    self.assertTrue(strict)
+                    if path == sdk_alias:
+                        return Path("/outside/sdk") if case == "sdk-escape" else sdk
+                    if path == clang and case == "link-escape":
+                        return Path("/outside/clang")
+                    if path not in files and path not in directories:
+                        raise AssertionError("unknown synthetic provider link")
+                    return path
+
+                def state(path):
+                    if path not in files and path not in directories and path not in (xcode, *xcode.parents):
+                        raise AssertionError("unknown synthetic provider stat")
+                    mode = (stat.S_IFREG if path in files else stat.S_IFDIR) | 0o755
+                    owner, group, inode, size = 0, 0, 17, len(files.get(path, b""))
+                    if case == "ancestor-owner" and path == Path("/Applications"):
+                        owner = 1001
+                    if case == "world-write" and path == sdk:
+                        mode |= 0o002
+                    if case == "subject-group-write" and path == clang:
+                        mode |= 0o020
+                        group = 60001
+                    if case == "setid-compiler" and path == clang:
+                        mode |= stat.S_ISUID
+                    if case == "nonexec-linker" and path == linker:
+                        mode = stat.S_IFREG | 0o644
+                    if case == "codesign-write" and path == Path("/usr/bin/codesign"):
+                        mode |= 0o002
+                    if case == "compiler-changed" and path == clang and path in opened:
+                        inode += 1
+                    if case == "oversized-compiler" and path == clang:
+                        size = 512 * self.module.MiB + 1
+                    return SimpleNamespace(st_uid=owner, st_gid=group, st_mode=mode, st_dev=3, st_ino=inode,
+                                           st_size=size, st_mtime_ns=101, st_ctime_ns=102)
+
+                def link_state(path):
+                    result = state(path)
+                    if case == "link-owner" and path == clang:
+                        result.st_uid = 60001
+                    return result
+
+                def children(path):
+                    if path not in directories:
+                        raise AssertionError("unknown synthetic provider directory")
+                    return directories[path]
+
+                class Input(io.BytesIO):
+                    def read(stream, count=-1):
+                        self.assertEqual(count, 65536)
+                        if case == "read-expiry" and stream.path == clang:
+                            clock.now = 1.0
+                        return super().read(count)
+
+                def open_input(path, mode):
+                    self.assertEqual(mode, "rb")
+                    if path not in files:
+                        raise AssertionError("unknown synthetic provider read")
+                    opened.append(path)
+                    stream = Input(files[path])
+                    stream.path = path
+                    streams.append(stream)
+                    return stream
+
+                def read_settings(path):
+                    self.assertEqual(path, settings)
+                    return files[path] + b" " if case == "settings-changed" else files[path]
+
+                executable = self.module._admit_executable
+                with patch.multiple(self.module, _canonical=Path, os=SimpleNamespace(), subprocess=SimpleNamespace(),
+                                    signal=SimpleNamespace(), time=SimpleNamespace(monotonic=lambda: clock.now)), \
+                     patch.object(Path, "resolve", resolve), patch.object(Path, "stat", state), \
+                     patch.object(Path, "lstat", link_state), patch.object(Path, "iterdir", children), \
+                     patch.object(Path, "open", open_input), patch.object(Path, "read_bytes", read_settings), \
+                     patch.object(self.module, "_admit_executable", wraps=executable) as role:
+                    if case == "valid":
+                        result = self.module._observer_toolchain(60001, 60001, deadline=1.0)
+                        self.assertEqual({key: result[key] for key in ("clang", "linker", "sdk", "toolchain")},
+                                         {"clang": clang, "linker": linker, "sdk": sdk, "toolchain": toolchain})
+                        self.assertEqual(result["evidence"], {"xcode": "26.3", "sdk": "macosx26.4", "provider_entries": 5,
+                                         "clang_sha256": hashlib.sha256(files[clang]).hexdigest(),
+                                         "linker_sha256": hashlib.sha256(files[linker]).hexdigest(),
+                                         "sdk_settings_sha256": hashlib.sha256(files[settings]).hexdigest()})
+                        self.assertEqual([c.args for c in role.call_args_list],
+                                         [(clang, 60001, 60001), (linker, 60001, 60001), (Path("/usr/bin/codesign"), 60001, 60001)])
+                        self.assertTrue(all(c.kwargs == {"root_owned": True} for c in role.call_args_list))
+                    else:
+                        with self.assertRaises(self.module.SessionError):
+                            self.module._observer_toolchain(60001, 60001, deadline=1.0)
+                self.assertTrue(all(stream.closed for stream in streams))
+                if case in {"sdk-escape", "initial-expiry", "ancestor-owner", "world-write", "link-escape", "link-owner"}:
+                    self.assertEqual(opened, [])
+                if case == "oversized-compiler":
+                    self.assertNotIn(clang, opened)
+
+    def test_observer_preparation_requires_each_real_result_and_revokes_publication_on_late_failure(self):
+        cases = ("valid", "toolchain-error", "unsupported-arch", "source-too-large", "output-collision", "frozen-collision",
+                 "version-invalid", "compile-nonzero", "compile-unwaited", "compile-no-stdout-eof", "compile-no-stderr-eof",
+                 "compile-no-finality", "compile-timeout", "compile-cancel", "compile-cleanup-error", "compile-diagnostics",
+                 "compile-idle-error", "compile-late-deadline", "verify-unwaited", "verify-diagnostics", "display-empty",
+                 "display-unwaited", "entitlements-unwaited", "entitlements-present", "entitlements-diagnostics",
+                 "post-signature-bytes", "post-signature-mode", "freeze-copy-error", "frozen-bytes", "frozen-mode",
+                 "native-error", "native-finality", "outer-finality")
+        for case in cases:
+            with self.subTest(observer_preparation=case):
+                session = session_double(self.module, "darwin")
+                session.admitted = False
+                session.process_observer = None
+                source = session.source / ".github/scripts/ci_process_observer.c"
+                output, frozen = session.work / "process-observer", session.bootstrap / "process-observer"
+                c_bytes, binary = b"int main(void) { return 0; }\n", b"inert compiled image, never executed"
+                xcode = Path("/Applications/Xcode_26.3.app/Contents/Developer")
+                toolchain = xcode / "Toolchains/XcodeDefault.xctoolchain"
+                tools = {"clang": toolchain / "usr/bin/clang", "linker": toolchain / "usr/bin/ld",
+                         "sdk": xcode / "Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+                         "toolchain": toolchain, "evidence": {"xcode": "26.3", "sdk": "macosx26.4"}}
+                display = (f"Executable={output}\nIdentifier={output.name}\nFormat=Mach-O thin (arm64)\n"
+                           "CodeDirectory v=20400 size=200 flags=0x20002(adhoc,linker-signed) hashes=2+0 location=embedded\n"
+                           "Signature=adhoc\nTeamIdentifier=not set\n").encode()
+                events, artifacts = [], []
+                progress = SimpleNamespace(stage="base", now=0.0)
+                observer_key = "MOBILE_RELEASE_TEST_PROCESS_OBSERVER"
+
+                def preflight():
+                    self.assertIsNone(session.process_observer)
+                    self.assertFalse(session.admitted)
+                    events.append(("base-preflight",))
+
+                def idle():
+                    self.module._remaining(session.deadline)
+                    events.append(("idle", progress.stage, session.process_observer is not None))
+                    if (case == "compile-idle-error" and progress.stage == "build"
+                            or case == "native-finality" and progress.stage == "native"
+                            or case == "outer-finality" and session.process_observer is not None):
+                        raise OSError(errno.EIO, "synthetic finality unknown")
+                    session.domain_finality = True
+
+                def run(argv, **kwargs):
+                    self.assertIsNone(session.process_observer)
+                    self.assertFalse(session.admitted)
+                    self.assertNotIn(observer_key, session._environment(kwargs["env"]))
+                    self.assertEqual(kwargs, {"cwd": session.work, "env": {"DEVELOPER_DIR": str(xcode)},
+                                             "seconds": 120 if "-o" in argv else 15,
+                                             "cpu_seconds": 60, "output_limit": 65536, "latch": False})
+                    if "--version" in argv:
+                        stage = "version"
+                        self.assertEqual(argv, [str(tools["clang"]), "--no-default-config", "--version"])
+                        out = b"unknown compiler\n" if case == "version-invalid" else b"Apple clang version 17.0.0\n"
+                        err = b""
+                    elif "-o" in argv:
+                        stage, out, err = "build", b"", b""
+                        self.assertEqual(argv, [str(tools["clang"]), "--no-default-config", "-fno-modules", "-std=c11",
+                            "-D_DARWIN_C_SOURCE", "-O2", "-Wall", "-Wextra", "-Werror", "-arch", "arm64",
+                            "-isysroot", str(tools["sdk"]), "-B", str(toolchain / "usr/bin"), "-Wl,-adhoc_codesign",
+                            str(source), "-lproc", "-o", str(output)])
+                        if case == "compile-diagnostics":
+                            err = f"{source}:7:9: error: synthetic-private-compiler-canary\n".encode()
+                    elif "--verify" in argv:
+                        stage, out = "verify", b""
+                        err = b"unknown verification diagnostic\n" if case == "verify-diagnostics" else b""
+                        self.assertEqual(argv, ["/usr/bin/codesign", "--verify", "--strict", str(output)])
+                    elif "--verbose=2" in argv:
+                        stage, out = "display", b""
+                        err = b"" if case == "display-empty" else display
+                        self.assertEqual(argv, ["/usr/bin/codesign", "--display", "--verbose=2", str(output)])
+                    else:
+                        stage = "entitlements"
+                        self.assertEqual(argv, ["/usr/bin/codesign", "--display", "--entitlements", "-", "--xml", str(output)])
+                        out = b"<plist><dict/></plist>\n" if case == "entitlements-present" else b""
+                        err = b"unknown extraction state\n" if case == "entitlements-diagnostics" else f"Executable={output}\n".encode()
+                    progress.stage = stage
+                    events.append(("run", stage))
+                    result = self.module.CapturedRun(out, err, 0, True, True, True, True, False, False,
+                                                    0.01, None, (), (len(out), len(err)))
+                    failures = {"compile-nonzero": {"returncode": 7}, "compile-unwaited": {"waited": False},
+                                "compile-no-stdout-eof": {"stdout_eof": False}, "compile-no-stderr-eof": {"stderr_eof": False},
+                                "compile-no-finality": {"domain_finality": False}, "compile-timeout": {"timed_out": True},
+                                "compile-cancel": {"cancelled": True}, "compile-cleanup-error": {"cleanup_errors": ("synthetic close",)}}
+                    if stage == "build" and case in failures:
+                        result = dataclasses.replace(result, **failures[case])
+                    if case == stage + "-unwaited":
+                        result = dataclasses.replace(result, waited=False)
+                    if case == "compile-late-deadline" and stage == "build":
+                        progress.now = session.deadline
+                    return result
+
+                def artifact(path, uid, gid, *, deadline):
+                    self.assertEqual(deadline, session.deadline)
+                    self.assertIsNone(session.process_observer)
+                    self.assertTrue(any(event[:2] == ("idle", "build") for event in events))
+                    artifacts.append(path)
+                    events.append(("artifact", path))
+                    if path == output:
+                        self.assertEqual((uid, gid), (session.uid, session.gid))
+                        if len(artifacts) == 2:
+                            if case == "post-signature-bytes":
+                                return binary + b"changed", 0o755
+                            if case == "post-signature-mode":
+                                return binary, 0o555
+                        return binary, 0o755
+                    self.assertEqual((path, uid, gid), (frozen, 0, 0))
+                    return (binary + b"changed" if case == "frozen-bytes" else binary,
+                            0o755 if case == "frozen-mode" else 0o555)
+
+                def freeze(path, data, mode):
+                    self.assertEqual((path, data, mode), (frozen, binary, 0o555))
+                    self.assertEqual(artifacts, [output, output])
+                    events.append(("freeze",))
+                    if case == "freeze-copy-error":
+                        raise ExceptionGroup("synthetic copy failure", [OSError(errno.EEXIST, "synthetic no-clobber collision")])
+
+                def native(candidate):
+                    self.assertEqual(candidate, frozen)
+                    self.assertEqual(artifacts, [output, output, frozen])
+                    self.assertIsNone(session.process_observer)
+                    self.assertFalse(session.admitted)
+                    self.assertNotIn(observer_key, session._environment({}))
+                    events.append(("native",))
+                    progress.stage = "native"
+                    if case == "native-error":
+                        raise ExceptionGroup("synthetic native failure", [OSError(errno.EIO, "not proven")])
+
+                def source_bytes(path):
+                    self.assertEqual(path, source)
+                    return b"x" * 65537 if case == "source-too-large" else c_bytes
+
+                def absent(path):
+                    self.assertIn(path, (output, frozen))
+                    if case == "output-collision" and path == output or case == "frozen-collision" and path == frozen:
+                        return SimpleNamespace()
+                    raise FileNotFoundError(errno.ENOENT, "synthetic absent task-owned name")
+
+                def mkdir(path, *, mode):
+                    self.assertEqual(mode, 0o700)
+                    self.assertIn(path, [session.work / name for name in ("home", "tmp", "config", "cache")])
+
+                prepared_tools = Mock(return_value=tools, side_effect=self.module.SessionError("synthetic provider binding failure")
+                                      if case == "toolchain-error" else None)
+                fake_os = SimpleNamespace(chown=Mock(), uname=lambda: SimpleNamespace(machine="unsupported" if case == "unsupported-arch" else "arm64"),
+                                          path=SimpleNamespace(basename=os.path.basename))
+                with patch.multiple(self.module, os=fake_os, subprocess=SimpleNamespace(), signal=SimpleNamespace(),
+                                    _readonly_tree=Mock(), _domain=Mock(return_value=set()),
+                                    _small_command=Mock(return_value=b"MRK_NSS_ABSENT\n"),
+                                    _admit_executable=Mock(return_value={"root_owned": True, "setuid": False, "setgid": False}),
+                                    _observer_toolchain=prepared_tools, _observer_artifact=artifact,
+                                    time=SimpleNamespace(monotonic=lambda: progress.now)), \
+                     patch.object(session, "_headroom", Mock()), patch.object(session, "_preflight", side_effect=preflight), \
+                     patch.object(session, "ensure_idle", side_effect=idle), patch.object(session, "_run", side_effect=run) as commands, \
+                     patch.object(session, "_observer_native_controls", side_effect=native) as controls, \
+                     patch.object(self.module, "_private_file", side_effect=freeze) as copy, \
+                     patch.object(Path, "read_bytes", source_bytes), patch.object(Path, "lstat", absent), patch.object(Path, "mkdir", mkdir):
+                    if case == "valid":
+                        session.admit()
+                        self.assertTrue(session.admitted)
+                        self.assertEqual(session.process_observer, frozen)
+                        self.assertEqual(session._environment({})[observer_key], str(frozen))
+                        self.assertIsNone(session.failure)
+                        self.assertEqual(commands.call_count, 5)
+                        copy.assert_called_once_with(frozen, binary, 0o555)
+                        controls.assert_called_once_with(frozen)
+                        self.assertLess(events.index(("base-preflight",)), events.index(("run", "version")))
+                        self.assertLess(events.index(("run", "build")), events.index(("artifact", output)))
+                        self.assertLess(events.index(("freeze",)), events.index(("native",)))
+                        self.assertEqual(events[-1], ("idle", "native", True))
+                        note = next(n for n in session.admission_results if n["name"] == "process-observer")
+                        self.assertTrue(note["ok"])
+                        self.assertEqual(note["source_sha256"], hashlib.sha256(c_bytes).hexdigest())
+                        self.assertEqual(note["binary_sha256"], hashlib.sha256(binary).hexdigest())
+                        self.assertEqual((note["mode"], note["producer_mode"], note["entitlements"]), ("0555", "0755", "none"))
+                    else:
+                        with self.assertRaises((self.module.SessionError, OSError, BaseExceptionGroup)):
+                            session.admit()
+                        self.assertFalse(session.admitted)
+                        self.assertIsNone(session.process_observer)
+                        self.assertNotIn(observer_key, session._environment({}))
+                        self.assertEqual(session.failure, "native isolation admission failed; no product command permitted")
+                        self.assertFalse(any(n["ok"] for n in session.admission_results if n["name"] == "process-observer"))
+                        before = commands.call_count
+                        progress.now = 0.0
+                        with self.assertRaises(self.module.SessionError):
+                            session.run([str(session.python)], cwd=session.work, env={}, seconds=1)
+                        self.assertEqual(commands.call_count, before)
+                    self.assertFalse(session._admitting)
+                prepared_tools.assert_called_once_with(session.uid, session.gid, deadline=session.deadline)
+                early = case.startswith("compile-") or case in {"toolchain-error", "unsupported-arch", "source-too-large",
+                                                               "output-collision", "frozen-collision", "version-invalid"}
+                if early:
+                    self.assertEqual(artifacts, [])
+                    copy.assert_not_called()
+                    controls.assert_not_called()
+                if case == "compile-diagnostics":
+                    note = next(n for n in session.admission_results if n["name"] == "process-observer-build")
+                    self.assertFalse(note["ok"])
+                    self.assertEqual(note["compiler_diagnostics"], [{"file": ".github/scripts/ci_process_observer.c",
+                                     "line": 7, "column": 9, "severity": "error"}])
+                    self.assertNotIn("synthetic-private-compiler-canary", json.dumps(session.admission_results))
+
+    def test_observer_root_control_keeps_foreign_original_custody_and_collects_late_failures(self):
+        for case in ("valid", "bad-ready", "bad-root-observation", "probe-unwaited", "probe-footer", "probe-stderr",
+                     "communicate-error", "wrong-close-footer", "poll-error", "wait-error", "missing-wait",
+                     "primary-and-close-errors", "unknown-domain", "late-close"):
+            with self.subTest(observer_root_control=case):
+                session = session_double(self.module, "darwin")
+                session.admitted = False
+                session.process_observer = None
+                session.deadline = 25.0
+                candidate = session.bootstrap / "process-observer"
+                clock, events = SimpleNamespace(now=0.0), []
+                original_error = OSError(errno.EIO, "synthetic original control error")
+                close_errors = [OSError(errno.EIO, "synthetic stdin close"), OSError(errno.EIO, "synthetic stderr close")]
+                child = SimpleNamespace(pid=5252, returncode=None)
+
+                def close(index):
+                    events.append(("close", index))
+                    if case == "primary-and-close-errors" and index in {0, 2}:
+                        raise close_errors[index // 2]
+                    if case == "late-close" and index == 2:
+                        clock.now = 25.0
+
+                child.stdin, child.stdout, child.stderr = [SimpleNamespace(close=Mock(side_effect=lambda i=i: close(i))) for i in range(3)]
+
+                def communicate(data, *, timeout):
+                    self.assertEqual((data, timeout), (b"q", 2))
+                    events.append(("communicate",))
+                    if case == "communicate-error":
+                        raise original_error
+                    child.returncode = 0
+                    return (b"wrong\n" if case == "wrong-close-footer" else b"MRK_SENTINEL_CLOSED\n"), b""
+
+                def poll():
+                    events.append(("poll",))
+                    if case == "poll-error":
+                        raise original_error
+                    return child.returncode
+
+                def kill():
+                    events.append(("kill-original",))
+                    child.returncode = -9
+
+                def wait(*, timeout):
+                    events.append(("wait", timeout))
+                    if case == "wait-error":
+                        raise original_error
+                    return None if case == "missing-wait" else child.returncode
+
+                child.communicate, child.poll, child.kill, child.wait = (Mock(side_effect=communicate), Mock(side_effect=poll),
+                                                                       Mock(side_effect=kill), Mock(side_effect=wait))
+
+                def ready(stream, timeout):
+                    self.assertIs(stream, child.stdout)
+                    self.assertEqual(timeout, 5)
+                    events.append(("ready",))
+                    return b"wrong\n" if case == "bad-ready" else b"MRK_SENTINEL_READY\n"
+
+                def snapshot(*, deadline):
+                    self.assertEqual(deadline, 25.0)
+                    child.poll.assert_not_called()
+                    child.wait.assert_not_called()
+                    events.append(("root-observation",))
+                    return {} if case == "bad-root-observation" else {(child.pid, child.pid): ((0, 0, 0), (0, 0, 0), 65536)}
+
+                def run(argv, **kwargs):
+                    self.assertEqual(argv, [str(session.python), "-I", "-S", "-B", str(session.entry),
+                                           "--observer-probe", str(candidate), str(child.pid), "20.0"])
+                    self.assertEqual(kwargs, {"cwd": session.work, "env": {}, "seconds": 20.0, "latch": False})
+                    self.assertIn(("root-observation",), events)
+                    child.poll.assert_not_called()
+                    child.wait.assert_not_called()
+                    events.append(("subject-control",))
+                    out = b"wrong\n" if case in {"probe-footer", "primary-and-close-errors"} else b"MRK_PROCESS_OBSERVER_OK\n"
+                    err = b"unexpected\n" if case == "probe-stderr" else b""
+                    return self.module.CapturedRun(out, err, 0, case != "probe-unwaited", True, True, True,
+                                                   False, False, 0.01, None, (), (len(out), len(err)))
+
+                domain = Mock(return_value=set(), side_effect=OSError(errno.EIO, "synthetic domain unknown")
+                              if case == "unknown-domain" else None)
+                launch = Mock(return_value=child)
+                with patch.multiple(self.module, os=SimpleNamespace(geteuid=lambda: 0, getgid=lambda: 0),
+                                    subprocess=SimpleNamespace(Popen=launch, PIPE=-1), selectors=SimpleNamespace(), signal=SimpleNamespace(),
+                                    time=SimpleNamespace(monotonic=lambda: clock.now), _ready_line=ready,
+                                    _mac_snapshot=snapshot, _domain=domain,
+                                    _small_command=Mock(side_effect=AssertionError("no real metadata/native tool"))), \
+                     patch.object(session, "_headroom", Mock()), patch.object(session, "_run", side_effect=run):
+                    if case == "valid":
+                        session._observer_native_controls(candidate)
+                    else:
+                        with self.assertRaises(BaseExceptionGroup) as caught:
+                            session._observer_native_controls(candidate)
+                        if case == "primary-and-close-errors":
+                            self.assertIsInstance(caught.exception.exceptions[0], self.module.SessionError)
+                            self.assertEqual(caught.exception.exceptions[1:], tuple(close_errors))
+                launch.assert_called_once_with([str(session.python), "-I", "-S", "-B", str(session.entry), "--sentinel"],
+                    cwd=session.work, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}, stdin=-1, stdout=-1, stderr=-1,
+                    close_fds=True, start_new_session=True, bufsize=0)
+                self.assertNotIn(str(candidate), launch.call_args.args[0])  # The compiled reader is NEVER a root command.
+                child.wait.assert_called_once()
+                self.assertTrue(0 <= child.wait.call_args.kwargs["timeout"] <= 2)
+                for stream in (child.stdin, child.stdout, child.stderr):
+                    stream.close.assert_called_once_with()
+                notes = [n for n in session.admission_results if n["name"] == "process-observer-native"]
+                if notes:
+                    self.assertEqual(notes[0]["ok"], case == "valid")
+                if case == "valid":
+                    self.assertEqual(len(notes), 1)
+                    self.assertLess(events.index(("subject-control",)), events.index(("communicate",)))
+                    self.assertLess(events.index(("communicate",)), events.index(("poll",)))
+                    child.kill.assert_not_called()
+                    self.assertEqual(domain.call_count, 2)
+                self.assertIsNone(session.process_observer)
+
+    def test_observer_eof_never_reaps_and_foreign_denial_is_an_exact_waited_kernel_result(self):
+        footer = b"MRK_OBSERVER_FAMILY_RELEASED\n"
+        for case in ("valid", "missing-footer", "stderr", "over-limit", "held-pipe", "selector-acquire", "selector-close", "close-expiry"):
+            with self.subTest(observer_eof=case):
+                rig = _Collection(self.module, stdout=(footer,), stderr=())
+                primary = OSError(errno.EIO, "synthetic observer selector acquisition")
+                if case == "missing-footer":
+                    rig.chunks[0] = []
+                elif case == "stderr":
+                    rig.chunks[1] = [b"unexpected diagnostics\n"]
+                elif case == "over-limit":
+                    rig.chunks[0] = [b"x" * 513]
+                elif case == "held-pipe":
+                    rig.hold = {0}
+                elif case == "selector-acquire":
+                    rig.selector_error = primary
+                elif case == "selector-close":
+                    rig.selector_close_error = True
+                original_close = rig.selector.close
+
+                def close_selector():
+                    original_close()
+                    if case == "close-expiry":
+                        rig.now = 1.0
+
+                with rig.scope(), patch.object(rig.selector, "close", close_selector):
+                    if case == "valid":
+                        self.module._observer_control_eof(rig.child, deadline=1.0)
+                    else:
+                        with self.assertRaises(BaseExceptionGroup) as caught:
+                            self.module._observer_control_eof(rig.child, deadline=1.0)
+                        if case == "selector-acquire":
+                            self.assertEqual(caught.exception.exceptions, (primary,))
+                        elif case in {"held-pipe", "close-expiry"}:
+                            self.assertTrue(any(isinstance(e, self.module.DeadlineExpired) for e in caught.exception.exceptions))
+                self.assertFalse(any(event[0] in {"poll", "wait-original", "kill-original", "terminate-original", "stream-close", "popen"}
+                                     for event in rig.events))
+                self.assertEqual(sum(event[0] == "selector-close" for event in rig.events), int(case != "selector-acquire"))
+                if case == "valid":
+                    self.assertIn(("unregister-eof", 0), rig.events)
+                    self.assertIn(("unregister-eof", 1), rig.events)
+
+        observer, foreign = Path("/synthetic/bootstrap/process-observer"), 7000
+        for case in ("eperm", "eacces", "identity-denied", "generic-error", "absent", "metadata-unwaited", "late", "root", "linux"):
+            with self.subTest(observer_foreign_query=case):
+                clock = SimpleNamespace(now=0.0)
+                records = {"identity-denied": f"MRK_PROCESS_V1 denied {foreign} identity 0\n",
+                           "generic-error": "MRK_PROCESS_V1 error target-query\n", "absent": f"MRK_PROCESS_V1 absent {foreign}\n"}
+                raw = records.get(case, f"MRK_PROCESS_V1 denied {foreign} kernel {errno.EACCES if case == 'eacces' else errno.EPERM}\n").encode()
+
+                def metadata(argv, seconds, **kwargs):
+                    self.assertEqual(argv, [str(observer), str(foreign)])
+                    self.assertEqual(seconds, 3)
+                    self.assertEqual(kwargs, {"expected_code": 2, "deadline": 1.0})
+                    if case == "metadata-unwaited":
+                        raise ExceptionGroup("synthetic original metadata wait failure", [TimeoutError("no actual wait")])
+                    if case == "late":
+                        clock.now = 1.0
+                    return raw
+
+                command = Mock(side_effect=metadata)
+                with patch.multiple(self.module, sys=SimpleNamespace(platform="linux" if case == "linux" else "darwin"),
+                                    os=SimpleNamespace(getuid=lambda: 0 if case == "root" else 60001, getgid=lambda: 60001),
+                                    subprocess=SimpleNamespace(), signal=SimpleNamespace(), _small_command=command,
+                                    time=SimpleNamespace(monotonic=lambda: clock.now)):
+                    if case in {"eperm", "eacces"}:
+                        self.assertEqual(self.module._observer_query(observer, foreign, None, deadline=1.0, kernel_denied=True), "denied")
+                    else:
+                        with self.assertRaises((self.module.SessionError, BaseExceptionGroup)):
+                            self.module._observer_query(observer, foreign, None, deadline=1.0, kernel_denied=True)
+                if case in {"root", "linux"}:
+                    command.assert_not_called()
+                else:
+                    command.assert_called_once()
+
+    def test_observer_probe_keeps_real_zombie_window_and_family_waits_its_own_descendant(self):
+        entry = Path("/synthetic/bootstrap/ci_sandbox.py")
+        candidate, foreign = entry.parent / "process-observer", 7000
+
+        def own_entry(path):
+            self.assertEqual(path, Path(self.module.__file__))
+            return entry
+
+        for case in ("valid", "vanished-before-reap", "present-after-reap", "foreign-error", "eof-error", "deadline"):
+            with self.subTest(observer_probe=case):
+                clock = SimpleNamespace(now=0.0, released=False, reaped=False)
+                events = []
+                child = SimpleNamespace(pid=4242, returncode=None)
+                for name, fd in (("stdin", 12), ("stdout", 10), ("stderr", 11)):
+                    setattr(child, name, SimpleNamespace(fileno=lambda fd=fd: fd, close=Mock()))
+
+                def poll():
+                    events.append(("poll",))
+                    return child.returncode
+
+                def kill():
+                    events.append(("kill-original",))
+                    child.returncode = -9
+
+                def wait(*, timeout):
+                    events.append(("wait", timeout))
+                    clock.reaped = True
+                    child.returncode = 0 if child.returncode is None else child.returncode
+                    return child.returncode
+
+                child.poll, child.kill, child.wait = Mock(side_effect=poll), Mock(side_effect=kill), Mock(side_effect=wait)
+
+                def query(observer, pid, group, *, deadline, kernel_denied=False):
+                    self.assertEqual((observer, deadline), (candidate, 1.0))
+                    if pid == foreign:
+                        self.assertEqual((group, kernel_denied), (None, True))
+                        if case == "foreign-error":
+                            raise self.module.SessionError("synthetic foreign observation not kernel-denied")
+                        state = "denied"
+                    else:
+                        self.assertIn(pid, (child.pid, 5277))
+                        self.assertEqual((group, kernel_denied), (child.pid, False))
+                        state = ("indeterminate" if case == "deadline" else "live") if not clock.released else (
+                            ("absent" if case == "vanished-before-reap" else "zombie") if not clock.reaped else
+                            ("live" if case == "present-after-reap" else "absent"))
+                    events.append(("query", pid, state))
+                    if len(events) > 128:
+                        raise AssertionError("finite synthetic observation budget exhausted")
+                    return state
+
+                def release(fd, data):
+                    self.assertEqual((fd, data), (12, b"q"))
+                    child.poll.assert_not_called()
+                    child.wait.assert_not_called()
+                    clock.released = True
+                    events.append(("release",))
+                    return 1
+
+                def eof(original, *, deadline):
+                    self.assertIs(original, child)
+                    self.assertEqual(deadline, 1.0)
+                    self.assertTrue(clock.released)
+                    child.poll.assert_not_called()
+                    child.wait.assert_not_called()
+                    events.append(("eof",))
+                    if case == "eof-error":
+                        raise self.module.SessionError("synthetic incomplete owned EOF")
+
+                def sleep(seconds):
+                    self.assertTrue(0 < seconds <= 0.01)
+                    clock.now += seconds
+
+                launch = Mock(return_value=child)
+                output = io.StringIO()
+                with patch.multiple(self.module, sys=SimpleNamespace(platform="darwin", executable="/synthetic/python"),
+                                    os=SimpleNamespace(getuid=lambda: 60001, geteuid=lambda: 60001, getgid=lambda: 60001,
+                                                       getegid=lambda: 60001, getpid=lambda: 6161, write=release),
+                                    subprocess=SimpleNamespace(Popen=launch, PIPE=-1), signal=SimpleNamespace(), selectors=SimpleNamespace(),
+                                    _ready_line=Mock(return_value=b"MRK_OBSERVER_FAMILY 5277\n"),
+                                    _observer_query=query, _observer_control_eof=eof,
+                                    _small_command=Mock(side_effect=AssertionError("no real observer invocation")),
+                                    time=SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep)), \
+                     patch.object(Path, "resolve", own_entry), redirect_stdout(output):
+                    if case == "valid":
+                        self.module._observer_probe(candidate, foreign, 1.0)
+                    else:
+                        with self.assertRaises(BaseExceptionGroup):
+                            self.module._observer_probe(candidate, foreign, 1.0)
+                launch.assert_called_once_with(["/synthetic/python", "-I", "-S", "-B", str(entry), "--observer-family", "1.0"],
+                    stdin=-1, stdout=-1, stderr=-1, close_fds=True, start_new_session=True, bufsize=0)
+                self.assertLessEqual(clock.now, 1.001)
+                self.assertTrue(child.wait.called)
+                for stream in (child.stdout, child.stderr):
+                    stream.close.assert_called_once_with()
+                self.assertTrue(child.stdin.close.called)
+                if case == "valid":
+                    self.assertEqual(output.getvalue(), "MRK_PROCESS_OBSERVER_OK\n")
+                    zombie = events.index(("query", child.pid, "zombie"))
+                    original_wait = next(i for i, event in enumerate(events) if event[0] == "wait")
+                    self.assertLess(events.index(("query", 5277, "live")), events.index(("release",)))
+                    self.assertLess(events.index(("eof",)), zombie)
+                    self.assertLess(zombie, original_wait)
+                    self.assertLess(original_wait, events.index(("query", child.pid, "absent")))
+                    self.assertTrue(all(i > zombie for i, event in enumerate(events) if event[0] in {"poll", "wait"}))
+                    self.assertEqual(child.wait.call_count, 2)
+                    child.kill.assert_not_called()
+                else:
+                    self.assertEqual(output.getvalue(), "")
+                    if case == "vanished-before-reap":
+                        self.assertLess(events.index(("query", child.pid, "absent")),
+                                        next(i for i, event in enumerate(events) if event[0] == "wait"))
+
+        for case in ("valid", "wrong-descendant-footer", "selector-and-stream-close-errors", "late-final-close"):
+            with self.subTest(observer_family=case):
+                clock = SimpleNamespace(now=0.0)
+                events = []
+                child = SimpleNamespace(pid=5277, returncode=None)
+                selector_error = OSError(errno.EIO, "synthetic release selector close")
+                stream_error = OSError(errno.EIO, "synthetic descendant stdout close")
+
+                def close(index):
+                    events.append(("stream-close", index))
+                    if case == "selector-and-stream-close-errors" and index == 1:
+                        raise stream_error
+                    if case == "late-final-close" and index == 2:
+                        clock.now = 1.0
+
+                child.stdin, child.stdout, child.stderr = [SimpleNamespace(close=Mock(side_effect=lambda i=i: close(i))) for i in range(3)]
+
+                def communicate(data, *, timeout):
+                    self.assertEqual((data, timeout), (b"q", 1.0))
+                    events.append(("communicate",))
+                    child.returncode = 0
+                    return (b"wrong\n" if case == "wrong-descendant-footer" else b"MRK_SENTINEL_CLOSED\n"), b""
+
+                def wait(*, timeout):
+                    events.append(("wait", timeout))
+                    return child.returncode
+
+                def kill():
+                    child.returncode = -9
+
+                child.communicate, child.poll, child.kill, child.wait = (Mock(side_effect=communicate), Mock(side_effect=lambda: child.returncode),
+                                                                       Mock(side_effect=kill), Mock(side_effect=wait))
+
+                class ReleaseSelector:
+                    def __enter__(selector):
+                        return selector
+
+                    def register(selector, fd, event):
+                        self.assertEqual((fd, event), (0, 1))
+
+                    def select(selector, timeout):
+                        self.assertEqual(timeout, 1.0)
+                        return [("synthetic-ready", 1)]
+
+                    def __exit__(selector, *_error):
+                        events.append(("selector-close",))
+                        if case == "selector-and-stream-close-errors":
+                            raise selector_error
+
+                launch, output = Mock(return_value=child), io.StringIO()
+                with patch.multiple(self.module, sys=SimpleNamespace(platform="darwin", executable="/synthetic/python"),
+                                    os=SimpleNamespace(getuid=lambda: 60001, geteuid=lambda: 60001, read=Mock(return_value=b"q")),
+                                    subprocess=SimpleNamespace(Popen=launch, PIPE=-1), signal=SimpleNamespace(),
+                                    selectors=SimpleNamespace(DefaultSelector=ReleaseSelector, EVENT_READ=1),
+                                    _ready_line=Mock(return_value=b"MRK_SENTINEL_READY\n"),
+                                    time=SimpleNamespace(monotonic=lambda: clock.now)), \
+                     patch.object(Path, "resolve", own_entry), redirect_stdout(output):
+                    if case == "valid":
+                        self.module._observer_family(1.0)
+                    else:
+                        with self.assertRaises(BaseExceptionGroup) as caught:
+                            self.module._observer_family(1.0)
+                        if case == "selector-and-stream-close-errors":
+                            self.assertEqual(caught.exception.exceptions, (selector_error, stream_error))
+                launch.assert_called_once_with(["/synthetic/python", "-I", "-S", "-B", str(entry), "--sentinel"],
+                                               stdin=-1, stdout=-1, stderr=-1, close_fds=True, bufsize=0)
+                child.wait.assert_called_once()
+                self.assertEqual([event for event in events if event[0] == "stream-close"], [("stream-close", 0), ("stream-close", 1), ("stream-close", 2)])
+                self.assertEqual("MRK_OBSERVER_FAMILY_RELEASED\n" in output.getvalue(), case == "valid")
+                if case == "valid":
+                    child.kill.assert_not_called()
+                    self.assertLess(events.index(("communicate",)), next(i for i, event in enumerate(events) if event[0] == "wait"))

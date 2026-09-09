@@ -22,6 +22,11 @@ module UploadProcessFixture
   CLEANUP_LIMIT = 5
   WORKER_LIMIT = 30
   OUTPUT_LIMIT = 32_768
+  PROCESS_OBSERVER_KEY = "MOBILE_RELEASE_TEST_PROCESS_OBSERVER"
+  # The owner fixes this before entry. Later configuration/canary changes must
+  # not select another executable or leak into the read-only observation.
+  PROCESS_OBSERVER_SELECTION = ENV[PROCESS_OBSERVER_KEY]&.dup&.freeze
+  PROCESS_OBSERVER_LOCALE = {"LANG" => "C", "LC_ALL" => "C"}.freeze
   NATIVE_PRIMARY_PROOFS = begin
     cases = {}
     %w[publication readiness watchdog].product(%w[standard io interrupt system-exit], %w[none close]).each do |boundary, kind, secondary|
@@ -82,7 +87,7 @@ module UploadProcessFixture
   # Only this parent waits on these direct Process.spawn children. Their PID is
   # reserved until waitpid actually reaps it; no asynchronous detach/waiter runs.
   # No signal is sent after that point, even on an assertion or parser failure.
-  def capture_command(argv, seconds: 2)
+  def capture_command(argv, seconds: 2, environment: process_observer_environment)
     lifetime do |scope|
       directory = output = errors = nil
       child = OwnedChild.new
@@ -91,7 +96,7 @@ module UploadProcessFixture
         output = File.open(File.join(directory, "stdout"), "w+", 0o600)
         errors = File.open(File.join(directory, "stderr"), "w+", 0o600)
         scope.active do
-          child.start({}, *argv, out: output, err: errors, in: File::NULL,
+          child.start(environment, *argv, out: output, err: errors, in: File::NULL,
                       unsetenv_others: true, pgroup: true)
           wait_until(seconds, "process-observation") do
             !child.poll.nil?
@@ -147,9 +152,90 @@ module UploadProcessFixture
     :live
   end
 
+  def process_observer_environment
+    PROCESS_OBSERVER_SELECTION.nil? ? {} : {PROCESS_OBSERVER_KEY => PROCESS_OBSERVER_SELECTION}
+  end
+
+  def validate_process_observer_path(path, darwin:)
+    return nil if path.nil? && !darwin
+    unless darwin && path.is_a?(String) && path.ascii_only? && path.bytesize.between?(1, 4096) &&
+           !path.include?("\0") && !path.include?("\n") && path == File.absolute_path(path) &&
+           File.basename(path) == "process-observer" && File.basename(File.dirname(path)) == "bootstrap" &&
+           File.dirname(File.dirname(File.dirname(path))) == "/private/tmp"
+      raise Failure.new("process-observation", "missing or invalid owner-fixed process observer")
+    end
+    file = File.lstat(path)
+    parents = [File.dirname(path), File.dirname(File.dirname(path))].map { |name| File.lstat(name) }
+    unless File.realpath(path) == path && file.file? && file.uid.zero? && file.nlink == 1 &&
+           (file.mode & 0o7777) == 0o555 && File.executable?(path) &&
+           parents.all? { |parent| parent.directory? && parent.uid.zero? && (parent.mode & 0o6022).zero? }
+      raise Failure.new("process-observation", "owner-fixed process observer is not immutable")
+    end
+    path
+  rescue SystemCallError, ArgumentError
+    raise Failure.new("process-observation", "owner-fixed process observer is unavailable")
+  end
+
+  def process_observer_path
+    # Requiring this only on actual observation lets non-observing workers load
+    # the fixture with their unchanged production environment. A scrubbed Mac
+    # driver that loses its selector must fail, never downgrade to system ps.
+    validate_process_observer_path(PROCESS_OBSERVER_SELECTION, darwin: RUBY_PLATFORM.include?("darwin"))
+  end
+
+  def observation_executable
+    process_observer_path || "/bin/ps"
+  end
+
+  def parse_process_observer(stdout, stderr, status, pid, group, uid: Process.uid, gid: Process.gid)
+    valid_identity = pid.is_a?(Integer) && pid.between?(2, 2_147_483_647) &&
+                     group.is_a?(Integer) && group.between?(2, 2_147_483_647) &&
+                     uid.is_a?(Integer) && uid.between?(1, 4_294_967_295) &&
+                     gid.is_a?(Integer) && gid.between?(0, 4_294_967_295)
+    unless valid_identity && stdout.is_a?(String) && stdout.ascii_only? && stdout.bytesize <= 512 &&
+           stderr == "" && status.is_a?(Integer) && status.zero?
+      raise Failure.new("process-observation", "process observer failed or returned unsupported output")
+    end
+    absent = /\AMRK_PROCESS_V1 absent ([1-9][0-9]*)\n\z/.match(stdout)
+    return "absent" if absent && Integer(absent[1], 10) == pid
+    number = "(?:0|[1-9][0-9]*)"
+    match = /\AMRK_PROCESS_V1 present ((?:#{number} ){9}#{number}) (live|indeterminate|zombie)\n\z/.match(stdout)
+    if match
+      values = match[1].split(" ").map { |value| Integer(value, 10) }
+      target, pgid, ruid, euid, suid, rgid, egid, sgid, bsd_status, inexit = values
+      expected_state = if bsd_status == 5
+        "zombie" # BSD SZOMB wins even when the independent INEXIT flag is set.
+      elsif inexit == 1 || ![2, 3, 4].include?(bsd_status)
+        "indeterminate"
+      else
+        "live"
+      end
+      if target == pid && pgid == group && [ruid, euid, suid] == [uid] * 3 &&
+         [rgid, egid, sgid] == [gid] * 3 && bsd_status.between?(0, 4_294_967_295) &&
+         [0, 1].include?(inexit) && match[2] == expected_state
+        return expected_state
+      end
+    end
+    # Denied/kernel, denied/identity and generic error are all failures, never
+    # an invented absent result. Do not echo arbitrary observer diagnostics.
+    raise Failure.new("process-observation", "process observer returned malformed or incorrectly scoped metadata")
+  end
+
+  def observer_liveness(value)
+    {"live" => :live, "indeterminate" => :indeterminate,
+     "zombie" => :stopped, "absent" => :stopped}.fetch(value)
+  end
+
   def state(pid, group, seconds: 2)
-    value = parse_state(*capture_command(["/bin/ps", "-o", "pid=,pgid=,stat=", "-p", pid.to_s], seconds: seconds), pid, group)
-    liveness(value)
+    observer = process_observer_path
+    if observer
+      result = capture_command([observer, pid.to_s], seconds: seconds, environment: PROCESS_OBSERVER_LOCALE)
+      observer_liveness(parse_process_observer(*result, pid, group))
+    else
+      result = capture_command(["/bin/ps", "-o", "pid=,pgid=,stat=", "-p", pid.to_s], seconds: seconds,
+                               environment: PROCESS_OBSERVER_LOCALE)
+      liveness(parse_state(*result, pid, group))
+    end
   end
 
   def alive?(pid, group)
@@ -247,8 +333,24 @@ module UploadProcessFixture
                     proof["callbackEntries"] == 0 && proof["framePublishedBeforeFault"])
   end
 
-  def run(platform:, root:, parameters:, mode:)
+  def validate_signal_observation!(platform, mode, enabled)
+    unless (enabled.equal?(false) || enabled.equal?(true)) &&
+           (!enabled || (platform == "native" && NativeSignalProbe::MODES.include?(mode)))
+      raise Failure.new("fixture-input", "invalid native signal observation request")
+    end
+  end
+
+  def run(platform:, root:, parameters:, mode:, observe_signals: false)
     validate_request!(platform, mode, parameters)
+    validate_signal_observation!(platform, mode, observe_signals)
+    if observe_signals && !NativeSignalProbe.current
+      return NativeSignalProbe.observe_parent(root, mode) do
+        run(platform: platform, root: root, parameters: parameters, mode: mode, observe_signals: true)
+      end
+    end
+    if observe_signals && !NativeSignalProbe.current.parent_for?(root, mode)
+      raise Failure.new("fixture-input", "native signal observer scope does not match the run")
+    end
     return run_ownership_probe(platform: platform, root: root, parameters: parameters, mode: mode) if mode.start_with?("ownership-")
     lifetime do |scope|
       directory = nil
@@ -258,11 +360,13 @@ module UploadProcessFixture
       result = proof = nil
       begin
         directory = File.realpath(Dir.mktmpdir("native-process-", root))
-        atomic_json(File.join(directory, "input.json"), {"platform" => platform, "parameters" => parameters, "mode" => mode})
+        input = {"platform" => platform, "parameters" => parameters, "mode" => mode}
+        input["observeSignals"] = true if observe_signals
+        atomic_json(File.join(directory, "input.json"), input)
         File.open(File.join(directory, "driver.stdout"), "w") do |output|
           File.open(File.join(directory, "driver.stderr"), "w") do |errors|
             scope.active do
-              child.start({}, RbConfig.ruby, File.realpath(__FILE__), "driver", directory,
+              child.start(process_observer_environment, RbConfig.ruby, File.realpath(__FILE__), "driver", directory,
                           in: File::NULL, out: output, err: errors, unsetenv_others: true, pgroup: true)
               killed = false
               wait_until(DRIVER_LIMIT, "driver") do
@@ -286,6 +390,16 @@ module UploadProcessFixture
                 result = {"kind" => "driver-terminated", "phase" => owner.fetch("phase"), "eofAfterDriverDeath" => true}
               else
                 result = read_json(File.join(directory, "result.json"))
+                if observe_signals
+                  signal_proof = read_json(File.join(directory, "native-signal-proof.json"))
+                  unless signal_proof["case"] == mode && signal_proof["kind"] == "native-signal-observation" &&
+                         signal_proof["sourceSha256"] == NativeSignalProbe.current.source_hashes &&
+                         signal_proof["failures"] == [] && signal_proof["hooksRestored"] == true &&
+                         signal_proof["baseDriverReturn"] == 0 && child.status.exited? && child.status.exitstatus == 0
+                    raise Failure.new("fixture-result", "failed native signal proof: #{JSON.generate(signal_proof)}")
+                  end
+                  result = result.merge("nativeSignalProof" => signal_proof, "observedDriverExitStatus" => child.status.exitstatus)
+                end
                 if NATIVE_PRIMARY_PROOFS.key?(mode)
                   # A passing regression envelope never replaces the actual
                   # failed native driver's result/status or grants PID authority.
@@ -325,7 +439,9 @@ module UploadProcessFixture
           diagnostics = {"errorClass" => error.class.name, "error" => error.message,
                          "driverStatus" => child.status&.to_s, "ownedDirectory" => directory}
           if directory
-            %w[owner.json result.json driver.stderr driver.stdout].each do |name|
+            names = %w[owner.json result.json driver.stderr driver.stdout]
+            names << "native-signal-proof.json" if observe_signals
+            names.each do |name|
               path = File.join(directory, name)
               diagnostics[name] = File.binread(path, OUTPUT_LIMIT).force_encoding("UTF-8").scrub if File.file?(path)
             end
@@ -941,10 +1057,422 @@ module UploadProcessFixture
     end
   end
 
+  # Separate opt-in proof, never installed by the ordinary native/adapter suites.
+  # The native waiter check is an observation, NOT QA-007 process authority;
+  # entered runs still require the admitted disposable hosted environment.
+  class NativeSignalProbe
+    MODES = %w[native-setup-interrupt native-setup-system-exit native-setup-io-error
+               native-setup-post-reap-cancel].freeze
+    SOURCES = %w[tests/workflow/upload_process_fixture.rb tests/workflow/upload_process_ownership.rb
+                 fastlane/native_upload_validation.rb fastlane/release_support.rb].freeze
+    class << self
+      attr_accessor :current, :last_parent
+    end
+    attr_reader :source_hashes, :requests, :failures, :records, :control_forwards, :hooks_restored
+
+    def initialize(role, mode, root: nil, driver: nil)
+      raise "invalid fixed signal proof" unless %i[parent driver control].include?(role) && MODES.include?(mode)
+      @role, @mode, @root, @driver = role, mode, root, driver
+      @requests, @failures, @records, @by_pid = [], [], [], {}
+      @start_owner = @signal_owner = nil
+      @backend_entries = @callback_entries = @backend_depth = @control_forwards = 0
+      @actual_waiter = nil
+      @actual_ios = []
+      @hooks_restored = false
+      base = File.expand_path("../..", __dir__)
+      @paths = SOURCES.to_h { |name| [name, File.realpath(File.join(base, name))] }
+      @source_hashes = source_snapshot.freeze
+      @anchors = {
+        "native" => anchor(SOURCES[2], 'Process.kill("KILL", -waiter.pid)'),
+        "fixture" => anchor(SOURCES[1], 'Process.kill(signal, group ? -@pid : @pid)'),
+        "self" => anchor(SOURCES[0], 'Process.kill("INT", Process.pid)')
+      }
+    end
+
+    def parent_for?(root, mode)
+      @role == :parent && @root == root && @mode == mode
+    end
+
+    def source_snapshot
+      @paths.to_h do |name, path|
+        bytes = File.binread(path, 1_048_577)
+        raise "oversized signal proof source" if bytes.bytesize > 1_048_576
+        [name, Digest::SHA256.hexdigest(bytes)]
+      end
+    end
+
+    def anchor(name, text)
+      lines = File.readlines(@paths.fetch(name))
+      matches = lines.each_index.select { |index| lines[index].strip.start_with?(text) }
+      raise "native signal proof source anchor changed" unless matches.length == 1
+      [@paths.fetch(name), matches.first + 1].freeze
+    end
+
+    def fail!(reason)
+      @failures << reason unless @failures.include?(reason)
+    end
+
+    def owner_scope(kind, owner)
+      variable = kind == :start ? :@start_owner : :@signal_owner
+      previous = instance_variable_get(variable)
+      instance_variable_set(variable, owner)
+      yield
+    ensure
+      instance_variable_set(variable, previous)
+    end
+
+    def spawned(pid, options)
+      if @start_owner
+        prior = @by_pid[pid]
+        fail!("overlapping fixture reservation") if prior && prior[:state] != :reaped
+        record = {owner: @start_owner, pid: pid, private_group: options[:pgroup].equal?(true),
+                  state: :live, status: nil}
+        @records << record
+        @by_pid[pid] = record
+      elsif @backend_depth.zero?
+        fail!("spawn without fixture ownership")
+      end
+    end
+
+    def waited(pid, value, error = nil)
+      record = @by_pid[pid]
+      return unless record
+      if error
+        record[:state] = :unknown unless record[:state] == :reaped
+      elsif value
+        unless value.first == pid && value.last.is_a?(Process::Status) && value.last.pid == pid
+          record[:state] = :unknown
+          fail!("inconsistent fixture wait")
+          return
+        end
+        record[:state], record[:status] = :reaped, value.last
+      end
+    end
+
+    def fixture_context(signal, targets, source)
+      target = targets.length == 1 && targets.first.is_a?(Integer) ? targets.first : nil
+      record = target && @by_pid[target.abs]
+      owner = @signal_owner
+      state = if record && record[:state] == :reaped
+        "reaped"
+      elsif record && owner && record[:owner].equal?(owner) && record[:state] == :live && owner.phase == :live
+        "live"
+      else
+        "unknown"
+      end
+      {"origin" => "fixture", "signal" => signal, "targets" => targets, "source" => source,
+       "state" => state, "sourceBound" => source == @anchors.fetch("fixture"),
+       "ownerBound" => !!(record && owner && record[:owner].equal?(owner) && owner.pid == record[:pid]),
+       "targetBound" => !!(record && (target == record[:pid] || (target == -record[:pid] && record[:private_group])))}
+    end
+
+    def request(signal, targets, location)
+      source = [location.path, location.lineno]
+      context = {"origin" => "fixture", "signal" => signal, "targets" => targets, "source" => source,
+                 "state" => "unknown", "sourceBound" => false, "ownerBound" => false, "targetBound" => false}
+      begin
+        context = fixture_context(signal, targets, source)
+        if source == @anchors.fetch("native")
+          context.merge!("origin" => "native", "state" => "unknown")
+          joined = @actual_waiter&.join(0)
+          context.merge!("state" => @actual_waiter ? (joined ? "reaped" : "live") : "unknown",
+                         "sourceBound" => true,
+                         "ownerBound" => @actual_waiter && @actual_waiter.equal?(@driver&.instance_variable_get(:@waiter)),
+                         "targetBound" => @actual_waiter && targets == [-@actual_waiter.pid])
+        elsif source == @anchors.fetch("self")
+          frame = @driver&.instance_variable_get(:@native_frame)
+          original = @driver&.instance_variable_get(:@injected_error)
+          scope = UploadProcessFixture.instance_variable_get(:@cancellation_scope)
+          context.merge!("origin" => "self", "state" => "reaped", "sourceBound" => true,
+                         "ownerBound" => @mode == MODES.last && @actual_waiter&.join(0) &&
+                           scope && scope.cleanup_depth.positive? && frame&.primary.equal?(original),
+                         "targetBound" => targets == [Process.pid])
+        end
+      rescue Exception => error
+        # A failed observation cannot authorize the backend or skip teardown.
+        fail!("request observation:#{error.class.name}")
+        context = context.merge("state" => "unknown", "ownerBound" => false)
+      end
+      dispatch(context)
+    end
+
+    def refusal(context)
+      return "shape" unless context["targets"].length == 1 && context["targets"].first.is_a?(Integer)
+      return "state" unless %w[live unknown reaped].include?(context["state"])
+      if context["origin"] == "fixture" || context["origin"] == "native"
+        return "unknown" if context["state"] == "unknown"
+        return "post-reap" if context["state"] == "reaped"
+      end
+      return "source" unless context["sourceBound"]
+      return "owner" unless context["ownerBound"]
+      return "target" unless context["targetBound"]
+      expected = context["origin"] == "self" ? "INT" : "KILL"
+      return "signal" unless context["signal"] == expected
+      unless context["origin"] == "fixture"
+        return "repeat" if @requests.any? { |item| item["origin"] == context["origin"] }
+      end
+      nil
+    end
+
+    # Control contexts can never choose a backend. Only a control observer has
+    # an inert backend; actual requests use the saved real Process.kill method.
+    def dispatch(context)
+      raise "signal observation exceeded its bound" if @requests.length >= 32
+      reason = refusal(context)
+      path, line = context.fetch("source")
+      item = {"origin" => context.fetch("origin"), "signal" => context.fetch("signal").to_s.byteslice(0, 32),
+              "targets" => context.fetch("targets").map { |target| target.is_a?(Integer) ? target : "invalid" },
+              "source" => {"path" => @paths.key(path) || "unrecognized", "line" => line},
+              "state" => context.fetch("state"), "forwarded" => false, "rejection" => reason}
+      @requests << item
+      if reason
+        fail!("#{item.fetch('origin')}:#{reason}")
+        return 0 # Cleanup continues, but the observer's failure cannot be cleared.
+      end
+      item["forwarded"] = true
+      item["result"] = if @role == :control
+        @control_forwards += 1
+        1
+      else
+        @process.fetch(:kill).call(context.fetch("signal"), *context.fetch("targets"))
+      end
+    rescue Exception => error
+      item["backendErrorClass"] = error.class.name if item && item["forwarded"]
+      fail!("signal exception:#{error.class.name}")
+      raise
+    end
+
+    def install
+      raise "signal observer is already active" if self.class.current
+      self.class.current = self
+      @process = %i[spawn waitpid2 kill].to_h { |name| [name, Process.method(name)] }
+      @owned = %i[start signal].to_h { |name| [name, OwnedChild.instance_method(name)] }
+      probe, process, owned = self, @process, @owned
+      Process.define_singleton_method(:spawn) do |*arguments, **options|
+        raise "control observer cannot acquire a child" if probe.instance_variable_get(:@role) == :control
+        raise "fixture reservation observation exceeded its bound" if probe.records.length >= 128
+        value = process.fetch(:spawn).call(*arguments, **options)
+        probe.spawned(value, options)
+        value
+      end
+      Process.define_singleton_method(:waitpid2) do |*arguments|
+        begin
+          value = process.fetch(:waitpid2).call(*arguments)
+        rescue Exception => error
+          probe.waited(arguments.first, nil, error)
+          raise
+        end
+        probe.waited(arguments.first, value)
+        value
+      end
+      Process.define_singleton_method(:kill) do |signal, *targets|
+        probe.request(signal, targets, caller_locations(1, 1).first)
+      end
+      OwnedChild.define_method(:start) do |*arguments, **options|
+        probe.owner_scope(:start, self) { owned.fetch(:start).bind_call(self, *arguments, **options) }
+      end
+      OwnedChild.define_method(:signal) do |signal, group: true|
+        probe.owner_scope(:signal, self) { owned.fetch(:signal).bind_call(self, signal, group: group) }
+      end
+      if @role == :driver
+        @open3 = Open3.method(:popen3)
+        Open3.define_singleton_method(:popen3) { |*arguments, **options, &block| probe.native_backend(*arguments, **options, &block) }
+      end
+    end
+
+    def native_backend(*arguments, **options, &block)
+      @backend_entries += 1
+      @backend_depth += 1
+      @open3.call(*arguments, **options) do |stdin, stdout, stderr, waiter|
+        @callback_entries += 1
+        @actual_waiter, @actual_ios = waiter, [stdin, stdout, stderr]
+        block.call(stdin, stdout, stderr, waiter)
+      end
+    ensure
+      @backend_depth -= 1
+    end
+
+    def restore
+      operations = (@process || {}).map { |name, method| -> { Process.define_singleton_method(name, method) } }
+      operations.concat((@owned || {}).map { |name, method| -> { OwnedChild.define_method(name, method) } })
+      operations << -> { Open3.define_singleton_method(:popen3, @open3) } if @open3
+      operations.each do |operation|
+        begin
+          operation.call
+        rescue Exception => error
+          fail!("hook restoration:#{error.class.name}")
+        end
+      end
+      @hooks_restored = @process && @owned && @process.all? { |name, method| Process.method(name) == method } &&
+        @owned.all? { |name, method| OwnedChild.instance_method(name) == method } && (!@open3 || Open3.method(:popen3) == @open3)
+      fail!("hook restoration incomplete") unless @hooks_restored
+      self.class.current = nil if self.class.current.equal?(self)
+    end
+
+    def observe
+      primary = value = nil
+      begin
+        Thread.handle_interrupt(Exception => :never) do
+          begin
+            install
+            value = Thread.handle_interrupt(Exception => :immediate) { yield }
+          rescue Exception => error
+            primary ||= error
+            fail!("observation body:#{error.class.name}")
+          ensure
+            begin
+              restore
+            rescue Exception => error
+              primary ||= error
+              fail!("hook restoration:#{error.class.name}")
+            ensure
+              begin
+                @records.each do |record|
+                  owner = record.fetch(:owner)
+                  unless record[:state] == :reaped && owner.phase == :reaped && record[:status].equal?(owner.status)
+                    fail!("fixture reservation not finally reaped")
+                  end
+                end
+                fail!("source changed during observation") unless source_snapshot == @source_hashes
+              rescue Exception => error
+                primary ||= error
+                fail!("observation postcondition:#{error.class.name}")
+              end
+            end
+          end
+        end
+      rescue Exception => error
+        primary ||= error
+        fail!("observation finalization:#{error.class.name}")
+      end
+      raise primary if primary
+      raise Failure.new("signal-observation", @failures.join("; ")) unless @failures.empty?
+      value
+    end
+
+    def evidence
+      value = {"kind" => "native-signal-observation", "role" => @role.to_s, "case" => @mode,
+       "sourceSha256" => @source_hashes, "hooksRestored" => !!@hooks_restored,
+       "requests" => @requests, "failures" => @failures,
+       "fixtureReservations" => @records.map do |record|
+         {"pid" => record[:pid], "privateGroup" => record[:private_group], "phase" => record[:state].to_s,
+          "ownerPhase" => record[:owner].phase.to_s, "exitStatus" => record[:status]&.exitstatus,
+          "termSignal" => record[:status]&.termsig}
+       end,
+       "backendEntries" => @backend_entries, "callbackEntries" => @callback_entries,
+       "controlForwards" => @control_forwards}
+      text = JSON.generate(value)
+      raise "oversized signal observation" if text.bytesize > OUTPUT_LIMIT
+      JSON.parse(text) # A detached history; inert controls cannot mutate real evidence.
+    end
+
+    def check_native(status, raw)
+      check = ->(name, condition) { fail!(name) unless condition }
+      check.call("base driver result", status == 0 && raw["kind"] == "pass" && raw["mode"] == @mode)
+      check.call("actual native callback", @backend_entries == 1 && @callback_entries == 1 &&
+                 @actual_waiter && @actual_waiter.equal?(@driver.instance_variable_get(:@waiter)))
+      joined = @actual_waiter&.join(0)
+      wait_status = @actual_waiter.value if joined
+      check.call("actual native SIGKILL", joined && wait_status.signaled? && wait_status.termsig == Signal.list.fetch("KILL"))
+      check.call("actual native descriptors", @actual_ios.length == 3 && @actual_ios.all?(&:closed?) &&
+                 @driver.owned_ios.length == 7 && @driver.owned_ios.all?(&:closed?))
+      primary = @driver.instance_variable_get(:@native_frame)&.primary
+      original = @driver.instance_variable_get(:@injected_error)
+      native_error = @driver.instance_variable_get(:@native_error)
+      check.call("actual original primary", primary.equal?(original) && original.message == @driver.instance_variable_get(:@injected_message))
+      if original.is_a?(IOError)
+        check.call("actual IOError redaction", native_error.instance_of?(MobileReleaseKit::ContractError) &&
+                   native_error.message == "Synthetic validator could not be executed safely; no upload is authorized")
+      else
+        check.call("actual native original", native_error.equal?(original) && native_error.message == original.message)
+        check.call("actual SystemExit status", native_error.status == 23) if original.is_a?(SystemExit)
+      end
+      %w[ready captureEntered firstCloseFromNative originalCloseCompleted watchdogStarted deadBeforeFallback
+         ownedDescriptorsClosed watchdogJoined waiterJoined injectorsJoined handlersRestored registryInactive].each do |name|
+        check.call(name, raw[name] == true)
+      end
+      check.call("one actual first close", raw["nativeSpawnAttempts"] == 1 && raw["injectionCount"] == 1)
+      check.call("no fallback or pending cleanup", !raw["fallbackUsed"] && !raw["watchdogIntervened"] &&
+                 !raw.key?("workerControlEOF") && !raw["pendingInterrupt"] && raw["cleanupErrors"] == [])
+      native_requests = @requests.select { |request| request["origin"] == "native" }
+      check.call("one actual production KILL", native_requests.length == 1 && native_requests.first["forwarded"] && native_requests.first["result"] == 1)
+      self_requests = @requests.select { |request| request["origin"] == "self" }
+      if @mode == MODES.last
+        injector = @driver.instance_variable_get(:@injector)
+        check.call("actual post-reap repeats", raw["postReapCancellationInjected"] && raw["postReapCleanupDepth"].to_i.positive? &&
+                   injector && !injector.alive? && raw["selfSignalQueued"] == Signal.list.fetch("INT") &&
+                   self_requests.length == 1 && self_requests.first["forwarded"] && self_requests.first["result"] == 1)
+      else
+        check.call("no unexpected self signal", self_requests.empty?)
+      end
+      {"baseDriverReturn" => status, "actualWaiterPid" => @actual_waiter&.pid,
+       "actualWorkerExitStatus" => wait_status&.exitstatus, "actualWorkerTermSignal" => wait_status&.termsig,
+       "actualOriginalPrimary" => primary.equal?(original), "actualNativeDescriptorsClosed" => @actual_ios.all?(&:closed?)}
+    end
+
+    def self.observe_parent(root, mode)
+      probe = new(:parent, mode, root: root)
+      self.last_parent = probe # Retired actual owner/status objects for inert controls only.
+      primary = value = nil
+      begin
+        Thread.handle_interrupt(Exception => :never) do
+          begin
+            value = probe.observe { yield }
+          rescue Exception => error
+            primary ||= error
+          ensure
+            begin
+              UploadProcessFixture.atomic_json(File.join(root, "#{mode}.signal-proof.json"), probe.evidence)
+            rescue Exception => error
+              probe.fail!("parent proof publication:#{error.class.name}")
+              primary ||= error
+            end
+          end
+        end
+      rescue Exception => error
+        primary ||= error
+      end
+      raise primary if primary
+      value.merge("parentSignalProof" => probe.evidence)
+    end
+
+    def self.execute_driver(directory, mode)
+      driver = NativeSetupDriver.new(directory, mode)
+      probe = new(:driver, mode, driver: driver)
+      status = nil
+      facts = {}
+      begin
+        probe.observe { status = driver.execute }
+        facts = probe.check_native(status, UploadProcessFixture.read_json(File.join(directory, "result.json")))
+      rescue Exception => error
+        probe.fail!("driver proof:#{error.class.name}")
+      end
+      proof = probe.evidence.merge(facts).merge("baseDriverReturn" => status)
+      raise "oversized native signal proof" if JSON.generate(proof).bytesize > OUTPUT_LIMIT
+      UploadProcessFixture.atomic_json(File.join(directory, "native-signal-proof.json"), proof)
+      probe.failures.empty? ? 0 : 1
+    end
+
+    def control_context(record, state)
+      raise "only fixed inert controls accept synthetic context" unless @role == :control && %w[live unknown reaped].include?(state)
+      owner = record.fetch(:owner)
+      unless record[:state] == :reaped && record[:private_group] && owner.phase == :reaped && record[:status].equal?(owner.status)
+        raise "control seed lacks an actual reaped private fixture child"
+      end
+      # This snapshot is explicitly synthetic, not a claim of renewed authority.
+      {"origin" => "fixture", "signal" => "KILL", "targets" => [-record.fetch(:pid)].freeze,
+       "source" => @anchors.fetch("fixture"), "state" => state,
+       "sourceBound" => true, "ownerBound" => true, "targetBound" => true}.freeze
+    end
+  end
+
   def driver(directory)
     input = read_json(File.join(directory, "input.json"))
     mode, platform = input.values_at("mode", "platform")
     validate_request!(platform, mode, input.fetch("parameters"))
+    observe_signals = input.fetch("observeSignals", false)
+    validate_signal_observation!(platform, mode, observe_signals)
+    return NativeSignalProbe.execute_driver(directory, mode) if observe_signals
     return NativePrimaryProbe.new(directory, mode).execute if NATIVE_PRIMARY_PROOFS.key?(mode)
     return NativeSetupDriver.new(directory, mode).execute if platform == "native"
     base_mode = mode.delete_suffix("-slow-cleanup")
@@ -1264,7 +1792,173 @@ module UploadProcessFixture
       end
     end
 
+    # Reused by the required adapter contract below. This helper alone is pure:
+    # numeric credentials and filesystem/capture responses are synthetic, no
+    # process is started and it supplies no native-platform evidence.
+    def assert_process_observer_protocol
+      fixture = UploadProcessFixture
+      fields = [123, 122, 501, 501, 501, 20, 20, 20, 3, 0, "live"]
+      line = ->(values = fields) { "MRK_PROCESS_V1 present #{values.join(' ')}\n" }
+      parse = ->(text, errors = "", status = 0) { fixture.parse_process_observer(text, errors, status, 123, 122, uid: 501, gid: 20) }
+      assert_equal "absent", parse.call("MRK_PROCESS_V1 absent 123\n")
+      [[0, 0, "indeterminate"], [1, 0, "indeterminate"], [1, 1, "indeterminate"],
+       [2, 0, "live"], [3, 0, "live"], [4, 0, "live"],
+       [2, 1, "indeterminate"], [3, 1, "indeterminate"], [4, 1, "indeterminate"],
+       [5, 0, "zombie"], [5, 1, "zombie"], [6, 0, "indeterminate"],
+       [4_294_967_295, 0, "indeterminate"]].each do |tail|
+        assert_equal tail.last, parse.call(line.call(fields.take(8) + tail))
+      end
+      {"live" => :live, "indeterminate" => :indeterminate,
+       "zombie" => :stopped, "absent" => :stopped}.each do |word, expected|
+        assert_equal expected, fixture.observer_liveness(word)
+      end
+      (0...10).each do |index|
+        ["0#{fields[index]}", "+#{fields[index]}", "-#{fields[index]}", "#{fields[index]}.0"].each do |bad|
+          altered = fields.dup
+          altered[index] = bad
+          assert_raises(Failure) { parse.call(line.call(altered)) }
+        end
+      end
+      # Every PID/PGID and saved/real/effective UID/GID column is authoritative.
+      (0...8).each do |index|
+        altered = fields.dup
+        altered[index] += 1
+        assert_raises(Failure) { parse.call(line.call(altered)) }
+      end
+      [[3, 1, "live"], [5, 1, "indeterminate"], [5, 0, "live"],
+       [1, 0, "live"], [6, 0, "live"], [3, 2, "indeterminate"],
+       [4_294_967_296, 0, "indeterminate"]].each do |tail|
+        assert_raises(Failure) { parse.call(line.call(fields.take(8) + tail)) }
+      end
+      malformed = [nil, "", "\xff".b, "x" * 513, line.call.chomp, line.call + "\n", line.call + line.call,
+                   line.call.sub("V1", "V2"), line.call.sub("present ", "present  "), line.call.sub(" ", "\t"),
+                   line.call.sub("live", "absent"), line.call.sub("live", "LIVE"),
+                   "MRK_PROCESS_V1 absent 124\n", "MRK_PROCESS_V1 absent 0123\n",
+                   "MRK_PROCESS_V1 absent 123 extra\n", "MRK_PROCESS_V1 error query\n",
+                   "MRK_PROCESS_V1 denied 123 kernel 1\n", "MRK_PROCESS_V1 denied 123 identity 0\n"]
+      malformed.each { |text| assert_raises(Failure) { parse.call(text) } }
+      [1, 2, 3, nil, "0", 0.0].each { |status| assert_raises(Failure) { parse.call(line.call, "", status) } }
+      [["MRK_PROCESS_V1 denied 123 kernel 1\n", 2], ["MRK_PROCESS_V1 denied 123 kernel 13\n", 2],
+       ["MRK_PROCESS_V1 denied 123 identity 0\n", 2], ["MRK_PROCESS_V1 error query\n", 3],
+       ["MRK_PROCESS_V1 absent 123\n", 1]].each do |text, status|
+        assert_raises(Failure) { parse.call(text, "", status) }
+      end
+      assert_raises(Failure) { parse.call(line.call, "diagnostic") }
+      [[1, 122, 501, 20], ["123", 122, 501, 20], [123, true, 501, 20], [123, 1, 501, 20],
+       [123, 122, 0, 20], [123, 122, 501, -1], [2_147_483_648, 122, 501, 20],
+       [123, 2_147_483_648, 501, 20], [123, 122, 4_294_967_296, 20],
+       [123, 122, 501, 4_294_967_296]].each do |pid, group, uid, gid|
+        assert_raises(Failure) { fixture.parse_process_observer(line.call, "", 0, pid, group, uid: uid, gid: gid) }
+      end
+      [0, 4_294_967_295].each do |gid|
+        maximum = [2_147_483_647, 2_147_483_647, *([4_294_967_295] * 3), *([gid] * 3), 3, 0, "live"]
+        assert_equal "live", fixture.parse_process_observer(line.call(maximum), "", 0, *maximum.take(2), uid: 4_294_967_295, gid: gid)
+      end
+      assert_process_observer_routing(line)
+    end
+
+    def assert_process_observer_routing(line)
+      fixture = UploadProcessFixture
+      path = "/private/tmp/mrk-synthetic-observer/bootstrap/process-observer"
+      assert_nil fixture.validate_process_observer_path(nil, darwin: false)
+      [nil, "", "relative/bootstrap/process-observer", "/bin/ps", path + "\0", path + "\n",
+       path.sub("/bootstrap/", "/bootstrap/../bootstrap/"), path.sub("/private/tmp/", "/tmp/")].each do |bad|
+        assert_raises(Failure) { fixture.validate_process_observer_path(bad, darwin: true) }
+      end
+      assert_raises(Failure) { fixture.validate_process_observer_path(path, darwin: false) }
+      metadata = Struct.new(:uid, :nlink, :mode, :kind) do
+        def file? = kind == :file
+        def directory? = kind == :directory
+      end
+      file = metadata.new(0, 1, 0o100555, :file)
+      parent = metadata.new(0, 1, 0o40755, :directory)
+      root = parent.dup
+      stats = {path => file, File.dirname(path) => parent, File.dirname(File.dirname(path)) => root}
+      File.stub(:lstat, ->(name) { stats.fetch(name) }) do
+        File.stub(:realpath, path) do
+          File.stub(:executable?, true) do
+            assert_equal path, fixture.validate_process_observer_path(path, darwin: true)
+            [[file, :uid, 501], [file, :nlink, 2], [file, :mode, 0o106555], [file, :mode, 0o100557],
+             [file, :kind, :symlink], [parent, :uid, 501], [parent, :mode, 0o40777], [root, :uid, 501]].each do |item, key, bad|
+              saved = item[key]
+              begin
+                item[key] = bad
+                assert_raises(Failure) { fixture.validate_process_observer_path(path, darwin: true) }
+              ensure
+                item[key] = saved
+              end
+            end
+          end
+          File.stub(:executable?, false) { assert_raises(Failure) { fixture.validate_process_observer_path(path, darwin: true) } }
+        end
+        File.stub(:realpath, path + "-different") { assert_raises(Failure) { fixture.validate_process_observer_path(path, darwin: true) } }
+      end
+      File.stub(:lstat, ->(*) { raise Errno::ENOENT }) do
+        assert_raises(Failure) { fixture.validate_process_observer_path(path, darwin: true) }
+      end
+      original = ENV[PROCESS_OBSERVER_KEY]
+      expected_environment = PROCESS_OBSERVER_SELECTION.nil? ? {} : {PROCESS_OBSERVER_KEY => PROCESS_OBSERVER_SELECTION}
+      begin
+        ENV[PROCESS_OBSERVER_KEY] = path + "-canary"
+        assert_equal expected_environment, fixture.process_observer_environment
+      ensure
+        original.nil? ? ENV.delete(PROCESS_OBSERVER_KEY) : ENV[PROCESS_OBSERVER_KEY] = original
+      end
+
+      calls, replies = [], []
+      capture = lambda do |argv, seconds:, environment:|
+        calls << [argv, seconds, environment]
+        [replies.shift || raise("unplanned synthetic observation"), "", 0]
+      end
+      fixture.stub(:process_observer_path, path) do
+        Process.stub(:uid, 501) do
+          Process.stub(:gid, 20) do
+            fixture.stub(:capture_command, capture) do
+              replies << line.call
+              assert_equal :live, fixture.state(123, 122, seconds: 0.25)
+              assert_equal [[path, "123"], 0.25, {"LANG" => "C", "LC_ALL" => "C"}], calls.last
+              [[1, 0, "indeterminate"], [3, 1, "indeterminate"]].each do |tail|
+                replies << line.call([123, 122, 501, 501, 501, 20, 20, 20] + tail)
+                refute fixture.ready?(123, 122)
+              end
+              replies << line.call
+              assert fixture.ready?(123, 122)
+              replies << line.call([123, 122, 501, 501, 501, 20, 20, 20, 5, 1, "zombie"])
+              error = assert_raises(Failure) { fixture.ready?(123, 122) }
+              assert_equal "readiness", error.kind
+              calls.clear
+              replies.concat([[3, 1, "indeterminate"], [3, 0, "live"], [5, 1, "zombie"]].map do |tail|
+                line.call([123, 122, 501, 501, 501, 20, 20, 20] + tail)
+              end)
+              ticks = [0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07]
+              fixture.stub(:clock, -> { ticks.shift || raise("synthetic clock exhausted") }) do
+                fixture.dead!(123, 122, deadline: 0.2)
+              end
+              assert_equal 3, calls.length
+              assert_empty replies
+              calls.zip([0.2, 0.17, 0.14]).each { |call, limit| assert_in_delta limit, call[1], 0.000_001 }
+              # Definite absence after the absolute endpoint is not success.
+              calls.clear
+              replies << "MRK_PROCESS_V1 absent 123\n"
+              ticks = [0.0, 0.2]
+              fixture.stub(:clock, -> { ticks.shift || raise("synthetic clock exhausted") }) do
+                error = assert_raises(Failure) { fixture.dead!(123, 122, deadline: 0.1) }
+                assert_equal "fixture-cleanup", error.kind
+              end
+              assert_equal 1, calls.length
+              calls.clear
+              fixture.stub(:clock, 0.1) do
+                assert_raises(Failure) { fixture.dead!(123, 122, deadline: 0.1) }
+              end
+              assert_empty calls # An exhausted budget cannot acquire a new observer.
+            end
+          end
+        end
+      end
+    end
+
     def test_process_observation_rejects_errors_malformed_output_and_foreign_groups
+      assert_process_observer_protocol
       parse = UploadProcessFixture.method(:parse_state)
       assert_equal "absent", parse.call("", "", 1, 123, 122)
       assert_equal "Z", parse.call("123 122 Z\n", "", 0, 123, 122)

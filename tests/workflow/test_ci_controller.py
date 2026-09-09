@@ -241,6 +241,7 @@ class CICoordinatorResultTests(unittest.TestCase):
         suites = {
             "ruby-support": ("test_fastlane_support.rb", {"FastlaneReleaseSupportTest"}, 12),
             "ruby-native-capture": ("test_native_upload_validation.rb", {"NativeUploadValidationTest"}, 13),
+            "ruby-native-signal-observation": ("test_native_signal_observation.rb", {"NativeSignalObservationTest"}, 1),
             "ruby-play_store": ("test_play_store.rb", {"PreservingSupplyUploaderTests"}, 35),
             "ruby-play_lanes": ("test_play_lanes.rb", {"PlayReleaseLanesTest", "BoundedPlayImageTest"}, 46),
             "ruby-apple_store": ("test_apple_store.rb", {"AppleOperationTransportTest", "AppleStoreContractTest"}, 7),

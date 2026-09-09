@@ -36,6 +36,7 @@ class NativeProfileCITests(unittest.TestCase):
         steps = controller.catalog(paths, "macos", deadline=12345.0)
         suites = {
             "ruby-native-capture": ("test_native_upload_validation.rb", 13),
+            "ruby-native-signal-observation": ("test_native_signal_observation.rb", 1),
             "ruby-ios_upload_validation": ("test_ios_upload_validation.rb", 26),
             "ruby-android_upload_validation": ("test_android_upload_validation.rb", 26),
         }

@@ -408,7 +408,8 @@ module UploadProcessFixture
         elsif @case == "changed-handler"
           Signal.trap("INT", @foreign)
         end
-      elsif @case == "repeated" && argv.first == "/bin/ps" && !@nested_cancelled && @stop_entered
+      elsif @case == "repeated" && !@nested_cancelled && @stop_entered &&
+            argv.first == UploadProcessFixture.observation_executable
         @nested_cancelled = true
         scope = UploadProcessFixture.instance_variable_get(:@cancellation_scope)
         event("nested-cleanup-observation", "cleanupDepth" => scope.cleanup_depth)
@@ -995,7 +996,7 @@ module UploadProcessFixture
           deadlines.length == 1 && entry.fetch("at") + entry.fetch("seconds") <= deadlines.first + 0.05
       end
       # Marker/observation PIDs carry NO signal authority. The real driver already
-      # joined; collect all its known native identities and use read-only ps only.
+      # joined; collect all its known native identities for read-only observation.
       identities = @dead_calls.map { |call| [call.fetch("pid"), call.fetch("group")] }
       preserved.each do |directory|
         owner = UploadProcessFixture.read_json(File.join(directory, "owner.json"))

@@ -255,7 +255,8 @@ class ReusableWorkflowContractTests(unittest.TestCase):
             "test_fastlane_support.rb", "test_play_store.rb", "test_play_lanes.rb", "test_apple_store.rb",
             "test_apple_lanes.rb", "test_apple_production.rb", "test_apple_production_lane.rb",
             "test_apple_asset_upload.rb", "test_ios_upload_validation.rb", "test_android_upload_validation.rb",
-            "test_native_upload_validation.rb", "test_workflow_yaml.rb", "test_supply_wif.rb",
+            "test_native_upload_validation.rb", "test_native_signal_observation.rb",
+            "test_workflow_yaml.rb", "test_supply_wif.rb",
         })
         self.assertEqual(gates["fastfile"].argv, (*paths.bundle, "exec", str(paths.ruby),
                                               str(ROOT / "fastlane/run_lane.rb"), "--validate"))

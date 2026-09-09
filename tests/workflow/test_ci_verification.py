@@ -236,7 +236,8 @@ class CIControllerContractTests(unittest.TestCase):
         controller = controller_module()
         before = ("source-copy", "source-environment", "source-dependencies", "bundler", "bundle-install",
                   "editable-install", "source-freeze", "source-pip-check", "bundle-check")
-        ruby = ("ruby-support", "ruby-native-capture", "ruby-play_store", "ruby-play_lanes", "ruby-apple_store",
+        ruby = ("ruby-support", "ruby-native-capture", "ruby-native-signal-observation",
+                "ruby-play_store", "ruby-play_lanes", "ruby-apple_store",
                 "ruby-apple_lanes", "ruby-apple_production", "ruby-apple_production_lane", "ruby-apple_asset_upload",
                 "ruby-ios_upload_validation", "ruby-android_upload_validation", "ruby-workflow-yaml", "ruby-supply-wif")
         wheel = ("wheel-copy", "wheel-build", "wheel-inspect", "wheel-environment", "wheel-pip", "wheel-install",
@@ -245,6 +246,7 @@ class CIControllerContractTests(unittest.TestCase):
             "linux": (*before, "python-full", *ruby, "fastfile", "actionlint", "jdk-signers", *wheel,
                       "python-wheel", "source-integrity"),
             "macos": (*before, "native-tools", "native-profile-source", "ruby-native-capture",
+                      "ruby-native-signal-observation",
                       "ruby-ios_upload_validation", "ruby-android_upload_validation", *wheel,
                       "native-profile-wheel", "source-integrity"),
         }

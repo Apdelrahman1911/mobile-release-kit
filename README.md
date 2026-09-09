@@ -231,25 +231,19 @@ HMAC-key retention, and fail-closed limitations. Recovery never makes a release 
 
 ## Development
 
-Run the repository tests without credentials:
+Use the credential-free [Release kit CI workflow](.github/workflows/ci.yml) for
+complete source, installed-wheel, Linux and macOS verification. It prepares
+offline inputs and admits an isolated test identity on each disposable
+GitHub-hosted VM before running the required product checks.
 
-```bash
-python3 -m pip install -e '.[test]'
-python3 -m unittest discover -s tests -v
-bundle install
-bundle exec ruby tests/workflow/test_play_store.rb
-ruby tests/workflow/test_workflow_yaml.rb
-bundle exec ruby tests/workflow/test_play_lanes.rb
-ruby -I. tests/workflow/test_fastlane_support.rb
-bundle exec ruby tests/workflow/test_apple_store.rb
-bundle exec ruby tests/workflow/test_apple_lanes.rb
-bundle exec ruby tests/workflow/test_apple_production.rb
-bundle exec ruby tests/workflow/test_apple_production_lane.rb
-bundle exec ruby tests/workflow/test_apple_asset_upload.rb
-bundle exec ruby tests/workflow/test_ios_upload_validation.rb
-bundle exec ruby tests/workflow/test_supply_wif.rb
-bundle exec ruby fastlane/run_lane.rb --validate
-```
+**Do not run full test discovery, native/process suites or the CI controller on
+a shared VPS, developer login session or self-hosted runner.** The separate
+QA-007 production process-group lifetime defect remains open; credential-free
+tests are not automatically safe process tests. Local work is limited to static
+inspection and explicitly reviewed pure/contract checks. See
+[repository verification](docs/verification.md) for the execution boundary,
+required coverage, evidence and current limitations. Never dispatch a release
+workflow or use real Store/signing credentials to test this repository.
 
 Workflow-contract tests reject mutable action references, inherited secrets, Store/OIDC authority
 in application-build jobs, build commands in Store jobs, missing hosted-runner runtime guards,
@@ -266,6 +260,7 @@ No shared-repository test uses a consumer credential or a real application/accou
 - [Recovery and resumability](docs/recovery.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Upgrading pinned consumers](docs/upgrading.md)
+- [Repository verification](docs/verification.md)
 - [Security policy](SECURITY.md)
 
 ## License

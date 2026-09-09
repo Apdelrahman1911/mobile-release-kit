@@ -38,7 +38,7 @@ Never bypass branch protection or dispatch release/Store workflows for testing.
 
 ## Small implementation and command authority
 
-The four files under [`.github/scripts/`](../.github/scripts/) have separate roles:
+The helpers under [`.github/scripts/`](../.github/scripts/) have separate roles:
 
 | File | Responsibility |
 |---|---|
@@ -46,6 +46,7 @@ The four files under [`.github/scripts/`](../.github/scripts/) have separate rol
 | `ci_sandbox.py` | One reserved nonprivileged identity, native isolation admission, original child/stream collection and domain finality. |
 | `ci_prepare.py` | Bounded public dependency acquisition and hash verification; never package installation or project evaluation. |
 | `ci_checks.py` | Fixed product checks, complete Python method outcomes, wheel/consumer validation and JDK signer scenarios. |
+| `ci_process_observer.c` | macOS-only, unprivileged SDK/libproc observation of one fixture PID; no signaling or process enumeration. |
 
 These are CI internals, not a general command-execution API. The reviewed
 `required_gate_ids()` and `catalog()` select the complete platform sequence.
@@ -139,7 +140,28 @@ inventory; it does not waive the product behaviors that inventory was meant to t
 | Platform | Required gate families |
 |---|---|
 | Linux | Offline source installation; full Python discovery; all listed Ruby suites, including native/iOS/Android descendant regressions; Fastfile validation; first-party/template actionlint; real JDK signer checks; wheel build/inspection/install/smoke/consumer and selected installed-wheel Python checks; source integrity. |
-| macOS | Offline source installation; exact Xcode 26.3/native tools; source native-profile gate and the three upload-process Ruby suites; wheel build/inspection/install/smoke/consumer; installed-wheel native-profile gate; source integrity. |
+| macOS | Offline source installation; exact Xcode 26.3/native tools; source native-profile gate, the three upload-process Ruby suites and separate native signal-observation proof; wheel build/inspection/install/smoke/consumer; installed-wheel native-profile gate; source integrity. |
+
+The original 13-method native suite and both 26-method adapters run without the
+separate signal-proof instrumentation. An additional fixed Ruby invocation on
+both platforms observes the three real first-close outcomes and post-reap
+teardown adversary. Its actual production signal observations and fixture
+ownership checks remain distinct from inert negative controls and from the
+ordinary suite's results; a veto is a failed proof, not runtime cleanup success.
+
+macOS fixture observations use the owner-admitted, unentitled SDK observer, not
+the system `ps` invocation that failed sandbox admission. The outside owner's
+trusted census still uses system `ps`. The owner compiles fixed immutable C
+source as the reserved identity, requires original producer exit/EOF/domain
+finality, checks the binary/signature, and freezes a root-owned copy. Actual
+live/descendant, unreaped-zombie, reap-to-absence and foreign-process permission
+controls must pass before the fixed fixture selector is published. Darwin
+observations with a missing selector fail; module imports remain inert. Linux
+retains its existing system-`ps` route. The strict tagged BSD metadata preserves
+indeterminate states: they prove neither readiness nor death, and never renew a
+deadline. A genuine zombie remains a zombie even when its exit flag is set.
+Fixture readiness still needs the independent worker/pipe/marker handshake.
+No fixture selector or test canary is added to a production validator environment.
 
 Source and wheel use separate build copies and venvs. Wheel checks must establish
 installed import locations, metadata/RECORD, packaged schemas/templates/Fastlane

@@ -532,7 +532,8 @@ class NativeUploadValidationTest < Minitest::Test
   end
 
   def raw_dispatch(copy, directory, fixture, literal)
-    {"argv" => [RbConfig.ruby, fixture, "driver", directory], "cwd" => Dir.pwd, "environment" => {},
+    {"argv" => [RbConfig.ruby, fixture, "driver", directory], "cwd" => Dir.pwd,
+     "environment" => UploadProcessFixture.process_observer_environment,
      "options" => {"unsetenv_others" => true, "pgroup" => true, "stdin" => File::NULL,
                    "stdout" => File.join(directory, "driver.stdout"), "stderr" => File.join(directory, "driver.stderr")},
      "copyRoot" => copy, "literalCase" => literal,
@@ -793,7 +794,9 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal observed.fetch(:dispatch), record.fetch("dispatch")
     dispatch = record.fetch("dispatch")
     assert_equal [RbConfig.ruby, dispatch.fetch("fixture").fetch("path"), "driver", directory], dispatch.fetch("argv")
-    assert_equal({}, dispatch.fetch("environment"))
+    expected_environment = UploadProcessFixture::PROCESS_OBSERVER_SELECTION.nil? ? {} :
+      {UploadProcessFixture::PROCESS_OBSERVER_KEY => UploadProcessFixture::PROCESS_OBSERVER_SELECTION}
+    assert_equal expected_environment, dispatch.fetch("environment")
     assert_equal Dir.pwd, dispatch.fetch("cwd")
     assert_equal({"unsetenv_others" => true, "pgroup" => true, "stdin" => File::NULL,
                   "stdout" => File.join(directory, "driver.stdout"), "stderr" => File.join(directory, "driver.stderr")}, dispatch.fetch("options"))

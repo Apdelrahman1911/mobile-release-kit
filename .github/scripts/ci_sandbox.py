@@ -10,10 +10,13 @@ from __future__ import annotations
 import dataclasses
 import errno
 import grp
+import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import pwd
+import re
 import resource
 import secrets
 import selectors
@@ -46,6 +49,7 @@ GIT_CONFIG_COUNT GIT_OPTIONAL_LOCKS
 FASTLANE_SKIP_UPDATE_CHECK FASTLANE_HIDE_CHANGELOG FASTLANE_OPT_OUT_USAGE
 FASTLANE_SKIP_DOCS FASTLANE_DISABLE_COLORS FASTLANE_SKIP_REPORTING
 MOBILE_RELEASE_REQUIRE_RUBY_CONTRACTS MOBILE_RELEASE_TEST_PYTHON
+MOBILE_RELEASE_TEST_PROCESS_OBSERVER
 DEVELOPER_DIR JAVA_HOME JAVA_TOOL_OPTIONS
 """.split())
 
@@ -55,11 +59,50 @@ class SessionError(RuntimeError):
 
 
 class DeadlineExpired(SessionError):
-    """The original, never renewed aggregate budget expired."""
+    """An owning, never renewed absolute budget expired."""
 
 
 _DIAGNOSTIC_OPERATIONS = frozenset({"process-groups-linux", "kernel-groups-library",
-                                    "kernel-groups-count", "kernel-groups-fill"})
+                                    "kernel-groups-count", "kernel-groups-fill",
+                                    "mac-original-credentials", "cleanup-batch",
+                                    "network-tcp4", "network-udp4", "network-tcp6", "network-udp6"})
+
+
+def _observer_error_fields(value: object) -> dict | None:
+    """Closed diagnostic schema only; no observer result is accepted here."""
+    if not isinstance(value, dict) or set(value) != {"code", "errno", "library_close_failed"}:
+        return None
+    code, number, closed = value["code"], value["errno"], value["library_close_failed"]
+    if not isinstance(code, str) or type(closed) is not bool:
+        return None
+    if code in {"INPUT", "CALLER_IDENTITY", "SELF_QUERY", "SELF_IDENTITY", "QUERY", "SIZE", "GROUP_LIBRARY"}:
+        if number is not None or closed:
+            return None
+    elif code in {"GROUP_SYMBOL", "GROUP_COUNT", "GROUP_BOUND", "GROUP_READ",
+                  "GROUP_CHANGED", "GROUP_IDENTITY", "GROUP_CLOSE"}:
+        if type(number) is not int or not 0 <= number < 4096:
+            return None
+        if code not in {"GROUP_COUNT", "GROUP_READ"} and number != 0:
+            return None
+        if code == "GROUP_CLOSE" and not closed:
+            return None
+    else:
+        return None
+    return {"code": code, "errno": number, "library_close_failed": closed}
+
+
+def _observer_error_note(data: bytes) -> dict | None:
+    """Recognize one exact fixed C error line; never publish stdout or a PID."""
+    if not isinstance(data, bytes) or len(data) > 128:
+        return None
+    match = re.fullmatch(rb"MRK_PROCESS_V1 error ([A-Z_]+)(?:_(0|[1-9][0-9]{0,3})(_AND_CLOSE)?)?\n", data)
+    if match is None:
+        return None
+    code = match[1].decode("ascii")
+    if code == "GROUP_CLOSE" and match[3] is not None:
+        return None
+    return _observer_error_fields({"code": code, "errno": None if match[2] is None else int(match[2]),
+                                   "library_close_failed": match[3] is not None or code == "GROUP_CLOSE"})
 
 
 def _exception_notes(error: BaseException) -> list[dict]:
@@ -120,6 +163,11 @@ def _child_exception_notes(data: bytes) -> list[dict]:
                     note["errno"] = number
                 if isinstance(operation, str) and operation in _DIAGNOSTIC_OPERATIONS:
                     note["operation"] = operation
+                observation = row.get("observation")
+                if isinstance(observation, dict):
+                    observer_error = _observer_error_fields(observation.get("observer_error"))
+                    if observer_error is not None:
+                        note["observation"] = {"observer_error": observer_error}
                 notes.append(note)
         if len(notes) >= 32:
             break
@@ -207,30 +255,58 @@ def _private_file(path: Path, data: bytes, mode: int = 0o600) -> None:
         raise BaseExceptionGroup("controller file write/close failure", errors)
 
 
+def _remaining(deadline: float) -> float:
+    if type(deadline) not in (int, float) or not math.isfinite(deadline):
+        raise SessionError("invalid owning absolute deadline")
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise DeadlineExpired("owning absolute deadline expired")
+    return left
+
+
+def _admit_executable(path: Path, uid: int, gid: int, *, root_owned: bool = False,
+                      non_set_id: bool = True) -> dict:
+    """Check a fixed provider/system executable, not a subject-selected tool."""
+    info = path.stat()
+    if (not stat.S_ISREG(info.st_mode) or not info.st_mode & 0o111
+            or info.st_uid == uid or info.st_mode & 0o002
+            or info.st_gid == gid and info.st_mode & 0o020
+            or root_owned and (info.st_uid != 0 or info.st_mode & 0o022)
+            or non_set_id and info.st_mode & (stat.S_ISUID | stat.S_ISGID)):
+        raise SessionError("fixed executable permission/identity contract failed")
+    return {"root_owned": info.st_uid == 0, "setuid": bool(info.st_mode & stat.S_ISUID),
+            "setgid": bool(info.st_mode & stat.S_ISGID)}
+
+
 def _small_command(argv: list[str], seconds: float = 10.0,
                    *, user: int | None = None, group: int | None = None,
                    return_pid: bool = False, expected_code: int = 0,
-                   detached: bool = True) -> bytes | tuple[bytes, int]:
+                   detached: bool = True, deadline: float | None = None) -> bytes | tuple[bytes, int]:
     """Bounded, original-parent collection of fixed trusted OS metadata tools."""
     kwargs = {} if user is None else {"user": user, "group": group, "extra_groups": []}
     child = sel = None
     result = [bytearray(), bytearray()]
     eof, waited, code = [False, False], False, None
+    if type(seconds) not in (int, float) or not 0 < seconds <= 3300:
+        raise SessionError("invalid trusted metadata time allowance")
     cutoff = time.monotonic() + seconds
+    if deadline is not None:
+        _remaining(deadline)
+        cutoff = min(cutoff, deadline)
     errors = []
     try:
+        _remaining(cutoff)
         child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE, close_fds=True,
                                  env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"},
                                  start_new_session=detached, **kwargs)
+        _remaining(cutoff)
         sel = selectors.DefaultSelector()
         for i, stream in enumerate((child.stdout, child.stderr)):
             os.set_blocking(stream.fileno(), False)
             sel.register(stream, selectors.EVENT_READ, i)
         while sel.get_map() or child.poll() is None:
-            if time.monotonic() >= cutoff:
-                raise SessionError("trusted metadata deadline")
-            for key, _ in sel.select(0.05):
+            for key, _ in sel.select(min(0.05, _remaining(cutoff))):
                 try:
                     chunk = os.read(key.fd, 65536)
                 except BlockingIOError:
@@ -242,21 +318,25 @@ def _small_command(argv: list[str], seconds: float = 10.0,
                 result[key.data].extend(chunk)
                 if sum(map(len, result)) > 2 * MiB:
                     raise SessionError("trusted metadata output limit")
-        code = child.wait(timeout=max(0.01, cutoff - time.monotonic()))
+        code = child.wait(timeout=_remaining(cutoff))
         waited = True
+        _remaining(cutoff)
         if code != expected_code or result[1]:
             raise SessionError("trusted metadata tool failed or emitted diagnostics")
     except BaseException as exc:
         errors.append(exc)
-    try:
-        # This handle has not been reaped by any other owner.  No PID-list kill.
-        if child is not None:
+    if child is not None:
+        try:
+            # This handle has no other owner.  No discovered-PID signal.
             if child.poll() is None:
                 child.kill()
-            code = child.wait(timeout=2)
+        except BaseException as exc:
+            errors.append(exc)
+        try:
+            code = child.wait(timeout=max(0.0, min(2, cutoff - time.monotonic())))
             waited = True
-    except BaseException as exc:
-        errors.append(exc)
+        except BaseException as exc:
+            errors.append(exc)
     for owned in (sel, child.stdout if child is not None else None,
                   child.stderr if child is not None else None):
         if owned is None:
@@ -265,12 +345,19 @@ def _small_command(argv: list[str], seconds: float = 10.0,
             owned.close()
         except BaseException as exc:
             errors.append(exc)
+    try:
+        _remaining(cutoff)
+    except BaseException as exc:
+        errors.append(exc)
     if errors:
         failure = BaseExceptionGroup("trusted metadata invocation/cleanup failure", errors)
         failure._ci_observation = {"returncode": code, "waited": waited, "stdout_eof": eof[0],
                                    "stderr_eof": eof[1], "stdout_bytes": len(result[0]),
                                    "stderr_bytes": len(result[1]), "error_count": len(errors),
                                    "exceptions": _child_exception_notes(bytes(result[1]))}
+        observer_error = _observer_error_note(bytes(result[0]))
+        if observer_error is not None:
+            failure._ci_observation["observer_error"] = observer_error
         raise failure
     out = bytes(result[0])
     return (out, child.pid) if return_pid else out
@@ -294,19 +381,25 @@ def _nss_absent(uid: int) -> None:
         raise SessionError("direct NSS lookup collision")
 
 
-def _linux_snapshot() -> dict[tuple[int, int], tuple[tuple[int, ...], tuple[int, ...], int]]:
+def _linux_snapshot(*, deadline: float | None = None) -> dict[tuple[int, int], tuple[tuple[int, ...], tuple[int, ...], int]]:
     """Complete bounded process AND thread credentials, including fs IDs."""
+    if deadline is not None:
+        _remaining(deadline)
     root = Path("/proc")
     pids = sorted(int(p.name) for p in root.iterdir() if p.name.isdecimal())
     if len(pids) > 32768:
         raise SessionError("process census size")
     rows = {}
     for pid in pids:
+        if deadline is not None:
+            _remaining(deadline)
         task = root / str(pid) / "task"
         tids = sorted(int(p.name) for p in task.iterdir() if p.name.isdecimal())
         if not tids or len(rows) + len(tids) > 131072:
             raise SessionError("thread census size")
         for tid in tids:
+            if deadline is not None:
+                _remaining(deadline)
             base = task / str(tid)
             before = (base / "stat").read_bytes()
             raw = (base / "status").read_bytes()
@@ -327,15 +420,19 @@ def _linux_snapshot() -> dict[tuple[int, int], tuple[tuple[int, ...], tuple[int,
             raise SessionError("thread churn during complete census")
     if pids != sorted(int(p.name) for p in root.iterdir() if p.name.isdecimal()):
         raise SessionError("process churn during complete census")
+    if deadline is not None:
+        _remaining(deadline)
     return rows
 
 
-def _mac_snapshot() -> dict[tuple[int, int], tuple[tuple[int, ...], tuple[int, ...], int]]:
+def _mac_snapshot(*, deadline: float | None = None) -> dict[tuple[int, int], tuple[tuple[int, ...], tuple[int, ...], int]]:
     # Unsupported Darwin fields/visibility are a failure, not an invented ABI.
     raw, owned_ps = _small_command(["/bin/ps", "-axo", "pid=,ruid=,uid=,svuid=,rgid=,gid=,svgid=,rss=,stat="],
-                                  return_pid=True)
+                                  return_pid=True, deadline=deadline)
     rows = {}
     for line in raw.splitlines():
+        if deadline is not None:
+            _remaining(deadline)
         fields = line.split()
         if len(fields) != 9 or not all(s.isdigit() for s in fields[:8]):
             raise SessionError("unsupported/incomplete Darwin process fields")
@@ -347,21 +444,42 @@ def _mac_snapshot() -> dict[tuple[int, int], tuple[tuple[int, ...], tuple[int, .
         rows[(pid, pid)] = ((ru, eu, su), (rg, eg, sg), rss * 1024)
     if not rows or len(rows) > 32768:
         raise SessionError("empty/oversized Darwin process census")
+    if deadline is not None:
+        _remaining(deadline)
     return rows
 
 
-def _snapshot(platform: str):
-    return _linux_snapshot() if platform == "linux" else _mac_snapshot()
+def _snapshot(platform: str, *, deadline: float | None = None):
+    return _linux_snapshot(deadline=deadline) if platform == "linux" else _mac_snapshot(deadline=deadline)
 
 
-def _domain(platform: str, uid: int, *, collision: bool = False) -> set[int]:
+def _domain(platform: str, uid: int, *, collision: bool = False, deadline: float | None = None) -> set[int]:
     """Two full passes; no missing/truncated/unknown row is silently ignored."""
     occupied = set()
     for _ in range(2):
-        for (pid, _), (uids, gids, _) in _snapshot(platform).items():
+        if deadline is not None:
+            _remaining(deadline)
+        for (pid, _), (uids, gids, _) in _snapshot(platform, deadline=deadline).items():
             if uid in uids or (collision and uid in gids):
                 occupied.add(pid)
+    if deadline is not None:
+        _remaining(deadline)
     return occupied
+
+
+def _observe_original_credentials(pid: int, uid: int, gid: int, *, deadline: float) -> None:
+    """Root observes its still-unreaped original handle; this is NOT signal authority."""
+    try:
+        if os.geteuid() != 0 or type(pid) is not int or pid <= 1:
+            raise SessionError("original credential observation requires its outside root owner")
+        _remaining(deadline)
+        row = _mac_snapshot(deadline=deadline).get((pid, pid))
+        _remaining(deadline)
+        if row is None or row[:2] != ((uid, uid, uid), (gid, gid, gid)):
+            raise SessionError("original unreaped child lacks exact real/effective/saved identities")
+    except BaseException as exc:
+        exc._ci_operation = "mac-original-credentials"
+        raise
 
 
 def _readonly_tree(root: Path) -> None:
@@ -373,6 +491,200 @@ def _readonly_tree(root: Path) -> None:
                 raise SessionError("nonordinary immutable input")
             if s.st_uid != 0 or s.st_mode & 0o022:
                 raise SessionError("immutable input is not root-owned/read-only to subject")
+
+
+def _observer_artifact(path: Path, uid: int, gid: int, *, deadline: float) -> tuple[bytes, int]:
+    """Read only AFTER producer finality; never follow/adopt a mutable name."""
+    fd = None
+    errors, chunks = [], []
+    size = 0
+    fields = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid,
+                        s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+    try:
+        _remaining(deadline)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or (before.st_uid, before.st_gid) != (uid, gid)
+                or before.st_mode & (stat.S_ISUID | stat.S_ISGID | 0o022)
+                or not before.st_mode & 0o111 or not 0 < before.st_size <= 16 * MiB):
+            raise SessionError("observer producer artifact identity/mode/size failed")
+        while True:
+            _remaining(deadline)
+            chunk = os.read(fd, min(65536, 16 * MiB - size + 1))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > 16 * MiB:
+                raise SessionError("observer producer artifact exceeds fixed bound")
+        if fields(before) != fields(os.fstat(fd)) or fields(before) != fields(path.lstat()) or size != before.st_size:
+            raise SessionError("observer producer artifact changed during observation")
+        _remaining(deadline)
+    except BaseException as exc:
+        errors.append(exc)
+    if fd is not None:
+        try:
+            os.close(fd)
+        except BaseException as exc:
+            errors.append(exc)
+    try:
+        _remaining(deadline)
+    except BaseException as exc:
+        errors.append(exc)
+    if errors:
+        raise BaseExceptionGroup("observer artifact observation/close failed", errors)
+    return b"".join(chunks), stat.S_IMODE(before.st_mode)
+
+
+def _observer_toolchain(uid: int, gid: int, *, deadline: float) -> dict:
+    """Bind only the selected provider installation; no PATH/config discovery."""
+    xcode = _canonical("/Applications/Xcode_26.3.app/Contents/Developer")
+    toolchain = _canonical(xcode / "Toolchains/XcodeDefault.xctoolchain")
+    sdk = _canonical((xcode / "Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk").resolve(strict=True))
+
+    def checked(path: Path):
+        _remaining(deadline)
+        info = path.stat()
+        if (info.st_uid != 0 or info.st_mode & 0o002
+                or info.st_gid == gid and info.st_mode & 0o020
+                or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode))):
+            raise SessionError("selected compiler/SDK is not root-owned and read-only to subject")
+        return info
+
+    if not _under(sdk, xcode):
+        raise SessionError("selected SDK resolves outside fixed Xcode installation")
+    for path in (xcode, *xcode.parents):
+        checked(path)
+    # Follow only canonical provider links within Xcode, visiting each directory
+    # once.  This includes headers/runtime files, not merely the clang pathname.
+    pending, visited, count = [toolchain, sdk], set(), 0
+    while pending:
+        current = pending.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+        checked(current)
+        for item in current.iterdir():
+            count += 1
+            if count > 300000:
+                raise SessionError("selected compiler/SDK inventory exceeds fixed bound")
+            _remaining(deadline)
+            target = item.resolve(strict=True)
+            if not _under(target, xcode) or item.lstat().st_uid != 0:
+                raise SessionError("selected compiler/SDK link escapes provider installation")
+            info = checked(target)
+            if stat.S_ISDIR(info.st_mode):
+                pending.append(target)
+    clang, linker = (_canonical((toolchain / "usr/bin" / name).resolve(strict=True)) for name in ("clang", "ld"))
+    for path in (clang, linker):
+        if not _under(path, toolchain):
+            raise SessionError("compiler/linker resolves outside selected toolchain")
+        _admit_executable(path, uid, gid, root_owned=True)
+    _admit_executable(Path("/usr/bin/codesign"), uid, gid, root_owned=True)
+
+    def digest(path: Path, maximum: int) -> str:
+        before = checked(path)
+        if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= maximum:
+            raise SessionError("fixed provider file size/type unsupported")
+        total, result = 0, hashlib.sha256()
+        with path.open("rb") as stream:
+            while chunk := stream.read(65536):
+                _remaining(deadline)
+                total += len(chunk)
+                if total > maximum:
+                    raise SessionError("fixed provider digest exceeds bound")
+                result.update(chunk)
+        after = checked(path)
+        if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+                or total != before.st_size):
+            raise SessionError("fixed provider file changed during binding")
+        return result.hexdigest()
+
+    settings = sdk / "SDKSettings.json"
+    settings_hash = digest(settings, MiB)
+    raw = settings.read_bytes()
+    if len(raw) > MiB or hashlib.sha256(raw).hexdigest() != settings_hash:
+        raise SessionError("selected SDK settings changed")
+    data = json.loads(raw)
+    version, canonical = data.get("Version"), data.get("CanonicalName")
+    if (not isinstance(version, str) or not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){1,2}", version)
+            or canonical != "macosx" + version):
+        raise SessionError("selected SDK identity/version is unsupported")
+    _remaining(deadline)
+    return {"clang": clang, "linker": linker, "sdk": sdk, "toolchain": toolchain,
+            "evidence": {"xcode": "26.3", "clang_sha256": digest(clang, 512 * MiB),
+                         "linker_sha256": digest(linker, 512 * MiB), "sdk": canonical,
+                         "sdk_settings_sha256": settings_hash, "provider_entries": count}}
+
+
+def _observer_signature_metadata(stdout: bytes, stderr: bytes, path: Path, arch: str) -> dict:
+    """Strict fixed codesign display contract; no failed/empty display inference."""
+    if stdout or not 0 < len(stderr) <= 16384 or not stderr.endswith(b"\n"):
+        raise SessionError("observer signature display is incomplete")
+    text = stderr.decode("ascii", "strict")
+    if "\r" in text or "\0" in text or arch not in {"arm64", "x86_64"}:
+        raise SessionError("observer signature display format unsupported")
+    required = {f"Executable={path}", f"Identifier={path.name}", f"Format=Mach-O thin ({arch})",
+                "Signature=adhoc", "TeamIdentifier=not set"}
+    ordinary = {"Info.plist=not bound", "Sealed Resources=none", "Internal requirements=none",
+                "Internal requirements count=0 size=12", "Hash type=sha256 size=32",
+                "Hash choices=sha256", "CMSDigestType=2", "Executable Segment base=0",
+                "Executable Segment flags=0x1", "Page size=4096", "Page size=16384"}
+    seen, keys, flags = set(), set(), None
+    for line in text.splitlines():
+        key = ("CodeDirectory" if line.startswith("CodeDirectory ") else
+               "Internal requirements" if line.startswith("Internal requirements") else line.split("=", 1)[0])
+        if key in keys:
+            raise SessionError("duplicate observer signature field")
+        keys.add(key)
+        seen.add(line)
+        if line in required or line in ordinary:
+            continue
+        match = re.fullmatch(r"CodeDirectory v=([0-9]+) size=([0-9]+) flags=0x([0-9a-f]+)\(([^()]*)\) hashes=([0-9]+)\+([0-9]+) location=embedded", line)
+        if match:
+            if flags is not None:
+                raise SessionError("duplicate observer CodeDirectory")
+            flags = int(match[3], 16)
+            if (flags not in {2, 0x20002} or match[4] != ("adhoc" if flags == 2 else "adhoc,linker-signed")
+                    or not 20001 <= int(match[1]) <= 99999 or not 0 < int(match[2]) <= 16 * MiB
+                    or not 0 < int(match[5]) <= 65536 or not 0 <= int(match[6]) <= 32):
+                raise SessionError("observer signature has unsupported signing flags/layout")
+            continue
+        if (re.fullmatch(r"(?:CandidateCDHash sha256|CDHash)=[0-9a-f]{40}", line)
+                or re.fullmatch(r"(?:CandidateCDHashFull sha256|CMSDigest)=[0-9a-f]{64}", line)
+                or re.fullmatch(r"Executable Segment limit=[0-9]{1,10}", line)):
+            continue
+        # Authority, nonempty TeamIdentifier, CS platform identifier and every
+        # unknown diagnostic/state are deliberately outside this finite grammar.
+        failure = SessionError("observer signature display contains unknown or privileged metadata")
+        known = {"Executable", "Identifier", "Format", "Signature", "TeamIdentifier", "Authority",
+                 "Platform identifier", "Runtime Version", "CodeDirectory", "Internal requirements"}
+        failure._ci_observation = {"signature_field": key if key in known else "unclassified"}
+        raise failure
+    if not required <= seen or flags is None:
+        failure = SessionError("observer signature lacks positive ordinary ad-hoc evidence")
+        failure._ci_observation = {"signature_fields_missing": sorted(line.split("=", 1)[0] for line in required - seen),
+                                   "code_directory_missing": flags is None}
+        raise failure
+    return {"signature": "adhoc", "flags": flags, "architecture": arch}
+
+
+def _observer_build_notes(data: bytes, source: Path) -> list[dict]:
+    """Only reviewed C source positions/severity, never compiler message text."""
+    pattern = re.compile(re.escape(str(source).encode()) + rb":([1-9][0-9]{0,6}):([1-9][0-9]{0,6}): (fatal error|error|warning):")
+    notes = []
+    for line in data[:65536].splitlines()[:512]:
+        match = pattern.match(line)
+        if match:
+            notes.append({"file": ".github/scripts/ci_process_observer.c", "line": int(match[1]),
+                          "column": int(match[2]), "severity": match[3].decode("ascii")})
+        elif line.startswith(b"clang: error:"):
+            notes.append({"category": "clang-driver"})
+        if len(notes) == 16:
+            break
+    return notes or ([{"category": "unclassified-compiler-diagnostics"}] if data else [])
 
 
 class Session:
@@ -387,6 +699,8 @@ class Session:
             raise SessionError("invalid original aggregate deadline")
         if signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0):
             raise SessionError("another aggregate timer already owns this process")
+        if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+            raise SessionError("original-parent ownership requires default SIGCHLD disposition")
         self.platform, self.root, self.deadline = platform, _canonical(root), deadline
         self.python, self.ruby = _canonical(python), _canonical(ruby)
         self.runner_home, self.runner_temp = _canonical(runner_home), _canonical(runner_temp)
@@ -401,6 +715,7 @@ class Session:
         self.domain_finality = False
         self.persisted_bytes = self._run_number = 0
         self.admission_results: list[dict[str, object]] = []
+        self.process_observer: Path | None = None
         self._handlers = {}
         self._timer_finished = False
         self._active: subprocess.Popen | None = None
@@ -515,6 +830,14 @@ class Session:
                  "PIP_DISABLE_PIP_VERSION_CHECK": "1", "GIT_CONFIG_NOSYSTEM": "1",
                  "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TERMINAL_PROMPT": "0", "BUNDLE_IGNORE_CONFIG": "1",
                  "GIT_ATTR_NOSYSTEM": "1", "GIT_CONFIG_COUNT": "0", "GIT_OPTIONAL_LOCKS": "0"}
+        observer_key = "MOBILE_RELEASE_TEST_PROCESS_OBSERVER"
+        observer = getattr(self, "process_observer", None)
+        if observer is not None:
+            if self.platform != "darwin" or observer != self.bootstrap / "process-observer":
+                raise SessionError("process observer selector lost its fixed owner binding")
+            fixed[observer_key] = str(observer)
+        elif observer_key in values:
+            raise SessionError("process observer has not completed native admission")
         if any(k in values and values[k] != v for k, v in fixed.items()):
             raise SessionError("caller attempted to alter fixed clean-environment boundary")
         if "JAVA_TOOL_OPTIONS" in values and values["JAVA_TOOL_OPTIONS"] != JAVA_LIMITS:
@@ -587,7 +910,7 @@ class Session:
             self._fail("attempted mutable-output access while a producer is owned")
             raise SessionError(self.failure)
         try:
-            if _domain(self.platform, self.uid):
+            if _domain(self.platform, self.uid, deadline=self.deadline):
                 raise SessionError("reserved identity still has a process or zombie")
             self.domain_finality = True
         except BaseException:
@@ -596,20 +919,38 @@ class Session:
             raise
         self._headroom()
 
-    def _cleanup(self) -> list[str]:
+    def _cleanup(self, *, deadline: float | None = None) -> list[str]:
         errors = []
         if self.platform == "darwin":
             try:
-                # Trusted immutable helper; no project argv/code or root PID kill.
-                data = _small_command([str(self.python), "-I", "-S", "-B", str(self.entry),
-                                       "--enter", "darwin", str(self.uid), str(self.gid), "10",
-                                       str(self.cleanup_policy), str(self.python), "-I", "-S", "-B",
-                                       str(self.entry), "--cleanup", str(self.uid)],
-                                      6, user=self.uid, group=self.gid)
-                if data != b"MRK_CLEANUP_COMPLETE\n":
-                    errors.append("trusted numerical cleanup did not complete")
+                # Root observes only; kernel-authorized signalling stays in U.
+                # One cutoff covers all censuses, batches, waits and sleeps.
+                cutoff = min(self.deadline, time.monotonic() + 4)
+                if deadline is not None:
+                    _remaining(deadline)
+                    cutoff = min(cutoff, deadline)
+                kind = "TERM"
+                while True:
+                    targets = sorted(_domain("darwin", self.uid, deadline=cutoff))
+                    if not targets:
+                        break  # Actual root census, not a helper receipt.
+                    if len(targets) > 4096:
+                        raise SessionError("numerical cleanup batch exceeds fixed bound")
+                    data = _small_command([str(self.python), "-I", "-S", "-B", str(self.entry),
+                                           "--enter", "darwin", str(self.uid), str(self.gid), "10",
+                                           str(self.cleanup_policy), str(self.python), "-I", "-S", "-B",
+                                           str(self.entry), "--cleanup-batch", str(self.uid), str(self.gid),
+                                           kind, json.dumps(targets), repr(cutoff)],
+                                          4, user=self.uid, group=self.gid, deadline=cutoff)
+                    if data != b"MRK_CLEANUP_BATCH_ATTEMPTED\n":
+                        raise SessionError("trusted numerical cleanup batch lacked its exact result")
+                    time.sleep(min(0.1, _remaining(cutoff)))
+                    kind = "KILL"
             except BaseException as exc:
                 errors.append(f"numerical cleanup {type(exc).__name__}")
+                if getattr(self, "_admitting", False):
+                    self.admission_results.append({"name": "cleanup-exception", "ok": False,
+                                                   "exceptions": _exception_notes(exc)})
         return errors
 
     def run(self, argv: list[str], *, cwd: str | Path, env: dict[str, str], seconds: float,
@@ -617,6 +958,8 @@ class Session:
         self._guard()
         if not self.admitted:
             raise SessionError("native admission has not completed")
+        if self.platform == "darwin" and self.process_observer is None:
+            raise SessionError("macOS process observer admission is missing")
         return self._run(argv, cwd=cwd, env=env, seconds=seconds,
                          output_limit=output_limit, cpu_seconds=cpu_seconds, latch=True)
 
@@ -668,9 +1011,13 @@ class Session:
                 paths.append(p)
                 fds.append(os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600))
             child = subprocess.Popen(command, cwd=cwd, env=child_env, stdin=subprocess.DEVNULL,
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                     close_fds=True, start_new_session=True, **kwargs)
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      close_fds=True, start_new_session=True, **kwargs)
             self._active = child
+            if self.platform == "darwin":
+                # Keep both strong references and do not poll/wait first.  Even
+                # an exited original retains its reserved PID/credentials here.
+                _observe_original_credentials(child.pid, self.uid, self.gid, deadline=cutoff)
             for i, stream in enumerate((child.stdout, child.stderr)):
                 os.set_blocking(stream.fileno(), False)
                 sel.register(stream, selectors.EVENT_READ, i)
@@ -696,7 +1043,7 @@ class Session:
                         child.kill()
                         kill_sent = True
                     if code is not None and not cleanup_done:
-                        errors.extend(self._cleanup())
+                        errors.extend(self._cleanup(deadline=min(self.deadline, stop_at + 8)))
                         cleanup_done = True
                     if now - stop_at >= 8:
                         if not all(eof):
@@ -708,7 +1055,7 @@ class Session:
                     self._headroom()
                     if self.platform == "darwin" and any(
                         self.uid in uids and rss > 2 * 1024 * MiB
-                        for uids, _gids, rss in _mac_snapshot().values()
+                        for uids, _gids, rss in _mac_snapshot(deadline=cutoff).values()
                     ):
                         fail("subject per-process RSS limit exceeded")
                     last_monitor = now
@@ -749,16 +1096,23 @@ class Session:
                                                "exceptions": _exception_notes(exc)})
             fail(f"collection {type(exc).__name__}")
         finally:
+            # A successful command may not buy more metadata time at finality.
+            # Failed-command cleanup uses its original stop timestamp, not a
+            # fresh allowance; neither path extends the aggregate endpoint.
+            final_cutoff = min(self.deadline, stop_at + 8) if stop_at is not None else cutoff
             if child is not None:
                 try:
                     if child.poll() is None:
                         child.kill()  # Still-owned original Popen only.
-                    code = child.wait(timeout=2)
+                except BaseException as exc:
+                    errors.append(f"original child stop {type(exc).__name__}")
+                try:
+                    code = child.wait(timeout=max(0.0, min(2, final_cutoff - time.monotonic())))
                     waited = True
                 except BaseException as exc:
                     errors.append(f"original child wait {type(exc).__name__}")
                 if failure is not None and not cleanup_done:
-                    errors.extend(self._cleanup())
+                    errors.extend(self._cleanup(deadline=final_cutoff))
                 for stream in (child.stdout, child.stderr):
                     try:
                         stream.close()
@@ -792,7 +1146,7 @@ class Session:
             self._active = child if child is not None and not waited else None
             self._busy = False
             try:
-                finality = waited and not _domain(self.platform, self.uid)
+                finality = waited and not _domain(self.platform, self.uid, deadline=final_cutoff)
                 self.domain_finality = finality
                 if not finality:
                     errors.append("reserved identity did not reach finality")
@@ -825,9 +1179,22 @@ class Session:
             _readonly_tree(self.source)
             _readonly_tree(self.inputs)
             self._headroom()
-            raw = _small_command([str(self.python), "-I", "-S", "-B", str(self.entry), "--nss", str(self.uid)])
-            if raw != b"MRK_NSS_ABSENT\n" or _domain(self.platform, self.uid, collision=True):
+            raw = _small_command([str(self.python), "-I", "-S", "-B", str(self.entry), "--nss", str(self.uid)],
+                                 deadline=self.deadline)
+            if raw != b"MRK_NSS_ABSENT\n" or _domain(self.platform, self.uid, collision=True, deadline=self.deadline):
                 raise SessionError("numeric identity collision or incomplete admission")
+            tools = {"python": _admit_executable(self.python, self.uid, self.gid),
+                     "sudo": _admit_executable(Path("/usr/bin/sudo"), self.uid, self.gid,
+                                               root_owned=True, non_set_id=False),
+                     "true": _admit_executable(Path("/usr/bin/true"), self.uid, self.gid, root_owned=True)}
+            if self.platform == "darwin":
+                tools["sandbox-exec"] = _admit_executable(Path("/usr/bin/sandbox-exec"), self.uid, self.gid,
+                                                         root_owned=True)
+                # Only root's census executes this original system ps.  Record
+                # actual image metadata without presuming why sandboxed exec failed.
+                tools["ps"] = _admit_executable(Path("/bin/ps"), self.uid, self.gid,
+                                                root_owned=True, non_set_id=False)
+            self.admission_results.append({"name": "fixed-entry-tools", "ok": True, "tools": tools})
             os.chown(self.work, self.uid, self.gid)
             for name in ("home", "tmp", "config", "cache"):
                 p = self.work / name
@@ -835,14 +1202,165 @@ class Session:
                 os.chown(p, self.uid, self.gid)
             self._preflight()
             self.ensure_idle()
+            if self.platform == "darwin":
+                self._admit_process_observer()
+                self.ensure_idle()
             self.admitted = True
         except BaseException as exc:
+            # Preparation may already have passed its own native controls, but
+            # the final outer admission boundary still owns publication.  Keep
+            # those subcontrol facts and revoke this attempt's aggregate claim.
+            self.admitted = False
+            self.process_observer = None
+            for row in self.admission_results:
+                if row["name"] == "process-observer":
+                    row["ok"] = False
             self.admission_results.append({"name": "native-admission-failure", "ok": False,
                                            "exceptions": _exception_notes(exc)})
             self._fail("native isolation admission failed; no product command permitted")
             raise
         finally:
             self._admitting = False
+
+    def _admit_process_observer(self) -> None:
+        """Prepare as U only after base native controls; publish last, once."""
+        if self.platform != "darwin" or self.process_observer is not None:
+            raise SessionError("duplicate/unsupported process observer preparation")
+        self.ensure_idle()
+        tools = _observer_toolchain(self.uid, self.gid, deadline=self.deadline)
+        arch = os.uname().machine
+        if arch not in {"arm64", "x86_64"}:
+            raise SessionError("unsupported native observer architecture")
+        source = self.source / ".github/scripts/ci_process_observer.c"
+        source_bytes = source.read_bytes()
+        if not 0 < len(source_bytes) <= 65536:
+            raise SessionError("immutable observer C source exceeds fixed bound")
+        output, frozen = self.work / "process-observer", self.bootstrap / "process-observer"
+        for path in (output, frozen):
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                continue
+            raise SessionError("observer output would overwrite an existing name")
+
+        def checked_run(name: str, argv: list[str], seconds: int = 15) -> tuple[CapturedRun, dict]:
+            result = self._run(argv, cwd=self.work,
+                               env={"DEVELOPER_DIR": "/Applications/Xcode_26.3.app/Contents/Developer"},
+                               seconds=seconds, cpu_seconds=60, output_limit=65536, latch=False)
+            note = self._note_capture(name, result)
+            if name == "process-observer-build":
+                note["compiler_diagnostics"] = _observer_build_notes(result.stderr, source)
+            if not result.ok:
+                raise SessionError("observer preparation command lacks genuine successful finality")
+            self.ensure_idle()
+            _remaining(self.deadline)
+            return result, note  # Semantic acceptance belongs to the caller below.
+
+        version, version_note = checked_run("process-observer-compiler", [str(tools["clang"]), "--no-default-config", "--version"])
+        version_lines = version.stdout.decode("ascii", "strict").splitlines()
+        if (version.stderr or not 1 <= len(version_lines) <= 8
+                or not re.fullmatch(r"Apple clang version [A-Za-z0-9 ._()+-]{1,160}", version_lines[0])
+                or any(len(line) > 1024 or any(ord(c) < 32 for c in line) for line in version_lines)):
+            raise SessionError("selected compiler version evidence is unsupported")
+        version_note["ok"] = True
+        command = [str(tools["clang"]), "--no-default-config", "-fno-modules", "-std=c11",
+                   "-D_DARWIN_C_SOURCE", "-O2", "-Wall", "-Wextra", "-Werror", "-arch", arch,
+                   "-isysroot", str(tools["sdk"]), "-B", str(tools["toolchain"] / "usr/bin"),
+                   "-Wl,-adhoc_codesign", str(source), "-lproc", "-o", str(output)]
+        compiled, build_note = checked_run("process-observer-build", command, 120)
+        if compiled.stdout or compiled.stderr:
+            raise SessionError("fixed observer compiler emitted unexpected diagnostics")
+        # No produced file is opened before the compiler's actual finality.
+        binary, producer_mode = _observer_artifact(output, self.uid, self.gid, deadline=self.deadline)
+        build_note["ok"] = True
+        verified, validity_note = checked_run("process-observer-signature-validity", ["/usr/bin/codesign", "--verify", "--strict", str(output)])
+        if verified.stdout or verified.stderr:
+            raise SessionError("observer signature verification emitted diagnostics")
+        validity_note["ok"] = True
+        display, display_note = checked_run("process-observer-signature-display", ["/usr/bin/codesign", "--display", "--verbose=2", str(output)])
+        signing = _observer_signature_metadata(display.stdout, display.stderr, output, arch)
+        display_note["ok"] = True
+        entitlements, entitlement_note = checked_run("process-observer-entitlements", ["/usr/bin/codesign", "--display", "--entitlements", "-", "--xml", str(output)])
+        if entitlements.stdout or entitlements.stderr not in (b"", f"Executable={output}\n".encode()):
+            raise SessionError("observer has entitlements or unsupported extraction diagnostics")
+        entitlement_note["ok"] = True
+        # The documented empty display means none only after actual successful
+        # strict validation/display, own waits, both EOFs and outside finality.
+        self.ensure_idle()
+        if _observer_artifact(output, self.uid, self.gid, deadline=self.deadline) != (binary, producer_mode):
+            raise SessionError("observer bytes/mode changed across read-only signature validation")
+        _remaining(self.deadline)
+        _readonly_tree(self.bootstrap)
+        _private_file(frozen, binary, 0o555)
+        os.chown(frozen, 0, 0)
+        frozen_bytes, frozen_mode = _observer_artifact(frozen, 0, 0, deadline=self.deadline)
+        if frozen_bytes != binary or frozen_mode != 0o555:
+            raise SessionError("observer immutable bootstrap copy differs")
+        _readonly_tree(self.bootstrap)
+        self._observer_native_controls(frozen)
+        self.ensure_idle()
+        _remaining(self.deadline)
+        self.process_observer = frozen  # No caller-selected or pre-admission path.
+        self.admission_results.append({"name": "process-observer", "ok": True,
+                                       "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+                                       "binary_sha256": hashlib.sha256(binary).hexdigest(),
+                                       "compiler_version": version_lines[0], "tools": tools["evidence"],
+                                       "producer_mode": format(producer_mode, "04o"), "mode": "0555",
+                                       **signing, "entitlements": "none"})
+
+    def _observer_native_controls(self, candidate: Path) -> None:
+        """Root owns only its fixed foreign sentinel; it never runs the reader."""
+        if candidate != self.bootstrap / "process-observer":
+            raise SessionError("native observer candidate is not the fixed bootstrap file")
+        cutoff = min(self.deadline, time.monotonic() + 30)
+        sentinel, errors = None, []
+        try:
+            _remaining(cutoff)
+            sentinel = subprocess.Popen([str(self.python), "-I", "-S", "-B", str(self.entry), "--sentinel"],
+                                        cwd=self.work, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        close_fds=True, start_new_session=True, bufsize=0)
+            if _ready_line(sentinel.stdout, min(5, _remaining(cutoff))) != b"MRK_SENTINEL_READY\n":
+                raise SessionError("owned foreign observer control did not become ready")
+            _observe_original_credentials(sentinel.pid, 0, os.getgid(), deadline=cutoff)
+            probe_cutoff = min(cutoff, time.monotonic() + 20)
+            result = self._run([str(self.python), "-I", "-S", "-B", str(self.entry),
+                                "--observer-probe", str(candidate), str(sentinel.pid), repr(probe_cutoff)],
+                               cwd=self.work, env={}, seconds=_remaining(probe_cutoff), latch=False)
+            note = self._note_capture("process-observer-native", result)
+            if not result.ok or result.stdout != b"MRK_PROCESS_OBSERVER_OK\n" or result.stderr:
+                raise SessionError("native process observer controls failed")
+            self.ensure_idle()
+            out, err = sentinel.communicate(b"q", timeout=min(2, _remaining(cutoff)))
+            if sentinel.returncode != 0 or out != b"MRK_SENTINEL_CLOSED\n" or err:
+                raise SessionError("owned foreign observer control did not close genuinely")
+            _remaining(cutoff)
+        except BaseException as exc:
+            errors.append(exc)
+        if sentinel is not None:
+            try:
+                if sentinel.poll() is None:
+                    sentinel.kill()  # This original root handle only, never a census PID.
+            except BaseException as exc:
+                errors.append(exc)
+            try:
+                if type(sentinel.wait(timeout=max(0.0, min(2, cutoff - time.monotonic())))) is not int:
+                    raise SessionError("owned foreign observer control has no original cleanup wait")
+            except BaseException as exc:
+                errors.append(exc)
+            for stream in (sentinel.stdin, sentinel.stdout, sentinel.stderr):
+                try:
+                    stream.close()
+                except BaseException as exc:
+                    errors.append(exc)
+        try:
+            self.ensure_idle()
+            _remaining(cutoff)
+        except BaseException as exc:
+            errors.append(exc)
+        if errors:
+            raise BaseExceptionGroup("observer native controls/owned foreign cleanup failed", errors)
+        note["ok"] = True  # Includes every original wait/EOF/close and final cutoff.
 
     def _note_capture(self, name: str, result: CapturedRun) -> dict:
         row = {"name": name, "ok": False, "subject_ok": result.ok,
@@ -866,7 +1384,7 @@ class Session:
             # is a single synthetic UID-owned0600 file, not a group capability.
             os.chown(self.outside_write, self.uid, self.gid)
             positive = self._trusted_entry(self.write_policy, ["--write-control", str(self.outside_write)])
-            out = _small_command(positive, 10, user=self.uid, group=self.gid)
+            out = _small_command(positive, 10, user=self.uid, group=self.gid, deadline=self.deadline)
             if out != b"MRK_OUTSIDE_WRITE_POSITIVE\n":
                 raise SessionError("outside-policy numerical write positive failed")
             self.ensure_idle()
@@ -909,6 +1427,7 @@ class Session:
             if not good.ok or good.stdout != b"MRK_NATIVE_ISOLATION_OK\n":
                 raise SessionError("native credentials/files/FD/network inheritance preflight failed")
             self.ensure_idle()
+            _outside_network_empty(listeners, deadline=self.deadline)
             # Revoke this synthetic positive grant before any product command.
             # Failed/unknown writers never reach this filesystem postcondition.
             os.chown(self.outside_write, 0, 0)
@@ -985,7 +1504,7 @@ class Session:
             if _ready_line(sentinel.stdout, 5) != b"MRK_SENTINEL_READY\n":
                 raise SessionError("owned outside-sandbox signal control did not become ready")
             raw = _small_command(self._trusted_entry(self.policy, ["--signal-case", str(sentinel.pid)]),
-                                 10, user=self.uid, group=self.gid)
+                                 10, user=self.uid, group=self.gid, deadline=self.deadline)
             if raw != b"MRK_SIGNAL_BOUNDARY_OK\n":
                 raise SessionError("native signal boundary did not pass its actual controls")
             out, err = sentinel.communicate(b"q", timeout=2)
@@ -1023,18 +1542,18 @@ class Session:
         raw = _small_command([str(self.python), "-I", "-S", "-B", str(self.entry), "--loss-owner",
                               json.dumps({"command": command, "kwargs": kwargs,
                                           "cwd": str(self.work), "env": self._environment({})})],
-                             10, expected_code=23)
+                             10, expected_code=23, deadline=self.deadline)
         fields = raw.split()
         if len(fields) != 2 or fields[0] != b"MRK_OWNER_LOST" or not fields[1].isdigit():
             raise SessionError("lost-owner negative control has no genuine owner observation")
         observed_child = int(fields[1])  # Observation only; never signal authority.
         errors = self._cleanup()
-        cutoff = time.monotonic() + 5
+        cutoff = min(self.deadline, time.monotonic() + 5)
         while time.monotonic() < cutoff:
-            rows = _snapshot(self.platform)
-            if all(pid != observed_child for pid, _ in rows) and not _domain(self.platform, self.uid):
+            rows = _snapshot(self.platform, deadline=cutoff)
+            if all(pid != observed_child for pid, _ in rows) and not _domain(self.platform, self.uid, deadline=cutoff):
                 break
-            time.sleep(0.05)
+            time.sleep(min(0.05, _remaining(cutoff)))
         else:
             errors.append("lost-owner platform cleanup remained unknown or incomplete")
         if errors:
@@ -1065,7 +1584,8 @@ class Session:
                     except BaseException as exc:
                         self.cleanup_errors.append(f"close original owned child {type(exc).__name__}")
             try:
-                self.domain_finality = not self._busy and self._active is None and not _domain(self.platform, self.uid)
+                self.domain_finality = (not self._busy and self._active is None
+                                        and not _domain(self.platform, self.uid, deadline=self.deadline))
                 if not self.domain_finality:
                     self.cleanup_errors.append("close did not establish reserved-identity finality")
                     self._fail("close did not establish reserved-identity finality")
@@ -1231,6 +1751,200 @@ def _signal_target(outside: bool) -> None:
         print("MRK_SIGNAL_RECEIVED", flush=True)
 
 
+def _observer_query(observer: Path, pid: int, group: int | None, *, deadline: float,
+                    kernel_denied: bool = False) -> str:
+    """Fixed native-control parser; arbitrary product or ps text is not accepted."""
+    if sys.platform != "darwin" or os.getuid() == 0:
+        raise SessionError("native reader may never execute as root or on a substitute platform")
+    raw = _small_command([str(observer), str(pid)], 3, expected_code=2 if kernel_denied else 0,
+                         deadline=deadline)
+    if len(raw) > 512 or not raw.endswith(b"\n") or raw.count(b"\n") != 1:
+        raise SessionError("native observer record size/framing failed")
+    if kernel_denied:
+        if raw not in {f"MRK_PROCESS_V1 denied {pid} kernel {number}\n".encode()
+                       for number in (errno.EPERM, errno.EACCES)}:
+            raise SessionError("foreign native observer result is not actual kernel denial")
+        _remaining(deadline)
+        return "denied"
+    if raw == f"MRK_PROCESS_V1 absent {pid}\n".encode():
+        _remaining(deadline)
+        return "absent"
+    fields = raw[:-1].split(b" ")
+    if (len(fields) != 13 or fields[:2] != [b"MRK_PROCESS_V1", b"present"]
+            or any(not re.fullmatch(rb"0|[1-9][0-9]{0,9}", part) for part in fields[2:12])):
+        raise SessionError("native observer record grammar failed")
+    observed, pgid, ru, eu, su, rg, eg, sg, status, exiting = map(int, fields[2:12])
+    if (observed != pid or not 1 < pgid < 2**31 or group is not None and pgid != group
+            or (ru, eu, su) != (os.getuid(),) * 3 or (rg, eg, sg) != (os.getgid(),) * 3
+            or not 0 <= status < 2**32 or exiting not in {0, 1}):
+        raise SessionError("native observer record identity/status failed")
+    wanted = "zombie" if status == 5 else "live" if status in {2, 3, 4} and not exiting else "indeterminate"
+    if fields[12] != wanted.encode():
+        raise SessionError("native observer record contradicts BSD state")
+    _remaining(deadline)
+    return wanted
+
+
+def _observer_control_eof(child, *, deadline: float) -> None:
+    """Drain original fixture pipes WITHOUT reaping its deliberately held zombie."""
+    sel, errors = None, []
+    data = [bytearray(), bytearray()]
+    try:
+        sel = selectors.DefaultSelector()
+        for i, stream in enumerate((child.stdout, child.stderr)):
+            os.set_blocking(stream.fileno(), False)
+            sel.register(stream, selectors.EVENT_READ, i)
+        while sel.get_map():
+            for key, _ in sel.select(min(0.05, _remaining(deadline))):
+                try:
+                    chunk = os.read(key.fd, 512 - len(data[key.data]) + 1)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    sel.unregister(key.fileobj)  # Actual EOF, not a closed local read end.
+                    continue
+                data[key.data].extend(chunk)
+                if len(data[key.data]) > 512:
+                    raise SessionError("observer fixture output exceeds fixed bound")
+        if data != [bytearray(b"MRK_OBSERVER_FAMILY_RELEASED\n"), bytearray()]:
+            raise SessionError("observer fixture lacks complete release/EOF evidence")
+        _remaining(deadline)
+    except BaseException as exc:
+        errors.append(exc)
+    if sel is not None:
+        try:
+            sel.close()
+        except BaseException as exc:
+            errors.append(exc)
+    try:
+        _remaining(deadline)
+    except BaseException as exc:
+        errors.append(exc)
+    if errors:
+        raise BaseExceptionGroup("observer fixture EOF/selector cleanup failed", errors)
+
+
+def _observer_family(deadline: float) -> None:
+    """U fixture is its grandchild's original parent and waits before exiting."""
+    if sys.platform != "darwin" or os.getuid() == 0 or os.getuid() != os.geteuid():
+        raise SessionError("observer family must remain a native unprivileged fixture")
+    child, errors = None, []
+    try:
+        _remaining(deadline)
+        child = subprocess.Popen([sys.executable, "-I", "-S", "-B", str(Path(__file__).resolve()), "--sentinel"],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 close_fds=True, bufsize=0)
+        if _ready_line(child.stdout, min(3, _remaining(deadline))) != b"MRK_SENTINEL_READY\n":
+            raise SessionError("owned observer descendant was not genuinely ready")
+        print(f"MRK_OBSERVER_FAMILY {child.pid}", flush=True)
+        with selectors.DefaultSelector() as sel:
+            sel.register(0, selectors.EVENT_READ)
+            if not sel.select(_remaining(deadline)) or os.read(0, 1) != b"q":
+                raise SessionError("observer family lost its owned release channel")
+        out, err = child.communicate(b"q", timeout=min(3, _remaining(deadline)))
+        if child.returncode != 0 or out != b"MRK_SENTINEL_CLOSED\n" or err:
+            raise SessionError("observer descendant was not actually waited/drained")
+    except BaseException as exc:
+        errors.append(exc)
+    if child is not None:
+        try:
+            if child.poll() is None:
+                child.kill()  # Own original child only.
+        except BaseException as exc:
+            errors.append(exc)
+        try:
+            if type(child.wait(timeout=max(0.0, min(2, deadline - time.monotonic())))) is not int:
+                raise SessionError("observer descendant has no original cleanup wait")
+        except BaseException as exc:
+            errors.append(exc)
+        for stream in (child.stdin, child.stdout, child.stderr):
+            try:
+                stream.close()
+            except BaseException as exc:
+                errors.append(exc)
+    try:
+        _remaining(deadline)
+    except BaseException as exc:
+        errors.append(exc)
+    if errors:
+        raise BaseExceptionGroup("observer descendant original custody/cleanup failed", errors)
+    print("MRK_OBSERVER_FAMILY_RELEASED", flush=True)
+
+
+def _observer_probe(observer: Path, foreign_pid: int, deadline: float) -> None:
+    """All reader invocations are U-owned; a printed PID grants no signal route."""
+    if (sys.platform != "darwin" or os.getuid() == 0 or os.getuid() != os.geteuid()
+            or os.getgid() != os.getegid() or not 1 < foreign_pid < 2**31
+            or observer != Path(__file__).resolve().parent / "process-observer"):
+        raise SessionError("invalid native observer probe role")
+    child, errors = None, []
+    try:
+        _remaining(deadline)
+        child = subprocess.Popen([sys.executable, "-I", "-S", "-B", str(Path(__file__).resolve()),
+                                  "--observer-family", repr(deadline)],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 close_fds=True, start_new_session=True, bufsize=0)
+        ready = _ready_line(child.stdout, min(5, _remaining(deadline)))
+        match = re.fullmatch(rb"MRK_OBSERVER_FAMILY ([1-9][0-9]{0,9})\n", ready)
+        if match is None:
+            raise SessionError("observer family has no actual readiness/control evidence")
+        descendant = int(match[1])
+        if not 1 < descendant < 2**31 or descendant in {child.pid, foreign_pid, os.getpid()}:
+            raise SessionError("observer descendant control identity is invalid")
+        for pid in (child.pid, descendant):
+            while True:
+                state = _observer_query(observer, pid, child.pid, deadline=deadline)
+                if state == "live":
+                    break
+                if state != "indeterminate":
+                    raise SessionError("observer live control stopped before observation")
+                time.sleep(min(0.01, _remaining(deadline)))
+        _observer_query(observer, foreign_pid, None, deadline=deadline, kernel_denied=True)
+        if os.write(child.stdin.fileno(), b"q") != 1:
+            raise SessionError("observer release write was incomplete")
+        child.stdin.close()
+        _observer_control_eof(child, deadline=deadline)
+        # Keep the strong original Popen handle.  Neither pipe EOF nor launching
+        # a separate reader polls/waits this child; its zombie PID stays reserved.
+        while True:
+            state = _observer_query(observer, child.pid, child.pid, deadline=deadline)
+            if state == "zombie":
+                break
+            if state == "absent":
+                raise SessionError("owned child disappeared before actual original reap")
+            time.sleep(min(0.01, _remaining(deadline)))
+        if child.wait(timeout=_remaining(deadline)) != 0:
+            raise SessionError("observer original zombie did not yield genuine successful wait")
+        if _observer_query(observer, child.pid, child.pid, deadline=deadline) != "absent":
+            raise SessionError("observer original child was not absent after actual reap")
+        _remaining(deadline)
+    except BaseException as exc:
+        errors.append(exc)
+    if child is not None:
+        try:
+            if child.poll() is None:
+                child.kill()  # Strongly held original fixture, not returned metadata.
+        except BaseException as exc:
+            errors.append(exc)
+        try:
+            if type(child.wait(timeout=max(0.0, min(2, deadline - time.monotonic())))) is not int:
+                raise SessionError("observer fixture has no original cleanup wait")
+        except BaseException as exc:
+            errors.append(exc)
+        for stream in (child.stdin, child.stdout, child.stderr):
+            try:
+                stream.close()
+            except BaseException as exc:
+                errors.append(exc)
+    try:
+        _remaining(deadline)
+    except BaseException as exc:
+        errors.append(exc)
+    if errors:
+        raise BaseExceptionGroup("observer native original-custody/cleanup controls failed", errors)
+    print("MRK_PROCESS_OBSERVER_OK", flush=True)
+
+
 def _loss_owner(data: dict) -> None:
     if os.geteuid() != 0:
         raise SessionError("fixed synthetic owner role requires outside subject identity")
@@ -1293,6 +2007,126 @@ def _process_groups(platform: str) -> list[int]:
         raise
 
 
+def _probe_network(platform: str, endpoints: list) -> None:
+    """Probe only owned loopback endpoints; UDP enqueue is not delivery."""
+    expected = {(socket.AF_INET, socket.SOCK_STREAM, "127.0.0.1"),
+                (socket.AF_INET, socket.SOCK_DGRAM, "127.0.0.1"),
+                (socket.AF_INET6, socket.SOCK_STREAM, "::1"),
+                (socket.AF_INET6, socket.SOCK_DGRAM, "::1")}
+    if (platform not in {"linux", "darwin"} or not isinstance(endpoints, list) or len(endpoints) != 4
+            or any(not isinstance(row, (list, tuple)) or len(row) != 4
+                   or not isinstance(row[0], int) or not isinstance(row[1], int) or not isinstance(row[2], str)
+                   or type(row[3]) is not int or not 0 < row[3] <= 65535 for row in endpoints)
+            or {(row[0], row[1], row[2]) for row in endpoints} != expected):
+        raise SessionError("incomplete fixed outside network endpoints")
+    if platform == "linux":
+        interfaces = socket.if_nameindex()
+        if (len(interfaces) != 1 or len(interfaces[0]) != 2
+                or type(interfaces[0][0]) is not int or interfaces[0][0] <= 0
+                or interfaces[0][1] != "lo"):
+            raise SessionError("isolated network namespace has unexpected interfaces")
+    for family, kind, host, port in endpoints:
+        stream = None
+        failures = []
+        operation = "network-" + ("tcp" if kind == socket.SOCK_STREAM else "udp") + ("4" if family == socket.AF_INET else "6")
+        try:
+            stream = socket.socket(family, kind)
+            stream.settimeout(0.5)
+            if kind == socket.SOCK_STREAM:
+                stream.connect((host, port))
+                raise SessionError("outside-domain TCP connection was permitted")
+            sent = stream.sendto(b"must-not-escape", (host, port))
+            if platform != "linux" or sent != len(b"must-not-escape"):
+                raise SessionError("outside-domain datagram was not denied or fully enqueued locally")
+            # Linux's separate stack/loopback can accept this datagram locally.
+            # The outside original owner must separately prove no delivery.
+        except OSError as exc:
+            allowed = {errno.EACCES, errno.EPERM} if platform == "darwin" else {
+                errno.EACCES, errno.EPERM, errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNREFUSED}
+            if exc.errno not in allowed:
+                failures.append(exc)
+        except BaseException as exc:
+            failures.append(exc)
+        if stream is not None:
+            try:
+                stream.close()
+            except BaseException as exc:
+                failures.append(exc)
+        if failures:
+            error = BaseExceptionGroup("fixed network probe/close failed", failures)
+            error._ci_operation = operation
+            raise error
+
+
+def _outside_network_empty(listeners: list, *, deadline: float) -> None:
+    """Original owner checks all four receivers AFTER wait, EOF and UID finality."""
+    expected = {(family, kind) for family in (socket.AF_INET, socket.AF_INET6)
+                for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM)}
+    if len(listeners) != 4 or {(s.family, s.type) for s in listeners} != expected:
+        raise SessionError("incomplete owned outside receiver inventory")
+    failures = []
+    for listener in listeners:
+        accepted = None
+        try:
+            _remaining(deadline)
+            listener.setblocking(False)
+            try:
+                if listener.type == socket.SOCK_STREAM:
+                    accepted, _address = listener.accept()
+                else:
+                    listener.recv(1)  # A zero-length datagram is also delivery.
+                raise SessionError("owned outside receiver observed prohibited delivery")
+            except BlockingIOError as exc:
+                if exc.errno not in {errno.EAGAIN, errno.EWOULDBLOCK}:
+                    raise
+        except BaseException as exc:
+            failures.append(exc)
+        if accepted is not None:
+            try:
+                accepted.close()
+            except BaseException as exc:
+                failures.append(exc)
+        if failures and isinstance(failures[-1], DeadlineExpired):
+            break
+    try:
+        _remaining(deadline)
+    except BaseException as exc:
+        failures.append(exc)
+    if failures:
+        raise BaseExceptionGroup("outside receiver observation/close failed", failures)
+
+
+def _sudo_denial() -> None:
+    """Only the pre-admitted fixed noninteractive command is a denial oracle."""
+    try:
+        child = subprocess.Popen(["/usr/bin/sudo", "-n", "-u", "root", "/usr/bin/true"],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, close_fds=True)
+    except OSError as exc:
+        if exc.errno in {errno.EPERM, errno.EACCES}:
+            return  # A real permission denial before an original child exists.
+        raise
+    failures = []
+    try:
+        result = child.wait(timeout=3)
+        if type(result) is not int or result == 0:
+            raise SessionError("subject has usable or unobserved sudo authority")
+    except BaseException as exc:
+        failures.append(exc)
+    try:
+        if child.poll() is None:
+            child.kill()
+    except BaseException as exc:
+        failures.append(exc)
+    try:
+        if type(child.wait(timeout=2)) is not int:
+            raise SessionError("fixed sudo denial has no original cleanup wait")
+    except BaseException as exc:
+        failures.append(exc)
+    if failures:
+        raise BaseExceptionGroup("fixed sudo denial/cleanup failed", failures)
+
+
 def _probe_leaf(data: dict) -> None:
     uid, gid = data["uid"], data["gid"]
     if (os.getuid(), os.geteuid(), os.getgid(), os.getegid()) != (uid, uid, gid, gid):
@@ -1325,10 +2159,9 @@ def _probe_leaf(data: dict) -> None:
             raise SessionError("capability/no-new-privileges drop failed")
         if any(os.readlink(f"/proc/self/ns/{n}") == data[f"host_{n}"] for n in ("net", "pid")):
             raise SessionError("required namespace was not separated")
-    else:
-        raw = _small_command(["/bin/ps", "-p", str(os.getpid()), "-o", "ruid=,uid=,svuid=,rgid=,gid=,svgid="])
-        if tuple(map(int, raw.split())) != (uid, uid, uid, gid, gid, gid):
-            raise SessionError("saved numerical credentials differ")
+    # Darwin saved IDs were observed by the real root parent on its original,
+    # still-unreaped Popen PID.  Fork and the admitted non-set-ID exec chain
+    # preserve them; sandboxed ps is not an appropriate metadata dependency.
     try:
         os.setuid(0)
     except PermissionError:
@@ -1374,25 +2207,7 @@ def _probe_leaf(data: dict) -> None:
     finally:
         a.close()
         b.close()
-    for family, kind, host, port in data["endpoints"]:
-        s = None
-        try:
-            s = socket.socket(family, kind)
-            s.settimeout(0.5)
-            if kind == socket.SOCK_STREAM:
-                s.connect((host, port))
-            else:
-                s.sendto(b"must-not-escape", (host, port))
-        except OSError as exc:
-            allowed = {errno.EACCES, errno.EPERM} if data["platform"] == "darwin" else {
-                errno.EACCES, errno.EPERM, errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNREFUSED}
-            if exc.errno not in allowed:
-                raise SessionError("network denial had an unknown cause") from exc
-        else:
-            raise SessionError("outside-domain networking was permitted")
-        finally:
-            if s is not None:
-                s.close()
+    _probe_network(data["platform"], data["endpoints"])
 
 
 def _probe(data: dict, *, grandchild: bool = False) -> None:
@@ -1405,42 +2220,37 @@ def _probe(data: dict, *, grandchild: bool = False) -> None:
         if raw != b"MRK_LEAF_OK\n":
             raise SessionError("fork/exec/detached-grandchild admission failed")
     if not grandchild:
-        # Fixed benign root command; stdin is closed, no real password/keychain.
-        child = subprocess.Popen(["/usr/bin/sudo", "-n", "-u", "root", "/usr/bin/true"],
-                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, close_fds=True)
-        try:
-            if child.wait(timeout=3) == 0:
-                raise SessionError("subject has usable sudo authority")
-        finally:
-            if child.poll() is None:
-                child.kill()
-            child.wait(timeout=2)
+        _sudo_denial()
     print("MRK_LEAF_OK" if grandchild else "MRK_NATIVE_ISOLATION_OK", flush=True)
 
 
-def _cleanup_numeric(uid: int) -> None:
-    if uid == 0 or (os.getuid(), os.geteuid()) != (uid, uid):
-        raise SessionError("cleanup must run only as the reserved unprivileged identity")
-    own = os.getpid()
-    cutoff = time.monotonic() + 4
-    sent_term = set()
-    while time.monotonic() < cutoff:
-        targets = _domain("darwin", uid) - {own}
-        if not targets:
-            print("MRK_CLEANUP_COMPLETE", flush=True)
-            return
+def _cleanup_numeric(uid: int, gid: int, kind: str, targets: list[int], deadline: float) -> None:
+    """Fixed U-only signal batch.  Root, never this helper, observes finality."""
+    try:
+        _remaining(deadline)
+        if (sys.platform != "darwin" or type(uid) is not int or type(gid) is not int
+                or not 60000 <= uid < 65000 or gid != uid
+                or (os.getuid(), os.geteuid(), os.getgid(), os.getegid()) != (uid, uid, gid, gid)
+                or _process_groups("darwin") != [gid]):
+            raise SessionError("cleanup batch lacks its reserved unprivileged credentials")
+        if (not isinstance(kind, str) or kind not in {"TERM", "KILL"}
+                or not isinstance(targets, list) or not 1 <= len(targets) <= 4096
+                or any(type(pid) is not int or not 1 < pid < 2**31 or pid == os.getpid() for pid in targets)
+                or len(set(targets)) != len(targets)):
+            raise SessionError("invalid fixed numerical cleanup batch")
+        signum = signal.SIGTERM if kind == "TERM" else signal.SIGKILL
         for pid in targets:
-            if pid <= 1:
-                raise SessionError("invalid numerical cleanup target")
+            _remaining(deadline)
             try:
-                os.kill(pid, signal.SIGKILL if pid in sent_term else signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            # A recycled foreign-UID PID yields PermissionError and FAILS.
-            sent_term.add(pid)
-        time.sleep(0.1)
-    raise SessionError("numerical cleanup did not reach finality")
+                os.kill(pid, signum)  # U-only; kernel rechecks even a recycled PID.
+            except OSError as exc:
+                if exc.errno != errno.ESRCH:
+                    raise  # Foreign UID EPERM and unknown errors are failures.
+        _remaining(deadline)
+        print("MRK_CLEANUP_BATCH_ATTEMPTED", flush=True)
+    except BaseException as exc:
+        exc._ci_operation = "cleanup-batch"
+        raise
 
 
 def _fixture(name: str) -> int:
@@ -1492,8 +2302,10 @@ def _main(argv: list[str]) -> int:
         else:
             _probe(data, grandchild=argv[0] == "--grandchild")
         return 0
-    if argv[0] == "--cleanup" and len(argv) == 2:
-        _cleanup_numeric(int(argv[1]))
+    if argv[0] == "--cleanup-batch" and len(argv) == 6:
+        if len(argv[4]) > 65536:
+            raise SessionError("cleanup batch argument exceeds fixed bound")
+        _cleanup_numeric(int(argv[1]), int(argv[2]), argv[3], json.loads(argv[4]), float(argv[5]))
         return 0
     if argv[0] == "--fixture" and len(argv) == 2:
         return _fixture(argv[1])
@@ -1502,6 +2314,12 @@ def _main(argv: list[str]) -> int:
         return 0
     if argv == ["--sentinel"] or argv == ["--signal-target"]:
         _signal_target(argv[0] == "--sentinel")
+        return 0
+    if argv[0] == "--observer-probe" and len(argv) == 4:
+        _observer_probe(Path(argv[1]), int(argv[2]), float(argv[3]))
+        return 0
+    if argv[0] == "--observer-family" and len(argv) == 2:
+        _observer_family(float(argv[1]))
         return 0
     if argv[0] == "--signal-case" and len(argv) == 2:
         _signal_subject(int(argv[1]))
