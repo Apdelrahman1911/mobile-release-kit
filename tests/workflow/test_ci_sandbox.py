@@ -74,6 +74,7 @@ def session_double(module, platform="linux"):
     session.admission_results = []
     session._handlers = {}
     session._active = None
+    session._home_state = None
     session.process_observer = session.bootstrap / "process-observer" if platform == "darwin" else None
     return session
 
@@ -549,6 +550,7 @@ class CISandboxPureTests(unittest.TestCase):
                                     time=SimpleNamespace(monotonic=lambda: 0.0),
                                     os=SimpleNamespace(chown=chown, path=SimpleNamespace(basename=os.path.basename))), \
                      patch.object(session, "_headroom", Mock()), patch.object(Path, "stat", tool_state), \
+                     patch.object(session, "_prepare_home_boundary", Mock()), \
                      patch.object(Path, "mkdir", side_effect=AssertionError("no admission allocation is permitted")), \
                      patch.object(self.module, "_admit_executable", wraps=admit_executable) as tools:
                     expected_error = GrantBoundary if case == "grant-boundary" else OSError if case == "later-stat-error" else self.module.SessionError
@@ -1323,7 +1325,7 @@ class CISandboxPureTests(unittest.TestCase):
             created.append(endpoint)
             return endpoint
 
-        fake_socket = SimpleNamespace(AF_INET=2, AF_INET6=10, SOCK_STREAM=1, SOCK_DGRAM=2, socket=socket_factory)
+        fake_socket = SimpleNamespace(AF_INET=2, AF_INET6=10, AF_UNIX=1, SOCK_STREAM=1, SOCK_DGRAM=2, socket=socket_factory)
         fake_os = SimpleNamespace(chown=Mock(), readlink=lambda _: "synthetic-namespace")
 
         def read_positive(path):
@@ -1360,10 +1362,17 @@ class CISandboxPureTests(unittest.TestCase):
         class AfterNative(RuntimeError):
             pass
 
-        for case in ("ordered", "waited", "stdout_eof", "stderr_eof", "domain_finality", "outside-error", "ruby-metadata-error"):
-            with self.subTest(native_boundary=case):
-                session = session_double(self.module)
+        cases = ("ordered", "waited", "stdout_eof", "stderr_eof", "domain_finality", "outside-error", "ruby-metadata-error",
+                 "home-positive-error", "home-non-delivery-error")
+        actual_home_empty = self.module._home_socket_empty
+        for platform, case in ((p, c) for p in ("linux", "darwin") for c in cases
+                               if p == "darwin" or c not in {"home-positive-error", "home-non-delivery-error"}):
+            with self.subTest(native_boundary=(platform, case)):
+                session = session_double(self.module, platform)
+                if platform == "darwin":
+                    session.runner_home = Path("/Users/runner")
                 rig = _Collection(self.module, session, stdout=(b"MRK_NATIVE_ISOLATION_OK\n",))
+                rig.snapshot_rows = {(rig.child.pid, rig.child.pid): ((session.uid,) * 3, (session.gid,) * 3, 65536)}
                 created, closed, events, cleanup = [], [], rig.events, {}
                 outside_error = OSError(errno.EIO, "synthetic unknown receiver") if case == "outside-error" else None
                 native_run = session._run
@@ -1371,11 +1380,47 @@ class CISandboxPureTests(unittest.TestCase):
                 metadata_error = OSError(errno.EACCES, "synthetic Ruby metadata observation failure")
                 ruby_paths = [session.ruby, *session.ruby.parents]
                 metadata_seen = []
+                home_error = OSError(errno.EIO, "synthetic owned HOME admission control")
+
+                def home_positive():
+                    self.assertEqual(platform, "darwin")
+                    self.assertEqual(events, [])
+                    events.append(("home-positive",))
+                    if case == "home-positive-error":
+                        raise home_error
+
+                def write_positive(*_argv, **_options):
+                    self.assertEqual(events, [("home-positive",)] if platform == "darwin" else [])
+                    events.append(("write-positive",))
+                    return b"MRK_OUTSIDE_WRITE_POSITIVE\n"
+
+                def home_accept():
+                    if case == "home-non-delivery-error":
+                        raise home_error
+                    raise BlockingIOError(errno.EAGAIN, "synthetic empty original HOME listener")
+
+                home_listener = SimpleNamespace(family=1, type=1, setblocking=Mock(), accept=Mock(side_effect=home_accept), close=Mock())
+                session._home_state = {"listener": home_listener} if platform == "darwin" else None
+
+                def home_empty(listener, *, deadline):
+                    self.assertIs(listener, home_listener)
+                    self.assertEqual(deadline, session.deadline)
+                    self.assertEqual(len([e for e in events if e[0] == "outside-observation"]), 4)
+                    self.assertIsNone(session._active)
+                    self.assertTrue(session.domain_finality)
+                    self.assertFalse(next(n for n in session.admission_results if n["name"] == "native-isolation")["ok"])
+                    self.assertLess(max(i for i, e in enumerate(events) if e[0] == "wait-original"),
+                                    max(i for i, e in enumerate(events) if e[0] == "domain"))
+                    self.assertEqual({e[1] for e in events if e[0] == "unregister-eof"}, {0, 1})
+                    events.append(("home-non-delivery",))
+                    return actual_home_empty(listener, deadline=deadline)
 
                 def ruby_metadata(path):
                     self.assertEqual(path, ruby_paths[len(metadata_seen)])
                     metadata_seen.append(path)
                     self.assertEqual(len([e for e in events if e[0] == "outside-observation"]), 4)
+                    if platform == "darwin":
+                        self.assertIn(("home-non-delivery",), events)
                     events.append(("ruby-metadata", len(metadata_seen) - 1))
                     if case == "ruby-metadata-error":
                         raise metadata_error
@@ -1393,6 +1438,18 @@ class CISandboxPureTests(unittest.TestCase):
                         events.append(("ruby-probe",))
                         raise stop
                     self.assertEqual([e[1] for e in events if e[0] == "positive-consumed"], list(range(4)))
+                    self.assertEqual(argv[:6], [str(session.python), "-I", "-S", "-B", str(session.entry), "--probe"])
+                    data = json.loads(argv[6])
+                    self.assertEqual((data["uid"], data["gid"], data["platform"]), (session.uid, session.gid, platform))
+                    if platform == "darwin":
+                        self.assertEqual((data["home_canary"], data["home_socket"]),
+                            (str(session.runner_home / f".{session.root.name}-home-read"), str(session.runner_home / f".{session.root.name}-home-socket")))
+                        self.assertNotIn("runtime_executables", data)
+                        self.assertLess(events.index(("home-positive",)), events.index(("write-positive",)))
+                    else:
+                        self.assertEqual(data["runtime_executables"], [str(session.python), str(session.ruby)])
+                        self.assertNotIn("home_canary", data)
+                        self.assertNotIn("home_socket", data)
                     result = native_run(argv, **kwargs)
                     self.assertTrue(result.ok, result)
                     return dataclasses.replace(result, **{case: False}) if case in {
@@ -1402,8 +1459,11 @@ class CISandboxPureTests(unittest.TestCase):
                 with rig.scope(), patch.object(self.module, "socket", fake_socket), \
                      patch.object(self.module.os, "chown", create=True) as chown, \
                      patch.object(self.module.os, "readlink", return_value="synthetic-namespace", create=True), \
-                     patch.object(self.module, "_small_command", return_value=b"MRK_OUTSIDE_WRITE_POSITIVE\n"), \
+                     patch.object(self.module.os, "fsencode", os.fsencode, create=True), \
+                     patch.object(self.module, "_small_command", side_effect=write_positive), \
+                     patch.object(self.module, "_home_socket_empty", side_effect=home_empty) as home_negative, \
                      patch.object(self.module, "_admit_executable", side_effect=AssertionError("Ruby metadata grants no new admission role")), \
+                     patch.object(session, "_home_positive_control", side_effect=home_positive) as home_control, \
                      patch.object(session, "_run", side_effect=collect_prefix), \
                      patch.object(Path, "read_bytes", read_positive), \
                      patch.object(Path, "stat", ruby_metadata), \
@@ -1411,17 +1471,30 @@ class CISandboxPureTests(unittest.TestCase):
                      patch.object(Path, "chmod") as chmod:
                     with self.assertRaises(BaseExceptionGroup) as caught:
                         session._preflight()
+                self.assertEqual(home_control.call_count, int(platform == "darwin"))
+                home_listener.close.assert_not_called()
+                if case == "home-positive-error":
+                    self.assertEqual(caught.exception.exceptions, (home_error,))
+                    self.assertEqual(events, [("home-positive",)])
+                    self.assertEqual(created, [])
+                    self.assertFalse(session.admission_results)
+                    chown.assert_not_called()
+                    chmod.assert_not_called()
+                    home_negative.assert_not_called()
+                    continue
                 seen = [i for i, event in enumerate(events) if event[0] == "outside-observation"]
                 note = next(n for n in session.admission_results if n["name"] == "native-isolation")
                 self.assertEqual([entry for entry in closed if entry[0] == "listener"],
                                  [("listener", index) for index in range(4)])
-                if case in {"ordered", "outside-error", "ruby-metadata-error"}:
+                if case in {"ordered", "outside-error", "ruby-metadata-error", "home-non-delivery-error"}:
                     self.assertEqual(len(seen), 4)
                     for event_name in ("wait-original", "unregister-eof", "domain"):
                         self.assertLess(max(i for i, event in enumerate(events) if event[0] == event_name), seen[0])
                     self.assertIsNone(session._active)
                 else:
                     self.assertEqual(seen, [])
+                self.assertEqual(home_negative.call_count, int(platform == "darwin" and case in
+                    {"ordered", "ruby-metadata-error", "home-non-delivery-error"}))
                 if case in {"ordered", "ruby-metadata-error"}:
                     self.assertEqual(caught.exception.exceptions, (stop if case == "ordered" else metadata_error,))
                     self.assertTrue(note["ok"])
@@ -2502,6 +2575,7 @@ class CISandboxPureTests(unittest.TestCase):
                                     _observer_toolchain=prepared_tools, _observer_artifact=artifact,
                                     time=SimpleNamespace(monotonic=lambda: progress.now)), \
                      patch.object(session, "_headroom", Mock()), patch.object(session, "_preflight", side_effect=preflight), \
+                     patch.object(session, "_prepare_home_boundary", Mock()), \
                      patch.object(session, "ensure_idle", side_effect=idle), patch.object(session, "_run", side_effect=run) as commands, \
                      patch.object(session, "_observer_native_controls", side_effect=native) as controls, \
                      patch.object(self.module, "_private_file", side_effect=freeze) as copy, \
@@ -2924,3 +2998,989 @@ class CISandboxPureTests(unittest.TestCase):
                 if case == "valid":
                     child.kill.assert_not_called()
                     self.assertLess(events.index(("communicate",)), next(i for i, event in enumerate(events) if event[0] == "wait"))
+
+    def test_provider_boundary_probe_runs_after_inherited_fd_guard_and_keeps_every_fixed_child_route(self):
+        class BoundaryReached(RuntimeError):
+            pass
+
+        uid = gid = 60001
+        for platform in ("linux", "darwin"):
+            data = {"platform": platform, "uid": uid, "gid": gid,
+                    "runtime_executables": ["/synthetic/python/bin/python", "/synthetic/ruby/bin/ruby"],
+                    "home_canary": "/Users/runner/.synthetic-home-canary", "home_socket": "/Users/runner/.synthetic-home-socket",
+                    "work": "/tmp/mrk-pure-fixture/work", "host_net": "host-net", "host_pid": "host-pid"}
+            seen = []
+
+            def inherited(fd):
+                self.assertIn(fd, range(1024))
+                seen.append(fd)
+                if fd > 2:
+                    raise OSError(errno.EBADF, "synthetic absent inherited descriptor")
+                return SimpleNamespace(st_mode=stat.S_IFCHR | 0o600)
+
+            def boundary(actual):
+                self.assertIs(actual, data)
+                self.assertEqual(seen, list(range(1024)))
+                raise BoundaryReached
+
+            def root_stat(path):
+                self.assertEqual(path, Path(data["work"]).parent)
+                return SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o755)
+
+            def status(path):
+                self.assertEqual(path, Path("/proc/self/status"))
+                return "CapInh:0\nCapPrm:0\nCapEff:0\nCapBnd:0\nCapAmb:0\nNoNewPrivs:1\n"
+
+            def namespace(path):
+                self.assertIn(path, ("/proc/self/ns/net", "/proc/self/ns/pid"))
+                return "subject-" + path.rsplit("/", 1)[1]
+
+            def root_entries(path):
+                self.assertEqual(path, Path(data["work"]).parent)
+                return ["source", "inputs", "bootstrap", "work"]
+
+            regain = Mock(side_effect=PermissionError(errno.EPERM, "synthetic regain-root denial"))
+
+            with self.subTest(provider_leaf_order=platform), \
+                 patch.multiple(self.module, os=SimpleNamespace(getuid=lambda: uid, geteuid=lambda: uid,
+                                    getgid=lambda: gid, getegid=lambda: gid, fstat=inherited,
+                                    getresuid=lambda: (uid, uid, uid), getresgid=lambda: (gid, gid, gid),
+                                    readlink=namespace, listdir=root_entries, setuid=regain),
+                                socket=SimpleNamespace(), subprocess=SimpleNamespace(), signal=SimpleNamespace(),
+                                _process_groups=Mock(return_value=[] if platform == "linux" else [gid]),
+                                _probe_provider_boundaries=Mock(side_effect=boundary)), \
+                 patch.object(Path, "stat", root_stat), patch.object(Path, "read_text", status), \
+                 patch.object(Path, "read_bytes", side_effect=AssertionError("no actual file may be read")):
+                with self.assertRaises(BoundaryReached):
+                    self.module._probe_leaf(data)
+            regain.assert_called_once_with(0)
+
+        entry = Path("/synthetic/bootstrap/ci_sandbox.py")
+        for case in ("parent", "grandchild", "child-footer", "child-unwaited"):
+            with self.subTest(provider_inheritance=case):
+                routes, output = [], io.StringIO()
+                original = TimeoutError("synthetic incomplete original child collection")
+
+                def own_entry(path):
+                    self.assertEqual(path, Path(self.module.__file__))
+                    return entry
+
+                def collected(argv, seconds, *, detached):
+                    self.assertEqual(argv[:5], ["/synthetic/python", "-I", "-S", "-B", str(entry)])
+                    self.assertEqual(len(argv), 7)
+                    self.assertEqual(json.loads(argv[6]), data)
+                    self.assertEqual(seconds, 10)
+                    self.assertIn(argv[5], ("--leaf", "--grandchild"))
+                    self.assertEqual(detached, argv[5] == "--grandchild")
+                    routes.append(argv[5])
+                    if case == "child-unwaited":
+                        raise original
+                    return b"wrong\n" if case == "child-footer" else b"MRK_LEAF_OK\n"
+
+                leaf, sudo = Mock(), Mock()
+                with patch.multiple(self.module, sys=SimpleNamespace(executable="/synthetic/python"),
+                                    os=SimpleNamespace(), subprocess=SimpleNamespace(), signal=SimpleNamespace(),
+                                    _probe_leaf=leaf, _small_command=collected, _sudo_denial=sudo), \
+                     patch.object(Path, "resolve", own_entry), redirect_stdout(output):
+                    if case in {"parent", "grandchild"}:
+                        self.module._probe(data, grandchild=case == "grandchild")
+                    else:
+                        with self.assertRaises(TimeoutError if case == "child-unwaited" else self.module.SessionError) as caught:
+                            self.module._probe(data)
+                        if case == "child-unwaited":
+                            self.assertIs(caught.exception, original)
+                leaf.assert_called_once_with(data)
+                self.assertEqual(routes, ["--leaf", "--grandchild"] if case == "parent" else ["--leaf"])
+                if case == "parent":
+                    sudo.assert_called_once_with()
+                else:
+                    sudo.assert_not_called()
+                self.assertEqual(output.getvalue(), "MRK_NATIVE_ISOLATION_OK\n" if case == "parent" else
+                                 "MRK_LEAF_OK\n" if case == "grandchild" else "")
+
+    def test_home_owned_handles_close_once_without_restoring_unknown_finality_or_expired_state(self):
+        for case in ("busy", "active", "remaining", "unknown", "expired", "independent-close-errors"):
+            with self.subTest(home_unknown_finality=case):
+                session = session_double(self.module, "darwin")
+                session.runner_home = Path("/Users/runner")
+                session.deadline = 1.0
+                session.failure = "earlier immutable failure"
+                session.domain_finality = True
+                session._busy = case == "busy"
+                session._active = object() if case == "active" else None
+                original = SimpleNamespace(st_dev=7, st_ino=101, st_mode=stat.S_IFDIR | 0o750, st_uid=1001, st_gid=20, st_nlink=2)
+                canary = SimpleNamespace(st_dev=7, st_ino=102, st_mode=stat.S_IFREG | 0o444, st_uid=0, st_gid=0, st_nlink=1)
+                endpoint = SimpleNamespace(st_dev=7, st_ino=103, st_mode=stat.S_IFSOCK | 0o666, st_uid=0, st_gid=0, st_nlink=1)
+                primary = OSError(errno.EIO, "synthetic unknown reserved-identity domain")
+                listener_error = OSError(errno.EIO, "synthetic original HOME listener close")
+                canary_error = OSError(errno.EIO, "synthetic original HOME canary close")
+                pin_error = OSError(errno.EIO, "synthetic original HOME pin close")
+                listener = SimpleNamespace(close=Mock(side_effect=listener_error if case == "independent-close-errors" else None))
+                session._home_state = {"pin": 101, "original": original, "change_attempted": True, "prepared": True,
+                    "expected_mode": 0o751, "canary_fd": 102, "canary_name": f".{session.root.name}-home-read",
+                    "canary_identity": canary, "canary_mode": 0o444, "canary_create_attempted": True, "listener": listener,
+                    "socket_name": f".{session.root.name}-home-socket", "socket_identity": endpoint, "socket_mode": 0o666,
+                    "socket_bind_attempted": True, "closed": False}
+
+                def close(fd):
+                    self.assertIn(fd, (101, 102))
+                    if case == "independent-close-errors":
+                        raise canary_error if fd == 102 else pin_error
+
+                closed = Mock(side_effect=close)
+                denied = Mock(side_effect=AssertionError("unknown ownership/finality cannot change HOME state"))
+                domain = Mock(side_effect=primary) if case in {"unknown", "independent-close-errors"} else Mock(return_value={4242})
+                with patch.multiple(self.module, os=SimpleNamespace(close=closed, fchmod=denied, unlink=denied, geteuid=lambda: 0,
+                                        path=SimpleNamespace(basename=os.path.basename)),
+                                    subprocess=SimpleNamespace(), socket=SimpleNamespace(), signal=SimpleNamespace(),
+                                    _domain=domain, time=SimpleNamespace(monotonic=lambda: 1.0 if case == "expired" else 0.0)), \
+                     patch.object(Path, "stat", side_effect=AssertionError("no real HOME stat is permitted")), \
+                     patch.object(Path, "lstat", side_effect=AssertionError("no real HOME lstat is permitted")), \
+                     patch.object(Path, "chmod", denied), patch.object(Path, "unlink", denied):
+                    failures = session._close_home_boundary()
+                    self.assertTrue(failures)
+                    self.assertTrue(session._home_state["closed"])
+                    self.assertEqual(session._close_home_boundary(), [])
+                denied.assert_not_called()
+                self.assertEqual(sorted(c.args[0] for c in closed.call_args_list), [101, 102])
+                listener.close.assert_called_once_with()
+                self.assertEqual(session.failure, "earlier immutable failure")
+                self.assertEqual(session.deadline, 1.0)
+                if case in {"unknown", "independent-close-errors"}:
+                    self.assertIn(primary, failures)
+                if case == "independent-close-errors":
+                    self.assertTrue(all(error in failures for error in (listener_error, canary_error, pin_error)))
+
+    def test_provider_fixed_write_and_home_read_stat_socket_controls_require_real_specific_denials(self):
+        executables = ["/synthetic/python/bin/python", "/synthetic/ruby/bin/ruby"]
+        for case in ("eacces", "eperm", "erofs", "missing", "running-text", "unknown", "write-permitted", "write-close-error"):
+            with self.subTest(runtime_write_control=case):
+                calls = []
+                close_error = OSError(errno.EIO, "synthetic admitted-write descriptor close")
+
+                def opened(path, flags):
+                    self.assertEqual(str(path), executables[len(calls)])
+                    self.assertEqual(flags & os.O_ACCMODE, os.O_WRONLY)
+                    self.assertFalse(flags & (os.O_TRUNC | os.O_CREAT | os.O_APPEND))
+                    calls.append(str(path))
+                    if len(calls) == 2 and case in {"write-permitted", "write-close-error"}:
+                        return 301
+                    number = {"eacces": errno.EACCES, "eperm": errno.EPERM, "erofs": errno.EROFS,
+                              "missing": errno.ENOENT, "running-text": errno.ETXTBSY, "unknown": errno.EIO}.get(case, errno.EACCES)
+                    raise OSError(number if len(calls) == 2 else errno.EACCES, "synthetic fixed executable write result")
+
+                closed = Mock(side_effect=close_error if case == "write-close-error" else None)
+                constants = {k: getattr(os, k) for k in ("O_WRONLY", "O_RDONLY", "O_NOFOLLOW", "O_CLOEXEC")}
+                with patch.multiple(self.module, os=SimpleNamespace(**constants, open=opened, close=closed),
+                                    sys=SimpleNamespace(platform="linux"), socket=SimpleNamespace(),
+                                    subprocess=SimpleNamespace(), signal=SimpleNamespace()), \
+                     patch.object(Path, "stat", side_effect=AssertionError("runtime-write denial is not inferred from stat")), \
+                     patch.object(Path, "read_bytes", side_effect=AssertionError("runtime-write probe must not read other files")):
+                    if case in {"eacces", "eperm", "erofs"}:
+                        self.module._probe_provider_boundaries({"platform": "linux", "runtime_executables": executables})
+                    else:
+                        with self.assertRaises((self.module.SessionError, OSError, BaseExceptionGroup)):
+                            self.module._probe_provider_boundaries({"platform": "linux", "runtime_executables": executables})
+                self.assertEqual(calls, executables)
+                if case in {"write-permitted", "write-close-error"}:
+                    closed.assert_called_once_with(301)
+                else:
+                    closed.assert_not_called()
+
+        home = Path("/Users/runner")
+        canary, address = home / ".mrk-pure-fixture-home-read", home / ".mrk-pure-fixture-home-socket"
+        cases = ("eacces", "eperm", "read-missing", "read-permitted", "stat-missing", "stat-readonly", "stat-permitted",
+                 "socket-missing", "socket-unknown", "socket-permitted", "socket-close-error")
+        for case in cases:
+            with self.subTest(home_mandatory_control=case):
+                events = []
+
+                def denied(path, operation):
+                    self.assertEqual(path, canary)
+                    events.append((operation,))
+                    if case == operation + "-permitted":
+                        return b"synthetic literal is readable" if operation == "read" else SimpleNamespace(st_mode=stat.S_IFREG | 0o444)
+                    number = errno.EPERM if case == "eperm" else errno.ENOENT if case == operation + "-missing" else errno.EROFS if case == "stat-readonly" and operation == "stat" else errno.EACCES
+                    raise OSError(number, "synthetic HOME canary permission result")
+
+                def connect(target):
+                    self.assertEqual(str(target), str(address))
+                    events.append(("connect",))
+                    if case == "socket-permitted":
+                        return
+                    number = errno.EPERM if case == "eperm" else errno.ENOENT if case == "socket-missing" else errno.EIO if case == "socket-unknown" else errno.EACCES
+                    raise OSError(number, "synthetic HOME endpoint connection result")
+
+                endpoint = SimpleNamespace(settimeout=Mock(), connect=Mock(side_effect=connect),
+                    close=Mock(side_effect=OSError(errno.EIO, "synthetic HOME endpoint close") if case == "socket-close-error" else None))
+                factory = Mock(return_value=endpoint)
+                data = {"platform": "darwin", "home_canary": str(canary), "home_socket": str(address),
+                        "runner_home": str(home), "work": "/private/tmp/mrk-pure-fixture/work"}
+
+                def opened(path, flags):
+                    self.assertEqual(flags, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+                    result = denied(path, "read")
+                    self.assertIsInstance(result, bytes)
+                    return 302
+
+                def metadata(path, *, follow_symlinks):
+                    self.assertFalse(follow_symlinks)
+                    return denied(path, "stat")
+
+                def read(fd, count):
+                    self.assertEqual((fd, count), (302, len(self.module._HOME_READ_BYTES) + 1))
+                    return b"synthetic readable bytes"
+
+                closed = Mock()
+                constants = {k: getattr(os, k) for k in ("O_RDONLY", "O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC")}
+                with patch.multiple(self.module, os=SimpleNamespace(**constants, fsencode=os.fsencode,
+                                        open=opened, stat=metadata, read=read, close=closed), sys=SimpleNamespace(platform="darwin"),
+                                    socket=SimpleNamespace(AF_UNIX=1, SOCK_STREAM=1, socket=factory),
+                                    subprocess=SimpleNamespace(), signal=SimpleNamespace()), \
+                     patch.object(Path, "read_bytes", side_effect=AssertionError("the known-path probe uses only its bounded descriptor")), \
+                     patch.object(Path, "stat", side_effect=AssertionError("the known-path probe must not follow links")):
+                    if case in {"eacces", "eperm"}:
+                        self.module._probe_provider_boundaries(data)
+                    else:
+                        with self.assertRaises((self.module.SessionError, OSError, BaseExceptionGroup)):
+                            self.module._probe_provider_boundaries(data)
+                if factory.called:
+                    factory.assert_called_once_with(1, 1)
+                    endpoint.close.assert_called_once_with()
+                    endpoint.settimeout.assert_called_once()
+                    self.assertTrue(0 < endpoint.settimeout.call_args.args[0] <= 3)
+                else:
+                    endpoint.close.assert_not_called()
+                if case == "read-permitted":
+                    closed.assert_called_once_with(302)
+                else:
+                    closed.assert_not_called()
+                if case in {"eacces", "eperm"}:
+                    self.assertEqual(events, [("read",), ("stat",), ("connect",)])
+
+    def test_home_search_preparation_and_terminal_restore_keep_original_handles_and_uncertain_effects(self):
+        cases = ("750", "751", "755", "home-mode", "home-owner", "home-group", "home-name", "open-home",
+                 "change-before-effect", "change-after-effect", "canary-collision", "canary-stat-error", "canary-links", "canary-subject-group",
+                 "canary-short-write", "canary-mode-after-effect", "socket-collision", "socket-subject-group", "socket-mode-after-effect",
+                 "manifest-error", "late-preparation", "close-name-drift", "close-mode-drift", "canary-replaced", "canary-group-drift", "socket-group-drift",
+                 "restore-after-effect", "three-close-errors")
+        for case in cases:
+            with self.subTest(home_pin_lifecycle=case):
+                session = session_double(self.module, "darwin")
+                session.admitted = False
+                session.process_observer = None
+                session.runner_home = Path("/Users/runner")
+                session.ruby = session.runner_home / "tools/ruby/bin/ruby"
+                session.tool_prefixes = (session.python.parent.parent, session.ruby.parent.parent)
+                session.deadline = 1.0
+                canary_name, socket_name = f".{session.root.name}-home-read", f".{session.root.name}-home-socket"
+                canary_path, socket_path = session.runner_home / canary_name, session.runner_home / socket_name
+                original_mode = int(case, 8) if case in {"750", "751", "755"} else 0o777 if case == "home-mode" else 0o750
+                clock = SimpleNamespace(now=0.0, closing=False)
+                events, nodes, captured_cleanup = [], {}, []
+                live_fds = {}
+                original_error = OSError(errno.EIO, "synthetic private HOME operation")
+                close_errors = {101: OSError(errno.EIO, "synthetic pin close"), 102: OSError(errno.EIO, "synthetic canary close"),
+                                "listener": OSError(errno.EIO, "synthetic listener close")}
+
+                def node(inode, kind, mode, *, uid=0, gid=0, links=1, size=0):
+                    return dict(st_dev=7, st_ino=inode, st_mode=kind | mode, st_uid=uid, st_gid=gid,
+                                st_nlink=links, st_size=size)
+
+                home_node = node(11, stat.S_IFDIR, original_mode,
+                                 uid=session.uid if case == "home-owner" else 1001,
+                                 gid=session.gid if case == "home-group" else 20, links=2)
+
+                def named_home(path):
+                    self.assertEqual(path, session.runner_home)
+                    result = dict(home_node)
+                    if case == "home-name" or clock.closing and case == "close-name-drift":
+                        result["st_ino"] += 1
+                    return SimpleNamespace(**result)
+
+                def opened(path, flags, mode=None, *, dir_fd=None):
+                    events.append(("open", str(path), flags, mode, dir_fd))
+                    if path == session.runner_home:
+                        self.assertEqual((flags, mode, dir_fd), (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, None, None))
+                        if case == "open-home":
+                            raise original_error
+                        live_fds[101] = home_node
+                        return 101
+                    self.assertEqual((path, flags, mode, dir_fd), (canary_name,
+                        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, 101))
+                    self.assertTrue(session._home_state["prepared"])
+                    self.assertTrue(session._home_state["canary_create_attempted"])
+                    if case == "canary-collision":
+                        nodes[canary_name] = node(91, stat.S_IFREG, 0o444, uid=1001)
+                        raise FileExistsError(errno.EEXIST, "synthetic foreign existing canary name")
+                    self.assertNotIn(canary_name, nodes)
+                    nodes[canary_name] = node(12, stat.S_IFREG, 0o600, gid=session.gid if case == "canary-subject-group" else 20,
+                                              links=2 if case == "canary-links" else 1)
+                    live_fds[102] = nodes[canary_name]
+                    return 102
+
+                def fstat(fd):
+                    self.assertIn(fd, live_fds)
+                    if fd == 102 and case == "canary-stat-error" and not clock.closing:
+                        raise original_error
+                    return SimpleNamespace(**live_fds[fd])
+
+                def metadata(name, *, dir_fd, follow_symlinks):
+                    self.assertEqual((dir_fd, follow_symlinks), (101, False))
+                    self.assertIn(name, (canary_name, socket_name))
+                    result = dict(nodes[name])
+                    if clock.closing and case == "canary-replaced" and name == canary_name:
+                        result["st_ino"] += 1
+                    if clock.closing and (case == "canary-group-drift" and name == canary_name
+                                          or case == "socket-group-drift" and name == socket_name):
+                        result["st_gid"] = 0  # Even another non-U group is not the original owned node.
+                    return SimpleNamespace(**result)
+
+                def fchmod(fd, mode):
+                    self.assertIn(fd, live_fds)
+                    self.assertIn((fd, mode), {(101, 0o751), (101, original_mode), (102, 0o444)})
+                    if fd == 101 and not clock.closing:
+                        self.assertTrue(session._home_state["change_attempted"])
+                    if fd == 102:
+                        self.assertIsNone(session._home_state["canary_mode"])
+                    events.append(("fchmod", fd, mode, clock.closing))
+                    if case == "change-before-effect" and fd == 101 and not clock.closing:
+                        raise original_error
+                    live_fds[fd]["st_mode"] = stat.S_IFMT(live_fds[fd]["st_mode"]) | mode
+                    if (case == "change-after-effect" and fd == 101 and not clock.closing
+                            or case == "canary-mode-after-effect" and fd == 102
+                            or case == "restore-after-effect" and fd == 101 and clock.closing):
+                        raise original_error
+
+                def write(fd, data):
+                    self.assertEqual((fd, data), (102, self.module._HOME_READ_BYTES))
+                    self.assertIsNotNone(session._home_state["canary_identity"])
+                    count = len(data) - 1 if case == "canary-short-write" else len(data)
+                    nodes[canary_name]["st_size"] = count
+                    return count
+
+                def socket_chmod(path, mode, *, follow_symlinks):
+                    self.assertEqual((path, mode, follow_symlinks), (socket_path, 0o666, False))
+                    self.assertIsNotNone(session._home_state["socket_identity"])
+                    self.assertIsNone(session._home_state["socket_mode"])
+                    events.append(("socket-chmod",))
+                    nodes[socket_name]["st_mode"] = stat.S_IFSOCK | mode
+                    if case == "socket-mode-after-effect":
+                        raise original_error
+
+                def unlink(name, *, dir_fd):
+                    self.assertTrue(clock.closing)
+                    self.assertEqual(dir_fd, 101)
+                    self.assertIn(name, (canary_name, socket_name))
+                    self.assertIn(name, nodes)
+                    self.assertEqual(nodes[name]["st_uid"], 0)  # Never the collision's pre-existing file.
+                    events.append(("unlink", name))
+                    del nodes[name]
+
+                def close(fd):
+                    self.assertIn(fd, live_fds)
+                    events.append(("close", fd))
+                    del live_fds[fd]
+                    if case == "three-close-errors":
+                        raise close_errors[fd]
+
+                def bind(address):
+                    self.assertEqual(address, str(socket_path))
+                    self.assertIsNotNone(session._home_state["listener"])
+                    self.assertTrue(session._home_state["socket_bind_attempted"])
+                    events.append(("bind",))
+                    if case == "socket-collision":
+                        nodes[socket_name] = node(92, stat.S_IFSOCK, 0o700, uid=1001)
+                        raise OSError(errno.EADDRINUSE, "synthetic foreign existing socket name")
+                    nodes[socket_name] = node(13, stat.S_IFSOCK, 0o700, gid=session.gid if case == "socket-subject-group" else 20)
+
+                def listener_close():
+                    events.append(("listener-close",))
+                    if case == "three-close-errors":
+                        raise close_errors["listener"]
+
+                listener = SimpleNamespace(settimeout=Mock(), bind=Mock(side_effect=bind), listen=Mock(),
+                                           close=Mock(side_effect=listener_close))
+                factory = Mock(return_value=listener)
+
+                def manifest(path, data, mode):
+                    self.assertEqual((path, mode), (session.bootstrap / "home-control.json", 0o444))
+                    self.assertEqual(json.loads(data), {"home": str(session.runner_home), "uid": session.uid,
+                                                       "gid": session.gid, "deadline": session.deadline})
+                    events.append(("manifest",))
+                    if case == "manifest-error":
+                        raise original_error
+                    if case == "late-preparation":
+                        clock.now = 1.0
+
+                def domain(platform, uid, *, deadline):
+                    self.assertEqual((platform, uid, deadline), ("darwin", session.uid, 1.0))
+                    self.module._remaining(deadline)
+                    events.append(("domain", clock.closing))
+                    return set()
+
+                finalize = session._close_home_boundary
+
+                def finalization():
+                    errors = finalize()
+                    captured_cleanup.extend(errors)
+                    return errors
+
+                constants = {k: getattr(os, k) for k in ("O_RDONLY", "O_RDWR", "O_DIRECTORY", "O_CREAT", "O_EXCL", "O_NOFOLLOW", "O_CLOEXEC")}
+                fake_os = SimpleNamespace(**constants, geteuid=lambda: 0, fsencode=os.fsencode,
+                    open=opened, fstat=fstat, stat=metadata, fchmod=fchmod, write=write, fsync=Mock(),
+                    chmod=socket_chmod, unlink=unlink, close=close, path=SimpleNamespace(basename=os.path.basename))
+                prepared = case in {"750", "751", "755", "close-name-drift", "close-mode-drift", "canary-replaced", "canary-group-drift", "socket-group-drift",
+                                    "restore-after-effect", "three-close-errors"}
+                with patch.multiple(self.module, os=fake_os, sys=SimpleNamespace(platform="darwin"),
+                                    socket=SimpleNamespace(AF_UNIX=1, SOCK_STREAM=1, socket=factory),
+                                    subprocess=SimpleNamespace(), signal=SimpleNamespace(), _domain=domain,
+                                    _private_file=Mock(side_effect=manifest), time=SimpleNamespace(monotonic=lambda: clock.now)), \
+                     patch.object(Path, "lstat", named_home), \
+                     patch.object(Path, "stat", side_effect=AssertionError("HOME pin must not follow paths")), \
+                     patch.object(Path, "chmod", side_effect=AssertionError("HOME permission changes require the original pin")), \
+                     patch.object(session, "_headroom", Mock()), \
+                     patch.object(session, "_close_home_boundary", side_effect=finalization) as final:
+                    if prepared:
+                        session._prepare_home_boundary()
+                    else:
+                        with self.assertRaises((self.module.SessionError, OSError, BaseExceptionGroup)):
+                            session._prepare_home_boundary()
+                    self.assertFalse(any(e[0] in {"close", "listener-close"} for e in events))
+                    self.assertFalse(session.admitted)
+                    preparation_note = next(n for n in session.admission_results if n["name"] == "home-search-preparation")
+                    self.assertEqual(preparation_note["ok"], prepared)
+                    if prepared:
+                        self.assertTrue(session._home_state["prepared"])
+                        self.assertEqual(session._home_state["pin"], 101)
+                        self.assertEqual(session._home_state["canary_fd"], 102)
+                        self.assertIs(session._home_state["listener"], listener)
+                        self.assertEqual(session._home_state["canary_identity"].st_gid, 20)
+                        self.assertEqual(session._home_state["socket_identity"].st_gid, 20)
+                        self.assertEqual(stat.S_IMODE(home_node["st_mode"]), 0o751 if original_mode == 0o750 else original_mode)
+                    clock.closing = True
+                    if case == "close-mode-drift":
+                        home_node["st_mode"] = stat.S_IFDIR | 0o775
+                    # Model the outer admission/product failure; restoration
+                    # must never rehabilitate this existing first failure.
+                    session.fail("earlier immutable failure")
+                    for _ in range(2):
+                        with self.assertRaisesRegex(self.module.SessionError, "earlier immutable failure"):
+                            session.close(keep_timer=True)
+                    final.assert_called_once_with()
+                self.assertTrue(session.closed)
+                self.assertFalse(session._timer_finished)
+                self.assertEqual(session.failure, "earlier immutable failure")
+                self.assertEqual(session.deadline, 1.0)
+                self.assertEqual(live_fds, {})
+                self.assertEqual(sum(e == ("close", 101) for e in events), int(case != "open-home"))
+                self.assertLessEqual(sum(e == ("close", 102) for e in events), 1)
+                self.assertEqual(listener.close.call_count, factory.call_count)
+                note = next(n for n in session.admission_results if n["name"] == "home-boundary-finalization")
+                if case in {"750", "751", "755"}:
+                    self.assertEqual(captured_cleanup, [])
+                    self.assertTrue(note["ok"])
+                    self.assertEqual(note["restored"], case == "750")
+                    self.assertTrue(note["canary_removed"] and note["socket_removed"])
+                    self.assertEqual(nodes, {})
+                    self.assertEqual(stat.S_IMODE(home_node["st_mode"]), original_mode)
+                    home_changes = [e for e in events if e[0] == "fchmod" and e[1] == 101]
+                    self.assertEqual(home_changes, [("fchmod", 101, 0o751, False), ("fchmod", 101, 0o750, True)] if case == "750" else [])
+                if case in {"change-after-effect", "late-preparation", "close-name-drift", "close-mode-drift"}:
+                    self.assertTrue(captured_cleanup)
+                    self.assertFalse(note["ok"] or note["restored"])
+                    self.assertFalse(any(e[0] == "unlink" or e[:2] == ("fchmod", 101) and e[3] for e in events))
+                if case in {"canary-collision", "canary-stat-error", "canary-links", "canary-subject-group", "canary-mode-after-effect", "canary-replaced", "canary-group-drift"}:
+                    self.assertNotIn(("unlink", canary_name), events)
+                    self.assertIn(canary_name, nodes)
+                    self.assertTrue(captured_cleanup)
+                if case in {"socket-collision", "socket-subject-group", "socket-mode-after-effect", "socket-group-drift"}:
+                    self.assertNotIn(("unlink", socket_name), events)
+                    self.assertIn(socket_name, nodes)
+                    self.assertTrue(captured_cleanup)
+                if case == "restore-after-effect":
+                    self.assertIn(original_error, captured_cleanup)
+                    self.assertFalse(note["restored"])
+                    self.assertFalse(any(e[0] == "unlink" for e in events))
+                if case == "three-close-errors":
+                    self.assertTrue(all(error in captured_cleanup for error in close_errors.values()))
+
+    def test_linux_provider_wrapper_keeps_collision_writer_import_and_partial_preparation_gates(self):
+        cases = ("valid", "nss-bad", "collision", "busy", "active", "prior-failure", "wrong-platform", "not-root",
+                 "missing-prefix", "existing-module", "spec-missing", "loader-failure", "partial-preparation",
+                 "incomplete-report", "late-preparation")
+        for case in cases:
+            with self.subTest(provider_owner_integration=case):
+                session = session_double(self.module)
+                session.admitted = False
+                python_prefix, ruby_prefix, jdk_prefix = session.python.parent.parent, session.ruby.parent.parent, Path("/synthetic/jdk")
+                session.tool_prefixes = (python_prefix, ruby_prefix, jdk_prefix)
+                if case == "missing-prefix":
+                    session.tool_prefixes = (python_prefix, ruby_prefix)
+                if case == "wrong-platform":
+                    session.platform = "darwin"
+                session._busy = case == "busy"
+                session._active = object() if case == "active" else None
+                if case == "prior-failure":
+                    session.fail("earlier immutable failure")
+                clock, events = SimpleNamespace(now=0.0), []
+                module_name = "_mrk_ci_provider_runtime"
+                real_module_before = sys.modules.get(module_name)
+                foreign = object()
+                modules = {module_name: foreign} if case == "existing-module" else {}
+                original = OSError(errno.EIO, "synthetic immutable module/preparation failure")
+
+                def protect(prefixes, **kwargs):
+                    self.assertEqual(prefixes, (("python", python_prefix), ("ruby", ruby_prefix), ("jdk", jdk_prefix)))
+                    self.assertEqual({k: v for k, v in kwargs.items() if k != "report"},
+                                     {"uid": session.uid, "gid": session.gid, "deadline": session.deadline})
+                    report = kwargs["report"]
+                    self.assertIs(report, session.admission_results[-1])
+                    self.assertEqual(report, {"name": "provider-runtime-permissions", "ok": False})
+                    events.append(("protect",))
+                    report.update(attempted=2, confirmed=1 if case == "partial-preparation" else 2)
+                    if case == "partial-preparation":
+                        raise original
+                    report["ok"] = case != "incomplete-report"
+                    if case == "late-preparation":
+                        clock.now = session.deadline
+                    return {"ok": True}  # Only the original shared report is authority.
+
+                prepared_module = SimpleNamespace(protect_selected_runtimes=Mock(side_effect=protect))
+
+                def load(actual):
+                    self.assertIs(actual, prepared_module)
+                    self.assertIs(modules[module_name], prepared_module)
+                    events.append(("load",))
+                    if case == "loader-failure":
+                        raise original
+
+                spec = SimpleNamespace(loader=SimpleNamespace(exec_module=Mock(side_effect=load)))
+
+                def specification(name, path):
+                    self.assertEqual((name, path), (module_name, session.source / ".github/scripts/ci_provider_runtime.py"))
+                    events.append(("spec",))
+                    return None if case == "spec-missing" else spec
+
+                def nss(argv, *, deadline):
+                    self.assertEqual(argv, [str(session.python), "-I", "-S", "-B", str(session.entry), "--nss", str(session.uid)])
+                    self.assertEqual(deadline, session.deadline)
+                    events.append(("nss",))
+                    return b"unobserved\n" if case == "nss-bad" else b"MRK_NSS_ABSENT\n"
+
+                def domain(platform, uid, *, collision=False, deadline):
+                    self.assertEqual((platform, uid, deadline), ("linux", session.uid, session.deadline))
+                    self.module._remaining(deadline)
+                    events.append(("domain", collision))
+                    return {4242} if case == "collision" and collision else set()
+
+                def tool(path, uid, gid, **options):
+                    self.assertEqual((uid, gid), (session.uid, session.gid))
+                    self.assertIn(path, (session.python, Path("/usr/bin/sudo"), Path("/usr/bin/true")))
+                    self.assertIn(("protect",), events)
+                    self.assertTrue(next(n for n in session.admission_results if n["name"] == "provider-runtime-permissions")["ok"])
+                    events.append(("tool", options["role"]))
+                    return {"role": options["role"], "failed_predicates": []}
+
+                def mkdir(path, *, mode):
+                    self.assertEqual(mode, 0o700)
+                    self.assertIn(path, [session.work / name for name in ("home", "tmp", "config", "cache")])
+
+                def preflight():
+                    self.assertIn(("tool", "python"), events)
+                    self.assertTrue(next(n for n in session.admission_results if n["name"] == "provider-runtime-permissions")["ok"])
+                    events.append(("preflight",))
+
+                direct = case in {"busy", "active", "prior-failure", "wrong-platform", "not-root", "missing-prefix",
+                                  "existing-module", "spec-missing", "loader-failure"}
+                chown = Mock()
+                with patch.multiple(self.module, os=SimpleNamespace(geteuid=lambda: 1001 if case == "not-root" else 0,
+                                        chown=chown, path=SimpleNamespace(basename=os.path.basename)),
+                                    sys=SimpleNamespace(platform="linux", base_prefix=str(python_prefix), modules=modules),
+                                    subprocess=SimpleNamespace(), signal=SimpleNamespace(), _canonical=Path,
+                                    _readonly_tree=Mock(), _small_command=nss, _domain=domain,
+                                    _admit_executable=tool, time=SimpleNamespace(monotonic=lambda: clock.now)), \
+                     patch.object(importlib.util, "spec_from_file_location", side_effect=specification) as make_spec, \
+                     patch.object(importlib.util, "module_from_spec", return_value=prepared_module) as make_module, \
+                     patch.object(session, "_headroom", Mock()), patch.object(session, "_preflight", side_effect=preflight), \
+                     patch.object(session, "_run", side_effect=AssertionError("this test may not launch any subject")), \
+                     patch.object(Path, "mkdir", mkdir), \
+                     patch.object(Path, "stat", side_effect=AssertionError("provider metadata belongs to the substituted module")), \
+                     patch.object(Path, "resolve", side_effect=AssertionError("no provider path resolution is permitted")):
+                    if case == "valid":
+                        session.admit()
+                    else:
+                        with self.assertRaises((self.module.SessionError, OSError)) as caught:
+                            session._prepare_provider_runtime() if direct else session.admit()
+                        if case in {"loader-failure", "partial-preparation"}:
+                            self.assertIs(caught.exception, original)
+                self.assertIs(sys.modules.get(module_name), real_module_before)  # No real lazy import or ownership mutation.
+                self.assertEqual(session.admitted, case == "valid")
+                if case == "valid":
+                    self.assertLess(events.index(("nss",)), events.index(("domain", True)))
+                    self.assertLess(events.index(("domain", True)), events.index(("load",)))
+                    self.assertLess(events.index(("protect",)), events.index(("tool", "python")))
+                    self.assertLess(events.index(("tool", "true")), events.index(("preflight",)))
+                    self.assertEqual(chown.call_count, 5)
+                else:
+                    self.assertFalse(any(e[0] in {"tool", "preflight"} for e in events))
+                    chown.assert_not_called()
+                    if not direct:
+                        self.assertEqual(session.failure, "native isolation admission failed; no product command permitted")
+                early = case in {"nss-bad", "collision", "busy", "active", "prior-failure", "wrong-platform", "not-root", "missing-prefix", "existing-module"}
+                if early:
+                    make_spec.assert_not_called()
+                    make_module.assert_not_called()
+                    prepared_module.protect_selected_runtimes.assert_not_called()
+                if case == "existing-module":
+                    self.assertIs(modules[module_name], foreign)
+                reports = [n for n in session.admission_results if n["name"] == "provider-runtime-permissions"]
+                if reports:
+                    self.assertEqual(reports[0]["ok"], case == "valid")
+                if case in {"partial-preparation", "incomplete-report", "late-preparation"}:
+                    self.assertEqual((reports[0]["attempted"], reports[0]["confirmed"]), (2, 1 if case == "partial-preparation" else 2))
+
+    def test_fixed_home_positive_requires_immutable_bounded_manifest_actual_literal_read_and_delivery(self):
+        metadata_cases = {
+            "manifest-owner": (201, "st_uid", 1001), "manifest-group": (201, "st_gid", 20),
+            "manifest-mode": (201, "st_mode", stat.S_IFREG | 0o644), "manifest-links": (201, "st_nlink", 2),
+            "manifest-type": (201, "st_mode", stat.S_IFLNK | 0o444), "manifest-empty": (201, "st_size", 0),
+            "manifest-large": (201, "st_size", 16385), "canary-owner": (202, "st_uid", 1001),
+            "canary-subject-group": (202, "st_gid", 60001), "canary-mode": (202, "st_mode", stat.S_IFREG | 0o644),
+            "canary-links": (202, "st_nlink", 2), "canary-type": (202, "st_mode", stat.S_IFSOCK | 0o444),
+            "canary-size": (202, "st_size", 1),
+        }
+        cases = ("valid", "wrong-platform", "wrong-uid", "effective-uid", "effective-gid", "manifest-open", "canary-open",
+                 "manifest-short", "manifest-tail", "manifest-key", "manifest-bool-uid", "manifest-wrong-gid", "extra-groups",
+                 "invalid-deadline", "expired-deadline", "canary-bytes", "canary-tail", "connect-error", "send-error",
+                 "send-late", "close-late", "three-close-errors", *metadata_cases)
+        for case in cases:
+            with self.subTest(fixed_home_control=case):
+                home, bootstrap = Path("/Users/runner"), Path("/private/tmp/mrk-pure-fixture/bootstrap")
+                entry, manifest = bootstrap / "ci_sandbox.py", bootstrap / "home-control.json"
+                canary, address = home / ".mrk-pure-fixture-home-read", home / ".mrk-pure-fixture-home-socket"
+                clock, events, live, acquired, reads = SimpleNamespace(now=0.0), [], set(), [], {}
+                body_error = OSError(errno.EIO, "synthetic fixed HOME control operation")
+                close_errors = {201: OSError(errno.EIO, "synthetic manifest close"), 202: OSError(errno.EIO, "synthetic canary close"),
+                                "peer": OSError(errno.EIO, "synthetic HOME positive peer close")}
+                data = {"home": str(home), "uid": 60001, "gid": 60001, "deadline": 100.0}
+                if case == "manifest-key":
+                    data["path"] = "/not-an-accepted-reader-interface"
+                if case == "manifest-bool-uid":
+                    data["uid"] = True
+                if case == "manifest-wrong-gid":
+                    data["gid"] += 1
+                if case in {"invalid-deadline", "expired-deadline"}:
+                    data["deadline"] = True if case == "invalid-deadline" else 0.0
+                raw = json.dumps(data).encode()
+                nodes = {201: dict(st_mode=stat.S_IFREG | 0o444, st_uid=0, st_gid=0, st_nlink=1, st_size=len(raw)),
+                         202: dict(st_mode=stat.S_IFREG | 0o444, st_uid=0, st_gid=20, st_nlink=1, st_size=len(self.module._HOME_READ_BYTES))}
+                if case in metadata_cases:
+                    fd, key, value = metadata_cases[case]
+                    nodes[fd][key] = value
+
+                def opened(path, flags):
+                    self.assertEqual(flags, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+                    expected = manifest if not acquired else canary
+                    self.assertEqual(path, expected)
+                    fd = 201 if path == manifest else 202
+                    events.append(("open", fd))
+                    if case == ("manifest-open" if fd == 201 else "canary-open"):
+                        raise body_error
+                    acquired.append(fd)
+                    live.add(fd)
+                    return fd
+
+                def metadata(fd):
+                    self.assertIn(fd, live)
+                    events.append(("fstat", fd))
+                    return SimpleNamespace(**nodes[fd])
+
+                def read(fd, size):
+                    self.assertIn(fd, live)
+                    count = reads.get(fd, 0)
+                    self.assertLess(count, 2)
+                    reads[fd] = count + 1
+                    self.assertEqual(size, (16385 if fd == 201 else len(self.module._HOME_READ_BYTES) + 1) if count == 0 else 1)
+                    events.append(("read", fd, size))
+                    if count:
+                        return b"x" if case == ("manifest-tail" if fd == 201 else "canary-tail") else b""
+                    if fd == 201:
+                        return raw[:-1] if case == "manifest-short" else raw
+                    return b"wrong\n" if case == "canary-bytes" else self.module._HOME_READ_BYTES
+
+                def close(fd):
+                    self.assertIn(fd, live)
+                    live.remove(fd)
+                    events.append(("close", fd))
+                    if case == "close-late" and fd == 201:
+                        clock.now = 100.0
+                    if case == "three-close-errors":
+                        raise close_errors[fd]
+
+                def canonical(value):
+                    self.assertEqual(value, str(home))
+                    return home
+
+                def own_entry(path):
+                    self.assertEqual(path, entry)
+                    return path
+
+                def connect(value):
+                    self.assertEqual(value, str(address))
+                    self.assertEqual(reads, {201: 2, 202: 2})
+                    events.append(("connect",))
+                    if case == "connect-error":
+                        raise body_error
+
+                def send(value):
+                    self.assertEqual(value, self.module._HOME_SOCKET_BYTES)
+                    events.append(("send",))
+                    if case == "send-error":
+                        raise body_error
+                    if case == "send-late":
+                        clock.now = 100.0
+
+                def peer_close():
+                    events.append(("peer-close",))
+                    if case == "three-close-errors":
+                        raise close_errors["peer"]
+
+                peer = SimpleNamespace(settimeout=Mock(), connect=Mock(side_effect=connect), sendall=Mock(side_effect=send),
+                                       close=Mock(side_effect=peer_close))
+                factory, limits = Mock(return_value=peer), Mock()
+                constants = {k: getattr(os, k) for k in ("O_RDONLY", "O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC")}
+                fake_os = SimpleNamespace(**constants, open=opened, fstat=metadata, read=read, close=close, fsencode=os.fsencode,
+                    getuid=lambda: 0 if case == "wrong-uid" else 60001, geteuid=lambda: 0 if case == "effective-uid" else 60001,
+                    getgid=lambda: 60001, getegid=lambda: 0 if case == "effective-gid" else 60001)
+                output = io.StringIO()
+                with patch.multiple(self.module, __file__=str(entry), os=fake_os,
+                                    sys=SimpleNamespace(platform="linux" if case == "wrong-platform" else "darwin"),
+                                    socket=SimpleNamespace(AF_UNIX=1, SOCK_STREAM=1, socket=factory),
+                                    subprocess=SimpleNamespace(), signal=SimpleNamespace(), _limits=limits,
+                                    _process_groups=Mock(return_value=[60001, 20] if case == "extra-groups" else [60001]),
+                                    _canonical=canonical, time=SimpleNamespace(monotonic=lambda: clock.now)), \
+                     patch.object(Path, "resolve", own_entry), \
+                     patch.object(Path, "read_bytes", side_effect=AssertionError("fixed control reads only bounded original descriptors")), \
+                     patch.object(Path, "stat", side_effect=AssertionError("fixed control metadata requires the opened descriptor")), \
+                     redirect_stdout(output):
+                    if case == "valid":
+                        self.module._home_positive()
+                    else:
+                        with self.assertRaises((self.module.SessionError, BaseExceptionGroup)) as caught:
+                            self.module._home_positive()
+                        if case == "three-close-errors":
+                            self.assertEqual(caught.exception.exceptions, (close_errors["peer"], close_errors[202], close_errors[201]))
+                        if case in {"manifest-open", "canary-open", "connect-error", "send-error"}:
+                            self.assertIs(caught.exception.exceptions[0], body_error)
+                self.assertEqual(live, set())
+                self.assertEqual([e[1] for e in events if e[0] == "close"], list(reversed(acquired)))
+                self.assertEqual(peer.close.call_count, factory.call_count)
+                self.assertEqual(output.getvalue(), "MRK_HOME_POSITIVE_OK\n" if case == "valid" else "")
+                if case in {"wrong-platform", "wrong-uid", "effective-uid", "effective-gid"}:
+                    limits.assert_not_called()
+                    self.assertEqual(events, [])
+                else:
+                    limits.assert_called_once_with("darwin", 10)
+                if factory.called:
+                    factory.assert_called_once_with(1, 1)
+                    self.assertTrue(all(0 < c.args[0] <= 2 for c in peer.settimeout.call_args_list))
+                    self.assertLess(events.index(("peer-close",)), events.index(("close", 202)))
+                if case == "valid":
+                    self.assertEqual(reads, {201: 2, 202: 2})
+                    peer.connect.assert_called_once_with(str(address))
+                    peer.sendall.assert_called_once_with(self.module._HOME_SOCKET_BYTES)
+
+        # Dispatch has exactly one fixed role and cannot accept a caller path,
+        # socket name or arbitrary command in place of its immutable manifest.
+        control = Mock()
+        with patch.multiple(self.module, _home_positive=control, os=SimpleNamespace(),
+                            subprocess=SimpleNamespace(), socket=SimpleNamespace(), signal=SimpleNamespace()):
+            self.assertEqual(self.module._main(["--home-positive"]), 0)
+            control.assert_called_once_with()
+            for tail in (["/other/path"], ["--", "/other/command"]):
+                with self.assertRaises(self.module.SessionError):
+                    self.module._main(["--home-positive", *tail])
+            control.assert_called_once_with()
+
+    def test_root_home_positive_uses_genuine_fixed_child_collection_finality_and_exact_delivery_eof(self):
+        genuine_collection = self.module._small_command
+        cases = ("valid", "fragmented", "missing-state", "unprepared", "missing-listener", "busy", "pin-drift",
+                 "pre-domain", "post-domain", "nonzero", "stderr", "wait-error", "stdout-held", "stderr-held",
+                 "collection-close-error", "wrong-footer", "accept-error", "wrong-token", "excess-token", "held-delivery",
+                 "accepted-close-error", "body-and-close-errors", "late-close")
+        for case in cases:
+            with self.subTest(root_home_positive=case):
+                session = session_double(self.module, "darwin")
+                rig = _Collection(self.module, session, stdout=(b"wrong\n" if case == "wrong-footer" else b"MRK_HOME_POSITIVE_OK\n",),
+                                  stderr=(b"synthetic diagnostic\n",) if case == "stderr" else ())
+                rig.exitcode = 7 if case == "nonzero" else 0
+                rig.wait_error = case == "wait-error"
+                if case in {"stdout-held", "stderr-held"}:
+                    rig.hold.add(0 if case == "stdout-held" else 1)
+                if case == "collection-close-error":
+                    rig.stream_close_errors = {0}
+                session._busy = case == "busy"
+                body_error = TimeoutError("synthetic HOME receiver incomplete delivery")
+                close_error = OSError(errno.EIO, "synthetic accepted HOME connection close")
+                pin_error = self.module.SessionError("synthetic HOME pin identity drift")
+                token, received = self.module._HOME_SOCKET_BYTES, 0
+                chunks = ([token[:5], token[5:], b""] if case == "fragmented" else
+                          [b"x" * len(token), b""] if case == "wrong-token" else
+                          [token + b"x"] if case == "excess-token" else
+                          [token, body_error] if case in {"held-delivery", "body-and-close-errors"} else [token, b""])
+
+                def recv(size):
+                    nonlocal received
+                    self.assertEqual(size, len(token) + 1 - received)
+                    self.assertTrue(chunks)
+                    chunk = chunks.pop(0)
+                    rig.events.append(("home-recv", size))
+                    if isinstance(chunk, BaseException):
+                        raise chunk
+                    received += len(chunk)
+                    return chunk
+
+                def accepted_close():
+                    rig.events.append(("home-accepted-close",))
+                    if case == "late-close":
+                        rig.now = session.deadline
+                    if case in {"accepted-close-error", "body-and-close-errors"}:
+                        raise close_error
+
+                accepted = SimpleNamespace(settimeout=Mock(), recv=Mock(side_effect=recv), close=Mock(side_effect=accepted_close))
+
+                def accept():
+                    rig.events.append(("home-accept",))
+                    self.assertEqual(rig.domain_calls, 2)
+                    self.assertTrue(session.domain_finality)
+                    self.assertIsNone(session._active)
+                    self.assertLess(max(i for i, e in enumerate(rig.events) if e[0] == "wait-original"),
+                                    max(i for i, e in enumerate(rig.events) if e[0] == "domain"))
+                    self.assertEqual({e[1] for e in rig.events if e[0] == "unregister-eof"}, {0, 1})
+                    if case == "accept-error":
+                        raise body_error
+                    return accepted, "synthetic-peer"
+
+                listener = SimpleNamespace(settimeout=Mock(), accept=Mock(side_effect=accept), close=Mock())
+                session._home_state = None if case == "missing-state" else {
+                    "prepared": case != "unprepared", "listener": None if case == "missing-listener" else listener,
+                    "expected_mode": 0o751,
+                }
+
+                def domain(platform, uid, *, deadline):
+                    result = rig.domain(platform, uid, deadline=deadline)
+                    self.assertEqual(deadline, session.deadline)
+                    return {4242} if (case == "pre-domain" and rig.domain_calls == 1
+                                      or case == "post-domain" and rig.domain_calls == 2) else result
+
+                def pin(mode):
+                    self.assertEqual(mode, 0o751)
+                    self.assertEqual(rig.domain_calls, 1)
+                    self.assertTrue(session.domain_finality)
+                    rig.events.append(("pin-check",))
+                    if case == "pin-drift":
+                        raise pin_error
+
+                def collect(argv, seconds, **kwargs):
+                    self.assertEqual(argv, [str(session.python), "-I", "-S", "-B", str(session.entry), "--home-positive"])
+                    self.assertEqual((seconds, kwargs), (10, {"user": session.uid, "group": session.gid, "deadline": session.deadline}))
+                    self.assertIn(("pin-check",), rig.events)
+                    return genuine_collection(argv, seconds, **kwargs)
+
+                metadata = Mock(side_effect=collect)
+                with rig.scope(), patch.object(self.module, "_small_command", metadata), \
+                     patch.object(self.module, "_domain", side_effect=domain), \
+                     patch.object(self.module, "socket", SimpleNamespace()), \
+                     patch.object(session, "_check_home_pin", side_effect=pin), \
+                     patch.object(Path, "stat", side_effect=AssertionError("all HOME metadata is owned by the substituted pin check")), \
+                     patch.object(Path, "lstat", side_effect=AssertionError("no actual HOME path observation is permitted")), \
+                     patch.object(Path, "read_bytes", side_effect=AssertionError("the root HOME control may not read paths")):
+                    if case in {"valid", "fragmented"}:
+                        session._home_positive_control()
+                    else:
+                        with self.assertRaises((self.module.SessionError, BaseExceptionGroup)) as caught:
+                            session._home_positive_control()
+                        if case == "body-and-close-errors":
+                            self.assertEqual(caught.exception.exceptions, (body_error, close_error))
+                        if case == "pin-drift":
+                            self.assertIs(caught.exception, pin_error)
+                notes = [n for n in session.admission_results if n["name"] == "home-DAC-and-delivery-positive"]
+                self.assertEqual(notes, [{"name": "home-DAC-and-delivery-positive", "ok": True}] if case in {"valid", "fragmented"} else [])
+                listener.close.assert_not_called()  # Root listener stays in Session's custody until owned finalization.
+                if case not in {"missing-state", "missing-listener"}:
+                    self.assertIs(session._home_state["listener"], listener)
+                preaccept = {"missing-state", "unprepared", "missing-listener", "busy", "pin-drift", "pre-domain", "post-domain",
+                             "nonzero", "stderr", "wait-error", "stdout-held", "stderr-held", "collection-close-error", "wrong-footer"}
+                if case in preaccept:
+                    listener.accept.assert_not_called()
+                    accepted.close.assert_not_called()
+                else:
+                    listener.accept.assert_called_once_with()
+                    self.assertEqual(accepted.close.call_count, int(case != "accept-error"))
+                for _, command, kwargs in (e for e in rig.events if e[0] == "popen"):
+                    self.assertEqual(command[-1], "--home-positive")
+                    self.assertEqual((kwargs["user"], kwargs["group"], kwargs["extra_groups"]), (session.uid, session.gid, []))
+                    self.assertTrue(kwargs["close_fds"])
+                    self.assertNotIn("pass_fds", kwargs)
+                    self.assertEqual(kwargs["env"], {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"})
+                self.assertEqual(session.deadline, 100.0)
+
+    def test_root_home_non_delivery_requires_real_would_block_and_retains_listener_on_every_failure(self):
+        for case in ("eagain", "ewouldblock", "wrong-family", "wrong-kind", "unknown-blocking", "unknown-error", "delivery",
+                     "delivery-close-error", "setblocking-error", "expired", "late-empty", "late-close"):
+            with self.subTest(home_non_delivery=case):
+                clock, events = SimpleNamespace(now=0.0), []
+                original = OSError(errno.EIO, "synthetic original HOME non-delivery observation")
+                close_error = OSError(errno.EIO, "synthetic prohibited HOME delivery close")
+
+                def close():
+                    events.append(("accepted-close",))
+                    if case == "late-close":
+                        clock.now = 1.0
+                    if case == "delivery-close-error":
+                        raise close_error
+
+                accepted = SimpleNamespace(close=Mock(side_effect=close))
+
+                def setblocking(value):
+                    self.assertFalse(value)
+                    events.append(("nonblocking",))
+                    if case == "setblocking-error":
+                        raise original
+
+                def accept():
+                    events.append(("accept",))
+                    if case in {"delivery", "delivery-close-error", "late-close"}:
+                        return accepted, "synthetic-peer"
+                    if case == "unknown-error":
+                        raise original
+                    if case == "late-empty":
+                        clock.now = 1.0
+                    raise BlockingIOError(errno.EIO if case == "unknown-blocking" else
+                                          errno.EWOULDBLOCK if case == "ewouldblock" else errno.EAGAIN, "synthetic original accept result")
+
+                listener = SimpleNamespace(family=2 if case == "wrong-family" else 1,
+                    type=2 if case == "wrong-kind" else 1, setblocking=Mock(side_effect=setblocking),
+                    accept=Mock(side_effect=accept), close=Mock())
+                clock.now = 1.0 if case == "expired" else 0.0
+                with patch.multiple(self.module, socket=SimpleNamespace(AF_UNIX=1, SOCK_STREAM=1),
+                                    os=SimpleNamespace(), subprocess=SimpleNamespace(), signal=SimpleNamespace(),
+                                    time=SimpleNamespace(monotonic=lambda: clock.now)):
+                    if case in {"eagain", "ewouldblock"}:
+                        self.module._home_socket_empty(listener, deadline=1.0)
+                    else:
+                        with self.assertRaises((self.module.SessionError, BaseExceptionGroup)) as caught:
+                            self.module._home_socket_empty(listener, deadline=1.0)
+                        if case == "delivery-close-error":
+                            self.assertEqual(len(caught.exception.exceptions), 2)
+                            self.assertIsInstance(caught.exception.exceptions[0], self.module.SessionError)
+                            self.assertIs(caught.exception.exceptions[1], close_error)
+                        if case in {"unknown-error", "setblocking-error"}:
+                            self.assertIs(caught.exception.exceptions[0], original)
+                listener.close.assert_not_called()
+                self.assertEqual(accepted.close.call_count, int(case in {"delivery", "delivery-close-error", "late-close"}))
+                if case in {"wrong-family", "wrong-kind", "expired"}:
+                    self.assertEqual(events, [])
+                else:
+                    self.assertEqual(events[:2], [("nonblocking",)] if case == "setblocking-error" else [("nonblocking",), ("accept",)])

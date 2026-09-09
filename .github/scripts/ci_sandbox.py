@@ -35,6 +35,8 @@ JAVA_LIMITS = (
     "-Xms32m -Xmx256m -XX:MaxMetaspaceSize=256m "
     "-XX:CompressedClassSpaceSize=128m -XX:ReservedCodeCacheSize=128m"
 )
+_HOME_READ_BYTES = b"MRK_SYNTHETIC_HOME_READ\n"
+_HOME_SOCKET_BYTES = b"MRK_SYNTHETIC_HOME_SOCKET\n"
 _ENV_KEYS = frozenset("""
 PATH LANG LC_ALL TZ HOME USER LOGNAME TMPDIR TMP TEMP XDG_CONFIG_HOME
 XDG_CACHE_HOME CI TERM PYTHONSAFEPATH PYTHONDONTWRITEBYTECODE PYTHONNOUSERSITE
@@ -299,6 +301,21 @@ def _tool_stat_note(info, uid: int, gid: int, *, role: str) -> dict:
             "subject_group": info.st_gid == gid, "setuid": bool(info.st_mode & stat.S_ISUID),
             "setgid": bool(info.st_mode & stat.S_ISGID), "owner_execute": bool(info.st_mode & 0o100),
             "group_execute": bool(info.st_mode & 0o010), "other_execute": bool(info.st_mode & 0o001)}
+
+
+def _home_node(info) -> tuple:
+    return info.st_dev, info.st_ino, info.st_uid, info.st_gid, stat.S_IFMT(info.st_mode)
+
+
+def _home_paths(home: Path, root: Path) -> tuple[Path, Path]:
+    """Only two session-derived synthetic names, never a caller-selected reader."""
+    if (not home.is_absolute() or not root.is_absolute() or ".." in home.parts
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", root.name)):
+        raise SessionError("invalid fixed HOME fixture binding")
+    canary, endpoint = (home / f".{root.name}-home-{suffix}" for suffix in ("read", "socket"))
+    if len(os.fsencode(endpoint)) >= 104:
+        raise SessionError("fixed HOME socket pathname exceeds native bound")
+    return canary, endpoint
 
 
 def _admit_executable(path: Path, uid: int, gid: int, *, root_owned: bool = False,
@@ -770,6 +787,7 @@ class Session:
         self.persisted_bytes = self._run_number = 0
         self.admission_results: list[dict[str, object]] = []
         self.process_observer: Path | None = None
+        self._home_state: dict | None = None
         self._handlers = {}
         self._timer_finished = False
         self._active: subprocess.Popen | None = None
@@ -1237,6 +1255,8 @@ class Session:
                                  deadline=self.deadline)
             if raw != b"MRK_NSS_ABSENT\n" or _domain(self.platform, self.uid, collision=True, deadline=self.deadline):
                 raise SessionError("numeric identity collision or incomplete admission")
+            if self.platform == "linux":
+                self._prepare_provider_runtime()
             tools = {}
             tools_note = {"name": "fixed-entry-tools", "ok": False, "tools": tools}
             self.admission_results.append(tools_note)
@@ -1265,6 +1285,8 @@ class Session:
                 p = self.work / name
                 p.mkdir(mode=0o700)
                 os.chown(p, self.uid, self.gid)
+            if self.platform == "darwin":
+                self._prepare_home_boundary()
             self._preflight()
             self.ensure_idle()
             if self.platform == "darwin":
@@ -1286,6 +1308,272 @@ class Session:
             raise
         finally:
             self._admitting = False
+
+    def _prepare_provider_runtime(self) -> None:
+        """Root-only selected Linux provider preparation; no child module import."""
+        if self.platform != "linux" or sys.platform != "linux" or os.geteuid() != 0:
+            raise SessionError("provider preparation requires the native root owner")
+        self.ensure_idle()
+        _remaining(self.deadline)
+        python_prefix = _canonical(sys.base_prefix)
+        ruby_prefix = self.ruby.parent.parent
+        remaining = [p for p in self.tool_prefixes if p not in {python_prefix, ruby_prefix}]
+        if (python_prefix not in self.tool_prefixes or ruby_prefix not in self.tool_prefixes
+                or not _under(self.python, python_prefix) or len(remaining) != 1):
+            raise SessionError("selected provider prefix roles are incomplete or ambiguous")
+        prefixes = (("python", python_prefix), ("ruby", ruby_prefix), ("jdk", remaining[0]))
+        # Only this root admission method loads the immutable provider-only
+        # source. The one-file copied bootstrap and every child role stay intact.
+        report = {"name": "provider-runtime-permissions", "ok": False}
+        self.admission_results.append(report)
+        try:
+            import importlib.util
+            name = "_mrk_ci_provider_runtime"
+            if name in sys.modules:
+                raise SessionError("provider preparation module already has an owner")
+            spec = importlib.util.spec_from_file_location(name, self.source / ".github/scripts/ci_provider_runtime.py")
+            if spec is None or spec.loader is None:
+                raise SessionError("immutable provider preparation module unavailable")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+            _remaining(self.deadline)
+            module.protect_selected_runtimes(prefixes, uid=self.uid, gid=self.gid,
+                                            deadline=self.deadline, report=report)
+            _remaining(self.deadline)
+            if report.get("ok") is not True:
+                raise SessionError("selected provider preparation did not complete")
+        except BaseException:
+            report["ok"] = False  # Preserve module counts, revoke any late aggregate claim.
+            raise
+
+    def _check_home_pin(self, mode: int) -> None:
+        state = self._home_state
+        _remaining(self.deadline)
+        pinned = os.fstat(state["pin"])
+        _remaining(self.deadline)
+        named = self.runner_home.lstat()
+        if (state["original"] is None or _home_node(pinned) != _home_node(state["original"])
+                or _home_node(named) != _home_node(pinned)
+                or stat.S_IMODE(pinned.st_mode) != mode or stat.S_IMODE(named.st_mode) != mode):
+            raise SessionError("owned HOME pin/path identity or mode drifted")
+        _remaining(self.deadline)
+
+    def _prepare_home_boundary(self) -> None:
+        """One disposable-VM HOME search bit; retain all custody before effects."""
+        if (self.platform != "darwin" or sys.platform != "darwin" or os.geteuid() != 0
+                or self._home_state is not None):
+            raise SessionError("invalid or repeated HOME preparation")
+        if not _under(self.ruby, self.runner_home):
+            raise SessionError("reviewed HOME preparation requires selected Ruby beneath HOME")
+        self.ensure_idle()
+        canary, endpoint = _home_paths(self.runner_home, self.root)
+        if any(_under(p, prefix) for p in (canary, endpoint) for prefix in self.tool_prefixes):
+            raise SessionError("synthetic HOME controls overlap a runtime exclusion")
+        state = {"pin": None, "original": None, "change_attempted": False, "prepared": False,
+                 "expected_mode": None, "canary_fd": None, "canary_name": canary.name,
+                 "canary_create_attempted": False, "canary_identity": None, "canary_mode": 0o600,
+                 "listener": None, "socket_name": endpoint.name, "socket_bind_attempted": False,
+                 "socket_identity": None, "socket_mode": None, "closed": False}
+        self._home_state = state
+        note = {"name": "home-search-preparation", "ok": False, "change_attempted": False,
+                "change_verified": False}
+        self.admission_results.append(note)
+        _remaining(self.deadline)
+        before = self.runner_home.lstat()
+        _remaining(self.deadline)
+        state["pin"] = os.open(self.runner_home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        _remaining(self.deadline)
+        original = os.fstat(state["pin"])
+        state["original"] = original
+        _remaining(self.deadline)
+        mode = stat.S_IMODE(original.st_mode)
+        if (not stat.S_ISDIR(original.st_mode) or original.st_uid == self.uid or original.st_gid == self.gid
+                or mode not in {0o750, 0o751, 0o755} or _home_node(before) != _home_node(original)
+                or stat.S_IMODE(before.st_mode) != mode):
+            raise SessionError("configured HOME does not match the reviewed pinned directory state")
+        note["original_mode"] = format(mode, "04o")
+        state["expected_mode"] = 0o751 if mode == 0o750 else mode
+        self._check_home_pin(mode)
+        if mode == 0o750:
+            state["change_attempted"] = note["change_attempted"] = True
+            os.fchmod(state["pin"], 0o751)
+        self._check_home_pin(state["expected_mode"])
+        state["prepared"] = True
+        note["change_verified"] = state["change_attempted"]
+        note["prepared_mode"] = format(state["expected_mode"], "04o")
+
+        _remaining(self.deadline)
+        state["canary_create_attempted"] = True
+        state["canary_fd"] = os.open(canary.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                    0o600, dir_fd=state["pin"])
+        _remaining(self.deadline)
+        created = os.fstat(state["canary_fd"])
+        _remaining(self.deadline)
+        # Darwin may inherit HOME's ordinary group; preserve it, never adopt U.
+        if (not stat.S_ISREG(created.st_mode) or created.st_uid != 0 or created.st_gid == self.gid
+                or created.st_nlink != 1 or stat.S_IMODE(created.st_mode) != 0o600 or created.st_size):
+            raise SessionError("new synthetic HOME file lacks exclusive creation identity")
+        state["canary_identity"] = created
+        if os.write(state["canary_fd"], _HOME_READ_BYTES) != len(_HOME_READ_BYTES):
+            raise SessionError("synthetic HOME file write was incomplete")
+        _remaining(self.deadline)
+        os.fsync(state["canary_fd"])
+        _remaining(self.deadline)
+        state["canary_mode"] = None
+        os.fchmod(state["canary_fd"], 0o444)
+        _remaining(self.deadline)
+        current = os.fstat(state["canary_fd"])
+        _remaining(self.deadline)
+        if (_home_node(current) != _home_node(created) or current.st_nlink != 1
+                or stat.S_IMODE(current.st_mode) != 0o444 or current.st_size != len(_HOME_READ_BYTES)):
+            raise SessionError("synthetic HOME file persistence/mode is not verified")
+        state["canary_mode"] = 0o444
+        self._check_home_pin(state["expected_mode"])
+        state["listener"] = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        state["listener"].settimeout(min(2, _remaining(self.deadline)))
+        _remaining(self.deadline)
+        state["socket_bind_attempted"] = True
+        state["listener"].bind(str(endpoint))  # No unlink, adoption or conflict retry.
+        _remaining(self.deadline)
+        node = os.stat(endpoint.name, dir_fd=state["pin"], follow_symlinks=False)
+        _remaining(self.deadline)
+        if not stat.S_ISSOCK(node.st_mode) or node.st_uid != 0 or node.st_gid == self.gid or node.st_nlink != 1:
+            raise SessionError("new synthetic HOME listener lacks its own node identity")
+        state["socket_identity"] = node
+        state["socket_mode"] = stat.S_IMODE(node.st_mode)
+        self._check_home_pin(state["expected_mode"])
+        state["socket_mode"] = None
+        os.chmod(endpoint, 0o666, follow_symlinks=False)  # Only this created synthetic socket, never HOME.
+        _remaining(self.deadline)
+        after = os.stat(endpoint.name, dir_fd=state["pin"], follow_symlinks=False)
+        _remaining(self.deadline)
+        if _home_node(after) != _home_node(node) or after.st_nlink != 1 or stat.S_IMODE(after.st_mode) != 0o666:
+            raise SessionError("synthetic HOME listener node changed")
+        state["socket_mode"] = 0o666
+        state["listener"].listen(8)
+        _remaining(self.deadline)
+        _private_file(self.bootstrap / "home-control.json", json.dumps({"home": str(self.runner_home),
+                      "uid": self.uid, "gid": self.gid, "deadline": self.deadline}).encode(), 0o444)
+        _remaining(self.deadline)
+        note["ok"] = True  # Preparation only; genuine mandatory controls still follow.
+
+    def _home_positive_control(self) -> None:
+        """Trusted fixed U code outside policy proves DAC is not the negative."""
+        state = self._home_state
+        if state is None or not state["prepared"] or state["listener"] is None:
+            raise SessionError("owned HOME controls are not prepared")
+        self.ensure_idle()
+        self._check_home_pin(state["expected_mode"])
+        raw = _small_command([str(self.python), "-I", "-S", "-B", str(self.entry), "--home-positive"],
+                             10, user=self.uid, group=self.gid, deadline=self.deadline)
+        if raw != b"MRK_HOME_POSITIVE_OK\n":
+            raise SessionError("fixed HOME DAC positive did not complete")
+        self.ensure_idle()
+        accepted, errors, data = None, [], bytearray()
+        try:
+            state["listener"].settimeout(min(2, _remaining(self.deadline)))
+            accepted, _ = state["listener"].accept()
+            while True:
+                accepted.settimeout(min(2, _remaining(self.deadline)))
+                chunk = accepted.recv(len(_HOME_SOCKET_BYTES) + 1 - len(data))
+                if not chunk:
+                    break
+                data.extend(chunk)
+                if len(data) > len(_HOME_SOCKET_BYTES):
+                    raise SessionError("synthetic HOME positive delivery exceeds literal bound")
+            if bytes(data) != _HOME_SOCKET_BYTES:
+                raise SessionError("synthetic HOME positive delivery was not observed")
+        except BaseException as exc:
+            errors.append(exc)
+        if accepted is not None:
+            try:
+                accepted.close()
+            except BaseException as exc:
+                errors.append(exc)
+        try:
+            _remaining(self.deadline)
+        except BaseException as exc:
+            errors.append(exc)
+        if errors:
+            raise BaseExceptionGroup("fixed HOME positive/accepted-connection close failed", errors)
+        self.admission_results.append({"name": "home-DAC-and-delivery-positive", "ok": True})
+
+    def _close_home_boundary(self) -> list[BaseException]:
+        """Finality-gated exact restore/removal; close every owned handle once."""
+        state = getattr(self, "_home_state", None)
+        if state is None or state["closed"]:
+            return []
+        state["closed"] = True
+        errors = []
+        note = {"name": "home-boundary-finalization", "ok": False, "restored": False,
+                "canary_removed": False, "socket_removed": False, "unverified_creation": []}
+        self.admission_results.append(note)
+        for kind, attempt_key, identity_key in (
+                ("canary", "canary_create_attempted", "canary_identity"),
+                ("socket", "socket_bind_attempted", "socket_identity")):
+            if state[attempt_key] and state[identity_key] is None:
+                note["unverified_creation"].append(kind)
+                errors.append(SessionError("synthetic HOME creation after-effect lacks owned identity"))
+        eligible = False
+        try:
+            _remaining(self.deadline)
+            if (self._busy or self._active is not None or not self.domain_finality
+                    or _domain(self.platform, self.uid, deadline=self.deadline)):
+                raise SessionError("HOME restoration has no genuine producer/domain finality")
+            if not state["prepared"]:
+                raise SessionError("HOME preparation after-effect is not verified")
+            self._check_home_pin(state["expected_mode"])
+            eligible = True
+        except BaseException as exc:
+            errors.append(exc)
+        if eligible:
+            final_mode = state["expected_mode"]
+            try:
+                if state["change_attempted"]:
+                    _remaining(self.deadline)
+                    os.fchmod(state["pin"], stat.S_IMODE(state["original"].st_mode))
+                    self._check_home_pin(stat.S_IMODE(state["original"].st_mode))
+                    final_mode = stat.S_IMODE(state["original"].st_mode)
+                    note["restored"] = True
+            except BaseException as exc:
+                eligible = False  # Uncertain restoration cannot authorize another path mutation.
+                errors.append(exc)
+        if eligible:
+            for kind, identity_key, mode_key, name_key in (
+                    ("canary", "canary_identity", "canary_mode", "canary_name"),
+                    ("socket", "socket_identity", "socket_mode", "socket_name")):
+                if state[identity_key] is None:
+                    continue
+                try:
+                    self._check_home_pin(final_mode)
+                    current = os.stat(state[name_key], dir_fd=state["pin"], follow_symlinks=False)
+                    _remaining(self.deadline)
+                    if (_home_node(current) != _home_node(state[identity_key]) or current.st_nlink != 1
+                            or state[mode_key] is None or stat.S_IMODE(current.st_mode) != state[mode_key]):
+                        raise SessionError("synthetic HOME node replacement/mode forbids removal")
+                    os.unlink(state[name_key], dir_fd=state["pin"])
+                    note[kind + "_removed"] = True
+                    _remaining(self.deadline)
+                except BaseException as exc:
+                    errors.append(exc)
+        # Local resource closure is always safe, even when no path mutation is.
+        for key in ("listener", "canary_fd", "pin"):
+            owned, state[key] = state[key], None
+            if owned is None:
+                continue
+            try:
+                owned.close() if key == "listener" else os.close(owned)
+            except BaseException as exc:
+                errors.append(exc)
+        try:
+            _remaining(self.deadline)
+        except BaseException as exc:
+            errors.append(exc)
+        note["ok"] = not errors
+        if errors:
+            note["exceptions"] = _exception_notes(BaseExceptionGroup("HOME owned finalization failed", errors))
+        return errors
 
     def _admit_process_observer(self) -> None:
         """Prepare as U only after base native controls; publish last, once."""
@@ -1467,6 +1755,8 @@ class Session:
         listeners, addresses = [], []
         failures = []
         try:
+            if self.platform == "darwin":
+                self._home_positive_control()
             # This grant is AFTER complete numerical collision admission.  It
             # is a single synthetic UID-owned0600 file, not a group capability.
             os.chown(self.outside_write, self.uid, self.gid)
@@ -1508,6 +1798,10 @@ class Session:
             if self.platform == "linux":
                 data["host_net"] = os.readlink("/proc/self/ns/net")
                 data["host_pid"] = os.readlink("/proc/self/ns/pid")
+                data["runtime_executables"] = [str(self.python), str(self.ruby)]
+            else:
+                canary, endpoint = _home_paths(self.runner_home, self.root)
+                data["home_canary"], data["home_socket"] = str(canary), str(endpoint)
             base = [str(self.python), "-I", "-S", "-B", str(self.entry)]
             good = self._run([*base, "--probe", json.dumps(data)], cwd=self.work, env={}, seconds=30, latch=False)
             native_note = self._note_capture("native-isolation", good)
@@ -1515,6 +1809,8 @@ class Session:
                 raise SessionError("native credentials/files/FD/network inheritance preflight failed")
             self.ensure_idle()
             _outside_network_empty(listeners, deadline=self.deadline)
+            if self.platform == "darwin":
+                _home_socket_empty(self._home_state["listener"], deadline=self.deadline)
             # Revoke this synthetic positive grant before any product command.
             # Failed/unknown writers never reach this filesystem postcondition.
             os.chown(self.outside_write, 0, 0)
@@ -1684,6 +1980,14 @@ class Session:
             # Failed/unknown state is deliberately NOT walked, deleted, adopted
             # or reset.  The reservation survives until this one VM is disposed.
         finally:
+            try:
+                home_errors = self._close_home_boundary()
+                if home_errors:
+                    self.cleanup_errors.extend(f"HOME finalization {type(exc).__name__}" for exc in home_errors)
+                    self._fail("owned HOME finalization failed")
+            except BaseException as exc:
+                self.cleanup_errors.append(f"HOME finalization {type(exc).__name__}")
+                self._fail("owned HOME finalization failed")
             self.closed = True
             if not keep_timer:
                 self.finish()
@@ -1765,6 +2069,71 @@ def _write_control(path: Path) -> None:
     if errors:
         raise BaseExceptionGroup("synthetic write control and close failed", errors)
     print("MRK_OUTSIDE_WRITE_POSITIVE", flush=True)
+
+
+def _home_positive() -> None:
+    """Fixed unprivileged synthetic HOME controls; no command/path arguments."""
+    if (sys.platform != "darwin" or not 60000 <= os.getuid() < 65000
+            or os.getuid() != os.geteuid() or os.getgid() != os.getuid() or os.getegid() != os.getgid()):
+        raise SessionError("invalid fixed HOME positive role")
+    _limits("darwin", 10)
+    bootstrap = Path(__file__).resolve().parent
+    fds, peer, errors, deadline = [], None, [], None
+    try:
+        fd = os.open(bootstrap / "home-control.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        fds.append(fd)
+        state = os.fstat(fd)
+        if (not stat.S_ISREG(state.st_mode) or state.st_uid != 0 or state.st_gid != 0
+                or state.st_nlink != 1 or stat.S_IMODE(state.st_mode) != 0o444 or not 0 < state.st_size <= 16384):
+            raise SessionError("fixed HOME manifest is not immutable bounded control")
+        raw = os.read(fd, 16385)
+        if len(raw) != state.st_size or os.read(fd, 1):
+            raise SessionError("fixed HOME manifest read is incomplete")
+        data = json.loads(raw)
+        if (not isinstance(data, dict) or set(data) != {"home", "uid", "gid", "deadline"}
+                or type(data["uid"]) is not int or type(data["gid"]) is not int
+                or (data["uid"], data["gid"]) != (os.getuid(), os.getgid())
+                or not isinstance(data["home"], str) or _process_groups("darwin") != [os.getgid()]):
+            raise SessionError("fixed HOME manifest lacks numerical owner binding")
+        deadline = data["deadline"]
+        _remaining(deadline)
+        home = _canonical(data["home"])
+        canary, endpoint = _home_paths(home, bootstrap.parent)
+        fd = os.open(canary, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        fds.append(fd)
+        state = os.fstat(fd)
+        if (not stat.S_ISREG(state.st_mode) or state.st_uid != 0 or state.st_gid == os.getgid()
+                or state.st_nlink != 1 or stat.S_IMODE(state.st_mode) != 0o444
+                or state.st_size != len(_HOME_READ_BYTES)):
+            raise SessionError("synthetic HOME canary lacks exact DAC-positive state")
+        if os.read(fd, len(_HOME_READ_BYTES) + 1) != _HOME_READ_BYTES or os.read(fd, 1):
+            raise SessionError("synthetic HOME canary was not genuinely read")
+        peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        peer.settimeout(min(2, _remaining(deadline)))
+        peer.connect(str(endpoint))
+        peer.settimeout(min(2, _remaining(deadline)))
+        peer.sendall(_HOME_SOCKET_BYTES)
+        _remaining(deadline)
+    except BaseException as exc:
+        errors.append(exc)
+    if peer is not None:
+        try:
+            peer.close()
+        except BaseException as exc:
+            errors.append(exc)
+    for fd in reversed(fds):
+        try:
+            os.close(fd)
+        except BaseException as exc:
+            errors.append(exc)
+    if deadline is not None:
+        try:
+            _remaining(deadline)
+        except BaseException as exc:
+            errors.append(exc)
+    if errors:
+        raise BaseExceptionGroup("fixed HOME positive/owned close failed", errors)
+    print("MRK_HOME_POSITIVE_OK", flush=True)
 
 
 def _ready_line(stream, seconds: float) -> bytes:
@@ -2184,6 +2553,106 @@ def _outside_network_empty(listeners: list, *, deadline: float) -> None:
         raise BaseExceptionGroup("outside receiver observation/close failed", failures)
 
 
+def _home_socket_empty(listener, *, deadline: float) -> None:
+    """Only the original synthetic HOME listener, after child wait/EOF/finality."""
+    if listener.family != socket.AF_UNIX or listener.type != socket.SOCK_STREAM:
+        raise SessionError("wrong owned HOME listener type")
+    accepted, errors = None, []
+    try:
+        _remaining(deadline)
+        listener.setblocking(False)
+        try:
+            accepted, _ = listener.accept()
+            raise SessionError("synthetic HOME listener observed prohibited delivery")
+        except BlockingIOError as exc:
+            if exc.errno not in {errno.EAGAIN, errno.EWOULDBLOCK}:
+                raise
+    except BaseException as exc:
+        errors.append(exc)
+    if accepted is not None:
+        try:
+            accepted.close()
+        except BaseException as exc:
+            errors.append(exc)
+    try:
+        _remaining(deadline)
+    except BaseException as exc:
+        errors.append(exc)
+    if errors:
+        raise BaseExceptionGroup("synthetic HOME non-delivery/accepted close failed", errors)
+
+
+def _probe_provider_boundaries(data: dict) -> None:
+    """Fixed runtime/HOME controls, without generic missing-fixture allowances."""
+    if data["platform"] == "linux":
+        targets = data["runtime_executables"]
+        if not isinstance(targets, list) or len(targets) != 2 or any(not Path(p).is_absolute() for p in targets):
+            raise SessionError("incomplete fixed provider writer-control inventory")
+        for target in targets:
+            fd, errors = None, []
+            try:
+                fd = os.open(target, os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                raise SessionError("selected provider executable is writable by the subject")
+            except OSError as exc:
+                if exc.errno not in {errno.EACCES, errno.EPERM, errno.EROFS}:
+                    errors.append(exc)  # Missing fixture and ETXTBSY are not protection evidence.
+            except BaseException as exc:
+                errors.append(exc)
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except BaseException as exc:
+                    errors.append(exc)
+            if errors:
+                raise BaseExceptionGroup("fixed provider write-open control/close failed", errors)
+        return
+    if data["platform"] != "darwin":
+        raise SessionError("unsupported fixed provider boundary platform")
+    canary, endpoint = _home_paths(Path(data["runner_home"]), Path(data["work"]).parent)
+    if (data["home_canary"], data["home_socket"]) != (str(canary), str(endpoint)):
+        raise SessionError("HOME boundary controls differ from fixed session names")
+    for operation in ("read", "metadata"):
+        fd, errors = None, []
+        try:
+            if operation == "read":
+                fd = os.open(canary, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+                os.read(fd, len(_HOME_READ_BYTES) + 1)
+            else:
+                os.stat(canary, follow_symlinks=False)
+            raise SessionError("synthetic HOME known-path access was permitted")
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EPERM}:
+                errors.append(exc)
+        except BaseException as exc:
+            errors.append(exc)
+        if fd is not None:
+            try:
+                os.close(fd)
+            except BaseException as exc:
+                errors.append(exc)
+        if errors:
+            raise BaseExceptionGroup("known-path HOME denial/owned close failed", errors)
+    peer, errors = None, []
+    try:
+        peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        peer.settimeout(0.5)
+        try:
+            peer.connect(str(endpoint))
+            raise SessionError("synthetic HOME pathname socket was reachable")
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EPERM}:
+                raise
+    except BaseException as exc:
+        errors.append(exc)
+    if peer is not None:
+        try:
+            peer.close()
+        except BaseException as exc:
+            errors.append(exc)
+    if errors:
+        raise BaseExceptionGroup("HOME named-socket denial/owned close failed", errors)
+
+
 def _sudo_denial() -> None:
     """Only the pre-admitted fixed noninteractive command is a denial oracle."""
     try:
@@ -2256,6 +2725,7 @@ def _probe_leaf(data: dict) -> None:
         pass
     else:
         raise SessionError("subject could regain root")
+    _probe_provider_boundaries(data)
     for target, operation in ((data["control"], "read"), (data["runner_home"], "list"),
                               (data["runner_temp"], "list"), (data["readonly"], "write"),
                               (data["outside_write"], "write"),
@@ -2399,6 +2869,9 @@ def _main(argv: list[str]) -> int:
         return _fixture(argv[1])
     if argv[0] == "--write-control" and len(argv) == 2:
         _write_control(Path(argv[1]))
+        return 0
+    if argv == ["--home-positive"]:
+        _home_positive()
         return 0
     if argv == ["--sentinel"] or argv == ["--signal-target"]:
         _signal_target(argv[0] == "--sentinel")

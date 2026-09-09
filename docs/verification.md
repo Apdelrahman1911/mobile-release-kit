@@ -44,6 +44,7 @@ The helpers under [`.github/scripts/`](../.github/scripts/) have separate roles:
 |---|---|
 | `verify_ci.py` | Exact committed-source snapshot, fixed gate catalog, source/wheel inspections, result parsing and sanitized final report. |
 | `ci_sandbox.py` | One reserved nonprivileged identity, native isolation admission, original child/stream collection and domain finality. |
+| `ci_provider_runtime.py` | Linux-only, bounded permission preparation of the exact selected provider runtimes before any test-identity launch. |
 | `ci_prepare.py` | Bounded public dependency acquisition and hash verification; never package installation or project evaluation. |
 | `ci_checks.py` | Fixed product checks, complete Python method outcomes, wheel/consumer validation and JDK signer scenarios. |
 | `ci_process_observer.c` | macOS-only, unprivileged SDK/libproc observation of one fixture PID; no signaling or process enumeration. |
@@ -65,6 +66,33 @@ Preparation downloads only public, allowlisted HTTPS inputs selected by
 checksum-bearing `Gemfile.lock`. Redirects, sizes, aggregate bytes, archive members
 and hashes are bounded. Preparation does not run a Gemfile, gemspec, downloaded
 installer, project backend, or package import; it does not restore shared caches.
+
+Provider images do not necessarily have permissions compatible with a distinct
+numeric test identity. After setup and identity-collision checks, the disposable
+Linux VM inventories only its selected Python/Ruby/JDK prefixes and removes
+write bits that would let that identity modify them. It does not change owners,
+runtime bytes, installation paths, signatures, cache parents or other versions.
+Unknown ACLs, unsafe links, changed identities and partial preparation fail
+admission. Existing executable/runtime checks and read-only mounts remain
+mandatory; permission preparation is not a substitute for native controls.
+
+On the disposable macOS VM, the selected Ruby may be beneath runner HOME with
+mode `0750`. The owner pins that exact directory and may add only other-search
+(`0750` to `0751`), not read/list/write permission or group membership. The
+mandatory sandbox policy is unchanged. Before product execution, fixed
+outside-policy controls must access a synthetic readable HOME file and a named
+local socket; sandboxed children and descendants must be denied file reads,
+metadata and socket access, with no outside delivery. No real private file or
+runner socket is probed. This demonstrates the effective privacy boundary
+despite the necessary directory traversal. A successful Ruby launch alone is
+insufficient.
+
+The HOME directory pin and synthetic fixtures remain owned by this attempt.
+Restoration of its original mode and removal of its fixtures require genuine
+process finality and matching current identities/permissions; drift or unknown
+cleanup remains failure and is left to disposal of this VM. These narrow
+preparation operations must never run on a shared host, persistent cache or
+consumer's HOME. They are not general permission-repair commands.
 
 After validation, input files become read-only. Actual gem installation, venv
 creation, editable installation and normal isolated wheel builds run offline as
@@ -89,8 +117,10 @@ Root owns the outer source/control directories and, before product execution,
 the work directory's **parent entries**. Only designated work leaves are writable
 by the test identity. Root-owning installed files alone is insufficient if their
 parent names can be replaced. Completed installations/build inputs are frozen
-only after producer finality. Original runner HOME/temp/control are inaccessible;
-only explicitly admitted, non-subject-writable runtime prefixes are exposed.
+only after producer finality. Original runner HOME/temp/control contents remain
+inaccessible to product code; only explicitly admitted, non-subject-writable
+runtime prefixes are exposed. The search-only compatibility preparation above
+does not exempt other HOME content or metadata from the mandatory policy.
 
 Linux uses distribution-provided `bwrap` for PID/network/IPC/UTS separation and
 read-only mounts, followed by `setpriv` for the numeric credential drop, cleared
