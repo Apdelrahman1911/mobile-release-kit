@@ -1,0 +1,148 @@
+{
+  "actionlint": {
+    "binary": {
+      "bytes": 6074530,
+      "filename": "actionlint",
+      "sha256": "c872d6db8c6bf83a8eaa704fc93999f027d55dffbc63b8a6abdccb47df5f4cd4"
+    },
+    "bytes": 2353908,
+    "filename": "actionlint_1.7.12_linux_amd64.tar.gz",
+    "name": "actionlint",
+    "sha256": "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
+    "url": "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz",
+    "version": "1.7.12"
+  },
+  "bundler": {
+    "bytes": 460800,
+    "filename": "bundler-4.0.16.gem",
+    "name": "bundler",
+    "sha256": "d6ca5dd440c24f9abce9844cf44cc8e18c6a553de65a47efb4544137af92c47d",
+    "url": "https://rubygems.org/downloads/bundler-4.0.16.gem",
+    "version": "4.0.16"
+  },
+  "gemfile_lock_sha256": "c49efc491e6ecaf86c3213ee51cfa55a2893d2249b9eb6b26ba9748c34f43bb1",
+  "locked_gem_count": 98,
+  "python": "3.11",
+  "ruby": "3.3.12",
+  "schema": 1,
+  "wheels": [
+    {
+      "bytes": 2110226,
+      "filename": "pip-24.0-py3-none-any.whl",
+      "name": "pip",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "sha256": "ba0d021a166865d2265246961bec0152ff124de910c5cc39f1156ce3fa7c69dc",
+      "url": "https://files.pythonhosted.org/packages/8a/6a/19e9fe04fca059ccf770861c7d5721ab4c2aebc539889e97c7977528a53b/pip-24.0-py3-none-any.whl",
+      "version": "24.0"
+    },
+    {
+      "bytes": 1201486,
+      "filename": "setuptools-80.9.0-py3-none-any.whl",
+      "name": "setuptools",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "sha256": "062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922",
+      "url": "https://files.pythonhosted.org/packages/a3/dc/17031897dae0efacfea57dfd3a82fdd2a2aeb58e0ff71b77b87e44edc772/setuptools-80.9.0-py3-none-any.whl",
+      "version": "80.9.0"
+    },
+    {
+      "bytes": 72494,
+      "filename": "wheel-0.45.1-py3-none-any.whl",
+      "name": "wheel",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "sha256": "708e7481cc80179af0e556bbf0cc00b8444c7321e2700b8d8580231d13017248",
+      "url": "https://files.pythonhosted.org/packages/0b/2c/87f3254fd8ffd29e4c02732eee68a83a1d3c346ae39bc6822dcbcb697f2b/wheel-0.45.1-py3-none-any.whl",
+      "version": "0.45.1"
+    },
+    {
+      "bytes": 67548,
+      "filename": "attrs-26.1.0-py3-none-any.whl",
+      "name": "attrs",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "sha256": "c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309",
+      "url": "https://files.pythonhosted.org/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl",
+      "version": "26.1.0"
+    },
+    {
+      "bytes": 90040,
+      "filename": "jsonschema-4.25.1-py3-none-any.whl",
+      "name": "jsonschema",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "sha256": "3fba0169e345c7175110351d456342c364814cfcf3b964ba4587f22915230a63",
+      "url": "https://files.pythonhosted.org/packages/bf/9c/8c95d856233c1f82500c2450b8c68576b4cf1c871db3afac5c34ff84e6fd/jsonschema-4.25.1-py3-none-any.whl",
+      "version": "4.25.1"
+    },
+    {
+      "bytes": 18437,
+      "filename": "jsonschema_specifications-2025.9.1-py3-none-any.whl",
+      "name": "jsonschema-specifications",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "sha256": "98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe",
+      "url": "https://files.pythonhosted.org/packages/41/45/1a4ed80516f02155c51f51e8cedb3c1902296743db0bbc66608a0db2814f/jsonschema_specifications-2025.9.1-py3-none-any.whl",
+      "version": "2025.9.1"
+    },
+    {
+      "bytes": 26775,
+      "filename": "referencing-0.36.2-py3-none-any.whl",
+      "name": "referencing",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "sha256": "e8699adbbf8b5c7de96d8ffa0eb5c158b3beafce084968e2ea8bb08c6794dcd0",
+      "url": "https://files.pythonhosted.org/packages/c1/b1/3baf80dc6d2b7bc27a95a67752d0208e410351e3feb4eb78de5f77454d8d/referencing-0.36.2-py3-none-any.whl",
+      "version": "0.36.2"
+    },
+    {
+      "bytes": 353210,
+      "filename": "rpds_py-0.27.1-cp311-cp311-macosx_11_0_arm64.whl",
+      "name": "rpds-py",
+      "platforms": [
+        "macos"
+      ],
+      "sha256": "62ac3d4e3e07b58ee0ddecd71d6ce3b1637de2d373501412df395a0ec5f9beb5",
+      "url": "https://files.pythonhosted.org/packages/11/94/2aab4bc86228bcf7c48760990273653a4900de89c7537ffe1b0d6097ed39/rpds_py-0.27.1-cp311-cp311-macosx_11_0_arm64.whl",
+      "version": "0.27.1"
+    },
+    {
+      "bytes": 384094,
+      "filename": "rpds_py-0.27.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "name": "rpds-py",
+      "platforms": [
+        "linux"
+      ],
+      "sha256": "cb56c6210ef77caa58e16e8c17d35c63fe3f5b60fd9ba9d424470c3400bcf9ed",
+      "url": "https://files.pythonhosted.org/packages/f5/48/64cabb7daced2968dd08e8a1b7988bf358d7bd5bcd5dc89a652f4668543c/rpds_py-0.27.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "version": "0.27.1"
+    },
+    {
+      "bytes": 45571,
+      "filename": "typing_extensions-4.16.0-py3-none-any.whl",
+      "name": "typing-extensions",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
+      "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl",
+      "version": "4.16.0"
+    }
+  ]
+}
