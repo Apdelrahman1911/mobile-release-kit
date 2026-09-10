@@ -2116,6 +2116,13 @@ class CISandboxPureTests(unittest.TestCase):
                 self.assertEqual(aia, authority + '(allow network-outbound (remote tcp "127.0.0.1:12345"))\n')
                 positive = session._native_policy_bytes(state, kind="write-positive").decode("ascii")
                 self.assertIn('(deny file-write* (require-not (require-any (literal ' + q(session.outside_write) + ")", positive)
+                for kind, policy in (("authority", authority), ("mach-baseline", baseline), ("aia", aia), ("write-positive", positive)):
+                    with self.subTest(native_cwd_metadata=(phase, kind)):
+                        exact = f"(allow file-read-metadata (literal {q(cwd)}))"
+                        self.assertEqual([line for line in policy.splitlines() if q(cwd) in line], [exact])
+                        data_rule = next(line for line in policy.splitlines() if line.startswith("(deny file-read* "))
+                        self.assertNotIn("(literal " + q(cwd) + ")", data_rule)
+                        self.assertNotIn("(subpath " + q(cwd) + ")", policy)
                 for kind, port in (("arbitrary-services", None), ("authority", 12345), ("aia", None),
                                    ("aia", True), ("aia", 1023), ("aia", 65536)):
                     with self.assertRaises(self.module.SessionError):
@@ -2126,6 +2133,235 @@ class CISandboxPureTests(unittest.TestCase):
         for invalid in (None, ["source"], "other", "native-authority-source"):
             with self.assertRaises(self.module.SessionError):
                 session._native_command(invalid)
+
+    def test_native_write_startup_is_exact_ordered_and_never_substitutes_for_capture_or_readback(self):
+        outer, inner = b"MRK_NATIVE_WRITE_OUTER\n", b"MRK_NATIVE_WRITE_INNER\n"
+        self.assertEqual((self.module._NATIVE_WRITE_OUTER, self.module._NATIVE_WRITE_INNER,
+                          self.module._NATIVE_WRITE_STDERR), (outer, inner, outer + inner))
+
+        class ExecBoundary(Exception):
+            pass
+
+        for case in ("source", "wheel", "framework-argv0", "ordinary", "unknown", "limits-error", "outer-error", "outer-short", "inner-error", "inner-short"):
+            with self.subTest(fixed_native_startup=case):
+                session = session_double(self.module, "darwin")
+                phase = "wheel" if case == "wheel" else "source"
+                canary = session.fixture_controls / ("outside-write" if case == "ordinary" else f"native-authority-{phase}-outside-write")
+                policy = session.bootstrap / f"native-write-positive-{phase}.sb"
+                base = [str(session.python), "-I", "-S", "-B", str(session.entry)]
+                role = "--write-control" if case == "ordinary" else "--unknown-control" if case == "unknown" else "--native-write-control"
+                command = [*base, role, str(canary)]
+                args = ["--enter", "darwin", str(session.uid), str(session.gid), "180", str(policy), *command]
+                events, raw, output = [], bytearray(), io.StringIO()
+                original = OSError("synthetic fixed startup write failure")
+                flags = SimpleNamespace(isolated=1, no_site=1, dont_write_bytecode=1, ignore_environment=1, no_user_site=1, safe_path=True)
+                fake_sys = SimpleNamespace(platform="darwin", executable=str(session.python), orig_argv=[*base, *args], flags=flags)
+                if case == "framework-argv0":
+                    fake_sys.orig_argv[0] = "/fixture-tools/python/Resources/Python.app/Contents/MacOS/Python"
+
+                def limits(platform, cpu):
+                    self.assertEqual((platform, cpu, events), ("darwin", 180, []))
+                    events.append("limits")
+                    if case == "limits-error":
+                        raise original
+
+                def write(fd, data):
+                    if fd == 2:
+                        self.assertIn(data, (outer, inner))
+                        marker = "outer" if data == outer else "inner"
+                        events.append(marker)
+                        if case == marker + "-error":
+                            raise original
+                        return len(data) - int(case == marker + "-short")
+                    self.assertEqual((fd, data), (614, b"MRK_POSITIVE_WRITE\n"))
+                    events.append("data-write")
+                    raw.extend(data)
+                    return len(data)
+
+                def open_canary(path, flags):
+                    self.assertEqual((path, flags), (canary, os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC))
+                    events.append("open")
+                    return 614
+
+                def execve(executable, argv, env):
+                    self.assertEqual((executable, argv, env), ("/usr/bin/sandbox-exec", ["/usr/bin/sandbox-exec", "-f", str(policy), *command], {}))
+                    events.append("exec")
+                    fake_sys.orig_argv = list(command)  # The second fixed interpreter invocation, not a real exec.
+                    if case == "framework-argv0":
+                        fake_sys.orig_argv[0] = "/fixture-tools/python/Resources/Python.app/Contents/MacOS/Python"
+                    self.assertEqual(self.module._main(command[5:]), 0)
+                    raise ExecBoundary
+
+                def fd_effect(label, fd, *args):
+                    self.assertEqual(fd, 614)
+                    self.assertEqual(args, (0,) if label == "truncate" else ())
+                    events.append(label)
+
+                constants = {name: getattr(os, name) for name in ("O_WRONLY", "O_NOFOLLOW", "O_CLOEXEC")}
+                fake_os = SimpleNamespace(**constants, getuid=lambda: session.uid, geteuid=lambda: session.uid,
+                    getgid=lambda: session.gid, getegid=lambda: session.gid, environ={}, execve=execve, write=write, open=open_canary,
+                    fstat=lambda fd: SimpleNamespace(st_uid=session.uid, st_nlink=1, st_mode=stat.S_IFREG | 0o600, st_size=len(raw)),
+                    ftruncate=lambda fd, size: fd_effect("truncate", fd, size), fsync=lambda fd: fd_effect("fsync", fd),
+                    close=lambda fd: fd_effect("close", fd))
+                with patch.multiple(self.module, __file__=str(session.entry), sys=fake_sys, os=fake_os, _limits=limits,
+                        subprocess=SimpleNamespace(), socket=SimpleNamespace(), signal=SimpleNamespace(), resource=SimpleNamespace()), \
+                     patch.object(Path, "resolve", lambda path, **_kwargs: path), \
+                     patch.object(Path, "open", side_effect=AssertionError("startup contract owns only an in-memory FD")), \
+                     patch.object(Path, "stat", side_effect=AssertionError("startup contract has no native metadata role")), redirect_stdout(output):
+                    expected = ExecBoundary if case in {"source", "wheel", "framework-argv0", "ordinary"} else OSError if case.endswith("error") else self.module.SessionError
+                    with self.assertRaises(expected) as caught:
+                        self.module._main(args)
+                    if case.endswith("error"):
+                        self.assertIs(caught.exception, original)
+                completed = case in {"source", "wheel", "framework-argv0", "ordinary"}
+                expected_events = (["limits", "exec"] if case in {"ordinary", "unknown"} else
+                                   ["limits"] if case == "limits-error" else
+                                   ["limits", "outer"] if case.startswith("outer-") else ["limits", "outer", "exec", "inner"])
+                if completed:
+                    expected_events += ["open", "truncate", "data-write", "fsync", "close"]
+                self.assertEqual(events, expected_events)
+                self.assertEqual(bytes(raw), b"MRK_POSITIVE_WRITE\n" if completed else b"")
+                self.assertEqual(output.getvalue(), "MRK_OUTSIDE_WRITE_POSITIVE\n" if completed else "")
+
+        # Each mismatch must fail before touching the existing stderr descriptor.
+        for outer_role in (True, False):
+            cases = ("native-platform", "root-identity", "effective-uid", "different-gid", "entry-root", "provider",
+                     "runtime-flags", "origin-flags", "origin-tail", "canary-phase", "extra", "unknown")
+            for case in (*cases, *(("declared-platform", "uid-spelling", "cpu", "policy-phase", "inner-executable", "inner-flags", "inner-entry") if outer_role else ())):
+                with self.subTest(native_startup_binding=(outer_role, case)):
+                    session = session_double(self.module, "darwin")
+                    entry = Path("/unapproved/native/bootstrap/ci_sandbox.py") if case == "entry-root" else session.entry
+                    python = Path("/unapproved/python") if case == "provider" else session.python
+                    base = [str(python), "-I", "-S", "-B", str(entry)]
+                    tail = ["--native-write-control", str(session.fixture_controls / "native-authority-source-outside-write")]
+                    if case == "canary-phase":
+                        tail[-1] = str(session.fixture_controls / "native-authority-other-outside-write")
+                    elif case == "unknown":
+                        tail[0] = "--unknown-control"
+                    args = ["--enter", "darwin", str(session.uid), str(session.gid), "180",
+                            str(session.bootstrap / "native-write-positive-source.sb"), *base, *tail] if outer_role else tail
+                    if case == "extra":
+                        args.append("--extra")
+                    changes = {"declared-platform": (1, "linux"), "uid-spelling": (2, "060001"), "cpu": (4, "179"),
+                               "policy-phase": (5, str(session.bootstrap / "native-write-positive-wheel.sb")),
+                               "inner-executable": (6, "/unapproved/bin/python"), "inner-flags": (8, "-s"),
+                               "inner-entry": (10, str(session.source / "ci_sandbox.py"))}
+                    if case in changes:
+                        index, value = changes[case]
+                        args[index] = value
+                    origin = [*base, *args]
+                    if case == "origin-flags":
+                        origin[2] = "-s"
+                    elif case == "origin-tail":
+                        origin.append("--extra")
+                    written = Mock(side_effect=AssertionError("mismatched entry may not publish a startup checkpoint"))
+                    flags = SimpleNamespace(isolated=1, no_site=0 if case == "runtime-flags" else 1,
+                                            dont_write_bytecode=1, ignore_environment=1, no_user_site=1, safe_path=True)
+                    with patch.multiple(self.module, __file__=str(entry),
+                            sys=SimpleNamespace(platform="linux" if case == "native-platform" else "darwin", executable=str(python), orig_argv=origin, flags=flags),
+                            os=SimpleNamespace(getuid=lambda: 0 if case == "root-identity" else session.uid,
+                                geteuid=lambda: 0 if case == "effective-uid" else session.uid,
+                                getgid=lambda: session.gid + int(case == "different-gid"), getegid=lambda: session.gid, write=written),
+                            subprocess=SimpleNamespace(), socket=SimpleNamespace(), signal=SimpleNamespace(), resource=SimpleNamespace()), \
+                         patch.object(Path, "resolve", lambda path, **_kwargs: path):
+                        with self.assertRaises(self.module.SessionError):
+                            self.module._native_write_checkpoint(args, outer=outer_role)
+                    written.assert_not_called()
+
+        observations = ((b"", "none"), (outer, "outer"), (outer + inner, "outer-and-inner"),
+            (inner, "unclassified"), (inner + outer, "unclassified"), (outer + inner + b"extra\n", "unclassified"),
+            (outer[:-1], "unclassified"), (b"unknown\n", "unclassified"))
+        captures = [(stderr, prefix, code, b"MRK_OUTSIDE_WRITE_POSITIVE\n" if code == 0 else b"")
+                    for stderr, prefix in observations for code in (-6, 0)]
+        captures.append((outer + inner, "outer-and-inner", 0, b"wrong stdout\n"))
+        for stderr, expected_prefix, code, stdout in captures:
+            with self.subTest(native_startup_capture=(expected_prefix, code), stdout=stdout, stderr=stderr):
+                session = session_double(self.module, "darwin")
+                state = native_state_double(session)
+                state["prepared"], session._native_preparing = False, "source"
+                result = self.module.CapturedRun(stdout, stderr, code, True, True, True, True, False, False,
+                    0.01, "command exited -6" if code != 0 else None,
+                    ("original cleanup diagnostic",) if code != 0 else (), (len(stdout), len(stderr)))
+                if code != 0:
+                    session.fail(result.primary_error)
+                session.persisted_bytes = len(stdout) + len(stderr)
+                command = [str(session.python), "-I", "-S", "-B", str(session.entry), "--native-write-control", str(state["outside_write"])]
+                with patch.multiple(self.module, os=SimpleNamespace(), subprocess=SimpleNamespace(), socket=SimpleNamespace(),
+                                    signal=SimpleNamespace(), time=SimpleNamespace(monotonic=lambda: 0.0)), \
+                     patch.object(session, "_run", return_value=result) as capture:
+                    self.assertIs(session._native_control_capture(state, "outside-write-positive", command,
+                        policy=session.bootstrap / "native-write-positive-source.sb", cwd=state["cwd"], seconds=10), result)
+                    self.assertEqual(self.module._native_write_prefix(stderr), expected_prefix)
+                row = state["control_notes"]["outside-write-positive"]
+                if code == 0 and stdout == b"MRK_OUTSIDE_WRITE_POSITIVE\n" and stderr == outer + inner:
+                    self.assertNotIn("native_write_startup", row)
+                else:
+                    self.assertEqual(row["native_write_startup"], expected_prefix)
+                self.assertFalse(row["ok"])  # Transport success cannot accept a semantic or incomplete native control.
+                self.assertEqual((row["subject_ok"], result.ok), (code == 0, code == 0))
+                self.assertEqual((row["returncode"], row["persisted"], row["error_count"]),
+                                 (code, [len(stdout), len(stderr)], 2 if code != 0 else 0))
+                self.assertTrue(row["waited"] and row["stdout_eof"] and row["stderr_eof"] and row["domain_finality"])
+                self.assertEqual((session.failure, session.persisted_bytes),
+                                 ("command exited -6" if code != 0 else None, len(stdout) + len(stderr)))
+                self.assertIsNone(session._native_control)
+                capture.assert_called_once()
+                self.assertNotIn("MRK_NATIVE_WRITE", repr(row))  # Closed classification, never raw diagnostics.
+
+        class BeforeNextControl(Exception):
+            pass
+
+        for case in ("source", "wheel", "empty", "outer-only", "reordered", "extra", "failed-capture", "missing-stdout", "wrong-readback"):
+            with self.subTest(native_startup_positive_acceptance=case):
+                session = session_double(self.module, "darwin")
+                phase = "wheel" if case == "wheel" else "source"
+                state = native_state_double(session, phase)
+                state["write_policy"] = session.bootstrap / f"native-write-positive-{phase}.sb"
+                state["outside_fd"] = 614
+                info = SimpleNamespace(st_dev=7, st_ino=91, st_uid=session.uid, st_gid=session.gid, st_nlink=1,
+                    st_mode=stat.S_IFREG | 0o600, st_size=len(b"MRK_POSITIVE_WRITE\n"), st_mtime_ns=11, st_ctime_ns=12)
+                state["outside_node"] = self.module._home_node(info)
+                stderr = {"empty": b"", "outer-only": outer, "reordered": inner + outer, "extra": outer + inner + b"extra\n"}.get(case, outer + inner)
+                stdout = b"" if case == "missing-stdout" else b"MRK_OUTSIDE_WRITE_POSITIVE\n"
+                result = self.module.CapturedRun(stdout, stderr, -6 if case == "failed-capture" else 0,
+                    True, True, True, True, False, False, 0.01, "command exited -6" if case == "failed-capture" else None,
+                    (), (len(stdout), len(stderr)))
+                stopped = BeforeNextControl("stop before unrelated native read/network/signal controls")
+                seen, raw = [], io.BytesIO(b"wrong\n" if case == "wrong-readback" else b"MRK_POSITIVE_WRITE\n")
+
+                def capture(current, selected, argv, *, policy, cwd, seconds):
+                    self.assertIs(current, state)
+                    self.assertEqual((cwd, seconds), (state["cwd"], 10))
+                    seen.append(selected)
+                    if selected == "outside-read-positive":
+                        raise stopped
+                    self.assertEqual((selected, policy, argv), ("outside-write-positive", state["write_policy"],
+                        [str(session.python), "-I", "-S", "-B", str(session.entry), "--native-write-control", str(state["outside_write"])]))
+                    return result
+
+                def read(fd, count):
+                    self.assertEqual(fd, 614)
+                    self.assertIn(count, (64, 1))
+                    return raw.read(count)
+
+                reader, observe = Mock(side_effect=read), Mock(return_value=info)
+                with patch.multiple(self.module, os=SimpleNamespace(fstat=observe, get_inheritable=lambda _fd: False,
+                        lseek=Mock(), SEEK_SET=os.SEEK_SET, read=reader), subprocess=SimpleNamespace(), socket=SimpleNamespace(),
+                        signal=SimpleNamespace(), time=SimpleNamespace(monotonic=lambda: 0.0)), \
+                     patch.object(session, "_native_control_capture", side_effect=capture), patch.object(session, "ensure_idle") as idle, \
+                     patch.object(Path, "lstat", return_value=info):
+                    with self.assertRaises(BaseExceptionGroup) as caught:
+                        session._native_boundary_controls(state)
+                    self.assertEqual(len(caught.exception.exceptions), 1)
+                    if case in {"source", "wheel"}:
+                        self.assertIs(caught.exception.exceptions[0], stopped)
+                    else:
+                        self.assertIsInstance(caught.exception.exceptions[0], self.module.SessionError)
+                reached_readback = case in {"source", "wheel", "wrong-readback"}
+                self.assertEqual(seen, ["outside-write-positive", "outside-read-positive"] if case in {"source", "wheel"} else ["outside-write-positive"])
+                self.assertEqual((idle.call_count, observe.call_count), (int(reached_readback), int(reached_readback)))
+                self.assertEqual(reader.call_count, 2 if case in {"source", "wheel"} else int(case == "wrong-readback"))
+                self.assertEqual(state["control_notes"], {})  # Never accept an incomplete full boundary sequence.
 
     def test_native_input_reads_and_rechecks_keep_original_custody_bytes_and_close_errors(self):
         path, raw = Path("/synthetic/native/input.py"), b"immutable native input\n"

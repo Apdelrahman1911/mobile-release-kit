@@ -53,6 +53,9 @@ _NATIVE_CONTROL_CASES = ("mach-baseline", "mach-ordinary", "mach-authority", "ma
                          "aia-prepare", "aia-evaluate")
 _NATIVE_TRUST_SERVICES = ("com.apple.trustd", "com.apple.trustd.agent")
 _NATIVE_OTHER_SERVICE = "com.apple.cfprefsd.daemon"
+_NATIVE_WRITE_OUTER = b"MRK_NATIVE_WRITE_OUTER\n"
+_NATIVE_WRITE_INNER = b"MRK_NATIVE_WRITE_INNER\n"
+_NATIVE_WRITE_STDERR = _NATIVE_WRITE_OUTER + _NATIVE_WRITE_INNER
 _ENV_KEYS = frozenset("""
 PATH LANG LC_ALL TZ HOME USER LOGNAME TMPDIR TMP TEMP XDG_CONFIG_HOME
 XDG_CACHE_HOME CI TERM PYTHONSAFEPATH PYTHONDONTWRITEBYTECODE PYTHONNOUSERSITE
@@ -1678,7 +1681,7 @@ class Session:
         # file/subdirectory bytes. Never grant a parent subpath here.
         reads.append(f"(literal {q(state['package'].parent)})")
         metadata = {p for path in (*runtime, *literals, state["package"], self.source / "tests", state["cwd"])
-                    for p in (path.parent, *path.parents)} | set(self.ruby_ancestors) | {state["outside_write"]}
+                    for p in (path.parent, *path.parents)} | set(self.ruby_ancestors) | {state["outside_write"], state["cwd"]}
         if len(metadata) > 256:
             raise SessionError("native authority metadata ancestry exceeds fixed bound")
         services = (*_NATIVE_TRUST_SERVICES, _NATIVE_OTHER_SERVICE) if kind == "mach-baseline" else _NATIVE_TRUST_SERVICES
@@ -1886,6 +1889,9 @@ class Session:
                                absolute_deadline=state["deadline"])
             row = self._note_capture("native-authority-" + state["phase"] + "-" + case, result)
             state["control_notes"][case] = row
+            if (case == "outside-write-positive" and (not result.ok
+                    or result.stdout != b"MRK_OUTSIDE_WRITE_POSITIVE\n" or result.stderr != _NATIVE_WRITE_STDERR)):
+                row["native_write_startup"] = _native_write_prefix(result.stderr)
             if not result.ok and case in _NATIVE_CONTROL_CASES:
                 # Diagnostic-only closed fields; never replace the failed
                 # capture, its original EOF/wait/finality or missing execution.
@@ -1948,7 +1954,8 @@ class Session:
             positive = self._native_control_capture(state, "outside-write-positive",
                 [*base, "--native-write-control", str(state["outside_write"])],
                 policy=state["write_policy"], cwd=state["cwd"], seconds=10)
-            if not positive.ok or positive.stdout != b"MRK_OUTSIDE_WRITE_POSITIVE\n" or positive.stderr:
+            if (not positive.ok or positive.stdout != b"MRK_OUTSIDE_WRITE_POSITIVE\n"
+                    or positive.stderr != _NATIVE_WRITE_STDERR):
                 raise SessionError("native authority outside-write positive did not complete")
             self.ensure_idle(deadline=deadline)
             fd = state["outside_fd"]
@@ -3725,6 +3732,49 @@ def _limits(platform: str, cpu: int, *, profile: str = "ordinary") -> None:
             raise SessionError("resource limit did not take effect")
 
 
+def _native_write_checkpoint(argv: list[str], *, outer: bool) -> None:
+    """Two exact fixed-command checkpoints, never an execution authority."""
+    if (type(outer) is not bool or type(argv) is not list
+            or any(type(arg) is not str for arg in argv) or sys.platform != "darwin"):
+        raise SessionError("invalid native write checkpoint invocation")
+    uid = os.getuid()
+    if not 60000 <= uid < 65000 or (os.geteuid(), os.getgid(), os.getegid()) != (uid,) * 3:
+        raise SessionError("native write checkpoint lacks original numerical credentials")
+    entry = Path(__file__).resolve(strict=True)
+    root = entry.parent.parent
+    python = Path(sys.executable).resolve(strict=True)
+    if (root.parent != Path("/private/tmp") or entry != root / "bootstrap/ci_sandbox.py"
+            or python.parent.name != "bin"):
+        raise SessionError("native write checkpoint lacks its fixed entry/provider paths")
+    base = [str(python), "-I", "-S", "-B", str(entry)]
+    expected = []
+    for phase in _NATIVE_PHASES:
+        tail = ["--native-write-control", str(root / "fixture-controls" / f"native-authority-{phase}-outside-write")]
+        expected.append(["--enter", "darwin", str(uid), str(uid), "180",
+                         str(root / "bootstrap" / f"native-write-positive-{phase}.sb"), *base, *tail]
+                        if outer else tail)
+    # CPython3.11's framework launcher replaces argv[0] with Python.app,
+    # preserves the suffix, and supplies the original sys.executable through
+    # __PYVENV_LAUNCHER__. Do not mistake those two spellings for a new caller.
+    flags = sys.flags
+    if (argv not in expected or type(sys.orig_argv) is not list
+            or sys.orig_argv[1:] != [*base[1:], *argv]
+            or (flags.isolated, flags.no_site, flags.dont_write_bytecode,
+                flags.ignore_environment, flags.no_user_site, flags.safe_path) != (1, 1, 1, 1, 1, True)):
+        raise SessionError("native write checkpoint command differs from its fixed phase")
+    data = _NATIVE_WRITE_OUTER if outer else _NATIVE_WRITE_INNER
+    if os.write(2, data) != len(data):
+        raise SessionError("native write checkpoint was not completely written")
+
+
+def _native_write_prefix(data: bytes) -> str:
+    """Failure-only attribution; malformed/extra bytes are never stage proof."""
+    if type(data) is not bytes or len(data) > len(_NATIVE_WRITE_STDERR):
+        return "unclassified"
+    return {b"": "none", _NATIVE_WRITE_OUTER: "outer",
+            _NATIVE_WRITE_STDERR: "outer-and-inner"}.get(data, "unclassified")
+
+
 def _write_control(path: Path, *, native: bool = False) -> None:
     parent = Path(__file__).resolve().parent.parent / "fixture-controls"
     expected = ({parent / f"native-authority-{phase}-outside-write" for phase in _NATIVE_PHASES}
@@ -3732,6 +3782,8 @@ def _write_control(path: Path, *, native: bool = False) -> None:
     if (path not in expected or native and sys.platform != "darwin"
             or os.getuid() != os.geteuid() or not 60000 <= os.geteuid() < 65000):
         raise SessionError("invalid fixed numerical write control")
+    if native:
+        _native_write_checkpoint(["--native-write-control", str(path)], outer=False)
     fd = os.open(path, os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     errors = []
     try:
@@ -4660,6 +4712,8 @@ def _main(argv: list[str]) -> int:
                 _userns_zero()
             _limits(platform, int(cpu))
         if platform == "darwin":
+            if len(command) == 7 and command[5] == "--native-write-control":
+                _native_write_checkpoint(argv, outer=True)
             command = ["/usr/bin/sandbox-exec", "-f", policy, *command]
         elif platform != "linux":
             raise SessionError("unsupported platform")
