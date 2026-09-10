@@ -2156,8 +2156,11 @@ class CISandboxPureTests(unittest.TestCase):
                 baseline = session._native_policy_bytes(state, kind="mach-baseline").decode("ascii")
                 self.assertIn('(global-name "com.apple.cfprefsd.daemon")', baseline)
                 self.assertNotIn("(allow network", baseline)
-                aia = session._native_policy_bytes(state, kind="aia", port=12345).decode("ascii")
-                self.assertEqual(aia, authority + '(allow network-outbound (remote tcp "127.0.0.1:12345"))\n')
+                for port in (1024, 12345, 65535):
+                    with self.subTest(native_aia_port=(phase, port)):
+                        aia = session._native_policy_bytes(state, kind="aia", port=port).decode("ascii")
+                        self.assertEqual(aia, authority + '(allow network-outbound (require-all '
+                                         f'(remote tcp) (remote ip "127.0.0.1:{port}")))\n')
                 positive = session._native_policy_bytes(state, kind="write-positive").decode("ascii")
                 self.assertIn('(deny file-write* (require-not (require-any (literal ' + q(session.outside_write) + ")", positive)
                 for kind, policy in (("authority", authority), ("mach-baseline", baseline), ("aia", aia), ("write-positive", positive)):

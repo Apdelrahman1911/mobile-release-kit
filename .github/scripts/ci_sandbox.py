@@ -2197,7 +2197,7 @@ class Session:
                 + "".join(f"(allow file-read-metadata (literal {q(path)}))\n" for path in sorted(metadata))
                 + f"(deny file-write* (require-not (require-any {' '.join(allowed_write)} (literal \"/dev/null\"))))\n")
         if kind == "aia":
-            text += f'(allow network-outbound (remote tcp "127.0.0.1:{port}"))\n'
+            text += f'(allow network-outbound (require-all (remote tcp) (remote ip "127.0.0.1:{port}")))\n'
         return text.encode("ascii")
 
     def _native_check_inputs(self, state: dict) -> None:
