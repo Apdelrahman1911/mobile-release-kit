@@ -231,8 +231,11 @@ qualify it. Every known compiler resource is independently released, and origina
 capture/deadline/EOF/finality checks remain mandatory.
 
 The fixed AIA probe uses four fresh synthetic chains/unique loopback issuer URLs
-and the same probe-only loopback permission. After a common explicitly enabled
-network baseline, the online control must actually fetch and accept; the offline
+under the same authority policy: direct client networking remains denied, with
+no AIA socket exception. The fixed trust-service route must still produce real
+online/mutant fetches; a provider that also prevents those fetches fails admission.
+After a common explicitly enabled network baseline, the online control must
+actually fetch and accept; the offline
 control disables networking while retaining certificate-parent lookup. A mutant
 omits only that final disabling setter and must be detected by real fetches.
 A separate negative ends with both network/keychain getters false, matching
