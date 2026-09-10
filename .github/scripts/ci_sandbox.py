@@ -215,6 +215,105 @@ def _native_startup_stage(data: bytes) -> str:
     return "unclassified"
 
 
+class _NativeExitIdentity(SessionError):
+    """Exact-sized original-child metadata contradicted its held identity."""
+
+
+_NATIVE_EXIT_BINDING = None
+_NATIVE_EXIT_LIBRARY = None  # OS-runtime binding is retained for this controller's lifetime.
+_NATIVE_EXIT_NAMESPACES = {2: "SIGNAL", 3: "CODESIGNING", 6: "DYLD", 7: "LIBXPC", 9: "EXEC",
+                           18: "LIBSYSTEM", 23: "GUARD", 25: "SANDBOX", 26: "SECURITY",
+                           35: "LIBIGNITION", 36: "BOOTMOUNT", 47: "SECINIT"}
+_NATIVE_EXIT_DYLD_CODES = {1: "DYLIB_MISSING", 2: "WRONG_ARCH", 3: "WRONG_VERSION", 4: "SYMBOL_MISSING",
+                          5: "CODE_SIGNATURE", 6: "FILE_SYSTEM_SANDBOX", 7: "MALFORMED_MACHO",
+                          9: "OTHER", 10: "DLSYM_BLOCKED"}
+
+
+def _native_exit_runtime():
+    """One fixed original-parent library binding; no helper process or dlclose."""
+    global _NATIVE_EXIT_BINDING, _NATIVE_EXIT_LIBRARY
+    if _NATIVE_EXIT_BINDING is not None:
+        return _NATIVE_EXIT_BINDING or None
+    _NATIVE_EXIT_BINDING = False  # A failed capability lookup does not authorize retries.
+    if sys.platform != "darwin" or sys.byteorder != "little":
+        return None
+    native = os.uname()
+    if (native.sysname != "Darwin" or native.machine not in {"arm64", "x86_64"}
+            or re.fullmatch(r"25\.[0-9]+\.[0-9]+", native.release) is None):
+        return None
+    try:
+        import ctypes
+        if (ctypes.sizeof(ctypes.c_void_p), ctypes.sizeof(ctypes.c_int),
+                ctypes.sizeof(ctypes.c_uint32), ctypes.sizeof(ctypes.c_uint64)) != (8, 4, 4, 8):
+            return None
+        library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        _NATIVE_EXIT_LIBRARY = library  # Retain even if symbol/capability binding fails afterward.
+        operation = library.proc_pidinfo
+        operation.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+        operation.restype = ctypes.c_int
+        _NATIVE_EXIT_BINDING = (ctypes, library, operation)
+    except (AttributeError, ImportError, OSError, TypeError):
+        return None
+    return _NATIVE_EXIT_BINDING
+
+
+def _native_exit_query(binding, pid: int, *, basic: bool = False) -> tuple[bytes | None, int | None]:
+    if type(pid) is not int or not 1 < pid < (1 << 31) or type(basic) is not bool:
+        return None, None
+    ctypes, _library, operation = binding
+    size = 24 if basic else 136
+    buffer = ctypes.create_string_buffer(size)
+    ctypes.set_errno(0)
+    # BASIC25 is private XNU12377-family provenance when absent from SDK headers;
+    # its actual packed layout and public BSD3 layout are pinned in the admitted C observer.
+    returned = operation(pid, 25 if basic else 3, 0 if basic else 1, ctypes.byref(buffer), size)
+    number = ctypes.get_errno()
+    if type(returned) is not int or returned != size:
+        return None, number if type(returned) is int and returned == 0 and type(number) is int and 0 < number < 4096 else None
+    raw = buffer.raw
+    return (raw, None) if type(raw) is bytes and len(raw) == size else (None, None)
+
+
+def _native_exit_bsd(raw: bytes, *, pid: int, parent: int, uid: int, gid: int) -> dict | None:
+    """SDK-pinned bytes, not a wait result, image authentication or PID authority."""
+    if type(raw) is not bytes or len(raw) != 136:
+        return None
+    flags, status, xstatus, found_pid, ppid, eu, eg, ru, rg, su, sg = (
+        int.from_bytes(raw[offset:offset + 4], "little") for offset in range(0, 44, 4))
+    if (found_pid != pid or ppid != parent or (ru, eu, su) != (uid,) * 3 or (rg, eg, sg) != (gid,) * 3
+            or flags & (0x00000002 | 0x00002000)):  # TRACED or PSUGID contradicts this exclusive owner.
+        raise _NativeExitIdentity("original-parent BSD identity/credentials changed")
+    if status not in {1, 2, 3, 4, 5} or not flags & 0x00000010:  # SDK LP64, not an unknown-flags mask.
+        return None
+    comm, name = raw[48:64], raw[64:96]
+    if b"\0" not in comm or b"\0" not in name:
+        return None
+    if status != 5:
+        return {"status": "transition" if flags & 0x00000004 or status == 1 else "live",
+                "expected": None, "reported_name_hint": "unavailable"}
+    try:
+        expected = os.waitstatus_to_exitcode(xstatus & 0xffff)
+    except (ValueError, OverflowError):
+        return None
+    reported = name.split(b"\0", 1)[0] or comm.split(b"\0", 1)[0]
+    hint = ({b"python": "python", b"python3": "python", b"python3.11": "python", b"Python": "python",
+             b"sandbox-exec": "sandbox-exec", b"true": "true"}).get(reported, "other")
+    return {"status": "terminal", "expected": expected, "reported_name_hint": hint}
+
+
+def _native_exit_basic(raw: bytes) -> dict | None:
+    if type(raw) is not bytes or len(raw) != 24:
+        return None
+    row = {key: int.from_bytes(raw[offset:offset + size], "little") for key, offset, size in (
+        ("namespace", 0, 4), ("code", 4, 8), ("flags", 12, 8), ("reason_buffer_size", 20, 4))}
+    # Closed source-family labels are hints only; no kcdata, names, paths or inferred grants.
+    if row["namespace"] in _NATIVE_EXIT_NAMESPACES:
+        row["namespace_label"] = _NATIVE_EXIT_NAMESPACES[row["namespace"]]
+    if row["namespace"] == 6 and row["code"] in _NATIVE_EXIT_DYLD_CODES:
+        row["code_label"] = _NATIVE_EXIT_DYLD_CODES[row["code"]]
+    return row
+
+
 class _NativeAbortIssue(Exception):
     """Private optional diagnostic failure; never a subject result or authority."""
 
@@ -2553,6 +2652,148 @@ class Session:
                     "producer_pending": bool(self._direct_producer_pending)}}
         return row
 
+    def _native_exit_prepare(self, state: dict) -> dict | None:
+        control = self._native_control
+        if (self.platform != "darwin" or state["phase"] != "source" or control is None
+                or control["state"] is not state or control["case"] != "startup-true"
+                or control["argv"] != ["/usr/bin/true"] or self.process_observer is None):
+            return None
+        _remaining(state["deadline"])
+        if os.geteuid() != 0 or signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+            raise _NativeExitIdentity("original-parent runtime ownership invariant changed")
+        parent = os.getpid()
+        if type(parent) is not int or not 1 < parent < (1 << 31):
+            raise _NativeExitIdentity("original controller PID is unavailable")
+        context = {"runtime": None, "child": None, "pid": None, "parent": parent,
+                   "uid": self.uid, "gid": self.gid, "deadline": None, "retired": True,
+                   "samples": 0, "basic_attempted": False, "expected": None,
+                   "reported_name_hint": "unavailable", "reason": None, "status": "unavailable",
+                   "mismatch": False}
+        try:
+            if self.cancelled:
+                self._fail("controller cancellation")
+                context["status"] = "cancelled"
+                return context
+            context["runtime"] = _native_exit_runtime()
+            context["retired"] = context["runtime"] is None
+            _remaining(state["deadline"])
+        except KeyboardInterrupt:
+            self.cancelled = True
+            self._fail("controller cancellation")
+            context["retired"], context["status"] = True, "cancelled"
+        except DeadlineExpired:
+            context["retired"], context["status"] = True, "deadline"
+        except Exception:
+            self._native_exit_retire(context, "unavailable")
+        return context
+
+    def _native_exit_retire(self, context: dict | None, status: str | None = None) -> None:
+        if context is not None and not context["retired"]:
+            context["retired"] = True  # Irreversible, including when the following original poll returns None.
+            if status is not None:
+                context["status"] = status
+
+    def _native_exit_owned(self, context: dict, child) -> None:
+        if (child is not context["child"] or child.pid != context["pid"] or os.getpid() != context["parent"]
+                or signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL):
+            self._native_exit_retire(context, "identity-error")
+            raise _NativeExitIdentity("original-parent diagnostic custody changed")
+
+    def _native_exit_sample(self, context: dict, child, *, cutoff: float) -> str:
+        if context["retired"]:
+            return "retired"
+        try:
+            self._native_exit_owned(context, child)
+            if context["deadline"] != cutoff:
+                raise _NativeExitIdentity("original-parent diagnostic cutoff changed")
+            if self.cancelled:
+                self._native_exit_retire(context, "cancelled")
+                return "retired"
+            if time.monotonic() >= cutoff:
+                self._native_exit_retire(context, "deadline")
+                return "retired"
+            if context["samples"] >= 64:
+                self._native_exit_retire(context, "limit")
+                return "retired"
+            if getattr(child, "returncode", None) is not None:
+                self._native_exit_retire(context, "unavailable")
+                return "retired"
+            context["samples"] += 1
+            raw, _number = _native_exit_query(context["runtime"], context["pid"])
+            observed = _native_exit_bsd(raw, pid=context["pid"], parent=context["parent"],
+                                        uid=context["uid"], gid=context["gid"])
+            if observed is None:
+                self._native_exit_retire(context, "unavailable")
+                return "retired"
+            if observed["status"] == "terminal":
+                context.update({"expected": observed["expected"], "reported_name_hint": observed["reported_name_hint"],
+                                "status": "terminal"})
+                return "terminal"  # The collector must latch nonzero BEFORE any optional BASIC call.
+            if self.cancelled or time.monotonic() >= cutoff:
+                self._native_exit_retire(context, "cancelled" if self.cancelled else "deadline")
+                return "retired"
+            return "live"  # A live/transition sample must NOT be followed by a consuming poll.
+        except _NativeExitIdentity:
+            self._native_exit_retire(context, "identity-error")
+            raise
+        except KeyboardInterrupt:
+            self.cancelled = True
+            self._native_exit_retire(context, "cancelled")
+        except DeadlineExpired:
+            self._native_exit_retire(context, "deadline")
+        except Exception:
+            self._native_exit_retire(context, "unavailable")
+        return "retired"
+
+    def _native_exit_reason(self, context: dict, child) -> None:
+        if context["retired"] or context["basic_attempted"] or context["expected"] in (None, 0):
+            return
+        try:
+            self._native_exit_owned(context, child)
+            if self.cancelled or time.monotonic() >= context["deadline"]:
+                self._native_exit_retire(context, "cancelled" if self.cancelled else "deadline")
+                return
+            if getattr(child, "returncode", None) is not None:
+                self._native_exit_retire(context, "unavailable")
+                return
+            context["basic_attempted"] = True
+            # The already-latched terminal failure is expected here. It is not
+            # permission for another process, another budget, or a later retry.
+            raw, number = _native_exit_query(context["runtime"], context["pid"], basic=True)
+            reason = _native_exit_basic(raw)
+            context["reason"] = reason
+            context["status"] = "observed" if reason is not None else "absent" if number == errno.ENOENT else "unavailable"
+        except _NativeExitIdentity:
+            self._native_exit_retire(context, "identity-error")
+            raise
+        except KeyboardInterrupt:
+            self.cancelled = True
+            self._native_exit_retire(context, "cancelled")
+        except DeadlineExpired:
+            self._native_exit_retire(context, "deadline")
+        except Exception:
+            self._native_exit_retire(context, "unavailable")
+
+    def _native_exit_compare(self, context: dict | None, code: int | None) -> bool:
+        if (context is None or context["expected"] is None or code is None
+                or context["expected"] == code or context["mismatch"]):
+            return False
+        context["mismatch"] = True
+        context["status"] = "wait-mismatch"
+        return True  # Only the caller holding the real wait latches this additional failure.
+
+    def _native_exit_attach(self, context: dict | None, result: CapturedRun) -> dict | None:
+        if context is None or result.ok:
+            return None
+        row = {"schema": 1, "status": context["status"], "reported_name_hint": context["reported_name_hint"]}
+        if context["expected"] is not None:
+            row["expected_wait_code"] = context["expected"]
+        if context["reason"] is not None:
+            row.update(context["reason"])
+        if len(json.dumps(row, separators=(",", ":"), allow_nan=False).encode()) > 2048:
+            return {"schema": 1, "status": "limit", "reported_name_hint": "unavailable"}
+        return row
+
     def _native_control_capture(self, state: dict, case: str, argv: list[str], *, policy: Path,
                                 cwd: Path, seconds: int) -> CapturedRun:
         """Only the fixed internal catalogs below construct these arguments."""
@@ -2597,8 +2838,12 @@ class Session:
             raise SessionError("native control differs from its finite immutable helper/policy catalog")
         self._native_control = {"state": state, "case": case, "argv": argv, "policy": policy,
                                 "cwd": cwd, "seconds": seconds}
+        exit_reason = None
         try:
             abort = None
+            if self.platform == "darwin" and state["phase"] == "source" and case == "startup-true":
+                exit_reason = self._native_exit_prepare(state)
+                self._native_control["exit_reason"] = exit_reason
             if self.platform == "darwin" and state["phase"] == "source" and case == "outside-write-positive":
                 abort = self._native_abort_prepare(state)
                 self._native_control["abort"] = abort
@@ -2616,6 +2861,10 @@ class Session:
                     self._fail(result.primary_error or "native startup control did not complete")
                     if case == "startup-python":
                         row["native_startup_stage"] = _native_startup_stage(result.stdout)
+            if exit_reason is not None and not row["ok"]:
+                attachment = self._native_exit_attach(exit_reason, result)
+                if attachment is not None:
+                    row["native_exit_reason"] = attachment
             if (case == "outside-write-positive" and (not result.ok
                     or result.stdout != b"MRK_OUTSIDE_WRITE_POSITIVE\n" or result.stderr != _NATIVE_WRITE_STDERR)):
                 row["native_write_startup"] = _native_write_prefix(result.stderr)
@@ -2637,6 +2886,7 @@ class Session:
                     row["native_control_diagnostics_unavailable"] = True
             return result  # Genuine original wait/EOF/finality/persisted facts.
         finally:
+            self._native_exit_retire(exit_reason)  # Also covers preparation failures before the collector's try.
             self._native_control = None
 
     def _native_backend_capture(self, state: dict, case: str, *, port: int | None = None) -> CapturedRun:
@@ -3191,6 +3441,8 @@ class Session:
             native_state["started"] = True  # A failed acquisition cannot authorize another attempt.
         abort = (self._native_control.get("abort") if profile == "native-control"
                  and self._native_control is not None else None)
+        exit_reason = (self._native_control.get("exit_reason") if profile == "native-control"
+                       and self._native_control is not None else None)
         self._busy = True
         self.domain_finality = False
         self._run_number += 1
@@ -3225,7 +3477,7 @@ class Session:
                 self._assert_userns_boundary()
             _remaining(cutoff)  # Capture acquisition may not buy a later spawn.
             self._native_abort_stamp(abort, "wall_before")
-            if abort is not None:
+            if abort is not None or exit_reason is not None:
                 # Optional observation cannot authorize a late/cancelled launch.
                 # Recheck the ORIGINAL subject cutoff, never the diagnostic D.
                 _remaining(cutoff)
@@ -3237,6 +3489,8 @@ class Session:
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                       close_fds=True, start_new_session=True, **kwargs)
             self._active = child
+            if exit_reason is not None:
+                exit_reason.update({"child": child, "pid": child.pid, "deadline": cutoff})
             self._native_abort_stamp(abort, "wall_after")
             if abort is not None:
                 abort["pid"] = child.pid
@@ -3249,15 +3503,41 @@ class Session:
                 sel.register(stream, selectors.EVENT_READ, i)
             while True:
                 now = time.monotonic()
+                poll_original = True
+                if exit_reason is not None and not exit_reason["retired"]:
+                    if failure is not None:
+                        self._native_exit_retire(exit_reason)
+                    else:
+                        try:
+                            observed = self._native_exit_sample(exit_reason, child, cutoff=cutoff)
+                            if observed == "live":
+                                poll_original = False
+                            elif observed == "terminal":
+                                expected = exit_reason["expected"]
+                                if expected != 0:
+                                    fail(f"command exited {expected}")  # Before optional BASIC and before pipe EOF.
+                                    self._native_exit_reason(exit_reason, child)
+                                self._native_exit_retire(exit_reason)
+                        except _NativeExitIdentity:
+                            fail("native original-parent observation identity mismatch")
+                            raise
                 # A nonzero original wait is latched BEFORE waiting for pipe EOF.
-                code = child.poll()
+                if poll_original:
+                    self._native_exit_retire(exit_reason)
+                    code = child.poll()
+                else:
+                    code = None  # Nonreaping live/transition observation supplies no wait result.
                 if code is not None:
                     first_wait = not waited
                     waited = True
                     if code != 0 and failure is None:
                         fail(f"command exited {code}")
+                    if self._native_exit_compare(exit_reason, code):
+                        fail("native terminal status disagrees with original wait")
                     if first_wait:
                         self._native_abort_stamp(abort, "wall_wait")
+                if exit_reason is not None:
+                    now = time.monotonic()  # Optional metadata cannot conceal elapsed original command time.
                 if now >= cutoff and failure is None:
                     timed_out = True
                     fail("command/original aggregate deadline expired")
@@ -3270,9 +3550,11 @@ class Session:
                             errors.append("stream EOF unavailable at bounded cleanup cutoff")
                         break
                     if code is None and not terminate_sent:
+                        self._native_exit_retire(exit_reason)
                         child.terminate()
                         terminate_sent = True
                     if code is None and now - stop_at >= 1 and not kill_sent:
+                        self._native_exit_retire(exit_reason)
                         child.kill()
                         kill_sent = True
                     if code is not None and not cleanup_done:
@@ -3321,6 +3603,7 @@ class Session:
                         fail("per-stream or whole-attempt persisted-output limit")
                         overflowed[i] = True
         except BaseException as exc:
+            self._native_exit_retire(exit_reason)
             if isinstance(exc, DeadlineExpired):
                 timed_out = True
             if isinstance(exc, KeyboardInterrupt):
@@ -3330,6 +3613,7 @@ class Session:
                                                "exceptions": _exception_notes(exc)})
             fail(f"collection {type(exc).__name__}")
         finally:
+            self._native_exit_retire(exit_reason)  # Before every finally poll, internally polling signal, or wait.
             # A successful command may not buy more metadata time at finality.
             # Failed-command cleanup uses its original stop timestamp, not a
             # fresh allowance; neither path extends the aggregate endpoint.
@@ -3344,6 +3628,8 @@ class Session:
                     code = child.wait(timeout=max(0.0, min(2, final_cutoff - time.monotonic())))
                     first_wait = not waited
                     waited = True
+                    if self._native_exit_compare(exit_reason, code):
+                        fail("native terminal status disagrees with original wait")
                     if first_wait:
                         self._native_abort_stamp(abort, "wall_wait")
                 except BaseException as exc:

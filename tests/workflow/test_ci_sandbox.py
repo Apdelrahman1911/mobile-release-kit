@@ -18,6 +18,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 from types import SimpleNamespace
@@ -128,6 +129,20 @@ def native_abort_ips_bytes(abort, *, metadata=None, body=None):
     header.update(metadata or {})
     report.update(body or {})
     return (json.dumps(header, separators=(",", ":")) + "\n" + json.dumps(report, separators=(",", ":")) + "\n").encode()
+
+
+def native_exit_bsd_bytes(session, *, status=5, expected_status=6, pid=4242, parent=4000, **changes):
+    """Synthetic fixed-layout bytes only; no SDK, kernel or image receipt."""
+    raw = bytearray(136)
+    fields = {"flags": (0, 0x10), "status": (4, status), "xstatus": (8, expected_status), "pid": (12, pid),
+        "ppid": (16, parent), "uid": (20, session.uid), "gid": (24, session.gid), "ruid": (28, session.uid),
+        "rgid": (32, session.gid), "svuid": (36, session.uid), "svgid": (40, session.gid)}
+    for key, (offset, value) in fields.items():
+        raw[offset:offset + 4] = changes.get(key, value).to_bytes(4, "little")
+    for key, offset, size in (("comm", 48, 16), ("name", 64, 32)):
+        value = changes.get(key, b"true\0")
+        raw[offset:offset + size] = value.ljust(size, b"\0")[:size]
+    return bytes(raw)
 
 
 class _Stream:
@@ -2714,6 +2729,7 @@ class CISandboxPureTests(unittest.TestCase):
                      patch.object(Path, "resolve", side_effect=AssertionError("fixed startup sequence fixture cannot resolve host paths")), \
                      patch.object(Path, "open", side_effect=AssertionError("fixed startup sequence fixture cannot open host files")), \
                      patch.object(session, "_headroom", Mock()), patch.object(session, "_run", collector), \
+                     patch.object(session, "_native_exit_prepare", return_value=None), \
                      patch.object(session, "_native_control_capture", side_effect=capture):
                     with self.assertRaises(BaseExceptionGroup) as caught:
                         session._native_boundary_controls(state)
@@ -2764,6 +2780,667 @@ class CISandboxPureTests(unittest.TestCase):
                         self.assertNotIn(private, repr(row))
                     if result.primary_error is not None:
                         self.assertEqual(session.failure, result.primary_error)
+
+    def test_native_exit_sdk_pins_runtime_query_and_fixed_decoders_preserve_closed_abi_authority(self):
+        # Source-only SDK contract: no C compiler, system header, dylib, native
+        # entry point or numeric process lookup is used by this regression.
+        source = (ROOT / ".github/scripts/ci_process_observer.c").read_text(encoding="utf-8")
+        fields = [("proc_bsdinfo", name, str(offset), "uint32_t") for name, offset in (
+            ("pbi_flags", 0), ("pbi_status", 4), ("pbi_xstatus", 8), ("pbi_pid", 12), ("pbi_ppid", 16),
+            ("pbi_uid", 20), ("pbi_gid", 24), ("pbi_ruid", 28), ("pbi_rgid", 32), ("pbi_svuid", 36), ("pbi_svgid", 40))]
+        fields += [("proc_exitreasonbasicinfo", name, str(offset), kind) for name, offset, kind in (
+            ("beri_namespace", 0, "uint32_t"), ("beri_code", 4, "uint64_t"), ("beri_flags", 12, "uint64_t"),
+            ("beri_reason_buf_size", 20, "uint32_t"))]
+
+        def pin_contract(text):
+            text = re.sub(r"/\*.*?\*/|//[^\n]*", "", text, flags=re.DOTALL)
+            compact = "".join(text.split())
+            self.assertEqual(re.findall(r"MRK_NATIVE_ABI_FIELD\((\w+),(\w+),(\d+),(\w+)\);", compact), fields)
+            for required in (
+                "_Static_assert(CHAR_BIT==8&&sizeof(void*)==8&&sizeof(int)==4&&INT_MAX==2147483647&&INT_MIN==(-2147483647-1),",
+                "_Static_assert(sizeof(uint32_t)==4&&sizeof(uint64_t)==8,",
+                "_Generic((uid_t)0,uint32_t:1,default:0)&&_Generic((gid_t)0,uint32_t:1,default:0)&&_Generic((pid_t)0,int32_t:1,default:0)",
+                "_Static_assert(_Generic(&proc_pidinfo,int(*)(int,int,uint64_t,void*,int):1,default:0),",
+                "_Static_assert(__BYTE_ORDER__==__ORDER_LITTLE_ENDIAN__,",
+                "_Static_assert(offsetof(structrecord,field)==(offset)\\&&sizeof(((structrecord*)0)->field)==sizeof(type)\\&&_Generic(((structrecord*)0)->field,type:1,default:0),",
+                "_Static_assert(sizeof(structproc_bsdinfo)==136,",
+                "_Static_assert(offsetof(structproc_bsdinfo,pbi_comm)==48&&sizeof(((structproc_bsdinfo*)0)->pbi_comm)==16,",
+                "_Static_assert(offsetof(structproc_bsdinfo,pbi_name)==64&&sizeof(((structproc_bsdinfo*)0)->pbi_name)==32,",
+                "_Static_assert(sizeof(structproc_exitreasonbasicinfo)==24,",
+                "_Static_assert(PROC_PIDTBSDINFO==3&&PROC_PIDTBSDINFO_SIZE==136,",
+                "_Static_assert(SIDL==1&&SRUN==2&&SSLEEP==3&&SSTOP==4&&SZOMB==5,",
+                "_Static_assert(PROC_FLAG_TRACED==2&&PROC_FLAG_INEXIT==4&&PROC_FLAG_LP64==0x10&&PROC_FLAG_PSUGID==0x2000,",
+                "#ifdefPROC_PIDEXITREASONBASICINFO_Static_assert(PROC_PIDEXITREASONBASICINFO==25,",
+            ):
+                self.assertIn(required, compact)
+            self.assertNotIn("#definePROC_PIDEXITREASONBASICINFO", compact)
+            self.assertIn("proc_pidinfo(pid,PROC_PIDTBSDINFO,UINT64_C(1),info,(int)sizeof(*info))", compact)
+            self.assertEqual(compact.count("proc_pidinfo("), 1)  # No external-parent BASIC query or new observer role.
+
+        pin_contract(source)
+        for name, changed in (("offset", source.replace("pbi_ppid, 16", "pbi_ppid, 20", 1)),
+                ("width", source.replace("beri_code, 4, uint64_t", "beri_code, 4, uint32_t", 1)),
+                ("size", source.replace("sizeof(struct proc_bsdinfo) == 136", "sizeof(struct proc_bsdinfo) == 128", 1)),
+                ("signature", source.replace("int (*)(int, int, uint64_t, void *, int)", "int (*)(int, int, int, void *, int)", 1)),
+                ("selector-provenance", "#define PROC_PIDEXITREASONBASICINFO 25\n" + source)):
+            with self.subTest(native_exit_sdk_pin_mutation=name):
+                self.assertNotEqual(changed, source)
+                with self.assertRaises(AssertionError):
+                    pin_contract(changed)
+
+        for case in ("darwin-arm", "darwin-intel", "linux", "big-endian", "wrong-kernel", "wrong-machine", "pointer-width",
+                     "integer-width", "missing-module", "missing-library", "missing-symbol"):
+            with self.subTest(native_exit_runtime=case):
+                pointer, integer, uint32, uint64 = object(), object(), object(), object()
+                widths = {pointer: 4 if case == "pointer-width" else 8, integer: 8 if case == "integer-width" else 4, uint32: 4, uint64: 8}
+                operation = Mock(side_effect=AssertionError("library binding must not query a numeric process"))
+                library = SimpleNamespace() if case == "missing-symbol" else SimpleNamespace(proc_pidinfo=operation)
+                loader = Mock(return_value=library, side_effect=OSError("synthetic unavailable library") if case == "missing-library" else None)
+                ffi = SimpleNamespace(c_void_p=pointer, c_int=integer, c_uint32=uint32, c_uint64=uint64,
+                                      sizeof=lambda kind: widths[kind], CDLL=loader)
+                uname = SimpleNamespace(sysname="Darwin", machine="x86_64" if case == "darwin-intel" else "armv7" if case == "wrong-machine" else "arm64",
+                                        release="24.6.0" if case == "wrong-kernel" else "25.6.0")
+                with patch.dict(sys.modules, {"ctypes": None if case == "missing-module" else ffi}), \
+                     patch.multiple(self.module, _NATIVE_EXIT_BINDING=None, _NATIVE_EXIT_LIBRARY=None,
+                        os=SimpleNamespace(uname=lambda: uname), subprocess=SimpleNamespace(), socket=SimpleNamespace(),
+                        signal=SimpleNamespace(), resource=SimpleNamespace(),
+                        sys=SimpleNamespace(platform="linux" if case == "linux" else "darwin", byteorder="big" if case == "big-endian" else "little")):
+                    binding = self.module._native_exit_runtime()
+                    self.assertIs(self.module._native_exit_runtime(), binding)  # Failed capability lookup is also once-only.
+                    if case in {"darwin-arm", "darwin-intel"}:
+                        self.assertEqual(binding, (ffi, library, operation))
+                        self.assertEqual(operation.argtypes, [integer, integer, uint64, pointer, integer])
+                        self.assertIs(operation.restype, integer)
+                    else:
+                        self.assertIsNone(binding)
+                    retained = case in {"darwin-arm", "darwin-intel", "missing-symbol"}
+                    self.assertIs(self.module._NATIVE_EXIT_LIBRARY, library if retained else None)
+                    self.assertEqual(self.module._NATIVE_EXIT_BINDING is False, case not in {"darwin-arm", "darwin-intel"})
+                operation.assert_not_called()
+                if case in {"darwin-arm", "darwin-intel", "missing-library", "missing-symbol"}:
+                    loader.assert_called_once_with("/usr/lib/libproc.dylib", use_errno=True)
+                else:
+                    loader.assert_not_called()
+
+        for basic in (False, True):
+            for case in ("exact", "zero", "negative", "short", "long", "bool-return", "false-return", "wrong-raw-type", "wrong-raw-size", "errno-bound", "bad-pid", "bad-selector"):
+                with self.subTest(native_exit_fixed_query=(basic, case)):
+                    size = 24 if basic else 136
+                    raw = b"\0" * (size - int(case == "wrong-raw-size"))
+                    buffer = SimpleNamespace(raw=bytearray(raw) if case == "wrong-raw-type" else raw)
+                    returned = {"zero": 0, "negative": -1, "short": size - 1, "long": size + 1,
+                                "bool-return": True, "false-return": False, "errno-bound": 0}.get(case, size)
+                    operation = Mock(return_value=returned)
+                    ffi = SimpleNamespace(create_string_buffer=Mock(return_value=buffer), byref=Mock(side_effect=lambda actual: actual),
+                                          set_errno=Mock(), get_errno=Mock(return_value=4096 if case == "errno-bound" else errno.EINVAL))
+                    binding = (ffi, object(), operation)
+                    result = self.module._native_exit_query(binding, True if case == "bad-pid" else 4242,
+                                                           basic=1 if case == "bad-selector" else basic)
+                    self.assertEqual(result, (raw, None) if case == "exact" else (None, errno.EINVAL if case == "zero" else None))
+                    if case in {"bad-pid", "bad-selector"}:
+                        ffi.create_string_buffer.assert_not_called()
+                        operation.assert_not_called()
+                        ffi.set_errno.assert_not_called()
+                    else:
+                        ffi.create_string_buffer.assert_called_once_with(size)
+                        ffi.byref.assert_called_once_with(buffer)
+                        ffi.set_errno.assert_called_once_with(0)
+                        ffi.get_errno.assert_called_once_with()
+                        operation.assert_called_once_with(4242, 25 if basic else 3, 0 if basic else 1, buffer, size)
+
+        session = session_double(self.module, "darwin")
+        identity = dict(pid=4242, parent=4000, uid=session.uid, gid=session.gid)
+        for status in range(1, 6):
+            for flags in (0x10, 0x14):
+                with self.subTest(native_exit_bsd_state=(status, flags)):
+                    decode = Mock(return_value=-6)
+                    with patch.object(self.module, "os", SimpleNamespace(waitstatus_to_exitcode=decode)):
+                        result = self.module._native_exit_bsd(native_exit_bsd_bytes(session, status=status, flags=flags, expected_status=0xabcd0086), **identity)
+                    self.assertEqual(result, {"status": "terminal" if status == 5 else "transition" if status == 1 or flags & 4 else "live",
+                        "expected": -6 if status == 5 else None, "reported_name_hint": "true" if status == 5 else "unavailable"})
+                    if status == 5:
+                        decode.assert_called_once_with(0x86)  # Compare only the low16 wait bits, never substitute a BSD returncode.
+                    else:
+                        decode.assert_not_called()
+        for field, value in (("pid", 4243), ("ppid", 4001), *((key, 60002) for key in ("uid", "gid", "ruid", "rgid", "svuid", "svgid")),
+                             ("flags", 0x12), ("flags", 0x2010)):
+            with self.subTest(native_exit_identity_contradiction=field), \
+                 patch.object(self.module, "os", SimpleNamespace()), self.assertRaises(self.module._NativeExitIdentity):
+                self.module._native_exit_bsd(native_exit_bsd_bytes(session, **{field: value}), **identity)
+        for raw in (None, b"", b"\0" * 135, native_exit_bsd_bytes(session) + b"x", bytearray(native_exit_bsd_bytes(session)),
+                    native_exit_bsd_bytes(session, status=0), native_exit_bsd_bytes(session, status=6),
+                    native_exit_bsd_bytes(session, flags=0), native_exit_bsd_bytes(session, comm=b"x" * 16),
+                    native_exit_bsd_bytes(session, name=b"x" * 32)):
+            with self.subTest(native_exit_optional_unavailable=repr(raw)[:50]), patch.object(self.module, "os", SimpleNamespace()):
+                self.assertIsNone(self.module._native_exit_bsd(raw, **identity))
+        with patch.object(self.module, "os", SimpleNamespace(waitstatus_to_exitcode=Mock(side_effect=ValueError("synthetic invalid wait status")))):
+            self.assertIsNone(self.module._native_exit_bsd(native_exit_bsd_bytes(session), **identity))
+        for reported, hint in ((b"python", "python"), (b"Python", "python"), (b"python3", "python"), (b"python3.11", "python"),
+                               (b"sandbox-exec", "sandbox-exec"), (b"true", "true"), (b"python-private", "other"),
+                               (b"PRIVATE-DIAGNOSTIC-CANARY", "other"), (b"", "true")):
+            with patch.object(self.module, "os", SimpleNamespace(waitstatus_to_exitcode=Mock(return_value=-6))):
+                result = self.module._native_exit_bsd(native_exit_bsd_bytes(session, name=reported + b"\0"), **identity)
+            self.assertEqual(result["reported_name_hint"], hint)
+            self.assertNotIn("PRIVATE-DIAGNOSTIC-CANARY", repr(result))
+
+        for namespace, code, flags, size in ((6, 1, 0, 0), (18, 1, 2, 100), ((1 << 32) - 1, (1 << 64) - 1, (1 << 64) - 1, (1 << 32) - 1)):
+            raw = namespace.to_bytes(4, "little") + code.to_bytes(8, "little") + flags.to_bytes(8, "little") + size.to_bytes(4, "little")
+            expected = dict(namespace=namespace, code=code, flags=flags, reason_buffer_size=size)
+            if namespace == 6:
+                expected.update(namespace_label="DYLD", code_label="DYLIB_MISSING")
+            elif namespace == 18:
+                expected["namespace_label"] = "LIBSYSTEM"
+            self.assertEqual(self.module._native_exit_basic(raw), expected)
+            for malformed in (None, raw[:-1], raw + b"x", bytearray(raw)):
+                self.assertIsNone(self.module._native_exit_basic(malformed))
+
+    def test_native_exit_private_eligibility_bounded_sampling_and_one_shot_reason_never_supply_wait_authority(self):
+        # Every process identity below is an inert object. The module's whole
+        # native/effect namespaces are replaced, not individual stdlib APIs.
+        for case in ("source", "linux", "wheel", "no-control", "foreign-state", "other-case", "other-vector", "no-observer",
+                     "nonroot", "sigchld", "parent-bool", "parent-low", "parent-high", "cancelled", "unavailable"):
+            with self.subTest(native_exit_eligibility=case):
+                session = session_double(self.module, "linux" if case == "linux" else "darwin")
+                state = native_state_double(session, "wheel" if case == "wheel" else "source")
+                session._native_control = {"state": dict(state) if case == "foreign-state" else state,
+                    "case": "startup-python" if case == "other-case" else "startup-true",
+                    "argv": ["/usr/bin/false"] if case == "other-vector" else ["/usr/bin/true"]}
+                if case == "no-control":
+                    session._native_control = None
+                if case == "no-observer":
+                    session.process_observer = None
+                session.cancelled = case == "cancelled"
+                runtime = (object(), object(), object())
+                binding = Mock(return_value=None if case == "unavailable" else runtime)
+                parent = {"parent-bool": True, "parent-low": 1, "parent-high": 1 << 31}.get(case, 4000)
+                with patch.multiple(self.module, os=SimpleNamespace(getpid=lambda: parent, geteuid=lambda: 1 if case == "nonroot" else 0),
+                        signal=SimpleNamespace(SIGCHLD=20, SIG_DFL=0, getsignal=lambda _: 1 if case == "sigchld" else 0),
+                        subprocess=SimpleNamespace(), socket=SimpleNamespace(), resource=SimpleNamespace(),
+                        time=SimpleNamespace(monotonic=lambda: 0.0), _native_exit_runtime=binding):
+                    if case in {"nonroot", "sigchld", "parent-bool", "parent-low", "parent-high"}:
+                        with self.assertRaises(self.module._NativeExitIdentity):
+                            session._native_exit_prepare(state)
+                        binding.assert_not_called()
+                        continue
+                    context = session._native_exit_prepare(state)
+                if case in {"source", "cancelled", "unavailable"}:
+                    self.assertEqual((context["parent"], context["uid"], context["gid"]), (4000, session.uid, session.gid))
+                    self.assertEqual((context["child"], context["pid"], context["deadline"], context["samples"], context["expected"]),
+                                     (None, None, None, 0, None))
+                    self.assertEqual(context["retired"], case != "source")
+                    self.assertEqual(context["status"], "cancelled" if case == "cancelled" else "unavailable")
+                    self.assertIs(context["runtime"], runtime if case == "source" else None)
+                    self.assertEqual(binding.call_count, int(case != "cancelled"))
+                else:
+                    self.assertIsNone(context)
+                    binding.assert_not_called()
+
+        def fixture():
+            session = session_double(self.module, "darwin")
+            child = SimpleNamespace(pid=4242, returncode=None)  # No consuming methods exist on this object.
+            context = dict(runtime=(object(), object(), object()), child=child, pid=4242, parent=4000,
+                uid=session.uid, gid=session.gid, deadline=1.0, retired=False, samples=0, basic_attempted=False,
+                expected=None, reported_name_hint="unavailable", reason=None, status="unavailable", mismatch=False)
+            clock = SimpleNamespace(now=0.0, parent=4000, disposition=0)
+            return session, child, context, clock
+
+        def scope(clock):
+            return patch.multiple(self.module, os=SimpleNamespace(getpid=lambda: clock.parent,
+                waitstatus_to_exitcode=Mock(return_value=-6)),
+                signal=SimpleNamespace(SIGCHLD=20, SIG_DFL=0, getsignal=lambda _: clock.disposition),
+                time=SimpleNamespace(monotonic=lambda: clock.now), subprocess=SimpleNamespace(),
+                socket=SimpleNamespace(), resource=SimpleNamespace())
+
+        for case in ("live", "terminal", "retired", "other-child", "changed-pid", "changed-parent", "changed-sigchld", "changed-cutoff",
+                     "cancelled", "deadline", "sample-cap", "already-waited", "identity-bytes", "unavailable", "query-error",
+                     "query-interrupt", "query-deadline", "cancelled-after-query", "deadline-after-query"):
+            with self.subTest(native_exit_sample=case):
+                session, child, context, clock = fixture()
+                actual, cutoff = child, context["deadline"]
+                if case == "retired":
+                    context["retired"] = True
+                elif case == "other-child":
+                    actual = SimpleNamespace(pid=4242, returncode=None)
+                elif case == "changed-pid":
+                    child.pid += 1
+                elif case == "changed-parent":
+                    clock.parent += 1
+                elif case == "changed-sigchld":
+                    clock.disposition = 1
+                elif case == "changed-cutoff":
+                    cutoff = 0.9
+                elif case == "cancelled":
+                    session.cancelled = True
+                elif case == "deadline":
+                    clock.now = 1.0
+                elif case == "sample-cap":
+                    context["samples"] = 64
+                elif case == "already-waited":
+                    child.returncode = -6
+
+                def query(runtime, pid, *, basic=False):
+                    self.assertIs(runtime, context["runtime"])
+                    self.assertEqual((pid, basic), (4242, False))
+                    self.assertFalse(context["retired"])
+                    if case == "query-error":
+                        raise OSError("synthetic optional fixed read")
+                    if case == "query-interrupt":
+                        raise KeyboardInterrupt("synthetic optional fixed read")
+                    if case == "query-deadline":
+                        raise self.module.DeadlineExpired("synthetic original cutoff")
+                    if case == "cancelled-after-query":
+                        session.cancelled = True
+                    if case == "deadline-after-query":
+                        clock.now = 1.0
+                    return (None, errno.EINVAL) if case == "unavailable" else (
+                        native_exit_bsd_bytes(session, status=5 if case == "terminal" else 2,
+                                              ppid=4001 if case == "identity-bytes" else 4000), None)
+
+                operation = Mock(side_effect=query)
+                contradictions = {"other-child", "changed-pid", "changed-parent", "changed-sigchld", "changed-cutoff", "identity-bytes"}
+                queried = {"live", "terminal", "identity-bytes", "unavailable", "query-error", "query-interrupt",
+                           "query-deadline", "cancelled-after-query", "deadline-after-query"}
+                with scope(clock), patch.object(self.module, "_native_exit_query", operation):
+                    if case in contradictions:
+                        with self.assertRaises(self.module._NativeExitIdentity):
+                            session._native_exit_sample(context, actual, cutoff=cutoff)
+                        self.assertEqual(context["status"], "identity-error")
+                    else:
+                        self.assertEqual(session._native_exit_sample(context, actual, cutoff=cutoff),
+                                         case if case in {"live", "terminal"} else "retired")
+                    self.assertEqual(operation.call_count, int(case in queried))
+                    self.assertEqual(context["retired"], case not in {"live", "terminal"})
+                    self.assertEqual(context["expected"], -6 if case == "terminal" else None)
+                    self.assertEqual(context["samples"], 64 if case == "sample-cap" else int(case in queried))
+                    self.assertIsNone(session.failure)  # Pure observation cannot impersonate the collector's failure/wait.
+                    if case in {"cancelled", "query-interrupt", "cancelled-after-query"}:
+                        self.assertTrue(session.cancelled)
+                        self.assertEqual(context["status"], "cancelled")
+                    if case in {"deadline", "query-deadline", "deadline-after-query"}:
+                        self.assertEqual(context["status"], "deadline")
+                    if case == "sample-cap":
+                        self.assertEqual(context["status"], "limit")
+                    session._native_exit_retire(context)
+                    status = context["status"]
+                    session._native_exit_retire(context, "limit")
+                    self.assertEqual(context["status"], status)  # Retirement is not a new query/status lifetime.
+                    self.assertEqual(session._native_exit_sample(context, actual, cutoff=cutoff), "retired")
+                    self.assertEqual(operation.call_count, int(case in queried))
+
+        basic_bytes = (6).to_bytes(4, "little") + (1).to_bytes(8, "little") + (0).to_bytes(8, "little") + (0).to_bytes(4, "little")
+        for case in ("observed", "absent", "unavailable", "retired", "already-attempted", "no-terminal", "terminal-zero", "cancelled",
+                     "deadline", "already-waited", "changed-parent", "query-error", "query-interrupt", "query-deadline"):
+            with self.subTest(native_exit_basic_once=case):
+                session, child, context, clock = fixture()
+                context.update(expected=-6, status="terminal", reported_name_hint="true")
+                session.fail("original first failure")
+                if case == "retired":
+                    context["retired"] = True
+                elif case == "already-attempted":
+                    context["basic_attempted"] = True
+                elif case == "no-terminal":
+                    context["expected"] = None
+                elif case == "terminal-zero":
+                    context["expected"] = 0
+                elif case == "cancelled":
+                    session.cancelled = True
+                elif case == "deadline":
+                    clock.now = 1.0
+                elif case == "already-waited":
+                    child.returncode = -6
+                elif case == "changed-parent":
+                    clock.parent = 4001
+                answer = (None, errno.ENOENT) if case == "absent" else (None, errno.EINVAL) if case == "unavailable" else (basic_bytes, None)
+                error = {"query-error": OSError("synthetic optional BASIC"), "query-interrupt": KeyboardInterrupt("synthetic optional BASIC"),
+                         "query-deadline": self.module.DeadlineExpired("synthetic original cutoff")}.get(case)
+                operation = Mock(return_value=answer, side_effect=error)
+                queried = case in {"observed", "absent", "unavailable", "query-error", "query-interrupt", "query-deadline"}
+                with scope(clock), patch.object(self.module, "_native_exit_query", operation):
+                    if case == "changed-parent":
+                        with self.assertRaises(self.module._NativeExitIdentity):
+                            session._native_exit_reason(context, child)
+                    else:
+                        session._native_exit_reason(context, child)
+                    session._native_exit_reason(context, child)  # Failure, absence and exceptions never permit retry.
+                    self.assertEqual(operation.call_count, int(queried))
+                    if queried:
+                        operation.assert_called_once_with(context["runtime"], 4242, basic=True)
+                        self.assertTrue(context["basic_attempted"])
+                    if case in {"observed", "absent", "unavailable"}:
+                        self.assertEqual(context["status"], case)
+                    self.assertEqual(session.failure, "original first failure")
+                    self.assertEqual(context["reason"] is not None, case == "observed")
+
+        session, child, context, clock = fixture()
+        context.update(expected=-6, status="observed", reported_name_hint="true", reason=self.module._native_exit_basic(basic_bytes))
+        failed = self.module.CapturedRun(b"", b"", -6, True, True, True, True, False, False, 0.1,
+                                        "command exited -6", (), (0, 0))
+        row = session._native_exit_attach(context, failed)
+        self.assertEqual(row, {"schema": 1, "status": "observed", "reported_name_hint": "true", "expected_wait_code": -6,
+                              "namespace": 6, "code": 1, "flags": 0, "reason_buffer_size": 0,
+                              "namespace_label": "DYLD", "code_label": "DYLIB_MISSING"})
+        self.assertLessEqual(len(json.dumps(row).encode()), 2048)
+        for private in ("4242", "4000", str(session.root), str(session.python), "PRIVATE-DIAGNOSTIC-CANARY"):
+            self.assertNotIn(private, json.dumps(row))
+        success = dataclasses.replace(failed, returncode=0, primary_error=None)
+        self.assertIsNone(session._native_exit_attach(context, success))
+        self.assertIsNone(session._native_exit_attach(None, failed))
+        context["reason"] = {"namespace_label": "x" * 4096}  # In-memory damaged-state limit, never a native payload.
+        self.assertEqual(session._native_exit_attach(context, failed),
+                         {"schema": 1, "status": "limit", "reported_name_hint": "unavailable"})
+        self.assertFalse(session._native_exit_compare(None, -9))
+        self.assertFalse(session._native_exit_compare(context, None))
+        self.assertFalse(session._native_exit_compare(context, -6))
+        self.assertTrue(session._native_exit_compare(context, -9))
+        self.assertFalse(session._native_exit_compare(context, -9))
+        self.assertFalse(session._native_exit_compare(context, -6))
+        self.assertEqual((context["expected"], context["status"], context["mismatch"]), (-6, "wait-mismatch", True))
+        self.assertEqual((failed.returncode, failed.waited, failed.finality, failed.primary_error),
+                         (-6, True, True, "command exited -6"))
+
+    def test_native_exit_original_parent_collector_retires_before_consumption_and_preserves_first_failure_and_finality(self):
+        # Real private capture/collector/report integration over the existing
+        # closed in-memory rig. Neither binding nor any process lookup is real.
+        cases = ("live-terminal", "zero-terminal", "zero-finality-error", "binding-unavailable", "optional-unavailable", "live-fallback",
+            "sample-limit", "deadline-live", "cancel-live", "query-error", "query-interrupt", "query-deadline", "identity",
+            "basic-error", "basic-deadline", "basic-cancel", "basic-identity", "wait-mismatch", "wait-zero-mismatch",
+            "late-wait-mismatch", "missing-wait", "held-eof", "cleanup-error", "capture-close-error", "persist-error",
+            "read-error", "selector-error", "credentials-error", "binding-cancel", "binding-interrupt", "binding-deadline",
+            "capture-cancel", "inputs-error")
+        prelaunch = {"binding-cancel", "binding-interrupt", "binding-deadline", "capture-cancel", "inputs-error"}
+        no_sample = prelaunch | {"binding-unavailable", "selector-error", "credentials-error"}
+        one_sample = {"optional-unavailable", "deadline-live", "cancel-live", "query-error", "query-interrupt", "query-deadline",
+                      "identity", "persist-error", "read-error"}
+        expected_zero = {"zero-terminal", "zero-finality-error", "wait-zero-mismatch"}
+        terminal_cases = set(cases) - no_sample - one_sample - {"live-fallback", "sample-limit"}
+        basic_cases = terminal_cases - expected_zero - {"basic-identity"}
+        payload = b"kept-original-output\n"
+        basic_bytes = (6).to_bytes(4, "little") + (1).to_bytes(8, "little") + (0).to_bytes(8, "little") + (0).to_bytes(4, "little")
+
+        for case in cases:
+            with self.subTest(native_exit_original_collector=case):
+                session = session_double(self.module, "darwin")
+                state = native_state_double(session, deadline=50.0)
+                state["prepared"], session._native_preparing = False, "source"
+                state["write_policy"] = session.bootstrap / "native-write-positive-source.sb"
+                empty_output = case in {"zero-terminal", "zero-finality-error"}
+                rig = _Collection(self.module, session, stdout=() if empty_output else (payload,), stderr=())
+                rig.snapshot_rows, rig.exit_at = {}, 50.0
+                rig.exitcode = 0 if case in {"zero-terminal", "zero-finality-error"} else -9 if case == "wait-mismatch" else -6
+                rig.unreapable = case == "missing-wait"
+                if case in {"binding-unavailable", "optional-unavailable", "query-error"}:
+                    rig.exit_at = 0.18
+                elif case == "live-fallback":
+                    rig.exit_at = 0.3
+                elif case == "sample-limit":
+                    rig.exit_at = 4.5
+                if case in basic_cases or case == "basic-identity":
+                    rig.hold = {1}  # Optional BASIC must observe an already-latched failure, not complete EOF.
+                if case == "selector-error":
+                    rig.selector_error = OSError("synthetic selector acquisition")
+                elif case == "capture-close-error":
+                    rig.fd_close_errors = {0}
+                elif case == "persist-error":
+                    rig.after_write_error = 0
+                elif case == "cleanup-error":
+                    rig.cleanup_diagnostics = ["synthetic numerical cleanup failure"]
+                elif case == "zero-finality-error":
+                    rig.final_domain = {4243: ((session.uid,), (session.gid,), 0)}
+                originals, latches, cutoffs, consumed, waited_codes = [], [], [], [], []
+                identity = SimpleNamespace(parent=4000)
+                runtime = (object(), object(), object())
+                real_prepare, real_fail = session._native_exit_prepare, session._fail
+
+                def bind():
+                    self.assertIsNone(session._active)
+                    self.assertFalse(any(event[0] == "popen" for event in rig.events))
+                    if case == "binding-cancel":
+                        session.cancelled = True
+                    elif case == "binding-interrupt":
+                        raise KeyboardInterrupt("synthetic original-parent binding cancellation")
+                    elif case == "binding-deadline":
+                        rig.now = state["deadline"] + 0.1
+                    return None if case == "binding-unavailable" else runtime
+
+                def prepare(actual):
+                    self.assertIs(actual, state)
+                    self.assertEqual(session._native_control["case"], "startup-true")
+                    context = real_prepare(actual)
+                    originals.append(context)
+                    return context
+
+                def latch(message):
+                    if session.failure is None:
+                        latches.append((message, rig.now))
+                    return real_fail(message)
+
+                def credentials(pid, uid, gid, *, deadline):
+                    self.assertEqual((pid, uid, gid), (rig.child.pid, session.uid, session.gid))
+                    self.assertIs(session._active, rig.child)
+                    self.assertIs(originals[0]["child"], rig.child)
+                    self.assertEqual(originals[0]["deadline"], deadline)
+                    cutoffs.append(deadline)
+                    if case == "credentials-error":
+                        raise self.module.SessionError("synthetic original credential observation failure")
+
+                def query(binding, pid, *, basic=False):
+                    context = originals[0]
+                    self.assertIs(binding, runtime)
+                    self.assertIs(context["child"], rig.child)
+                    self.assertIs(session._active, rig.child)
+                    self.assertEqual((pid, context["pid"], context["parent"], context["uid"], context["gid"]),
+                                     (4242, 4242, 4000, session.uid, session.gid))
+                    self.assertEqual((context["deadline"], state["deadline"], session.deadline), (cutoffs[0], 50.0, 100.0))
+                    self.assertFalse(context["retired"])
+                    self.assertFalse(consumed, "a genuine consuming operation must permanently end numeric observation")
+                    self.assertLess(rig.now, context["deadline"])
+                    if basic:
+                        rig.events.append(("native-basic", rig.now))
+                        self.assertTrue(context["basic_attempted"])
+                        self.assertEqual(context["expected"], -6)
+                        self.assertEqual(session.failure, "command exited -6")
+                        self.assertEqual(latches[0][0], session.failure)
+                        self.assertNotIn(("unregister-eof", 1), rig.events)
+                        if case == "basic-error":
+                            rig.hold.clear()
+                            raise OSError("synthetic optional BASIC unavailability")
+                        if case == "basic-deadline":
+                            rig.now = context["deadline"] + 0.1
+                        elif case == "basic-cancel":
+                            session.cancelled = True
+                        if case != "held-eof":
+                            rig.hold.clear()
+                        return basic_bytes, None
+                    rig.events.append(("native-bsd", context["samples"], rig.now))
+                    if case in {"optional-unavailable", "live-fallback"} and (case == "optional-unavailable" or context["samples"] == 2):
+                        return None, errno.ESRCH
+                    if case == "query-error":
+                        raise OSError("synthetic optional BSD unavailability")
+                    if case == "query-interrupt":
+                        raise KeyboardInterrupt("synthetic optional BSD cancellation")
+                    if case == "query-deadline":
+                        rig.now = context["deadline"]
+                        raise self.module.DeadlineExpired("synthetic original command deadline")
+                    if case == "identity":
+                        return native_exit_bsd_bytes(session, pid=4243), None
+                    if case == "deadline-live":
+                        rig.now = context["deadline"]
+                    elif case == "cancel-live":
+                        session.cancelled = True
+                    if context["samples"] <= 2 or case == "sample-limit":
+                        return native_exit_bsd_bytes(session, status=2 if context["samples"] == 1 else 1), None
+                    rig.exit_at = rig.now  # A synthetic terminal record still requires the original fake child's actual wait.
+                    if case == "basic-identity":
+                        identity.parent = 4001
+                    return native_exit_bsd_bytes(session, expected_status=0 if case in expected_zero else 6), None
+
+                def consuming(name, original):
+                    def consume(*args, **kwargs):
+                        self.assertEqual(len(originals), 1)
+                        self.assertTrue(originals[0]["retired"], name + " may itself reap; retire BEFORE entering it")
+                        consumed.append((name, rig.now))
+                        rig.events.append(("consume-original", name, rig.now))
+                        if name in {"terminate", "kill"}:
+                            rig.child.poll()  # Model Popen signalling's internal, potentially consuming poll.
+                        answer = original(*args, **kwargs)
+                        if name == "poll" and answer is not None:
+                            rig.child.returncode = answer
+                        if name == "wait":
+                            if case == "late-wait-mismatch":
+                                answer = -9
+                            waited_codes.append(answer)
+                        return answer
+                    return consume
+
+                def opened(path, flags, mode):
+                    descriptor = rig.open(path, flags, mode)
+                    if case == "capture-cancel" and len(rig.opened) == 2:
+                        session.cancelled = True
+                    return descriptor
+
+                binding, operation = Mock(side_effect=bind), Mock(side_effect=query)
+                capture = refused = None
+                with rig.scope(), ExitStack() as effects:
+                    effects.enter_context(patch.multiple(self.module, _native_exit_runtime=binding, _native_exit_query=operation,
+                        _observe_original_credentials=credentials, sys=SimpleNamespace(orig_argv=[]),
+                        signal=SimpleNamespace(SIGCHLD=20, SIG_DFL=0, getsignal=lambda _: 0),
+                        socket=SimpleNamespace(), resource=SimpleNamespace()))
+                    effects.enter_context(patch.object(self.module, "os", SimpleNamespace(**vars(self.module.os),
+                        getpid=lambda: identity.parent, waitstatus_to_exitcode=lambda status: 0 if status == 0 else -6)))
+                    effects.enter_context(patch.object(self.module.os, "open", side_effect=opened))
+                    effects.enter_context(patch.object(Path, "resolve", side_effect=AssertionError("inert startup capture cannot resolve native paths")))
+                    effects.enter_context(patch.object(session, "_native_check_inputs",
+                        side_effect=self.module.SessionError("synthetic immutable input failure") if case == "inputs-error" else None))
+                    effects.enter_context(patch.object(session, "_native_close_pins", return_value=[]))
+                    effects.enter_context(patch.object(session, "_native_exit_prepare", side_effect=prepare))
+                    effects.enter_context(patch.object(session, "_fail", side_effect=latch))
+                    for name in ("poll", "wait", "terminate", "kill"):
+                        effects.enter_context(patch.object(rig.child, name, side_effect=consuming(name, getattr(rig.child, name))))
+                    if case == "read-error":
+                        effects.enter_context(patch.object(self.module.os, "read", side_effect=OSError("synthetic original pipe read failure")))
+                    try:
+                        capture = session._native_control_capture(state, "startup-true", ["/usr/bin/true"],
+                            policy=state["write_policy"], cwd=state["cwd"], seconds=10)
+                    except self.module.SessionError as exc:
+                        refused = exc
+                binding.assert_called_once_with()
+                self.assertEqual(len(originals), 1)
+                context = originals[0]
+                self.assertTrue(context["retired"])
+                self.assertIsNone(session._native_control)
+                self.assertFalse(session._busy or session._direct_producer_pending)
+                self.assertEqual((state["deadline"], session.deadline, state["startup_seen"], state["control_seen"]),
+                                 (50.0, 100.0, ["startup-true"], []))
+                samples = [event for event in rig.events if event[0] == "native-bsd"]
+                basics = [event for event in rig.events if event[0] == "native-basic"]
+                self.assertEqual(len(samples), 0 if case in no_sample else 1 if case in one_sample else 2 if case == "live-fallback" else
+                                 64 if case == "sample-limit" else 3)
+                self.assertEqual(len(basics), int(case in basic_cases))
+                self.assertEqual(context["samples"], len(samples))
+                self.assertEqual(operation.call_count, len(samples) + len(basics))
+                if case in prelaunch:
+                    self.assertTrue(refused is not None or capture is not None and not capture.ok)
+                    self.assertIsNotNone(session.failure)
+                    self.assertEqual(session.cancelled, case in {"binding-cancel", "binding-interrupt", "capture-cancel"})
+                    self.assertIsNone(context["child"])
+                    self.assertIsNone(context["pid"])
+                    self.assertIsNone(context["deadline"])
+                    self.assertIsNone(session._active)
+                    for name in ("popen", "poll", "wait-original", "terminate-original", "kill-original", "stream-close", "cleanup"):
+                        self.assertNotIn(name, [event[0] for event in rig.events])
+                    self.assertFalse(consumed or cutoffs or waited_codes)
+                    self.assertEqual(session.persisted_bytes, 0)
+                    if capture is not None:
+                        self.assertFalse(capture.waited or capture.finality or capture.stdout_eof or capture.stderr_eof)
+                    continue
+
+                self.assertIsNone(refused)
+                self.assertIsNotNone(capture)
+                self.assertNotIn("AssertionError", repr((capture.primary_error, capture.cleanup_errors)))
+                self.assertEqual(len(cutoffs), int(case != "selector-error"))
+                if cutoffs:
+                    self.assertGreater(cutoffs[0], 10.0)
+                    self.assertLess(cutoffs[0], 10.1)
+                    self.assertEqual(context["deadline"], cutoffs[0])
+                    self.assertIs(context["child"], rig.child)
+                if samples:
+                    last_query_index = max(i for i, event in enumerate(rig.events) if event[0] in {"native-bsd", "native-basic"})
+                    first_consume_index = next(i for i, event in enumerate(rig.events) if event[0] == "consume-original")
+                    self.assertLess(last_query_index, first_consume_index)
+                if case in {"binding-unavailable", "optional-unavailable", "live-fallback", "sample-limit", "query-error"}:
+                    self.assertEqual(next(event for event in rig.events if event[0] == "poll"), ("poll", None))
+                    self.assertEqual(context["status"], "limit" if case == "sample-limit" else "unavailable")
+                if case in {"deadline-live", "query-deadline"}:
+                    self.assertEqual(context["status"], "deadline")
+                if case in {"cancel-live", "query-interrupt"}:
+                    self.assertEqual(context["status"], "cancelled")
+                if case in {"identity", "basic-identity"}:
+                    self.assertEqual(context["status"], "identity-error")
+                if case in {"wait-mismatch", "wait-zero-mismatch", "late-wait-mismatch"}:
+                    self.assertEqual((context["status"], context["mismatch"]), ("wait-mismatch", True))
+                    self.assertEqual(capture.cleanup_errors.count("native terminal status disagrees with original wait"), 1)
+                failure = {"zero-terminal": None, "zero-finality-error": "late capture/cleanup/finality error",
+                    "deadline-live": "command/original aggregate deadline expired", "query-deadline": "command/original aggregate deadline expired",
+                    "cancel-live": "command cancellation", "query-interrupt": "command cancellation",
+                    "identity": "native original-parent observation identity mismatch", "selector-error": "collection OSError",
+                    "credentials-error": "collection SessionError", "persist-error": "collection OSError", "read-error": "collection OSError"}.get(case, "command exited -6")
+                self.assertEqual((capture.primary_error, session.failure), (failure, failure))
+                self.assertEqual(capture.ok, case == "zero-terminal")
+                self.assertEqual(capture.timed_out, case in {"deadline-live", "query-deadline"})
+                self.assertEqual(capture.cancelled, case in {"cancel-live", "query-interrupt", "basic-cancel"})
+                self.assertEqual(capture.waited, case not in {"selector-error", "missing-wait"})
+                self.assertEqual(capture.returncode, waited_codes[-1] if waited_codes else None)
+                self.assertEqual(capture.returncode, None if case in {"selector-error", "missing-wait"} else
+                    -15 if case in {"deadline-live", "query-deadline", "cancel-live", "query-interrupt"} else
+                    -9 if case in {"credentials-error", "identity", "read-error", "persist-error", "wait-mismatch", "late-wait-mismatch"} else
+                    0 if case in {"zero-terminal", "zero-finality-error"} else -6)
+                if case == "missing-wait":
+                    self.assertIs(session._active, rig.child)  # The BSD expectation cannot release the original producer.
+                    self.assertFalse(capture.finality)
+                    self.assertIn("original child wait TimeoutError", capture.cleanup_errors)
+                else:
+                    self.assertIsNone(session._active)
+                if case in {"held-eof", "basic-deadline"}:
+                    self.assertFalse(capture.stderr_eof or capture.finality)
+                    self.assertIn("stream EOF unavailable at bounded cleanup cutoff", capture.cleanup_errors)
+                if case == "zero-finality-error":
+                    self.assertFalse(capture.domain_finality)
+                    self.assertIn("reserved identity did not reach finality", capture.cleanup_errors)
+                if case == "capture-close-error":
+                    self.assertIn("capture close OSError", capture.cleanup_errors)
+                if case == "cleanup-error":
+                    self.assertIn("synthetic numerical cleanup failure", capture.cleanup_errors)
+                if case in {"live-terminal", "zero-terminal", "binding-unavailable", "live-fallback", "sample-limit", "optional-unavailable"}:
+                    self.assertTrue(capture.waited and capture.stdout_eof and capture.stderr_eof and capture.domain_finality)
+                actual = tuple(bytes(rig.captures.get(fd, b"")) for fd in (100, 101))
+                expected_output = b"" if empty_output or case in {"selector-error", "credentials-error", "identity", "read-error"} else payload
+                self.assertEqual((capture.stdout, capture.stderr), (expected_output, b""))
+                self.assertEqual((capture.stdout, capture.stderr), actual)
+                self.assertEqual(capture.persisted, tuple(map(len, actual)))
+                self.assertEqual(session.persisted_bytes, sum(capture.persisted))
+                cleanup_cutoffs = [event[1] for event in rig.events if event[0] == "cleanup-deadline"]
+                if cleanup_cutoffs:
+                    self.assertEqual(len(cleanup_cutoffs), 1)
+                    self.assertAlmostEqual(cleanup_cutoffs[0], min(state["deadline"], latches[0][1] + 8), delta=0.005)
+                    self.assertTrue(all(event[2] <= cleanup_cutoffs[0] for event in rig.events if event[0] == "domain-deadline" and event[1] > 1))
+                row = state["control_notes"]["startup-true"]
+                self.assertEqual((row["ok"], row["subject_ok"], row["returncode"], row["waited"], row["stdout_eof"], row["stderr_eof"],
+                    row["domain_finality"], row["timed_out"], row["cancelled"], row["persisted"]),
+                    (capture.ok, capture.ok, capture.returncode, capture.waited, capture.stdout_eof, capture.stderr_eof,
+                     capture.domain_finality, capture.timed_out, capture.cancelled, list(capture.persisted)))
+                if case == "zero-terminal":
+                    self.assertNotIn("native_exit_reason", row)
+                else:
+                    attachment = row["native_exit_reason"]
+                    self.assertEqual(attachment["schema"], 1)
+                    self.assertEqual(attachment["status"], context["status"])
+                    self.assertEqual(attachment.get("expected_wait_code"), 0 if case in expected_zero else -6 if case in terminal_cases else None)
+                    self.assertLessEqual(len(json.dumps(attachment).encode()), 2048)
+                    self.assertLessEqual(set(attachment), {"schema", "status", "reported_name_hint", "expected_wait_code", "namespace", "code", "flags",
+                                                          "reason_buffer_size", "namespace_label", "code_label"})
+                    for private in ("4242", "4000", str(session.root), str(session.python), "PRIVATE-DIAGNOSTIC-CANARY"):
+                        self.assertNotIn(private, json.dumps(attachment))
+                self.assertNotIn("native_abort_diagnostic", row)
 
     def test_native_abort_ips_requires_strict_objects_original_identity_precise_time_and_closed_hints(self):
         session = session_double(self.module, "darwin")
