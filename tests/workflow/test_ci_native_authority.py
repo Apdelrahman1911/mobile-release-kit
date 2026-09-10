@@ -1197,6 +1197,249 @@ class NativeAuthorityTests(unittest.TestCase):
             with self.subTest(index=index, key=key), self.assertRaises(m.NativeControlError):
                 m.require_aia_controls(encode(modified), fixtures, requests)
 
+    def test_aia_comparison_observation_is_closed_and_preserves_real_mismatches(self):
+        m = self.module
+        fixtures = aia_fixtures(m)
+        record, requests = aia_evidence(m, fixtures)
+        encode = lambda value: m.AIA_PREFIX + json.dumps(value).encode() + b"\n"
+        unavailable = {"schema": 1, "control": "aia-comparison",
+                       "semantics": "comparison-observation-only", "available": False}
+        expected = unavailable | {"available": True, "cases": [
+            {key: row[key] for key in ("case", "baseline_network", "network", "keychains", "accepted", "error", "result")}
+            | {"chain_count": 3 if index in (0, 2) else 1, "chain_matches": True,
+               "request_count": 1 if index in (0, 2) else 0} for index, row in enumerate(record["cases"])],
+            "requests": [{"case": name, "issuer_matches": True} for name in ("online", "mutant")], "requests_match": True}
+
+        def project(data, originals=fixtures, observed=requests):
+            # No path, clock, native provider or resource operation is available
+            # to this projection; only the three existing in-memory inputs.
+            with patch.multiple(m, os=SimpleNamespace(), subprocess=SimpleNamespace(), socket=SimpleNamespace(),
+                                threading=SimpleNamespace(), secrets=SimpleNamespace(), time=SimpleNamespace(), Path=SimpleNamespace()):
+                return m._aia_comparison_note(data, originals, observed)
+
+        self.assertEqual(project(encode(record)), expected)
+        for index, key, value in ((0, "baseline_network", False), (1, "network", True), (3, "keychains", True),
+                                  (0, "accepted", False), (3, "error", False), (0, "result", 0),
+                                  (1, "result", 0xffffffff), (0, "chain", ["0" * 64] * 3),
+                                  (1, "chain", [*record["cases"][1]["chain"], "0" * 64])):
+            changed = json.loads(json.dumps(record))
+            changed["cases"][index][key] = value
+            with self.subTest(comparison_value=(index, key, value)):
+                note = project(encode(changed))
+                wanted = json.loads(json.dumps(expected))
+                if key == "chain":
+                    wanted["cases"][index].update(chain_count=len(value), chain_matches=False)
+                else:
+                    wanted["cases"][index][key] = value
+                self.assertEqual(note, wanted)
+                with self.assertRaises(m.NativeControlError):
+                    m.require_aia_controls(encode(changed), fixtures, requests)
+        absent = json.loads(json.dumps(record))
+        for index in (0, 2):
+            absent["cases"][index].update(accepted=False, error=True, result=5,
+                                          chain=absent["cases"][index]["chain"][:1])
+        note = project(encode(absent), observed=[])
+        self.assertTrue(note["available"])
+        self.assertEqual(note["requests"], [])
+        self.assertFalse(note["requests_match"])
+        self.assertEqual([row["request_count"] for row in note["cases"]], [0] * 4)
+        for index in (0, 2):
+            self.assertEqual({key: note["cases"][index][key] for key in ("accepted", "error", "result", "chain_count", "chain_matches")},
+                             {"accepted": False, "error": True, "result": 5, "chain_count": 1, "chain_matches": False})
+        with self.assertRaises(m.NativeControlError):
+            m.require_aia_controls(encode(absent), fixtures, [])
+
+        unknown = ("/mrk-aia/" + "f" * 32 + "/online.der", "e" * 64)
+        for observed, labels, matches, counts in (
+            ([], [], [], [0, 0, 0, 0]),
+            (list(reversed(requests)), ["mutant", "online"], [True, True], [1, 0, 1, 0]),
+            ([(requests[0][0], "0" * 64), requests[1]], ["online", "mutant"], [False, True], [1, 0, 1, 0]),
+            ([*requests, unknown], ["online", "mutant", "unknown"], [True, True, False], [1, 0, 1, 0]),
+            ([*requests, requests[0]], ["online", "mutant", "online"], [True] * 3, [2, 0, 1, 0]),
+            (requests * 4, ["online", "mutant"] * 4, [True] * 8, [4, 0, 4, 0])):
+            with self.subTest(comparison_requests=observed):
+                note = project(encode(record), observed=observed)
+                self.assertTrue(note["available"])
+                self.assertFalse(note["requests_match"])
+                self.assertEqual(note["requests"], [{"case": name, "issuer_matches": match} for name, match in zip(labels, matches)])
+                self.assertEqual([row["request_count"] for row in note["cases"]], counts)
+                with self.assertRaises(m.NativeControlError):
+                    m.require_aia_controls(encode(record), fixtures, observed)
+                public = json.dumps(note)
+                for private in (unknown[0], unknown[1], "/mrk-aia/", "synthetic-", "chain\"", "route\"",
+                                *(fixture["route"] for fixture in fixtures),
+                                *(m.hashlib.sha256(fixture[role]).hexdigest() for fixture in fixtures for role in ("root", "issuer", "leaf"))):
+                    self.assertNotIn(private, public)
+                self.assertLess(len(public), 4096)
+
+        data = encode(record)
+        malformed = [None, data.decode(), bytearray(data), b"", data[:-1], data + b"PRIVATE-CAPTURE\n", b"prefix " + data,
+                     b"x" * 4097, data.replace(b'"schema": 1', b'"schema": 1, "schema": 1'),
+                     data.replace(b'"case": "online"', b'"case": "online", "case": "online"'),
+                     data.replace(b'"schema": 1', b'"schema": true'), data.replace(b'"online"', b'"\xff"'),
+                     encode({**record, "PRIVATE-FIELD": "/Users/private/signing.key"}),
+                     encode({**record, "cases": record["cases"][:3]}), encode({**record, "cases": list(reversed(record["cases"]))})]
+        for key, value in (("case", "PRIVATE-CASE"), ("baseline_network", 1), ("network", None), ("keychains", 0),
+                           ("accepted", "false"), ("error", 1.0), ("result", True), ("result", -1),
+                           ("result", 0x100000000), ("result", 4.0), ("chain", []), ("chain", ["0" * 64] * 4),
+                           ("chain", "PRIVATE-CHAIN"), ("chain", ["A" * 64]), ("chain", ["0" * 63]),
+                           ("chain", [True]), ("PRIVATE-FIELD", "PRIVATE-MESSAGE")):
+            changed = json.loads(json.dumps(record))
+            changed["cases"][0][key] = value
+            malformed.append(encode(changed))
+        for data in malformed:
+            with self.subTest(comparison_malformed_capture=repr(data)[:60]):
+                self.assertEqual(project(data), unavailable)
+        for originals in (None, tuple(fixtures), fixtures[:3], [fixtures[0], fixtures[0], *fixtures[2:]]):
+            self.assertEqual(project(encode(record), originals=originals), unavailable)
+        for key, value in (("case", True), ("route", "/mrk-aia/PRIVATE-NONCE/online.der"),
+                           ("route", fixtures[1]["route"]), ("root", b""), ("root", b"not-DER"),
+                           ("root", b"\x30" * (m._MAX_DER + 1)), ("issuer", bytearray(b"\x30")),
+                           ("leaf", "PRIVATE-DER"), ("PRIVATE-FIELD", "PRIVATE-MESSAGE")):
+            originals = [dict(fixture) for fixture in fixtures]
+            originals[0][key] = value
+            with self.subTest(comparison_malformed_fixture=key):
+                self.assertEqual(project(encode(record), originals=originals), unavailable)
+        maximum = [dict(fixture) for fixture in fixtures]
+        maximum[0]["root"] = b"\x30" + b"x" * (m._MAX_DER - 1)
+        bounded_record, bounded_requests = aia_evidence(m, maximum)
+        self.assertEqual(project(encode(bounded_record), maximum, bounded_requests), expected)
+        for observed in (None, tuple(requests), requests * 4 + requests[:1], [list(requests[0])],
+                         [(requests[0][0], requests[0][1], "PRIVATE-EXTRA")], [(None, requests[0][1])],
+                         [("http://127.0.0.1:60123/PRIVATE-URL", requests[0][1])],
+                         [(requests[0][0], "A" * 64)], [(requests[0][0], "0" * 63)], [(requests[0][0], b"0" * 64)]):
+            with self.subTest(comparison_malformed_request=observed):
+                self.assertEqual(project(encode(record), observed=observed), unavailable)
+
+    def test_aia_comparison_failure_projection_requires_original_finality_and_preserves_error(self):
+        from workflow.test_ci_sandbox import sandbox_module
+
+        m, parent = self.module, sandbox_module()  # Inert definitions only; no Session construction.
+        fixtures = aia_fixtures(m)
+        record, original_requests = aia_evidence(m, fixtures)
+        outputs = {name: m.MACH_PREFIX + json.dumps(row).encode() + b"\n" for name, row in (
+            ("mach-baseline", mach_row([0, 1102, 0])), ("mach-ordinary", mach_row([1100] * 3)))}
+        outputs.update({name: m.MACH_APPLY_PREFIX + json.dumps(row).encode() + b"\n" for name, row in (
+            ("mach-authority", mach_application("mach-initial")),
+            ("mach-nonexpand", mach_application("mach-nonexpand", returned=-1, number=1)))})
+        outputs.update({"aia-prepare": b"MRK_AIA_PREPARED\n", "aia-evaluate": m.AIA_PREFIX + json.dumps(record).encode() + b"\n"})
+        real_compare, real_project = m.require_aia_controls, m._aia_comparison_note
+        scratch = Path("/pure/probes")
+        for mode in ("comparison", "formatting-error", "formatting-cancel", "success", "capture-error", "capture-refused", "finality-error",
+                     "close-error", "deadline", "final-idle-error"):
+            with self.subTest(comparison_owner_gate=mode):
+                events, originals, now, closed, last = [], [], [10.0], [False], [None]
+                earlier = OSError("PRIVATE-EARLIER-ERROR /Users/private/signing.key")
+                formatter = (KeyboardInterrupt("PRIVATE-FORMATTING-CANCEL") if mode == "formatting-cancel"
+                             else ValueError("PRIVATE-FORMATTING-ERROR"))
+                requests = original_requests if mode in {"success", "final-idle-error"} else []
+
+                def launch(case, *, port=None):
+                    events.append(("capture", case, port))
+                    last[0] = case
+                    if case == "aia-evaluate" and mode == "capture-error":
+                        raise earlier
+                    return SimpleNamespace(ok=not (case == "aia-evaluate" and mode == "capture-refused"), stdout=outputs[case])
+
+                def idle():
+                    events.append(("idle", last[0]))
+                    if (mode == "finality-error" and last[0] == "aia-evaluate" and not closed[0]
+                            or mode == "final-idle-error" and closed[0]):
+                        raise earlier
+
+                def close():
+                    events.append("close")
+                    if mode == "close-error":
+                        raise earlier
+                    closed[0] = True
+                    if mode == "deadline":
+                        now[0] = 100.0
+
+                def compare(data, actual_fixtures, actual_requests):
+                    events.append("compare")
+                    self.assertTrue(closed[0])
+                    self.assertLess(now[0], 100.0)
+                    self.assertIs(data, outputs["aia-evaluate"])
+                    self.assertIs(actual_fixtures, fixtures)
+                    self.assertIs(actual_requests, requests)
+                    try:
+                        return real_compare(data, actual_fixtures, actual_requests)
+                    except m.NativeControlError as error:
+                        originals.append(error)
+                        raise
+
+                def project(data, actual_fixtures, actual_requests):
+                    events.append("project")
+                    self.assertTrue(closed[0])
+                    self.assertEqual(len(originals), 1)
+                    self.assertIs(data, outputs["aia-evaluate"])
+                    self.assertIs(actual_fixtures, fixtures)
+                    self.assertIs(actual_requests, requests)
+                    if mode in {"formatting-error", "formatting-cancel"}:
+                        raise formatter
+                    return real_project(data, actual_fixtures, actual_requests)
+
+                responder = SimpleNamespace(port=60123, requests=requests, start=Mock(side_effect=lambda rows: events.append("start")),
+                                            close=Mock(side_effect=close))
+                comparator, projector = Mock(side_effect=compare), Mock(side_effect=project)
+                with patch.multiple(m, time=SimpleNamespace(monotonic=lambda: now[0]), os=SimpleNamespace(),
+                    subprocess=SimpleNamespace(), socket=SimpleNamespace(), threading=SimpleNamespace(), secrets=SimpleNamespace(),
+                    Path=SimpleNamespace(), _scratch=Mock(return_value=scratch), _fixtures=Mock(return_value=fixtures),
+                    _Responder=Mock(return_value=responder), require_aia_controls=comparator, _aia_comparison_note=projector), \
+                     patch.object(parent, "os", SimpleNamespace(path=SimpleNamespace(basename=lambda value: value.rsplit("/", 1)[-1]))):
+                    if mode == "success":
+                        result = m.admit_controls(launch, idle, scratch, deadline=100.0, policy_sha256="a" * 64)
+                        self.assertTrue(result["cleanup_ok"])
+                        self.assertTrue(result["aia"]["final_disable_mutation_detected"])
+                        self.assertEqual(result["aia"]["request_counts"], [1, 0, 1, 0])
+                        projector.assert_not_called()
+                    else:
+                        expected_error = (m.NativeControlError if mode in {"comparison", "formatting-error", "formatting-cancel", "deadline"}
+                                          else OSError if mode == "final-idle-error" else BaseExceptionGroup)
+                        with self.assertRaises(expected_error) as raised:
+                            m.admit_controls(launch, idle, scratch, deadline=100.0, policy_sha256="a" * 64)
+                        error = raised.exception
+                        if mode in {"comparison", "formatting-error", "formatting-cancel"}:
+                            self.assertEqual(len(originals), 1)
+                            self.assertIs(error, originals[0])
+                            projector.assert_called_once_with(outputs["aia-evaluate"], fixtures, requests)
+                            self.assertEqual(events[-3:], ["close", "compare", "project"])
+                            if mode == "comparison":
+                                self.assertEqual(error._ci_observation, real_project(outputs["aia-evaluate"], fixtures, requests))
+                                self.assertFalse(error._ci_observation["requests_match"])
+                                self.assertEqual(parent._exception_notes(error),
+                                    [{"exception": "NativeControlError", "lines": [], "observation": error._ci_observation}])
+                            else:
+                                self.assertFalse(hasattr(error, "_ci_observation"))
+                                self.assertIsNot(error, formatter)
+                                self.assertEqual(parent._exception_notes(error), [{"exception": "NativeControlError", "lines": []}])
+                        else:
+                            projector.assert_not_called()
+                            self.assertFalse(hasattr(error, "_ci_observation"))
+                            if mode == "final-idle-error":
+                                self.assertIs(error, earlier)
+                            if isinstance(error, BaseExceptionGroup):
+                                leaves = [leaf for child in error.exceptions for leaf in
+                                          (child.exceptions if isinstance(child, BaseExceptionGroup) else (child,))]
+                                self.assertTrue(all(not hasattr(leaf, "_ci_observation") for leaf in leaves))
+                                if mode in {"capture-error", "finality-error", "close-error"}:
+                                    self.assertIn(earlier, leaves)
+                        public = json.dumps(parent._exception_notes(error))
+                        for private in ("PRIVATE-", "/Users/", "signing.key", "/mrk-aia/", "synthetic-", str(error)):
+                            self.assertNotIn(private, public)
+                    if mode in {"comparison", "formatting-error", "formatting-cancel", "success", "final-idle-error"}:
+                        comparator.assert_called_once_with(outputs["aia-evaluate"], fixtures, requests)
+                    else:
+                        comparator.assert_not_called()
+                    responder.start.assert_called_once_with({fixture["route"]: fixture["issuer"] for fixture in fixtures})
+                    responder.close.assert_called_once_with()
+                captures = [event for event in events if isinstance(event, tuple) and event[0] == "capture"]
+                self.assertEqual(captures, [("capture", case, None if case.startswith("mach-") else 60123) for case in outputs])
+                for index, event in enumerate(events):
+                    if isinstance(event, tuple) and event[0] == "capture":
+                        self.assertEqual(events[index + 1], ("idle", event[1]))
+                self.assertLess(events.index(("idle", "aia-evaluate")), events.index("close"))
+
     def test_fixture_manifest_rejects_reused_nonces_certificates_and_changed_bytes(self):
         m = self.module
         fixtures = aia_fixtures(m)

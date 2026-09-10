@@ -432,6 +432,14 @@ checks and timeouts are unchanged. Optional fixed stderr-token labels report
 observed text, not a proven operating-system cause. Diagnostic failure preserves
 the original failure, and any failure marker prevents native success acceptance.
 
+An AIA comparison failure may additionally publish a closed original-parent
+observation after successful capture/finality and responder close/join. It includes
+only fixed case labels, exact Boolean values, bounded trust-result/chain counts,
+and fixture-derived chain/request match flags. Malformed records are unavailable;
+raw routes, certificate digests, captures and messages are excluded. These fields
+diagnose an already failed comparison, never replace its original acceptance
+oracle or qualify an earlier failed capture, cutoff or cleanup.
+
 Do not upload raw captures, writable-directory globs, private Store data or signing
 assets. Reuse evidence only for the exact applicable source/configuration/toolchain.
 Protected PR delivery and actual resulting `main` CI are separate required evidence.

@@ -842,6 +842,59 @@ def require_aia_controls(data: bytes, fixtures: list[dict], requests: list[tuple
     return {"cases": record["cases"], "request_counts": counts, "final_disable_mutation_detected": True}
 
 
+def _aia_comparison_note(data: bytes, fixtures: list[dict], requests: list[tuple[str, str]]) -> dict:
+    """Closed observations from original in-memory inputs, never acceptance authority."""
+    unavailable = {"schema": 1, "control": "aia-comparison",
+                   "semantics": "comparison-observation-only", "available": False}
+    try:
+        record = _parse(data, AIA_PREFIX)
+        _require(set(record) == {"schema", "cases"} and type(record["cases"]) is list
+                 and type(fixtures) is list and len(record["cases"]) == len(fixtures) == 4
+                 and type(requests) is list and len(requests) <= 8, "AIA diagnostic inventory differs")
+        cases, originals, expected_requests = [], {}, []
+        bools = ("baseline_network", "network", "keychains", "accepted", "error")
+        for case, row, fixture in zip(_CASES, record["cases"], fixtures):
+            _require(type(fixture) is dict and set(fixture) == {"case", "route", "root", "issuer", "leaf"}
+                     and type(fixture["case"]) is str and fixture["case"] == case
+                     and type(fixture["route"]) is str and len(fixture["route"]) <= 96
+                     and re.fullmatch(rf"/mrk-aia/[0-9a-f]{{32}}/{case}\.der", fixture["route"]) is not None
+                     and all(type(fixture[role]) is bytes and 0 < len(fixture[role]) <= _MAX_DER
+                             and fixture[role].startswith(b"\x30") for role in ("root", "issuer", "leaf")),
+                     "AIA diagnostic fixture differs")
+            _require(type(row) is dict and set(row) == {"case", *bools, "result", "chain"}
+                     and type(row["case"]) is str and row["case"] == case
+                     and all(type(row[key]) is bool for key in bools)
+                     and type(row["result"]) is int and 0 <= row["result"] <= 0xffffffff
+                     and type(row["chain"]) is list and 1 <= len(row["chain"]) <= 3
+                     and all(type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+                             for value in row["chain"]), "AIA diagnostic result differs")
+            online = case in ("online", "mutant")
+            expected_chain = [hashlib.sha256(fixture[role]).hexdigest()
+                              for role in (("leaf", "issuer", "root") if online else ("leaf",))]
+            issuer = hashlib.sha256(fixture["issuer"]).hexdigest()
+            originals[fixture["route"]] = (case, issuer)
+            if online:
+                expected_requests.append((fixture["route"], issuer))
+            cases.append({"case": case, **{key: row[key] for key in bools}, "result": row["result"],
+                          "chain_count": len(row["chain"]), "chain_matches": row["chain"] == expected_chain,
+                          "request_count": 0})
+        observed_requests = []
+        for request in requests:
+            _require(type(request) is tuple and len(request) == 2 and all(type(value) is str for value in request)
+                     and len(request[0]) <= 96 and re.fullmatch(
+                         r"/mrk-aia/[0-9a-f]{32}/(?:online|offline|mutant|product-offline)\.der", request[0]) is not None
+                     and re.fullmatch(r"[0-9a-f]{64}", request[1]) is not None, "AIA diagnostic request differs")
+            case, issuer = originals.get(request[0], ("unknown", None))
+            observed_requests.append({"case": case, "issuer_matches": request[1] == issuer})
+            for row in cases:
+                if row["case"] == case:
+                    row["request_count"] += 1
+        return {**unavailable, "available": True, "cases": cases, "requests": observed_requests,
+                "requests_match": requests == expected_requests}
+    except (NativeControlError, ValueError, TypeError, KeyError, RecursionError):
+        return unavailable
+
+
 class _Responder:
     """One original owner's finite HTTP responder; no service requests or proxies."""
 
@@ -1021,7 +1074,16 @@ def admit_controls(launch, ensure_idle, scratch: Path, *, deadline: float, polic
     if errors:
         raise BaseExceptionGroup("native AIA controls/owned responder cleanup failed", errors)
     _remaining(deadline)
-    aia = require_aia_controls(output, fixtures, responder.requests)
+    try:
+        aia = require_aia_controls(output, fixtures, responder.requests)
+    except NativeControlError as original:
+        # Only this completed original comparison may expose a closed note.
+        # Earlier capture/finality/cutoff/close failures never reach this seam.
+        try:
+            original._ci_observation = _aia_comparison_note(output, fixtures, responder.requests)
+        except BaseException:
+            pass  # Even diagnostic construction/attachment failure retains the original error.
+        raise
     ensure_idle()
     _remaining(deadline)
     return {"schema": 1, "mach": {name: row for name, row in zip(
