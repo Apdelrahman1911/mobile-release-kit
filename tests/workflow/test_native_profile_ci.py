@@ -76,6 +76,7 @@ def _inert_native_suites(outcome="success", *, subtests=3, unknown_id=False):
         raise OSError(errno.EPERM, "PRIVATE_NATIVE_MODULE_SETUP")
 
     module = ModuleType(_FIXTURE_MODULE)
+    module.Fixture = Fixture
     if outcome in {"setUpClass", "tearDownClass"}:
         setattr(Fixture, outcome, classmethod(class_failure))
     if outcome in {"setUpModule", "tearDownModule"}:
@@ -104,7 +105,7 @@ def _inert_native_gate(*, suites=None, stderr=None, platform="darwin", run_effec
             run_effect(len(calls) - 1)
         return SimpleNamespace(returncode=0)
 
-    def inventory():
+    def inventory(partition="all"):
         events.append("inventory")
         return _FIXTURE_IDS
 
@@ -135,6 +136,40 @@ def _inert_native_gate(*, suites=None, stderr=None, platform="darwin", run_effec
                         _expected_native_ids=expected, _product_modules=imported):
         yield SimpleNamespace(events=events, calls=calls, stderr=output, inventory=expected,
                               products=imported, product_values=products, loader=loader, discover=discovered)
+
+
+def _inert_authority_runtime(*, installed_wheel=False):
+    """Entirely synthetic runtime metadata; no interpreter/process is started."""
+    gate = run_native_profile_checks
+    machinery = gate.importlib.machinery
+    base = Path("/fixture/provider/python311")
+    phase = "wheel" if installed_wheel else "source"
+    return SimpleNamespace(
+        platform="darwin", implementation=SimpleNamespace(name="cpython"), version_info=(3, 11, 0),
+        flags=SimpleNamespace(isolated=1, ignore_environment=1, no_user_site=1,
+                              no_site=1, safe_path=True, dont_write_bytecode=1),
+        dont_write_bytecode=True, base_prefix=str(base), base_exec_prefix=str(base),
+        prefix="/must-not-select-package-from-sys-prefix", stderr=io.StringIO(),
+        executable=str(gate.ROOT.parent / f"work/{phase}-venv/bin/python"), modules={},
+        meta_path=[machinery.BuiltinImporter, machinery.FrozenImporter, machinery.PathFinder],
+        path_hooks=[gate.zipimport.zipimporter, machinery.FileFinder.path_hook(
+            (machinery.ExtensionFileLoader, machinery.EXTENSION_SUFFIXES),
+            (machinery.SourceFileLoader, machinery.SOURCE_SUFFIXES),
+            (machinery.SourcelessFileLoader, machinery.BYTECODE_SUFFIXES))],
+        path=[str(base / "lib/python311.zip"), str(base / "lib/python3.11"),
+              str(base / "lib/python3.11/lib-dynload")], path_importer_cache={},
+    )
+
+
+def _inert_origin_module(name, root, *, package=False):
+    """Real stdlib spec construction only: never executes the referenced file."""
+    gate = run_native_profile_checks
+    suffix = name.split(".")[1:]
+    filename = root.joinpath(*suffix, "__init__.py") if package else root.joinpath(*suffix).with_suffix(".py")
+    spec = gate.importlib.util.spec_from_file_location(
+        name, filename, submodule_search_locations=[str(root)] if package else None,
+    )
+    return gate.importlib.util.module_from_spec(spec)
 
 
 def _native_envelopes(output):
@@ -323,7 +358,7 @@ class NativeProfileCITests(unittest.TestCase):
 
                 controller = controller_module()
                 paths = SimpleNamespace(source=Path("/synthetic/native-source"))
-                checks = SimpleNamespace(expected_python_ids=Mock(return_value=_FIXTURE_IDS))
+                checks = SimpleNamespace(native_partition_ids=Mock(return_value=_FIXTURE_IDS))
                 captured = SimpleNamespace(ok=False, returncode=1, waited=True, stdout_eof=True, stderr_eof=True,
                     domain_finality=True, timed_out=False, cancelled=False, stdout=b"", stderr=output.getvalue().encode(),
                     persisted=(), duration=0.01, cleanup_errors=(), primary_error="command exited 1")
@@ -336,7 +371,7 @@ class NativeProfileCITests(unittest.TestCase):
                         controller.parse_capture(step, captured, paths, "macos", checks)
                 self.assertEqual(public["native_diagnostic"], diagnostic)
                 self.assertNotIn("PRIVATE", json.dumps(public))
-                checks.expected_python_ids.assert_called_once_with(paths.source, "native", deadline=10.0)
+                checks.native_partition_ids.assert_called_once_with(paths.source, "all", deadline=10.0)
 
     def test_native_prerequisite_fields_are_finite_and_publication_preserves_original(self):
         gate = run_native_profile_checks
@@ -528,8 +563,9 @@ class NativeProfileCITests(unittest.TestCase):
 
     def test_native_inventory_reuses_exact_fixed_source_authority_without_budget(self):
         gate = run_native_profile_checks
-        for case in ("success", "missing-loader", "pattern-drift", "inventory-error"):
-            with self.subTest(case=case):
+        for case, partition in itertools.product(("success", "missing-loader", "pattern-drift", "inventory-error"),
+                                                 ("all", "authority", "ordinary")):
+            with self.subTest(case=case, partition=partition):
                 events = []
                 original = ValueError("PRIVATE_SOURCE_INVENTORY_FAILURE")
 
@@ -540,7 +576,7 @@ class NativeProfileCITests(unittest.TestCase):
                     return _FIXTURE_IDS
 
                 checks = SimpleNamespace(NATIVE_PATTERNS=gate.PATTERNS if case != "pattern-drift" else (),
-                                         expected_python_ids=expected)
+                                         native_partition_ids=expected)
                 loader = SimpleNamespace(exec_module=lambda module: events.append(("definitions", module)))
                 spec = SimpleNamespace(loader=None if case == "missing-loader" else loader)
                 specs = Mock(return_value=spec)
@@ -548,14 +584,15 @@ class NativeProfileCITests(unittest.TestCase):
                 facade = SimpleNamespace(util=SimpleNamespace(spec_from_file_location=specs, module_from_spec=modules))
                 with patch.object(gate, "importlib", facade):
                     if case == "success":
-                        self.assertEqual(gate._expected_native_ids(), _FIXTURE_IDS)
+                        self.assertEqual(gate._expected_native_ids() if partition == "all" else
+                                         gate._expected_native_ids(partition), _FIXTURE_IDS)
                     elif case == "inventory-error":
                         with self.assertRaises(ValueError) as raised:
-                            gate._expected_native_ids()
+                            gate._expected_native_ids(partition)
                         self.assertIs(raised.exception, original)
                     else:
                         with self.assertRaises(AssertionError):
-                            gate._expected_native_ids()
+                            gate._expected_native_ids(partition)
                 specs.assert_called_once_with("_mrk_native_inventory", gate.ROOT / ".github/scripts/ci_checks.py")
                 if case == "missing-loader":
                     modules.assert_not_called()
@@ -564,8 +601,322 @@ class NativeProfileCITests(unittest.TestCase):
                     modules.assert_called_once_with(spec)
                     expected_events = [("definitions", checks)]
                     if case != "pattern-drift":
-                        expected_events.append(("inventory", (gate.ROOT, "native"), {}))
+                        expected_events.append(("inventory", (gate.ROOT, partition), {}))
                     self.assertEqual(events, expected_events)
+
+    def test_native_partition_entrypoints_are_exact_and_preserve_standalone_forms(self):
+        gate = run_native_profile_checks
+        cases = (([], "all", False), (["--installed-wheel"], "all", True),
+                 (["--authority"], "authority", False), (["--authority", "--installed-wheel"], "authority", True),
+                 (["--ordinary"], "ordinary", False), (["--ordinary", "--installed-wheel"], "ordinary", True))
+        for arguments, partition, wheel in cases:
+            with self.subTest(arguments=arguments), patch.object(gate, "run", return_value=7) as run:
+                self.assertEqual(gate.main(arguments), 7)
+                run.assert_called_once_with(partition=partition, installed_wheel=wheel)
+        invalid = (None, "--authority", {}, [True], ["--help"], ["--authority", "--ordinary"],
+                   ["--ordinary", "--authority"], ["--authority", "--authority"],
+                   ["--installed-wheel", "--authority"], ["--installed-wheel", "--ordinary"],
+                   ["--authority", "--installed-wheel", "--installed-wheel"], ["--test", _FIXTURE_IDS[0]])
+        for arguments in invalid:
+            with self.subTest(arguments=arguments), patch.object(gate, "run") as run:
+                with self.assertRaises(SystemExit):
+                    gate.main(arguments)
+                run.assert_not_called()
+        for arguments in ({"partition": "other"}, {"partition": True}, {"installed_wheel": 1}):
+            with _inert_native_gate() as fixture, self.assertRaises(AssertionError):
+                gate.run(**arguments)
+            self.assertEqual(fixture.events, [])
+
+    def test_native_partitions_place_prerequisites_and_preserve_failure_and_pins(self):
+        gate = run_native_profile_checks
+        for partition, wheel, outcome in itertools.product(("authority", "ordinary"), (False, True),
+                                                           ("success", "error", "skip")):
+            with self.subTest(partition=partition, wheel=wheel, outcome=outcome):
+                suites, module, executed = _inert_native_suites(outcome)
+                package = gate.ROOT.parent / ("work/wheel-venv/lib/python3.11/site-packages/mobile_release" if wheel
+                                              else "work/source-build/src/mobile_release")
+                selected = unittest.TestSuite(suites)
+                with patch.dict(sys.modules, {_FIXTURE_MODULE: module}), _inert_native_gate() as fixture:
+                    fixture.product_values[-1].apple_roots.side_effect = lambda: fixture.events.append("pins")
+                    with patch.object(gate, "_authority_package_root", side_effect=lambda value:
+                                      fixture.events.append("authority-runtime") or package) as runtime, \
+                            patch.object(gate, "_fixed_package", side_effect=lambda name, directory:
+                                         fixture.events.append("bootstrap:" + name)) as bootstrap, \
+                            patch.object(gate, "_selected_suite", side_effect=lambda expected:
+                                         fixture.events.append("selected") or selected) as selection, \
+                            patch.object(gate, "_authority_origins", side_effect=lambda *_args, **_kwargs:
+                                         fixture.events.append("origins")) as origins:
+                        self.assertEqual(gate.run(partition=partition, installed_wheel=wheel), outcome != "success")
+                    fixture.inventory.assert_called_once_with(partition)
+                    selection.assert_called_once_with(_FIXTURE_IDS)
+                    fixture.loader.assert_not_called()
+                    self.assertEqual(fixture.calls, [] if partition == "ordinary" else [
+                        (command, {"stdin": subprocess.DEVNULL, "check": True, "timeout": 30})
+                        for _role, command in _NATIVE_COMMANDS])
+                    if partition == "authority":
+                        runtime.assert_called_once_with(wheel)
+                        self.assertEqual(bootstrap.call_args_list[0].args, ("mobile_release", package))
+                        self.assertEqual(bootstrap.call_count, 2)
+                        self.assertEqual(origins.call_count, 3 if outcome == "success" else 2)
+                        self.assertEqual(origins.call_args_list[0].args, (package,))
+                        self.assertEqual(origins.call_args_list[1].kwargs, {"tests_loaded": True})
+                        self.assertEqual(fixture.events[:8], ["authority-runtime"] + ["prerequisite"] * 4
+                                         + ["inventory", "bootstrap:mobile_release", "bootstrap:unit"])
+                    else:
+                        runtime.assert_not_called()
+                        self.assertEqual([call.args for call in bootstrap.call_args_list], [
+                            ("unit", gate.ROOT / "tests/unit"), ("workflow", gate.ROOT / "tests/workflow")])
+                        origins.assert_not_called()
+                        self.assertEqual(fixture.events[:4], ["inventory", "bootstrap:unit", "bootstrap:workflow", "product-import"])
+                    self.assertEqual(fixture.product_values[-1].apple_roots.call_count,
+                                     1 if wheel or partition == "authority" else 0)
+                self.assertEqual(executed, ["before", "subject", "after"])
+                envelopes = _native_envelopes(fixture.stderr.getvalue())
+                self.assertEqual(len(envelopes), 0 if outcome == "success" else 1)
+                if envelopes:
+                    self.assertEqual(envelopes[0]["phase"], "tests")
+                    self.assertEqual(envelopes[0]["records"][0]["id"], _FIXTURE_IDS[1])
+                    self.assertEqual(envelopes[0]["records"][0]["outcome"], outcome)
+
+        original = subprocess.CalledProcessError(1, "PRIVATE_NATIVE_COMMAND")
+        for failure in ("runtime", "prerequisite"):
+            def fail(_index):
+                raise original
+
+            with _inert_native_gate(run_effect=fail) as fixture, \
+                    patch.object(gate, "_authority_package_root", side_effect=original if failure == "runtime" else None), \
+                    patch.object(gate, "_fixed_package") as bootstrap:
+                with self.assertRaises(subprocess.CalledProcessError) as raised:
+                    gate.run(partition="authority")
+            self.assertIs(raised.exception, original)
+            bootstrap.assert_not_called()
+            fixture.inventory.assert_not_called()
+            self.assertEqual(len(fixture.calls), 0 if failure == "runtime" else 1)
+
+    def test_native_authority_runtime_binds_phase_and_rejects_sites_paths_and_hooks(self):
+        gate = run_native_profile_checks
+        for wheel in (False, True):
+            runtime = _inert_authority_runtime(installed_wheel=wheel)
+            expected = gate.ROOT.parent / ("work/wheel-venv/lib/python3.11/site-packages/mobile_release" if wheel
+                                           else "work/source-build/src/mobile_release")
+            with patch.object(gate, "sys", runtime):
+                self.assertEqual(gate._authority_package_root(wheel), expected)
+            self.assertEqual(runtime.modules, {})
+        mutations = {
+            "site-enabled": lambda s: setattr(s.flags, "no_site", 0),
+            "environment-enabled": lambda s: setattr(s.flags, "ignore_environment", 0),
+            "writes-bytecode": lambda s: setattr(s, "dont_write_bytecode", False),
+            "wrong-version": lambda s: setattr(s, "version_info", (3, 12, 0)),
+            "wrong-implementation": lambda s: setattr(s.implementation, "name", "other"),
+            "wrong-phase": lambda s: setattr(s, "executable", str(gate.ROOT.parent / "work/wheel-venv/bin/python")),
+            "provider-not-venv": lambda s: setattr(s, "executable", "/fixture/provider/python311/bin/python"),
+            "relative-interpreter": lambda s: setattr(s, "executable", "work/source-venv/bin/python"),
+            "site-import": lambda s: s.modules.update(site=ModuleType("site")),
+            "sitecustomize-import": lambda s: s.modules.update(sitecustomize=ModuleType("sitecustomize")),
+            "usercustomize-import": lambda s: s.modules.update(usercustomize=ModuleType("usercustomize")),
+            "preloaded-product": lambda s: s.modules.update(mobile_release=ModuleType("mobile_release")),
+            "preloaded-test-child": lambda s: s.modules.update({"unit.old": ModuleType("unit.old")}),
+            "preloaded-workflow": lambda s: s.modules.update(workflow=ModuleType("workflow")),
+            "extra-meta-hook": lambda s: s.meta_path.append(object()),
+            "replacement-path-hook": lambda s: s.path_hooks.__setitem__(1, lambda path: None),
+            "extra-path-hook": lambda s: s.path_hooks.append(lambda path: None),
+            "current-directory": lambda s: s.path.insert(0, ""),
+            "test-search-directory": lambda s: s.path.append(str(gate.ROOT / "tests")),
+            "site-search-directory": lambda s: s.path.append(str(gate.ROOT.parent / "work/wheel-venv/lib/python3.11/site-packages")),
+            "cached-custom-finder": lambda s: s.path_importer_cache.update({s.path[1]: object()}),
+            "preloaded-package-finder": lambda s: s.path_importer_cache.update({
+                str(gate.ROOT.parent / "work/source-build/src/mobile_release"): None}),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(mutation=name):
+                runtime = _inert_authority_runtime()
+                mutate(runtime)
+                with patch.object(gate, "sys", runtime), self.assertRaises(AssertionError):
+                    gate._authority_package_root(False)
+        # A function with the stock hook's code but different loader closure is
+        # still an import hook, not the pristine provider's path loader.
+        runtime = _inert_authority_runtime()
+        runtime.path_hooks[1] = gate.importlib.machinery.FileFinder.path_hook(
+            (gate.importlib.machinery.SourceFileLoader, [".different"]))
+        with patch.object(gate, "sys", runtime), self.assertRaises(AssertionError):
+            gate._authority_package_root(False)
+
+    def test_native_authority_bootstrap_is_explicit_and_preserves_import_custody(self):
+        gate = run_native_profile_checks
+        loader_class = gate.importlib.machinery.SourceFileLoader
+        for wheel in (False, True):
+            runtime = _inert_authority_runtime(installed_wheel=wheel)
+            original_path = runtime.path[:]
+            with patch.object(gate, "sys", runtime), patch.object(loader_class, "exec_module") as execute:
+                package = gate._authority_package_root(wheel)
+                gate._fixed_package("mobile_release", package)
+                gate._fixed_package("unit", gate.ROOT / "tests/unit")
+                self.assertEqual(execute.call_count, 2)
+                self.assertEqual(execute.call_args_list[0].args, (runtime.modules["mobile_release"],))
+                self.assertEqual(execute.call_args_list[1].args, (runtime.modules["unit"],))
+                self.assertEqual(runtime.modules["mobile_release"].__file__, str(package / "__init__.py"))
+                self.assertEqual(runtime.modules["mobile_release"].__path__, [str(package)])
+                self.assertEqual(runtime.modules["unit"].__path__, [str(gate.ROOT / "tests/unit")])
+                with self.assertRaises(AssertionError):
+                    gate._fixed_package("mobile_release", package)
+                self.assertEqual(execute.call_count, 2)
+            self.assertEqual(runtime.path, original_path)
+            self.assertEqual(set(runtime.modules), {"mobile_release", "unit"})
+
+        # The ordinary native partition additionally loads the immutable
+        # workflow package for real process/default-cancellation fixtures.
+        runtime = _inert_authority_runtime()
+        with patch.object(gate, "sys", runtime), patch.object(loader_class, "exec_module") as execute:
+            gate._fixed_package("workflow", gate.ROOT / "tests/workflow")
+            self.assertEqual(runtime.modules["workflow"].__path__, [str(gate.ROOT / "tests/workflow")])
+            execute.assert_called_once_with(runtime.modules["workflow"])
+
+        original = OSError(errno.EIO, "PRIVATE_BOOTSTRAP_ERROR")
+        for fault in ("exception", "origin-changed", "custody-changed", "early-origin", "missing-loader"):
+            with self.subTest(fault=fault):
+                runtime = _inert_authority_runtime()
+                directory = gate.ROOT.parent / "work/source-build/src/mobile_release"
+                other = ModuleType("mobile_release")
+
+                def execute(module):
+                    if fault == "exception":
+                        raise original
+                    if fault == "origin-changed":
+                        module.__file__ = "/PRIVATE_ALTERNATE_PACKAGE/__init__.py"
+                    if fault == "custody-changed":
+                        runtime.modules["mobile_release"] = other
+
+                spec = gate.importlib.util.spec_from_file_location(
+                    "mobile_release", (Path("/PRIVATE_ALTERNATE_PACKAGE") if fault == "early-origin" else directory)
+                    / "__init__.py", submodule_search_locations=[str(directory)])
+                if fault == "missing-loader":
+                    spec.loader = None
+                with patch.object(gate, "sys", runtime), patch.object(loader_class, "exec_module", side_effect=execute) as run, \
+                        patch.object(gate.importlib.util, "spec_from_file_location", return_value=spec):
+                    with self.assertRaises(OSError if fault == "exception" else AssertionError) as raised:
+                        gate._fixed_package("mobile_release", directory)
+                if fault == "exception":
+                    self.assertIs(raised.exception, original)
+                self.assertEqual(runtime.modules, {"mobile_release": other} if fault == "custody-changed" else {})
+                self.assertEqual(run.call_count, 0 if fault in {"early-origin", "missing-loader"} else 1)
+
+    def test_native_authority_origins_reject_mixed_packages_and_unrelated_test_code(self):
+        gate = run_native_profile_checks
+        for wheel, fault in itertools.product((False, True), (
+                "none", "source-mix", "extra-package-path", "loader", "spec-origin", "package-name", "nested-package",
+                "missing-product", "missing-test", "unrelated-test", "ordinary-workflow", "late-search-path")):
+            with self.subTest(wheel=wheel, fault=fault):
+                runtime = _inert_authority_runtime(installed_wheel=wheel)
+                with patch.object(gate, "sys", runtime):
+                    package = gate._authority_package_root(wheel)
+                    for name in gate.AUTHORITY_PRODUCT_MODULES | gate.AUTHORITY_UNIT_MODULES:
+                        is_product = name == "mobile_release" or name.startswith("mobile_release.")
+                        runtime.modules[name] = _inert_origin_module(
+                            name, package if is_product else gate.ROOT / "tests/unit", package="." not in name)
+                    subject = runtime.modules["mobile_release.ios_profiles"]
+                    if fault == "source-mix":
+                        runtime.modules["mobile_release.ios_profiles"] = _inert_origin_module(
+                            "mobile_release.ios_profiles", gate.ROOT / "src/mobile_release")
+                    elif fault == "extra-package-path":
+                        runtime.modules["mobile_release"].__path__.append("/PRIVATE_OTHER_PACKAGE")
+                    elif fault == "loader":
+                        subject.__loader__ = object()
+                    elif fault == "spec-origin":
+                        subject.__spec__.origin = "/PRIVATE_OTHER_PACKAGE/ios_profiles.py"
+                    elif fault == "package-name":
+                        subject.__package__ = "other"
+                    elif fault == "nested-package":
+                        subject.__path__ = []
+                    elif fault == "missing-product":
+                        del runtime.modules["mobile_release.ios_profiles"]
+                    elif fault == "missing-test":
+                        del runtime.modules["unit.ios_profile_helpers"]
+                    elif fault == "unrelated-test":
+                        name = "unit.test_macho_native"
+                        runtime.modules[name] = _inert_origin_module(name, gate.ROOT / "tests/unit")
+                    elif fault == "ordinary-workflow":
+                        runtime.modules["workflow"] = _inert_origin_module(
+                            "workflow", gate.ROOT / "tests/workflow", package=True)
+                    elif fault == "late-search-path":
+                        runtime.path.append("")
+                    if fault == "none":
+                        gate._authority_origins(package, tests_loaded=True)
+                        # The real unmodified worker derives its package parent
+                        # from precisely this bound ios_profiles.__file__.
+                        self.assertEqual(Path(subject.__file__).parent.parent, package.parent)
+                    else:
+                        with self.assertRaises(AssertionError):
+                            gate._authority_origins(package, tests_loaded=True)
+
+    def test_native_partition_selection_keeps_exact_methods_and_real_fixture_lifecycle(self):
+        gate = run_native_profile_checks
+        _suites, module, events = _inert_native_suites()
+        package = ModuleType("unit")
+        package.__path__ = []
+        package.native_diagnostic_fixture = module
+        module.setUpModule = lambda: events.append("module-setup")
+        module.tearDownModule = lambda: events.append("module-teardown")
+
+        def class_setup(cls):
+            events.append("class-setup")
+            cls.addClassCleanup(lambda: events.append("class-cleanup"))
+
+        module.Fixture.setUpClass = classmethod(class_setup)
+        module.Fixture.tearDownClass = classmethod(lambda cls: events.append("class-teardown"))
+        module.Fixture.test_04_support = lambda self: events.append("UNSELECTED")
+        expected = _FIXTURE_IDS[:3]
+        with patch.dict(sys.modules, {"unit": package, _FIXTURE_MODULE: module}):
+            suite = gate._selected_suite(expected)
+            self.assertEqual(suite.countTestCases(), 3)
+            result = unittest.TextTestRunner(stream=io.StringIO()).run(suite)
+        self.assertTrue(result.wasSuccessful())
+        self.assertEqual(result.testsRun, 3)
+        self.assertEqual(result.skipped, [])
+        self.assertEqual(events, ["module-setup", "class-setup", "before", "subject", "after",
+                                  "class-teardown", "class-cleanup", "module-teardown"])
+
+        for malformed in ((), [], (_FIXTURE_IDS[0], _FIXTURE_IDS[0]), tuple(reversed(expected)), (1,)):
+            with patch.object(gate.unittest, "TestLoader") as loader, self.assertRaises(AssertionError):
+                gate._selected_suite(malformed)
+            loader.assert_not_called()
+        for fault in ("duplicate", "missing", "extra", "unknown", "loader-error"):
+            with self.subTest(fault=fault):
+                suites, module, events = _inert_native_suites(unknown_id=fault == "unknown")
+                cases = [test for suite in suites for test in suite]
+                selected = cases[:3]
+                if fault == "duplicate":
+                    selected[1] = selected[0]
+                elif fault == "missing":
+                    selected.pop()
+                elif fault == "extra":
+                    selected.append(cases[3])
+                producer = SimpleNamespace(errors=["PRIVATE_IMPORT_ERROR"] if fault == "loader-error" else [],
+                    loadTestsFromNames=Mock(return_value=unittest.TestSuite(selected)))
+                with patch.object(gate.unittest, "TestLoader", return_value=producer), self.assertRaises(AssertionError):
+                    gate._selected_suite(expected)
+                self.assertEqual(events, [])
+
+    def test_native_authority_success_requires_final_origin_check_without_erasing_failure(self):
+        gate = run_native_profile_checks
+        original = AssertionError("PRIVATE_FINAL_ORIGIN_DRIFT")
+        for outcome in ("success", "error"):
+            suites, module, _events = _inert_native_suites(outcome)
+            with patch.dict(sys.modules, {_FIXTURE_MODULE: module}), _inert_native_gate() as fixture, \
+                    patch.object(gate, "_authority_package_root", return_value=Path("/fixture/package")), \
+                    patch.object(gate, "_fixed_package"), \
+                    patch.object(gate, "_selected_suite", return_value=unittest.TestSuite(suites)), \
+                    patch.object(gate, "_authority_origins", side_effect=[None, None, original]) as origins:
+                if outcome == "success":
+                    with self.assertRaises(AssertionError) as raised:
+                        gate.run(partition="authority")
+                    self.assertIs(raised.exception, original)
+                else:
+                    self.assertEqual(gate.run(partition="authority"), 1)
+            self.assertEqual(origins.call_count, 3 if outcome == "success" else 2)
+            envelopes = _native_envelopes(fixture.stderr.getvalue())
+            self.assertEqual(len(envelopes), 0 if outcome == "success" else 1)
+            if envelopes:
+                self.assertEqual(envelopes[0]["records"][0]["category"], "os-error")
 
 
 if __name__ == "__main__":

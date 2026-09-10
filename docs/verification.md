@@ -48,6 +48,7 @@ The helpers under [`.github/scripts/`](../.github/scripts/) have separate roles:
 | `ci_prepare.py` | Bounded public dependency acquisition and hash verification; never package installation or project evaluation. |
 | `ci_checks.py` | Fixed product checks, complete Python method outcomes, wheel/consumer validation and JDK signer scenarios. |
 | `ci_process_observer.c` | macOS-only, unprivileged SDK/libproc observation of one fixture PID; no signaling or process enumeration. |
+| `ci_native_authority.py` | Fixed macOS trust-service lookup and synthetic offline-evaluation controls; no general service-request interface. |
 
 These are CI internals, not a general command-execution API. The reviewed
 `required_gate_ids()` and `catalog()` select the complete platform sequence.
@@ -154,9 +155,60 @@ or finality failure stay failed for VM disposal; restore and descriptor-close er
 are collected independently. Never apply this host preparation on a shared VPS.
 
 macOS uses a numeric `Popen` credential drop and inherited `sandbox-exec` policy.
-The candidate denies networking and Mach lookup, restricts writes to task work,
+The ordinary policy denies networking and Mach lookup, restricts writes to task work,
 protects runner/control reads, and restricts signals to the same sandbox. Native
 controls must prove inheritance through fork/exec and detached descendants.
+
+### Fixed macOS native-authority partition
+
+Actual Apple trust evaluation needs the platform trust service even with explicit
+anchors, network access disabled and keychain search disabled. Only the fixed
+native-authority partition may look up the two literal endpoints
+`com.apple.trustd` and `com.apple.trustd.agent`; Security.framework chooses its
+real inherited-bootstrap route. This is not a service permission for ordinary
+tests, builds, arbitrary commands or user-supplied inputs. Ordinary policy stays
+unchanged and cannot acquire this grant by applying a second sandbox policy.
+
+The same collision-admitted numeric identity executes precisely the five existing
+`NativeProfileAuthorityTests` methods and the four unchanged tool prerequisites.
+The remaining native tests run separately under ordinary policy. Source and
+installed-wheel gates each require two genuine successful captures, their exact
+nonempty/disjoint/complete method union, and no skips. Each original capture
+retains its own wait, EOF, exit, finality, cleanup and persisted-output facts;
+there is no manufactured combined process result. Failure retains completed and
+unexecuted partition information and never authorizes a later launch.
+
+Authority entry uses the selected Python with `-I -S -B`, explicit immutable
+package specifications, fixed test helpers and fresh exclusive scratch. No
+site/.pth startup, ambient configuration or prior writable work is admitted.
+Parent inspection compares every selected package module/resource with the
+source, including installed-wheel bytes and immutable modes. The unchanged
+profile worker uses the same selected package. Its parent directory may be
+listed for Python's package finder, but sibling file/module bytes remain denied;
+listing a directory is not a site-packages subtree read grant.
+
+Native controls require real outside positives and protected-read/write, inherited
+descriptor, foreign-signal and IPv4/IPv6 TCP/UDP denials under the role. Finite
+lookup-only controls distinguish known-present forbidden services from service
+absence. No trust-store mutation, service management or daemon cleanup is used.
+The fixed AIA probe uses four fresh synthetic chains/unique loopback issuer URLs
+and the same probe-only loopback permission. After a common explicitly enabled
+network baseline, the online control must actually fetch and accept; the offline
+control disables networking while retaining certificate-parent lookup. A mutant
+omits only that final disabling setter and must be detected by real fetches.
+A separate negative ends with both network/keychain getters false, matching
+product settings. BasicX509 itself defaults offline: this is not a default-true
+claim or proof about deleting the production setter alone. Production policies
+and the five real test methods are unchanged. All probe resources have their
+original bounded owner and independent cleanup/finality checks.
+
+The original canonical `/usr/bin/codesign` and clean system launch are part of the
+Apple OS/provider trust basis for its default offline verification semantics.
+File ownership/hashes are not a measured executing-process platform-status bit.
+Per-evaluation offline settings also do not promise global OS network silence:
+trustd can perform independent system maintenance. Its daemon processes and
+caches are not task-owned. No real credentials, Store request or private signing
+input is supplied; actual arbitrary project sockets remain denied.
 
 Before product tests, synthetic admission checks exercise credentials, protected
 files, ordinary local IPC, inherited descriptors, outside-domain loopback denial,
@@ -171,6 +223,13 @@ no failed gate receives a renewed execution allowance. Child CPU, file, descript
 process and memory bounds supplement the hosted job timeout. The current capture
 limits are 8 MiB per ordinary stream, 16 MiB for selected installer streams, and
 256 MiB persisted per attempt. A 4 GiB + 512 MiB disk reserve is maintained.
+
+Each logical native source/wheel gate fixes `min(aggregate_deadline, start+900)`
+before package inspection or role preparation. Both subcaptures, preparation,
+parsers, process finality and final union reconciliation use that same absolute
+cutoff; the second capture does not receive a new900-second budget. Exhausting
+the aggregate/explicit endpoint fails immediately, without a renewed grace
+period. Original-handle cleanup still runs; uncertain finality cannot pass.
 
 The ordinary per-file logical-size limit is512MiB. Only the exact Linux
 `python-full` invocation uses `(1 << 32) + 1MiB`, preserving the genuine sparse

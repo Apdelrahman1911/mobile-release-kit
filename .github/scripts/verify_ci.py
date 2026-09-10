@@ -111,6 +111,7 @@ class Step:
     seconds: int = 120
     parser: str = "exit"
     expected_tests: int = 0
+    native_partition: str = "all"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -633,7 +634,9 @@ def minitest_records(stdout: str, expected: tuple[str, ...], *, deadline: float 
                        "unknown_count": unknown}
 
 
-def parse_capture(step: Step, result, paths: Paths, platform: str, checks) -> CheckResult:
+def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, deadline: float | None = None) -> CheckResult:
+    if deadline is not None:
+        check_clock(deadline)
     if (not result.ok or type(result.returncode) is not int or result.returncode != 0
             or result.waited is not True or result.stdout_eof is not True or result.stderr_eof is not True
             or result.domain_finality is not True or result.primary_error is not None or result.cleanup_errors):
@@ -660,7 +663,7 @@ def parse_capture(step: Step, result, paths: Paths, platform: str, checks) -> Ch
     elif step.parser == "native":
         if any(line.startswith(NATIVE_DIAGNOSTIC_PREFIX) for line in (stdout + "\n" + stderr).splitlines()):
             raise VerificationError("NATIVE_FAILURE_DIAGNOSTIC_ON_SUCCESS")
-        expected = checks.expected_python_ids(paths.source, "native")
+        expected = checks.native_partition_ids(paths.source, step.native_partition, deadline=deadline)
         footers = re.findall(r"(?m)^Ran (\d+) tests? in [0-9.]+s\s*$", stderr)
         if footers != [str(len(expected))] or not re.search(r"(?m)^OK\s*$", stderr) or "skipped" in stderr:
             raise VerificationError("NATIVE_PYTHON_RESULT")
@@ -710,6 +713,8 @@ def parse_capture(step: Step, result, paths: Paths, platform: str, checks) -> Ch
         details["summary"] = summary
     elif step.parser != "exit":
         raise VerificationError("UNKNOWN_RESULT_PARSER")
+    if deadline is not None:
+        check_clock(deadline)
     return CheckResult(True, details)
 
 
@@ -817,15 +822,20 @@ def native_failure_diagnostic(text: str, expected: tuple[str, ...], *, deadline:
     return {"schema": 1, "phase": phase, "records": records}
 
 
+def capture_observations(result) -> dict:
+    """Original capture facts, retained even when later parsing/inspection fails."""
+    return {"returncode": result.returncode, "waited": result.waited,
+            "stdout_eof": result.stdout_eof, "stderr_eof": result.stderr_eof,
+            "domain_finality": result.domain_finality, "timed_out": result.timed_out,
+            "cancelled": result.cancelled, "stdout_bytes": len(result.stdout),
+            "stderr_bytes": len(result.stderr), "persisted": list(result.persisted),
+            "seconds": round(result.duration, 3), "cleanup_error_count": len(result.cleanup_errors)}
+
+
 def failure_details(result, step: Step | None = None, paths: Paths | None = None,
                     *, checks=None, deadline: float | None = None, platform: str | None = None) -> dict:
     """Public-safe observations only; never forward raw child diagnostics."""
-    value = {"returncode": result.returncode, "waited": result.waited,
-             "stdout_eof": result.stdout_eof, "stderr_eof": result.stderr_eof,
-             "domain_finality": result.domain_finality, "timed_out": result.timed_out,
-             "cancelled": result.cancelled, "stdout_bytes": len(result.stdout),
-             "stderr_bytes": len(result.stderr), "persisted": list(result.persisted),
-             "seconds": round(result.duration, 3), "cleanup_error_count": len(result.cleanup_errors)}
+    value = capture_observations(result)
     # These are fixed source file/line and exception-class observations, not
     # raw exceptions, fixture logs, private paths, environment or signing data.
     text = result.stderr.decode("utf-8", "replace")
@@ -919,7 +929,7 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
         try:
             if deadline is not None:
                 check_clock(deadline)
-            expected = checks.expected_python_ids(paths.source, "native", deadline=deadline)
+            expected = checks.native_partition_ids(paths.source, step.native_partition, deadline=deadline)
             diagnostic = native_failure_diagnostic(result.stdout.decode("utf-8", "replace") + "\n" + stderr,
                                                    expected, deadline=deadline)
             if diagnostic is not None:
@@ -1007,8 +1017,118 @@ def tool_evidence(paths: Paths, session, platform: str, *, deadline: float) -> d
     return data
 
 
+def perform_native_gate(step: Step, paths: Paths, session, checks,
+                        platform: str, *, deadline: float) -> CheckResult:
+    """Two original captures, one logical gate and one never-renewed cutoff.
+
+    The catalog retains the standalone representative command. Only these two
+    fixed gate identities may use this partitioned protocol; the Session admits
+    the narrower authority argv independently. No merged CapturedRun is made.
+    """
+    started = time.monotonic()
+    details = {"stage": "contract", "partitions": [
+        {"partition": name, "status": "UNEXECUTED"} for name in ("authority", "ordinary")
+    ]}
+    active = None
+    try:
+        check_clock(deadline)
+        cutoff = min(deadline, started + 900.0)
+        phase = {"native-profile-source": "source", "native-profile-wheel": "wheel"}.get(step.id)
+        if platform != "macos" or phase is None:
+            raise VerificationError("NATIVE_GATE_CONTRACT")
+        python = paths.source_python if phase == "source" else paths.wheel_python
+        entry = paths.source / "tests/workflow/run_native_profile_checks.py"
+        tail = () if phase == "source" else ("--installed-wheel",)
+        env = dict(environment(paths, platform))
+        if phase == "wheel":
+            env["PATH"] = str(paths.wheel_python.parent) + ":" + env["PATH"]
+            env["MOBILE_RELEASE_TEST_PYTHON"] = str(paths.wheel_python)
+        expected = Step(step.id, argv=(str(python), "-I", "-B", str(entry), *tail),
+                        cwd=paths.work, env=tuple(sorted(env.items())), seconds=900, parser="native")
+        if step != expected:
+            raise VerificationError("NATIVE_GATE_CONTRACT")
+        session.ensure_idle(deadline=cutoff)
+        check_capacity(paths.work, 64 * 1024**2)
+        details["stage"] = "inventory"
+        inventories = {name: checks.native_partition_ids(paths.source, name, deadline=cutoff)
+                       for name in ("all", "authority", "ordinary")}
+        if (any(type(ids) is not tuple or not ids or tuple(sorted(set(ids))) != ids
+                for ids in inventories.values())
+                or len(inventories["authority"]) != 5
+                or set(inventories["authority"]) & set(inventories["ordinary"])
+                or tuple(sorted(inventories["authority"] + inventories["ordinary"])) != inventories["all"]):
+            raise VerificationError("NATIVE_PARTITION_UNION")
+        details["stage"] = "package"
+        package = (paths.work / "source-build/src/mobile_release" if phase == "source"
+                   else paths.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
+        details["package"] = checks.inspect_native_package(paths.source, package, deadline=cutoff)
+        details["stage"] = "preparation"
+        session.prepare_native_authority(phase, deadline=cutoff)
+        completed = []
+        for row in details["partitions"]:
+            active = row
+            partition = row["partition"]
+            details["stage"] = partition
+            check_clock(cutoff)
+            session.ensure_idle(deadline=cutoff)
+            authority = partition == "authority"
+            part = dataclasses.replace(step, native_partition=partition,
+                argv=(str(python), "-I", *(("-S",) if authority else ()), "-B", str(entry),
+                      "--" + partition, *tail),
+                cwd=paths.work / f"native-authority-{phase}" if authority else step.cwd,
+                env=() if authority else step.env)
+            row["status"] = "RUNNING"
+            value = session.run(list(part.argv), cwd=part.cwd, env=dict(part.env), seconds=900,
+                                output_limit=8 * 1024**2, cpu_seconds=180,
+                                profile=f"native-authority-{phase}" if authority else "ordinary",
+                                absolute_deadline=cutoff)
+            row["capture"] = capture_observations(value)
+            primary = None
+            try:
+                parsed = parse_capture(part, value, paths, platform, checks, deadline=cutoff)
+            except BaseException as exc:
+                primary = exc
+            try:
+                session.ensure_idle(deadline=cutoff)
+            except BaseException as exc:
+                if primary is None:
+                    primary = exc
+                else:
+                    row["idle_error"] = error_details(exc)
+            if primary is not None:
+                try:
+                    row["capture"] = failure_details(value, part, paths, checks=checks,
+                                                     deadline=cutoff, platform=platform)
+                except BaseException as exc:
+                    # Original wait/EOF/persisted counts and first failure stay
+                    # available even if the diagnostic parser is interrupted.
+                    row["diagnostic_error"] = error_details(exc)
+                raise primary
+            observed = tuple(parsed.details["completed"])
+            if observed != inventories[partition]:
+                raise VerificationError("NATIVE_PARTITION_RESULT")
+            row.update(status="PASS", tests=len(observed), completed=list(observed))
+            completed.extend(observed)
+        details["stage"] = "union"
+        check_clock(cutoff)
+        if tuple(sorted(completed)) != inventories["all"] or len(completed) != len(set(completed)):
+            raise VerificationError("NATIVE_PARTITION_UNION")
+        details.update(stage="complete", tests=len(completed), completed=sorted(completed))
+        check_clock(cutoff)
+        return CheckResult(True, details)
+    except BaseException as exc:
+        if active is not None and active["status"] == "RUNNING":
+            active["status"] = "FAIL"
+        details["failure"] = error_details(exc)
+        return CheckResult(False, details, exc.code if isinstance(exc, VerificationError) else "NATIVE_GATE_FAILURE")
+
+
 def perform_step(step: Step, paths: Paths, session, checks, inventory: dict,
                  platform: str, *, deadline: float) -> CheckResult:
+    if step.id in {"native-profile-source", "native-profile-wheel"}:
+        # Compute the native gate's absolute endpoint before any preparation,
+        # census, capacity check or package inspection can consume its budget.
+        return perform_native_gate(step, paths, session, checks, platform, deadline=deadline)
     check_clock(deadline)
     session.ensure_idle()
     # Allow room for this gate's finite install/build rather than filling the VM.

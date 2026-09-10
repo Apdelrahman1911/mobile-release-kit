@@ -1,0 +1,861 @@
+"""Finite macOS admission controls; importing this module performs no probes.
+
+Only the original hosted owner may select these immutable child roles. This is
+not an application API, an arbitrary IPC client, or a network-enabled test runner.
+The actual authority and ordinary policies keep their network denial. trustd's
+autonomous system maintenance remains part of the OS TCB, not a task-owned worker.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import re
+import secrets
+import socket
+import stat
+import subprocess
+import sys
+import threading
+import time
+from types import SimpleNamespace
+
+
+TRUST_SERVICES = ("com.apple.trustd", "com.apple.trustd.agent")
+OTHER_SERVICE = "com.apple.cfprefsd.daemon"
+MACH_SERVICES = (*TRUST_SERVICES, OTHER_SERVICE)
+MACH_PREFIX = b"MRK_NATIVE_MACH="
+AIA_PREFIX = b"MRK_NATIVE_AIA="
+_DENIED = (1100, 1102)  # NOT_PRIVILEGED / UNKNOWN_SERVICE; needs an outside positive.
+_CASES = ("online", "offline", "mutant", "product-offline")
+_MAX_DER = 16 * 1024
+_FAILURE_PREFIX = b"MRK_NATIVE_CONTROL_FAILED="
+_FAILURE_ROLES = frozenset(("mach", "mach-nonexpand", "aia-prepare", "aia-evaluate", "invalid"))
+_FAILURE_CATEGORIES = frozenset(("NativeControlError", "TimeoutExpired", "KeyboardInterrupt", "SystemExit",
+                               "MemoryError", "OSError", "ValueError", "TypeError", "AttributeError",
+                               "AssertionError", "RuntimeError", "Exception", "BaseException"))
+
+
+class NativeControlError(RuntimeError):
+    """A fixed native control or its independently owned cleanup failed."""
+
+
+def _failure_note(error: BaseException, argv: list[str]) -> dict:
+    """Closed diagnostic attribution, never messages, paths, arguments or authority.
+
+    error_count counts reported leaf errors only. A truncated note is explicitly
+    incomplete; it cannot stand in for any original capture/finality fact.
+    """
+    roles = {"--mach": (2, "mach"), "--mach-nonexpand": (3, "mach-nonexpand"),
+             "--aia-prepare": (3, "aia-prepare"), "--aia-evaluate": (3, "aia-evaluate")}
+    shape = roles.get(argv[0]) if type(argv) is list and argv and type(argv[0]) is str else None
+    role = shape[1] if shape is not None and len(argv) == shape[0] else "invalid"
+    categories = ((NativeControlError, "NativeControlError"), (subprocess.TimeoutExpired, "TimeoutExpired"),
+                  (KeyboardInterrupt, "KeyboardInterrupt"), (SystemExit, "SystemExit"),
+                  (MemoryError, "MemoryError"), (OSError, "OSError"), (ValueError, "ValueError"),
+                  (TypeError, "TypeError"), (AttributeError, "AttributeError"),
+                  (AssertionError, "AssertionError"), (RuntimeError, "RuntimeError"),
+                  (Exception, "Exception"), (BaseException, "BaseException"))
+    notes, pending, inspected, truncated = [], [error], 0, False
+    while pending and inspected < 64 and len(notes) < 16:
+        current = pending.pop()
+        inspected += 1
+        if isinstance(current, BaseExceptionGroup):
+            space = max(0, 64 - inspected - len(pending))
+            truncated |= len(current.exceptions) > space
+            pending.extend(reversed(current.exceptions[:space]))
+            continue
+        lines, tb, frames = [], current.__traceback__, 0
+        while tb is not None and frames < 64:
+            if tb.tb_frame.f_code.co_filename == __file__:
+                if type(tb.tb_lineno) is int and 0 < tb.tb_lineno < 10000:
+                    lines.append(tb.tb_lineno)
+                else:
+                    truncated = True
+            tb, frames = tb.tb_next, frames + 1
+        lines = sorted(set(lines))
+        truncated |= tb is not None or len(lines) > 8
+        category = next(name for kind, name in categories if isinstance(current, kind))
+        notes.append({"exception": category, "lines": lines[:8]})
+    return {"schema": 1, "role": role, "error_count": len(notes),
+            "truncated": bool(truncated or pending), "exceptions": notes}
+
+
+def _require(value: bool, message: str) -> None:
+    if not value:
+        raise NativeControlError(message)
+
+
+def _remaining(deadline: float) -> float:
+    _require(type(deadline) in (int, float) and math.isfinite(deadline), "invalid native cutoff")
+    left = deadline - time.monotonic()
+    _require(0 < left <= 3300, "native control cutoff expired or invalid")
+    return left
+
+
+def _object(pairs):
+    result = {}
+    for key, value in pairs:
+        _require(key not in result, "duplicate native control field")
+        result[key] = value
+    return result
+
+
+def _parse(data: bytes, prefix: bytes) -> dict:
+    _require(type(data) is bytes and 0 < len(data) <= 4096 and data.startswith(prefix)
+             and data.endswith(b"\n") and data.count(b"\n") == 1, "native control framing differs")
+    try:
+        value = json.loads(data[len(prefix):-1].decode("ascii"), object_pairs_hook=_object)
+    except (ValueError, UnicodeError) as exc:
+        raise NativeControlError("invalid native control JSON") from exc
+    _require(type(value) is dict and type(value.get("schema")) is int and value["schema"] == 1,
+             "native control schema differs")
+    return value
+
+
+def parse_failure(data: bytes, role: str) -> dict | None:
+    """One fully bounded failed-child note, never execution or success evidence."""
+    if type(role) is not str or role not in _FAILURE_ROLES:
+        return None
+    try:
+        value = _parse(data, _FAILURE_PREFIX)
+    except (NativeControlError, ValueError, UnicodeError, RecursionError):
+        return None
+    if (set(value) != {"schema", "role", "error_count", "truncated", "exceptions"}
+            or value["role"] != role or type(value["truncated"]) is not bool
+            or type(value["error_count"]) is not int or not 0 <= value["error_count"] <= 16
+            or type(value["exceptions"]) is not list or len(value["exceptions"]) != value["error_count"]
+            or value["error_count"] == 0 and not value["truncated"]):
+        return None
+    notes = []
+    for row in value["exceptions"]:
+        if type(row) is not dict or set(row) != {"exception", "lines"}:
+            return None
+        category, lines = row["exception"], row["lines"]
+        if (type(category) is not str or category not in _FAILURE_CATEGORIES
+                or type(lines) is not list or len(lines) > 8
+                or any(type(line) is not int or not 0 < line < 10000 for line in lines)
+                or lines != sorted(set(lines))):
+            return None
+        notes.append({"exception": category, "lines": list(lines)})
+    return {"schema": 1, "role": role, "error_count": len(notes),
+            "truncated": value["truncated"], "exceptions": notes}
+
+
+def parse_mach(data: bytes) -> dict:
+    value = _parse(data, MACH_PREFIX)
+    _require(set(value) == {"schema", "codes", "released"}, "Mach record fields differ")
+    codes, released = value["codes"], value["released"]
+    _require(type(codes) is list and type(released) is list and len(codes) == len(released) == 3,
+             "Mach record inventory differs")
+    for code, closed in zip(codes, released):
+        _require(type(code) is int and code in (0, *_DENIED) and type(closed) is bool
+                 and closed == (code == 0), "Mach result or owned-port release is unknown")
+    return value
+
+
+def require_mach_controls(positive: dict, ordinary: dict, authority: dict, nonexpand: dict) -> None:
+    # UNKNOWN_SERVICE is not independently denial evidence. A corresponding
+    # successful same-attempt outside lookup is mandatory before any negative.
+    records = [parse_mach(MACH_PREFIX + json.dumps(row).encode("ascii") + b"\n")
+               for row in (positive, ordinary, authority, nonexpand)]
+    outside, plain, allowed, nested = [row["codes"] for row in records]
+    _require(outside[2] == 0 and 0 in outside[:2], "required outside Mach positive is unavailable")
+    _require(all(code in _DENIED for code in (*plain, *nested)),
+             "ordinary or nested policy expanded Mach authority")
+    _require(allowed[2] in _DENIED, "authority admitted an unallowed Mach service")
+    for index in range(2):
+        _require(allowed[index] == outside[index], "trust-service availability changed or is denied")
+
+
+def _mach_api():
+    import ctypes as C
+
+    library = C.CDLL("/usr/lib/libSystem.B.dylib")
+    lookup = library.bootstrap_look_up
+    lookup.argtypes = [C.c_uint32, C.c_char_p, C.POINTER(C.c_uint32)]
+    lookup.restype = C.c_int
+    deallocate = library.mach_port_deallocate
+    deallocate.argtypes, deallocate.restype = [C.c_uint32, C.c_uint32], C.c_int
+    bootstrap = C.c_uint32.in_dll(library, "bootstrap_port").value
+    own_task = C.c_uint32.in_dll(library, "mach_task_self_").value
+    _require(bootstrap != 0 and own_task != 0, "native lookup ports are unavailable")
+
+    def query(name):
+        port = C.c_uint32()
+        status = lookup(bootstrap, name.encode("ascii"), C.byref(port))
+        return status, port.value
+
+    return SimpleNamespace(lookup=query, release=lambda port: deallocate(own_task, port))
+
+
+def mach_probe(deadline: float) -> dict:
+    """Lookup only the three literals; never send a service request payload."""
+    _remaining(deadline)
+    _require(sys.platform == "darwin", "Mach controls require real macOS")
+    api = _mach_api()
+    codes, released, errors = [], [], []
+    for name in MACH_SERVICES:
+        port, status = 0, None
+        try:
+            _remaining(deadline)
+            status, port = api.lookup(name)
+            _require(status in (0, *_DENIED) and bool(port) == (status == 0),
+                     "unexpected native lookup status or output right")
+            codes.append(status)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            # Only successful lookups confer custody of this send right. An
+            # invalid error output is not authority to deallocate another name.
+            if status == 0 and port:
+                try:
+                    _require(api.release(port) == 0, "native lookup port release failed")
+                    released.append(True)
+                except BaseException as exc:
+                    errors.append(exc)
+            elif status in _DENIED and not port:
+                released.append(False)
+        if errors:
+            raise BaseExceptionGroup("fixed Mach lookup/cleanup failed", errors)
+    _remaining(deadline)
+    return {"schema": 1, "codes": codes, "released": released}
+
+
+def _command(arguments: list[str], deadline: float, *, capture: bool = False) -> bytes:
+    """Only literal internally constructed fixture/non-expansion commands call this."""
+    child, errors, output = None, [], b""
+    try:
+        _remaining(deadline)
+        cutoff = min(deadline, time.monotonic() + 30.0)
+        child = subprocess.Popen(arguments, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, close_fds=True)
+        left = _remaining(cutoff)  # Popen time cannot renew the original allowance.
+        if capture:
+            # The sole captured child is the finite three-lookup helper, not a
+            # caller command. Its framing is checked by parse_mach afterwards.
+            output, _ = child.communicate(timeout=left)
+        else:
+            child.wait(timeout=left)
+        _require(child.returncode == 0, "fixed native child failed")
+        _remaining(cutoff)
+    except BaseException as exc:
+        errors.append(exc)
+    finally:
+        if child is not None and child.returncode is None:
+            try:
+                child.kill()  # This original child only; never a discovered PID/group.
+            except BaseException as exc:
+                errors.append(exc)
+            try:
+                child.wait(timeout=max(0.0, min(2.0, cutoff - time.monotonic())))
+            except BaseException as exc:
+                errors.append(exc)
+        if child is not None and child.stdout is not None:
+            try:
+                child.stdout.close()
+            except BaseException as exc:
+                errors.append(exc)
+    if errors:
+        raise BaseExceptionGroup("fixed native child/cleanup failed", errors)
+    _remaining(cutoff)
+    return output
+
+
+def mach_nonexpand(policy: Path, deadline: float) -> dict:
+    entry = Path(__file__).resolve(strict=True)
+    wanted = entry.parent / "native-authority-source.sb"
+    _require(policy == wanted and policy.resolve(strict=True) == wanted,
+             "non-expansion policy is not the fixed owner policy")
+    state = policy.lstat()
+    _require(stat.S_ISREG(state.st_mode) and state.st_uid == 0 and stat.S_IMODE(state.st_mode) == 0o444,
+             "non-expansion policy custody differs")
+    result = _command(["/usr/bin/sandbox-exec", "-f", str(wanted), sys.executable,
+                       "-I", "-S", "-B", str(entry), "--mach", repr(deadline)], deadline, capture=True)
+    return parse_mach(result)
+
+
+def _port(value: int) -> int:
+    _require(type(value) is int and 1024 <= value <= 65535, "invalid owned loopback port")
+    return value
+
+
+def _read_public(path: Path, maximum: int = _MAX_DER) -> bytes:
+    """Bounded no-follow read after the Session's original wait/UID finality."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    errors, result = [], b""
+    try:
+        before = os.fstat(fd)
+        _require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+                 and not stat.S_IMODE(before.st_mode) & 0o022 and 0 < before.st_size <= maximum,
+                 "synthetic public fixture type/mode/size differs")
+        result = os.read(fd, maximum + 1)
+        after = os.fstat(fd)
+        _require(0 < len(result) == before.st_size <= maximum
+                 and (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                 == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns),
+                 "synthetic public fixture changed during read")
+    except BaseException as exc:
+        errors.append(exc)
+    finally:
+        try:
+            os.close(fd)
+        except BaseException as exc:
+            errors.append(exc)
+    if errors:
+        raise BaseExceptionGroup("synthetic fixture read/close failed", errors)
+    return result
+
+
+def _write_new(path: Path, data: bytes) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    errors = []
+    try:
+        _require(os.write(fd, data) == len(data), "synthetic fixture write was incomplete")
+    except BaseException as exc:
+        errors.append(exc)
+    finally:
+        try:
+            os.close(fd)
+        except BaseException as exc:
+            errors.append(exc)
+    if errors:
+        raise BaseExceptionGroup("synthetic fixture write/close failed", errors)
+
+
+def _scratch(path: Path) -> Path:
+    _require(path.is_absolute() and path == path.resolve(strict=True) and path.name == "probes"
+             and path.parent.name == "native-authority-source" and path.parent.parent.name == "work"
+             and path.parent.parent.parent.parent == Path("/private/tmp"), "native control scratch differs")
+    state = path.lstat()
+    _require(stat.S_ISDIR(state.st_mode) and stat.S_IMODE(state.st_mode) == 0o700
+             and 60000 <= state.st_uid < 65000 and state.st_gid == state.st_uid,
+             "native control scratch custody differs")
+    return path
+
+
+def _route(nonce: str, case: str) -> str:
+    _require(type(nonce) is str and re.fullmatch(r"[0-9a-f]{32}", nonce) is not None and case in _CASES,
+             "synthetic issuer path differs")
+    return f"/mrk-aia/{nonce}/{case}.der"
+
+
+def prepare_aia(port: int, deadline: float) -> None:
+    """Four independent tiny RSA chains; no trust API evaluates them here."""
+    _port(port)
+    _remaining(deadline)
+    work = _scratch(Path.cwd())
+    _require(not tuple(work.iterdir()), "native fixture scratch is not fresh and empty")
+    rows = []
+    for case in _CASES:
+        _remaining(deadline)
+        nonce = secrets.token_hex(16)
+        url = f"http://127.0.0.1:{port}" + _route(nonce, case)
+        config = work / f"{case}.cnf"
+        _write_new(config, ("[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=unused\n"
+                           "[root]\nbasicConstraints=critical,CA:true,pathlen:1\n"
+                           "keyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n"
+                           "[issuer]\nbasicConstraints=critical,CA:true,pathlen:0\n"
+                           "keyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n"
+                           "authorityKeyIdentifier=keyid:always\n[leaf]\n"
+                           "basicConstraints=critical,CA:false\nkeyUsage=critical,digitalSignature\n"
+                           "subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid:always\n"
+                           f"authorityInfoAccess=caIssuers;URI:{url}\n").encode("ascii"))
+        temporary = [config]
+        for index, role in enumerate(("root", "issuer", "leaf")):
+            stem = work / f"{case}-{role}"
+            key, pem, csr = Path(str(stem) + ".key"), Path(str(stem) + ".pem"), Path(str(stem) + ".csr")
+            temporary.extend((key, pem))
+            subject = f"/CN=MRK synthetic {role} {nonce}"
+            args = ["/usr/bin/openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes", "-sha256",
+                    "-config", str(config), "-subj", subject, "-keyout", str(key)]
+            if role == "root":
+                args += ["-x509", "-days", "1", "-set_serial", "1", "-extensions", "root", "-out", str(pem)]
+            else:
+                args += ["-out", str(csr)]
+                temporary.append(csr)
+            _command(args, deadline)
+            if role != "root":
+                parent = work / f"{case}-{'root' if role == 'issuer' else 'issuer'}"
+                _command(["/usr/bin/openssl", "x509", "-req", "-in", str(csr), "-CA", str(parent) + ".pem",
+                          "-CAkey", str(parent) + ".key", "-set_serial", str(index + 1), "-days", "1", "-sha256",
+                          "-extfile", str(config), "-extensions", role, "-out", str(pem)], deadline)
+            _command(["/usr/bin/openssl", "x509", "-in", str(pem), "-outform", "DER",
+                      "-out", str(stem) + ".der"], deadline)
+        # A malformed negative fixture must not masquerade as missing-issuer
+        # evidence. This check does not populate Security.framework's caches.
+        _command(["/usr/bin/openssl", "verify", "-CAfile", str(work / f"{case}-root.pem"),
+                  "-untrusted", str(work / f"{case}-issuer.pem"), str(work / f"{case}-leaf.pem")], deadline)
+        rows.append({"case": case, "nonce": nonce, **{
+            role: hashlib.sha256(_read_public(work / f"{case}-{role}.der")).hexdigest()
+            for role in ("root", "issuer", "leaf")}})
+        # The fresh exclusive scratch and every original completed fixed child
+        # establish these precise outputs as ours. Keep only public DER/manifest.
+        errors = []
+        for path in temporary:
+            try:
+                state = path.lstat()
+                _require(stat.S_ISREG(state.st_mode) and state.st_nlink == 1 and state.st_uid == os.getuid(),
+                         "synthetic temporary output custody differs")
+                path.unlink()
+            except BaseException as exc:
+                errors.append(exc)
+        if errors:
+            raise BaseExceptionGroup("synthetic temporary output cleanup failed", errors)
+    _write_new(work / "aia.json", json.dumps({"schema": 1, "port": port, "cases": rows},
+                                            sort_keys=True, separators=(",", ":")).encode("ascii"))
+    _remaining(deadline)
+
+
+def _fixtures(work: Path, port: int, deadline: float) -> list[dict]:
+    _scratch(work)
+    _port(port)
+    _remaining(deadline)
+    try:
+        manifest = json.loads(_read_public(work / "aia.json", 4096).decode("ascii"), object_pairs_hook=_object)
+    except (ValueError, UnicodeError) as exc:
+        raise NativeControlError("synthetic fixture manifest is invalid") from exc
+    _require(type(manifest) is dict and set(manifest) == {"schema", "port", "cases"}
+             and type(manifest["schema"]) is int and manifest["schema"] == 1
+             and type(manifest["port"]) is int and manifest["port"] == port
+             and type(manifest["cases"]) is list and len(manifest["cases"]) == 4,
+             "synthetic fixture manifest contract differs")
+    records, hashes, nonces = [], set(), set()
+    for name, row in zip(_CASES, manifest["cases"]):
+        _remaining(deadline)
+        _require(type(row) is dict and set(row) == {"case", "nonce", "root", "issuer", "leaf"}
+                 and row["case"] == name, "synthetic fixture inventory differs")
+        route = _route(row["nonce"], name)
+        _require(row["nonce"] not in nonces, "synthetic issuer path was reused")
+        nonces.add(row["nonce"])
+        record = {"case": name, "route": route}
+        for role in ("root", "issuer", "leaf"):
+            data = _read_public(work / f"{name}-{role}.der")
+            digest = hashlib.sha256(data).hexdigest()
+            _require(data.startswith(b"\x30") and row[role] == digest and digest not in hashes,
+                     "synthetic chain bytes changed or were reused")
+            hashes.add(digest)
+            record[role] = data
+        records.append(record)
+    _remaining(deadline)
+    return records
+
+
+class _Trust:
+    """One fresh real BasicX509 trust object, with explicit CF reference custody."""
+
+    def __init__(self, leaf: bytes, root: bytes):
+        import ctypes as C
+
+        self.C, self.owned = C, []
+        security = C.CDLL("/System/Library/Frameworks/Security.framework/Security")
+        foundation = C.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        P = C.c_void_p
+
+        def bind(library, name, result, arguments):
+            function = getattr(library, name)
+            function.restype, function.argtypes = result, arguments
+            return function
+
+        self.release = bind(foundation, "CFRelease", None, [P])
+        self.data_create = bind(foundation, "CFDataCreate", P, [P, P, C.c_long])
+        self.data_length = bind(foundation, "CFDataGetLength", C.c_long, [P])
+        self.data_bytes = bind(foundation, "CFDataGetBytePtr", P, [P])
+        self.array_create = bind(foundation, "CFArrayCreate", P, [P, P, C.c_long, P])
+        self.array_count = bind(foundation, "CFArrayGetCount", C.c_long, [P])
+        self.array_item = bind(foundation, "CFArrayGetValueAtIndex", P, [P, C.c_long])
+        self.cert_create = bind(security, "SecCertificateCreateWithData", P, [P, P])
+        self.cert_data = bind(security, "SecCertificateCopyData", P, [P])
+        policy_create = bind(security, "SecPolicyCreateBasicX509", P, [])
+        trust_create = bind(security, "SecTrustCreateWithCertificates", C.c_int32, [P, P, C.POINTER(P)])
+        anchors = bind(security, "SecTrustSetAnchorCertificates", C.c_int32, [P, P])
+        anchors_only = bind(security, "SecTrustSetAnchorCertificatesOnly", C.c_int32, [P, C.c_ubyte])
+        self.network_set = bind(security, "SecTrustSetNetworkFetchAllowed", C.c_int32, [P, C.c_ubyte])
+        self.keychains_set = bind(security, "SecTrustSetKeychainsAllowed", C.c_int32, [P, C.c_ubyte])
+        self.network_get = bind(security, "SecTrustGetNetworkFetchAllowed", C.c_int32, [P, C.POINTER(C.c_ubyte)])
+        self.keychains_get = bind(security, "SecTrustGetKeychainsAllowed", C.c_int32, [P, C.POINTER(C.c_ubyte)])
+        self.native_evaluate = bind(security, "SecTrustEvaluateWithError", C.c_bool, [P, C.POINTER(P)])
+        self.trust_result = bind(security, "SecTrustGetTrustResult", C.c_int32, [P, C.POINTER(C.c_uint32)])
+        self.copy_chain = bind(security, "SecTrustCopyCertificateChain", P, [P])
+        try:
+            policy = self._own(policy_create())
+            # Only the leaf is presented. The independently generated issuer is
+            # available exclusively through the fixed owner responder.
+            presented = self._array([self._certificate(leaf)])
+            pointer = P()
+            try:
+                status = trust_create(presented, policy, C.byref(pointer))
+            finally:
+                if pointer.value:
+                    self.owned.append(pointer.value)
+            _require(status == 0 and bool(pointer.value), "native trust creation failed")
+            self.trust = pointer.value
+            _require(anchors(self.trust, self._array([self._certificate(root)])) == 0
+                     and anchors_only(self.trust, 1) == 0, "native synthetic anchor settings failed")
+        except BaseException as original:
+            try:
+                self.close()
+            except BaseException as cleanup:
+                raise BaseExceptionGroup("native trust creation/cleanup failed", [original, cleanup])
+            raise
+
+    def _own(self, value):
+        _require(bool(value), "native CF allocation failed")
+        self.owned.append(value)
+        return value
+
+    def _certificate(self, raw):
+        return self._own(self.cert_create(None, self._own(self.data_create(None, raw, len(raw)))))
+
+    def _array(self, values):
+        return self._own(self.array_create(None, (self.C.c_void_p * len(values))(*values), len(values), None))
+
+    def set_network(self, allowed: bool) -> None:
+        _require(self.network_set(self.trust, int(allowed)) == 0, "native network setter failed")
+
+    def set_keychains(self, allowed: bool) -> None:
+        _require(self.keychains_set(self.trust, int(allowed)) == 0, "native keychain setter failed")
+
+    def get_network(self) -> bool:
+        return self._get(self.network_get)
+
+    def get_keychains(self) -> bool:
+        return self._get(self.keychains_get)
+
+    def _get(self, getter) -> bool:
+        value = self.C.c_ubyte(2)
+        _require(getter(self.trust, self.C.byref(value)) == 0 and value.value in (0, 1),
+                 "native trust getter failed")
+        return bool(value.value)
+
+    def evaluate(self) -> dict:
+        error = self.C.c_void_p()
+        try:
+            accepted = self.native_evaluate(self.trust, self.C.byref(error))
+        finally:
+            if error.value:
+                self.owned.append(error.value)
+        result = self.C.c_uint32()
+        _require(self.trust_result(self.trust, self.C.byref(result)) == 0, "native trust result is unavailable")
+        chain = self._own(self.copy_chain(self.trust))
+        count = self.array_count(chain)
+        _require(1 <= count <= 3, "native synthetic chain length differs")
+        hashes = []
+        for index in range(count):
+            certificate = self.array_item(chain, index)
+            _require(bool(certificate), "native synthetic chain item is unavailable")
+            raw = self._own(self.cert_data(certificate))
+            size, location = self.data_length(raw), self.data_bytes(raw)
+            _require(0 < size <= _MAX_DER and bool(location), "native synthetic chain encoding differs")
+            hashes.append(hashlib.sha256(self.C.string_at(location, size)).hexdigest())
+        return {"accepted": bool(accepted), "error": bool(error.value), "result": result.value, "chain": hashes}
+
+    def close(self) -> None:
+        errors = []
+        while self.owned:
+            value = self.owned.pop()
+            try:
+                self.release(value)
+            except BaseException as exc:
+                errors.append(exc)
+        if errors:
+            raise BaseExceptionGroup("native CF reference cleanup failed", errors)
+
+
+def _evaluate_case(fixture: dict, deadline: float) -> dict:
+    trust, errors, row = None, [], None
+    case = fixture["case"]
+    _require(case in _CASES, "unknown fixed AIA case")
+    try:
+        _remaining(deadline)
+        trust = _Trust(fixture["leaf"], fixture["root"])
+        # BasicX509 itself defaults offline. R2 deliberately establishes the
+        # SAME enabled baseline for all four, never a mutant-only enabling call.
+        trust.set_network(True)
+        _require(trust.get_network() is True, "native AIA enabled baseline failed")
+        keys = case != "product-offline"
+        trust.set_keychains(keys)
+        if case in ("offline", "product-offline"):
+            trust.set_network(False)
+        # The mutant omits only that final disable; not a product-default claim.
+        network, keychains = trust.get_network(), trust.get_keychains()
+        _require(network is (case in ("online", "mutant")) and keychains is keys,
+                 "native AIA final getter differs")
+        _remaining(deadline)
+        result = trust.evaluate()
+        _remaining(deadline)
+        row = {"case": case, "baseline_network": True, "network": network, "keychains": keychains, **result}
+    except BaseException as exc:
+        errors.append(exc)
+    finally:
+        if trust is not None:
+            try:
+                trust.close()
+            except BaseException as exc:
+                errors.append(exc)
+    if errors:
+        raise BaseExceptionGroup("native AIA evaluation/cleanup failed", errors)
+    return row
+
+
+def evaluate_aia(port: int, deadline: float) -> dict:
+    fixtures = _fixtures(Path.cwd(), port, deadline)
+    return {"schema": 1, "cases": [_evaluate_case(fixture, deadline) for fixture in fixtures]}
+
+
+def require_aia_controls(data: bytes, fixtures: list[dict], requests: list[tuple[str, str]]) -> dict:
+    record = _parse(data, AIA_PREFIX)
+    _require(set(record) == {"schema", "cases"} and type(record["cases"]) is list
+             and len(record["cases"]) == len(fixtures) == 4, "native AIA result inventory differs")
+    expected_requests, counts = [], []
+    for case, row, fixture in zip(_CASES, record["cases"], fixtures):
+        _require(type(row) is dict and set(row) == {"case", "baseline_network", "network", "keychains",
+                                                   "accepted", "error", "result", "chain"}
+                 and row["case"] == fixture["case"] == case, "native AIA result fields differ")
+        for key in ("baseline_network", "network", "keychains", "accepted", "error"):
+            _require(type(row[key]) is bool, "native AIA boolean result differs")
+        online = case in ("online", "mutant")
+        chain = [hashlib.sha256(fixture[role]).hexdigest()
+                 for role in (("leaf", "issuer", "root") if online else ("leaf",))]
+        _require(row["baseline_network"] and row["network"] is online
+                 and row["keychains"] is (case != "product-offline") and row["accepted"] is online
+                 and row["error"] is not online and type(row["result"]) is int
+                 and row["result"] == (4 if online else 5) and row["chain"] == chain,
+                 "native AIA acceptance, missing issuer, getter or exact chain differs")
+        if online:
+            expected_requests.append((fixture["route"], hashlib.sha256(fixture["issuer"]).hexdigest()))
+        counts.append(sum(route == fixture["route"] for route, _digest in requests))
+    _require(requests == expected_requests, "native AIA exact issuer requests/responses differ")
+    return {"cases": record["cases"], "request_counts": counts, "final_disable_mutation_detected": True}
+
+
+class _Responder:
+    """One original owner's finite HTTP responder; no service requests or proxies."""
+
+    def __init__(self, deadline: float):
+        self.deadline = deadline
+        self.listener = self.thread = None
+        self.start_attempted = False
+        self.stop = threading.Event()
+        self.responses, self.requests, self.errors = {}, [], []
+        _remaining(deadline)
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listener = listener  # Custody precedes any fallible configuration.
+        try:
+            listener.settimeout(0.1)
+            listener.bind(("127.0.0.1", 0))
+            self.port = _port(listener.getsockname()[1])
+            listener.listen(8)
+        except BaseException as original:
+            try:
+                listener.close()
+            except BaseException as cleanup:
+                raise BaseExceptionGroup("responder setup/close failed", [original, cleanup])
+            raise
+
+    def start(self, responses: dict[str, bytes]) -> None:
+        _remaining(self.deadline)
+        _require(self.thread is None and len(responses) == len(_CASES), "responder inventory differs")
+        _require(all(type(route) is str and re.fullmatch(r"/mrk-aia/[0-9a-f]{32}/(?:online|offline|mutant|product-offline)\.der", route)
+                     and type(body) is bytes and 0 < len(body) <= _MAX_DER and body.startswith(b"\x30")
+                     for route, body in responses.items()), "responder contains non-fixture data")
+        self.responses = dict(responses)
+        self.thread = threading.Thread(target=self._serve, name="mrk-owned-aia-responder", daemon=False)
+        _remaining(self.deadline)
+        self.start_attempted = True  # Thread.start can raise after acquiring a native worker.
+        self.thread.start()
+        _remaining(self.deadline)
+
+    def _serve(self) -> None:
+        try:
+            while not self.stop.is_set():
+                self.listener.settimeout(min(0.1, _remaining(self.deadline)))
+                try:
+                    connection, address = self.listener.accept()
+                except socket.timeout:
+                    continue
+                errors = []
+                try:
+                    _require(address[0] == "127.0.0.1" and len(self.requests) < 8,
+                             "unexpected responder client or request bound")
+                    request = b""
+                    while b"\r\n\r\n" not in request:
+                        _require(len(request) < 4096, "issuer request exceeds fixed bound")
+                        connection.settimeout(min(1.0, _remaining(self.deadline)))
+                        part = connection.recv(min(4096 - len(request), 1024))
+                        _require(bool(part), "issuer request ended prematurely")
+                        request += part
+                        _remaining(self.deadline)
+                    first, _ = request.split(b"\r\n", 1)
+                    pieces = first.decode("ascii").split(" ")
+                    _require(len(pieces) == 3 and pieces[0] == "GET"
+                             and pieces[2] in ("HTTP/1.0", "HTTP/1.1")
+                             and pieces[1] in self.responses, "unexpected issuer request")
+                    route = pieces[1]
+                    body = self.responses[route]
+                    response = (b"HTTP/1.1 200 OK\r\nContent-Type: application/pkix-cert\r\n"
+                                b"Cache-Control: no-store\r\nConnection: close\r\nContent-Length: "
+                                + str(len(body)).encode("ascii") + b"\r\n\r\n" + body)
+                    connection.settimeout(min(1.0, _remaining(self.deadline)))
+                    connection.sendall(response)
+                    self.requests.append((route, hashlib.sha256(body).hexdigest()))
+                except BaseException as exc:
+                    errors.append(exc)
+                finally:
+                    try:
+                        connection.close()
+                    except BaseException as exc:
+                        errors.append(exc)
+                if errors:
+                    raise BaseExceptionGroup("owned issuer request/close failed", errors)
+        except BaseException as exc:
+            self.errors.append(exc)
+
+    def close(self) -> None:
+        errors, joined = [], False
+        try:
+            self.stop.set()
+        except BaseException as exc:
+            errors.append(exc)
+        # The accept timeout and each accepted socket's deadline let the worker
+        # exit before its listener is closed. A failed join is never acceptance.
+        if self.start_attempted:
+            try:
+                _require(self.thread is not None, "owned responder thread custody is unknown")
+                self.thread.join(timeout=max(0.0, min(2.0, self.deadline - time.monotonic())))
+                _require(not self.thread.is_alive(), "owned issuer responder did not join")
+                joined = True
+            except BaseException as exc:
+                errors.append(exc)
+        if self.listener is not None:
+            if joined:
+                pending = None
+                try:
+                    self.listener.settimeout(0)
+                    pending, _address = self.listener.accept()
+                    errors.append(NativeControlError("issuer request remained queued after native finality"))
+                except BlockingIOError:
+                    pass
+                except BaseException as exc:
+                    errors.append(exc)
+                finally:
+                    if pending is not None:
+                        try:
+                            pending.close()
+                        except BaseException as exc:
+                            errors.append(exc)
+            try:
+                self.listener.close()
+            except BaseException as exc:
+                errors.append(exc)
+        errors.extend(self.errors)
+        if errors:
+            raise BaseExceptionGroup("owned responder cleanup failed", errors)
+
+
+def admit_controls(launch, ensure_idle, scratch: Path, *, deadline: float) -> dict:
+    """Original owner only. The six-case callback returns real Session captures.
+
+    Session fixes source/bootstrap/argv/identity/cwd/environment/policy and keeps
+    every original capture. No receipt, callback from U, or caller URL grants a
+    launch. The listener is never inherited by a subject.
+    """
+    _remaining(deadline)
+    ensure_idle()
+    _scratch(scratch)
+
+    def run(case, *, port=None):
+        result, errors = None, []
+        try:
+            _remaining(deadline)
+            result = launch(case, port=port)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            try:
+                ensure_idle()
+            except BaseException as exc:
+                errors.append(exc)
+        if errors:
+            raise BaseExceptionGroup("native control capture/finality failed", errors)
+        _remaining(deadline)
+        _require(result is not None and result.ok is True, "native control capture did not succeed")
+        return result.stdout
+
+    rows = [parse_mach(run(case)) for case in
+            ("mach-baseline", "mach-ordinary", "mach-authority", "mach-nonexpand")]
+    require_mach_controls(*rows)
+    responder, errors, aia = None, [], None
+    try:
+        _remaining(deadline)
+        responder = _Responder(deadline)
+        prepared = run("aia-prepare", port=responder.port)
+        _require(prepared == b"MRK_AIA_PREPARED\n", "native fixture preparation did not complete")
+        ensure_idle()  # No fixture reads while a previous producer remains unknown.
+        fixtures = _fixtures(scratch, responder.port, deadline)
+        responder.start({row["route"]: row["issuer"] for row in fixtures})
+        output = run("aia-evaluate", port=responder.port)
+    except BaseException as exc:
+        errors.append(exc)
+    finally:
+        if responder is not None:
+            try:
+                responder.close()
+            except BaseException as exc:
+                errors.append(exc)
+    if errors:
+        raise BaseExceptionGroup("native AIA controls/owned responder cleanup failed", errors)
+    _remaining(deadline)
+    aia = require_aia_controls(output, fixtures, responder.requests)
+    ensure_idle()
+    _remaining(deadline)
+    return {"schema": 1, "mach": {name: row for name, row in zip(
+        ("baseline", "ordinary", "authority", "nonexpand"), rows)}, "aia": aia, "cleanup_ok": True}
+
+
+def _main(argv: list[str]) -> int:
+    _require(sys.platform == "darwin", "native controls require real macOS")
+    identity = (os.getuid(), os.geteuid(), os.getgid(), os.getegid())
+    _require(len(set(identity)) == 1 and 60000 <= identity[0] < 65000,
+             "native helper did not receive admitted numerical identity")
+    entry = Path(__file__).resolve(strict=True)
+    _require(entry.name == "ci_native_authority.py" and entry.parent.name == "bootstrap"
+             and entry.parent.parent.parent == Path("/private/tmp"), "native helper origin differs")
+    _require(type(argv) is list and len(argv) in (2, 3) and all(type(arg) is str for arg in argv)
+             and 0 < len(argv[-1]) <= 64, "invalid fixed native helper role")
+    deadline = float(argv[-1])
+    _remaining(deadline)
+    if argv[0] == "--mach" and len(argv) == 2:
+        prefix, result = MACH_PREFIX, mach_probe(deadline)
+    elif argv[0] == "--mach-nonexpand" and len(argv) == 3:
+        prefix, result = MACH_PREFIX, mach_nonexpand(Path(argv[1]), deadline)
+    elif argv[0] in ("--aia-prepare", "--aia-evaluate") and len(argv) == 3:
+        _require(re.fullmatch(r"[1-9][0-9]{3,4}", argv[1]) is not None, "invalid native fixture port")
+        port = _port(int(argv[1]))
+        if argv[0] == "--aia-prepare":
+            prepare_aia(port, deadline)
+            print("MRK_AIA_PREPARED", flush=True)
+            return 0
+        prefix, result = AIA_PREFIX, evaluate_aia(port, deadline)
+    else:
+        raise NativeControlError("unknown fixed native helper role")
+    _remaining(deadline)
+    line = prefix.decode("ascii") + json.dumps(result, separators=(",", ":"), sort_keys=True, allow_nan=False)
+    _require(len(line) < 4096, "native control output exceeds bound")
+    print(line, flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        code = _main(sys.argv[1:])
+    except BaseException as error:
+        # Keep raw paths, native exception messages and ephemeral fixture keys
+        # out of captured diagnostics. The original parent still records failure.
+        print(_FAILURE_PREFIX.decode("ascii") + json.dumps(_failure_note(error, sys.argv[1:]),
+                                                        separators=(",", ":")), file=sys.stderr, flush=True)
+        code = 1
+    raise SystemExit(code)

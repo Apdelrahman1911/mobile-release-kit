@@ -65,6 +65,17 @@ NATIVE_PATTERNS = (
     "test_ios_profile_installation.py", "test_default_cancellation.py",
     "test_profile_processes.py", "test_macho_native.py",
 )
+# Only this source-known class may run with the fixed native trust-service role.
+# A newly added method must not silently enlarge that role's callset.
+NATIVE_AUTHORITY_IDS = tuple(sorted(
+    "unit.test_ios_profile_authority.NativeProfileAuthorityTests." + name for name in (
+        "test_actual_signature_integrity_and_exact_signer_are_checked_before_policy",
+        "test_complete_two_layer_synthetic_signature_succeeds_only_with_explicit_policy_seam",
+        "test_default_policy_rejects_even_valid_signature_with_production_looking_fake_issuer",
+        "test_real_production_policy_accepts_apple_public_issuer_not_test_or_macos_purpose",
+        "test_signed_outer_cannot_authorize_unsigned_or_substituted_inner_profile",
+    )
+))
 # Exact method identities, not a count, file-wide exemption or skip-message match.
 LINUX_MACOS_SKIPS = frozenset({
     "unit.test_ios_profile_authority.NativeProfileAuthorityTests.test_actual_signature_integrity_and_exact_signer_are_checked_before_policy",
@@ -629,6 +640,19 @@ def expected_python_ids(source_root: Path, selection: str = "full", *, deadline:
     return tuple(sorted(result))
 
 
+def native_partition_ids(source_root: Path, partition: str = "all", *, deadline: float | None = None) -> tuple[str, ...]:
+    """Exact disjoint native partitions, derived without importing test code."""
+    _require(type(partition) is str and partition in {"all", "ordinary", "authority"}, "NATIVE_PARTITION")
+    complete = expected_python_ids(source_root, "native", deadline=deadline)
+    prefix = "unit.test_ios_profile_authority.NativeProfileAuthorityTests."
+    authority = tuple(identifier for identifier in complete if identifier.startswith(prefix))
+    _require(authority == NATIVE_AUTHORITY_IDS, "NATIVE_AUTHORITY_INVENTORY")
+    ordinary = tuple(identifier for identifier in complete if identifier not in authority)
+    _require(bool(ordinary) and len(set(ordinary) | set(authority)) == len(complete)
+             and not set(ordinary) & set(authority), "NATIVE_PARTITION_UNION")
+    return {"all": complete, "ordinary": ordinary, "authority": authority}[partition]
+
+
 def validate_test_outcomes(expected, outcomes, platform: str) -> None:
     _require(platform in {"linux", "darwin", "macos"}, "TEST_PLATFORM")
     _require(type(expected) in {list, tuple} and bool(expected) and len(expected) == len(set(expected)), "TEST_EXPECTED_IDS")
@@ -818,6 +842,34 @@ def _source_package(source_root: Path, *, deadline: float) -> dict[str, bytes]:
              and hashlib.sha256(_read_regular(source_root / "LICENSE", deadline=deadline)).hexdigest() == LICENSE_SHA256,
              "SOURCE_PUBLIC_RESOURCE_PINS")
     return files
+
+
+def inspect_native_package(source_root: Path, package_root: Path, *, deadline: float) -> dict:
+    """Data-only pre-entry binding of the frozen package, never a product import.
+
+    Parent-directory custody and interpreter selection belong to Session. This
+    checks every package byte/resource and its ordinary immutable file mode;
+    neither a wheel receipt nor an editable .pth grants import authority.
+    """
+    _remaining(deadline, 3300)
+    _require(package_root.is_absolute() and package_root.resolve(strict=True) == package_root,
+             "NATIVE_PACKAGE_ROOT")
+    expected = _source_package(source_root, deadline=deadline)
+    actual, directories = _tree(package_root, deadline=deadline)
+    _require(actual == expected and directories == {"data"}, "NATIVE_PACKAGE_BYTES")
+    for relative in ("", *sorted(directories), *sorted(actual)):
+        _remaining(deadline, 3300)
+        path = package_root / relative
+        info = path.lstat()
+        directory = relative == "" or relative in directories
+        _require(info.st_uid == 0 and info.st_gid == 0
+                 and stat.S_IMODE(info.st_mode) == (0o555 if directory else 0o444)
+                 and (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode) and info.st_nlink == 1),
+                 "NATIVE_PACKAGE_MODE")
+    _remaining(deadline, 3300)
+    return {"files": len(actual), "modules": sum(name.endswith(".py") for name in actual),
+            "roots_sha256": APPLE_ROOTS_SHA256, "bytes_match_source": True,
+            "immutable_modes": True}
 
 
 def _validate_metadata(metadata, source_root: Path, *, deadline: float) -> None:

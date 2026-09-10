@@ -235,6 +235,8 @@ Use the credential-free [Release kit CI workflow](.github/workflows/ci.yml) for
 complete source, installed-wheel, Linux and macOS verification. It prepares
 offline inputs and admits an isolated test identity on each disposable
 GitHub-hosted VM before running the required product checks.
+macOS source and wheel checks separate the fixed Apple trust-authority tests
+from ordinary native tests without dropping coverage or renewing gate deadlines.
 
 **Do not run full test discovery, native/process suites or the CI controller on
 a shared VPS, developer login session or self-hosted runner.** The separate

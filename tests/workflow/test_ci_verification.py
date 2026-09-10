@@ -232,6 +232,220 @@ sudo() {
 
 
 class CIControllerContractTests(unittest.TestCase):
+    def _native_gate_fixture(self, phase="source"):
+        """Only data and fake calls: no Session, product import or native work."""
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        authority = ci_module("ci_checks").NATIVE_AUTHORITY_IDS
+        ordinary = ("unit.synthetic.OrdinaryTests.test_first", "unit.synthetic.OrdinaryTests.test_second")
+        inventories = {"authority": authority, "ordinary": ordinary,
+                       "all": tuple(sorted(authority + ordinary))}
+        step = next(item for item in controller.catalog(paths, "macos", deadline=2500.0)
+                    if item.id == "native-profile-" + phase)
+        rig = SimpleNamespace(controller=controller, paths=paths, step=step, now=100.0,
+                              inventories=inventories, events=[], captures=[], changes={},
+                              prepare_error=None, idle_error=None, run_error=None,
+                              prepare_advance=100.0, run_advance=50.0)
+
+        def identities(source, partition, *, deadline):
+            self.assertEqual(source, ROOT)
+            rig.events.append(("inventory", partition, deadline))
+            return rig.inventories[partition]
+
+        def package(source, root, *, deadline):
+            self.assertEqual(source, ROOT)
+            rig.events.append(("package", root, deadline))
+            return {"bytes_match_source": True, "immutable_modes": True}
+
+        def idle(*, deadline):
+            rig.events.append(("idle", deadline))
+            if rig.idle_error is not None and rig.captures:
+                raise rig.idle_error
+
+        def prepare(selected, *, deadline):
+            rig.events.append(("prepare", selected, deadline))
+            rig.now += rig.prepare_advance
+            if rig.prepare_error is not None:
+                raise rig.prepare_error
+
+        def run(argv, **options):
+            partition = "authority" if "--authority" in argv else "ordinary"
+            rig.events.append(("run", argv, options))
+            if rig.run_error is not None:
+                raise rig.run_error
+            ids = rig.inventories[partition]
+            text = "".join(f"{name.rsplit('.', 1)[1]} ({name}) ... ok\n" for name in ids)
+            text += f"\nRan {len(ids)} tests in 0.01s\n\nOK\n"
+            values = dict(ok=True, returncode=0, waited=True, stdout_eof=True, stderr_eof=True,
+                          domain_finality=True, primary_error=None, cleanup_errors=(), stdout=b"",
+                          stderr=text.encode(), duration=rig.run_advance, timed_out=False,
+                          cancelled=False, persisted=(0, len(text)))
+            capture = SimpleNamespace(**{**values, **rig.changes.get(partition, {})})
+            rig.captures.append(capture)
+            rig.now += rig.run_advance
+            return capture
+
+        rig.checks = SimpleNamespace(native_partition_ids=identities, inspect_native_package=package)
+        rig.session = SimpleNamespace(ensure_idle=idle, prepare_native_authority=prepare, run=run)
+        return rig
+
+    def _perform_native_fixture(self, rig, *, step=None, platform="macos", deadline=2500.0):
+        with patch.object(rig.controller.time, "monotonic", side_effect=lambda: rig.now), \
+                patch.object(rig.controller, "check_capacity"):
+            return rig.controller.perform_step(step or rig.step, rig.paths, rig.session, rig.checks,
+                                               {}, platform, deadline=deadline)
+
+    def test_native_gate_keeps_two_real_capture_records_and_one_source_wheel_cutoff(self):
+        for phase, original_deadline, cutoff in (("source", 2500.0, 1000.0), ("wheel", 800.0, 800.0)):
+            with self.subTest(phase=phase):
+                rig = self._native_gate_fixture(phase)
+                result = self._perform_native_fixture(rig, deadline=original_deadline)
+                self.assertTrue(result.ok, result)
+                self.assertEqual(result.details["stage"], "complete")
+                self.assertEqual(result.details["completed"], list(rig.inventories["all"]))
+                self.assertEqual(result.details["tests"], 7)
+                self.assertNotIn("returncode", result.details)  # No invented aggregate capture.
+                records = result.details["partitions"]
+                self.assertEqual([row["status"] for row in records], ["PASS", "PASS"])
+                calls = [event for event in rig.events if event[0] == "run"]
+                self.assertEqual(len(calls), 2)
+                python = rig.paths.source_python if phase == "source" else rig.paths.wheel_python
+                entry = str(ROOT / "tests/workflow/run_native_profile_checks.py")
+                tail = [] if phase == "source" else ["--installed-wheel"]
+                self.assertEqual(calls[0][1], [str(python), "-I", "-S", "-B", entry, "--authority", *tail])
+                self.assertEqual(calls[1][1], [str(python), "-I", "-B", entry, "--ordinary", *tail])
+                self.assertEqual(calls[0][2]["env"], {})
+                self.assertEqual(calls[0][2]["cwd"], rig.paths.work / ("native-authority-" + phase))
+                self.assertEqual(calls[0][2]["profile"], "native-authority-" + phase)
+                self.assertEqual(calls[1][2]["env"], dict(rig.step.env))
+                self.assertEqual(calls[1][2]["cwd"], rig.paths.work)
+                self.assertEqual(calls[1][2]["profile"], "ordinary")
+                for index, (_, _, options) in enumerate(calls):
+                    self.assertEqual(options["absolute_deadline"], cutoff)
+                    self.assertEqual(options["seconds"], 900)
+                    self.assertEqual(options["cpu_seconds"], 180)
+                    self.assertEqual(options["output_limit"], 8 * 1024**2)
+                    self.assertEqual(records[index]["capture"],
+                                     rig.controller.capture_observations(rig.captures[index]))
+                    self.assertEqual(records[index]["completed"], list(rig.inventories[records[index]["partition"]]))
+                self.assertEqual([event for event in rig.events if event[0] == "prepare"], [("prepare", phase, cutoff)])
+                package = (rig.paths.work / "source-build/src/mobile_release" if phase == "source"
+                           else rig.paths.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
+                self.assertIn(("package", package, cutoff), rig.events)
+                self.assertTrue(all(event[-1] == cutoff for event in rig.events if event[0] != "run"))
+
+    def test_native_gate_rejects_contract_or_partition_drift_without_launch(self):
+        controller = controller_module()
+        rig = self._native_gate_fixture()
+        for changes in ({"kind": "inspection"}, {"argv": (*rig.step.argv, "--authority")},
+                        {"env": ()}, {"cwd": rig.paths.source}, {"seconds": 901},
+                        {"parser": "exit"}, {"native_partition": "authority"}, {"expected_tests": 5}):
+            with self.subTest(changes=changes):
+                result = self._perform_native_fixture(rig, step=dataclasses.replace(rig.step, **changes))
+                self.assertEqual(result.error, "NATIVE_GATE_CONTRACT")
+                self.assertEqual(rig.events, [])
+        self.assertEqual(self._perform_native_fixture(rig, platform="linux").error, "NATIVE_GATE_CONTRACT")
+        self.assertEqual(rig.events, [])
+        for mutation in ("missing", "duplicate", "overlap", "expanded-authority"):
+            with self.subTest(mutation=mutation):
+                rig = self._native_gate_fixture()
+                if mutation == "missing":
+                    rig.inventories["ordinary"] = rig.inventories["ordinary"][:-1]
+                elif mutation == "duplicate":
+                    rig.inventories["ordinary"] *= 2
+                elif mutation == "overlap":
+                    rig.inventories["ordinary"] += rig.inventories["authority"][:1]
+                else:
+                    rig.inventories["authority"] += rig.inventories["ordinary"][:1]
+                result = self._perform_native_fixture(rig)
+                self.assertEqual(result.error, "NATIVE_PARTITION_UNION")
+                self.assertFalse(any(event[0] in {"package", "prepare", "run"} for event in rig.events))
+                self.assertEqual([row["status"] for row in result.details["partitions"]], ["UNEXECUTED"] * 2)
+
+    def test_native_gate_failure_preserves_original_capture_and_never_runs_later_partition(self):
+        failure = OSError("synthetic private failure; must not be published")
+        for mode in ("preparation", "launch", "exit", "wait", "stdout-eof", "stderr-eof", "finality",
+                     "timeout", "cancel", "primary", "cleanup", "parser", "idle", "diagnostic", "ordinary"):
+            with self.subTest(mode=mode):
+                rig = self._native_gate_fixture()
+                fields = {"exit": {"returncode": 1}, "wait": {"waited": False},
+                          "stdout-eof": {"stdout_eof": False}, "stderr-eof": {"stderr_eof": False},
+                          "finality": {"domain_finality": False}, "timeout": {"ok": False, "timed_out": True},
+                          "cancel": {"ok": False, "cancelled": True}, "primary": {"primary_error": "FIXTURE"},
+                          "cleanup": {"cleanup_errors": ("FIXTURE_CLOSE",)}, "parser": {"stderr": b"OK\n"}}
+                if mode == "preparation":
+                    rig.prepare_error = failure
+                elif mode == "launch":
+                    rig.run_error = failure
+                elif mode == "idle":
+                    rig.idle_error = failure
+                elif mode == "diagnostic":
+                    rig.changes["authority"] = {"returncode": 1}
+                    rig.idle_error = failure
+                elif mode == "ordinary":
+                    rig.changes["ordinary"] = {"returncode": 1}
+                else:
+                    rig.changes["authority"] = fields[mode]
+                with contextlib.ExitStack() as stack:
+                    if mode == "diagnostic":
+                        stack.enter_context(patch.object(rig.controller, "failure_details", side_effect=failure))
+                    result = self._perform_native_fixture(rig)
+                self.assertFalse(result.ok)
+                self.assertNotIn(str(failure), json.dumps(result.details))
+                records = result.details["partitions"]
+                expected_count = 0 if mode in {"preparation", "launch"} else 2 if mode == "ordinary" else 1
+                self.assertEqual(len(rig.captures), expected_count)
+                self.assertEqual(records[1]["status"], "FAIL" if mode == "ordinary" else "UNEXECUTED")
+                if mode == "ordinary":
+                    self.assertEqual(records[0]["status"], "PASS")
+                if mode == "preparation":
+                    self.assertEqual(records[0]["status"], "UNEXECUTED")
+                for index, capture in enumerate(rig.captures):
+                    for field, value in rig.controller.capture_observations(capture).items():
+                        self.assertEqual(records[index]["capture"][field], value)
+                if mode == "diagnostic":
+                    self.assertEqual(result.error, "COMMAND_EXIT_OR_FINALITY")
+                    self.assertIn("idle_error", records[0])
+                    self.assertIn("diagnostic_error", records[0])
+
+    def test_native_gate_deadline_covers_preparation_both_captures_and_final_reconciliation(self):
+        for mode in ("preparation", "authority", "ordinary", "union"):
+            with self.subTest(mode=mode):
+                rig = self._native_gate_fixture()
+                if mode == "preparation":
+                    rig.prepare_advance = 900.0
+                elif mode == "authority":
+                    rig.run_advance = 800.0
+                elif mode == "ordinary":
+                    rig.run_advance = 400.0
+                reconciliations = []
+
+                def late_sorted(values, *args, **kwargs):
+                    result = sorted(values, *args, **kwargs)
+                    if type(values) is list and tuple(result) == rig.inventories["all"]:
+                        reconciliations.append(True)
+                        if len(reconciliations) == 2:
+                            rig.now = 1000.0
+                    return result
+
+                with contextlib.ExitStack() as stack:
+                    if mode == "union":
+                        stack.enter_context(patch.object(rig.controller, "sorted", create=True, side_effect=late_sorted))
+                    result = self._perform_native_fixture(rig)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error, "AGGREGATE_DEADLINE")
+                self.assertEqual(len(rig.captures), {"preparation": 0, "authority": 1, "ordinary": 2, "union": 2}[mode])
+                records = result.details["partitions"]
+                if mode == "preparation":
+                    self.assertEqual([row["status"] for row in records], ["UNEXECUTED"] * 2)
+                elif mode == "authority":
+                    self.assertEqual(records[1]["status"], "UNEXECUTED")
+                elif mode == "union":
+                    self.assertEqual([row["status"] for row in records], ["PASS"] * 2)
+                    self.assertEqual(len(reconciliations), 2)
+                for index, capture in enumerate(rig.captures):
+                    self.assertEqual(records[index]["capture"]["persisted"], list(capture.persisted))
+
     def test_fixed_linux_python_storage_profile_is_selected_only_for_full_discovery(self):
         controller = controller_module()
         paths = fixture_paths(controller)
@@ -246,7 +460,9 @@ class CIControllerContractTests(unittest.TestCase):
                 patch.object(controller, "parse_capture", return_value=controller.CheckResult(True)):
             for platform in ("linux", "macos"):
                 for step in controller.catalog(paths, platform, deadline=1000.0):
-                    if step.kind != "command":
+                    # Native authority has a distinct two-capture contract;
+                    # the focused tests below cover that path independently.
+                    if step.kind != "command" or step.parser == "native":
                         continue
                     result = controller.perform_step(step, paths, session, None, {}, platform, deadline=1000.0)
                     self.assertTrue(result.ok)
@@ -582,7 +798,7 @@ class CIControllerContractTests(unittest.TestCase):
         controller = controller_module()
         paths = fixture_paths(controller)
         expected = ("unit.synthetic.NativeContracts.test_native",)
-        checks = SimpleNamespace(expected_python_ids=lambda *_args, **_kwargs: expected)
+        checks = SimpleNamespace(native_partition_ids=lambda *_args, **_kwargs: expected)
         step = controller.Step("native-profile-source", parser="native")
         row = {"id": "system-code", "outcome": "error", "category": "nonzero-exit", "errno": None, "returncode": 1}
 
@@ -657,10 +873,10 @@ class CIControllerContractTests(unittest.TestCase):
 
         def identities(source, selection, **_kwargs):
             self.assertEqual(source, ROOT)
-            self.assertEqual(selection, "native")
+            self.assertEqual(selection, "all")
             return expected
 
-        checks = SimpleNamespace(expected_python_ids=identities)
+        checks = SimpleNamespace(native_partition_ids=identities)
         step = controller.Step("native-profile-source", parser="native")
         footer = "\nRan 1 test in 0.01s\n\nOK\n"
         full = "test_native (unit.synthetic.NativeContracts.test_native) ... ok\n"
@@ -688,6 +904,88 @@ class CIControllerContractTests(unittest.TestCase):
 
 
 class CIProductEvidenceContractTests(unittest.TestCase):
+    def test_native_partition_authority_is_exact_and_cannot_silently_expand(self):
+        checks = ci_module("ci_checks")
+        deadline = time.monotonic() + 30.0
+        complete = checks.expected_python_ids(ROOT, "native", deadline=deadline)
+        authority = checks.native_partition_ids(ROOT, "authority", deadline=deadline)
+        ordinary = checks.native_partition_ids(ROOT, "ordinary", deadline=deadline)
+        self.assertEqual(authority, checks.NATIVE_AUTHORITY_IDS)
+        self.assertEqual(len(authority), 5)
+        self.assertTrue(ordinary)
+        self.assertFalse(set(authority) & set(ordinary))
+        self.assertEqual(tuple(sorted(authority + ordinary)), complete)
+        self.assertEqual(checks.native_partition_ids(ROOT, "all", deadline=deadline), complete)
+        for invalid in ("unknown", "Authority", "", None, True, []):
+            with self.subTest(partition=invalid), self.assertRaisesRegex(checks.CheckError, "NATIVE_PARTITION"):
+                checks.native_partition_ids(ROOT, invalid, deadline=deadline)
+        for changed in (tuple(name for name in complete if name != authority[0]),
+                        tuple(sorted(complete + (authority[0],))),
+                        tuple(sorted(complete + (authority[0].rsplit(".", 1)[0] + ".test_unreviewed",))),
+                        authority):
+            with self.subTest(inventory=changed), \
+                    patch.object(checks, "expected_python_ids", return_value=changed), \
+                    self.assertRaises(checks.CheckError):
+                checks.native_partition_ids(ROOT, "authority", deadline=deadline)
+
+    def test_native_package_inspection_requires_complete_bytes_and_immutable_ordinary_nodes(self):
+        checks = ci_module("ci_checks")
+        expected = {"__init__.py": b"# inert fixture\n", "data/apple-profile-roots.pem": b"synthetic public roots\n"}
+        deadline = time.monotonic() + 30.0
+        actual_lstat = Path.lstat
+        with tempfile.TemporaryDirectory(prefix="mrk-ci-native-package-") as temporary:
+            root = Path(temporary).resolve() / "mobile_release"
+            root.mkdir()
+            (root / "data").mkdir()
+            for relative, content in expected.items():
+                (root / relative).write_bytes(content)
+            changes = {}
+
+            def metadata(path):
+                info = actual_lstat(path)
+                if path != root and not path.is_relative_to(root):
+                    return info
+                # Only metadata is modeled: byte/inventory checks read these
+                # tiny actual owned files. Never chown or edit provider paths.
+                directory = stat.S_ISDIR(info.st_mode)
+                values = dict(st_uid=0, st_gid=0, st_nlink=info.st_nlink,
+                              st_mode=(stat.S_IFDIR | 0o555) if directory else (stat.S_IFREG | 0o444))
+                if path == root / "__init__.py":
+                    values.update(changes)
+                return SimpleNamespace(**values)
+
+            with patch.object(checks, "_source_package", return_value=expected), patch.object(Path, "lstat", metadata):
+                result = checks.inspect_native_package(ROOT, root, deadline=deadline)
+                self.assertEqual(result["files"], 2)
+                self.assertEqual(result["modules"], 1)
+                self.assertTrue(result["bytes_match_source"])
+                self.assertTrue(result["immutable_modes"])
+                for changed in ({"st_uid": 60123}, {"st_gid": 60123}, {"st_nlink": 2},
+                                {"st_mode": stat.S_IFREG | 0o644}, {"st_mode": stat.S_IFREG | 0o4544}):
+                    changes.clear()
+                    changes.update(changed)
+                    with self.subTest(metadata=changed), self.assertRaisesRegex(checks.CheckError, "NATIVE_PACKAGE_MODE"):
+                        checks.inspect_native_package(ROOT, root, deadline=deadline)
+                changes.clear()
+                for mutation in ("changed", "missing", "extra-hook", "extra-directory"):
+                    with self.subTest(mutation=mutation):
+                        if mutation == "changed":
+                            (root / "__init__.py").write_bytes(b"# changed inert fixture\n")
+                        elif mutation == "missing":
+                            (root / "__init__.py").unlink()
+                        elif mutation == "extra-hook":
+                            (root / "unreviewed.pth").write_bytes(b"# inert; must never load\n")
+                        else:
+                            (root / "extra").mkdir()
+                        with self.assertRaisesRegex(checks.CheckError, "NATIVE_PACKAGE_BYTES"):
+                            checks.inspect_native_package(ROOT, root, deadline=deadline)
+                        if mutation in {"changed", "missing"}:
+                            (root / "__init__.py").write_bytes(expected["__init__.py"])
+                        elif mutation == "extra-hook":
+                            (root / "unreviewed.pth").unlink()
+                        else:
+                            (root / "extra").rmdir()
+
     def test_tree_checks_incremental_count_and_byte_budget_before_later_file_reads(self):
         checks = ci_module("ci_checks")
         original_reader, original_open = checks._read_regular, os.open

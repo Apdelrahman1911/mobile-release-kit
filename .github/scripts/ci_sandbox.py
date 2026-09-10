@@ -11,6 +11,7 @@ import dataclasses
 import errno
 import grp
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -45,6 +46,13 @@ _PYTHON_FULL_WORK_TMPFS = (("tmp", 640 * MiB), *((name, 16 * MiB) for name in (
     "home", "config", "cache", "gem-cache", "bundle-config", "bundle-home", "checks")))
 _PYTHON_FULL_PRIVATE_TMPFS = (("/run", 16 * MiB), ("/tmp", 128 * MiB), ("/dev/shm", 16 * MiB))
 _USERNS_PATH = Path("/proc/sys/user/max_user_namespaces")
+_NATIVE_PHASES = ("source", "wheel")
+_NATIVE_PROFILES = frozenset("native-authority-" + phase for phase in _NATIVE_PHASES)
+_NATIVE_LEAVES = ("home", "tmp", "config", "cache", "probes")
+_NATIVE_CONTROL_CASES = ("mach-baseline", "mach-ordinary", "mach-authority", "mach-nonexpand",
+                         "aia-prepare", "aia-evaluate")
+_NATIVE_TRUST_SERVICES = ("com.apple.trustd", "com.apple.trustd.agent")
+_NATIVE_OTHER_SERVICE = "com.apple.cfprefsd.daemon"
 _ENV_KEYS = frozenset("""
 PATH LANG LC_ALL TZ HOME USER LOGNAME TMPDIR TMP TEMP XDG_CONFIG_HOME
 XDG_CACHE_HOME CI TERM PYTHONSAFEPATH PYTHONDONTWRITEBYTECODE PYTHONNOUSERSITE
@@ -401,6 +409,62 @@ def _remaining(deadline: float) -> float:
     if left <= 0:
         raise DeadlineExpired("owning absolute deadline expired")
     return left
+
+
+def _native_file_key(info) -> tuple:
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+            info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _native_file(path: Path, *, deadline: float, uid: int, gid: int,
+                 root_owned: bool = True, maximum: int = 16 * MiB) -> tuple[bytes, tuple]:
+    """Finite no-follow immutable input binding, with independent owned close.
+
+    These bytes and modes describe a file, not an executing platform-status bit.
+    The original Apple codesign launch still relies on the expressly admitted OS
+    provider/launch TCB premise. No file is copied, resigned or substituted here.
+    """
+    fd, errors, chunks, total = None, [], [], 0
+    try:
+        _remaining(deadline)
+        if _canonical(path) != path:
+            raise SessionError("native role input has a noncanonical alias")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or not 0 <= before.st_size <= maximum or before.st_uid == uid
+                or before.st_mode & (stat.S_ISUID | stat.S_ISGID | 0o002)
+                or before.st_gid == gid and before.st_mode & 0o020
+                or root_owned and (before.st_uid, before.st_gid) != (0, 0)
+                or os.get_inheritable(fd)):
+            raise SessionError("native role input type/ownership/mode/size differs")
+        while True:
+            _remaining(deadline)
+            part = os.read(fd, min(65536, maximum - total + 1))
+            if not part:
+                break
+            total += len(part)
+            if total > maximum:
+                raise SessionError("native role input exceeds its byte bound")
+            chunks.append(part)
+        if (_native_file_key(before) != _native_file_key(os.fstat(fd))
+                or _native_file_key(before) != _native_file_key(path.lstat()) or total != before.st_size):
+            raise SessionError("native role input changed during its original read")
+        _remaining(deadline)
+    except BaseException as exc:
+        errors.append(exc)
+    if fd is not None:
+        try:
+            os.close(fd)
+        except BaseException as exc:
+            errors.append(exc)
+    try:
+        _remaining(deadline)
+    except BaseException as exc:
+        errors.append(exc)
+    if errors:
+        raise BaseExceptionGroup("native input observation/owned close failed", errors)
+    return b"".join(chunks), _native_file_key(before)
 
 
 def _python_full_command(root: Path, deadline: float) -> list[str]:
@@ -1224,6 +1288,9 @@ class Session:
         self.process_observer: Path | None = None
         self._home_state: dict | None = None
         self._userns_state: dict | None = None
+        self._native_authority: dict[str, dict] = {}
+        self._native_preparing: str | None = None
+        self._native_control: dict | None = None
         self._handlers = {}
         self._timer_finished = False
         self._active: subprocess.Popen | None = None
@@ -1426,15 +1493,737 @@ class Session:
                 raise SessionError("untrusted executable PATH component")
         return result
 
+    def _native_deadline(self, deadline: float) -> float:
+        if (type(deadline) not in (int, float) or not math.isfinite(deadline)
+                or not 0 < deadline <= self.deadline):
+            raise SessionError("native authority needs its original tighter absolute cutoff")
+        try:
+            _remaining(deadline)
+        except DeadlineExpired:
+            self._fail("native authority original cutoff expired")
+            raise
+        return deadline
+
+    def _native_command(self, phase: str) -> list[str]:
+        if type(phase) is not str or phase not in _NATIVE_PHASES:
+            raise SessionError("unknown fixed native authority phase")
+        return [str(self.work / f"{phase}-venv/bin/python"), "-I", "-S", "-B",
+                str(self.source / "tests/workflow/run_native_profile_checks.py"), "--authority",
+                *(["--installed-wheel"] if phase == "wheel" else [])]
+
+    def _native_environment(self, state: dict) -> dict[str, str]:
+        """No caller hooks or previous ordinary HOME/configuration are imported."""
+        root = state["cwd"]
+        return {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8",
+                "LC_ALL": "en_US.UTF-8", "TZ": "UTC", "CI": "true",
+                "HOME": str(root / "home"), "USER": f"mrk-ci-{self.uid}",
+                "LOGNAME": f"mrk-ci-{self.uid}",
+                "TMPDIR": str(root / "tmp"), "TMP": str(root / "tmp"), "TEMP": str(root / "tmp"),
+                "XDG_CONFIG_HOME": str(root / "config"), "XDG_CACHE_HOME": str(root / "cache"),
+                "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1", "PYTHONSAFEPATH": "1",
+                "DEVELOPER_DIR": "/Applications/Xcode_26.3.app/Contents/Developer"}
+
+    def _native_pin(self, state: dict, path: Path, *, owner: tuple[int, int] = (0, 0),
+                    modes: tuple[int, ...] = (0o555, 0o755)) -> None:
+        """Retain original no-follow directory custody, never a pathname receipt."""
+        if any(pin["path"] == path for pin in state["pins"]):
+            return
+        _remaining(state["deadline"])
+        _canonical(path)
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        pin = {"path": path, "fd": fd, "node": None}
+        state["pins"].append(pin)  # Custody precedes the first fallible observation.
+        info = os.fstat(fd)
+        named = path.lstat()
+        node = (*_home_node(info), stat.S_IMODE(info.st_mode))
+        if (not stat.S_ISDIR(info.st_mode) or (info.st_uid, info.st_gid) != owner
+                or stat.S_IMODE(info.st_mode) not in modes or os.get_inheritable(fd)
+                or node != (*_home_node(named), stat.S_IMODE(named.st_mode))):
+            raise SessionError("native authority directory custody/type/mode differs")
+        pin["node"] = node
+        _remaining(state["deadline"])
+
+    def _native_add_file(self, state: dict, path: Path, *, root_owned: bool = True,
+                         maximum: int = 16 * MiB) -> bytes:
+        raw, identity = _native_file(path, deadline=state["deadline"], uid=self.uid, gid=self.gid,
+                                     root_owned=root_owned, maximum=maximum)
+        record = {"identity": identity, "sha256": hashlib.sha256(raw).hexdigest(),
+                  "root_owned": root_owned, "maximum": maximum}
+        if path in state["files"] and state["files"][path] != record:
+            raise SessionError("native authority immutable file binding changed")
+        state["files"][path] = record
+        if len(state["files"]) > 1024 or sum(row["identity"][6] for row in state["files"].values()) > 128 * MiB:
+            raise SessionError("native authority immutable input inventory exceeds fixed bounds")
+        return raw
+
+    def _native_tree(self, state: dict, root: Path, *, binding: bool) -> tuple[str, ...]:
+        """Bound the complete read-granted first-party tree, not just imports."""
+        names = []
+        def walk_error(error):
+            raise error
+        for current, directories, files in os.walk(root, followlinks=False, onerror=walk_error):
+            _remaining(state["deadline"])
+            current = Path(current)
+            if len(current.relative_to(root).parts) > 32:
+                raise SessionError("native authority input tree depth exceeds bound")
+            if binding:
+                self._native_pin(state, current, modes=(0o555,))
+            for name in sorted(directories + files):
+                _remaining(state["deadline"])
+                path = current / name
+                info = path.lstat()
+                if (not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
+                        or (info.st_uid, info.st_gid) != (0, 0)
+                        or stat.S_IMODE(info.st_mode) not in (0o444, 0o555)):
+                    raise SessionError("native authority input tree is not ordinary and frozen")
+                names.append(path.relative_to(root).as_posix())
+                if len(names) > 1024:
+                    raise SessionError("native authority input tree inventory exceeds bound")
+                if binding and stat.S_ISREG(info.st_mode):
+                    self._native_add_file(state, path)
+        _remaining(state["deadline"])
+        return tuple(sorted(names))
+
+    def _native_bind_inputs(self, state: dict) -> None:
+        deadline, phase = state["deadline"], state["phase"]
+        # make_layout() has already permanently protected the work top level.
+        # Admission's earlier U-owned0700 directory is NOT sufficient here.
+        for path in (self.root, self.work, self.bootstrap):
+            self._native_pin(state, path, modes=(0o755,))
+        for path in (self.source, self.source / ".github", self.source / ".github/scripts"):
+            self._native_pin(state, path, modes=(0o555,))
+        venv = self.work / f"{phase}-venv"
+        package = (self.work / "source-build/src/mobile_release" if phase == "source"
+                   else venv / "lib/python3.11/site-packages/mobile_release")
+        state["package"] = package
+        for target in (venv / "bin", package.parent):
+            paths, current = [], target
+            while current != self.work:
+                if not _under(current, self.work) or len(paths) > 32:
+                    raise SessionError("native authority fixed input ancestry differs")
+                paths.append(current)
+                current = current.parent
+            for path in reversed(paths):
+                self._native_pin(state, path, modes=(0o555,))
+        for root in (package, self.source / "tests"):
+            state["trees"][root] = self._native_tree(state, root, binding=True)
+        for path in (self.entry, self.source / ".github/scripts/ci_checks.py", self.source / "pyproject.toml"):
+            self._native_add_file(state, path)
+        original = self._native_add_file(state, self.python, root_owned=False, maximum=32 * MiB)
+        selected = Path(self._native_command(phase)[0])
+        if self._native_add_file(state, selected, maximum=32 * MiB) != original:
+            raise SessionError("native authority interpreter is not the frozen selected provider copy")
+        if stat.S_IMODE(state["files"][selected]["identity"][2]) != 0o555:
+            raise SessionError("native authority interpreter mode is not frozen0555")
+        _admit_executable(selected, self.uid, self.gid, root_owned=True, role="python")
+        config = self._native_add_file(state, venv / "pyvenv.cfg")
+        rows = {}
+        for line in config.decode("utf-8", "strict").splitlines():
+            key, separator, value = line.partition(" = ")
+            if not separator or key in rows:
+                raise SessionError("native authority venv configuration is ambiguous")
+            rows[key] = value
+        if (set(rows) != {"home", "include-system-site-packages", "version", "executable", "command"}
+                or rows["home"] != str(self.python.parent) or rows["executable"] != str(self.python)
+                or rows["include-system-site-packages"] != "false"
+                or rows["version"] != sys.version.split()[0]
+                or rows["command"] != f"{self.python} -m venv --copies {venv}"):
+            raise SessionError("native authority venv runtime origin differs from its fixed provider")
+        tools = {}
+        for role, path in (("signature-tool", Path("/usr/bin/codesign")), ("true", Path("/usr/bin/true")),
+                           ("sandbox-exec", Path("/usr/bin/sandbox-exec"))):
+            _remaining(deadline)
+            metadata = _admit_executable(path, self.uid, self.gid, root_owned=True, role=role)
+            self._native_add_file(state, path)
+            tools[role] = {"sha256": state["files"][path]["sha256"], "metadata": metadata}
+        state["tools"] = tools
+        # req's original command has no -config override. Bind only the two
+        # documented public OS configuration locations, not all of private/etc.
+        configs = (Path("/private/etc/ssl/openssl.cnf"), Path("/System/Library/OpenSSL/openssl.cnf"))
+        for path in configs:
+            _remaining(deadline)
+            try:
+                before = path.lstat()
+            except FileNotFoundError:
+                continue  # No compatibility claim: a missing actual dependency fails natively.
+            actual = path.resolve(strict=True)
+            if actual not in configs or _native_file_key(before) != _native_file_key(path.lstat()):
+                raise SessionError("fixed OpenSSL public configuration alias changed or escaped")
+            self._native_add_file(state, actual, maximum=MiB)
+        _remaining(deadline)
+
+    def _native_policy_bytes(self, state: dict, *, kind: str, port: int | None = None) -> bytes:
+        """Separate finite policies. The ordinary _write_policy is untouched."""
+        if kind not in {"authority", "mach-baseline", "aia", "write-positive"}:
+            raise SessionError("unknown native fixed policy kind")
+        if ((kind == "aia" and not (type(port) is int and 1024 <= port <= 65535))
+                or kind != "aia" and port is not None):
+            raise SessionError("native AIA policy lacks its original owned responder port")
+        q = lambda value: json.dumps(str(value), ensure_ascii=True)
+        runtime = (*self.tool_prefixes, Path("/Applications/Xcode_26.3.app/Contents/Developer"),
+                   *(Path(p) for p in ("/System/Library", "/usr/lib", "/usr/share", "/usr/bin", "/bin", "/usr/sbin", "/sbin")))
+        reads = [f"(subpath {q(path)})" for path in (*runtime, state["package"], self.source / "tests",
+                                                    *(state["cwd"] / name for name in _NATIVE_LEAVES))]
+        literals = (self.entry, self.bootstrap / "ci_native_authority.py", self.policy,
+                    self.bootstrap / "native-authority-source.sb", state["policy"],
+                    self.bootstrap / "readonly", self.source / "pyproject.toml",
+                    self.source / ".github/scripts/ci_checks.py", Path(state["argv"][0]),
+                    self.work / f"{state['phase']}-venv/pyvenv.cfg",
+                    Path("/private/etc/ssl/openssl.cnf"), Path("/System/Library/OpenSSL/openssl.cnf"),
+                    *(Path(p) for p in ("/dev/null", "/dev/random", "/dev/urandom",
+                                       "/private/etc/localtime", "/private/etc/passwd", "/private/etc/group")))
+        reads.extend(f"(literal {q(path)})" for path in literals)
+        # Unchanged ios_profiles BOOTSTRAP uses FileFinder on package.parent.
+        # Listing exactly this immutable directory is not reading its sibling
+        # file/subdirectory bytes. Never grant a parent subpath here.
+        reads.append(f"(literal {q(state['package'].parent)})")
+        metadata = {p for path in (*runtime, *literals, state["package"], self.source / "tests", state["cwd"])
+                    for p in (path.parent, *path.parents)} | set(self.ruby_ancestors) | {state["outside_write"]}
+        if len(metadata) > 256:
+            raise SessionError("native authority metadata ancestry exceeds fixed bound")
+        services = (*_NATIVE_TRUST_SERVICES, _NATIVE_OTHER_SERVICE) if kind == "mach-baseline" else _NATIVE_TRUST_SERVICES
+        mach = " ".join(f"(global-name {q(name)})" for name in services)
+        allowed_write = ([f"(literal {q(state['outside_write'])})"] if kind == "write-positive"
+                         else [f"(subpath {q(state['cwd'] / name)})" for name in _NATIVE_LEAVES])
+        text = ("(version 1)\n(allow default)\n(deny network*)\n"
+                f"(deny mach-lookup (require-not (require-any {mach})))\n"
+                "(deny signal (require-not (target same-sandbox)))\n"
+                f"(deny file-read* (require-not (require-any {' '.join(reads)})))\n"
+                + "".join(f"(allow file-read-metadata (literal {q(path)}))\n" for path in sorted(metadata))
+                + f"(deny file-write* (require-not (require-any {' '.join(allowed_write)} (literal \"/dev/null\"))))\n")
+        if kind == "aia":
+            text += f'(allow network-outbound (remote tcp "127.0.0.1:{port}"))\n'
+        return text.encode("ascii")
+
+    def _native_check_inputs(self, state: dict) -> None:
+        _remaining(state["deadline"])
+        for pin in state["pins"]:
+            _remaining(state["deadline"])
+            if pin["fd"] is None or pin["node"] is None or os.get_inheritable(pin["fd"]):
+                raise SessionError("native authority lost original directory descriptor custody")
+            for current in (os.fstat(pin["fd"]), pin["path"].lstat()):
+                if (*_home_node(current), stat.S_IMODE(current.st_mode)) != pin["node"]:
+                    raise SessionError("native authority pinned directory/name changed")
+        for root, wanted in state["trees"].items():
+            if self._native_tree(state, root, binding=False) != wanted:
+                raise SessionError("native authority immutable tree inventory changed")
+        for path, expected in state["files"].items():
+            raw, identity = _native_file(path, deadline=state["deadline"], uid=self.uid, gid=self.gid,
+                                         root_owned=expected["root_owned"], maximum=expected["maximum"])
+            if identity != expected["identity"] or hashlib.sha256(raw).hexdigest() != expected["sha256"]:
+                raise SessionError("native authority bound input/policy bytes changed")
+        if sorted(p.name for p in state["cwd"].iterdir()) != sorted(_NATIVE_LEAVES):
+            raise SessionError("native authority scratch root lost its exclusive leaf inventory")
+        _remaining(state["deadline"])
+
+    def _native_close_pins(self, state: dict) -> list[str]:
+        errors = []
+        fd, state["outside_fd"] = state.get("outside_fd"), None
+        if fd is not None:
+            try:
+                os.close(fd)
+            except BaseException as exc:
+                errors.append(f"native authority outside fixture close {type(exc).__name__}")
+        for pin in reversed(state["pins"]):
+            fd, pin["fd"] = pin["fd"], None  # Ambiguous close is never retried.
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except BaseException as exc:
+                    errors.append(f"native authority owned directory close {type(exc).__name__}")
+        state["closed"] = True
+        return errors
+
+    def prepare_native_authority(self, phase: str, *, deadline: float) -> dict:
+        """Owner-only finite preparation; no ordinary-subject request interface.
+
+        A phase has one attempt. Genuine idle, immutable inputs and all native
+        controls precede publication. Failed or ambiguous effects are retained
+        in this VM; neither a second preparation nor an adopted directory exists.
+        """
+        self._guard()
+        if (type(phase) is not str or phase not in _NATIVE_PHASES or self.platform != "darwin"
+                or not self.admitted or self._admitting or self.process_observer is None
+                or getattr(self, "_native_preparing", None) is not None
+                or getattr(self, "_native_control", None) is not None):
+            raise SessionError("native authority preparation state/platform/phase differs")
+        deadline = self._native_deadline(deadline)
+        if deadline - time.monotonic() > 900 or phase in self._native_authority:
+            raise SessionError("native authority preparation has a renewed or duplicate phase")
+        if phase == "wheel":
+            previous = self._native_authority.get("source")
+            if (not previous or not previous.get("completed") or not previous.get("closed")
+                    or not previous.get("native_controls")):
+                raise SessionError("wheel authority requires the completed original source authority")
+        self.ensure_idle(deadline=deadline)
+        state = {"phase": phase, "deadline": deadline, "cwd": self.work / ("native-authority-" + phase),
+                 "policy": self.bootstrap / ("native-authority-" + phase + ".sb"),
+                 "argv": self._native_command(phase), "pins": [], "files": {}, "trees": {},
+                 "prepared": False, "started": False, "completed": False, "closed": False,
+                 "control_seen": [], "control_notes": {}, "native_controls": None, "outside_fd": None,
+                 "outside_write": self.fixture_controls / f"native-authority-{phase}-outside-write",
+                 "outside_read": self.work / "home" / f"native-authority-{phase}-read",
+                 "sibling_read": self.work / f"{phase}-venv/lib/python3.11/site-packages/pip/__init__.py"}
+        self._native_authority[phase] = state  # Record attempt before any owned effects.
+        self._native_preparing = phase
+        note = {"name": "native-authority-" + phase + "-preparation", "ok": False}
+        self.admission_results.append(note)
+        try:
+            self._native_bind_inputs(state)
+            raw = self._native_add_file(state, self.source / ".github/scripts/ci_native_authority.py")
+            helper = self.bootstrap / "ci_native_authority.py"
+            if phase == "source":
+                _private_file(helper, raw, 0o444)
+            if self._native_add_file(state, helper) != raw:
+                raise SessionError("native authority bootstrap helper differs from immutable source")
+            _remaining(deadline)
+            state["cwd"].mkdir(mode=0o755)
+            state["cwd"].chmod(0o755)
+            self._native_pin(state, state["cwd"], modes=(0o755,))
+            for name in _NATIVE_LEAVES:
+                _remaining(deadline)
+                leaf = state["cwd"] / name
+                leaf.mkdir(mode=0o700)
+                os.chown(leaf, self.uid, self.gid)
+                leaf.chmod(0o700)
+                self._native_pin(state, leaf, owner=(self.uid, self.gid), modes=(0o700,))
+            _private_file(state["outside_read"], b"MRK_NATIVE_PREVIOUS_SCRATCH\n", 0o444)
+            self._native_add_file(state, state["sibling_read"])
+            self._native_pin(state, self.fixture_controls, modes=(0o755,))
+            _private_file(state["outside_write"], b"MRK_NATIVE_OUTSIDE_INITIAL\n")
+            state["outside_fd"] = os.open(state["outside_write"], os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+            fd = state["outside_fd"]
+            original = os.fstat(fd)
+            if (not stat.S_ISREG(original.st_mode) or original.st_nlink != 1
+                    or (original.st_uid, original.st_gid) != (0, 0)
+                    or stat.S_IMODE(original.st_mode) != 0o600 or os.get_inheritable(fd)
+                    or _native_file_key(original) != _native_file_key(state["outside_write"].lstat())):
+                raise SessionError("native authority outside positive fixture custody differs")
+            os.fchown(fd, self.uid, self.gid)
+            state["outside_node"] = _home_node(os.fstat(fd))
+            _private_file(state["policy"], self._native_policy_bytes(state, kind="authority"), 0o444)
+            self._native_add_file(state, state["policy"])
+            positive = self.bootstrap / f"native-write-positive-{phase}.sb"
+            _private_file(positive, self._native_policy_bytes(state, kind="write-positive"), 0o444)
+            self._native_add_file(state, positive)
+            state["write_policy"] = positive
+            self._native_boundary_controls(state)
+            if phase == "source":
+                baseline = self.bootstrap / "native-mach-baseline.sb"
+                _private_file(baseline, self._native_policy_bytes(state, kind="mach-baseline"), 0o444)
+                self._native_add_file(state, baseline)
+                state["mach_policy"] = baseline
+                spec = importlib.util.spec_from_file_location("_mrk_native_authority_controls", helper)
+                if spec is None or spec.loader is None:
+                    raise SessionError("fixed native control helper is unavailable")
+                backend = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(backend)  # Reviewed inert controller definitions only.
+                state["backend"] = backend
+                state["native_controls"] = backend.admit_controls(
+                    lambda case, *, port=None: self._native_backend_capture(state, case, port=port),
+                    lambda: self.ensure_idle(deadline=deadline), state["cwd"] / "probes", deadline=deadline)
+                if state["control_seen"] != list(_NATIVE_CONTROL_CASES):
+                    raise SessionError("native authority control inventory is incomplete")
+                for case in _NATIVE_CONTROL_CASES:
+                    state["control_notes"][case]["ok"] = True
+            else:
+                # Same literal service rule and probe-only oracle; the actual
+                # wheel policy still receives its own direct native boundaries.
+                state["native_controls"] = self._native_authority["source"]["native_controls"]
+            self.ensure_idle(deadline=deadline)
+            self._native_check_inputs(state)
+            note.update({"phase": phase, "tools": state["tools"],
+                         "input_files": len(state["files"]), "controls": state["native_controls"],
+                         "service_controls_from": "source", "boundary_controls": "this-phase"})
+            _remaining(deadline)
+            if self.cancelled:
+                self._fail("controller cancellation")
+            self._guard()  # Final input/control work cannot publish after cancellation.
+            state["prepared"] = True
+            note["ok"] = True
+            return {"schema": 1, "phase": phase, "prepared": True, "input_files": len(state["files"]),
+                    "tools": state["tools"], "controls": state["native_controls"]}
+        except BaseException as original:
+            state["prepared"] = False
+            note["ok"] = False
+            self._fail("native authority preparation failed")
+            errors = self._native_close_pins(state)
+            self.cleanup_errors.extend(errors)
+            note.update({"exceptions": _exception_notes(original), "cleanup_errors": len(errors)})
+            if errors:
+                raise BaseExceptionGroup("native authority preparation/owned close failed",
+                                         [original, SessionError("native authority owned close failed")])
+            raise
+        finally:
+            self._native_control = None
+            self._native_preparing = None
+
+    def _native_control_capture(self, state: dict, case: str, argv: list[str], *, policy: Path,
+                                cwd: Path, seconds: int) -> CapturedRun:
+        """Only the fixed internal catalogs below construct these arguments."""
+        if (self._native_preparing != state["phase"] or self._native_control is not None
+                or state["closed"] or state["started"]):
+            raise SessionError("native admission capture lacks its original preparation owner")
+        self._native_state_binding(state)
+        policies = {"mach-baseline": self.bootstrap / "native-mach-baseline.sb", "mach-ordinary": self.policy,
+                    "mach-authority": state["policy"], "mach-nonexpand": self.policy,
+                    "aia-prepare": state["policy"],
+                    "aia-evaluate": self.bootstrap / "native-aia-source.sb",
+                    "outside-write-positive": self.bootstrap / f"native-write-positive-{state['phase']}.sb",
+                    "outside-read-positive": self.policy, "native-isolation": state["policy"]}
+        bounds = {"aia-prepare": 300, "aia-evaluate": 120,
+                  "outside-write-positive": 10, "outside-read-positive": 10}
+        helper = self.bootstrap / "ci_native_authority.py" if case in _NATIVE_CONTROL_CASES else self.entry
+        expected_cwd = state["cwd"] / "probes" if case in _NATIVE_CONTROL_CASES else state["cwd"]
+        if (case not in policies or policy != policies[case] or seconds != bounds.get(case, 30)
+                or cwd != expected_cwd or argv[:5] != [str(self.python), "-I", "-S", "-B", str(helper)]):
+            raise SessionError("native control differs from its finite immutable helper/policy catalog")
+        self._native_control = {"state": state, "case": case, "argv": argv, "policy": policy,
+                                "cwd": cwd, "seconds": seconds}
+        try:
+            result = self._run(argv, cwd=cwd, env={}, seconds=seconds, output_limit=MiB,
+                               cpu_seconds=180, latch=True, profile="native-control",
+                               absolute_deadline=state["deadline"])
+            row = self._note_capture("native-authority-" + state["phase"] + "-" + case, result)
+            state["control_notes"][case] = row
+            if not result.ok and case in _NATIVE_CONTROL_CASES:
+                # Diagnostic-only closed fields; never replace the failed
+                # capture, its original EOF/wait/finality or missing execution.
+                role = "mach" if case in {"mach-baseline", "mach-ordinary", "mach-authority"} else case
+                if time.monotonic() < state["deadline"]:
+                    diagnostic = state["backend"].parse_failure(result.stderr, role)
+                    if diagnostic is not None:
+                        row["native_control_error"] = diagnostic
+                    else:
+                        row["native_control_diagnostics_unavailable"] = True
+                else:
+                    row["native_control_diagnostics_unavailable"] = True
+            return result  # Genuine original wait/EOF/finality/persisted facts.
+        finally:
+            self._native_control = None
+
+    def _native_backend_capture(self, state: dict, case: str, *, port: int | None = None) -> CapturedRun:
+        index = len(state["control_seen"])
+        if (state["phase"] != "source" or type(case) is not str or index >= len(_NATIVE_CONTROL_CASES)
+                or case != _NATIVE_CONTROL_CASES[index]):
+            raise SessionError("native backend case is absent, duplicated or out of order")
+        _remaining(state["deadline"])
+        helper = self.bootstrap / "ci_native_authority.py"
+        base = [str(self.python), "-I", "-S", "-B", str(helper)]
+        if case.startswith("mach-"):
+            if port is not None:
+                raise SessionError("Mach lookup control has no network port input")
+            policies = {"mach-baseline": state["mach_policy"], "mach-ordinary": self.policy,
+                        "mach-authority": state["policy"], "mach-nonexpand": self.policy}
+            policy = policies[case]
+            command = ([*base, "--mach-nonexpand", str(self.bootstrap / "native-authority-source.sb"),
+                        repr(state["deadline"])] if case == "mach-nonexpand"
+                       else [*base, "--mach", repr(state["deadline"])])
+            seconds = 30
+        else:
+            if type(port) is not int or not 1024 <= port <= 65535:
+                raise SessionError("AIA control lacks the original owned responder port")
+            policy = self.bootstrap / "native-aia-source.sb"
+            if case == "aia-prepare":
+                if "aia_port" in state:
+                    raise SessionError("AIA original responder binding was already attempted")
+                state["aia_port"] = port
+                _private_file(policy, self._native_policy_bytes(state, kind="aia", port=port), 0o444)
+                self._native_add_file(state, policy)
+            elif port != state.get("aia_port"):
+                raise SessionError("AIA responder port changed after fixture preparation")
+            command = [*base, "--" + case, str(port), repr(state["deadline"])]
+            seconds = 300 if case == "aia-prepare" else 120
+            if case == "aia-prepare":
+                policy = state["policy"]  # Fixture creation has no network requirement.
+        state["control_seen"].append(case)  # No retry after ambiguous launch or collection.
+        return self._native_control_capture(state, case, command, policy=policy,
+                                            cwd=state["cwd"] / "probes", seconds=seconds)
+
+    def _native_boundary_controls(self, state: dict) -> None:
+        """Real positives/negatives under EACH phase's actual authority policy."""
+        deadline, listeners, endpoints, errors = state["deadline"], [], [], []
+        base = [str(self.python), "-I", "-S", "-B", str(self.entry)]
+        try:
+            positive = self._native_control_capture(state, "outside-write-positive",
+                [*base, "--native-write-control", str(state["outside_write"])],
+                policy=state["write_policy"], cwd=state["cwd"], seconds=10)
+            if not positive.ok or positive.stdout != b"MRK_OUTSIDE_WRITE_POSITIVE\n" or positive.stderr:
+                raise SessionError("native authority outside-write positive did not complete")
+            self.ensure_idle(deadline=deadline)
+            fd = state["outside_fd"]
+            current = os.fstat(fd)
+            if (_home_node(current) != state["outside_node"] or current.st_nlink != 1
+                    or stat.S_IMODE(current.st_mode) != 0o600 or os.get_inheritable(fd)
+                    or _native_file_key(current) != _native_file_key(state["outside_write"].lstat())):
+                raise SessionError("native authority writable canary changed its original custody")
+            os.lseek(fd, 0, os.SEEK_SET)
+            if os.read(fd, 64) != b"MRK_POSITIVE_WRITE\n" or os.read(fd, 1):
+                raise SessionError("native authority outside-write positive did not persist exact bytes")
+            positive = self._native_control_capture(state, "outside-read-positive",
+                [*base, "--native-read-control", state["phase"], repr(deadline)],
+                policy=self.policy, cwd=state["cwd"], seconds=10)
+            if not positive.ok or positive.stdout != b"MRK_NATIVE_OUTSIDE_READ_OK\n" or positive.stderr:
+                raise SessionError("native authority known previous/sibling read positive failed")
+            self.ensure_idle(deadline=deadline)
+            for family, host in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+                for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+                    _remaining(deadline)
+                    listener = socket.socket(family, kind)
+                    listeners.append(listener)
+                    listener.settimeout(min(1, _remaining(deadline)))
+                    listener.bind((host, 0))
+                    address = listener.getsockname()
+                    if kind == socket.SOCK_STREAM:
+                        listener.listen(8)
+                    _outside_network_control(listener, deadline=deadline)
+                    endpoints.append([int(family), int(kind), host, address[1]])
+            canary, home_socket = _home_paths(self.runner_home, self.root)
+            data = {"uid": self.uid, "gid": self.gid, "platform": "darwin",
+                    "work": str(self.work), "probe_scratch": str(state["cwd"] / "probes"),
+                    "source": str(self.source), "readonly": str(self.bootstrap / "readonly"),
+                    "control": str(self.control / "denied"), "outside_write": str(state["outside_write"]),
+                    "outside_reads": [str(state["outside_read"]), str(state["sibling_read"])],
+                    "runner_home": str(self.runner_home), "runner_temp": str(self.runner_temp),
+                    "home_canary": str(canary), "home_socket": str(home_socket),
+                    "ruby_prefix": str(self.ruby_prefix), "ruby_executable": str(self.ruby),
+                    "home_sibling": str(_ruby_sibling_path(self.runner_home, self.ruby_prefix, self.root)),
+                    "endpoints": endpoints}
+            result = self._native_control_capture(state, "native-isolation", [*base, "--probe", json.dumps(data)],
+                policy=state["policy"], cwd=state["cwd"], seconds=30)
+            if not result.ok or result.stdout != b"MRK_NATIVE_ISOLATION_OK\n" or result.stderr:
+                raise SessionError("native authority real identity/FD/files/network inheritance controls failed")
+            self.ensure_idle(deadline=deadline)
+            _outside_network_empty(listeners, deadline=deadline)
+            _home_socket_empty(self._home_state["listener"], deadline=deadline)
+            self._native_signal_control(state)
+            self.ensure_idle(deadline=deadline)
+            current = os.fstat(fd)
+            if (_home_node(current) != state["outside_node"] or stat.S_IMODE(current.st_mode) != 0o600
+                    or current.st_nlink != 1
+                    or _native_file_key(current) != _native_file_key(state["outside_write"].lstat())):
+                raise SessionError("native authority canary revocation lost its original finality/custody")
+            os.fchown(fd, 0, 0)
+            os.fchmod(fd, 0o400)
+            after = os.fstat(fd)
+            if ((after.st_uid, after.st_gid) != (0, 0) or stat.S_IMODE(after.st_mode) != 0o400
+                    or after.st_dev != current.st_dev or after.st_ino != current.st_ino
+                    or _native_file_key(after) != _native_file_key(state["outside_write"].lstat())):
+                raise SessionError("native authority outside grant revocation postcondition failed")
+            _remaining(deadline)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            for listener in listeners:
+                try:
+                    listener.close()
+                except BaseException as exc:
+                    errors.append(exc)
+            try:
+                _remaining(deadline)
+            except BaseException as exc:
+                errors.append(exc)
+        if errors:
+            raise BaseExceptionGroup("native authority boundary/owned listener cleanup failed", errors)
+        for case in ("outside-write-positive", "outside-read-positive", "native-isolation"):
+            state["control_notes"][case]["ok"] = True
+
+    def _native_signal_control(self, state: dict) -> None:
+        """Fixed same-UID outside sentinel, never a discovered service/process."""
+        deadline = state["deadline"]
+        self.ensure_idle(deadline=deadline)
+        sentinel, errors, subject_done, sentinel_waited = None, [], False, False
+        self.domain_finality = False
+        self._direct_producer_pending = True
+        try:
+            _remaining(deadline)
+            sentinel = subprocess.Popen(self._trusted_entry(self.cleanup_policy, ["--sentinel"]),
+                cwd=state["cwd"], env=self._native_environment(state), user=self.uid,
+                group=self.gid, extra_groups=[], close_fds=True, start_new_session=True,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+            self._active = sentinel
+            _observe_original_credentials(sentinel.pid, self.uid, self.gid, deadline=deadline)
+            if _ready_line(sentinel.stdout, 5, deadline=deadline) != b"MRK_SENTINEL_READY\n":
+                raise SessionError("native authority outside signal sentinel did not become ready")
+            raw = _small_command(self._trusted_entry(state["policy"], ["--signal-case", str(sentinel.pid)]),
+                                 10, user=self.uid, group=self.gid, deadline=deadline)
+            subject_done = True  # Only the genuine original collector's normal return releases custody.
+            if raw != b"MRK_SIGNAL_BOUNDARY_OK\n":
+                raise SessionError("native authority actual signal control failed")
+            out, err = sentinel.communicate(b"q", timeout=min(2, _remaining(deadline)))
+            sentinel_waited = True
+            if sentinel.returncode != 0 or out != b"MRK_SENTINEL_CLOSED\n" or err:
+                raise SessionError("native authority outside sentinel received a signal or failed")
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            if sentinel is not None:
+                try:
+                    if sentinel.poll() is None:
+                        sentinel.kill()  # Original synthetic handle only.
+                except BaseException as exc:
+                    errors.append(exc)
+                try:
+                    sentinel.wait(timeout=max(0.0, min(2, deadline - time.monotonic())))
+                    sentinel_waited = True
+                except BaseException as exc:
+                    errors.append(exc)
+                for stream in (sentinel.stdin, sentinel.stdout, sentinel.stderr):
+                    try:
+                        stream.close()
+                    except BaseException as exc:
+                        errors.append(exc)
+            if sentinel_waited:
+                self._active = None
+            if subject_done and sentinel_waited:
+                self._direct_producer_pending = False
+            try:
+                _remaining(deadline)
+            except BaseException as exc:
+                errors.append(exc)
+        if errors:
+            raise BaseExceptionGroup("native authority original signal controls/cleanup failed", errors)
+        self.ensure_idle(deadline=deadline)
+        self.admission_results.append({"name": "native-authority-" + state["phase"] + "-signal", "ok": True})
+
+    def _native_state_binding(self, state: dict) -> None:
+        phase = state.get("phase")
+        if (type(phase) is not str or phase not in _NATIVE_PHASES
+                or state.get("cwd") != self.work / ("native-authority-" + phase)
+                or state.get("policy") != self.bootstrap / ("native-authority-" + phase + ".sb")
+                or state.get("argv") != self._native_command(phase)
+                or state.get("package") != (self.work / "source-build/src/mobile_release" if phase == "source"
+                    else self.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")):
+            raise SessionError("native authority lost its exact fixed phase/path/policy binding")
+
+    def _native_request(self, argv: list[str], *, cwd: Path, env: dict, seconds: float,
+                        output_limit: int, cpu_seconds: int, latch: bool, cancel_after: float | None,
+                        profile: str, absolute_deadline: float | None) -> dict:
+        if (self.platform != "darwin" or not self.admitted or self._admitting or not latch
+                or cancel_after is not None or type(env) is not dict or env
+                or type(cpu_seconds) is not int or cpu_seconds != 180 or type(output_limit) is not int
+                or type(seconds) not in (int, float) or not math.isfinite(seconds)
+                or self.process_observer is None):
+            raise SessionError("native role invocation differs from its admitted fixed owner")
+        if profile == "native-control":
+            control = self._native_control
+            if control is None or self._native_preparing != control["state"]["phase"]:
+                raise SessionError("native control has no original private preparation owner")
+            state = control["state"]
+            if (argv != control["argv"] or cwd != control["cwd"] or seconds != control["seconds"]
+                    or output_limit != MiB or state["prepared"] or state["started"] or state["closed"]):
+                raise SessionError("native admission command/cwd/bounds differ from its fixed catalog")
+        else:
+            phase = profile.removeprefix("native-authority-")
+            state = self._native_authority.get(phase)
+            if (state is None or not state["prepared"] or state["started"] or state["completed"]
+                    or state["closed"] or self._native_preparing is not None or self._native_control is not None
+                    or argv != self._native_command(phase) or argv != state["argv"] or cwd != state["cwd"]
+                    or seconds != 900 or output_limit != 8 * MiB or not state["native_controls"]):
+                raise SessionError("native authority command/phase/cwd/bounds differ from its prepared one-shot role")
+        if absolute_deadline != state["deadline"]:
+            raise SessionError("native authority original cutoff was changed or renewed")
+        self._native_state_binding(state)
+        self._native_deadline(absolute_deadline)
+        return state
+
+    def _native_scratch_inventory(self, state: dict) -> dict:
+        """Only observe bounded ordinary task outputs after actual finality.
+
+        Private scratch is retained for the existing successful controller's
+        symlink-safe disposal; a failed or unknown attempt is left to VM disposal.
+        No output pathname grants authority to delete a foreign/shared resource.
+        """
+        count = total = 0
+        def walk_error(error):
+            raise error
+        for leaf in _NATIVE_LEAVES:
+            root = state["cwd"] / leaf
+            for current, directories, files in os.walk(root, followlinks=False, onerror=walk_error):
+                _remaining(state["deadline"])
+                if len(Path(current).relative_to(root).parts) > 32:
+                    raise SessionError("native scratch output depth exceeds bound")
+                for name in directories + files:
+                    _remaining(state["deadline"])
+                    info = (Path(current) / name).lstat()
+                    if (not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode))
+                            or (info.st_uid, info.st_gid) != (self.uid, self.gid)
+                            or info.st_mode & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX | 0o022)
+                            or stat.S_ISREG(info.st_mode) and info.st_nlink != 1):
+                        raise SessionError("native scratch output has unsafe type/ownership/mode/link state")
+                    count += 1
+                    total += info.st_size if stat.S_ISREG(info.st_mode) else 0
+                    if count > 4096 or total > 128 * MiB:
+                        raise SessionError("native scratch outputs exceed fixed inventory/byte bounds")
+        _remaining(state["deadline"])
+        return {"entries": count, "bytes": total, "private_retained": True}
+
+    def _native_finish_run(self, state: dict, result: CapturedRun) -> CapturedRun:
+        start, errors, expired = time.monotonic(), [], False
+        note = {"name": "native-authority-" + state["phase"] + "-postconditions", "ok": False}
+        self.admission_results.append(note)
+        try:
+            if result.ok:
+                self.ensure_idle(deadline=state["deadline"])
+                self._native_check_inputs(state)
+                note["outputs"] = self._native_scratch_inventory(state)
+            else:
+                self._fail("native authority capture did not succeed")
+        except BaseException as exc:
+            expired = isinstance(exc, DeadlineExpired)
+            errors.append(f"native authority postconditions {type(exc).__name__}")
+            note["exceptions"] = _exception_notes(exc)
+        finally:
+            errors.extend(self._native_close_pins(state))
+            finished = time.monotonic()
+            if finished >= state["deadline"]:
+                expired = True
+                errors.append("native authority postconditions exceeded original cutoff")
+        cancelled = result.cancelled or self.cancelled
+        if self.cancelled and not result.cancelled:
+            self._fail("controller cancellation")
+            errors.append("native authority postconditions observed late controller cancellation")
+        elif self.failure and result.ok:
+            errors.append("native authority postconditions observed latched session failure")
+        state["completed"] = result.ok and not errors and not cancelled and self.failure is None
+        note.update({"ok": state["completed"], "cleanup_errors": len(errors)})
+        if errors:
+            self._fail(result.primary_error or "native authority postconditions failed")
+            self.cleanup_errors.extend(errors)
+        # Extend THIS actual capture's own postconditions; never invent a
+        # combined capture, original wait, EOF, output bytes or successful phase.
+        return dataclasses.replace(result, primary_error=result.primary_error or
+                                   (self.failure if errors else None),
+                                   cleanup_errors=(*result.cleanup_errors, *errors),
+                                   timed_out=result.timed_out or expired,
+                                   cancelled=cancelled,
+                                   duration=result.duration + max(0.0, finished - start))
+
     def _argv(self, argv: list[str], cpu: int, *, profile: str = "ordinary") -> tuple[list[str], dict]:
-        if type(profile) is not str or profile not in {"ordinary", "python-full"}:
+        if type(profile) is not str or profile not in {"ordinary", "python-full", "native-control", *_NATIVE_PROFILES}:
             raise SessionError("unknown fixed command profile")
         if profile == "python-full" and (self.platform != "linux" or cpu != 300
                                           or argv != _python_full_command(self.root, self.deadline)):
             raise SessionError("fixed Python profile command/platform differs")
         role = "--enter-python-full" if profile == "python-full" else "--enter"
+        policy = self.policy
+        if profile in _NATIVE_PROFILES:
+            phase = profile.removeprefix("native-authority-")
+            state = getattr(self, "_native_authority", {}).get(phase)
+            if (self.platform != "darwin" or cpu != 180 or state is None or not state["prepared"]
+                    or state["started"] or state["closed"] or argv != self._native_command(phase)
+                    or self._native_preparing is not None or self._native_control is not None):
+                raise SessionError("native authority argv lacks its fixed original preparation")
+            self._native_state_binding(state)
+            policy = state["policy"]
+        elif profile == "native-control":
+            control = getattr(self, "_native_control", None)
+            if (self.platform != "darwin" or cpu != 180 or control is None
+                    or self._native_preparing != control["state"]["phase"] or argv != control["argv"]):
+                raise SessionError("native control argv lacks its private fixed catalog owner")
+            policy = control["policy"]
         entry = [str(self.python), "-I", "-S", "-B", str(self.entry), role, self.platform,
-                 str(self.uid), str(self.gid), str(cpu), str(self.policy), *argv]
+                 str(self.uid), str(self.gid), str(cpu), str(policy), *argv]
         if self.platform == "darwin":
             return entry, {"user": self.uid, "group": self.gid, "extra_groups": []}
         cmd = ["/usr/bin/bwrap", "--assert-userns-disabled", "--unshare-pid", "--unshare-net", "--unshare-ipc", "--unshare-uts",
@@ -1490,22 +2279,31 @@ class Session:
         if info.f_bavail * info.f_frsize < DISK_RESERVE:
             raise SessionError("private verification disk headroom exhausted")
 
-    def ensure_idle(self) -> None:
+    def ensure_idle(self, *, deadline: float | None = None) -> None:
         """Required BEFORE any copy/hash/chmod/delete of task-produced paths."""
         self._guard()
+        cutoff = self.deadline
+        if deadline is not None:
+            if (type(deadline) not in (int, float) or not math.isfinite(deadline)
+                    or not 0 < deadline <= self.deadline):
+                raise SessionError("invalid tighter idle-observation deadline")
+            cutoff = deadline
         if self._busy or self._active is not None or getattr(self, "_direct_producer_pending", False):
             self.domain_finality = False
             self._fail("attempted mutable-output access while a producer is owned")
             raise SessionError(self.failure)
         try:
-            if _domain(self.platform, self.uid, deadline=self.deadline):
+            _remaining(cutoff)
+            if _domain(self.platform, self.uid, deadline=cutoff):
                 raise SessionError("reserved identity still has a process or zombie")
+            _remaining(cutoff)
             self.domain_finality = True
         except BaseException:
             self.domain_finality = False
             self._fail("reserved-identity finality is unknown or false")
             raise
         self._headroom()
+        _remaining(cutoff)
 
     def _cleanup(self, *, deadline: float | None = None) -> list[str]:
         errors = []
@@ -1542,19 +2340,44 @@ class Session:
         return errors
 
     def run(self, argv: list[str], *, cwd: str | Path, env: dict[str, str], seconds: float,
-            output_limit: int = 8 * MiB, cpu_seconds: int = 180, profile: str = "ordinary") -> CapturedRun:
+            output_limit: int = 8 * MiB, cpu_seconds: int = 180, profile: str = "ordinary",
+            absolute_deadline: float | None = None) -> CapturedRun:
         self._guard()
         if not self.admitted:
             raise SessionError("native admission has not completed")
         if self.platform == "darwin" and self.process_observer is None:
             raise SessionError("macOS process observer admission is missing")
-        return self._run(argv, cwd=cwd, env=env, seconds=seconds,
-                         output_limit=output_limit, cpu_seconds=cpu_seconds, latch=True, profile=profile)
+        if profile == "native-control":
+            raise SessionError("private native admission roles are not public run profiles")
+        try:
+            return self._run(argv, cwd=cwd, env=env, seconds=seconds,
+                             output_limit=output_limit, cpu_seconds=cpu_seconds, latch=True, profile=profile,
+                             absolute_deadline=absolute_deadline)
+        except BaseException:
+            if type(profile) is str and profile in _NATIVE_PROFILES:
+                self._fail("native authority invocation failed before a complete capture")
+                state = self._native_authority.get(profile.removeprefix("native-authority-"))
+                if state is not None:
+                    state["prepared"] = False
+                    self.cleanup_errors.extend(self._native_close_pins(state))
+            raise
 
     def _run(self, argv: list[str], *, cwd: str | Path, env: dict[str, str], seconds: float,
              output_limit: int = 8 * MiB, cpu_seconds: int = 180, latch: bool,
-             cancel_after: float | None = None, profile: str = "ordinary") -> CapturedRun:
+             cancel_after: float | None = None, profile: str = "ordinary",
+             absolute_deadline: float | None = None) -> CapturedRun:
         self._guard()
+        bound = self.deadline
+        if absolute_deadline is not None:
+            if (type(absolute_deadline) not in (int, float) or not math.isfinite(absolute_deadline)
+                    or not 0 < absolute_deadline <= self.deadline):
+                raise SessionError("invalid tighter absolute command deadline")
+            bound = absolute_deadline
+            try:
+                _remaining(bound)
+            except DeadlineExpired:
+                self._fail("original absolute command deadline expired before preparation")
+                raise
         if self._busy or not isinstance(argv, list) or not argv or not Path(argv[0]).is_absolute():
             raise SessionError("invalid/reentrant fixed command")
         if any(not isinstance(a, str) or "\0" in a for a in argv):
@@ -1564,25 +2387,58 @@ class Session:
             raise SessionError("command cwd outside source/private work")
         if not 0 < seconds <= 3300 or not 0 < output_limit <= 16 * MiB or not 0 < cpu_seconds <= 300:
             raise SessionError("unbounded command resource request")
-        if type(profile) is not str or profile not in {"ordinary", "python-full"}:
+        if type(profile) is not str or profile not in {"ordinary", "python-full", "native-control", *_NATIVE_PROFILES}:
             raise SessionError("unknown fixed command profile")
         if profile == "python-full" and (self.platform != "linux" or not self.admitted or self._admitting
                 or not latch or cancel_after is not None or cwd != self.work or seconds != 900
                 or cpu_seconds != 300 or output_limit != 8 * MiB
                 or argv != _python_full_command(self.root, self.deadline)):
             raise SessionError("fixed Python profile invocation differs from its one admitted gate")
-        child_env = self._environment(env)
+        native_state = None
+        if profile in _NATIVE_PROFILES or profile == "native-control":
+            native_state = self._native_request(argv, cwd=cwd, env=env, seconds=seconds,
+                output_limit=output_limit, cpu_seconds=cpu_seconds, latch=latch, cancel_after=cancel_after,
+                profile=profile, absolute_deadline=absolute_deadline)
+            child_env = self._native_environment(native_state)
+        else:
+            if (getattr(self, "_native_preparing", None) is not None
+                    or any(not state["closed"] for state in getattr(self, "_native_authority", {}).values())):
+                raise SessionError("ordinary launch cannot overlap an unresolved native authority phase")
+            child_env = self._environment(env)
         command, kwargs = self._argv(argv, cpu_seconds, profile=profile)
-        self.ensure_idle()
+        try:
+            _remaining(bound)
+            if absolute_deadline is None:
+                self.ensure_idle()
+            else:
+                self.ensure_idle(deadline=bound)
+        except DeadlineExpired:
+            self._fail("original absolute command deadline expired during preparation")
+            raise
         self._headroom()
+        if native_state is not None:
+            try:
+                self._native_check_inputs(native_state)
+            except BaseException:
+                self._fail("native authority immutable inputs failed before capture")
+                native_state["prepared"] = False
+                self.cleanup_errors.extend(self._native_close_pins(native_state))
+                raise
         if profile == "python-full":
             self._check_python_full_inputs()
             _python_full_memory(deadline=self.deadline)
+        try:
+            _remaining(bound)
+        except DeadlineExpired:
+            self._fail("original absolute command deadline expired before capture")
+            raise
+        if profile in _NATIVE_PROFILES:
+            native_state["started"] = True  # A failed acquisition cannot authorize another attempt.
         self._busy = True
         self.domain_finality = False
         self._run_number += 1
         start, failure, errors = time.monotonic(), None, []
-        cutoff = min(self.deadline, start + seconds)
+        cutoff = min(bound, start + seconds)
         outputs, fds, paths, eof, persisted = [bytearray(), bytearray()], [], [], [False, False], [0, 0]
         overflowed = [False, False]
         code = None
@@ -1610,6 +2466,7 @@ class Session:
                 fds.append(os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600))
             if self.platform == "linux":
                 self._assert_userns_boundary()
+            _remaining(cutoff)  # Capture acquisition may not buy a later spawn.
             child = subprocess.Popen(command, cwd=cwd, env=child_env, stdin=subprocess.DEVNULL,
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                       close_fds=True, start_new_session=True, **kwargs)
@@ -1636,6 +2493,10 @@ class Session:
                     cancelled = True
                     fail("command cancellation")
                 if failure is not None:
+                    if now >= min(bound, stop_at + 8):
+                        if not all(eof):
+                            errors.append("stream EOF unavailable at bounded cleanup cutoff")
+                        break
                     if code is None and not terminate_sent:
                         child.terminate()
                         terminate_sent = True
@@ -1643,7 +2504,7 @@ class Session:
                         child.kill()
                         kill_sent = True
                     if code is not None and not cleanup_done:
-                        errors.extend(self._cleanup(deadline=min(self.deadline, stop_at + 8)))
+                        errors.extend(self._cleanup(deadline=min(bound, stop_at + 8)))
                         cleanup_done = True
                     if now - stop_at >= 8:
                         if not all(eof):
@@ -1659,7 +2520,8 @@ class Session:
                     ):
                         fail("subject per-process RSS limit exceeded")
                     last_monitor = now
-                for key, _ in sel.select(0.05):
+                poll_cutoff = cutoff if stop_at is None else min(bound, stop_at + 8)
+                for key, _ in sel.select(max(0.0, min(0.05, poll_cutoff - time.monotonic()))):
                     i = key.data
                     try:
                         size = 65536 if overflowed[i] else min(65536, output_limit - len(outputs[i]) + 1)
@@ -1699,7 +2561,7 @@ class Session:
             # A successful command may not buy more metadata time at finality.
             # Failed-command cleanup uses its original stop timestamp, not a
             # fresh allowance; neither path extends the aggregate endpoint.
-            final_cutoff = min(self.deadline, stop_at + 8) if stop_at is not None else cutoff
+            final_cutoff = min(bound, stop_at + 8) if stop_at is not None else cutoff
             if child is not None:
                 try:
                     if child.poll() is None:
@@ -1766,9 +2628,10 @@ class Session:
             if latch and failure is not None:
                 self._fail(failure)
                 self.cleanup_errors.extend(errors)
-        return CapturedRun(bytes(outputs[0]), bytes(outputs[1]), code, waited, *eof,
-                           finality, timed_out, cancelled, time.monotonic() - start,
-                           failure, tuple(errors), tuple(persisted))
+        result = CapturedRun(bytes(outputs[0]), bytes(outputs[1]), code, waited, *eof,
+                             finality, timed_out, cancelled, time.monotonic() - start,
+                             failure, tuple(errors), tuple(persisted))
+        return self._native_finish_run(native_state, result) if profile in _NATIVE_PROFILES else result
 
     def admit(self) -> None:
         self._guard()
@@ -2776,6 +3639,17 @@ class Session:
             # Failed/unknown state is deliberately NOT walked, deleted, adopted
             # or reset.  The reservation survives until this one VM is disposed.
         finally:
+            for state in getattr(self, "_native_authority", {}).values():
+                try:
+                    if not state["completed"]:
+                        self._fail("native authority phase was left incomplete at terminal close")
+                    errors = self._native_close_pins(state)
+                    if errors:
+                        self.cleanup_errors.extend(errors)
+                        self._fail("native authority owned finalization failed")
+                except BaseException as exc:
+                    self.cleanup_errors.append(f"native authority terminal finalization {type(exc).__name__}")
+                    self._fail("native authority owned finalization failed")
             try:
                 userns_errors = self._close_userns_boundary()
                 if userns_errors:
@@ -2851,9 +3725,12 @@ def _limits(platform: str, cpu: int, *, profile: str = "ordinary") -> None:
             raise SessionError("resource limit did not take effect")
 
 
-def _write_control(path: Path) -> None:
-    expected = Path(__file__).resolve().parent.parent / "fixture-controls" / "outside-write"
-    if path != expected or os.getuid() != os.geteuid() or not 60000 <= os.geteuid() < 65000:
+def _write_control(path: Path, *, native: bool = False) -> None:
+    parent = Path(__file__).resolve().parent.parent / "fixture-controls"
+    expected = ({parent / f"native-authority-{phase}-outside-write" for phase in _NATIVE_PHASES}
+                if native else {parent / "outside-write"})
+    if (path not in expected or native and sys.platform != "darwin"
+            or os.getuid() != os.geteuid() or not 60000 <= os.geteuid() < 65000):
         raise SessionError("invalid fixed numerical write control")
     fd = os.open(path, os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     errors = []
@@ -2878,6 +3755,24 @@ def _write_control(path: Path) -> None:
     if errors:
         raise BaseExceptionGroup("synthetic write control and close failed", errors)
     print("MRK_OUTSIDE_WRITE_POSITIVE", flush=True)
+
+
+def _native_read_control(phase: str, deadline: float) -> None:
+    """Two fixed public/synthetic reads prove later negatives are not absence."""
+    if (sys.platform != "darwin" or phase not in _NATIVE_PHASES
+            or not 60000 <= os.getuid() < 65000
+            or (os.getuid(), os.getgid(), os.getegid()) != (os.geteuid(),) * 3):
+        raise SessionError("invalid fixed native read positive role")
+    root = Path(__file__).resolve().parent.parent
+    _remaining(deadline)
+    canary, _ = _native_file(root / "work/home" / f"native-authority-{phase}-read",
+                              deadline=deadline, uid=os.getuid(), gid=os.getgid(), maximum=64)
+    sibling, _ = _native_file(root / "work" / f"{phase}-venv/lib/python3.11/site-packages/pip/__init__.py",
+                               deadline=deadline, uid=os.getuid(), gid=os.getgid())
+    if canary != b"MRK_NATIVE_PREVIOUS_SCRATCH\n" or not sibling:
+        raise SessionError("fixed native outside/sibling read did not return its actual public bytes")
+    _remaining(deadline)
+    print("MRK_NATIVE_OUTSIDE_READ_OK", flush=True)
 
 
 def _home_positive() -> None:
@@ -2958,9 +3853,12 @@ def _home_positive() -> None:
     print("MRK_HOME_POSITIVE_OK", flush=True)
 
 
-def _ready_line(stream, seconds: float) -> bytes:
+def _ready_line(stream, seconds: float, *, deadline: float | None = None) -> bytes:
     """Read one bounded fixed trusted-control line; no mutable readiness file."""
     cutoff, data = time.monotonic() + seconds, bytearray()
+    if deadline is not None:
+        _remaining(deadline)
+        cutoff = min(cutoff, deadline)
     with selectors.DefaultSelector() as sel:
         sel.register(stream, selectors.EVENT_READ)
         while time.monotonic() < cutoff:
@@ -2971,6 +3869,8 @@ def _ready_line(stream, seconds: float) -> bytes:
                 raise SessionError("owned control stream closed before readiness")
             data.extend(chunk)
             if b"\n" in data:
+                if deadline is not None:
+                    _remaining(cutoff)
                 return bytes(data)
             if len(data) == 256:
                 raise SessionError("owned control line exceeds bound")
@@ -3341,6 +4241,47 @@ def _probe_network(platform: str, endpoints: list) -> None:
             raise error
 
 
+def _outside_network_control(listener, *, deadline: float) -> None:
+    """One real owned loopback endpoint, and independent positive socket closes."""
+    positive = accepted = None
+    errors = []
+    try:
+        _remaining(deadline)
+        if (listener.family not in (socket.AF_INET, socket.AF_INET6)
+                or listener.type not in (socket.SOCK_STREAM, socket.SOCK_DGRAM)):
+            raise SessionError("unexpected fixed outside listener kind")
+        address = listener.getsockname()
+        if address[0] != ("127.0.0.1" if listener.family == socket.AF_INET else "::1"):
+            raise SessionError("outside positive listener is not its owned loopback address")
+        positive = socket.socket(listener.family, listener.type)
+        listener.settimeout(min(1, _remaining(deadline)))
+        positive.settimeout(min(1, _remaining(deadline)))
+        if listener.type == socket.SOCK_STREAM:
+            positive.connect(address)
+            listener.settimeout(min(1, _remaining(deadline)))
+            accepted, _ = listener.accept()
+        else:
+            if positive.sendto(b"owned-control", address) != len(b"owned-control"):
+                raise SessionError("outside UDP positive did not send its exact synthetic bytes")
+            listener.settimeout(min(1, _remaining(deadline)))
+            if listener.recv(64) != b"owned-control":
+                raise SessionError("outside UDP positive did not actually receive its exact bytes")
+    except BaseException as exc:
+        errors.append(exc)
+    for stream in (accepted, positive):
+        if stream is not None:
+            try:
+                stream.close()
+            except BaseException as exc:
+                errors.append(exc)
+    try:
+        _remaining(deadline)
+    except BaseException as exc:
+        errors.append(exc)
+    if errors:
+        raise BaseExceptionGroup("outside owned network positive/independent close failed", errors)
+
+
 def _outside_network_empty(listeners: list, *, deadline: float) -> None:
     """Original owner checks all four receivers AFTER wait, EOF and UID finality."""
     expected = {(family, kind) for family in (socket.AF_INET, socket.AF_INET6)
@@ -3570,10 +4511,22 @@ def _probe_leaf(data: dict) -> None:
     else:
         raise SessionError("subject could regain root")
     _probe_provider_boundaries(data)
+    extra_reads, scratch_root = [], Path(data["work"])
+    if "probe_scratch" in data:
+        scratch_root = Path(data["probe_scratch"])
+        phase = scratch_root.parent.name.removeprefix("native-authority-")
+        work = Path(data["work"])
+        wanted = [str(work / "home" / f"native-authority-{phase}-read"),
+                  str(work / f"{phase}-venv/lib/python3.11/site-packages/pip/__init__.py")]
+        if (data["platform"] != "darwin" or phase not in _NATIVE_PHASES
+                or scratch_root != work / ("native-authority-" + phase) / "probes"
+                or data.get("outside_reads") != wanted):
+            raise SessionError("native authority probe lost its fixed scratch/read controls")
+        extra_reads = [(path, "read") for path in wanted]
     for target, operation in ((data["control"], "read"), (data["runner_home"], "list"),
                               (data["runner_temp"], "list"), (data["readonly"], "write"),
                               (data["outside_write"], "write"),
-                              (str(Path(data["source"]) / "pyproject.toml"), "write")):
+                              (str(Path(data["source"]) / "pyproject.toml"), "write"), *extra_reads):
         try:
             if operation == "read":
                 Path(target).read_bytes()
@@ -3592,7 +4545,7 @@ def _probe_leaf(data: dict) -> None:
         raise SessionError("protected-file boundary ineffective")
     if not (Path(data["source"]) / "pyproject.toml").read_bytes():
         raise SessionError("golden source is unavailable")
-    scratch = Path(data["work"]) / f"probe-{os.getpid()}"
+    scratch = scratch_root / f"probe-{os.getpid()}"
     scratch.write_bytes(b"private scratch")
     if scratch.read_bytes() != b"private scratch":
         raise SessionError("private scratch is not usable")
@@ -3734,10 +4687,16 @@ def _main(argv: list[str]) -> int:
         if sys.platform == "linux":
             _userns_zero()
         return _fixture(argv[1])
-    if argv[0] == "--write-control" and len(argv) == 2:
+    if argv[0] in {"--write-control", "--native-write-control"} and len(argv) == 2:
         if sys.platform == "linux":
             _userns_zero()
-        _write_control(Path(argv[1]))
+        if argv[0] == "--native-write-control":
+            _write_control(Path(argv[1]), native=True)
+        else:
+            _write_control(Path(argv[1]))
+        return 0
+    if argv[0] == "--native-read-control" and len(argv) == 3:
+        _native_read_control(argv[1], float(argv[2]))
         return 0
     if argv == ["--home-positive"]:
         _home_positive()

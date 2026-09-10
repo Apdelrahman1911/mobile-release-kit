@@ -79,9 +79,27 @@ def session_double(module, platform="linux"):
     session._active = None
     session._home_state = None
     session._userns_state = None
+    session._native_authority = {}
+    session._native_preparing = None
+    session._native_control = None
     session._direct_producer_pending = False
     session.process_observer = session.bootstrap / "process-observer" if platform == "darwin" else None
     return session
+
+
+def native_state_double(session, phase="source", *, deadline=1.0):
+    """Inert prepared-role state, never a native admission receipt or a path."""
+    state = dict(phase=phase, deadline=deadline, cwd=session.work / f"native-authority-{phase}",
+        policy=session.bootstrap / f"native-authority-{phase}.sb", argv=session._native_command(phase),
+        package=session.work / ("source-build/src/mobile_release" if phase == "source" else
+                                "wheel-venv/lib/python3.11/site-packages/mobile_release"),
+        pins=[], files={}, trees={}, prepared=True, started=False, completed=False, closed=False,
+        control_seen=[], control_notes={}, native_controls={"synthetic-inert-fixture": True}, outside_fd=None,
+        outside_write=session.fixture_controls / f"native-authority-{phase}-outside-write",
+        outside_read=session.work / "home" / f"native-authority-{phase}-read",
+        sibling_read=session.work / f"{phase}-venv/lib/python3.11/site-packages/pip/__init__.py")
+    session._native_authority[phase] = state
+    return state
 
 
 class _Stream:
@@ -319,9 +337,11 @@ class _Collection:
             stack.enter_context(patch.object(self.session, "_argv", return_value=(["/synthetic/entry"], {})))
             yield
 
-    def collect(self, *, seconds=1.0, output_limit=64, latch=True):
+    def collect(self, *, seconds=1.0, output_limit=64, latch=True, absolute_deadline=None):
         with self.scope():
             kwargs = dict(cwd=self.session.work, env={}, seconds=seconds, output_limit=output_limit)
+            if absolute_deadline is not None:
+                kwargs["absolute_deadline"] = absolute_deadline
             if latch:
                 return self.session.run([str(self.session.python), "--synthetic"], **kwargs)
             return self.session._run([str(self.session.python), "--synthetic"], latch=False, **kwargs)
@@ -2047,6 +2067,749 @@ class CISandboxPureTests(unittest.TestCase):
             self.assertNotIn(clause, positive)
         self.assertEqual(subject, old_subject)  # No other widening or changed write/signal/network role.
 
+    def test_native_authority_policy_and_environment_are_fixed_separate_and_nonexpanding(self):
+        session = session_double(self.module, "darwin")
+        with patch.object(self.module, "_private_file") as write:
+            session._write_policy()
+        ordinary = tuple(call.args for call in write.call_args_list)
+        self.assertEqual(len(ordinary), 3)
+        for phase in ("source", "wheel"):
+            with self.subTest(native_policy_phase=phase):
+                cwd = session.work / f"native-authority-{phase}"
+                package = (session.work / "source-build/src/mobile_release" if phase == "source" else
+                           session.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
+                expected_argv = [str(session.work / f"{phase}-venv/bin/python"), "-I", "-S", "-B",
+                    str(session.source / "tests/workflow/run_native_profile_checks.py"), "--authority",
+                    *(["--installed-wheel"] if phase == "wheel" else [])]
+                self.assertEqual(session._native_command(phase), expected_argv)
+                state = dict(phase=phase, cwd=cwd, package=package, argv=expected_argv,
+                             policy=session.bootstrap / f"native-authority-{phase}.sb", outside_write=session.outside_write)
+                expected_env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8",
+                    "TZ": "UTC", "CI": "true", "USER": "mrk-ci-60001", "LOGNAME": "mrk-ci-60001",
+                    "HOME": str(cwd / "home"), "TMPDIR": str(cwd / "tmp"), "TMP": str(cwd / "tmp"), "TEMP": str(cwd / "tmp"),
+                    "XDG_CONFIG_HOME": str(cwd / "config"), "XDG_CACHE_HOME": str(cwd / "cache"),
+                    "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1", "PYTHONSAFEPATH": "1",
+                    "DEVELOPER_DIR": "/Applications/Xcode_26.3.app/Contents/Developer"}
+                with patch.object(self.module, "os", SimpleNamespace(environ={"PYTHONPATH": "/synthetic/poison",
+                        "HOME": "/synthetic/old-home", "MOBILE_RELEASE_NATIVE_ROLE": "arbitrary"})):
+                    self.assertEqual(session._native_environment(state), expected_env)
+                q = lambda path: json.dumps(str(path), ensure_ascii=True)
+                authority = session._native_policy_bytes(state, kind="authority").decode("ascii")
+                self.assertIn("(deny network*)\n", authority)
+                self.assertNotIn("(allow network", authority)
+                self.assertIn('(deny mach-lookup (require-not (require-any (global-name "com.apple.trustd") '
+                              '(global-name "com.apple.trustd.agent"))))\n', authority)
+                self.assertNotIn("com.apple.cfprefsd.daemon", authority)
+                self.assertIn("(deny signal (require-not (target same-sandbox)))\n", authority)
+                self.assertIn("(subpath " + q(package) + ")", authority)
+                self.assertIn("(literal " + q(package.parent) + ")", authority)
+                self.assertNotIn("(subpath " + q(package.parent) + ")", authority)
+                for previous in (session.work, session.work / "home", session.work / "tmp", session.source,
+                                 session.control, session.runner_home, session.runner_temp):
+                    self.assertNotIn("(subpath " + q(previous) + ")", authority)
+                for leaf in ("home", "tmp", "config", "cache", "probes"):
+                    self.assertIn("(subpath " + q(cwd / leaf) + ")", authority)
+                baseline = session._native_policy_bytes(state, kind="mach-baseline").decode("ascii")
+                self.assertIn('(global-name "com.apple.cfprefsd.daemon")', baseline)
+                self.assertNotIn("(allow network", baseline)
+                aia = session._native_policy_bytes(state, kind="aia", port=12345).decode("ascii")
+                self.assertEqual(aia, authority + '(allow network-outbound (remote tcp "127.0.0.1:12345"))\n')
+                positive = session._native_policy_bytes(state, kind="write-positive").decode("ascii")
+                self.assertIn('(deny file-write* (require-not (require-any (literal ' + q(session.outside_write) + ")", positive)
+                for kind, port in (("arbitrary-services", None), ("authority", 12345), ("aia", None),
+                                   ("aia", True), ("aia", 1023), ("aia", 65536)):
+                    with self.assertRaises(self.module.SessionError):
+                        session._native_policy_bytes(state, kind=kind, port=port)
+        with patch.object(self.module, "_private_file") as write:
+            session._write_policy()
+        self.assertEqual(tuple(call.args for call in write.call_args_list), ordinary)
+        for invalid in (None, ["source"], "other", "native-authority-source"):
+            with self.assertRaises(self.module.SessionError):
+                session._native_command(invalid)
+
+    def test_native_input_reads_and_rechecks_keep_original_custody_bytes_and_close_errors(self):
+        path, raw = Path("/synthetic/native/input.py"), b"immutable native input\n"
+        for case in ("valid", "alias", "subject-owner", "world-write", "multiple-links", "inherited", "renamed", "grew",
+                     "read-and-close-errors", "close-expired", "initial-expiry"):
+            with self.subTest(native_input_read=case):
+                before = SimpleNamespace(st_dev=7, st_ino=81, st_mode=stat.S_IFREG | (0o446 if case == "world-write" else 0o444),
+                    st_uid=60001 if case == "subject-owner" else 0, st_gid=0, st_nlink=2 if case == "multiple-links" else 1, st_size=len(raw),
+                    st_mtime_ns=11, st_ctime_ns=12)
+                named = SimpleNamespace(**(vars(before) | ({"st_ino": 82} if case == "renamed" else {})))
+                clock = SimpleNamespace(now=1.0 if case == "initial-expiry" else 0.0)
+                data = io.BytesIO(raw + (b"x" if case == "grew" else b""))
+                primary, secondary = OSError("synthetic input read error"), OSError("synthetic input close error")
+
+                def read(fd, count):
+                    self.assertEqual(fd, 701)
+                    self.assertTrue(0 < count <= 65536)
+                    if case == "read-and-close-errors":
+                        raise primary
+                    return data.read(count)
+
+                def close(fd):
+                    self.assertEqual(fd, 701)
+                    if case == "read-and-close-errors":
+                        raise secondary
+                    if case == "close-expired":
+                        clock.now = 1.0
+
+                opened, closed = Mock(return_value=701), Mock(side_effect=close)
+                constants = {name: getattr(os, name) for name in ("O_RDONLY", "O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC")}
+                fake_os = SimpleNamespace(**constants, open=opened, read=read, close=closed,
+                    fstat=Mock(return_value=before), get_inheritable=Mock(return_value=case == "inherited"))
+                with patch.multiple(self.module, os=fake_os, subprocess=SimpleNamespace(), signal=SimpleNamespace(),
+                        socket=SimpleNamespace(), time=SimpleNamespace(monotonic=lambda: clock.now),
+                        _canonical=Mock(return_value=path.with_name("alias.py") if case == "alias" else path)), \
+                     patch.object(Path, "lstat", return_value=named), \
+                     patch.object(Path, "open", side_effect=AssertionError("input custody may use only its fake original descriptor")):
+                    if case == "valid":
+                        result, identity = self.module._native_file(path, deadline=1.0, uid=60001, gid=60001, maximum=len(raw))
+                        self.assertEqual(result, raw)
+                        self.assertEqual(identity, (7, 81, stat.S_IFREG | 0o444, 0, 0, 1, len(raw), 11, 12))
+                    else:
+                        with self.assertRaises(BaseExceptionGroup) as caught:
+                            self.module._native_file(path, deadline=1.0, uid=60001, gid=60001, maximum=len(raw))
+                        if case == "read-and-close-errors":
+                            self.assertEqual(caught.exception.exceptions, (primary, secondary))
+                        if case in {"close-expired", "initial-expiry"}:
+                            self.assertTrue(all(isinstance(error, self.module.DeadlineExpired) for error in caught.exception.exceptions))
+                if case in {"alias", "initial-expiry"}:
+                    opened.assert_not_called()
+                    closed.assert_not_called()
+                else:
+                    opened.assert_called_once_with(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+                    closed.assert_called_once_with(701)
+
+        for case in ("valid", "first-stat-error", "name-drift"):
+            with self.subTest(native_original_pin=case):
+                session = session_double(self.module, "darwin")
+                state = {"deadline": 1.0, "pins": []}
+                node = SimpleNamespace(st_dev=7, st_ino=91, st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | 0o555)
+                named = SimpleNamespace(**(vars(node) | ({"st_ino": 92} if case == "name-drift" else {})))
+                original = OSError("synthetic first descriptor observation failed")
+                opened, closed = Mock(return_value=705), Mock()
+                constants = {name: getattr(os, name) for name in ("O_RDONLY", "O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC")}
+                with patch.multiple(self.module, os=SimpleNamespace(**constants, open=opened, close=closed,
+                        fstat=Mock(return_value=node, side_effect=original if case == "first-stat-error" else None),
+                        get_inheritable=lambda _fd: False), _canonical=Path,
+                        time=SimpleNamespace(monotonic=lambda: 0.0), subprocess=SimpleNamespace(), signal=SimpleNamespace()), \
+                     patch.object(Path, "lstat", return_value=named):
+                    if case == "valid":
+                        session._native_pin(state, path.parent, modes=(0o555,))
+                    else:
+                        with self.assertRaises(OSError if case == "first-stat-error" else self.module.SessionError) as caught:
+                            session._native_pin(state, path.parent, modes=(0o555,))
+                        if case == "first-stat-error":
+                            self.assertIs(caught.exception, original)
+                    self.assertEqual(len(state["pins"]), 1)
+                    self.assertEqual(state["pins"][0]["fd"], 705)  # Owned before even the first fstat can fail.
+                    self.assertEqual(state["pins"][0]["node"] is None, case != "valid")
+                    self.assertEqual(session._native_close_pins(state), [])
+                opened.assert_called_once_with(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                closed.assert_called_once_with(705)
+
+        for case in ("valid", "closed-pin", "inherited-pin", "named-parent-replaced", "tree-extra", "file-bytes", "root-extra"):
+            with self.subTest(native_input_recheck=case):
+                session = session_double(self.module, "darwin")
+                cwd = session.work / "native-authority-source"
+                node = SimpleNamespace(st_dev=7, st_ino=91, st_mode=stat.S_IFDIR | 0o555, st_uid=0, st_gid=0)
+                named = SimpleNamespace(**(vars(node) | ({"st_ino": 92} if case == "named-parent-replaced" else {})))
+                state = dict(deadline=1.0, cwd=cwd, pins=[{"path": path.parent, "fd": None if case == "closed-pin" else 702,
+                    "node": (*self.module._home_node(node), 0o555)}], trees={path.parent: ("input.py",)},
+                    files={path: {"identity": ("synthetic-bound-identity",), "sha256": hashlib.sha256(raw).hexdigest(),
+                                  "root_owned": True, "maximum": len(raw)}})
+                contents = raw + b"changed" if case == "file-bytes" else raw
+                reader = Mock(return_value=(contents, ("synthetic-bound-identity",)))
+                names = ["home", "tmp", "config", "cache", "probes"] + (["old-site-hook.py"] if case == "root-extra" else [])
+
+                def pinned_node(fd):
+                    self.assertEqual(fd, 702)
+                    return node
+
+                def named_node(queried):
+                    self.assertEqual(queried, path.parent)
+                    return named
+
+                def leaves(queried):
+                    self.assertEqual(queried, cwd)
+                    return [cwd / name for name in names]
+
+                with patch.multiple(self.module, os=SimpleNamespace(fstat=pinned_node,
+                        get_inheritable=Mock(return_value=case == "inherited-pin")), subprocess=SimpleNamespace(),
+                        socket=SimpleNamespace(), signal=SimpleNamespace(), time=SimpleNamespace(monotonic=lambda: 0.0),
+                        _native_file=reader), \
+                     patch.object(session, "_native_tree", return_value=("extra.py", "input.py") if case == "tree-extra" else ("input.py",)) as tree, \
+                     patch.object(Path, "lstat", named_node), patch.object(Path, "iterdir", leaves), \
+                     patch.object(Path, "open", side_effect=AssertionError("recheck must retain the fixed input reader")):
+                    if case == "valid":
+                        session._native_check_inputs(state)
+                        reader.assert_called_once_with(path, deadline=1.0, uid=session.uid, gid=session.gid,
+                                                       root_owned=True, maximum=len(raw))
+                        tree.assert_called_once_with(state, path.parent, binding=False)
+                    else:
+                        with self.assertRaises(self.module.SessionError):
+                            session._native_check_inputs(state)
+                if case in {"closed-pin", "inherited-pin", "named-parent-replaced"}:
+                    tree.assert_not_called()
+                    reader.assert_not_called()
+
+        # A close failure retires only the original descriptor; it is not a
+        # retry authority, and cannot suppress an independent later close.
+        session = session_double(self.module, "darwin")
+        state = {"pins": [{"fd": 703}, {"fd": 704}], "closed": False}
+        closed = Mock(side_effect=OSError("synthetic independently reported close error"))
+        with patch.object(self.module, "os", SimpleNamespace(close=closed)):
+            errors = session._native_close_pins(state)
+            self.assertEqual(len(errors), 2)
+            self.assertEqual(session._native_close_pins(state), [])
+        self.assertEqual([call.args for call in closed.call_args_list], [(704,), (703,)])
+        self.assertTrue(state["closed"])
+        self.assertEqual([pin["fd"] for pin in state["pins"]], [None, None])
+
+        # The new read positive must really consume both exact finite inputs;
+        # it cannot print success for absence, wrong identity or late reads.
+        for case in ("source", "wheel", "linux", "wrong-phase", "root-identity", "group-mismatch", "wrong-canary", "empty-sibling", "read-error", "late-read"):
+            with self.subTest(native_read_positive=case):
+                phase = "wheel" if case == "wheel" else "other" if case == "wrong-phase" else "source"
+                root = Path("/synthetic/native-read")
+                paths = (root / "work/home" / f"native-authority-{phase}-read",
+                         root / "work" / f"{phase}-venv/lib/python3.11/site-packages/pip/__init__.py")
+                clock, seen, output = SimpleNamespace(now=0.0), [], io.StringIO()
+                uid, gid = (0 if case == "root-identity" else 60001), (60002 if case == "group-mismatch" else 60001)
+                original = OSError("synthetic bounded read unavailable")
+
+                def read(path, *, deadline, uid: int, gid: int, maximum=16 * self.module.MiB):
+                    self.assertEqual((deadline, uid, gid), (1.0, 60001, 60001))
+                    self.assertEqual(path, paths[len(seen)])
+                    self.assertEqual(maximum, 64 if not seen else 16 * self.module.MiB)
+                    seen.append(path)
+                    if case == "read-error":
+                        raise original
+                    if len(seen) == 1:
+                        return (b"wrong" if case == "wrong-canary" else b"MRK_NATIVE_PREVIOUS_SCRATCH\n"), ()
+                    if case == "late-read":
+                        clock.now = 1.0
+                    return (b"" if case == "empty-sibling" else b"actual immutable sibling bytes"), ()
+
+                with patch.multiple(self.module, os=SimpleNamespace(getuid=lambda: uid, geteuid=lambda: uid,
+                        getgid=lambda: gid, getegid=lambda: gid), sys=SimpleNamespace(platform="linux" if case == "linux" else "darwin"),
+                        time=SimpleNamespace(monotonic=lambda: clock.now), subprocess=SimpleNamespace(), socket=SimpleNamespace(),
+                        signal=SimpleNamespace(), _native_file=read), \
+                     patch.object(Path, "resolve", return_value=root / "bootstrap/ci_sandbox.py"), redirect_stdout(output):
+                    if case in {"source", "wheel"}:
+                        self.module._native_read_control(phase, 1.0)
+                    else:
+                        with self.assertRaises(OSError if case == "read-error" else self.module.SessionError) as caught:
+                            self.module._native_read_control(phase, 1.0)
+                        if case == "read-error":
+                            self.assertIs(caught.exception, original)
+                self.assertEqual(output.getvalue(), "MRK_NATIVE_OUTSIDE_READ_OK\n" if case in {"source", "wheel"} else "")
+                self.assertEqual(len(seen), 0 if case in {"linux", "wrong-phase", "root-identity", "group-mismatch"} else
+                                 1 if case == "read-error" else 2)
+
+    def test_native_authority_admission_rejects_unknown_phase_and_producer_before_acquisition(self):
+        cases = ("phase-none", "phase-list", "phase-unknown", "linux", "not-admitted", "admitting", "closed",
+                 "prior-failure", "busy", "original-owned", "direct-pending", "domain-present", "domain-unknown",
+                 "expired", "duplicate-attempt", "wheel-before-source")
+        for case in cases:
+            with self.subTest(native_role_preacquisition=case):
+                session = session_double(self.module, "linux" if case == "linux" else "darwin")
+                rig = _Collection(self.module, session)
+                phase = {"phase-none": None, "phase-list": ["source"], "phase-unknown": "arbitrary-service-role",
+                         "wheel-before-source": "wheel"}.get(case, "source")
+                session.admitted = case != "not-admitted"
+                session._admitting, session.closed, session._busy = case == "admitting", case == "closed", case == "busy"
+                session._active = object() if case == "original-owned" else None
+                session._direct_producer_pending = case == "direct-pending"
+                if case == "prior-failure":
+                    session.fail("original owner failure")
+                elif case == "duplicate-attempt":
+                    session._native_authority["source"] = {"prepared": False, "started": False, "completed": False}
+                elif case == "expired":
+                    rig.now = 0.5
+                domain = Mock(return_value={4242} if case == "domain-present" else set(),
+                              side_effect=OSError("synthetic unknown original identity domain") if case == "domain-unknown" else None)
+                with rig.scope(), patch.object(self.module, "_domain", domain), ExitStack() as stack:
+                    filesystem = [stack.enter_context(patch.object(Path, method,
+                        side_effect=AssertionError("refused role may not acquire or inspect paths")))
+                        for method in ("resolve", "stat", "lstat", "open", "mkdir", "chmod", "unlink", "rmdir",
+                                       "read_bytes", "read_text", "write_bytes", "iterdir")]
+                    private_file = stack.enter_context(patch.object(self.module, "_private_file",
+                        side_effect=AssertionError("refused role may not create a policy or receipt")))
+                    expected = (self.module.SessionError, OSError) if case == "domain-unknown" else self.module.SessionError
+                    with self.assertRaises(expected):
+                        session.prepare_native_authority(phase, deadline=0.5)
+                    for operation in filesystem:
+                        operation.assert_not_called()
+                    private_file.assert_not_called()
+                    session._argv.assert_not_called()
+                self.assertEqual(rig.opened, [])
+                self.assertFalse(any(e[0] == "popen" for e in rig.events))
+                self.assertFalse(any(row.get("prepared", False) for row in session._native_authority.values()))
+                self.assertEqual(session.deadline, 100.0)
+                if case in {"prior-failure", "busy", "original-owned", "direct-pending", "domain-present", "domain-unknown", "expired"}:
+                    self.assertIsNotNone(session.failure)
+                if case == "prior-failure":
+                    self.assertEqual(session.failure, "original owner failure")
+
+    def test_native_authority_preparation_is_exclusive_once_only_and_keeps_six_fixed_control_routes(self):
+        for case in ("source", "wheel", "input-failure", "cwd-collision", "mkdir-after-effect", "leaf-owner-after-effect",
+                     "boundary-failure", "cleanup-errors", "late-preparation", "cancelled-preparation"):
+            with self.subTest(native_preparation=case):
+                session = session_double(self.module, "darwin")
+                phase = "wheel" if case == "wheel" else "source"
+                cwd = session.work / f"native-authority-{phase}"
+                helper, helper_source = session.bootstrap / "ci_native_authority.py", session.source / ".github/scripts/ci_native_authority.py"
+                payload = b"inert fixed helper bytes, never imported\n"
+                controls = {"synthetic-inert-fixture": True}
+                if phase == "wheel":
+                    session._native_authority["source"] = dict(completed=True, closed=True, native_controls=controls)
+                clock, nodes, files, fds, acquired, events = SimpleNamespace(now=0.0), {}, {}, {}, [], []
+                original = OSError("synthetic native preparation fault")
+
+                def node(path, *, directory=False, mode=0o444, owner=(0, 0), raw=b""):
+                    nodes[path] = dict(st_dev=7, st_ino=100 + len(nodes), st_uid=owner[0], st_gid=owner[1],
+                        st_mode=(stat.S_IFDIR if directory else stat.S_IFREG) | mode, st_nlink=1,
+                        st_size=len(raw), st_mtime_ns=11, st_ctime_ns=12)
+                    if not directory:
+                        files[path] = raw
+
+                for path in (session.root, session.work, session.bootstrap, session.fixture_controls):
+                    node(path, directory=True, mode=0o755)
+                node(helper_source, raw=payload)
+                sibling = session.work / f"{phase}-venv/lib/python3.11/site-packages/pip/__init__.py"
+                node(sibling, raw=b"frozen unrelated sibling; not an import\n")
+                if phase == "wheel":
+                    node(helper, raw=payload)
+                if case == "cwd-collision":
+                    node(cwd, directory=True, mode=0o700, owner=(1001, 20))
+
+                def acquire(path):
+                    self.assertIn(path, nodes)
+                    fd = 800 + len(acquired)
+                    acquired.append(fd)
+                    fds[fd] = path
+                    return fd
+
+                def pin(state, path, *, owner=(0, 0), modes=(0o555, 0o755)):
+                    self.assertIs(state, session._native_authority[phase])
+                    observed = SimpleNamespace(**nodes[path])
+                    self.assertEqual((observed.st_uid, observed.st_gid), owner)
+                    self.assertIn(stat.S_IMODE(observed.st_mode), modes)
+                    state["pins"].append({"path": path, "fd": acquire(path),
+                                          "node": (*self.module._home_node(observed), stat.S_IMODE(observed.st_mode))})
+                    events.append(("pin", path))
+
+                def bind(state):
+                    self.assertTrue(session.domain_finality)
+                    self.assertEqual(session._native_preparing, phase)
+                    self.assertFalse(state["prepared"])
+                    events.append(("bind-inputs",))
+                    if case == "input-failure":
+                        raise original
+                    state["package"] = (session.work / "source-build/src/mobile_release" if phase == "source" else
+                                        session.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
+                    state["tools"] = {"signature-tool": {"synthetic-bound-input": True}}
+                    for path in (session.root, session.work, session.bootstrap):
+                        pin(state, path, modes=(0o755,))
+
+                def add_file(state, path, **_options):
+                    self.assertIn(path, files)
+                    raw = files[path]
+                    state["files"][path] = dict(identity=(7, nodes[path]["st_ino"], nodes[path]["st_mode"], 0, 0, 1, len(raw), 11, 12),
+                        sha256=hashlib.sha256(raw).hexdigest(), root_owned=True, maximum=16 * self.module.MiB)
+                    return raw
+
+                def private_file(path, raw, mode=0o600):
+                    self.assertNotIn(path, nodes)  # Create-only; the existing helper is reused only for wheel.
+                    events.append(("private-file", path, mode))
+                    node(path, mode=mode, raw=raw)
+
+                def mkdir(path, mode=0o777, parents=False, exist_ok=False):
+                    self.assertFalse(parents or exist_ok)
+                    self.assertEqual(session._native_preparing, phase)
+                    self.assertIs(session._native_authority[phase]["prepared"], False)
+                    events.append(("mkdir", path, mode))
+                    if path in nodes:
+                        raise FileExistsError("synthetic foreign scratch name")
+                    node(path, directory=True, mode=mode)
+                    if case == "mkdir-after-effect" and path == cwd:
+                        raise original  # Effect happened but no returned/pinned identity.
+
+                def chmod(path, mode, *, follow_symlinks=True):
+                    self.assertIn(path, nodes)
+                    self.assertIn((path, mode), {(cwd, 0o755), *((cwd / name, 0o700) for name in self.module._NATIVE_LEAVES)})
+                    nodes[path]["st_mode"] = stat.S_IFMT(nodes[path]["st_mode"]) | mode
+
+                def chown(path, uid, gid):
+                    self.assertIn(path, [cwd / name for name in self.module._NATIVE_LEAVES])
+                    self.assertEqual((uid, gid), (session.uid, session.gid))
+                    nodes[path]["st_uid"], nodes[path]["st_gid"] = uid, gid
+                    if case == "leaf-owner-after-effect" and path == cwd / "home":
+                        raise original
+
+                def opened(path, flags):
+                    self.assertEqual((path, flags), (session._native_authority[phase]["outside_write"], os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC))
+                    return acquire(path)
+
+                def fstat(fd):
+                    self.assertIn(fd, fds)
+                    return SimpleNamespace(**nodes[fds[fd]])
+
+                def fchown(fd, uid, gid):
+                    self.assertEqual(fds[fd], session._native_authority[phase]["outside_write"])
+                    self.assertEqual((uid, gid), (session.uid, session.gid))
+                    nodes[fds[fd]]["st_uid"], nodes[fds[fd]]["st_gid"] = uid, gid
+
+                def close(fd):
+                    self.assertIn(fd, fds)
+                    del fds[fd]
+                    events.append(("close", fd))
+                    if case == "cleanup-errors":
+                        raise OSError("synthetic independently reported owned-close failure")
+
+                def boundary(state):
+                    self.assertIs(state, session._native_authority[phase])
+                    self.assertFalse(state["prepared"] or state["started"])
+                    self.assertIsNotNone(state["outside_fd"])
+                    events.append(("direct-boundaries", phase))
+                    if case in {"boundary-failure", "cleanup-errors"}:
+                        raise original
+
+                fixed_cases = ("mach-baseline", "mach-ordinary", "mach-authority", "mach-nonexpand", "aia-prepare", "aia-evaluate")
+
+                def capture(state, selected, command, *, policy, cwd: Path, seconds):
+                    self.assertEqual(phase, "source")
+                    self.assertEqual(session._native_preparing, phase)
+                    self.assertEqual(state["control_seen"], list(fixed_cases[:fixed_cases.index(selected) + 1]))
+                    base = [str(session.python), "-I", "-S", "-B", str(helper)]
+                    if selected == "mach-nonexpand":
+                        expected = [*base, "--mach-nonexpand", str(session.bootstrap / "native-authority-source.sb"), "1.0"]
+                    elif selected.startswith("mach-"):
+                        expected = [*base, "--mach", "1.0"]
+                    else:
+                        expected = [*base, "--" + selected, "12345", "1.0"]
+                    self.assertEqual(command, expected)
+                    policies = {"mach-baseline": state["mach_policy"], "mach-ordinary": session.policy,
+                        "mach-authority": state["policy"], "mach-nonexpand": session.policy,
+                        "aia-prepare": state["policy"], "aia-evaluate": session.bootstrap / "native-aia-source.sb"}
+                    self.assertEqual(policy, policies[selected])
+                    self.assertEqual(cwd, state["cwd"] / "probes")
+                    self.assertEqual(seconds, 300 if selected == "aia-prepare" else 120 if selected == "aia-evaluate" else 30)
+                    events.append(("control", selected))
+                    state["control_notes"][selected] = {"ok": False}
+                    return self.module.CapturedRun(b"", b"", 0, True, True, True, True, False, False, 0.01, None, (), (0, 0))
+
+                def admit_controls(capture_callback, idle_callback, root, *, deadline):
+                    self.assertEqual((root, deadline), (cwd / "probes", 1.0))
+                    for selected in fixed_cases:
+                        result = capture_callback(selected, **({"port": 12345} if selected.startswith("aia-") else {}))
+                        self.assertTrue(result.ok)
+                        self.assertTrue(all(not row["ok"] for row in session._native_authority[phase]["control_notes"].values()))
+                        idle_callback()
+                    return controls
+
+                backend = SimpleNamespace(admit_controls=admit_controls)
+                loader = SimpleNamespace(exec_module=Mock())  # Never import/evaluate the actual native helper.
+                spec = SimpleNamespace(loader=loader)
+                fake_imports = SimpleNamespace(util=SimpleNamespace(spec_from_file_location=Mock(return_value=spec),
+                                                                  module_from_spec=Mock(return_value=backend)))
+
+                def checked(state):
+                    self.assertFalse(state["prepared"])
+                    self.assertTrue(session.domain_finality)
+                    events.append(("inputs-rechecked",))
+                    if case == "late-preparation":
+                        clock.now = 1.0
+                    elif case == "cancelled-preparation":
+                        session.cancelled = True
+                        session.fail("synthetic preparation cancellation before publication")
+
+                constants = {name: getattr(os, name) for name in ("O_RDWR", "O_NOFOLLOW", "O_CLOEXEC")}
+                fake_os = SimpleNamespace(**constants, open=opened, fstat=fstat, fchown=fchown, close=close, chown=chown,
+                                         get_inheritable=lambda _fd: False, path=SimpleNamespace(basename=os.path.basename))
+                with patch.multiple(self.module, os=fake_os, time=SimpleNamespace(monotonic=lambda: clock.now),
+                        subprocess=SimpleNamespace(), socket=SimpleNamespace(), signal=SimpleNamespace(), selectors=SimpleNamespace(),
+                        resource=SimpleNamespace(), importlib=fake_imports, _domain=Mock(return_value=set()), _canonical=Path,
+                        _private_file=private_file), \
+                     patch.object(session, "_headroom", Mock()), patch.object(session, "_native_bind_inputs", side_effect=bind), \
+                     patch.object(session, "_native_add_file", side_effect=add_file), patch.object(session, "_native_pin", side_effect=pin), \
+                     patch.object(session, "_native_boundary_controls", side_effect=boundary), \
+                     patch.object(session, "_native_control_capture", side_effect=capture), \
+                     patch.object(session, "_native_check_inputs", side_effect=checked), \
+                     patch.object(Path, "mkdir", mkdir), patch.object(Path, "chmod", chmod), \
+                     patch.object(Path, "lstat", lambda path: SimpleNamespace(**nodes[path])), ExitStack() as stack:
+                    removal = [stack.enter_context(patch.object(Path, name, side_effect=AssertionError("native preparation cannot delete or adopt paths")))
+                               for name in ("unlink", "rmdir", "open", "read_bytes", "iterdir", "resolve", "stat")]
+                    if case in {"source", "wheel"}:
+                        report = session.prepare_native_authority(phase, deadline=1.0)
+                        state = session._native_authority[phase]
+                        self.assertEqual((report["schema"], report["phase"], report["prepared"]), (1, phase, True))
+                        self.assertTrue(state["prepared"])
+                        self.assertFalse(state["started"] or state["closed"])
+                        self.assertEqual(state["native_controls"], controls)
+                        self.assertEqual(state["control_notes"], {selected: {"ok": True} for selected in fixed_cases} if phase == "source" else {})
+                        self.assertEqual([event for event in events if event[0] == "direct-boundaries"], [("direct-boundaries", phase)])
+                        self.assertEqual([event[1] for event in events if event[0] == "control"], list(fixed_cases) if phase == "source" else [])
+                        count = len(events)
+                        with self.assertRaises(self.module.SessionError):
+                            session.prepare_native_authority(phase, deadline=1.0)
+                        self.assertEqual(len(events), count)
+                        self.assertEqual(session._native_close_pins(state), [])
+                    else:
+                        expected = BaseExceptionGroup if case == "cleanup-errors" else FileExistsError if case == "cwd-collision" else \
+                                   self.module.DeadlineExpired if case == "late-preparation" else \
+                                   self.module.SessionError if case == "cancelled-preparation" else OSError
+                        with self.assertRaises(expected) as caught:
+                            session.prepare_native_authority(phase, deadline=1.0)
+                        state = session._native_authority[phase]
+                        self.assertFalse(state["prepared"])
+                        self.assertTrue(state["closed"])
+                        self.assertIsNotNone(session.failure)
+                        if case == "cleanup-errors":
+                            self.assertIs(caught.exception.exceptions[0], original)
+                            self.assertEqual(len(session.cleanup_errors), len(acquired))
+                        count = len(events)
+                        with self.assertRaises(self.module.SessionError):
+                            session.prepare_native_authority(phase, deadline=1.0)
+                        self.assertEqual(len(events), count)
+                    self.assertEqual(session._native_close_pins(state), [])
+                    for operation in removal:
+                        operation.assert_not_called()
+                self.assertIsNone(session._native_preparing)
+                self.assertIsNone(session._native_control)
+                self.assertEqual(fds, {})
+                self.assertCountEqual([event[1] for event in events if event[0] == "close"], acquired)
+                self.assertEqual(session.deadline, 100.0)
+                if case == "cwd-collision":
+                    self.assertEqual((nodes[cwd]["st_uid"], nodes[cwd]["st_gid"], stat.S_IMODE(nodes[cwd]["st_mode"])), (1001, 20, 0o700))
+                if case == "mkdir-after-effect":
+                    self.assertIn(cwd, nodes)
+                    self.assertNotIn(("pin", cwd), events)
+                if case in {"source", "late-preparation", "cancelled-preparation"}:
+                    fake_imports.util.spec_from_file_location.assert_called_once_with("_mrk_native_authority_controls", helper)
+                    loader.exec_module.assert_called_once_with(backend)
+                else:
+                    loader.exec_module.assert_not_called()
+
+    def test_native_authority_run_admits_only_exact_prepared_profiles_and_keeps_original_capture(self):
+        cases = ("source", "wheel", "unknown-profile", "public-control", "linux", "not-admitted", "admitting", "env", "cwd",
+                 "state-root", "state-policy", "state-phase", "argv", "python-flags", "cpu", "seconds", "limit",
+                 "no-cutoff", "changed-cutoff", "unlatched", "cancel-control", "unprepared", "started", "completed",
+                 "closed", "busy", "original-owned", "direct-pending", "unknown-domain", "ordinary-overlap")
+        for case in cases:
+            with self.subTest(native_profile_invocation=case):
+                session = session_double(self.module, "linux" if case == "linux" else "darwin")
+                phase = "wheel" if case == "wheel" else "source"
+                state = native_state_double(session, phase)
+                rig = _Collection(self.module, session)
+                rig.snapshot_rows = {(rig.child.pid, rig.child.pid): ((session.uid,) * 3, (session.gid,) * 3, 65536)}
+                session.admitted, session._admitting = case != "not-admitted", case == "admitting"
+                session._busy, session._direct_producer_pending = case == "busy", case == "direct-pending"
+                session._active = object() if case == "original-owned" else None
+                if case in {"started", "completed", "closed"}:
+                    state[case] = True
+                if case == "unprepared":
+                    state["prepared"] = False
+                if case == "state-root":
+                    state["cwd"] = session.work / "unbound-native-root"
+                elif case == "state-policy":
+                    state["policy"] = session.bootstrap / "unbound-native-policy.sb"
+                elif case == "state-phase":
+                    state["phase"] = "wheel"
+                command = list(state["argv"])
+                if case == "argv":
+                    command.append("--caller-selected-test")
+                elif case == "python-flags":
+                    command[2] = "-s"  # Not -S: site/.pth must not be initialized.
+                kwargs = dict(cwd=state["cwd"], env={}, seconds=900, output_limit=8 * self.module.MiB,
+                    cpu_seconds=180, profile="native-authority-" + phase, absolute_deadline=1.0)
+                changes = {"unknown-profile": {"profile": "native-authority-arbitrary"}, "public-control": {"profile": "native-control"},
+                    "ordinary-overlap": {"profile": "ordinary"}, "env": {"env": {"PYTHONSAFEPATH": "1"}},
+                    "cwd": {"cwd": session.work}, "cpu": {"cpu_seconds": 179}, "seconds": {"seconds": 899},
+                    "limit": {"output_limit": self.module.MiB}, "no-cutoff": {"absolute_deadline": None},
+                    "changed-cutoff": {"absolute_deadline": 0.9}}
+                kwargs.update(changes.get(case, {}))
+                input_states = []
+
+                def inputs(observed):
+                    self.assertIs(observed, state)
+                    self.assertFalse(session._busy)
+                    self.assertIsNone(session._active)
+                    self.assertTrue(session.domain_finality)
+                    input_states.append(state["started"])
+
+                actual_argv = type(session)._argv.__get__(session)
+                with rig.scope(), patch.object(session, "_argv", wraps=actual_argv) as argv_builder, \
+                     patch.object(session, "_native_check_inputs", side_effect=inputs) as check, \
+                     patch.object(session, "_native_scratch_inventory", return_value={"entries": 0, "bytes": 0, "private_retained": True}) as inventory, \
+                     patch.object(Path, "open", side_effect=AssertionError("profile test must use only closed fake capture/input seams")), \
+                     patch.object(Path, "stat", side_effect=AssertionError("profile test must use only closed fake metadata seams")), ExitStack() as stack:
+                    if case == "unknown-domain":
+                        stack.enter_context(patch.object(self.module, "_domain", side_effect=OSError("synthetic unknown native finality")))
+                    if case in {"source", "wheel"}:
+                        result = session.run(command, **kwargs)
+                        self.assertTrue(result.ok, result)
+                        self.assertTrue(result.waited and result.stdout_eof and result.stderr_eof and result.finality)
+                        self.assertEqual((result.stdout, result.stderr, result.persisted), (b"PASS\n", b"", (5, 0)))
+                        self.assertEqual(session.persisted_bytes, 5)
+                        self.assertEqual(input_states, [False, True])
+                        self.assertTrue(state["started"] and state["completed"] and state["closed"])
+                        self.assertEqual(rig.domain_calls, 3)
+                        argv_builder.assert_called_once_with(command, 180, profile="native-authority-" + phase)
+                        inventory.assert_called_once_with(state)
+                        call = next(event for event in rig.events if event[0] == "popen")
+                        self.assertEqual(call[1], tuple([str(session.python), "-I", "-S", "-B", str(session.entry), "--enter", "darwin",
+                            str(session.uid), str(session.gid), "180", str(state["policy"]), *command]))
+                        self.assertEqual(call[2]["env"], session._native_environment(state))
+                        self.assertEqual((call[2]["user"], call[2]["group"], call[2]["extra_groups"]), (session.uid, session.gid, []))
+                        with self.assertRaises(self.module.SessionError):
+                            session.run(command, **kwargs)
+                        self.assertEqual(len(rig.opened), 2)
+                    else:
+                        expected = OSError if case == "unknown-domain" else self.module.SessionError
+                        with self.assertRaises(expected):
+                            if case in {"unlatched", "cancel-control"}:
+                                session._run(command, **kwargs, latch=case != "unlatched",
+                                             cancel_after=0.01 if case == "cancel-control" else None)
+                            else:
+                                session.run(command, **kwargs)
+                        check.assert_not_called()
+                        inventory.assert_not_called()
+                        self.assertEqual(rig.opened, [])
+                        self.assertFalse(any(event[0] == "popen" for event in rig.events))
+                self.assertEqual(session.deadline, 100.0)
+
+    def test_native_postconditions_preserve_failure_accounting_and_close_only_original_resources(self):
+        for case in ("input-refusal", "original-and-close-errors", "unknown-finality", "unsafe-output", "close-expired", "close-cancelled"):
+            with self.subTest(native_capture_finalization=case):
+                session = session_double(self.module, "darwin")
+                state = native_state_double(session)
+                state["pins"], state["outside_fd"] = [{"fd": 703}], 704
+                rig = _Collection(self.module, session)
+                rig.snapshot_rows = {(rig.child.pid, rig.child.pid): ((session.uid,) * 3, (session.gid,) * 3, 65536)}
+                if case == "original-and-close-errors":
+                    rig.exit_at, rig.exitcode = 0.0, 7
+                elif case == "unknown-finality":
+                    rig.final_domain = OSError("synthetic unknown native domain")
+                original, owned_closes = OSError("synthetic immutable input changed"), []
+
+                def close(fd):
+                    if fd not in (703, 704):
+                        return rig.close(fd)
+                    self.assertNotIn(fd, owned_closes)
+                    owned_closes.append(fd)
+                    if case in {"input-refusal", "original-and-close-errors"}:
+                        raise OSError("synthetic independently reported native close")
+                    if case == "close-expired" and fd == 703:
+                        rig.now = 1.0
+                    elif case == "close-cancelled" and fd == 703:
+                        session.cancelled = True
+                        session.fail("synthetic late owner cancellation")
+
+                with rig.scope(), patch.object(self.module.os, "close", side_effect=close), \
+                     patch.object(session, "_native_check_inputs", side_effect=original if case == "input-refusal" else None) as inputs, \
+                     patch.object(session, "_native_scratch_inventory", return_value={"entries": 0, "bytes": 0, "private_retained": True},
+                                  side_effect=self.module.SessionError("synthetic unsafe native output") if case == "unsafe-output" else None) as inventory, \
+                     patch.object(Path, "unlink", side_effect=AssertionError("uncertain native state may not authorize path removal")) as remove:
+                    kwargs = dict(cwd=state["cwd"], env={}, seconds=900, profile="native-authority-source", absolute_deadline=1.0)
+                    if case == "input-refusal":
+                        with self.assertRaises(OSError) as caught:
+                            session.run(state["argv"], **kwargs)
+                        self.assertIs(caught.exception, original)
+                        self.assertEqual(rig.opened, [])
+                        self.assertFalse(state["prepared"] or state["started"])
+                        self.assertEqual(len(session.cleanup_errors), 2)
+                    else:
+                        result = session.run(state["argv"], **kwargs)
+                        self.assertFalse(result.ok)
+                        self.assertTrue(result.waited and result.stdout_eof and result.stderr_eof)
+                        self.assertEqual((result.stdout, result.stderr, result.persisted), (b"PASS\n", b"", (5, 0)))
+                        self.assertEqual(session.persisted_bytes, 5)
+                        self.assertEqual(result.timed_out, case == "close-expired")
+                        self.assertEqual(result.cancelled, case == "close-cancelled")
+                        if case == "original-and-close-errors":
+                            self.assertEqual((result.returncode, result.primary_error, session.failure), (7, "command exited 7", "command exited 7"))
+                            self.assertIn("native authority outside fixture close OSError", result.cleanup_errors)
+                            self.assertIn("native authority owned directory close OSError", result.cleanup_errors)
+                        elif case == "unknown-finality":
+                            self.assertFalse(result.finality or session.domain_finality)
+                        elif case == "close-cancelled":
+                            self.assertEqual(session.failure, "synthetic late owner cancellation")
+                        else:
+                            self.assertIn("native authority postconditions", result.primary_error)
+                    self.assertEqual(inputs.call_count, 1 if case in {"input-refusal", "original-and-close-errors", "unknown-finality"} else 2)
+                    if case in {"input-refusal", "original-and-close-errors", "unknown-finality"}:
+                        inventory.assert_not_called()
+                    remove.assert_not_called()
+                    self.assertEqual(owned_closes, [704, 703])
+                    self.assertTrue(state["closed"])
+                    self.assertFalse(state["completed"])
+                    self.assertIsNone(state["outside_fd"])
+                    self.assertEqual(state["pins"], [{"fd": None}])
+                    self.assertIsNotNone(session.failure)
+                    with self.assertRaises(self.module.SessionError):
+                        session.run(state["argv"], **kwargs)
+                    self.assertEqual(owned_closes, [704, 703])
+
+        for case in ("valid", "link", "foreign-owner", "world-write", "set-id", "hard-link", "too-large", "expired"):
+            with self.subTest(native_safe_output_inventory=case):
+                session = session_double(self.module, "darwin")
+                state = native_state_double(session)
+                leaves = [state["cwd"] / name for name in self.module._NATIVE_LEAVES]
+                path = state["cwd"] / "tmp/output"
+                info = SimpleNamespace(st_uid=1001 if case == "foreign-owner" else session.uid, st_gid=session.gid,
+                    st_mode=(stat.S_IFLNK if case == "link" else stat.S_IFREG) |
+                            (0o602 if case == "world-write" else 0o4600 if case == "set-id" else 0o600),
+                    st_nlink=2 if case == "hard-link" else 1, st_size=128 * self.module.MiB + 1 if case == "too-large" else 4)
+
+                def walk(root, *, followlinks, onerror):
+                    self.assertIn(root, leaves)
+                    self.assertFalse(followlinks)
+                    self.assertTrue(callable(onerror))
+                    return [(str(root), [], ["output"] if root == path.parent else [])]
+
+                def metadata(queried):
+                    self.assertEqual(queried, path)
+                    return info
+
+                with patch.multiple(self.module, os=SimpleNamespace(walk=walk), subprocess=SimpleNamespace(), signal=SimpleNamespace(),
+                                    socket=SimpleNamespace(), time=SimpleNamespace(monotonic=lambda: 1.0 if case == "expired" else 0.0)), \
+                     patch.object(Path, "lstat", metadata), \
+                     patch.object(Path, "unlink", side_effect=AssertionError("inventory is not a deletion capability")):
+                    if case == "valid":
+                        self.assertEqual(session._native_scratch_inventory(state), {"entries": 1, "bytes": 4, "private_retained": True})
+                    else:
+                        with self.assertRaises(self.module.SessionError):
+                            session._native_scratch_inventory(state)
+
+        for case in ("prepared-only", "prior-failure", "direct-pending"):
+            with self.subTest(native_terminal_close=case):
+                session = session_double(self.module, "darwin")
+                state = native_state_double(session)
+                state["pins"], state["outside_fd"] = [{"fd": 703}], 704
+                session._direct_producer_pending = case == "direct-pending"
+                if case == "prior-failure":
+                    session.fail("earlier original owner failure")
+                closes = Mock(side_effect=OSError("synthetic independently reported terminal close"))
+                with patch.multiple(self.module, os=SimpleNamespace(close=closes), subprocess=SimpleNamespace(), signal=SimpleNamespace(),
+                        socket=SimpleNamespace(), _domain=Mock(return_value=set()), time=SimpleNamespace(monotonic=lambda: 0.0)), \
+                     patch.object(Path, "unlink", side_effect=AssertionError("terminal close may not remove unknown native outputs")):
+                    for _ in range(2):
+                        with self.assertRaises(self.module.SessionError):
+                            session.close(keep_timer=True)
+                    self.assertTrue(session.closed and state["closed"])
+                    self.assertFalse(state["completed"])
+                    self.assertFalse(session._timer_finished)
+                    if case == "prior-failure":
+                        self.assertEqual(session.failure, "earlier original owner failure")
+                    if case == "direct-pending":
+                        self.assertFalse(session.domain_finality)
+                    self.assertIn("native authority outside fixture close OSError", session.cleanup_errors)
+                    self.assertIn("native authority owned directory close OSError", session.cleanup_errors)
+                self.assertEqual([call.args for call in closes.call_args_list], [(704,), (703,)])
+
     def test_finality_access_guard_and_close_fail_without_adopting_or_resetting(self):
         for case in ("busy", "owned", "pending-direct", "remaining", "unknown"):
             session = session_double(self.module)
@@ -2789,7 +3552,7 @@ class CISandboxPureTests(unittest.TestCase):
                 self.assertLessEqual(rig.select_calls, 512)
 
     def test_original_timeout_cancellation_and_late_events_latch_failure(self):
-        for case in ("aggregate", "cancel", "late-timeout", "late-cancel"):
+        for case in ("aggregate", "relative-timeout", "cancel", "late-timeout", "late-cancel"):
             with self.subTest(case=case):
                 rig = _Collection(self.module)
                 seconds = 1.0
@@ -2797,6 +3560,9 @@ class CISandboxPureTests(unittest.TestCase):
                     rig.session.deadline = 0.2
                     rig.exit_at, rig.terminate_exits = float("inf"), False
                     seconds = 10.0
+                elif case == "relative-timeout":
+                    rig.exit_at, rig.terminate_exits = float("inf"), False
+                    seconds = 0.2
                 elif case == "cancel":
                     rig.exit_at, rig.cancel_at = float("inf"), 0.08
                 elif case == "late-timeout":
@@ -2806,15 +3572,157 @@ class CISandboxPureTests(unittest.TestCase):
                 result = rig.collect(seconds=seconds)
                 self.assertFalse(result.ok)
                 self.assertIsNotNone(rig.session.failure)
-                self.assertEqual(result.timed_out, case in {"aggregate", "late-timeout"})
+                self.assertEqual(result.timed_out, case in {"aggregate", "relative-timeout", "late-timeout"})
                 self.assertEqual(result.cancelled, case in {"cancel", "late-cancel"})
                 if case == "aggregate":
                     self.assertEqual(rig.session.deadline, 0.2)
+                    # An exhausted aggregate endpoint cannot acquire another
+                    # second of TERM grace. Finalization still owns the exact
+                    # original handle and attempts kill/wait0 and all closes.
+                    self.assertNotIn(("terminate-original",), rig.events)
+                    self.assertEqual(rig.events.count(("kill-original",)), 1)
+                    self.assertEqual(len([e for e in rig.events if e[0] == "wait-budget"]), 1)
+                    self.assertTrue(all(e[1] == 0.0 for e in rig.events if e[0] == "wait-budget"))
+                    self.assertIn(("selector-close",), rig.events)
+                    self.assertEqual([e for e in rig.events if e[0] == "capture-close"],
+                                     [("capture-close", 100), ("capture-close", 101)])
+                    self.assertFalse(result.finality or rig.session.domain_finality)
+                    self.assertLess(result.duration, 1.0)
+                elif case == "relative-timeout":
+                    # The original staged cleanup remains available while the
+                    # original aggregate deadline still has real headroom.
+                    self.assertEqual(rig.session.deadline, 100.0)
                     term = rig.events.index(("terminate-original",))
                     kill = rig.events.index(("kill-original",))
                     self.assertLess(term, kill)
+                    self.assertGreaterEqual(result.duration, 1.0)
                 with self.assertRaises(self.module.SessionError):
                     rig.collect()
+
+    def test_absolute_deadline_validation_and_preparation_expiry_precede_any_capture(self):
+        for endpoint in (True, False, 0, -1.0, float("nan"), float("inf"), -float("inf"),
+                         "0.5", 100.001):
+            with self.subTest(invalid_absolute_endpoint=repr(endpoint)):
+                rig = _Collection(self.module)
+                with rig.scope(), patch.object(Path, "stat", side_effect=AssertionError("invalid endpoint may not observe files")), \
+                     patch.object(Path, "open", side_effect=AssertionError("invalid endpoint may not open files")), \
+                     patch.object(self.module, "_canonical", side_effect=AssertionError("invalid endpoint may not resolve paths")) as canonical:
+                    with self.assertRaises(self.module.SessionError):
+                        rig.session.run([str(rig.session.python), "--synthetic"], cwd=rig.session.work,
+                            env={}, seconds=1.0, absolute_deadline=endpoint)
+                    rig.session._argv.assert_not_called()
+                    canonical.assert_not_called()
+                self.assertEqual(rig.opened, [])
+                self.assertFalse(any(e[0] == "popen" for e in rig.events))
+                self.assertIsNone(rig.session._active)
+                self.assertFalse(rig.session._busy)
+                self.assertEqual(rig.session.deadline, 100.0)
+
+        for case in ("expired-entry", "preparation-consumed-budget"):
+            with self.subTest(absolute_preacquisition=case):
+                rig = _Collection(self.module)
+                if case == "expired-entry":
+                    rig.now = 0.5
+
+                def prepare(*_args, **_kwargs):
+                    rig.events.append(("preparation-consumed",))
+                    rig.now = 0.5  # Exactly the gate's old endpoint, not a new allowance.
+                    return ["/synthetic/entry"], {}
+
+                with rig.scope():
+                    rig.session._argv.side_effect = prepare
+                    with self.assertRaises(self.module.DeadlineExpired):
+                        rig.session.run([str(rig.session.python), "--synthetic"], cwd=rig.session.work,
+                            env={}, seconds=900, absolute_deadline=0.5)
+                    self.assertEqual(rig.session._argv.call_count, int(case == "preparation-consumed-budget"))
+                self.assertEqual(rig.opened, [])
+                self.assertFalse(any(e[0] == "popen" for e in rig.events))
+                self.assertIsNotNone(rig.session.failure)
+                self.assertIsNone(rig.session._active)
+                self.assertFalse(rig.session._busy)
+                self.assertEqual(rig.session.deadline, 100.0)
+
+    def test_absolute_deadline_bounds_collection_finality_and_second_phase_without_renewal(self):
+        for case in ("absolute-tighter", "relative-tighter", "integer-endpoint", "late-finality", "expired-before-spawn"):
+            with self.subTest(absolute_collection=case):
+                session = session_double(self.module, "darwin")
+                rig = _Collection(self.module, session)
+                rig.snapshot_rows = {(rig.child.pid, rig.child.pid): ((session.uid,) * 3, (session.gid,) * 3, 65536)}
+                endpoint = 1 if case == "integer-endpoint" else 0.5
+                seconds = 0.2 if case == "relative-tighter" else 900
+                if case == "late-finality":
+                    rig.final_time = endpoint
+                elif case == "expired-before-spawn":
+                    rig.fsync_errors, rig.fd_close_errors = {0}, {1}
+                original_open = rig.open
+
+                def opened(*args):
+                    fd = original_open(*args)
+                    if case == "expired-before-spawn" and len(rig.opened) == 2:
+                        rig.now = endpoint
+                    return fd
+
+                with rig.scope(), patch.object(self.module.os, "open", side_effect=opened):
+                    result = session.run([str(session.python), "--synthetic"], cwd=session.work, env={},
+                                         seconds=seconds, output_limit=64, absolute_deadline=endpoint)
+                self.assertEqual(result.ok, case not in {"late-finality", "expired-before-spawn"}, result)
+                self.assertEqual(session.deadline, 100.0)
+                self.assertIsNone(session._active)
+                self.assertFalse(session._busy)
+                self.assertIn(("domain-deadline", 1, endpoint), rig.events)
+                if case == "expired-before-spawn":
+                    self.assertFalse(any(e[0] in {"popen", "root-snapshot", "wait-original"} for e in rig.events))
+                    self.assertFalse(result.waited)
+                    self.assertFalse(result.stdout_eof or result.stderr_eof or result.finality)
+                    self.assertEqual(result.persisted, (0, 0))
+                    self.assertEqual(session.persisted_bytes, 0)
+                    self.assertEqual([e for e in rig.events if e[0] == "capture-close"],
+                                     [("capture-close", 100), ("capture-close", 101)])
+                    self.assertIn("capture fsync OSError", result.cleanup_errors)
+                    self.assertIn("capture close OSError", result.cleanup_errors)
+                    self.assertEqual(session.failure, result.primary_error)
+                    self.assertEqual(session.cleanup_errors, list(result.cleanup_errors))
+                else:
+                    observations = [e[1] for e in rig.events if e[0] == "root-snapshot"]
+                    self.assertEqual(len(observations), 1)
+                    cutoff = observations[0]
+                    if case == "relative-tighter":
+                        self.assertLess(cutoff, endpoint)
+                        self.assertGreaterEqual(cutoff, seconds)
+                    else:
+                        self.assertEqual(cutoff, endpoint)
+                    self.assertTrue(all(e[2] <= cutoff for e in rig.events
+                                        if e[0] == "domain-deadline" and e[1] > 1))
+                    self.assertTrue(result.waited and result.stdout_eof and result.stderr_eof)
+                    self.assertEqual(result.persisted, (5, 0))
+                if case in {"late-finality", "expired-before-spawn"}:
+                    self.assertTrue(result.timed_out)
+                    self.assertIsNotNone(session.failure)
+
+        # Two genuine in-memory captures share ONE old endpoint. The second
+        # enters after most preparation time has elapsed; it cannot renew900s.
+        session = session_double(self.module)
+        session.deadline = 1500.0
+        first = _Collection(self.module, session, stdout=(b"first phase\n",))
+        first.now, first.exit_at = 100.0, 100.08
+        first_result = first.collect(seconds=900, absolute_deadline=900.0)
+        self.assertTrue(first_result.ok, first_result)
+        first_persisted = session.persisted_bytes
+        second = _Collection(self.module, session, stdout=(b"second phase\n",))
+        second.now, second.exit_at = 899.8, 900.5
+        second_result = second.collect(seconds=900, absolute_deadline=900.0)
+        self.assertIsNot(first_result, second_result)
+        self.assertFalse(second_result.ok)
+        self.assertTrue(second_result.timed_out)
+        self.assertLess(second_result.duration, 2.0)
+        self.assertEqual(session.deadline, 1500.0)
+        self.assertEqual(session._run_number, 2)
+        self.assertEqual(session.persisted_bytes, first_persisted + len(b"second phase\n"))
+        self.assertTrue(all(e[1] <= 900.0 for e in second.events if e[0] == "cleanup-deadline"))
+        self.assertTrue(all(e[2] <= 900.0 for e in second.events if e[0] == "domain-deadline" and e[1] > 1))
+        self.assertIsNotNone(session.failure)
+        with self.assertRaises(self.module.SessionError):
+            _Collection(self.module, session).collect(seconds=900, absolute_deadline=900.0)
 
     def test_expected_negative_subject_isolated_but_cannot_rehabilitate_real_failure(self):
         session = session_double(self.module)
@@ -3018,6 +3926,63 @@ class CISandboxPureTests(unittest.TestCase):
                         else:
                             stream.sendto.assert_called_once_with(b"must-not-escape", (host, port))
                             stream.connect.assert_not_called()
+
+        # The positive's connect/send may consume its original absolute budget.
+        # No second blocking receive is then permitted, and only actually
+        # acquired local handles are closed; the listener is still caller-owned.
+        for family, kind, host, port in endpoints:
+            for case in ("valid", "operation-expired", "close-expired", "independent-close-errors"):
+                with self.subTest(outside_network_positive=(family, kind, case)):
+                    clock = SimpleNamespace(now=0.0)
+                    positive_error = OSError("synthetic original positive close error")
+                    accepted_error = OSError("synthetic original accepted close error")
+
+                    def operation(*args):
+                        self.assertEqual(args, ((host, port),) if kind == 1 else (b"owned-control", (host, port)))
+                        if case == "operation-expired":
+                            clock.now = 1.0
+                        return None if kind == 1 else len(b"owned-control")
+
+                    def positive_close():
+                        if case == "close-expired":
+                            clock.now = 1.0
+                        if case == "independent-close-errors":
+                            raise positive_error
+
+                    accepted = SimpleNamespace(close=Mock(side_effect=accepted_error if case == "independent-close-errors" else None))
+                    positive = SimpleNamespace(settimeout=Mock(), connect=Mock(side_effect=operation),
+                        sendto=Mock(side_effect=operation), close=Mock(side_effect=positive_close))
+                    listener = SimpleNamespace(family=family, type=kind, getsockname=Mock(return_value=(host, port)),
+                        settimeout=Mock(), accept=Mock(return_value=(accepted, ("synthetic-peer", 1))),
+                        recv=Mock(return_value=b"owned-control"), close=Mock())
+                    sockets = SimpleNamespace(AF_INET=2, AF_INET6=10, SOCK_STREAM=1, SOCK_DGRAM=2,
+                                              socket=Mock(return_value=positive))
+                    with patch.multiple(self.module, socket=sockets, os=SimpleNamespace(), subprocess=SimpleNamespace(),
+                                        signal=SimpleNamespace(), time=SimpleNamespace(monotonic=lambda: clock.now)):
+                        if case == "valid":
+                            self.module._outside_network_control(listener, deadline=1.0)
+                        else:
+                            with self.assertRaises(BaseExceptionGroup) as caught:
+                                self.module._outside_network_control(listener, deadline=1.0)
+                            if "expired" in case:
+                                self.assertTrue(all(isinstance(error, self.module.DeadlineExpired) for error in caught.exception.exceptions))
+                            else:
+                                self.assertEqual(caught.exception.exceptions, (accepted_error, positive_error) if kind == 1 else (positive_error,))
+                    sockets.socket.assert_called_once_with(family, kind)
+                    positive.settimeout.assert_called_once_with(1.0)
+                    positive.close.assert_called_once_with()
+                    listener.close.assert_not_called()
+                    self.assertEqual([call.args for call in listener.settimeout.call_args_list],
+                                     [(1.0,)] if case == "operation-expired" else [(1.0,), (1.0,)])
+                    if kind == 1:
+                        positive.connect.assert_called_once_with((host, port))
+                        positive.sendto.assert_not_called()
+                    else:
+                        positive.sendto.assert_called_once_with(b"owned-control", (host, port))
+                        positive.connect.assert_not_called()
+                    self.assertEqual(listener.accept.call_count, int(kind == 1 and case != "operation-expired"))
+                    self.assertEqual(accepted.close.call_count, listener.accept.call_count)
+                    self.assertEqual(listener.recv.call_count, int(kind == 2 and case != "operation-expired"))
 
         sockets = SimpleNamespace(AF_INET=2, AF_INET6=10, SOCK_STREAM=1, SOCK_DGRAM=2,
                                   socket=Mock(side_effect=AssertionError("no real receiver creation")))
