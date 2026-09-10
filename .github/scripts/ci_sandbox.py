@@ -56,6 +56,116 @@ _NATIVE_OTHER_SERVICE = "com.apple.cfprefsd.daemon"
 _NATIVE_WRITE_OUTER = b"MRK_NATIVE_WRITE_OUTER\n"
 _NATIVE_WRITE_INNER = b"MRK_NATIVE_WRITE_INNER\n"
 _NATIVE_WRITE_STDERR = _NATIVE_WRITE_OUTER + _NATIVE_WRITE_INNER
+_NATIVE_STARTUP_CASES = ("startup-true", "startup-python")
+# Deliberately literal, not code generated from a changing import inventory.
+# Test-only AST checks bind every statement to this module's actual imports.
+_NATIVE_STARTUP_PYTHON = '''from __future__ import annotations
+print("MRK_NATIVE_PYTHON_BOOT", flush=True)
+print("MRK_NATIVE_IMPORT_01_BEFORE", flush=True)
+import dataclasses
+print("MRK_NATIVE_IMPORT_01_AFTER", flush=True)
+print("MRK_NATIVE_IMPORT_02_BEFORE", flush=True)
+import errno
+print("MRK_NATIVE_IMPORT_02_AFTER", flush=True)
+print("MRK_NATIVE_IMPORT_03_BEFORE", flush=True)
+import grp
+print("MRK_NATIVE_IMPORT_03_AFTER", flush=True)
+print("MRK_NATIVE_IMPORT_04_BEFORE", flush=True)
+import hashlib
+print("MRK_NATIVE_IMPORT_04_AFTER", flush=True)
+print("MRK_NATIVE_IMPORT_05_BEFORE", flush=True)
+import importlib.util
+print("MRK_NATIVE_IMPORT_05_AFTER", flush=True)
+print("MRK_NATIVE_IMPORT_06_BEFORE", flush=True)
+import json
+print("MRK_NATIVE_IMPORT_06_AFTER", flush=True)
+print("MRK_NATIVE_IMPORT_07_BEFORE", flush=True)
+import math
+print("MRK_NATIVE_IMPORT_07_AFTER", flush=True)
+print("MRK_NATIVE_IMPORT_08_BEFORE", flush=True)
+import os
+print("MRK_NATIVE_IMPORT_08_AFTER", flush=True)
+print("MRK_NATIVE_IMPORT_09_BEFORE", flush=True)
+from pathlib import Path
+print("MRK_NATIVE_IMPORT_09_AFTER", flush=True)
+print("MRK_NATIVE_IMPORT_10_BEFORE", flush=True)
+import pwd
+print("MRK_NATIVE_IMPORT_10_AFTER", flush=True)
+print("MRK_NATIVE_IMPORT_11_BEFORE", flush=True)
+import re
+print("MRK_NATIVE_IMPORT_11_AFTER", flush=True)
+print("MRK_NATIVE_IMPORT_12_BEFORE", flush=True)
+import resource
+print("MRK_NATIVE_IMPORT_12_AFTER", flush=True)
+print("MRK_NATIVE_IMPORT_13_BEFORE", flush=True)
+import secrets
+print("MRK_NATIVE_IMPORT_13_AFTER", flush=True)
+print("MRK_NATIVE_IMPORT_14_BEFORE", flush=True)
+import selectors
+print("MRK_NATIVE_IMPORT_14_AFTER", flush=True)
+print("MRK_NATIVE_IMPORT_15_BEFORE", flush=True)
+import signal
+print("MRK_NATIVE_IMPORT_15_AFTER", flush=True)
+print("MRK_NATIVE_IMPORT_16_BEFORE", flush=True)
+import socket
+print("MRK_NATIVE_IMPORT_16_AFTER", flush=True)
+print("MRK_NATIVE_IMPORT_17_BEFORE", flush=True)
+import stat
+print("MRK_NATIVE_IMPORT_17_AFTER", flush=True)
+print("MRK_NATIVE_IMPORT_18_BEFORE", flush=True)
+import subprocess
+print("MRK_NATIVE_IMPORT_18_AFTER", flush=True)
+print("MRK_NATIVE_IMPORT_19_BEFORE", flush=True)
+import sys
+print("MRK_NATIVE_IMPORT_19_AFTER", flush=True)
+print("MRK_NATIVE_IMPORT_20_BEFORE", flush=True)
+import time
+print("MRK_NATIVE_IMPORT_20_AFTER", flush=True)
+print("MRK_NATIVE_PYTHON_DONE", flush=True)
+'''
+_NATIVE_STARTUP_STDOUT = b'''MRK_NATIVE_PYTHON_BOOT
+MRK_NATIVE_IMPORT_01_BEFORE
+MRK_NATIVE_IMPORT_01_AFTER
+MRK_NATIVE_IMPORT_02_BEFORE
+MRK_NATIVE_IMPORT_02_AFTER
+MRK_NATIVE_IMPORT_03_BEFORE
+MRK_NATIVE_IMPORT_03_AFTER
+MRK_NATIVE_IMPORT_04_BEFORE
+MRK_NATIVE_IMPORT_04_AFTER
+MRK_NATIVE_IMPORT_05_BEFORE
+MRK_NATIVE_IMPORT_05_AFTER
+MRK_NATIVE_IMPORT_06_BEFORE
+MRK_NATIVE_IMPORT_06_AFTER
+MRK_NATIVE_IMPORT_07_BEFORE
+MRK_NATIVE_IMPORT_07_AFTER
+MRK_NATIVE_IMPORT_08_BEFORE
+MRK_NATIVE_IMPORT_08_AFTER
+MRK_NATIVE_IMPORT_09_BEFORE
+MRK_NATIVE_IMPORT_09_AFTER
+MRK_NATIVE_IMPORT_10_BEFORE
+MRK_NATIVE_IMPORT_10_AFTER
+MRK_NATIVE_IMPORT_11_BEFORE
+MRK_NATIVE_IMPORT_11_AFTER
+MRK_NATIVE_IMPORT_12_BEFORE
+MRK_NATIVE_IMPORT_12_AFTER
+MRK_NATIVE_IMPORT_13_BEFORE
+MRK_NATIVE_IMPORT_13_AFTER
+MRK_NATIVE_IMPORT_14_BEFORE
+MRK_NATIVE_IMPORT_14_AFTER
+MRK_NATIVE_IMPORT_15_BEFORE
+MRK_NATIVE_IMPORT_15_AFTER
+MRK_NATIVE_IMPORT_16_BEFORE
+MRK_NATIVE_IMPORT_16_AFTER
+MRK_NATIVE_IMPORT_17_BEFORE
+MRK_NATIVE_IMPORT_17_AFTER
+MRK_NATIVE_IMPORT_18_BEFORE
+MRK_NATIVE_IMPORT_18_AFTER
+MRK_NATIVE_IMPORT_19_BEFORE
+MRK_NATIVE_IMPORT_19_AFTER
+MRK_NATIVE_IMPORT_20_BEFORE
+MRK_NATIVE_IMPORT_20_AFTER
+MRK_NATIVE_PYTHON_DONE
+'''
 _ENV_KEYS = frozenset("""
 PATH LANG LC_ALL TZ HOME USER LOGNAME TMPDIR TMP TEMP XDG_CONFIG_HOME
 XDG_CACHE_HOME CI TERM PYTHONSAFEPATH PYTHONDONTWRITEBYTECODE PYTHONNOUSERSITE
@@ -85,6 +195,24 @@ class DeadlineExpired(SessionError):
 
 class _CensusUnstable(SessionError):
     """An incomplete Linux pass; only finality may discard it and resnapshot."""
+
+
+def _native_startup_stage(data: bytes) -> str:
+    """Exact complete-line progress only; neither an import cause nor a pass."""
+    if type(data) is not bytes or len(data) > len(_NATIVE_STARTUP_STDOUT):
+        return "unclassified"
+    if not data:
+        return "no-body-marker"
+    prefix = b""
+    for index, line in enumerate(_NATIVE_STARTUP_STDOUT.splitlines(keepends=True)):
+        prefix += line
+        if data == prefix:
+            if index == 0:
+                return "body"
+            if index == 41:
+                return "imports-finished"
+            return f"{'before' if index % 2 else 'after'}-import-{(index + 1) // 2:02d}"
+    return "unclassified"
 
 
 class _NativeAbortIssue(Exception):
@@ -2001,7 +2129,7 @@ class Session:
                  "policy": self.bootstrap / ("native-authority-" + phase + ".sb"),
                  "argv": self._native_command(phase), "pins": [], "files": {}, "trees": {},
                  "prepared": False, "started": False, "completed": False, "closed": False,
-                 "control_seen": [], "control_notes": {}, "native_controls": None, "outside_fd": None,
+                 "control_seen": [], "startup_seen": [], "control_notes": {}, "native_controls": None, "outside_fd": None,
                  "outside_write": self.fixture_controls / f"native-authority-{phase}-outside-write",
                  "outside_read": self.work / "home" / f"native-authority-{phase}-read",
                  "sibling_read": self.work / f"{phase}-venv/lib/python3.11/site-packages/pip/__init__.py"}
@@ -2442,7 +2570,29 @@ class Session:
                   "outside-write-positive": 10, "outside-read-positive": 10}
         helper = self.bootstrap / "ci_native_authority.py" if case in _NATIVE_CONTROL_CASES else self.entry
         expected_cwd = state["cwd"] / "probes" if case in _NATIVE_CONTROL_CASES else state["cwd"]
-        if (case not in policies or policy != policies[case] or seconds != bounds.get(case, 30)
+        if case in _NATIVE_STARTUP_CASES:
+            seen = state.get("startup_seen")
+            if (self.platform != "darwin" or state["phase"] != "source" or state["prepared"]
+                    or not self.admitted or self._admitting or self.process_observer is None
+                    or self._busy or self._active is not None or self._direct_producer_pending
+                    or self._native_authority.get("source") is not state
+                    or type(seen) is not list or len(seen) >= len(_NATIVE_STARTUP_CASES)
+                    or seen != list(_NATIVE_STARTUP_CASES[:len(seen)])
+                    or case != _NATIVE_STARTUP_CASES[len(seen)]
+                    or seen and state["control_notes"].get("startup-true", {}).get("ok") is not True):
+                raise SessionError("native startup control lacks its original source-only ordered owner")
+            command = (["/usr/bin/true"] if case == "startup-true" else
+                       [str(self.python), "-I", "-S", "-B", "-c", _NATIVE_STARTUP_PYTHON])
+            if (type(argv) is not list or argv != command or type(seconds) is not int or seconds != 10
+                    or cwd != state["cwd"] or policy != self.bootstrap / "native-write-positive-source.sb"
+                    or policy != state.get("write_policy")):
+                raise SessionError("native startup control differs from its two fixed vectors/policy/bounds")
+            self._native_deadline(state["deadline"])
+            if self.cancelled:
+                self._fail("controller cancellation")
+            self._guard()
+            seen.append(case)  # Consume before acquisition; even an exception cannot replay this case.
+        elif (case not in policies or policy != policies[case] or seconds != bounds.get(case, 30)
                 or cwd != expected_cwd or argv[:5] != [str(self.python), "-I", "-S", "-B", str(helper)]):
             raise SessionError("native control differs from its finite immutable helper/policy catalog")
         self._native_control = {"state": state, "case": case, "argv": argv, "policy": policy,
@@ -2457,6 +2607,15 @@ class Session:
                                absolute_deadline=state["deadline"])
             row = self._note_capture("native-authority-" + state["phase"] + "-" + case, result)
             state["control_notes"][case] = row
+            if case in _NATIVE_STARTUP_CASES:
+                expected = b"" if case == "startup-true" else _NATIVE_STARTUP_STDOUT
+                row["ok"] = (result.ok and type(result.stdout) is bytes and result.stdout == expected
+                             and type(result.stderr) is bytes and not result.stderr and not self.cancelled
+                             and self.failure is None and time.monotonic() < state["deadline"])
+                if not row["ok"]:
+                    self._fail(result.primary_error or "native startup control did not complete")
+                    if case == "startup-python":
+                        row["native_startup_stage"] = _native_startup_stage(result.stdout)
             if (case == "outside-write-positive" and (not result.ok
                     or result.stdout != b"MRK_OUTSIDE_WRITE_POSITIVE\n" or result.stderr != _NATIVE_WRITE_STDERR)):
                 row["native_write_startup"] = _native_write_prefix(result.stderr)
@@ -2523,6 +2682,23 @@ class Session:
         deadline, listeners, endpoints, errors = state["deadline"], [], [], []
         base = [str(self.python), "-I", "-S", "-B", str(self.entry)]
         try:
+            if state["phase"] == "source":
+                for case, command in (("startup-true", ["/usr/bin/true"]),
+                                      ("startup-python", [str(self.python), "-I", "-S", "-B", "-c", _NATIVE_STARTUP_PYTHON])):
+                    self._native_control_capture(state, case, command,
+                        policy=state["write_policy"], cwd=state["cwd"], seconds=10)
+                    row = state["control_notes"][case]  # This original capture, not a reconstructed receipt.
+                    if row["ok"] is not True:
+                        raise SessionError("native startup boundary control failed")
+                    try:
+                        self.ensure_idle(deadline=deadline)
+                        _remaining(deadline)
+                        if self.cancelled:
+                            self._fail("controller cancellation")
+                        self._guard()
+                    except BaseException:
+                        row["ok"] = False
+                        raise
             positive = self._native_control_capture(state, "outside-write-positive",
                 [*base, "--native-write-control", str(state["outside_write"])],
                 policy=state["write_policy"], cwd=state["cwd"], seconds=10)

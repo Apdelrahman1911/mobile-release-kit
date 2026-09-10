@@ -7,6 +7,7 @@ The helper's OS/process/signal namespaces are replaced, not shared stdlib APIs.
 """
 from __future__ import annotations
 
+import ast
 from contextlib import ExitStack, contextmanager, redirect_stdout
 import dataclasses
 import errno
@@ -94,7 +95,7 @@ def native_state_double(session, phase="source", *, deadline=1.0):
         package=session.work / ("source-build/src/mobile_release" if phase == "source" else
                                 "wheel-venv/lib/python3.11/site-packages/mobile_release"),
         pins=[], files={}, trees={}, prepared=True, started=False, completed=False, closed=False,
-        control_seen=[], control_notes={}, native_controls={"synthetic-inert-fixture": True}, outside_fd=None,
+        control_seen=[], startup_seen=[], control_notes={}, native_controls={"synthetic-inert-fixture": True}, outside_fd=None,
         outside_write=session.fixture_controls / f"native-authority-{phase}-outside-write",
         outside_read=session.work / "home" / f"native-authority-{phase}-read",
         sibling_read=session.work / f"{phase}-venv/lib/python3.11/site-packages/pip/__init__.py")
@@ -2364,6 +2365,15 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertIs(current, state)
                     self.assertEqual((cwd, seconds), (state["cwd"], 10))
                     seen.append(selected)
+                    if selected in {"startup-true", "startup-python"}:
+                        self.assertEqual(phase, "source")
+                        expected_command = ["/usr/bin/true"] if selected == "startup-true" else [
+                            str(session.python), "-I", "-S", "-B", "-c", self.module._NATIVE_STARTUP_PYTHON]
+                        expected_output = b"" if selected == "startup-true" else self.module._NATIVE_STARTUP_STDOUT
+                        self.assertEqual((argv, policy), (expected_command, state["write_policy"]))
+                        state["control_notes"][selected] = {"ok": True}
+                        return self.module.CapturedRun(expected_output, b"", 0, True, True, True, True,
+                            False, False, 0.01, None, (), (len(expected_output), 0))
                     if selected == "outside-read-positive":
                         raise stopped
                     self.assertEqual((selected, policy, argv), ("outside-write-positive", state["write_policy"],
@@ -2389,10 +2399,371 @@ class CISandboxPureTests(unittest.TestCase):
                     else:
                         self.assertIsInstance(caught.exception.exceptions[0], self.module.SessionError)
                 reached_readback = case in {"source", "wheel", "wrong-readback"}
-                self.assertEqual(seen, ["outside-write-positive", "outside-read-positive"] if case in {"source", "wheel"} else ["outside-write-positive"])
-                self.assertEqual((idle.call_count, observe.call_count), (int(reached_readback), int(reached_readback)))
+                startup_cases = [] if phase == "wheel" else ["startup-true", "startup-python"]
+                self.assertEqual(seen, startup_cases + (["outside-write-positive", "outside-read-positive"]
+                    if case in {"source", "wheel"} else ["outside-write-positive"]))
+                self.assertEqual((idle.call_count, observe.call_count), (len(startup_cases) + int(reached_readback), int(reached_readback)))
                 self.assertEqual(reader.call_count, 2 if case in {"source", "wheel"} else int(case == "wrong-readback"))
-                self.assertEqual(state["control_notes"], {})  # Never accept an incomplete full boundary sequence.
+                self.assertEqual(state["control_notes"], {selected: {"ok": True} for selected in startup_cases})
+                # Successful startup controls never imply the later original boundary sequence passed.
+
+    def test_native_startup_literal_ast_and_exact_prefixes_bind_current_imports_without_executing_code(self):
+        # Parse only. Neither this hardcoded diagnostic nor any mutated string
+        # is compiled/evaluated, imported, or passed to a process in this test.
+        helper = (ROOT / ".github/scripts/ci_sandbox.py").read_text(encoding="utf-8")
+        imports = ("import dataclasses", "import errno", "import grp", "import hashlib", "import importlib.util",
+            "import json", "import math", "import os", "from pathlib import Path", "import pwd", "import re",
+            "import resource", "import secrets", "import selectors", "import signal", "import socket", "import stat",
+            "import subprocess", "import sys", "import time")
+        future = "from __future__ import annotations"
+        tokens = ["MRK_NATIVE_PYTHON_BOOT", *(f"MRK_NATIVE_IMPORT_{index:02}_{edge}"
+            for index in range(1, 21) for edge in ("BEFORE", "AFTER")), "MRK_NATIVE_PYTHON_DONE"]
+        expected = "".join(token + "\n" for token in tokens).encode("ascii")
+
+        def shape(node):
+            return ast.dump(node, include_attributes=False)
+
+        def literal_contract(program, actual_helper):
+            self.assertIs(type(program), str)
+            source_tree, program_tree = ast.parse(actual_helper), ast.parse(program)
+            actual_imports = [node for node in source_tree.body if isinstance(node, (ast.Import, ast.ImportFrom))]
+            fixed_imports = ast.parse(future + "\n" + "\n".join(imports)).body
+            self.assertEqual([shape(node) for node in actual_imports], [shape(node) for node in fixed_imports])
+            self.assertEqual(len(program_tree.body), 63)
+            self.assertEqual(shape(program_tree.body[0]), shape(fixed_imports[0]))
+            prints = [program_tree.body[1], *(node for index in range(20)
+                for node in (program_tree.body[2 + 3 * index], program_tree.body[4 + 3 * index])), program_tree.body[-1]]
+            self.assertEqual([shape(program_tree.body[3 + 3 * index]) for index in range(20)],
+                             [shape(node) for node in fixed_imports[1:]])
+            for node, token in zip(prints, tokens, strict=True):
+                self.assertEqual(shape(node), shape(ast.parse(f'print("{token}", flush=True)').body[0]))
+
+        program = self.module._NATIVE_STARTUP_PYTHON
+        literal_contract(program, helper)
+        self.assertEqual(self.module._NATIVE_STARTUP_CASES, ("startup-true", "startup-python"))
+        self.assertEqual(self.module._NATIVE_STARTUP_STDOUT, expected)
+        self.assertEqual(len(expected.splitlines()), 42)
+        self.assertLess(len(expected), 2048)
+        assignments = {node.targets[0].id: node.value for node in ast.parse(helper).body
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)}
+        for name, value in (("_NATIVE_STARTUP_PYTHON", program), ("_NATIVE_STARTUP_STDOUT", expected)):
+            self.assertIsInstance(assignments[name], ast.Constant)  # Hardcoded authority, not AST-derived/generated executable text.
+            self.assertEqual(assignments[name].value, value)
+
+        program_mutations = (
+            program.replace("import errno\n", "import errno as renamed\n", 1),
+            program.replace("from pathlib import Path\n", "import pathlib\n", 1),
+            program.replace(future, "from __future__ import generator_stop", 1),
+            program.replace("import dataclasses\n", "import errno\n", 1),
+            program + "import decimal\n",
+            program + 'open("/synthetic/not-opened", "w")\n',
+            program.replace("MRK_NATIVE_PYTHON_BOOT", "MRK_NATIVE_PYTHON_OTHER", 1),
+            program.replace("flush=True", "flush=False", 1),
+        )
+        for number, mutated in enumerate(program_mutations):
+            with self.subTest(native_startup_program_mutation=number):
+                self.assertNotEqual(mutated, program)
+                with self.assertRaises(AssertionError):
+                    literal_contract(mutated, helper)
+        for number, mutated in enumerate((helper.replace("import grp\n", "import grp as renamed\n", 1),
+                helper.replace("from pathlib import Path\n", "import pathlib\n", 1),
+                helper.replace(future, "from __future__ import generator_stop", 1),
+                helper.replace("import dataclasses\nimport errno\n", "import errno\nimport dataclasses\n", 1),
+                helper + "\nimport decimal\n")):
+            with self.subTest(native_startup_helper_import_drift=number):
+                self.assertNotEqual(mutated, helper)
+                with self.assertRaises(AssertionError):
+                    literal_contract(program, mutated)
+
+        lines = expected.splitlines(keepends=True)
+        stages = ["no-body-marker", "body", *(f"{edge}-import-{index:02}"
+            for index in range(1, 21) for edge in ("before", "after")), "imports-finished"]
+        self.assertEqual(len(stages), len(lines) + 1)
+        for count, stage in enumerate(stages):
+            with self.subTest(native_startup_exact_prefix=count):
+                self.assertEqual(self.module._native_startup_stage(b"".join(lines[:count])), stage)
+        for mutated in (None, True, expected.decode(), bytearray(expected), [expected], expected[:-1], expected + b"extra\n",
+                        lines[0][:-1], b"".join(lines[1:]), b"".join([lines[0], lines[2], lines[1]]),
+                        lines[0] * 2, lines[0] + b"PRIVATE-DIAGNOSTIC-CANARY\n", expected + b"x" * 2048):
+            with self.subTest(native_startup_malformed_prefix=repr(mutated)[:70]):
+                self.assertEqual(self.module._native_startup_stage(mutated), "unclassified")
+
+    def test_native_startup_private_routes_consume_attempts_and_stop_on_semantic_or_lifecycle_failure(self):
+        def configured(phase="source", platform="darwin"):
+            session = session_double(self.module, platform)
+            state = native_state_double(session, phase, deadline=20.0)
+            state["prepared"], session._native_preparing = False, phase
+            session.domain_finality = True
+            state["write_policy"] = session.bootstrap / f"native-write-positive-{phase}.sb"
+            return session, state
+
+        def vector(session, selected):
+            return ["/usr/bin/true"] if selected == "startup-true" else [
+                str(session.python), "-I", "-S", "-B", "-c", self.module._NATIVE_STARTUP_PYTHON]
+
+        invalid = ("linux", "wheel", "foreign-state", "owner-mismatch", "reentrant", "busy", "active-original", "direct-pending", "unadmitted", "admitting", "missing-observer",
+            "prepared", "started", "closed", "cancelled", "expired", "latched-failure", "missing-order", "wrong-order-type",
+            "out-of-order", "duplicate", "missing-prior-success", "failed-prior", "true-extra", "other-tool", "python-provider",
+            "python-flags", "python-code", "python-extra", "tuple-vector", "policy", "state-policy", "cwd", "seconds")
+        for case in invalid:
+            with self.subTest(native_startup_refusal=case):
+                session, state = configured("wheel" if case == "wheel" else "source", "linux" if case == "linux" else "darwin")
+                selected = "startup-python" if case.startswith("python-") or case in {
+                    "out-of-order", "missing-prior-success", "failed-prior"} else "startup-true"
+                if selected == "startup-python" and case != "out-of-order":
+                    state["startup_seen"] = ["startup-true"]
+                    state["control_notes"]["startup-true"] = {"ok": case != "failed-prior"}
+                    if case == "missing-prior-success":
+                        state["control_notes"].clear()
+                argv, policy, cwd, seconds = vector(session, selected), state["write_policy"], state["cwd"], 10
+                if case == "foreign-state":
+                    session._native_authority[state["phase"]] = dict(state)
+                elif case == "owner-mismatch":
+                    session._native_preparing = None
+                elif case == "reentrant":
+                    session._native_control = {"synthetic-already-owned": True}
+                elif case == "busy":
+                    session._busy = True
+                elif case == "active-original":
+                    session._active = SimpleNamespace(pid=4242)  # Inert original reference; no process operation.
+                elif case == "direct-pending":
+                    session._direct_producer_pending = True
+                elif case == "unadmitted":
+                    session.admitted = False
+                elif case == "admitting":
+                    session._admitting = True
+                elif case == "missing-observer":
+                    session.process_observer = None
+                elif case in {"prepared", "started", "closed"}:
+                    state[case] = True
+                elif case == "cancelled":
+                    session.cancelled = True
+                elif case == "latched-failure":
+                    session.fail("original prior failure")
+                elif case == "missing-order":
+                    del state["startup_seen"]
+                elif case == "wrong-order-type":
+                    state["startup_seen"] = ()
+                elif case == "duplicate":
+                    state["startup_seen"] = ["startup-true"]
+                elif case == "true-extra":
+                    argv.append("--extra")
+                elif case == "other-tool":
+                    argv[0] = "/usr/bin/false"
+                elif case == "python-provider":
+                    argv[0] = str(session.work / "source-venv/bin/python")
+                elif case == "python-flags":
+                    argv[2] = "-s"
+                elif case == "python-code":
+                    argv[-1] += "\nimport decimal\n"
+                elif case == "python-extra":
+                    argv.append("--extra")
+                elif case == "tuple-vector":
+                    argv = tuple(argv)
+                elif case == "policy":
+                    policy = session.policy
+                elif case == "state-policy":
+                    state["write_policy"] = session.policy
+                elif case == "cwd":
+                    cwd = session.work
+                elif case == "seconds":
+                    seconds = 9
+                before = repr(state.get("startup_seen"))
+                capture = Mock(side_effect=AssertionError("invalid startup binding must be refused before acquisition"))
+                with patch.multiple(self.module, os=SimpleNamespace(), subprocess=SimpleNamespace(), socket=SimpleNamespace(),
+                        signal=SimpleNamespace(), resource=SimpleNamespace(), _canonical=Path,
+                        time=SimpleNamespace(monotonic=lambda: state["deadline"] if case == "expired" else 0.0)), \
+                     patch.object(Path, "resolve", side_effect=AssertionError("rejected startup vector cannot inspect native paths")), \
+                     patch.object(session, "_run", capture):
+                    with self.assertRaises(self.module.SessionError):
+                        session._native_control_capture(state, selected, argv, policy=policy, cwd=cwd, seconds=seconds)
+                capture.assert_not_called()
+                self.assertEqual(repr(state.get("startup_seen")), before)
+                self.assertEqual(state["control_seen"], [])  # The six existing Mach/AIA cases retain separate custody.
+
+        # The public native-control selector is rejected before even the fake
+        # collector; ordinary execution cannot overlap private preparation.
+        for selected in ("startup-true", "startup-python"):
+            session, state = configured()
+            with patch.multiple(self.module, os=SimpleNamespace(), subprocess=SimpleNamespace(), socket=SimpleNamespace(),
+                    signal=SimpleNamespace(), resource=SimpleNamespace(), _canonical=Path,
+                    time=SimpleNamespace(monotonic=lambda: 0.0)), \
+                 patch.object(session, "_argv", side_effect=AssertionError("public startup request cannot acquire a launcher")) as launcher:
+                for profile in ("native-control", "ordinary"):
+                    with self.subTest(native_startup_public=(selected, profile)), self.assertRaises(self.module.SessionError):
+                        session.run(vector(session, selected), cwd=state["cwd"], env={}, seconds=10, profile=profile,
+                            absolute_deadline=state["deadline"])
+                launcher.assert_not_called()
+            self.assertEqual(state["startup_seen"], [])
+
+        class OriginalBoundaryReached(Exception):
+            pass
+
+        scenarios = ("source", "wheel", "true-nonzero", "true-stdout", "true-stderr", "true-acquisition", "python-acquisition",
+            "python-prefix-failure", "python-empty-failure", "python-zero-prefix", "python-zero-malformed", "python-full-nonzero", "python-stderr", "python-finality", "python-close-error",
+            "python-timeout", "true-late", "python-late", "true-cancelled", "python-cancelled", "idle-failure", "idle-expired", "idle-cancelled")
+        for case in scenarios:
+            with self.subTest(native_startup_sequence=case):
+                session, state = configured("wheel" if case == "wheel" else "source")
+                state["files"] = {state["write_policy"]: {"synthetic-immutable-policy": True}}
+                state["tools"] = {"true": {"sha256": "0" * 64}, "python": {"sha256": "1" * 64}}
+                original_inputs = repr((state["files"], state["tools"], state["policy"], state["write_policy"]))
+                clock, events, captured = SimpleNamespace(now=0.0), [], {}
+                original_capture = session._native_control_capture
+                stop = OriginalBoundaryReached("stop before the original canary read or any native operation")
+                acquisition = OSError("synthetic original acquisition failure")
+
+                def collect(argv, *, cwd, env, seconds, output_limit, cpu_seconds, latch, profile, absolute_deadline):
+                    selected = session._native_control["case"]
+                    self.assertIn(selected, ("startup-true", "startup-python"))
+                    self.assertEqual(state["startup_seen"], ["startup-true"] if selected == "startup-true" else ["startup-true", "startup-python"])
+                    self.assertEqual(state["control_seen"], [])
+                    self.assertEqual(argv, vector(session, selected))
+                    self.assertEqual((cwd, env, seconds, output_limit, cpu_seconds, latch, profile, absolute_deadline),
+                        (state["cwd"], {}, 10, self.module.MiB, 180, True, "native-control", state["deadline"]))
+                    self.assertNotIn("abort", session._native_control)  # New controls do not broaden abort-diagnostic eligibility.
+                    options = dict(cwd=cwd, env=env, seconds=seconds, output_limit=output_limit, cpu_seconds=cpu_seconds,
+                                   latch=latch, cancel_after=None, profile=profile, absolute_deadline=absolute_deadline)
+                    self.assertIs(session._native_request(argv, **options), state)
+                    if case == "source":
+                        for changed in ({"env": {"PYTHONPATH": "/synthetic/not-admitted"}}, {"seconds": 9}, {"output_limit": output_limit - 1},
+                                        {"cpu_seconds": 179}, {"absolute_deadline": absolute_deadline + 1}, {"latch": False}, {"cancel_after": 1}):
+                            with self.assertRaises(self.module.SessionError):
+                                session._native_request(argv, **(options | changed))
+                    routed, identity = session._argv(argv, cpu_seconds, profile=profile)
+                    self.assertEqual(routed, [str(session.python), "-I", "-S", "-B", str(session.entry), "--enter", "darwin",
+                        str(session.uid), str(session.gid), "180", str(state["write_policy"]), *argv])
+                    self.assertEqual(identity, {"user": session.uid, "group": session.gid, "extra_groups": []})
+                    native_env = session._native_environment(state)
+                    self.assertEqual((native_env["HOME"], native_env["TMPDIR"]), (str(state["cwd"] / "home"), str(state["cwd"] / "tmp")))
+                    self.assertNotIn("PYTHONPATH", native_env)
+                    events.append(("capture", selected))
+                    if (case, selected) in {("true-acquisition", "startup-true"), ("python-acquisition", "startup-python")}:
+                        raise acquisition
+                    stdout = b"" if selected == "startup-true" else self.module._NATIVE_STARTUP_STDOUT
+                    stderr, code, finality, timeout, primary, cleanup = b"", 0, True, False, None, ()
+                    if selected == "startup-true":
+                        if case == "true-nonzero":
+                            code, primary = 1, "command exited 1"
+                        elif case == "true-stdout":
+                            stdout = b"unexpected\n"
+                        elif case == "true-stderr":
+                            stderr = b"PRIVATE-DIAGNOSTIC-CANARY\n"
+                    else:
+                        if case == "python-prefix-failure":
+                            stdout = b"".join(stdout.splitlines(keepends=True)[:10])
+                            code, primary = -6, "command exited -6"
+                        elif case == "python-empty-failure":
+                            stdout, code, primary = b"", -6, "command exited -6"
+                        elif case == "python-zero-prefix":
+                            stdout = stdout.splitlines(keepends=True)[0]
+                        elif case == "python-zero-malformed":
+                            stdout = stdout.splitlines(keepends=True)[0] + b"PRIVATE-DIAGNOSTIC-CANARY\n"
+                        elif case == "python-full-nonzero":
+                            code, primary = -6, "command exited -6"
+                        elif case == "python-stderr":
+                            stderr = b"PRIVATE-DIAGNOSTIC-CANARY\n"
+                        elif case == "python-finality":
+                            finality, primary = False, "reserved identity did not reach finality"
+                        elif case == "python-close-error":
+                            primary, cleanup = "late capture/cleanup/finality error", ("original capture close failed",)
+                        elif case == "python-timeout":
+                            timeout, primary = True, "command/original aggregate deadline expired"
+                    result = self.module.CapturedRun(stdout, stderr, code, True, True, True, finality, timeout, False, 0.125,
+                                                    primary, cleanup, (len(stdout), len(stderr)))
+                    captured[selected] = result
+                    session.persisted_bytes += sum(result.persisted)
+                    session.domain_finality = finality
+                    if primary is not None:
+                        session.fail(primary)
+                        session.cleanup_errors.extend(cleanup)
+                    if case == ("true-late" if selected == "startup-true" else "python-late"):
+                        clock.now = state["deadline"] + 0.1
+                    if case == ("true-cancelled" if selected == "startup-true" else "python-cancelled"):
+                        session.cancelled = True
+                    return result
+
+                def capture(actual, selected, argv, *, policy, cwd, seconds):
+                    self.assertIs(actual, state)
+                    if selected == "outside-write-positive":
+                        self.assertEqual((policy, cwd, seconds), (state["write_policy"], state["cwd"], 10))
+                        self.assertEqual(argv, [str(session.python), "-I", "-S", "-B", str(session.entry),
+                            "--native-write-control", str(state["outside_write"])])
+                        events.append(("original-boundary", selected))
+                        raise stop
+                    self.assertEqual(selected, "startup-true" if not state["startup_seen"] else "startup-python")
+                    result = original_capture(actual, selected, argv, policy=policy, cwd=cwd, seconds=seconds)
+                    self.assertIs(result, captured[selected])  # Strict semantic rejection cannot rewrite genuine transport facts.
+                    return result
+
+                def domain(platform, uid, *, deadline):
+                    self.assertEqual((platform, uid, deadline), ("darwin", session.uid, state["deadline"]))
+                    events.append(("idle", state["startup_seen"][-1]))
+                    if case == "idle-failure":
+                        raise OSError("synthetic original domain observation unavailable")
+                    if case == "idle-expired":
+                        clock.now = deadline
+                    if case == "idle-cancelled":
+                        session.cancelled = True
+                    return {}
+
+                collector = Mock(side_effect=collect)
+                with patch.multiple(self.module, os=SimpleNamespace(), subprocess=SimpleNamespace(), socket=SimpleNamespace(),
+                        signal=SimpleNamespace(), resource=SimpleNamespace(), _canonical=Path, _domain=domain,
+                        time=SimpleNamespace(monotonic=lambda: clock.now)), \
+                     patch.object(Path, "resolve", side_effect=AssertionError("fixed startup sequence fixture cannot resolve host paths")), \
+                     patch.object(Path, "open", side_effect=AssertionError("fixed startup sequence fixture cannot open host files")), \
+                     patch.object(session, "_headroom", Mock()), patch.object(session, "_run", collector), \
+                     patch.object(session, "_native_control_capture", side_effect=capture):
+                    with self.assertRaises(BaseExceptionGroup) as caught:
+                        session._native_boundary_controls(state)
+                    if case in {"source", "wheel"}:
+                        self.assertEqual(caught.exception.exceptions, (stop,))
+                    elif case in {"true-acquisition", "python-acquisition"}:
+                        self.assertIn(acquisition, caught.exception.exceptions)
+                    else:
+                        self.assertIsNotNone(session.failure)
+                    calls_before = collector.call_count
+                    for selected in ("startup-true", "startup-python"):
+                        with self.assertRaises(self.module.SessionError):
+                            original_capture(state, selected, vector(session, selected),
+                                policy=state["write_policy"], cwd=state["cwd"], seconds=10)
+                    self.assertEqual(collector.call_count, calls_before)  # Neither an exception nor failed row can buy replay/next case.
+                reached_python = case == "source" or case.startswith("python-")
+                expected_attempts = [] if case == "wheel" else ["startup-true", *(["startup-python"] if reached_python else [])]
+                self.assertEqual(state["startup_seen"], expected_attempts)
+                self.assertEqual([value for event, value in events if event == "capture"], expected_attempts)
+                self.assertEqual([value for event, value in events if event == "original-boundary"],
+                                 ["outside-write-positive"] if case in {"source", "wheel"} else [])
+                expected_idle = ["startup-true", "startup-python"] if case == "source" else ["startup-true"] if (
+                    reached_python or case.startswith("idle-")) else []
+                self.assertEqual([value for event, value in events if event == "idle"], expected_idle)
+                if case == "source":
+                    self.assertEqual(events, [("capture", "startup-true"), ("idle", "startup-true"),
+                        ("capture", "startup-python"), ("idle", "startup-python"), ("original-boundary", "outside-write-positive")])
+                self.assertEqual(repr((state["files"], state["tools"], state["policy"], state["write_policy"])), original_inputs)
+                self.assertEqual((state["control_seen"], state["deadline"], session.deadline), ([], 20.0, 100.0))
+                self.assertIsNone(session._native_control)
+                self.assertEqual(session.persisted_bytes, sum(sum(result.persisted) for result in captured.values()))
+                for selected, result in captured.items():
+                    row = state["control_notes"][selected]
+                    self.assertEqual((row["subject_ok"], row["returncode"], row["waited"], row["stdout_eof"], row["stderr_eof"],
+                        row["domain_finality"], row["timed_out"], row["cancelled"], row["persisted"]),
+                        (result.ok, result.returncode, result.waited, result.stdout_eof, result.stderr_eof, result.domain_finality,
+                         result.timed_out, result.cancelled, list(result.persisted)))
+                    expected_ok = case == "source" or selected == "startup-true" and reached_python
+                    self.assertEqual(row["ok"], expected_ok)
+                    if selected == "startup-python" and not expected_ok:
+                        expected_stage = {"python-prefix-failure": "before-import-05", "python-empty-failure": "no-body-marker",
+                            "python-zero-prefix": "body", "python-zero-malformed": "unclassified"}.get(case, "imports-finished")
+                        self.assertEqual(row["native_startup_stage"], expected_stage)
+                    else:
+                        self.assertNotIn("native_startup_stage", row)
+                    self.assertNotIn("native_abort_diagnostic", row)
+                    for private in ("MRK_NATIVE_PYTHON", "MRK_NATIVE_IMPORT", "PRIVATE-DIAGNOSTIC-CANARY", str(session.root), str(session.python)):
+                        self.assertNotIn(private, repr(row))
+                    if result.primary_error is not None:
+                        self.assertEqual(session.failure, result.primary_error)
 
     def test_native_abort_ips_requires_strict_objects_original_identity_precise_time_and_closed_hints(self):
         session = session_double(self.module, "darwin")
@@ -3722,6 +4093,10 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertIs(state, session._native_authority[phase])
                     self.assertFalse(state["prepared"] or state["started"])
                     self.assertIsNotNone(state["outside_fd"])
+                    self.assertEqual(state["startup_seen"], [])
+                    self.assertIn(state["write_policy"], state["files"])
+                    self.assertEqual(state["files"][state["write_policy"]]["sha256"],
+                                     hashlib.sha256(files[state["write_policy"]]).hexdigest())
                     events.append(("direct-boundaries", phase))
                     if case in {"boundary-failure", "cleanup-errors"}:
                         raise original
