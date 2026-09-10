@@ -29,6 +29,9 @@ from typing import Callable
 
 AGGREGATE_SECONDS = 3300
 DISK_RESERVE = 4 * 1024**3 + 512 * 1024**2
+MINITEST_FOOTER = (r"(?m)^(\d{1,9}) runs, (\d{1,9}) assertions, (\d{1,9}) failures, "
+                   r"(\d{1,9}) errors, (\d{1,9}) skips[ \t]*$")
+NATIVE_DIAGNOSTIC_PREFIX = "MRK_NATIVE_DIAGNOSTIC="
 RUBY_SUITES = (
     ("ruby-support", "test_fastlane_support.rb", 12),
     ("ruby-native-capture", "test_native_upload_validation.rb", 13),
@@ -573,6 +576,63 @@ def validate_inputs(root: Path, value: dict, *, deadline: float) -> dict:
             "tools_sha256": value["manifest_sha256"], "lock_sha256": value["lock_sha256"]}
 
 
+def minitest_records(stdout: str, expected: tuple[str, ...], *, deadline: float | None = None) -> tuple[list, dict]:
+    """Associate each verbose start with its own terminal, despite body logging.
+
+    A terminal from the next test cannot finish a missing record. Ambiguous
+    structural text fails closed; ordinary line-oriented diagnostics are not
+    themselves results. Returned diagnostics contain only source-known names.
+    """
+    if deadline is not None:
+        check_clock(deadline)
+    expected_set = set(expected)
+    starts = list(re.finditer(r"(?m)^([A-Za-z0-9_:]+#test_[A-Za-z0-9_]+)[ \t]*=[ \t]*", stdout))
+    footers = list(re.finditer(MINITEST_FOOTER, stdout))
+    boundary = footers[0].start() if footers else len(stdout)
+    reasons, completed, seen, duplicates, unknown = set(), [], set(), set(), 0
+    terminal_pattern = r"(?m)^([0-9]{1,9}\.[0-9]{2}) s = ([.FES])[ \t]*$"
+    if len(footers) != 1:
+        reasons.add("footer-count")
+    if (re.search(terminal_pattern, stdout[:starts[0].start()] if starts else stdout)
+            or footers and re.search(terminal_pattern, stdout[footers[0].end():])):
+        reasons.add("unscoped-terminal")
+    for index, start in enumerate(starts):
+        if deadline is not None:
+            check_clock(deadline)
+        identifier = start[1]
+        if identifier not in expected_set:
+            unknown += 1
+            reasons.add("unknown-id")
+        if identifier in seen:
+            reasons.add("duplicate-id")
+            if identifier in expected_set:
+                duplicates.add(identifier)
+        seen.add(identifier)
+        if start.start() >= boundary:
+            reasons.add("record-after-footer")
+            continue
+        end = min(starts[index + 1].start() if index + 1 < len(starts) else len(stdout), boundary)
+        body = stdout[start.end():end]
+        terminals = re.findall(terminal_pattern, body)
+        if len(terminals) != 1:
+            reasons.add("terminal-count")
+        elif terminals[0][1] != ".":
+            reasons.add("terminal-status")
+        elif identifier in expected_set:
+            completed.append(identifier)
+    missing = expected_set - set(completed)
+    if missing:
+        reasons.add("missing-ids")
+    if len(starts) != len(expected):
+        reasons.add("record-count")
+    if deadline is not None:
+        check_clock(deadline)
+    return completed, {"reasons": sorted(reasons), "expected_count": len(expected),
+                       "started_count": len(starts), "completed_count": len(completed),
+                       "missing_ids": sorted(missing)[:16], "duplicate_ids": sorted(duplicates)[:16],
+                       "unknown_count": unknown}
+
+
 def parse_capture(step: Step, result, paths: Paths, platform: str, checks) -> CheckResult:
     if (not result.ok or type(result.returncode) is not int or result.returncode != 0
             or result.waited is not True or result.stdout_eof is not True or result.stderr_eof is not True
@@ -583,21 +643,23 @@ def parse_capture(step: Step, result, paths: Paths, platform: str, checks) -> Ch
     details = {"returncode": result.returncode, "stdout_bytes": len(result.stdout),
                "stderr_bytes": len(result.stderr), "seconds": round(result.duration, 3)}
     if step.parser == "minitest":
-        matches = re.findall(r"(?m)^(\d+) runs, (\d+) assertions, (\d+) failures, (\d+) errors, (\d+) skips\s*$", stdout)
+        matches = re.findall(MINITEST_FOOTER, stdout)
         if len(matches) != 1:
             raise VerificationError("MINITEST_RESULT_MISSING")
         runs, assertions, failures, errors, skips = map(int, matches[0])
         if runs != step.expected_tests or assertions < 1 or failures or errors or skips:
             raise VerificationError("MINITEST_RESULT_REJECTED")
-        completed = re.findall(r"(?m)^([A-Za-z0-9_:]+#test_[A-Za-z0-9_]+)\s*=.*?\s=\s\.\s*$", stdout)
         expected = ruby_expected_ids(paths.source, step.id)
-        if len(completed) != runs or len(expected) != runs or tuple(sorted(completed)) != expected:
+        completed, structure = minitest_records(stdout, expected)
+        if structure["reasons"] or len(completed) != runs or len(expected) != runs or tuple(sorted(completed)) != expected:
             raise VerificationError("MINITEST_COMPLETION_INVENTORY")
         details.update(tests=runs, assertions=assertions, completed=completed)
     elif step.parser == "supply":
         if stdout != "locked Fastlane Supply WIF contract: PASS\n":
             raise VerificationError("SUPPLY_RESULT")
     elif step.parser == "native":
+        if any(line.startswith(NATIVE_DIAGNOSTIC_PREFIX) for line in (stdout + "\n" + stderr).splitlines()):
+            raise VerificationError("NATIVE_FAILURE_DIAGNOSTIC_ON_SUCCESS")
         expected = checks.expected_python_ids(paths.source, "native")
         footers = re.findall(r"(?m)^Ran (\d+) tests? in [0-9.]+s\s*$", stderr)
         if footers != [str(len(expected))] or not re.search(r"(?m)^OK\s*$", stderr) or "skipped" in stderr:
@@ -703,6 +765,58 @@ def python_storage_profile(data: object) -> dict | None:
     return dict(data)
 
 
+def native_failure_diagnostic(text: str, expected: tuple[str, ...], *, deadline: float | None = None) -> dict | None:
+    """Accept only bounded actual-failure attribution, never execution authority."""
+    if deadline is not None:
+        check_clock(deadline)
+    lines = [line[len(NATIVE_DIAGNOSTIC_PREFIX):] for line in text.splitlines()
+             if line.startswith(NATIVE_DIAGNOSTIC_PREFIX)]
+    if len(lines) != 1 or len(lines[0]) > 16 * 1024:
+        return None
+    data = strict_json(lines[0])
+    if (type(data) is not dict or set(data) != {"schema", "phase", "records"}
+            or type(data["schema"]) is not int or data["schema"] != 1
+            or type(data["phase"]) is not str or data["phase"] not in {"prerequisite", "tests"}
+            or type(data["records"]) is not list or not 1 <= len(data["records"]) <= 16):
+        return None
+    phase, records = data["phase"], []
+    if phase == "prerequisite":
+        allowed = {"openssl-version", "clang-discovery", "dsymutil-discovery", "system-code"}
+        if len(data["records"]) != 1:
+            return None
+    else:
+        allowed = set(expected)
+        classes = {identifier.rsplit(".", 1)[0] for identifier in expected}
+        modules = {identifier.rsplit(".", 2)[0] for identifier in expected}
+        allowed.update(f"{action} ({name})" for action in ("setUpClass", "tearDownClass") for name in classes)
+        allowed.update(f"{action} ({name})" for action in ("setUpModule", "tearDownModule") for name in modules)
+    outcomes = {"error", "failure", "skip", "expected-failure", "unexpected-success"}
+    categories = {"nonzero-exit", "timeout", "os-error", "assertion-error", "value-error", "type-error",
+                  "memory-error", "exception", "base-exception", "none"}
+    for row in data["records"]:
+        if deadline is not None:
+            check_clock(deadline)
+        if type(row) is not dict or set(row) != {"id", "outcome", "category", "errno", "returncode"}:
+            return None
+        identifier, outcome, category, number, code = (row[k] for k in ("id", "outcome", "category", "errno", "returncode"))
+        if (type(identifier) is not str or identifier not in allowed or len(identifier) > 512
+                or type(outcome) is not str or outcome not in outcomes
+                or type(category) is not str or category not in categories
+                or phase == "prerequisite" and outcome != "error"
+                or (outcome in {"skip", "unexpected-success"}) != (category == "none")
+                or number is not None and (type(number) is not int or not 0 < number < 4096)
+                or code is not None and (type(code) is not int or not -255 <= code <= 255 or code == 0)
+                or category != "os-error" and number is not None
+                or category != "nonzero-exit" and code is not None):
+            return None
+        # Repeated failing subtests can legitimately share a parent method ID.
+        records.append({"id": identifier, "outcome": outcome, "category": category,
+                        "errno": number, "returncode": code})
+    if deadline is not None:
+        check_clock(deadline)
+    return {"schema": 1, "phase": phase, "records": records}
+
+
 def failure_details(result, step: Step | None = None, paths: Paths | None = None,
                     *, checks=None, deadline: float | None = None, platform: str | None = None) -> dict:
     """Public-safe observations only; never forward raw child diagnostics."""
@@ -762,8 +876,12 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
             pass
     if step is not None and paths is not None and step.parser == "minitest":
         try:
-            expected = set(ruby_expected_ids(paths.source, step.id))
+            if deadline is not None:
+                check_clock(deadline)
+            expected_ids = ruby_expected_ids(paths.source, step.id)
+            expected = set(expected_ids)
             text = result.stdout.decode("utf-8", "replace")
+            _, value["minitest_structure"] = minitest_records(text, expected_ids, deadline=deadline)
             # Only source-known test IDs and first-party relative locations.
             # Exception messages, assertion values and raw captures stay private.
             failed = re.findall(r"(?m)^([A-Za-z0-9_:]+#test_[A-Za-z0-9_]+)(?: \[[^\r\n]{1,512}\])?:\s*$", text)
@@ -777,11 +895,39 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
             locations = re.findall(r"((?:tests/workflow|fastlane)/[A-Za-z0-9_]+\.rb):([1-9][0-9]{0,5})", text)
             value["ruby_locations"] = sorted({(name, int(line)) for name, line in locations
                                                 if name in allowed})[:32]
-            footers = re.findall(r"(?m)^(\d{1,9}) runs, (\d{1,9}) assertions, (\d{1,9}) failures, "
-                                 r"(\d{1,9}) errors, (\d{1,9}) skips\s*$", text)
+            footers = re.findall(MINITEST_FOOTER, text)
             value["minitest_observations"] = [list(map(int, row)) for row in footers[:2]]
         except (VerificationError, OSError, UnicodeError):
+            if deadline is not None:
+                check_clock(deadline)
             value["ruby_diagnostics_unavailable"] = True
+    if step is not None and paths is not None and checks is not None and step.id in {
+            "native-profile-source", "native-profile-wheel"}:
+        stderr = result.stderr.decode("utf-8", "replace")
+        lowered = stderr.lower()
+        # These fixed tokens are observations of captured text, not diagnoses
+        # of a kernel/service cause. Never forward surrounding native output.
+        tokens = (("permission-denied", "permission denied"),
+                  ("operation-not-permitted", "operation not permitted"),
+                  ("code-signing-internal", "internal error in code signing subsystem"),
+                  ("unsigned-code", "code object is not signed at all"),
+                  ("altered-code", "code or signature modified"),
+                  ("untrusted-chain", "cssmerr_tp_not_trusted"),
+                  ("chain-build-failed", "unable to build chain to self-signed root"),
+                  ("interaction-not-allowed", "user interaction is not allowed"))
+        value["native_error_tokens"] = [label for label, token in tokens if token in lowered]
+        try:
+            if deadline is not None:
+                check_clock(deadline)
+            expected = checks.expected_python_ids(paths.source, "native", deadline=deadline)
+            diagnostic = native_failure_diagnostic(result.stdout.decode("utf-8", "replace") + "\n" + stderr,
+                                                   expected, deadline=deadline)
+            if diagnostic is not None:
+                value["native_diagnostic"] = diagnostic
+        except Exception:
+            if deadline is not None:
+                check_clock(deadline)
+            value["native_diagnostics_unavailable"] = True
     return value
 
 

@@ -314,6 +314,23 @@ filters the schema/identities and requires an empty callback list on success.
 Only genuinely completed fixed storage controls may appear as profile observations;
 they never replace original wait/EOF/domain finality or successful test outcomes.
 
+Ruby completion parsing binds each source-known verbose method prefix to exactly
+one timed successful terminal before the next method or footer. Ordinary multiline
+body logging is allowed; a later method's terminal cannot complete a missing
+record. Unknown/duplicate identities, ambiguous terminals, adverse outcomes and
+footer/count mismatches fail. Failure observations contain only finite structural
+reasons/counts and bounded source-known missing/duplicate IDs, never raw body logs.
+
+Native source/wheel failures can identify the actual failing fixed prerequisite
+(`openssl-version`, `clang-discovery`, `dsymutil-discovery`, or `system-code`) or
+at most16 source-known test/fixture callbacks. Only finite category/outcome labels
+and bounded actual errno/returncode values are published; unknown attribution is
+omitted. Repeated failing subtests may share their parent method ID, but duplicate
+diagnostic envelopes are rejected. The four prerequisite commands, order, native
+checks and timeouts are unchanged. Optional fixed stderr-token labels report
+observed text, not a proven operating-system cause. Diagnostic failure preserves
+the original failure, and any failure marker prevents native success acceptance.
+
 Do not upload raw captures, writable-directory globs, private Store data or signing
 assets. Reuse evidence only for the exact applicable source/configuration/toolchain.
 Protected PR delivery and actual resulting `main` CI are separate required evidence.

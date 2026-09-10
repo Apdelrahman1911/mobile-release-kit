@@ -521,6 +521,135 @@ class CIControllerContractTests(unittest.TestCase):
                     with self.assertRaisesRegex(controller.VerificationError, "DISK_HEADROOM"):
                         controller.check_capacity(Path("/fixture/work"), prospective)
 
+    def test_minitest_parser_preserves_completion_identity_across_body_logging(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        expected = ("SyntheticTests#test_first", "SyntheticTests#test_second")
+        step = controller.Step("ruby-play_store", parser="minitest", expected_tests=2)
+        footer = "\nFinished in 0.03s.\n2 runs, 5 assertions, 0 failures, 0 errors, 0 skips\n"
+        first = expected[0] + " = 0.01 s = .\n"
+        second = expected[1] + " = 0.02 s = .\n"
+        clean = first + second
+        noisy = (expected[0] + " = ordinary body log\ntext = .\n0.01 s = .\n"
+                 + expected[1] + " = \n[fixture] still running\nmore logging\n0.02 s = .\n")
+
+        def capture(text, **changes):
+            values = dict(ok=True, returncode=0, waited=True, stdout_eof=True, stderr_eof=True,
+                          domain_finality=True, primary_error=None, cleanup_errors=(), stdout=text.encode(),
+                          stderr=b"", duration=0.03, timed_out=False, cancelled=False,
+                          persisted=(len(text), 0))
+            return SimpleNamespace(**{**values, **changes})
+
+        with patch.object(controller, "ruby_expected_ids", return_value=expected):
+            for transcript in (clean, noisy):
+                actual = controller.parse_capture(step, capture(transcript + footer), paths, "linux", None)
+                self.assertEqual(actual.details["completed"], list(expected))
+                self.assertEqual(actual.details["assertions"], 5)
+            cases = (
+                expected[0] + " = missing terminal\n" + second + footer,
+                first + expected[1] + " = missing terminal\n" + footer,
+                first + first + footer,
+                clean.replace("SyntheticTests#test_second", "PRIVATE_UNKNOWN#test_secret") + footer,
+                clean.replace("0.01 s = .", "0.01 s = .\n0.01 s = .") + footer,
+                *(clean.replace("0.01 s = .", "0.01 s = " + status) + footer for status in ("F", "E", "S", "?")),
+                clean + footer + first,
+                clean + footer + footer,
+                "0.01 s = .\n" + clean + footer,
+                clean + footer + "0.01 s = .\n",
+                clean.replace("0.01 s", "nan s") + footer,
+                second + footer,
+            )
+            for transcript in cases:
+                with self.subTest(transcript=transcript), self.assertRaises(controller.VerificationError):
+                    controller.parse_capture(step, capture(transcript), paths, "linux", None)
+            diagnostic = controller.failure_details(capture(cases[3]), step, paths)
+            structure = diagnostic["minitest_structure"]
+            self.assertEqual(structure["unknown_count"], 1)
+            self.assertEqual(structure["missing_ids"], [expected[1]])
+            self.assertNotIn("PRIVATE_UNKNOWN", json.dumps(diagnostic))
+            self.assertNotIn("test_secret", json.dumps(diagnostic))
+            self.assertEqual(diagnostic["minitest_observations"], [[2, 5, 0, 0, 0]])
+            for field, value in (("returncode", False), ("waited", False), ("stdout_eof", False),
+                                 ("stderr_eof", False), ("domain_finality", False),
+                                 ("primary_error", "fixture"), ("cleanup_errors", ("fixture",))):
+                with self.subTest(field=field), self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                    controller.parse_capture(step, capture(noisy + footer, **{field: value}), paths, "linux", None)
+            with patch.object(controller.time, "monotonic", return_value=100.0):
+                with self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(capture(clean + footer), step, paths, deadline=100.0)
+
+    def test_native_failure_diagnostics_are_source_bound_and_cannot_authorize_success(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        expected = ("unit.synthetic.NativeContracts.test_native",)
+        checks = SimpleNamespace(expected_python_ids=lambda *_args, **_kwargs: expected)
+        step = controller.Step("native-profile-source", parser="native")
+        row = {"id": "system-code", "outcome": "error", "category": "nonzero-exit", "errno": None, "returncode": 1}
+
+        def envelope(records, phase="prerequisite", **changes):
+            return {"schema": 1, "phase": phase, "records": records, **changes}
+
+        def encode(value):
+            return controller.NATIVE_DIAGNOSTIC_PREFIX + json.dumps(value) + "\n"
+
+        def capture(text, **changes):
+            values = dict(ok=False, returncode=1, waited=True, stdout_eof=True, stderr_eof=True,
+                          domain_finality=True, primary_error=None, cleanup_errors=(), stdout=b"",
+                          stderr=text.encode(), duration=0.03, timed_out=False, cancelled=False,
+                          persisted=(0, len(text)))
+            return SimpleNamespace(**{**values, **changes})
+
+        for identifier in ("openssl-version", "clang-discovery", "dsymutil-discovery", "system-code"):
+            value = envelope([{**row, "id": identifier}])
+            self.assertEqual(controller.native_failure_diagnostic(encode(value), expected), value)
+        for identifier in (expected[0], "setUpClass (unit.synthetic.NativeContracts)",
+                           "tearDownClass (unit.synthetic.NativeContracts)",
+                           "setUpModule (unit.synthetic)", "tearDownModule (unit.synthetic)"):
+            value = envelope([{**row, "id": identifier}], "tests")
+            self.assertEqual(controller.native_failure_diagnostic(encode(value), expected), value)
+        repeated = envelope([{**row, "id": expected[0]}] * 2, "tests")
+        self.assertEqual(controller.native_failure_diagnostic(encode(repeated), expected), repeated)
+        source = encode(envelope([row])) + "PRIVATE_PATH: Operation not permitted\ninternal error in Code Signing subsystem\n"
+        result = controller.failure_details(capture(source), step, paths, checks=checks)
+        self.assertEqual(result["native_diagnostic"], envelope([row]))
+        self.assertEqual(result["native_error_tokens"], ["operation-not-permitted", "code-signing-internal"])
+        self.assertNotIn("PRIVATE_PATH", json.dumps(result))
+        self.assertEqual(result["returncode"], 1)
+        self.assertTrue(result["waited"])
+
+        invalid = [envelope([row], schema=True), envelope([row], phase="PRIVATE_PHASE"),
+                   envelope([row], extra="PRIVATE_VALUE"), envelope([]), envelope([row] * 17),
+                   envelope([{**row, "id": "PRIVATE_COMMAND"}]),
+                   envelope([{**row, "id": "setUpClass (unit.private.Secret)"}], "tests"),
+                   envelope([{**row, "message": "PRIVATE_VALUE"}]),
+                   envelope([{**row, "outcome": "ok"}]), envelope([{**row, "outcome": "skip"}]),
+                   envelope([{**row, "category": "PRIVATE_CATEGORY"}]),
+                   envelope([{**row, "category": "os-error"}]),  # Non-null returncode on wrong category.
+                   envelope([{**row, "errno": 5}]),
+                   *(envelope([{**row, "returncode": bad}]) for bad in (True, 0, -256, 256, 1.0, "1")),
+                   *(envelope([{**row, "category": "os-error", "returncode": None, "errno": bad}])
+                     for bad in (True, 0, 4096, 1.0, "5"))]
+        for value in invalid:
+            with self.subTest(value=value):
+                self.assertIsNone(controller.native_failure_diagnostic(encode(value), expected))
+                detail = controller.failure_details(capture(encode(value)), step, paths, checks=checks)
+                self.assertNotIn("native_diagnostic", detail)
+                self.assertNotIn("PRIVATE_", json.dumps(detail))
+        good = encode(envelope([row]))
+        for malformed in (good + good, controller.NATIVE_DIAGNOSTIC_PREFIX + "x" * (16 * 1024 + 1),
+                          controller.NATIVE_DIAGNOSTIC_PREFIX + '{"schema":1,"schema":1}\n',
+                          controller.NATIVE_DIAGNOSTIC_PREFIX + "not-json\n"):
+            detail = controller.failure_details(capture(malformed), step, paths, checks=checks)
+            self.assertNotIn("native_diagnostic", detail)
+        self.assertNotIn("native_diagnostic", controller.failure_details(capture(good),
+                         controller.Step("ruby-native-capture", parser="minitest"), paths, checks=checks))
+        full = "test_native (unit.synthetic.NativeContracts.test_native) ... ok\n\nRan 1 test in 0.01s\n\nOK\n"
+        with self.assertRaisesRegex(controller.VerificationError, "NATIVE_FAILURE_DIAGNOSTIC_ON_SUCCESS"):
+            controller.parse_capture(step, capture(good + full, ok=True, returncode=0), paths, "macos", checks)
+        with patch.object(controller.time, "monotonic", return_value=100.0):
+            with self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                controller.failure_details(capture(good), step, paths, checks=checks, deadline=100.0)
+
     def test_native_text_parser_normalizes_real_method_identity_and_rejects_incomplete_output(self):
         controller = controller_module()
         paths = fixture_paths(controller)
