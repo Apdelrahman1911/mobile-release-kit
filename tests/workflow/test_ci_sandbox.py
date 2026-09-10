@@ -4435,11 +4435,12 @@ class CISandboxPureTests(unittest.TestCase):
 
     def test_native_input_reads_and_rechecks_keep_original_custody_bytes_and_close_errors(self):
         path, raw = Path("/synthetic/native/input.py"), b"immutable native input\n"
-        for case in ("valid", "alias", "subject-owner", "world-write", "multiple-links", "inherited", "renamed", "grew",
+        for case in ("valid", "alias", "subject-owner", "root-uid-nonzero-group", "world-write", "multiple-links", "inherited", "renamed", "grew",
                      "read-and-close-errors", "close-expired", "initial-expiry"):
             with self.subTest(native_input_read=case):
                 before = SimpleNamespace(st_dev=7, st_ino=81, st_mode=stat.S_IFREG | (0o446 if case == "world-write" else 0o444),
-                    st_uid=60001 if case == "subject-owner" else 0, st_gid=0, st_nlink=2 if case == "multiple-links" else 1, st_size=len(raw),
+                    st_uid=60001 if case == "subject-owner" else 0, st_gid=60001 if case == "root-uid-nonzero-group" else 0,
+                    st_nlink=2 if case == "multiple-links" else 1, st_size=len(raw),
                     st_mtime_ns=11, st_ctime_ns=12)
                 named = SimpleNamespace(**(vars(before) | ({"st_ino": 82} if case == "renamed" else {})))
                 clock = SimpleNamespace(now=1.0 if case == "initial-expiry" else 0.0)
@@ -4614,6 +4615,132 @@ class CISandboxPureTests(unittest.TestCase):
                 self.assertEqual(len(seen), 0 if case in {"linux", "wrong-phase", "root-identity", "group-mismatch"} else
                                  1 if case == "read-error" else 2)
 
+        # Connect the real creator, positive control and strict reader over one
+        # in-memory filesystem. Parent-group inheritance is modeled, not hidden
+        # behind a reader success stub or a fake creator that assumes 0:0.
+        for phase in ("source", "wheel"):
+            for normalize in (True, False):
+                with self.subTest(native_read_creator_integration=(phase, normalize)):
+                    root, output = Path("/synthetic/native-read-owner"), io.StringIO()
+                    canary = root / "work/home" / f"native-authority-{phase}-read"
+                    sibling = root / "work" / f"{phase}-venv/lib/python3.11/site-packages/pip/__init__.py"
+                    wanted = b"MRK_NATIVE_PREVIOUS_SCRATCH\n"
+                    identity = SimpleNamespace(uid=0, gid=0)
+                    nodes, contents, descriptors, events = {}, {}, {}, []
+
+                    def node(path, owner, raw):
+                        nodes[path] = dict(st_dev=7, st_ino=100 + len(nodes), st_mode=stat.S_IFREG | 0o444,
+                            st_uid=owner[0], st_gid=owner[1], st_nlink=1, st_size=len(raw), st_mtime_ns=11, st_ctime_ns=12)
+                        contents[path] = bytearray(raw)
+
+                    node(sibling, (0, 0), b"immutable pip sibling bytes; never imported\n")
+                    create_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+                    read_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+
+                    def opened(path, flags, mode=None):
+                        if mode is not None:
+                            self.assertEqual((path, flags, mode, identity.uid, identity.gid), (canary, create_flags, 0o444, 0, 0))
+                            self.assertNotIn(path, nodes)
+                            node(path, (0, 60001), b"")  # Root creator beneath the existing U:U HOME.
+                            fd = 701
+                        else:
+                            self.assertEqual((flags, identity.uid, identity.gid), (read_flags, 60001, 60001))
+                            self.assertIn(path, (canary, sibling))
+                            self.assertIn(path, nodes)
+                            fd = 702 if path == canary else 703
+                        self.assertNotIn(fd, descriptors)
+                        descriptors[fd] = {"path": path, "position": 0}
+                        events.append(("open", fd, path))
+                        return fd
+
+                    def fchown(fd, uid, gid):
+                        self.assertEqual((fd, uid, gid, identity.uid), (701, 0, 0, 0))
+                        self.assertEqual(descriptors[fd]["path"], canary)
+                        self.assertEqual((nodes[canary]["st_uid"], nodes[canary]["st_gid"]), (0, 60001))
+                        events.append(("fchown", fd, uid, gid))
+                        nodes[canary].update(st_uid=0, st_gid=0)
+
+                    def write(fd, raw):
+                        self.assertEqual((fd, descriptors[fd]["path"], identity.uid), (701, canary, 0))
+                        count = min(3, len(raw))
+                        contents[canary].extend(raw[:count])
+                        nodes[canary]["st_size"] = len(contents[canary])
+                        events.append(("write", fd, count))
+                        return count
+
+                    def fsync(fd):
+                        self.assertEqual((fd, bytes(contents[descriptors[fd]["path"]])), (701, wanted))
+                        events.append(("fsync", fd))
+
+                    def fchmod(fd, mode):
+                        self.assertEqual((fd, mode), (701, 0o444))
+                        nodes[descriptors[fd]["path"]]["st_mode"] = stat.S_IFREG | mode
+                        events.append(("fchmod", fd, mode))
+
+                    def fstat(fd):
+                        self.assertIn(fd, descriptors)
+                        events.append(("fstat", fd))
+                        return SimpleNamespace(**nodes[descriptors[fd]["path"]])
+
+                    def inheritable(fd):
+                        self.assertIn(fd, descriptors)
+                        return False
+
+                    def read(fd, count):
+                        self.assertIn(fd, (702, 703))
+                        self.assertEqual((identity.uid, identity.gid), (60001, 60001))
+                        self.assertTrue(0 < count <= 65536)
+                        current = descriptors[fd]
+                        part = bytes(contents[current["path"]][current["position"]:current["position"] + min(count, 5)])
+                        current["position"] += len(part)
+                        events.append(("read", fd, part))
+                        return part
+
+                    def close(fd):
+                        self.assertIn(fd, descriptors)
+                        del descriptors[fd]
+                        events.append(("close", fd))
+
+                    def resolve(path, *, strict=False):
+                        if path == Path(self.module.__file__):
+                            return root / "bootstrap/ci_sandbox.py"
+                        self.assertIn(path, (canary, sibling))
+                        self.assertTrue(strict)
+                        return path
+
+                    constants = {name: getattr(os, name) for name in
+                        ("O_WRONLY", "O_CREAT", "O_EXCL", "O_NOFOLLOW", "O_CLOEXEC", "O_RDONLY", "O_NONBLOCK")}
+                    fake_os = SimpleNamespace(**constants, open=opened, write=write, fsync=fsync, fchmod=fchmod, fchown=fchown,
+                        fstat=fstat, get_inheritable=inheritable, read=read, close=close,
+                        getuid=lambda: identity.uid, geteuid=lambda: identity.uid, getgid=lambda: identity.gid, getegid=lambda: identity.gid)
+                    with patch.multiple(self.module, os=fake_os, sys=SimpleNamespace(platform="darwin"),
+                            time=SimpleNamespace(monotonic=lambda: 0.0), subprocess=SimpleNamespace(), socket=SimpleNamespace(),
+                            signal=SimpleNamespace(), resource=SimpleNamespace()), \
+                         patch.object(Path, "resolve", resolve), patch.object(Path, "lstat", lambda path: SimpleNamespace(**nodes[path])), \
+                         patch.object(Path, "open", side_effect=AssertionError("canary integration may use only original fake descriptors")), redirect_stdout(output):
+                        # False is the scoped omission mutant: all creator bytes,
+                        # flags and modes remain real, but inherited GID is left.
+                        self.module._private_file(canary, wanted, 0o444, root_owned=normalize)
+                        self.assertEqual(descriptors, {})
+                        self.assertEqual(events[-1], ("close", 701))
+                        self.assertEqual((nodes[canary]["st_uid"], nodes[canary]["st_gid"]), (0, 0 if normalize else 60001))
+                        identity.uid = identity.gid = 60001
+                        if normalize:
+                            self.module._native_read_control(phase, 1.0)
+                        else:
+                            with self.assertRaises(BaseExceptionGroup) as caught:
+                                self.module._native_read_control(phase, 1.0)
+                            self.assertEqual(len(caught.exception.exceptions), 1)
+                            self.assertIsInstance(caught.exception.exceptions[0], self.module.SessionError)
+                    self.assertEqual(output.getvalue(), "MRK_NATIVE_OUTSIDE_READ_OK\n" if normalize else "")
+                    self.assertEqual(descriptors, {})
+                    self.assertEqual(bytes(contents[canary]), wanted)
+                    self.assertEqual([event for event in events if event[0] == "fchown"], [("fchown", 701, 0, 0)] if normalize else [])
+                    self.assertEqual([event[1] for event in events if event[0] == "close"], [701, 702, 703] if normalize else [701, 702])
+                    self.assertEqual({event[1] for event in events if event[0] == "read"}, {702, 703} if normalize else set())
+                    if normalize:
+                        self.assertLess(events.index(("fchown", 701, 0, 0)), next(i for i, event in enumerate(events) if event[0] == "write"))
+
     def test_native_authority_admission_rejects_unknown_phase_and_producer_before_acquisition(self):
         cases = ("phase-none", "phase-list", "phase-unknown", "linux", "not-admitted", "admitting", "closed",
                  "prior-failure", "busy", "original-owned", "direct-pending", "domain-present", "domain-unknown",
@@ -4660,11 +4787,11 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertEqual(session.failure, "original owner failure")
 
     def test_native_authority_preparation_is_exclusive_once_only_and_keeps_six_fixed_control_routes(self):
-        for case in ("source", "wheel", "input-failure", "cwd-collision", "mkdir-after-effect", "leaf-owner-after-effect",
+        for case in ("source", "wheel", "read-creator-failure-source", "read-creator-failure-wheel", "input-failure", "cwd-collision", "mkdir-after-effect", "leaf-owner-after-effect",
                      "boundary-failure", "cleanup-errors", "late-preparation", "cancelled-preparation"):
             with self.subTest(native_preparation=case):
                 session = session_double(self.module, "darwin")
-                phase = "wheel" if case == "wheel" else "source"
+                phase = "wheel" if case in {"wheel", "read-creator-failure-wheel"} else "source"
                 cwd = session.work / f"native-authority-{phase}"
                 helper, helper_source = session.bootstrap / "ci_native_authority.py", session.source / ".github/scripts/ci_native_authority.py"
                 payload = b"inert fixed helper bytes, never imported\n"
@@ -4683,6 +4810,7 @@ class CISandboxPureTests(unittest.TestCase):
 
                 for path in (session.root, session.work, session.bootstrap, session.fixture_controls):
                     node(path, directory=True, mode=0o755)
+                node(session.work / "home", directory=True, mode=0o700, owner=(session.uid, session.gid))
                 node(helper_source, raw=payload)
                 sibling = session.work / f"{phase}-venv/lib/python3.11/site-packages/pip/__init__.py"
                 node(sibling, raw=b"frozen unrelated sibling; not an import\n")
@@ -4723,14 +4851,24 @@ class CISandboxPureTests(unittest.TestCase):
                 def add_file(state, path, **_options):
                     self.assertIn(path, files)
                     raw = files[path]
-                    state["files"][path] = dict(identity=(7, nodes[path]["st_ino"], nodes[path]["st_mode"], 0, 0, 1, len(raw), 11, 12),
+                    self.assertEqual((nodes[path]["st_uid"], nodes[path]["st_gid"]), (0, 0))
+                    state["files"][path] = dict(identity=self.module._native_file_key(SimpleNamespace(**nodes[path])),
                         sha256=hashlib.sha256(raw).hexdigest(), root_owned=True, maximum=16 * self.module.MiB)
                     return raw
 
-                def private_file(path, raw, mode=0o600):
+                def private_file(path, raw, mode=0o600, *, root_owned=False):
                     self.assertNotIn(path, nodes)  # Create-only; the existing helper is reused only for wheel.
-                    events.append(("private-file", path, mode))
-                    node(path, mode=mode, raw=raw)
+                    self.assertIs(type(root_owned), bool)
+                    inherited = (0, nodes[path.parent]["st_gid"])
+                    events.append(("private-file", path, mode, root_owned, inherited))
+                    node(path, mode=mode, owner=inherited, raw=raw)
+                    if root_owned:
+                        self.assertEqual((path, raw, mode, inherited), (session.work / "home" / f"native-authority-{phase}-read",
+                                         b"MRK_NATIVE_PREVIOUS_SCRATCH\n", 0o444, (0, session.gid)))
+                        nodes[path].update(st_uid=0, st_gid=0)
+                        if case.startswith("read-creator-failure-"):
+                            session.fail("synthetic original read-canary creation failure")
+                            raise original  # Preserve an after-effect output; never publish or adopt it.
 
                 def mkdir(path, mode=0o777, parents=False, exist_ok=False):
                     self.assertFalse(parents or exist_ok)
@@ -4892,6 +5030,20 @@ class CISandboxPureTests(unittest.TestCase):
                 self.assertEqual(fds, {})
                 self.assertCountEqual([event[1] for event in events if event[0] == "close"], acquired)
                 self.assertEqual(session.deadline, 100.0)
+                read_path = session.work / "home" / f"native-authority-{phase}-read"
+                opted = [event for event in events if event[0] == "private-file" and event[3]]
+                if read_path in nodes:
+                    self.assertEqual(opted, [("private-file", read_path, 0o444, True, (0, session.gid))])
+                    self.assertEqual((nodes[read_path]["st_uid"], nodes[read_path]["st_gid"]), (0, 0))
+                    self.assertNotIn(read_path, state["files"])  # No redundant pin or relaxed strict-reader route.
+                else:
+                    self.assertEqual(opted, [])
+                if case.startswith("read-creator-failure-"):
+                    self.assertEqual(session.failure, "synthetic original read-canary creation failure")
+                    self.assertIn(read_path, nodes)
+                    self.assertNotIn(state["outside_write"], nodes)
+                    self.assertFalse(state["started"] or state["prepared"] or any(note.get("ok") for note in session.admission_results))
+                    self.assertFalse(any(event[0] in {"direct-boundaries", "control"} for event in events))
                 if case == "cwd-collision":
                     self.assertEqual((nodes[cwd]["st_uid"], nodes[cwd]["st_gid"], stat.S_IMODE(nodes[cwd]["st_mode"])), (1001, 20, 0o700))
                 if case == "mkdir-after-effect":
@@ -6625,55 +6777,176 @@ class CISandboxPureTests(unittest.TestCase):
         # Root's existing copy primitive must really use exclusive no-follow
         # creation and independently close after partial writes/permission errors.
         # Every descriptor here is synthetic; no filesystem path is opened.
-        for case in ("success", "collision", "partial-write-error", "write-and-close-error", "mode-error"):
+        for case in ("success", "success-explicit-false", "collision", "partial-write-error", "write-and-close-error", "mode-error",
+                     "root-inherited-parent", "root-already-owned", "root-collision", "root-owner-before", "root-owner-after",
+                     "root-owner-after-close", "root-noeffect", "root-write-error", "root-sync-error", "root-mode-error",
+                     "root-stat-error", "root-uid", "root-gid", "root-type", "root-links", "root-mode", "root-size",
+                     "root-inheritable", "root-inherit-error", "root-close-error", "root-postcondition-close"):
             with self.subTest(observer_copy=case):
-                persisted = bytearray()
+                persisted, events = bytearray(), []
+                root_owned = case.startswith("root-")
+                node = SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_nlink=1, st_uid=0,
+                                       st_gid=0 if case == "root-already-owned" else 60001, st_size=0)
                 write_error = OSError(errno.EIO, "synthetic interrupted copy write")
                 close_error = OSError(errno.EIO, "synthetic copy close")
+                owner_error = OSError(errno.EIO, "synthetic original-descriptor ownership error")
+                metadata_error = OSError(errno.EIO, "synthetic original-descriptor postcondition unavailable")
+                sync_error, mode_error = OSError("synthetic copy sync"), OSError("synthetic immutable-mode failure")
+
+                def opened_file(actual, flags, mode):
+                    events.append("open")
+                    if case in {"collision", "root-collision"}:
+                        raise FileExistsError(errno.EEXIST, "synthetic bootstrap collision")
+                    return 202
+
+                def fchown(fd, uid, gid):
+                    self.assertEqual((fd, uid, gid), (202, 0, 0))
+                    events.append("fchown")
+                    self.assertEqual(persisted, b"")
+                    if case == "root-owner-before":
+                        raise owner_error
+                    if case != "root-noeffect":
+                        node.st_uid = node.st_gid = 0
+                    if case in {"root-owner-after", "root-owner-after-close"}:
+                        raise owner_error
 
                 def write(fd, data):
                     self.assertEqual(fd, 202)
+                    events.append("write")
                     count = min(2, len(data))
                     persisted.extend(data[:count])
-                    if case in {"partial-write-error", "write-and-close-error"}:
+                    node.st_size = len(persisted)
+                    if case in {"partial-write-error", "write-and-close-error", "root-write-error"}:
                         raise write_error
                     return count
 
-                opened = Mock(return_value=202, side_effect=FileExistsError(errno.EEXIST, "synthetic bootstrap collision")
-                              if case == "collision" else None)
+                def sync(fd):
+                    self.assertEqual(fd, 202)
+                    events.append("fsync")
+                    if case == "root-sync-error":
+                        raise sync_error
+
+                def mode(fd, requested):
+                    self.assertEqual((fd, requested), (202, 0o555))
+                    events.append("fchmod")
+                    if case in {"mode-error", "root-mode-error"}:
+                        raise mode_error
+                    if case != "root-mode":
+                        node.st_mode = stat.S_IFREG | requested
+
+                def fstat(fd):
+                    self.assertEqual(fd, 202)
+                    events.append("fstat")
+                    if case == "root-stat-error":
+                        raise metadata_error
+                    changes = {"root-uid": {"st_uid": 1}, "root-gid": {"st_gid": 20},
+                        "root-type": {"st_mode": stat.S_IFIFO | 0o555}, "root-links": {"st_nlink": 2},
+                        "root-size": {"st_size": len(payload) + 1}, "root-postcondition-close": {"st_gid": 20}}
+                    return SimpleNamespace(**(vars(node) | changes.get(case, {})))
+
+                def inheritable(fd):
+                    self.assertEqual(fd, 202)
+                    events.append("get_inheritable")
+                    if case == "root-inherit-error":
+                        raise metadata_error
+                    return case == "root-inheritable"
+
+                def close(fd):
+                    self.assertEqual(fd, 202)
+                    events.append("close")
+                    if case in {"write-and-close-error", "root-owner-after-close", "root-close-error", "root-postcondition-close"}:
+                        raise close_error
+
+                opened = Mock(side_effect=opened_file)
                 writes = Mock(side_effect=write)
-                closed = Mock(side_effect=close_error if case == "write-and-close-error" else None)
-                chmod = Mock(side_effect=OSError(errno.EIO, "synthetic immutable-mode failure") if case == "mode-error" else None)
-                fsync = Mock()
+                closed, chmod, fsync = Mock(side_effect=close), Mock(side_effect=mode), Mock(side_effect=sync)
+                owner, metadata, inherited = Mock(side_effect=fchown), Mock(side_effect=fstat), Mock(side_effect=inheritable)
                 constants = {k: getattr(os, k) for k in ("O_WRONLY", "O_CREAT", "O_EXCL", "O_NOFOLLOW", "O_CLOEXEC")}
-                fake_os = SimpleNamespace(**constants, open=opened, write=writes, fsync=fsync, fchmod=chmod, close=closed)
+                fake_os = SimpleNamespace(**constants, open=opened, write=writes, fsync=fsync, fchmod=chmod, close=closed,
+                                          fchown=owner, fstat=metadata, get_inheritable=inherited)
+                options = {"root_owned": root_owned} if root_owned or case == "success-explicit-false" else {}
+                successes = {"success", "success-explicit-false", "root-inherited-parent", "root-already-owned"}
                 with patch.object(self.module, "os", fake_os):
-                    if case == "success":
-                        self.module._private_file(path, payload, 0o555)
-                    elif case == "collision":
+                    if case in successes:
+                        self.module._private_file(path, payload, 0o555, **options)
+                    elif case in {"collision", "root-collision"}:
                         with self.assertRaises(FileExistsError):
-                            self.module._private_file(path, payload, 0o555)
+                            self.module._private_file(path, payload, 0o555, **options)
                     else:
                         with self.assertRaises(BaseExceptionGroup) as caught:
-                            self.module._private_file(path, payload, 0o555)
+                            self.module._private_file(path, payload, 0o555, **options)
+                        self.assertNotIn("AssertionError", repr(caught.exception))
                         if case == "write-and-close-error":
                             self.assertEqual(caught.exception.exceptions, (write_error, close_error))
+                        elif case == "root-owner-after-close":
+                            self.assertEqual(caught.exception.exceptions, (owner_error, close_error))
+                        elif case in {"root-owner-before", "root-owner-after"}:
+                            self.assertEqual(caught.exception.exceptions, (owner_error,))
+                        elif case in {"root-stat-error", "root-inherit-error"}:
+                            self.assertEqual(caught.exception.exceptions, (metadata_error,))
+                        elif case == "root-close-error":
+                            self.assertEqual(caught.exception.exceptions, (close_error,))
+                        elif case == "root-postcondition-close":
+                            self.assertEqual(len(caught.exception.exceptions), 2)
+                            self.assertIsInstance(caught.exception.exceptions[0], self.module.SessionError)
+                            self.assertIs(caught.exception.exceptions[1], close_error)
+                        elif case in {"partial-write-error", "root-write-error"}:
+                            self.assertEqual(caught.exception.exceptions, (write_error,))
+                        elif case == "root-sync-error":
+                            self.assertEqual(caught.exception.exceptions, (sync_error,))
+                        elif case in {"mode-error", "root-mode-error"}:
+                            self.assertEqual(caught.exception.exceptions, (mode_error,))
+                        else:
+                            self.assertEqual(len(caught.exception.exceptions), 1)
+                            self.assertIsInstance(caught.exception.exceptions[0], self.module.SessionError)
                 opened.assert_called_once_with(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o555)
-                if case == "collision":
+                if not root_owned:
+                    owner.assert_not_called()
+                    metadata.assert_not_called()
+                    inherited.assert_not_called()
+                if case in {"collision", "root-collision"}:
                     writes.assert_not_called()
                     closed.assert_not_called()
                     chmod.assert_not_called()
+                    owner.assert_not_called()
                     self.assertEqual(persisted, b"")
+                    self.assertEqual(events, ["open"])
                 else:
                     closed.assert_called_once_with(202)
-                    if case in {"success", "mode-error"}:
-                        self.assertEqual(persisted, payload)
-                        fsync.assert_called_once_with(202)
-                        chmod.assert_called_once_with(202, 0o555)
-                    else:
+                    self.assertEqual(events[-1], "close")
+                    if root_owned:
+                        owner.assert_called_once_with(202, 0, 0)
+                        self.assertEqual(events[:2], ["open", "fchown"])
+                    if case in {"root-owner-before", "root-owner-after", "root-owner-after-close"}:
+                        self.assertEqual(persisted, b"")
+                        writes.assert_not_called()
+                        fsync.assert_not_called()
+                        chmod.assert_not_called()
+                        self.assertEqual((node.st_uid, node.st_gid), (0, 60001 if case == "root-owner-before" else 0))
+                    elif case in {"partial-write-error", "write-and-close-error", "root-write-error"}:
                         self.assertEqual(persisted, payload[:2])
                         fsync.assert_not_called()
                         chmod.assert_not_called()
+                    else:
+                        self.assertEqual(persisted, payload)
+                        fsync.assert_called_once_with(202)
+                        if case == "root-sync-error":
+                            chmod.assert_not_called()
+                        else:
+                            chmod.assert_called_once_with(202, 0o555)
+                    if case in successes:
+                        expected = ["open", *(["fchown"] if root_owned else []), *(["write"] * writes.call_count), "fsync", "fchmod",
+                                    *(["fstat", "get_inheritable"] if root_owned else []), "close"]
+                        self.assertEqual(events, expected)
+                        if root_owned:
+                            self.assertEqual((node.st_uid, node.st_gid, stat.S_IMODE(node.st_mode), node.st_size), (0, 0, 0o555, len(payload)))
+
+        for invalid in (None, 0, 1, "true", []):
+            with self.subTest(private_file_invalid_owner_option=repr(invalid)):
+                opened = Mock(side_effect=AssertionError("non-Boolean ownership option must fail before acquisition"))
+                with patch.object(self.module, "os", SimpleNamespace(open=opened)), self.assertRaises(self.module.SessionError):
+                    self.module._private_file(path, payload, root_owned=invalid)
+                opened.assert_not_called()
 
     def test_observer_signature_metadata_requires_complete_unprivileged_singletons(self):
         path = Path("/synthetic/private/process-observer-build")

@@ -847,11 +847,16 @@ def _canonical(value: str | Path) -> Path:
     return p
 
 
-def _private_file(path: Path, data: bytes, mode: int = 0o600) -> None:
+def _private_file(path: Path, data: bytes, mode: int = 0o600, *, root_owned: bool = False) -> None:
+    if type(root_owned) is not bool:
+        raise SessionError("invalid fixed controller-file ownership option")
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL
                  | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
     errors = []
     try:
+        if root_owned:
+            # Darwin inherits the directory's group, even for root creation.
+            os.fchown(fd, 0, 0)
         view = memoryview(data)
         while view:
             n = os.write(fd, view)
@@ -860,6 +865,13 @@ def _private_file(path: Path, data: bytes, mode: int = 0o600) -> None:
             view = view[n:]
         os.fsync(fd)
         os.fchmod(fd, mode)  # Exact immutable/public-bootstrap mode despite umask.
+        if root_owned:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or (info.st_uid, info.st_gid) != (0, 0)
+                    or stat.S_IMODE(info.st_mode) != mode or info.st_size != len(data)
+                    or os.get_inheritable(fd)):
+                raise SessionError("root-owned controller-file postcondition differs")
     except BaseException as exc:
         errors.append(exc)
     try:
@@ -2258,7 +2270,7 @@ class Session:
                 os.chown(leaf, self.uid, self.gid)
                 leaf.chmod(0o700)
                 self._native_pin(state, leaf, owner=(self.uid, self.gid), modes=(0o700,))
-            _private_file(state["outside_read"], b"MRK_NATIVE_PREVIOUS_SCRATCH\n", 0o444)
+            _private_file(state["outside_read"], b"MRK_NATIVE_PREVIOUS_SCRATCH\n", 0o444, root_owned=True)
             self._native_add_file(state, state["sibling_read"])
             self._native_pin(state, self.fixture_controls, modes=(0o755,))
             _private_file(state["outside_write"], b"MRK_NATIVE_OUTSIDE_INITIAL\n")
