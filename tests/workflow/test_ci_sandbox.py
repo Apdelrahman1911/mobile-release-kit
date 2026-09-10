@@ -5515,6 +5515,310 @@ class CISandboxPureTests(unittest.TestCase):
                 self.assertEqual(sum(event[0] == "wait-original" for event in rig.events), 1)
                 self.assertEqual(sum(event[0] == "popen" for event in rig.events), 1)
 
+    def test_native_aia_launch_text_is_closed_bounded_and_requires_original_complete_failure(self):
+        session = session_double(self.module, "darwin")
+        helper = session.bootstrap / "ci_native_authority.py"
+        original = self.module.CapturedRun(b"", b"opaque\n", 65, True, True, True, True,
+            False, False, 0.01, "command exited 65", (), (0, 7))
+        base = {"schema": 1, "semantics": "reported-stderr-tokens-only", "diagnosis": "unresolved",
+                "prefix": "unrecognized", "tokens": []}
+
+        def capture(raw=b"opaque\n", **changes):
+            return dataclasses.replace(original, **({"stderr": raw, "persisted": (0, len(raw))} | changes))
+
+        def project(result):
+            # These pure text projections need no clock, metadata, process or
+            # provider operation, even for unknown or invalid capture input.
+            with patch.multiple(self.module, os=SimpleNamespace(), subprocess=SimpleNamespace(),
+                                socket=SimpleNamespace(), time=SimpleNamespace()), ExitStack() as effects:
+                for operation in ("open", "stat", "lstat", "resolve"):
+                    effects.enter_context(patch.object(Path, operation,
+                        side_effect=AssertionError("closed AIA text projection must not inspect host paths")))
+                return self.module._native_aia_launch_text(result, session.python, helper)
+
+        literals = ("address", "argument", "arguments", "compile", "compiling", "filter", "illegal", "invalid",
+            "ip", "network-outbound", "number", "opening", "operation", "port", "profile", "reading", "remote",
+            "require-all", "sandbox_apply", "sandbox_compile", "sandbox_compile_file", "sandbox_compile_string",
+            "sandbox_init", "socket", "string", "symbol", "syntax", "tcp", "udp", "unbound", "undefined", "unknown",
+            "variable", "execvp")
+        phrases = (("can't open file", "cant-open-file"), ("permission denied", "permission-denied"),
+            ("operation not permitted", "operation-not-permitted"), ("no such file or directory", "no-such-file"),
+            ("library not loaded", "library-not-loaded"), ("symbol not found", "symbol-not-found"))
+        for word in literals:
+            with self.subTest(aia_literal=word):
+                raw = f"sandbox-exec: {word} {word.upper()} ({word})\n".encode()
+                self.assertEqual(project(capture(raw)), base | {"prefix": "sandbox-exec", "tokens": [word]})
+                # Both sides independently exclude ASCII identifiers, digits,
+                # underscore and hyphen, including shorter sandbox_compile.
+                bounded = " ".join(part for boundary in ("a", "Z", "0", "_", "-")
+                                   for part in (boundary + word, word + boundary)).encode() + b"\n"
+                self.assertEqual(project(capture(bounded)), base)
+        for phrase, label in phrases:
+            with self.subTest(aia_phrase=phrase):
+                overlap = {"operation"} if label == "operation-not-permitted" else (
+                    {"symbol"} if label == "symbol-not-found" else set())
+                raw = (phrase + " / " + phrase.upper() + "\n").encode()
+                self.assertEqual(project(capture(raw)), base | {"tokens": sorted({label} | overlap)})
+                for boundary in ("a", "Z", "0", "_", "-"):
+                    for bounded in (boundary + phrase, phrase + boundary):
+                        self.assertNotIn(label, project(capture((bounded + "\n").encode()))["tokens"])
+        all_words = " ".join((*reversed(literals), *(phrase for phrase, _ in phrases), "TCP", "tcp"))
+        self.assertEqual(project(capture((all_words + "\n").encode())),
+                         base | {"tokens": sorted({*literals, *(label for _, label in phrases)})})
+        self.assertEqual(project(capture(b"tcp, [udp];\t(PORT) syntax/tcp\n")),
+                         base | {"tokens": ["port", "syntax", "tcp", "udp"]})
+
+        prefixes = ((b"sandbox-exec: ", "sandbox-exec"), (str(session.python).encode() + b": ", "python"),
+            (b"dyld: ", "dyld"), (b"dyld[0]: ", "dyld"), (b"dyld[0123456789]: ", "dyld"),
+            (b"MRK_NATIVE_CONTROL_FAILED=", "native-helper-note"))
+        for prefix, label in prefixes:
+            with self.subTest(aia_prefix=prefix):
+                self.assertEqual(project(capture(prefix + b"opaque\n")), base | {"prefix": label})
+                self.assertEqual(project(capture(b" " + prefix + b"opaque\n")), base)
+        for prefix in (b"Sandbox-exec: ", b"sandbox-exec:", b"dyld[]: ", b"dyld[12345678901]: ",
+                       b"dyld[-1]: ", b"dyld[+1]: ", b"dyld[1a]: ", b"DYLD[1]: ", b"dyld[1]:",
+                       b"mrk_native_control_failed=", b"MRK_NATIVE_CONTROL_FAILED: ",
+                       str(session.python).encode() + b"-other: ", b"/other/python: "):
+            with self.subTest(aia_unrecognized_prefix=prefix):
+                self.assertEqual(project(capture(prefix + b"opaque\n")), base)
+
+        for number, message, label in ((2, "No such file or directory", "no-such-file"),
+                                       (13, "Permission denied", "permission-denied")):
+            raw = f"{session.python}: can't open file '{helper}': [Errno {number}] {message}\n".encode()
+            expected = base | {"prefix": "python", "tokens": sorted(("cant-open-file", label)),
+                               "exact_python_open": {"code": "python-script-open", "errno": number}}
+            self.assertEqual(project(capture(raw)), expected)
+            for changed in (b"prefix " + raw, raw + b"extra\n", raw[:-1] + b" suffix\n",
+                            raw.replace(str(helper).encode(), str(session.entry).encode()),
+                            raw.replace(str(helper).encode(), b"/other/native-helper.py"),
+                            raw.replace(str(session.python).encode(), b"/other/python"),
+                            raw.replace(f"[Errno {number}]".encode(), b"[Errno 1]"),
+                            raw.replace(message.encode(), b"unsupported spelling")):
+                with self.subTest(aia_python_open_nonmatch=changed):
+                    self.assertNotIn("exact_python_open", project(capture(changed)))
+        private = b"dyld[9876543210]: PRIVATE-AIA-CANARY /Users/private/signing.key opaque_identifier_9\n"
+        projected = project(capture(private))
+        self.assertEqual(projected, base | {"prefix": "dyld"})
+        for canary in ("9876543210", "PRIVATE-AIA-CANARY", "/Users/", "signing.key", "opaque_identifier_9",
+                       str(session.python), str(helper)):
+            self.assertNotIn(canary, json.dumps(projected))
+        for raw in (b"\n", b"\t\n", b"\n" * 32, b"x" * 4095 + b"\n", b"x" * 4064 + b"\n" * 32):
+            self.assertEqual(project(capture(raw)), base)
+        for raw in (b"", b"opaque", b"x\n" * 33, b"x" * 4096 + b"\n",
+                    *(b"opaque" + bytes([byte]) + b"\n" for byte in (*range(9), *range(11, 32), 127, 128, 255))):
+            with self.subTest(aia_bad_framing=raw[:32], length=len(raw)):
+                self.assertIsNone(project(capture(raw)))
+
+        class IntegerSubclass(int):
+            pass
+
+        class BytesSubclass(bytes):
+            pass
+
+        class TextSubclass(str):
+            pass
+
+        class TupleSubclass(tuple):
+            pass
+
+        class CaptureSubclass(self.module.CapturedRun):
+            pass
+
+        for value in (None, {}, SimpleNamespace(**dataclasses.asdict(original)),
+                      CaptureSubclass(**dataclasses.asdict(original))):
+            self.assertIsNone(project(value))
+        for value in (-128, -1, 1, 255):
+            self.assertEqual(project(capture(returncode=value, primary_error=f"command exited {value}")), base)
+        for value in (None, False, True, 0, -129, 256, 65.0, "65", IntegerSubclass(65)):
+            with self.subTest(aia_bad_returncode=value):
+                self.assertIsNone(project(capture(returncode=value, primary_error=f"command exited {value}")))
+        for field in ("waited", "stdout_eof", "stderr_eof", "domain_finality"):
+            for value in (False, None, 1, "true"):
+                with self.subTest(aia_capture_field=field, value=value):
+                    self.assertIsNone(project(capture(**{field: value})))
+        for field in ("timed_out", "cancelled"):
+            for value in (True, None, 0, "false"):
+                with self.subTest(aia_capture_field=field, value=value):
+                    self.assertIsNone(project(capture(**{field: value})))
+        invalid = {"stdout": (b"x", "", None, bytearray(), BytesSubclass(b"")),
+            "stderr": (None, "opaque\n", bytearray(b"opaque\n"), memoryview(b"opaque\n"), BytesSubclass(b"opaque\n")),
+            "primary_error": (None, "", "command exited 1", TextSubclass("command exited 65")),
+            "cleanup_errors": (("synthetic close error",), [], None, TupleSubclass(())),
+            "persisted": ([0, 7], (), (0,), (0, 7, 0), (False, 7), (0.0, 7), (0, 7.0), (0, "7"),
+                          (0, IntegerSubclass(7)), (IntegerSubclass(0), 7), (1, 7), (0, 6), (None, 7),
+                          (0, None), TupleSubclass((0, 7)))}
+        for field, values in invalid.items():
+            for value in values:
+                with self.subTest(aia_capture_field=field, value=value):
+                    self.assertIsNone(project(dataclasses.replace(original, **{field: value})))
+        self.assertIsNone(project(capture(b"\n", persisted=(0, True))))
+        self.assertEqual(original, capture())  # Diagnostics never replace or mutate the original capture.
+
+    def test_native_aia_launch_text_attaches_only_to_original_failed_source_capture(self):
+        # The real parser is inert on import. Below, all helper process/native/
+        # filesystem namespaces and every collection effect are in-memory seams.
+        spec = importlib.util.spec_from_file_location(
+            "_mrk_pure_aia_failure_parser", ROOT / ".github/scripts/ci_native_authority.py")
+        if spec is None or spec.loader is None:
+            raise AssertionError("required fixed native failure parser is missing")
+        backend = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(backend)
+        diagnostic = {"schema": 1, "role": "aia-evaluate", "error_count": 1, "truncated": False,
+                      "exceptions": [{"exception": "NativeControlError", "lines": [12]}]}
+        footer = backend._FAILURE_PREFIX + json.dumps(diagnostic).encode() + b"\n"
+        opaque = b"PRIVATE-AIA-MESSAGE /Users/private/signing.key opaque_identifier_9\n"
+        unknown = b"sandbox-exec: unbound variable tcp " + opaque
+        marker = b'MRK_SANDBOX_ERROR=[{"exception":"PRIVATE_CHILD_CANARY","lines":[1]}]\n'
+        for case in ("unknown", "strict-footer", "malformed-footer", "private-marker", "close-error",
+                     "unknown-finality", "expired-finality", "successful-capture"):
+            with self.subTest(aia_original_collection=case):
+                session = session_double(self.module, "darwin")
+                state = native_state_double(session, deadline=50.0)
+                state["prepared"], session._native_preparing = False, "source"
+                state["control_seen"], state["aia_port"] = list(self.module._NATIVE_CONTROL_CASES[:5]), 12345
+                parser = Mock(wraps=backend.parse_failure)
+                state["backend"] = SimpleNamespace(parse_failure=parser)
+                raw = footer if case == "strict-footer" else footer + opaque if case == "malformed-footer" else (
+                    marker + opaque if case == "private-marker" else unknown)
+                code = 1 if case == "strict-footer" else 0 if case == "successful-capture" else 65
+                rig = _Collection(self.module, session, stdout=(), stderr=(raw,))
+                rig.exit_at, rig.exitcode, rig.snapshot_rows = 0.0, code, {}
+                if case == "close-error":
+                    rig.fd_close_errors = {1}
+                elif case == "unknown-finality":
+                    rig.final_domain = OSError("synthetic unavailable AIA domain")
+                elif case == "expired-finality":
+                    rig.final_time = state["deadline"]
+                real_argv = type(session)._argv.__get__(session)
+                with rig.scope(), patch.object(session, "_argv", wraps=real_argv) as argv_builder, \
+                     patch.object(session, "_native_check_inputs", Mock()) as inputs, \
+                     patch.object(self.module, "_observe_original_credentials", Mock()) as credentials, \
+                     patch.object(session, "_note_capture", wraps=session._note_capture) as noting, \
+                     patch.object(self.module, "_native_aia_launch_text", wraps=self.module._native_aia_launch_text) as projecting, \
+                     patch.multiple(backend, os=SimpleNamespace(), subprocess=SimpleNamespace(), socket=SimpleNamespace(),
+                                    threading=SimpleNamespace(), secrets=SimpleNamespace(), sys=SimpleNamespace(),
+                                    time=SimpleNamespace(monotonic=rig.monotonic)), ExitStack() as effects:
+                    for operation in ("open", "stat", "lstat", "resolve"):
+                        effects.enter_context(patch.object(Path, operation,
+                            side_effect=AssertionError("AIA collection bridge must not inspect host paths")))
+                    result = session._native_backend_capture(state, "aia-evaluate", port=12345)
+                    row = state["control_notes"]["aia-evaluate"]
+                    self.assertIs(type(result), self.module.CapturedRun)
+                    self.assertIs(noting.call_args.args[1], result)
+                    self.assertEqual(noting.call_args.kwargs, {"parse_child_notes": False})
+                    self.assertEqual((result.stdout, result.stderr, result.persisted), (b"", raw, (0, len(raw))))
+                    self.assertEqual((bytes(rig.captures[100]), bytes(rig.captures[101])), (result.stdout, result.stderr))
+                    self.assertEqual(session.persisted_bytes, sum(result.persisted))
+                    expected_error = None if code == 0 else f"command exited {code}"
+                    self.assertEqual((result.returncode, result.primary_error, session.failure), (code, expected_error, expected_error))
+                    self.assertEqual(next(event[3] for event in rig.events if event[0] == "read"), expected_error)
+                    self.assertTrue(result.waited and result.stdout_eof and result.stderr_eof)
+                    self.assertFalse(result.timed_out or result.cancelled)
+                    self.assertEqual(result.domain_finality, case not in {"unknown-finality", "expired-finality"})
+                    self.assertEqual(bool(result.cleanup_errors), case in {"close-error", "unknown-finality", "expired-finality"})
+                    self.assertEqual(result.ok, case == "successful-capture")
+                    self.assertFalse(row["ok"])  # A capture is not all six controls or AIA acceptance.
+                    self.assertEqual(row["subject_ok"], result.ok)
+                    self.assertEqual(row["exceptions"], [])
+                    self.assertEqual(row["error_count"], len(result.cleanup_errors) + (expected_error is not None))
+                    self.assertEqual(row["persisted"], list(result.persisted))
+                    for field in ("returncode", "waited", "stdout_eof", "stderr_eof", "domain_finality", "timed_out", "cancelled"):
+                        self.assertEqual(row[field], getattr(result, field))
+                    self.assertEqual(session.admission_results, [row])
+                    if case in {"expired-finality", "successful-capture"}:
+                        parser.assert_not_called()
+                        projecting.assert_not_called()
+                    else:
+                        parser.assert_called_once_with(result.stderr, "aia-evaluate")
+                        projecting.assert_called_once_with(result, session.python, session.bootstrap / "ci_native_authority.py")
+                        self.assertIs(projecting.call_args.args[0], result)
+                    if case in {"unknown", "strict-footer", "malformed-footer", "private-marker"}:
+                        prefix = "native-helper-note" if "footer" in case else (
+                            "unrecognized" if case == "private-marker" else "sandbox-exec")
+                        self.assertEqual(row["native_aia_launch_text"], {"schema": 1,
+                            "semantics": "reported-stderr-tokens-only", "diagnosis": "unresolved", "prefix": prefix,
+                            "tokens": ["tcp", "unbound", "variable"] if case == "unknown" else []})
+                    else:
+                        self.assertNotIn("native_aia_launch_text", row)
+                    if case == "strict-footer":
+                        self.assertEqual(row["native_control_error"], diagnostic)
+                        self.assertNotIn("native_control_diagnostics_unavailable", row)
+                    else:
+                        self.assertNotIn("native_control_error", row)
+                        if case == "successful-capture":
+                            self.assertNotIn("native_control_diagnostics_unavailable", row)
+                        else:
+                            self.assertTrue(row["native_control_diagnostics_unavailable"])
+                    command = [str(session.python), "-I", "-S", "-B", str(session.bootstrap / "ci_native_authority.py"),
+                               "--aia-evaluate", "12345", "50.0"]
+                    argv_builder.assert_called_once_with(command, 180, profile="native-control")
+                    launch = next(event for event in rig.events if event[0] == "popen")
+                    self.assertEqual(launch[1], tuple([str(session.python), "-I", "-S", "-B", str(session.entry), "--enter",
+                        "darwin", str(session.uid), str(session.gid), "180", str(session.bootstrap / "native-aia-source.sb"), *command]))
+                    self.assertEqual((launch[2]["user"], launch[2]["group"], launch[2]["extra_groups"]), (session.uid, session.gid, []))
+                    self.assertEqual(launch[2]["env"], session._native_environment(state))
+                    inputs.assert_called_once_with(state)
+                    credentials.assert_called_once()
+                    self.module._small_command.assert_not_called()
+                    self.assertFalse(any(event[0] == "root-snapshot" for event in rig.events))
+                    self.assertEqual(sum(event[0] == "read" for event in rig.events), 3)
+                    public = json.dumps(session.admission_results)
+                    for private in ("PRIVATE_CHILD_CANARY", "PRIVATE-AIA-MESSAGE", "/Users/", "signing.key", "opaque_identifier_9",
+                                    "MRK_SANDBOX_ERROR=", "MRK_NATIVE_CONTROL_FAILED=", "sandbox-exec:", str(session.root)):
+                        self.assertNotIn(private, public)
+                self.assertEqual(state["control_seen"], list(self.module._NATIVE_CONTROL_CASES))
+                self.assertEqual(state["aia_port"], 12345)
+                self.assertFalse(state["prepared"] or state["started"] or state["completed"])
+                self.assertIsNone(session._native_control)
+                self.assertIsNone(session._active)
+                self.assertFalse(session._busy)
+                self.assertEqual(len(rig.opened), 2)
+                self.assertEqual(sum(event[0] == "popen" for event in rig.events), 1)
+                self.assertEqual(sum(event[0] == "wait-original" for event in rig.events), 1)
+                self.assertEqual(session.deadline, 100.0)
+
+        # Fixed preparation and a synthetic wheel/internal-control seam retain
+        # their existing generic notes. The real backend still rejects wheel;
+        # neither check creates native fixtures, a responder or a new role.
+        for phase, selected in (("source", "aia-prepare"), ("wheel", "aia-evaluate")):
+            session = session_double(self.module, "darwin")
+            state = native_state_double(session, phase, deadline=50.0)
+            state["prepared"], session._native_preparing = False, phase
+            state["backend"] = SimpleNamespace(parse_failure=Mock(wraps=backend.parse_failure))
+            raw = b'MRK_SANDBOX_ERROR=[{"exception":"OSError","lines":[1]}]\n'
+            rig = _Collection(self.module, session, stdout=(), stderr=(raw,))
+            rig.exit_at, rig.exitcode, rig.snapshot_rows = 0.0, 65, {}
+            with self.subTest(aia_unexposed_role=(phase, selected)), rig.scope(), \
+                 patch.object(session, "_native_check_inputs", Mock()), \
+                 patch.object(self.module, "_observe_original_credentials", Mock()), \
+                 patch.object(self.module, "_native_aia_launch_text", wraps=self.module._native_aia_launch_text) as projecting, \
+                 patch.multiple(backend, os=SimpleNamespace(), subprocess=SimpleNamespace(), socket=SimpleNamespace(),
+                                threading=SimpleNamespace(), secrets=SimpleNamespace(), sys=SimpleNamespace()), ExitStack() as effects:
+                for operation in ("open", "stat", "lstat", "resolve"):
+                    effects.enter_context(patch.object(Path, operation,
+                        side_effect=AssertionError("other-role text projection must not inspect host paths")))
+                if phase == "wheel":
+                    with self.assertRaises(self.module.SessionError):
+                        session._native_backend_capture(state, selected, port=12345)
+                    self.assertEqual(rig.opened, [])
+                command = [str(session.python), "-I", "-S", "-B", str(session.bootstrap / "ci_native_authority.py"),
+                           "--" + selected, "12345", "50.0"]
+                result = session._native_control_capture(state, selected, command,
+                    policy=state["policy"] if selected == "aia-prepare" else session.bootstrap / "native-aia-source.sb",
+                    cwd=state["cwd"] / "probes", seconds=300 if selected == "aia-prepare" else 120)
+                row = state["control_notes"][selected]
+                self.assertEqual(row["exceptions"], [{"exception": "OSError", "lines": [1]}])
+                self.assertTrue(row["native_control_diagnostics_unavailable"])
+                self.assertNotIn("native_aia_launch_text", row)
+                projecting.assert_not_called()
+                self.assertEqual((result.returncode, result.stderr, result.persisted), (65, raw, (0, len(raw))))
+                self.assertFalse(result.ok or row["ok"] or row["subject_ok"])
+                self.assertEqual(sum(event[0] == "popen" for event in rig.events), 1)
+                self.assertEqual(sum(event[0] == "wait-original" for event in rig.events), 1)
+            self.assertIsNone(session._native_control)
+            self.assertIsNone(session._active)
+            self.assertFalse(session._busy)
+
     def test_native_postconditions_preserve_failure_accounting_and_close_only_original_resources(self):
         for case in ("input-refusal", "original-and-close-errors", "unknown-finality", "unsafe-output", "close-expired", "close-cancelled"):
             with self.subTest(native_capture_finalization=case):

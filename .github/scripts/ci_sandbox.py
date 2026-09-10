@@ -680,6 +680,63 @@ def _launcher_error(data: bytes, python: Path, script: Path) -> dict | None:
     return None
 
 
+def _native_aia_launch_text(result: CapturedRun, python: Path, helper: Path) -> dict | None:
+    """Closed lexical hints from one complete failed capture, never its cause.
+
+    Prefixes and words can occur in displayed source or other reported text.
+    They neither authenticate the emitter nor prove an OS/compiler operation.
+    No original string, path, PID or arbitrary identifier enters the result.
+    """
+    if (type(result) is not CapturedRun or type(result.returncode) is not int
+            or not -128 <= result.returncode <= 255 or result.returncode == 0
+            or type(result.stdout) is not bytes or result.stdout != b""
+            or type(result.stderr) is not bytes or not 0 < len(result.stderr) <= 4096
+            or any(value is not True for value in (result.waited, result.stdout_eof,
+                                                   result.stderr_eof, result.domain_finality))
+            or result.timed_out is not False or result.cancelled is not False
+            or type(result.cleanup_errors) is not tuple or result.cleanup_errors
+            or type(result.primary_error) is not str
+            or result.primary_error != f"command exited {result.returncode}"
+            or type(result.persisted) is not tuple or len(result.persisted) != 2
+            or any(type(count) is not int for count in result.persisted)
+            or result.persisted != (0, len(result.stderr))):
+        return None
+    data = result.stderr
+    if (not data.endswith(b"\n") or not 1 <= data.count(b"\n") <= 32
+            or any(byte not in (9, 10) and not 32 <= byte <= 126 for byte in data)):
+        return None
+    if data.startswith(b"sandbox-exec: "):
+        prefix = "sandbox-exec"
+    elif data.startswith(str(python).encode("ascii") + b": "):
+        prefix = "python"
+    elif re.match(rb"dyld(?:\[[0-9]{1,10}\])?: ", data):
+        prefix = "dyld"
+    elif data.startswith(b"MRK_NATIVE_CONTROL_FAILED="):
+        prefix = "native-helper-note"
+    else:
+        prefix = "unrecognized"
+    literals = ("address", "argument", "arguments", "compile", "compiling", "filter", "illegal",
+                "invalid", "ip", "network-outbound", "number", "opening", "operation", "port",
+                "profile", "reading", "remote", "require-all", "sandbox_apply", "sandbox_compile",
+                "sandbox_compile_file", "sandbox_compile_string", "sandbox_init", "socket",
+                "string", "symbol", "syntax", "tcp", "udp", "unbound", "undefined", "unknown",
+                "variable", "execvp")
+    phrases = (("can't open file", "cant-open-file"), ("permission denied", "permission-denied"),
+               ("operation not permitted", "operation-not-permitted"),
+               ("no such file or directory", "no-such-file"),
+               ("library not loaded", "library-not-loaded"), ("symbol not found", "symbol-not-found"))
+    lower = data.lower()
+    tokens = sorted({label for literal, label in (*((word, word) for word in literals), *phrases)
+                     if re.search(rb"(?<![a-z0-9_-])" + re.escape(literal.encode("ascii"))
+                                  + rb"(?![a-z0-9_-])", lower)})
+    note = {"schema": 1, "semantics": "reported-stderr-tokens-only", "diagnosis": "unresolved",
+            "prefix": prefix, "tokens": tokens}
+    exact = _launcher_error(data, python, helper)
+    if exact is not None:
+        note["exact_python_open"] = exact
+    return note
+
+
 def _ruby_launch_error(result: CapturedRun, ruby: Path) -> dict | None:
     """Exact fixed-launch failure diagnosis, never a substitute accepted result."""
     if (result.returncode != 71 or result.stdout or not result.waited
@@ -2878,6 +2935,7 @@ class Session:
             self._native_initial_binding(state, argv, policy=policy, cwd=cwd, seconds=seconds)
         elif "--mach-initial" in argv:
             raise SessionError("initial native application is not available to another control")
+        aia_text_case = state["phase"] == "source" and case == "aia-evaluate"
         self._native_control = {"state": state, "case": case, "argv": argv, "policy": policy,
                                 "cwd": cwd, "seconds": seconds}
         exit_reason = None
@@ -2893,7 +2951,7 @@ class Session:
                                cpu_seconds=180, latch=True, profile="native-control",
                                absolute_deadline=state["deadline"])
             row = self._note_capture("native-authority-" + state["phase"] + "-" + case, result,
-                                     parse_child_notes=case not in {"mach-authority", "mach-nonexpand"})
+                                     parse_child_notes=case not in {"mach-authority", "mach-nonexpand"} and not aia_text_case)
             state["control_notes"][case] = row
             if case in _NATIVE_STARTUP_CASES:
                 expected = b"" if case == "startup-true" else _NATIVE_STARTUP_STDOUT
@@ -2926,6 +2984,10 @@ class Session:
                         row["native_control_error"] = diagnostic
                     else:
                         row["native_control_diagnostics_unavailable"] = True
+                    if aia_text_case:
+                        launch_text = _native_aia_launch_text(result, self.python, helper)
+                        if launch_text is not None:
+                            row["native_aia_launch_text"] = launch_text
                 else:
                     row["native_control_diagnostics_unavailable"] = True
             return result  # Genuine original wait/EOF/finality/persisted facts.
