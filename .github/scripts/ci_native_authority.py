@@ -32,6 +32,7 @@ MACH_APPLY_PREFIX = b"MRK_NATIVE_MACH_APPLY="
 AIA_PREFIX = b"MRK_NATIVE_AIA="
 _DENIED = (1100, 1102)  # NOT_PRIVILEGED / UNKNOWN_SERVICE; needs an outside positive.
 _CASES = ("online", "offline", "mutant", "product-offline")
+_CONTRAST_CASE = "online-full-chain-offline"
 _MAX_DER = 16 * 1024
 _FAILURE_PREFIX = b"MRK_NATIVE_CONTROL_FAILED="
 _FAILURE_ROLES = frozenset(("mach", "mach-initial", "mach-nonexpand", "aia-prepare", "aia-evaluate", "invalid"))
@@ -657,13 +658,13 @@ def _fixtures(work: Path, port: int, deadline: float) -> list[dict]:
 class _Trust:
     """One fresh real BasicX509 trust object, with explicit CF reference custody."""
 
-    def __init__(self, leaf: bytes, root: bytes):
+    def __init__(self, leaf: bytes, root: bytes, *, issuer: bytes | None = None):
         import ctypes as C
 
         self.C, self.owned = C, []
         security = C.CDLL("/System/Library/Frameworks/Security.framework/Security")
         foundation = C.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
-        self.foundation = foundation
+        self.security, self.foundation = security, foundation
         self.error_observation = {"status": "unavailable", "code": None}
         P = C.c_void_p
 
@@ -694,9 +695,12 @@ class _Trust:
         self.copy_chain = bind(security, "SecTrustCopyCertificateChain", P, [P])
         try:
             policy = self._own(policy_create())
-            # Only the leaf is presented. The independently generated issuer is
-            # available exclusively through the fixed owner responder.
-            presented = self._array([self._certificate(leaf)])
+            # All four original cases present only the leaf. The sole separate
+            # post-original offline contrast supplies the complete same chain.
+            certificates = [self._certificate(leaf)]
+            if issuer is not None:
+                certificates.extend((self._certificate(issuer), self._certificate(root)))
+            presented = self._array(certificates)
             pointer = P()
             try:
                 status = trust_create(presented, policy, C.byref(pointer))
@@ -776,6 +780,61 @@ class _Trust:
             # Cancellation/SystemExit still reaches the original CF cleanup owner.
             return unavailable
 
+    def _anchor_observation(self, root_bytes: bytes, issuer_bytes: bytes) -> dict:
+        """Public readback/name equality, not service-side receipt or acceptance.
+
+        Every Copy-rule reference joins this trust's original cleanup owner,
+        including an out pointer acquired before a failed diagnostic returns.
+        """
+        unavailable = {"available": False, "anchors": None, "issuer_subject_equal": None}
+        try:
+            C, security, foundation = self.C, self.security, self.foundation
+            P = C.c_void_p
+
+            def bind(library, name, result, arguments):
+                function = getattr(library, name)
+                function.restype, function.argtypes = result, arguments
+                return function
+
+            copy_anchors = bind(security, "SecTrustCopyCustomAnchorCertificates", C.c_int32, [P, C.POINTER(P)])
+            pointer = P()
+            try:
+                status = copy_anchors(self.trust, C.byref(pointer))
+            finally:
+                if pointer.value:
+                    self.owned.append(pointer.value)
+            # Success with a null output is unavailable, not an observed empty
+            # array. In particular CFArrayGetCount must never receive NULL.
+            _require(type(status) is int and status == 0 and bool(pointer.value),
+                     "native custom anchor readback is unavailable")
+            count = self.array_count(pointer.value)
+            _require(type(count) is int and 0 <= count <= 3, "native custom anchor count differs")
+            hashes = []
+            for index in range(count):
+                certificate = self.array_item(pointer.value, index)  # Borrowed from the owned array.
+                _require(bool(certificate), "native custom anchor item is unavailable")
+                raw = self._own(self.cert_data(certificate))
+                size, location = self.data_length(raw), self.data_bytes(raw)
+                _require(type(size) is int and 0 < size <= _MAX_DER and bool(location),
+                         "native custom anchor encoding differs")
+                hashes.append(hashlib.sha256(C.string_at(location, size)).hexdigest())
+            copy_issuer = bind(security, "SecCertificateCopyNormalizedIssuerSequence", P, [P])
+            copy_subject = bind(security, "SecCertificateCopyNormalizedSubjectSequence", P, [P])
+            equal = bind(foundation, "CFEqual", C.c_ubyte, [P, P])
+            issuer_name = self._own(copy_issuer(self._certificate(issuer_bytes)))
+            root_name = self._own(copy_subject(self._certificate(root_bytes)))
+            for name in (issuer_name, root_name):
+                size = self.data_length(name)
+                _require(type(size) is int and 0 < size <= _MAX_DER,
+                         "native normalized name size differs")
+            matches = equal(issuer_name, root_name)
+            _require(type(matches) is int and matches in (0, 1), "native normalized name comparison differs")
+            return {"available": True, "anchors": hashes, "issuer_subject_equal": bool(matches)}
+        except Exception:
+            # Cancellation/SystemExit and every eventual real close failure
+            # remain failures. Only optional diagnostic reads become unavailable.
+            return unavailable
+
     def evaluate(self) -> dict:
         error = self.C.c_void_p()
         try:
@@ -811,8 +870,9 @@ class _Trust:
             raise BaseExceptionGroup("native CF reference cleanup failed", errors)
 
 
-def _evaluate_case(fixture: dict, deadline: float, observations: list[dict] | None = None) -> dict:
-    trust, errors, row = None, [], None
+def _evaluate_case(fixture: dict, deadline: float, observations: list[dict] | None = None,
+                   anchor_observations: list[dict] | None = None) -> dict:
+    trust, errors, row, anchor = None, [], None, None
     case = fixture["case"]
     _require(case in _CASES, "unknown fixed AIA case")
     try:
@@ -834,6 +894,9 @@ def _evaluate_case(fixture: dict, deadline: float, observations: list[dict] | No
         result = trust.evaluate()
         _remaining(deadline)
         row = {"case": case, "baseline_network": True, "network": network, "keychains": keychains, **result}
+        if anchor_observations is not None:
+            anchor = trust._anchor_observation(fixture["root"], fixture["issuer"])
+            _remaining(deadline)
     except BaseException as exc:
         errors.append(exc)
     finally:
@@ -844,21 +907,57 @@ def _evaluate_case(fixture: dict, deadline: float, observations: list[dict] | No
                 errors.append(exc)
     if errors:
         raise BaseExceptionGroup("native AIA evaluation/cleanup failed", errors)
+    _remaining(deadline)
     if observations is not None:
         # Only detached Python values survive close; no getter uses a retired ref.
         observations.append({"case": case, **trust.error_observation})
+    if anchor_observations is not None:
+        anchor_observations.append({"case": case, "available": anchor["available"],
+                                    "anchors": None if anchor["anchors"] is None else list(anchor["anchors"]),
+                                    "issuer_subject_equal": anchor["issuer_subject_equal"]})
     return row
+
+
+def _evaluate_full_chain_contrast(fixture: dict, deadline: float) -> dict:
+    """One fresh offline evaluation after all original cases have closed."""
+    _require(fixture["case"] == "online", "native full-chain contrast fixture differs")
+    trust, errors, result = None, [], None
+    try:
+        _remaining(deadline)
+        trust = _Trust(fixture["leaf"], fixture["root"], issuer=fixture["issuer"])
+        trust.set_network(False)
+        trust.set_keychains(False)
+        network, keychains = trust.get_network(), trust.get_keychains()
+        _require(network is False and keychains is False, "native full-chain contrast getters differ")
+        _remaining(deadline)
+        result = trust.evaluate()
+        _remaining(deadline)
+    except BaseException as exc:
+        errors.append(exc)
+    finally:
+        if trust is not None:
+            try:
+                trust.close()
+            except BaseException as exc:
+                errors.append(exc)
+    if errors:
+        raise BaseExceptionGroup("native full-chain contrast/cleanup failed", errors)
+    _remaining(deadline)
+    return {"case": _CONTRAST_CASE, "network": network, "keychains": keychains, **result,
+            "trust_error": dict(trust.error_observation)}
 
 
 def evaluate_aia(port: int, deadline: float) -> dict:
     fixtures = _fixtures(Path.cwd(), port, deadline)
-    observations = []
-    cases = [_evaluate_case(fixture, deadline, observations) for fixture in fixtures]
-    return {"schema": 1, "cases": cases, "error_observations": observations}
+    observations, anchors = [], []
+    cases = [_evaluate_case(fixture, deadline, observations, anchors) for fixture in fixtures]
+    contrast = _evaluate_full_chain_contrast(fixtures[0], deadline)
+    return {"schema": 1, "cases": cases, "error_observations": observations,
+            "chain_observations": {"anchors": anchors, "contrast": contrast}}
 
 
-def _aia_record(data: bytes) -> tuple[dict, list[dict]]:
-    """Recognize only the closed optional diagnostic extension, not new authority."""
+def _aia_record(data: bytes) -> tuple[dict, list[dict], dict | None]:
+    """Recognize only closed optional diagnostic extensions, not new authority."""
     record = _parse(data, AIA_PREFIX)
     observations = [{"case": case, "status": "unavailable", "code": None} for case in _CASES]
     if "error_observations" in record:
@@ -874,11 +973,46 @@ def _aia_record(data: bytes) -> tuple[dict, list[dict]]:
             _require(type(row["code"]) is int and -(2**31) <= row["code"] < 2**31
                      if row["status"] == "osstatus" else row["code"] is None,
                      "native AIA diagnostic code differs")
-    return record, observations
+    chains = None
+    if "chain_observations" in record:
+        chains = record.pop("chain_observations")
+        _require(type(chains) is dict and set(chains) == {"anchors", "contrast"}
+                 and type(chains["anchors"]) is list and len(chains["anchors"]) == len(_CASES),
+                 "native AIA chain diagnostic inventory differs")
+        for case, row in zip(_CASES, chains["anchors"]):
+            _require(type(row) is dict and set(row) == {"case", "available", "anchors", "issuer_subject_equal"}
+                     and type(row["case"]) is str and row["case"] == case
+                     and type(row["available"]) is bool, "native AIA anchor diagnostic fields differ")
+            if row["available"]:
+                _require(type(row["anchors"]) is list and len(row["anchors"]) <= 3
+                         and all(type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+                                 for value in row["anchors"])
+                         and type(row["issuer_subject_equal"]) is bool, "native AIA anchor observation differs")
+            else:
+                _require(row["anchors"] is None and row["issuer_subject_equal"] is None,
+                         "unavailable native AIA anchor observation differs")
+        row = chains["contrast"]
+        bools = ("network", "keychains", "accepted", "error")
+        _require(type(row) is dict and set(row) == {"case", *bools, "result", "chain", "trust_error"}
+                 and type(row["case"]) is str and row["case"] == _CONTRAST_CASE
+                 and all(type(row[key]) is bool for key in bools)
+                 and type(row["result"]) is int and 0 <= row["result"] <= 0xffffffff
+                 and type(row["chain"]) is list and 1 <= len(row["chain"]) <= 3
+                 and all(type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+                         for value in row["chain"]), "native AIA contrast observation differs")
+        error = row["trust_error"]
+        _require(type(error) is dict and set(error) == {"status", "code"}
+                 and type(error["status"]) is str
+                 and error["status"] in {"no-error", "osstatus", "other-domain", "unavailable"},
+                 "native AIA contrast error fields differ")
+        _require(type(error["code"]) is int and -(2**31) <= error["code"] < 2**31
+                 if error["status"] == "osstatus" else error["code"] is None,
+                 "native AIA contrast error code differs")
+    return record, observations, chains
 
 
 def require_aia_controls(data: bytes, fixtures: list[dict], requests: list[tuple[str, str]]) -> dict:
-    record, _observations = _aia_record(data)
+    record, _observations, _chains = _aia_record(data)
     _require(set(record) == {"schema", "cases"} and type(record["cases"]) is list
              and len(record["cases"]) == len(fixtures) == 4, "native AIA result inventory differs")
     expected_requests, counts = [], []
@@ -908,7 +1042,7 @@ def _aia_comparison_note(data: bytes, fixtures: list[dict], requests: list[tuple
     unavailable = {"schema": 1, "control": "aia-comparison",
                    "semantics": "comparison-observation-only", "available": False}
     try:
-        record, errors = _aia_record(data)
+        record, errors, chains = _aia_record(data)
         _require(set(record) == {"schema", "cases"} and type(record["cases"]) is list
                  and type(fixtures) is list and len(record["cases"]) == len(fixtures) == 4
                  and type(requests) is list and len(requests) <= 8, "AIA diagnostic inventory differs")
@@ -937,10 +1071,20 @@ def _aia_comparison_note(data: bytes, fixtures: list[dict], requests: list[tuple
             originals[fixture["route"]] = (case, issuer)
             if online:
                 expected_requests.append((fixture["route"], issuer))
+            anchor_note = {"available": False, "anchor_count": None, "anchors_match": None,
+                           "anchor_roles": None, "issuer_subject_equal": None}
+            anchor = None if chains is None else chains["anchors"][len(cases)]
+            if anchor is not None and anchor["available"]:
+                root = hashlib.sha256(fixture["root"]).hexdigest()
+                anchor_note = {"available": True, "anchor_count": len(anchor["anchors"]),
+                               "anchors_match": anchor["anchors"] == [root],
+                               "anchor_roles": ["root" if digest == root else "other" for digest in anchor["anchors"]],
+                               "issuer_subject_equal": anchor["issuer_subject_equal"]}
             cases.append({"case": case, **{key: row[key] for key in bools}, "result": row["result"],
                           "chain_count": len(row["chain"]), "chain_matches": row["chain"] == expected_chain,
                           "chain_roles": [roles.get(digest, "other") for digest in row["chain"]],
                           "trust_error": {"status": error["status"], "code": error["code"]},
+                          "anchor_observation": anchor_note,
                           "request_count": 0})
         observed_requests = []
         for request in requests:
@@ -953,7 +1097,17 @@ def _aia_comparison_note(data: bytes, fixtures: list[dict], requests: list[tuple
             for row in cases:
                 if row["case"] == case:
                     row["request_count"] += 1
-        return {**unavailable, "available": True, "cases": cases, "requests": observed_requests,
+        contrast = {"available": False}
+        if chains is not None:
+            row, fixture = chains["contrast"], fixtures[0]
+            roles = {hashlib.sha256(fixture[role]).hexdigest(): role for role in ("leaf", "issuer", "root")}
+            expected_chain = [hashlib.sha256(fixture[role]).hexdigest() for role in ("leaf", "issuer", "root")]
+            contrast = {"available": True, "case": _CONTRAST_CASE,
+                        **{key: row[key] for key in ("network", "keychains", "accepted", "error", "result")},
+                        "chain_count": len(row["chain"]), "chain_matches": row["chain"] == expected_chain,
+                        "chain_roles": [roles.get(digest, "other") for digest in row["chain"]],
+                        "trust_error": dict(row["trust_error"])}
+        return {**unavailable, "available": True, "cases": cases, "requests": observed_requests, "contrast": contrast,
                 "requests_match": requests == expected_requests}
     except (NativeControlError, ValueError, TypeError, KeyError, RecursionError):
         return unavailable
