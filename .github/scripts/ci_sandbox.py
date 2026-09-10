@@ -87,6 +87,244 @@ class _CensusUnstable(SessionError):
     """An incomplete Linux pass; only finality may discard it and resnapshot."""
 
 
+class _NativeAbortIssue(Exception):
+    """Private optional diagnostic failure; never a subject result or authority."""
+
+    def __init__(self, status: str, code: str, *, number: int | None = None,
+                 close_failed: bool = False, retry: bool = False):
+        super().__init__(code)
+        self.status, self.code = status, code
+        self.number = number if type(number) is int and 0 < number < 4096 else None
+        self.close_failed, self.retry = close_failed, retry
+
+
+_NATIVE_ABORT_SYSTEM_IMAGES = {
+    "/usr/lib/dyld": "dyld",
+    "/usr/lib/system/libsystem_secinit.dylib": "libsystem-secinit",
+    "/usr/lib/system/libsystem_kernel.dylib": "libsystem-kernel",
+    "/usr/lib/system/libsystem_c.dylib": "libsystem-c",
+    "/usr/lib/system/libdispatch.dylib": "libdispatch",
+}
+_NATIVE_ABORT_PUBLIC_PATHS = frozenset({
+    "/dev/null", "/dev/random", "/dev/urandom", "/dev/fd/0", "/dev/fd/1", "/dev/fd/2",
+    "/usr/bin/sandbox-exec", *_NATIVE_ABORT_SYSTEM_IMAGES,
+})
+_NATIVE_ABORT_FRAMES = {
+    "abort": "abort", "__abort_with_payload": "abort-with-payload", "_os_crash": "os-crash",
+    "Py_FatalError": "python-fatal-error", "_libsecinit_appsandbox": "libsecinit-initialize",
+    "_libsecinit_initializer": "libsecinit-initialize",
+    "dyld4::halt(char const*, dyld4::StructuredError const*)": "dyld-halt",
+}
+_NATIVE_ABORT_OPERATIONS = frozenset({
+    "file-read-data", "file-read-metadata", "file-read-xattr", "file-write-data", "file-write-create",
+    "mach-lookup", "sysctl-read", "process-exec",
+})
+
+
+def _native_abort_time(value: object) -> tuple[int, int]:
+    """Precision-only rounding/truncation interval, in half-nanoseconds."""
+    if not isinstance(value, str) or len(value) > 80:
+        raise _NativeAbortIssue("unavailable", "CLOCK_BINDING")
+    match = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})"
+                         r"(?:\.(\d{1,9}))? ?([+-])(\d{2}):?(\d{2})", value, flags=re.ASCII)
+    if match is None:
+        raise _NativeAbortIssue("unavailable", "CLOCK_BINDING")
+    # Optional controller parsing only: no new unconditional subject startup import.
+    import datetime
+    try:
+        parts = [int(match[n]) for n in range(1, 7)]
+        hour, minute = int(match[9]), int(match[10])
+        if hour > 23 or minute > 59:
+            raise ValueError
+        delta = datetime.datetime(*parts) - datetime.datetime(1970, 1, 1)
+        offset = (hour * 3600 + minute * 60) * (1 if match[8] == "+" else -1)
+        fraction = match[7] or ""
+        instant = ((delta.days * 86400 + delta.seconds - offset) * 1_000_000_000
+                   + int(fraction.ljust(9, "0")))
+        unit = 10 ** (9 - len(fraction))
+    except (ValueError, OverflowError) as exc:
+        raise _NativeAbortIssue("unavailable", "CLOCK_BINDING") from exc
+    return 2 * instant - unit, 2 * instant + 2 * unit
+
+
+def _native_abort_window(abort: dict) -> tuple[int, int, int]:
+    before, after, waited = (abort.get(key) for key in ("wall_before", "wall_after", "wall_wait"))
+    if (any(type(t) is not int or not 0 < t < (1 << 63) for t in (before, after, waited))
+            or not before <= after <= waited or waited - before > 18_000_000_000
+            or type(abort.get("pid")) is not int or not 0 < abort["pid"] < (1 << 31)
+            or type(abort.get("uid")) is not int or not 0 < abort["uid"] < (1 << 32)):
+        raise _NativeAbortIssue("unavailable", "CLOCK_BINDING")
+    return before, after, waited
+
+
+def _native_abort_json(raw: bytes, *, maximum: int, depth: int, code: str):
+    """Strict bounded JSON with a nesting check before the recursive decoder."""
+    if not isinstance(raw, bytes) or len(raw) > maximum:
+        raise _NativeAbortIssue("limit", "LIMIT")
+    try:
+        data = raw.decode("utf-8", "strict")
+    except UnicodeError as exc:
+        raise _NativeAbortIssue("malformed", code) from exc
+    level, quoted, escaped = 0, False, False
+    for char in data:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in "[{":
+            level += 1
+            if level > depth:
+                raise _NativeAbortIssue("limit", "LIMIT")
+        elif char in "]}":
+            level -= 1
+
+    def pairs(rows):
+        result = {}
+        for key, value in rows:
+            if key in result:
+                raise ValueError
+            result[key] = value
+        return result
+
+    def finite(value):
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError
+        return number
+
+    def nonfinite(_value):
+        raise ValueError
+
+    try:
+        return json.loads(data, object_pairs_hook=pairs, parse_float=finite, parse_constant=nonfinite)
+    except json.JSONDecodeError as exc:
+        # A missing terminal value/delimiter may be an incompletely arrived IPS.
+        raise _NativeAbortIssue("malformed", code, retry=exc.pos == len(data.rstrip())) from exc
+    except (ValueError, RecursionError, OverflowError) as exc:
+        raise _NativeAbortIssue("malformed", code) from exc
+
+
+def _native_abort_ips_record(raw: bytes, abort: dict) -> dict | None:
+    before, after, waited = _native_abort_window(abort)
+    if not isinstance(raw, bytes) or len(raw) > MiB:
+        raise _NativeAbortIssue("limit", "LIMIT")
+    header, separator, body = raw.partition(b"\n")
+    if not separator:
+        raise _NativeAbortIssue("malformed", "IPS_IO", retry=not raw)
+    metadata = _native_abort_json(header, maximum=MiB, depth=64, code="IPS_IO")
+    report = _native_abort_json(body, maximum=MiB, depth=64, code="IPS_IO")
+    if type(metadata) is not dict or type(report) is not dict:
+        raise _NativeAbortIssue("malformed", "IPS_IO")
+    bug = metadata.get("bug_type")
+    exception = report.get("exception")
+    path = report.get("procPath")
+    if (not (type(bug) is int and bug == 309 or type(bug) is str and bug == "309")
+            or type(report.get("pid")) is not int or report["pid"] != abort["pid"]
+            or type(report.get("userID")) is not int or report["userID"] != abort["uid"]
+            or not isinstance(path, str) or path not in abort["images"]
+            or type(exception) is not dict or exception.get("type") != "EXC_CRASH"
+            or exception.get("signal") != "SIGABRT"):
+        return None
+    try:
+        launch_lo, launch_hi = _native_abort_time(report.get("procLaunch"))
+        capture_lo, capture_hi = _native_abort_time(report.get("captureTime"))
+    except _NativeAbortIssue:
+        return None
+    if not (launch_lo <= 2 * after and launch_hi > 2 * before
+            and capture_lo <= 2 * waited and capture_hi > 2 * before and capture_hi > launch_lo):
+        return None
+    termination = report.get("termination")
+    namespace, code = "ABSENT", None
+    if type(termination) is dict:
+        given = termination.get("namespace")
+        namespace = (given if isinstance(given, str) and given in
+                     {"SIGNAL", "DYLD", "LIBSYSTEM", "SANDBOX", "CODESIGNING"}
+                     else "ABSENT" if given is None else "OTHER")
+        candidate = termination.get("code")
+        if type(candidate) is int and 0 <= candidate < (1 << 64):
+            code = candidate
+    fault_role, roles = "absent", []
+    index, threads, images = report.get("faultingThread"), report.get("threads"), report.get("usedImages")
+    if type(index) is int and type(threads) is list and 0 <= index < len(threads):
+        thread = threads[index]
+        frames = thread.get("frames") if type(thread) is dict else None
+        if type(frames) is list:
+            for n, frame in enumerate(frames[:64]):
+                if type(frame) is not dict:
+                    continue
+                image_index = frame.get("imageIndex")
+                if n == 0 and type(images) is list and type(image_index) is int and 0 <= image_index < len(images):
+                    image = images[image_index]
+                    image_path = image.get("path") if type(image) is dict else None
+                    if isinstance(image_path, str):
+                        fault_role = abort["images"].get(image_path, _NATIVE_ABORT_SYSTEM_IMAGES.get(image_path, "other"))
+                symbol = frame.get("symbol")
+                role = _NATIVE_ABORT_FRAMES.get(symbol) if isinstance(symbol, str) else None
+                if role is not None and role not in roles and len(roles) < 8:
+                    roles.append(role)
+    return {"sha256": hashlib.sha256(raw).hexdigest(), "image_role": abort["images"][path],
+            "exception": "EXC_CRASH", "signal": "SIGABRT", "termination_namespace": namespace,
+            "termination_code": code, "fault_image_role": fault_role, "frame_roles": roles}
+
+
+def _native_abort_log_records(raw: bytes, abort: dict) -> list[dict]:
+    """PID/name/time-correlated denials only; emitter UID/PID is not subject identity."""
+    before, _after, waited = _native_abort_window(abort)
+    records = _native_abort_json(raw, maximum=2 * MiB, depth=32, code="LOG_PARSE")
+    if type(records) is not list:
+        raise _NativeAbortIssue("malformed", "LOG_PARSE")
+    if len(records) > 64:
+        raise _NativeAbortIssue("limit", "LIMIT")
+    names = {Path(path).name for path in abort["images"]}
+    producers = {"/kernel": "kernel", "/System/Library/Kernels/kernel": "kernel",
+                 "/usr/libexec/sandboxd": "sandboxd"}
+    denials = []
+    for record in records:
+        if type(record) is not dict:
+            raise _NativeAbortIssue("malformed", "LOG_PARSE")
+        declared, path = record.get("process"), record.get("processImagePath")
+        producer = producers.get(path) if isinstance(path, str) else None
+        if (declared is not None and declared not in ("kernel", "sandboxd")
+                or "processImagePath" in record and producer is None
+                or declared is None and producer is None
+                or declared is not None and producer is not None and declared != producer):
+            continue
+        try:
+            lo, hi = _native_abort_time(record.get("timestamp"))
+        except _NativeAbortIssue:
+            continue
+        if lo > 2 * waited or hi <= 2 * before:
+            continue
+        message = record.get("eventMessage")
+        if not isinstance(message, str) or len(message) > 8192:
+            continue
+        match = re.fullmatch(r"Sandbox: ([A-Za-z0-9_.-]{1,128})\(([1-9][0-9]{0,9})\) "
+                             r"deny\([0-9]{1,10}\) ([a-z][a-z0-9-]{0,63}) ([^\r\n\x00]{1,4096})", message)
+        if match is None or match[1] not in names or int(match[2]) != abort["pid"]:
+            continue
+        operation, resource = match[3], match[4]
+        row = {"operation": operation if operation in _NATIVE_ABORT_OPERATIONS else "other",
+               "resource_role": "redacted"}
+        if resource in _NATIVE_ABORT_PUBLIC_PATHS:
+            row["public_path"] = resource
+            row["resource_role"] = ("stdio-device" if resource.startswith("/dev/")
+                                    else "admitted-system-image" if resource == "/usr/bin/sandbox-exec"
+                                    else "public-os")
+        elif abort["images"].get(resource) in {"python-selected", "python-framework"}:
+            row["resource_role"] = "admitted-python"
+        elif (isinstance(abort.get("control_root"), str) and resource.startswith(abort["control_root"] + "/")
+              and ".." not in Path(resource).parts):
+            row["resource_role"] = "owned-control"
+        if row not in denials and len(denials) < 8:
+            denials.append(row)
+    return denials
+
+
 _DIAGNOSTIC_OPERATIONS = frozenset({"process-groups-linux", "kernel-groups-library",
                                     "kernel-groups-count", "kernel-groups-fill",
                                     "mac-original-credentials", "cleanup-batch",
@@ -1861,6 +2099,332 @@ class Session:
             self._native_control = None
             self._native_preparing = None
 
+    def _native_abort_error(self, abort: dict, error: BaseException, code: str) -> _NativeAbortIssue:
+        if isinstance(error, _NativeAbortIssue):
+            issue = error
+        elif isinstance(error, DeadlineExpired):
+            issue = _NativeAbortIssue("deadline", "DEADLINE")
+        elif isinstance(error, KeyboardInterrupt):
+            self.cancelled = True
+            issue = _NativeAbortIssue("cancelled", "CANCELLED")
+        else:
+            issue = _NativeAbortIssue("unavailable", code,
+                                      number=error.errno if isinstance(error, OSError) else None)
+        note = {"code": issue.code, "producer_pending": bool(self._direct_producer_pending)}
+        if issue.number is not None:
+            note["errno"] = issue.number
+        if "diagnostic_error" not in abort or issue.close_failed or self._direct_producer_pending:
+            abort["diagnostic_error"] = note
+        return issue
+
+    def _native_abort_guard(self, abort: dict) -> None:
+        # A latched subject failure permits this bounded observation, not a new
+        # subject command. This cutoff never feeds back into the original run.
+        if abort["close_failed"]:
+            raise _NativeAbortIssue("unavailable", "IPS_CLOSE", close_failed=True)
+        if self.cancelled:
+            raise _NativeAbortIssue("cancelled", "CANCELLED")
+        if self.closed or self._direct_producer_pending:
+            raise _NativeAbortIssue("unavailable", "LOG_COLLECTOR")
+        if time.monotonic() >= abort["deadline"]:
+            raise _NativeAbortIssue("deadline", "DEADLINE")
+
+    def _native_abort_close(self, abort: dict, owned, *, iterator: bool = False) -> None:
+        """Caller retires the original handle first; never retry an uncertain close."""
+        try:
+            owned.close() if iterator else os.close(owned)
+        except BaseException as exc:
+            abort["close_failed"] = True
+            self.cleanup_errors.append("native abort diagnostic readonly close failed")
+            self._fail("native abort diagnostic readonly cleanup failed")
+            issue = _NativeAbortIssue("unavailable", "IPS_CLOSE", close_failed=True,
+                                      number=exc.errno if isinstance(exc, OSError) else None)
+            self._native_abort_error(abort, issue, "IPS_CLOSE")
+            # Readonly handles are not producers of reserved-identity processes.
+            # Do not alter pending or independently established domain finality.
+            raise issue from exc
+
+    def _native_abort_read(self, abort: dict, path: Path, *, maximum: int,
+                           directory_fd: int | None = None, fresh: bool = False) -> tuple[bytes, tuple]:
+        fd, problem, chunks, total = None, None, [], 0
+        try:
+            self._native_abort_guard(abort)
+            if (directory_fd is not None and (path.is_absolute() or len(path.parts) != 1)
+                    or directory_fd is None and _canonical(path) != path):
+                raise _NativeAbortIssue("unavailable", "IPS_IO")
+            named = os.stat(path, dir_fd=directory_fd, follow_symlinks=False)
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                         dir_fd=directory_fd)
+            before = os.fstat(fd)
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_nlink != 1
+                    or before.st_mode & (0o002 | stat.S_ISUID | stat.S_ISGID)
+                    or before.st_gid == self.gid and before.st_mode & 0o020 or os.get_inheritable(fd)
+                    or _native_file_key(named) != _native_file_key(before)):
+                raise _NativeAbortIssue("unavailable", "IPS_IO")
+            if not 0 <= before.st_size <= maximum:
+                raise _NativeAbortIssue("limit", "LIMIT")
+            if not fresh and not before.st_mode & 0o111:
+                raise _NativeAbortIssue("unavailable", "LOG_ADMISSION")
+            birth = None
+            if fresh:
+                launch, _after, waited = _native_abort_window(abort)
+                now = time.time_ns()
+                birth = getattr(before, "st_birthtime_ns", None)
+                if birth is None:
+                    displayed = getattr(before, "st_birthtime", None)
+                    if type(displayed) not in (int, float) or not math.isfinite(displayed):
+                        raise _NativeAbortIssue("unavailable", "IPS_IO")
+                    birth = int(displayed * 1_000_000_000)
+                if (type(now) is not int or now < waited or type(birth) is not int
+                        or not launch <= birth <= now or not launch <= before.st_mtime_ns <= now):
+                    raise _NativeAbortIssue("unavailable", "IPS_IO")
+            budget_key, budget = ("ips_bytes", 4 * MiB) if fresh else ("binding_bytes", 32 * MiB)
+            if abort[budget_key] + before.st_size > budget:
+                raise _NativeAbortIssue("limit", "LIMIT")
+            while True:
+                self._native_abort_guard(abort)
+                part = os.read(fd, min(65536, maximum - total + 1, budget - abort[budget_key] + 1))
+                if not part:
+                    break
+                total += len(part)
+                abort[budget_key] += len(part)
+                if total > maximum or abort[budget_key] > budget:
+                    raise _NativeAbortIssue("limit", "LIMIT")
+                chunks.append(part)
+            after = os.fstat(fd)
+            final_name = os.stat(path, dir_fd=directory_fd, follow_symlinks=False)
+            if (_native_file_key(before) != _native_file_key(after)
+                    or _native_file_key(before) != _native_file_key(final_name) or total != before.st_size
+                    or fresh and (getattr(before, "st_birthtime_ns", None), getattr(before, "st_birthtime", None)) !=
+                                 (getattr(after, "st_birthtime_ns", None), getattr(after, "st_birthtime", None))):
+                raise _NativeAbortIssue("unavailable", "IPS_IO")
+            self._native_abort_guard(abort)
+        except BaseException as exc:
+            problem = self._native_abort_error(abort, exc, "IPS_IO")
+        if fd is not None:
+            owned, fd = fd, None
+            try:
+                self._native_abort_close(abort, owned)
+            except _NativeAbortIssue as exc:
+                problem = exc
+        if problem is not None:
+            raise problem
+        self._native_abort_guard(abort)
+        return b"".join(chunks), _native_file_key(before)
+
+    def _native_abort_prepare(self, state: dict) -> dict:
+        # Private known admitted images only. This table does not enlarge inputs,
+        # tool roles, native policy or subject authority.
+        abort = {"deadline": min(state["deadline"], self.deadline, time.monotonic() + 10),
+                 "phase": state["phase"], "case": "outside-write-positive", "uid": self.uid,
+                 "pid": None, "wall_before": None, "wall_after": None, "wall_wait": None,
+                 "images": {str(self.python): "python-selected", "/usr/bin/sandbox-exec": "sandbox-exec"},
+                 "bindings": {}, "binding_bytes": 0, "ips_bytes": 0, "candidates": 0,
+                 "attempted": False, "log_attempted": False, "close_failed": False,
+                 "control_root": str(self.control)}
+        try:
+            self._native_abort_guard(abort)
+            prefixes = [prefix for prefix in self.tool_prefixes if _under(self.python, prefix)]
+            original = getattr(sys, "orig_argv", None)
+            if (len(prefixes) != 1 or type(original) is not list or not original
+                    or not isinstance(original[0], str) or not Path(original[0]).is_absolute()):
+                return abort
+            candidate = Path(original[0]).resolve(strict=True)
+            self._native_abort_guard(abort)
+            if candidate in (self.python, Path("/usr/bin/sandbox-exec")) or not _under(candidate, prefixes[0]):
+                return abort
+            raw, identity = self._native_abort_read(abort, candidate, maximum=16 * MiB)
+            abort["bindings"][str(candidate)] = {"identity": identity, "sha256": hashlib.sha256(raw).hexdigest()}
+            abort["images"][str(candidate)] = "python-framework"
+        except BaseException as exc:
+            issue = self._native_abort_error(abort, exc, "IPS_IO")
+            if issue.status in {"deadline", "cancelled"} or issue.close_failed:
+                abort["disabled"] = issue.status
+            # Cleanly unavailable optional framework image is simply omitted.
+        return abort
+
+    def _native_abort_stamp(self, abort: dict | None, key: str) -> None:
+        if abort is None:
+            return
+        try:
+            abort[key] = time.time_ns()
+        except BaseException as exc:
+            abort[key] = None
+            self._native_abort_error(abort, exc, "CLOCK_BINDING")
+
+    def _native_abort_ips(self, abort: dict) -> tuple[str, dict | None]:
+        directory = Path("/Library/Logs/DiagnosticReports")
+        prefixes = tuple(Path(path).name + separator for path in abort["images"] for separator in ("-", "_"))
+        for attempt in range(2):
+            fd = iterator = None
+            problem, matches, issues, contradicted = None, [], [], False
+            try:
+                self._native_abort_guard(abort)
+                named = os.stat(directory, follow_symlinks=False)
+                fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                info = os.fstat(fd)
+                if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o002
+                        or info.st_gid == self.gid and info.st_mode & 0o020
+                        or os.get_inheritable(fd) or _home_node(named) != _home_node(info)
+                        or named.st_mode != info.st_mode):
+                    raise _NativeAbortIssue("unavailable", "IPS_IO")
+                iterator = os.scandir(fd)  # Actual iterator owns a separate duplicated descriptor.
+                for _ in range(256):
+                    self._native_abort_guard(abort)
+                    try:
+                        entry = next(iterator)
+                    except StopIteration:
+                        break
+                    if not (entry.name.endswith(".ips") and entry.name.startswith(prefixes)):
+                        continue
+                    if abort["candidates"] >= 8:
+                        raise _NativeAbortIssue("limit", "LIMIT")
+                    abort["candidates"] += 1
+                    try:
+                        raw, _identity = self._native_abort_read(abort, Path(entry.name), maximum=MiB,
+                                                               directory_fd=fd, fresh=True)
+                        self._native_abort_guard(abort)
+                        record = _native_abort_ips_record(raw, abort)
+                        self._native_abort_guard(abort)
+                        if record is not None:
+                            matches.append(record)
+                        else:
+                            contradicted = True
+                    except _NativeAbortIssue as exc:
+                        if exc.close_failed or exc.status in {"deadline", "cancelled", "limit"}:
+                            raise
+                        issues.append(exc)
+                else:
+                    raise _NativeAbortIssue("limit", "LIMIT")
+                # Log arrival can change directory times, not its original identity/mode.
+                final_name = os.stat(directory, follow_symlinks=False)
+                if _home_node(final_name) != _home_node(info) or final_name.st_mode != info.st_mode:
+                    raise _NativeAbortIssue("unavailable", "IPS_IO")
+            except FileNotFoundError:
+                issues.append(_NativeAbortIssue("absent", "IPS_IO", retry=True))
+            except BaseException as exc:
+                problem = self._native_abort_error(abort, exc, "IPS_IO")
+            if iterator is not None:
+                owned, iterator = iterator, None
+                try:
+                    self._native_abort_close(abort, owned, iterator=True)
+                except _NativeAbortIssue as exc:
+                    problem = exc
+            if fd is not None:
+                owned, fd = fd, None
+                try:
+                    self._native_abort_close(abort, owned)
+                except _NativeAbortIssue as exc:
+                    problem = exc
+            if problem is not None:
+                raise problem
+            self._native_abort_guard(abort)
+            if len(matches) > 1 or matches and issues:
+                return "ambiguous", None
+            if matches:
+                record = matches[0]
+                hint = (record["termination_namespace"] in {"DYLD", "LIBSYSTEM", "SANDBOX", "CODESIGNING"}
+                        or record["fault_image_role"] in {"dyld", "libsystem-secinit"}
+                        or any(role in {"python-fatal-error", "dyld-halt", "libsecinit-initialize"}
+                               for role in record["frame_roles"]))
+                return ("matched" if hint else "matched-no-hint"), record
+            retry = not contradicted and all(issue.retry for issue in issues)
+            status = issues[0].status if issues else "unavailable" if contradicted else "absent"
+            if attempt or not retry:
+                if issues:
+                    self._native_abort_error(abort, issues[0], "IPS_IO")
+                return status, None
+            self._native_abort_guard(abort)
+            time.sleep(min(1.0, max(0.0, abort["deadline"] - time.monotonic())))
+        raise AssertionError("bounded diagnostic scan did not terminate")
+
+    def _native_abort_log(self, abort: dict) -> dict:
+        result = {"log_status": "unavailable"}
+        if abort["log_attempted"]:
+            return result
+        abort["log_attempted"] = True
+        try:
+            self._native_abort_guard(abort)
+            before, _after, waited = _native_abort_window(abort)
+            tool = Path("/usr/bin/log")
+            raw, identity = self._native_abort_read(abort, tool, maximum=16 * MiB)
+            abort["bindings"][str(tool)] = {"identity": identity, "sha256": hashlib.sha256(raw).hexdigest()}
+            import datetime
+            epoch = datetime.datetime(1970, 1, 1)
+            start = (epoch + datetime.timedelta(seconds=before // 1_000_000_000)).strftime("%Y-%m-%d %H:%M:%S+0000")
+            end = (epoch + datetime.timedelta(seconds=(waited + 999_999_999) // 1_000_000_000)).strftime("%Y-%m-%d %H:%M:%S+0000")
+            predicate = f'(process == "kernel" OR process == "sandboxd") AND eventMessage CONTAINS "({abort["pid"]})"'
+            argv = [str(tool), "show", "--style", "json", "--start", start, "--end", end,
+                    "--timezone", "UTC", "--no-pager", "--predicate", predicate]
+            self._native_abort_guard(abort)
+            if identity != _native_file_key(os.stat(tool, follow_symlinks=False)):
+                raise _NativeAbortIssue("unavailable", "LOG_ADMISSION")
+            seconds = min(5.0, abort["deadline"] - time.monotonic())
+            if seconds <= 0:
+                raise _NativeAbortIssue("deadline", "DEADLINE")
+        except BaseException as exc:
+            issue = self._native_abort_error(abort, exc, "LOG_ADMISSION")
+            result["log_status"] = issue.status if issue.status in {"deadline", "cancelled", "limit"} else "unavailable"
+            return result
+        self._direct_producer_pending = True
+        self.domain_finality = False
+        try:
+            collected = _small_command(argv, seconds=seconds, deadline=abort["deadline"])
+        except BaseException as exc:
+            self.cleanup_errors.append("native abort diagnostic metadata collector did not release custody")
+            self._fail("native abort diagnostic metadata collector cleanup failed")
+            # Even waited/code0/bothEOF in exception observations are not a normal
+            # collector return. Preserve actual producer uncertainty until VM disposal.
+            self._native_abort_error(abort, _NativeAbortIssue("collector-error", "LOG_COLLECTOR",
+                number=exc.errno if isinstance(exc, OSError) else None), "LOG_COLLECTOR")
+            return {"log_status": "collector-error"}
+        self._direct_producer_pending = False  # Genuine normal return only; no finality assertion here.
+        result["log_sha256"] = hashlib.sha256(collected).hexdigest()
+        try:
+            self._native_abort_guard(abort)
+            denials = _native_abort_log_records(collected, abort)
+            self._native_abort_guard(abort)
+            result.update({"log_status": "matched-denial" if denials else "no-record", "denials": denials})
+        except BaseException as exc:
+            result["log_status"] = self._native_abort_error(abort, exc, "LOG_PARSE").status
+        return result
+
+    def _native_abort_attach(self, abort: dict, result: CapturedRun) -> dict | None:
+        if (self.platform != "darwin" or abort.get("phase") != "source"
+                or abort.get("case") != "outside-write-positive" or abort["attempted"]
+                or result.returncode != -signal.SIGABRT or not result.waited
+                or not result.stdout_eof or not result.stderr_eof or not result.domain_finality
+                or result.stderr != _NATIVE_WRITE_OUTER or result.timed_out or result.cancelled):
+            return None
+        abort["attempted"] = True
+        row = {"schema": 1, "subject": "source-outside-write-positive", "ips_status": "unavailable",
+               "log_status": "unavailable"}
+        try:
+            self._native_abort_guard(abort)
+            _native_abort_window(abort)
+            status, ips = self._native_abort_ips(abort)
+            row["ips_status"] = status
+            if ips is not None:
+                row["ips"] = ips
+            self._native_abort_guard(abort)
+            if status == "matched":
+                row["log_status"] = "not-needed"
+            else:
+                row.update(self._native_abort_log(abort))
+        except BaseException as exc:
+            issue = self._native_abort_error(abort, exc, "IPS_IO")
+            row["ips_status"] = issue.status
+            row["log_status"] = issue.status if issue.status in {"deadline", "cancelled"} else "unavailable"
+            if not issue.close_failed and issue.status not in {"deadline", "cancelled"}:
+                row.update(self._native_abort_log(abort))
+        if "diagnostic_error" in abort:
+            row["diagnostic_error"] = dict(abort["diagnostic_error"], producer_pending=bool(self._direct_producer_pending))
+        if len(json.dumps(row, separators=(",", ":"), allow_nan=False).encode()) > 4096:
+            return {"schema": 1, "subject": "source-outside-write-positive", "ips_status": "limit",
+                    "log_status": "limit", "diagnostic_error": {"code": "LIMIT",
+                    "producer_pending": bool(self._direct_producer_pending)}}
+        return row
+
     def _native_control_capture(self, state: dict, case: str, argv: list[str], *, policy: Path,
                                 cwd: Path, seconds: int) -> CapturedRun:
         """Only the fixed internal catalogs below construct these arguments."""
@@ -1884,6 +2448,10 @@ class Session:
         self._native_control = {"state": state, "case": case, "argv": argv, "policy": policy,
                                 "cwd": cwd, "seconds": seconds}
         try:
+            abort = None
+            if self.platform == "darwin" and state["phase"] == "source" and case == "outside-write-positive":
+                abort = self._native_abort_prepare(state)
+                self._native_control["abort"] = abort
             result = self._run(argv, cwd=cwd, env={}, seconds=seconds, output_limit=MiB,
                                cpu_seconds=180, latch=True, profile="native-control",
                                absolute_deadline=state["deadline"])
@@ -1892,6 +2460,10 @@ class Session:
             if (case == "outside-write-positive" and (not result.ok
                     or result.stdout != b"MRK_OUTSIDE_WRITE_POSITIVE\n" or result.stderr != _NATIVE_WRITE_STDERR)):
                 row["native_write_startup"] = _native_write_prefix(result.stderr)
+            if abort is not None:
+                attachment = self._native_abort_attach(abort, result)
+                if attachment is not None:
+                    row["native_abort_diagnostic"] = attachment
             if not result.ok and case in _NATIVE_CONTROL_CASES:
                 # Diagnostic-only closed fields; never replace the failed
                 # capture, its original EOF/wait/finality or missing execution.
@@ -2441,6 +3013,8 @@ class Session:
             raise
         if profile in _NATIVE_PROFILES:
             native_state["started"] = True  # A failed acquisition cannot authorize another attempt.
+        abort = (self._native_control.get("abort") if profile == "native-control"
+                 and self._native_control is not None else None)
         self._busy = True
         self.domain_finality = False
         self._run_number += 1
@@ -2474,10 +3048,22 @@ class Session:
             if self.platform == "linux":
                 self._assert_userns_boundary()
             _remaining(cutoff)  # Capture acquisition may not buy a later spawn.
+            self._native_abort_stamp(abort, "wall_before")
+            if abort is not None:
+                # Optional observation cannot authorize a late/cancelled launch.
+                # Recheck the ORIGINAL subject cutoff, never the diagnostic D.
+                _remaining(cutoff)
+                if self.cancelled or self.failure is not None:
+                    cancelled = self.cancelled
+                    fail(self.failure or "command cancellation")
+                    raise SessionError("prelaunch observation found a stopped controller")
             child = subprocess.Popen(command, cwd=cwd, env=child_env, stdin=subprocess.DEVNULL,
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                       close_fds=True, start_new_session=True, **kwargs)
             self._active = child
+            self._native_abort_stamp(abort, "wall_after")
+            if abort is not None:
+                abort["pid"] = child.pid
             if self.platform == "darwin":
                 # Keep both strong references and do not poll/wait first.  Even
                 # an exited original retains its reserved PID/credentials here.
@@ -2490,9 +3076,12 @@ class Session:
                 # A nonzero original wait is latched BEFORE waiting for pipe EOF.
                 code = child.poll()
                 if code is not None:
+                    first_wait = not waited
                     waited = True
                     if code != 0 and failure is None:
                         fail(f"command exited {code}")
+                    if first_wait:
+                        self._native_abort_stamp(abort, "wall_wait")
                 if now >= cutoff and failure is None:
                     timed_out = True
                     fail("command/original aggregate deadline expired")
@@ -2577,7 +3166,10 @@ class Session:
                     errors.append(f"original child stop {type(exc).__name__}")
                 try:
                     code = child.wait(timeout=max(0.0, min(2, final_cutoff - time.monotonic())))
+                    first_wait = not waited
                     waited = True
+                    if first_wait:
+                        self._native_abort_stamp(abort, "wall_wait")
                 except BaseException as exc:
                     errors.append(f"original child wait {type(exc).__name__}")
                 if failure is not None and not cleanup_done:

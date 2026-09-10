@@ -102,6 +102,33 @@ def native_state_double(session, phase="source", *, deadline=1.0):
     return state
 
 
+def native_abort_double(session, *, deadline=1.0):
+    """Private synthetic correlation only; never process or image admission."""
+    wall = 1_789_029_600_000_000_000  # 2026-09-10 08:40:00 UTC, integer nanoseconds.
+    return dict(deadline=deadline, uid=session.uid, pid=4242,
+        images={str(session.python): "python-selected", "/usr/bin/sandbox-exec": "sandbox-exec"},
+        bindings={}, binding_bytes=0, ips_bytes=0, candidates=0, attempted=False, log_attempted=False,
+        close_failed=False, phase="source", case="outside-write-positive",
+        wall_before=wall + 125_000_000, wall_after=wall + 126_000_000, wall_wait=wall + 2_500_000_000)
+
+
+def native_abort_ips_bytes(abort, *, metadata=None, body=None):
+    """Two in-memory JSON objects, with deliberate private redaction canaries."""
+    header = {"bug_type": "309", "timestamp": "2026-09-10 08:40:02.5000 +0000"}
+    report = {"pid": abort["pid"], "userID": abort["uid"],
+        "procPath": next(path for path, role in abort["images"].items() if role == "python-selected"),
+        "procLaunch": "2026-09-10 08:40:00.1255 +0000", "captureTime": "2026-09-10 08:40:02.4999 +0000",
+        "exception": {"type": "EXC_CRASH", "signal": "SIGABRT"},
+        "termination": {"namespace": "LIBSYSTEM", "code": 1}, "faultingThread": 0,
+        "threads": [{"frames": [{"imageIndex": 0, "symbol": "__abort_with_payload"}]}],
+        "usedImages": [{"path": "/usr/lib/system/libsystem_kernel.dylib"}],
+        "asi": {"private": ["/Users/private-user/secrets.txt", "PRIVATE-DIAGNOSTIC-CANARY"]},
+        "environment": {"PRIVATE_TOKEN": "PRIVATE-DIAGNOSTIC-CANARY"}}
+    header.update(metadata or {})
+    report.update(body or {})
+    return (json.dumps(header, separators=(",", ":")) + "\n" + json.dumps(report, separators=(",", ":")) + "\n").encode()
+
+
 class _Stream:
     def __init__(self, rig, index):
         self.rig, self.index = rig, index
@@ -324,7 +351,8 @@ class _Collection:
                 self.module, os=fake_os,
                 subprocess=SimpleNamespace(Popen=self.popen, DEVNULL=-3, PIPE=-1),
                 selectors=SimpleNamespace(DefaultSelector=self.make_selector, EVENT_READ=1),
-                time=SimpleNamespace(monotonic=self.monotonic), signal=SimpleNamespace(),
+                time=SimpleNamespace(monotonic=self.monotonic,
+                    time_ns=lambda: 1_789_029_600_000_000_000 + int(self.now * 1_000_000_000)), signal=SimpleNamespace(),
                 _domain=self.domain, _canonical=Path,
                 _small_command=Mock(side_effect=AssertionError("native metadata is forbidden")),
                 _mac_snapshot=self.mac_snapshot,
@@ -2288,7 +2316,10 @@ class CISandboxPureTests(unittest.TestCase):
                 command = [str(session.python), "-I", "-S", "-B", str(session.entry), "--native-write-control", str(state["outside_write"])]
                 with patch.multiple(self.module, os=SimpleNamespace(), subprocess=SimpleNamespace(), socket=SimpleNamespace(),
                                     signal=SimpleNamespace(), time=SimpleNamespace(monotonic=lambda: 0.0)), \
-                     patch.object(session, "_run", return_value=result) as capture:
+                     patch.object(session, "_run", return_value=result) as capture, \
+                     patch.object(session, "_native_abort_prepare", return_value=native_abort_double(session)), \
+                     patch.object(session, "_native_abort_attach", return_value={"schema": 1,
+                        "subject": "source-outside-write-positive", "ips_status": "unavailable", "log_status": "unavailable"}):
                     self.assertIs(session._native_control_capture(state, "outside-write-positive", command,
                         policy=session.bootstrap / "native-write-positive-source.sb", cwd=state["cwd"], seconds=10), result)
                     self.assertEqual(self.module._native_write_prefix(stderr), expected_prefix)
@@ -2362,6 +2393,988 @@ class CISandboxPureTests(unittest.TestCase):
                 self.assertEqual((idle.call_count, observe.call_count), (int(reached_readback), int(reached_readback)))
                 self.assertEqual(reader.call_count, 2 if case in {"source", "wheel"} else int(case == "wrong-readback"))
                 self.assertEqual(state["control_notes"], {})  # Never accept an incomplete full boundary sequence.
+
+    def test_native_abort_ips_requires_strict_objects_original_identity_precise_time_and_closed_hints(self):
+        session = session_double(self.module, "darwin")
+        abort = native_abort_double(session)
+        wall = 1_789_029_600_000_000_000
+        for text, instant, unit in (("2026-09-10 08:40:00 +0000", wall, 1_000_000_000),
+                ("2026-09-10 08:40:00.1255 +0000", wall + 125_500_000, 100_000),
+                ("2026-09-10 11:10:00.1255 +0230", wall + 125_500_000, 100_000),
+                ("2026-09-10 08:40:00.125500123 +0000", wall + 125_500_123, 1)):
+            with self.subTest(native_abort_timestamp=text):
+                self.assertEqual(self.module._native_abort_time(text), (2 * instant - unit, 2 * instant + 2 * unit))
+        for value in (None, True, 1, "", "2026-09-10 08:40:00", "2026-02-29 08:40:00 +0000",
+                      "2026-09-10 08:40:00 +2500", "2026-09-10 08:40:00.1234567890 +0000", "x" * 129):
+            with self.subTest(native_abort_invalid_timestamp=value), self.assertRaises(self.module._NativeAbortIssue):
+                self.module._native_abort_time(value)
+
+        for bug_type in ("309", 309):
+            raw = native_abort_ips_bytes(abort, metadata={"bug_type": bug_type})
+            observed = self.module._native_abort_ips_record(raw, abort)
+            self.assertEqual(observed, {"sha256": hashlib.sha256(raw).hexdigest(), "image_role": "python-selected",
+                "exception": "EXC_CRASH", "signal": "SIGABRT", "termination_namespace": "LIBSYSTEM", "termination_code": 1,
+                "fault_image_role": "libsystem-kernel", "frame_roles": ["abort-with-payload"]})
+            encoded = json.dumps(observed)
+            self.assertLessEqual(len(encoded.encode()), 4096)
+            for private in ("PRIVATE-DIAGNOSTIC-CANARY", "PRIVATE_TOKEN", "/Users/", str(session.root), str(session.python), "__abort_with_payload"):
+                self.assertNotIn(private, encoded)
+
+        raw = native_abort_ips_bytes(abort)
+        for field, value in (("pid", 4243), ("pid", "4242"), ("pid", True), ("userID", 60002), ("userID", "60001"),
+                ("userID", True), ("procPath", "/unadmitted/bin/python"), ("procPath", None),
+                ("procLaunch", "2026-09-10 08:40:00.0000 +0000"),
+                ("procLaunch", "2026-09-10 08:39:59.9999 +0000"),
+                ("captureTime", "2026-09-10 08:40:03.0000 +0000"),
+                ("captureTime", "2026-09-10 08:39:59.9999 +0000"),
+                ("exception", {"type": "EXC_BAD_ACCESS", "signal": "SIGABRT"}),
+                ("exception", {"type": "EXC_CRASH", "signal": "SIGSEGV"})):
+            with self.subTest(native_abort_identity=(field, value)):
+                self.assertIsNone(self.module._native_abort_ips_record(native_abort_ips_bytes(abort, body={field: value}), abort))
+        for field in ("pid", "userID", "procPath", "procLaunch", "captureTime", "exception"):
+            header, body = [json.loads(line) for line in raw.splitlines()]
+            del body[field]
+            missing = (json.dumps(header) + "\n" + json.dumps(body)).encode()
+            with self.subTest(native_abort_missing_identity=field):
+                self.assertIsNone(self.module._native_abort_ips_record(missing, abort))
+        for bug_type in (True, 309.0, "0309", "309.0", None):
+            with self.subTest(native_abort_noncanonical_bug_type=bug_type):
+                self.assertIsNone(self.module._native_abort_ips_record(native_abort_ips_bytes(abort, metadata={"bug_type": bug_type}), abort))
+
+        # Coarse process time may overlap only through its displayed precision;
+        # a precise contradicting value cannot borrow metadata time or slack.
+        self.assertIsNotNone(self.module._native_abort_ips_record(native_abort_ips_bytes(abort,
+            body={"procLaunch": "2026-09-10 08:40:00 +0000"}), abort))
+        self.assertIsNone(self.module._native_abort_ips_record(native_abort_ips_bytes(abort,
+            metadata={"timestamp": "2026-09-10 08:40:00.1255 +0000"}, body={"procLaunch": None}), abort))
+        self.assertIsNone(self.module._native_abort_ips_record(native_abort_ips_bytes(abort, body={
+            "procLaunch": "2026-09-10 08:40:00.1259 +0000", "captureTime": "2026-09-10 08:40:00.1251 +0000"}), abort))
+        for changes in ({"wall_after": abort["wall_before"] - 1}, {"wall_wait": abort["wall_after"] - 1},
+                        {"wall_wait": abort["wall_before"] + 18_000_000_001}, {"wall_before": float(abort["wall_before"])},
+                        {"wall_before": -1}):
+            with self.subTest(native_abort_clock_binding=changes), self.assertRaises(self.module._NativeAbortIssue) as caught:
+                self.module._native_abort_ips_record(raw, abort | changes)
+            self.assertEqual(caught.exception.code, "CLOCK_BINDING")
+
+        header, body = raw.split(b"\n", 1)
+        malformed = (b"\xff\n{}", header + body, header + b"\n[]", b"[]\n" + body,
+                     raw + b"{}", raw[:-2], raw.replace(b'"bug_type":"309"', b'"bug_type":"309","bug_type":"309"', 1),
+                     raw.replace(b'"pid":4242', b'"pid":4242,"pid":4242', 1),
+                     raw.replace(b'"code":1', b'"code":NaN', 1), raw.replace(b'"code":1', b'"code":Infinity', 1))
+        for value in malformed:
+            with self.subTest(native_abort_strict_json=value[:70]), self.assertRaises(self.module._NativeAbortIssue) as caught:
+                self.module._native_abort_ips_record(value, abort)
+            self.assertEqual(caught.exception.status, "malformed")
+        for value in (raw + b" " * self.module.MiB,
+                      header + b'\n{"ignored":' + b"[" * 65 + b"0" + b"]" * 65 + b"}"):
+            with self.subTest(native_abort_bounded_json=len(value)), self.assertRaises(self.module._NativeAbortIssue) as caught:
+                self.module._native_abort_ips_record(value, abort)
+            self.assertEqual(caught.exception.status, "limit")
+        decoder = Mock(side_effect=AssertionError("depth must be refused before the recursive JSON decoder"))
+        with patch.object(self.module, "json", SimpleNamespace(loads=decoder, JSONDecodeError=json.JSONDecodeError)), \
+             self.assertRaises(self.module._NativeAbortIssue) as caught:
+            self.module._native_abort_json(b"[" * 65 + b"0" + b"]" * 65, maximum=self.module.MiB, depth=64, code="IPS_IO")
+        self.assertEqual(caught.exception.status, "limit")
+        decoder.assert_not_called()
+
+        unknown = self.module._native_abort_ips_record(native_abort_ips_bytes(abort, body={
+            "termination": {"namespace": "PRIVATE-DIAGNOSTIC-CANARY", "code": -1},
+            "threads": [{"frames": [{"imageIndex": 0, "symbol": "PRIVATE-DIAGNOSTIC-CANARY"}]}],
+            "usedImages": [{"path": "/Users/private-user/PRIVATE-DIAGNOSTIC-CANARY"}]}), abort)
+        self.assertEqual((unknown["termination_namespace"], unknown["termination_code"], unknown["fault_image_role"], unknown["frame_roles"]),
+                         ("OTHER", None, "other", []))
+        self.assertNotIn("PRIVATE-DIAGNOSTIC-CANARY", json.dumps(unknown))
+        for changes in ({"faultingThread": True}, {"faultingThread": -1},
+                        {"threads": [{"frames": [{"imageIndex": True}]}]},
+                        {"threads": [{"frames": [{"imageIndex": -1}]}]}):
+            observed = self.module._native_abort_ips_record(native_abort_ips_bytes(abort, body=changes), abort)
+            self.assertEqual(observed["fault_image_role"], "absent")
+        frames = [{"imageIndex": 0, "symbol": "abort"}] * 64 + [{"imageIndex": 0, "symbol": "Py_FatalError"}]
+        observed = self.module._native_abort_ips_record(native_abort_ips_bytes(abort, body={"threads": [{"frames": frames}]}), abort)
+        self.assertEqual(observed["frame_roles"], ["abort"])
+
+    def test_native_abort_log_parser_matches_original_event_not_daemon_and_never_exports_private_text(self):
+        session = session_double(self.module, "darwin")
+        abort = native_abort_double(session)
+        message = "Sandbox: python(4242) deny(1) file-read-data /dev/null"
+        base = {"process": "kernel", "processImagePath": "/kernel", "processID": 0,
+                "timestamp": "2026-09-10 08:40:01.250000+0000", "eventMessage": message,
+                "PRIVATE_TOKEN": "PRIVATE-DIAGNOSTIC-CANARY"}
+        expected = {"operation": "file-read-data", "resource_role": "stdio-device", "public_path": "/dev/null"}
+        for additions in ({}, {"uid": session.uid}, {"userID": session.uid}, {"userIdentifier": session.uid},
+                          {"uid": 0, "userID": 0, "userIdentifier": 0}, {"uid": session.uid + 1},
+                          {"processID": 99999}, {"process": "sandboxd", "processImagePath": "/usr/libexec/sandboxd"}):
+            with self.subTest(native_abort_log_identity=additions):
+                self.assertEqual(self.module._native_abort_log_records(json.dumps([base | additions]).encode(), abort), [expected])
+        self.assertEqual(self.module._native_abort_log_records(json.dumps([base, base]).encode(), abort), [expected])
+        for changes in ({"process": "other"}, {"processImagePath": "/Users/private-user/kernel"},
+                {"processImagePath": "/usr/libexec/sandboxd"},
+                {"eventMessage": message.replace("(4242)", "(42421)"), "processID": 4242, "uid": session.uid},
+                {"eventMessage": message.replace("(4242)", "(04242)")},
+                {"eventMessage": message.replace("python(4242)", "other-python(4242)")},
+                {"eventMessage": "unrelated prefix " + message}, {"eventMessage": message + "\n" + message},
+                {"timestamp": "2026-09-10 08:40:03.000000+0000"},
+                {"timestamp": "2026-09-10 08:40:00.000000+0000"}):
+            with self.subTest(native_abort_unrelated_log=changes):
+                self.assertEqual(self.module._native_abort_log_records(json.dumps([base | changes]).encode(), abort), [])
+        unsupported = dict(base)
+        unsupported.pop("process")
+        unsupported.pop("processImagePath")
+        unsupported["processName"] = "kernel"
+        self.assertEqual(self.module._native_abort_log_records(json.dumps([unsupported]).encode(), abort), [])
+        for resource, role in ((str(session.control / "denied"), "owned-control"),
+                               (str(session.control) + "/../outside", "redacted"),
+                               (str(session.control) + "-not-ours/denied", "redacted")):
+            entry = base | {"eventMessage": f"Sandbox: python(4242) deny(1) file-read-data {resource}"}
+            observed = self.module._native_abort_log_records(json.dumps([entry]).encode(), abort | {"control_root": str(session.control)})
+            self.assertEqual(observed, [{"operation": "file-read-data", "resource_role": role}])
+
+        operations = {"file-read-data", "file-read-metadata", "file-read-xattr", "file-write-data", "file-write-create",
+                      "mach-lookup", "sysctl-read", "process-exec", "other"}
+        resources = {"stdio-device", "admitted-python", "admitted-system-image", "owned-control", "public-os", "redacted"}
+        public = {"/dev/null", "/dev/random", "/dev/urandom", "/dev/fd/0", "/dev/fd/1", "/dev/fd/2",
+                  "/usr/lib/dyld", "/usr/bin/sandbox-exec", "/usr/lib/system/libsystem_secinit.dylib",
+                  "/usr/lib/system/libsystem_kernel.dylib", "/usr/lib/system/libsystem_c.dylib", "/usr/lib/system/libdispatch.dylib"}
+        for operation, resource in (("mach-lookup", "com.apple.PRIVATE-DIAGNOSTIC-CANARY"),
+                ("file-read-data", "/Users/private-user/PRIVATE-DIAGNOSTIC-CANARY"),
+                ("process-exec", str(session.python)), ("private-operation", "/Users/private-user/private"),
+                ("file-read-metadata", "/usr/lib/dyld-extra"),
+                *(("file-read-data", value) for value in sorted(public))):
+            with self.subTest(native_abort_log_redaction=(operation, resource)):
+                entry = base | {"eventMessage": f"Sandbox: python(4242) deny(1) {operation} {resource}"}
+                observed = self.module._native_abort_log_records(json.dumps([entry]).encode(), abort)
+                self.assertEqual(len(observed), 1)
+                row = observed[0]
+                self.assertEqual(set(row), {"operation", "resource_role", *(["public_path"] if resource in public else [])})
+                self.assertEqual(row["operation"], operation if operation in operations else "other")
+                self.assertIn(row["resource_role"], resources)
+                if resource in public:
+                    self.assertEqual(row["public_path"], resource)
+                encoded = json.dumps(observed)
+                self.assertLessEqual(len(encoded.encode()), 4096)
+                for private in ("PRIVATE-DIAGNOSTIC-CANARY", "PRIVATE_TOKEN", "/Users/", str(session.python), str(session.root)):
+                    self.assertNotIn(private, encoded)
+
+        valid = json.dumps([base], separators=(",", ":")).encode()
+        for value in (b"\xff", b"{}", valid + b"[]", valid[:-1], b'[null]',
+                      valid.replace(b'"processID":0', b'"processID":0,"processID":0', 1),
+                      valid.replace(b'"processID":0', b'"processID":NaN', 1)):
+            with self.subTest(native_abort_strict_log_json=value[:70]), self.assertRaises(self.module._NativeAbortIssue) as caught:
+                self.module._native_abort_log_records(value, abort)
+            self.assertEqual(caught.exception.status, "malformed")
+        for value in (json.dumps([base] * 65).encode(), b"[" * 33 + b"0" + b"]" * 33, valid + b" " * (2 * self.module.MiB)):
+            with self.subTest(native_abort_bounded_log=len(value)), self.assertRaises(self.module._NativeAbortIssue) as caught:
+                self.module._native_abort_log_records(value, abort)
+            self.assertEqual(caught.exception.status, "limit")
+        distinct = [base | {"eventMessage": f"Sandbox: python(4242) deny(1) {operation} /dev/null"}
+                    for operation in sorted(operations)]
+        observed = self.module._native_abort_log_records(json.dumps(distinct + distinct).encode(), abort)
+        self.assertEqual(len(observed), 8)
+        self.assertEqual(len({json.dumps(row, sort_keys=True) for row in observed}), 8)
+
+    def test_native_abort_reads_and_scans_bound_and_close_only_original_readonly_resources(self):
+        raw = b"synthetic bounded report bytes\n"
+        wall = 1_789_029_600_000_000_000
+        cases = ("valid", "float-birth", "atime-only", "admin-group-write", "bad-path", "expired", "cancelled", "named-stat-error", "fd-stat-error",
+                 "subject-owner", "subject-group-write", "world-write", "hard-link", "raced-fifo", "inherited", "oversize", "aggregate", "grew", "short",
+                 "renamed", "stale-birth", "future-mtime", "missing-birth", "read-error", "read-and-close-error", "close-error", "close-expired")
+        for case in cases:
+            with self.subTest(native_abort_read=case):
+                session = session_double(self.module, "darwin")
+                session.domain_finality = True
+                session.fail("command exited -6")
+                abort = native_abort_double(session)
+                session.cancelled = case == "cancelled"
+                if case == "aggregate":
+                    abort["ips_bytes"] = 4 * self.module.MiB - len(raw) + 1
+                clock, closed = SimpleNamespace(now=1.0 if case == "expired" else 0.0), []
+                path = Path("nested/report.ips" if case == "bad-path" else "python_report.ips")
+                before = SimpleNamespace(st_dev=7, st_ino=91, st_mode=stat.S_IFREG | 0o600, st_uid=0, st_gid=0,
+                    st_nlink=1, st_size=len(raw), st_mtime_ns=wall + 2_600_000_000, st_ctime_ns=wall + 2_600_000_000,
+                    st_birthtime_ns=wall + 2_600_000_000, st_atime_ns=1)
+                if case == "subject-owner":
+                    before.st_uid = session.uid
+                elif case in {"admin-group-write", "subject-group-write"}:
+                    before.st_mode |= 0o020
+                    before.st_gid = 80 if case == "admin-group-write" else session.gid
+                elif case == "world-write":
+                    before.st_mode |= 0o002
+                elif case == "hard-link":
+                    before.st_nlink = 2
+                elif case == "oversize":
+                    before.st_size += 1
+                elif case == "stale-birth":
+                    before.st_birthtime_ns = wall
+                elif case == "future-mtime":
+                    before.st_mtime_ns = wall + 4_000_000_000
+                elif case in {"float-birth", "missing-birth"}:
+                    del before.st_birthtime_ns
+                    if case == "float-birth":
+                        before.st_birthtime = (wall + 2_600_000_000) / 1_000_000_000
+                named_calls, fd_calls = [], []
+                data = io.BytesIO(raw + b"x" if case == "grew" else raw[:-1] if case == "short" else raw)
+
+                def named(queried, *, dir_fd, follow_symlinks):
+                    self.assertEqual((queried, dir_fd, follow_symlinks), (path, 501, False))
+                    named_calls.append(queried)
+                    if case == "named-stat-error":
+                        raise OSError(errno.EIO, "PRIVATE-DIAGNOSTIC-CANARY")
+                    values = vars(before) | ({"st_ino": 92} if case == "renamed" and len(named_calls) > 1 else {})
+                    return SimpleNamespace(**values)
+
+                def descriptor(fd):
+                    self.assertEqual(fd, 502)
+                    fd_calls.append(fd)
+                    if case == "fd-stat-error":
+                        raise OSError(errno.EIO, "PRIVATE-DIAGNOSTIC-CANARY")
+                    values = vars(before) | ({"st_mode": stat.S_IFIFO | 0o600} if case == "raced-fifo" else {})
+                    if case == "atime-only" and len(fd_calls) > 1:
+                        values["st_atime_ns"] = 999
+                    return SimpleNamespace(**values)
+
+                def read(fd, count):
+                    self.assertEqual(fd, 502)
+                    self.assertTrue(0 < count <= 65536)
+                    if case in {"read-error", "read-and-close-error"}:
+                        raise OSError(errno.EIO, "PRIVATE-DIAGNOSTIC-CANARY")
+                    return data.read(count)
+
+                def close(fd):
+                    self.assertEqual(fd, 502)  # Never the caller's directory FD501.
+                    self.assertNotIn(fd, closed)
+                    closed.append(fd)  # Simulate a close effect before a reported error.
+                    if case in {"close-error", "read-and-close-error"}:
+                        raise OSError(errno.EIO, "PRIVATE-DIAGNOSTIC-CANARY")
+                    if case == "close-expired":
+                        clock.now = 1.0
+
+                opened, reader = Mock(return_value=502), Mock(side_effect=read)
+                constants = {name: getattr(os, name) for name in ("O_RDONLY", "O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC")}
+                with patch.multiple(self.module, os=SimpleNamespace(**constants, open=opened, stat=named, fstat=descriptor,
+                        read=reader, close=close, get_inheritable=lambda _fd: case == "inherited"),
+                        time=SimpleNamespace(monotonic=lambda: clock.now, time_ns=lambda: wall + 3_000_000_000),
+                        subprocess=SimpleNamespace(), socket=SimpleNamespace(), signal=SimpleNamespace(), resource=SimpleNamespace()), \
+                     patch.object(Path, "resolve", side_effect=AssertionError("relative diagnostic read cannot follow a host path")), \
+                     patch.object(Path, "open", side_effect=AssertionError("diagnostic read owns only its fake original descriptor")):
+                    if case in {"valid", "float-birth", "atime-only", "admin-group-write"}:
+                        observed, identity = session._native_abort_read(abort, path, maximum=len(raw), directory_fd=501, fresh=True)
+                        self.assertEqual((observed, identity), (raw, self.module._native_file_key(before)))
+                    else:
+                        with self.assertRaises(self.module._NativeAbortIssue) as caught:
+                            session._native_abort_read(abort, path, maximum=len(raw), directory_fd=501, fresh=True)
+                        if case in {"close-error", "read-and-close-error"}:
+                            self.assertTrue(caught.exception.close_failed)
+                            self.assertEqual(caught.exception.code, "IPS_CLOSE")
+                            with self.assertRaises(self.module._NativeAbortIssue):
+                                session._native_abort_read(abort, path, maximum=len(raw), directory_fd=501, fresh=True)
+                        elif case in {"expired", "close-expired", "cancelled", "aggregate", "grew", "oversize"}:
+                            self.assertEqual(caught.exception.status, "cancelled" if case == "cancelled" else
+                                             "limit" if case in {"aggregate", "grew", "oversize"} else "deadline")
+                acquired = case not in {"bad-path", "expired", "cancelled", "named-stat-error"}
+                if acquired:
+                    opened.assert_called_once_with(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=501)
+                else:
+                    opened.assert_not_called()
+                self.assertEqual(closed, [502] if acquired else [])
+                if case in {"raced-fifo", "fd-stat-error", "subject-owner", "subject-group-write", "world-write", "hard-link", "inherited", "oversize",
+                            "stale-birth", "future-mtime", "missing-birth", "aggregate"} or not acquired:
+                    reader.assert_not_called()
+                self.assertTrue(session.domain_finality)
+                self.assertFalse(session._direct_producer_pending)
+                self.assertEqual(session.failure, "command exited -6")
+                ambiguous_close = case in {"close-error", "read-and-close-error"}
+                self.assertEqual((abort["close_failed"], len(session.cleanup_errors)), (ambiguous_close, int(ambiguous_close)))
+                self.assertNotIn("PRIVATE-DIAGNOSTIC-CANARY", repr(session.cleanup_errors) + repr(abort.get("diagnostic_error")))
+
+        for case in ("valid-binding", "full-aggregate", "non-executable", "individual-bound", "aggregate-bound", "canonical-drift"):
+            with self.subTest(native_abort_image_read=case):
+                session = session_double(self.module, "darwin")
+                abort = native_abort_double(session)
+                image = b"synthetic executable image bytes\n"
+                path = Path("/usr/bin/log")
+                maximum = 16 * self.module.MiB
+                node = SimpleNamespace(st_dev=7, st_ino=91, st_mode=stat.S_IFREG | (0o444 if case == "non-executable" else 0o555),
+                    st_uid=0, st_gid=0, st_nlink=1, st_size=maximum + 1 if case == "individual-bound" else len(image),
+                    st_mtime_ns=1, st_ctime_ns=2)
+                abort["binding_bytes"] = 32 * self.module.MiB - len(image) + int(case == "aggregate-bound") if case in {
+                    "full-aggregate", "aggregate-bound"} else 0
+                data = io.BytesIO(image)
+                opened, closed, reader = Mock(return_value=502), Mock(), Mock(side_effect=lambda fd, count: data.read(count))
+                constants = {name: getattr(os, name) for name in ("O_RDONLY", "O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC")}
+                named = Mock(return_value=node)
+                with patch.multiple(self.module, os=SimpleNamespace(**constants, stat=named, open=opened, close=closed, read=reader,
+                        fstat=Mock(return_value=node), get_inheritable=lambda fd: False), _canonical=Mock(
+                            return_value=Path("/unadmitted/log") if case == "canonical-drift" else path),
+                        subprocess=SimpleNamespace(), socket=SimpleNamespace(), signal=SimpleNamespace(), resource=SimpleNamespace(),
+                        time=SimpleNamespace(monotonic=lambda: 0.0)), \
+                     patch.object(Path, "open", side_effect=AssertionError("image binding must use only an original fake descriptor")):
+                    if case in {"valid-binding", "full-aggregate"}:
+                        observed, identity = session._native_abort_read(abort, path, maximum=maximum)
+                        self.assertEqual((observed, identity), (image, self.module._native_file_key(node)))
+                        self.assertEqual(abort["binding_bytes"], len(image) if case == "valid-binding" else 32 * self.module.MiB)
+                    else:
+                        with self.assertRaises(self.module._NativeAbortIssue) as caught:
+                            session._native_abort_read(abort, path, maximum=maximum)
+                        self.assertEqual(caught.exception.status, "limit" if case in {"individual-bound", "aggregate-bound"} else "unavailable")
+                self.assertEqual(abort["ips_bytes"], 0)  # Optional image bindings do not consume or enlarge the IPS budget.
+                if case == "canonical-drift":
+                    opened.assert_not_called()
+                    closed.assert_not_called()
+                    named.assert_not_called()
+                else:
+                    opened.assert_called_once_with(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=None)
+                    closed.assert_called_once_with(502)
+                if case not in {"valid-binding", "full-aggregate"}:
+                    reader.assert_not_called()
+
+        scan_cases = ("valid", "no-hint", "admin-group-write", "directory-time-only", "absent", "unrelated-name", "arrived",
+            "incomplete-arrived", "incomplete-twice", "contradicted", "malformed", "multiple", "matched-and-malformed",
+            "entries-limit", "candidates-limit", "byte-limit", "subject-owner", "subject-group-write", "world-write",
+            "directory-fifo", "directory-name-drift", "directory-mode-drift", "directory-absent", "directory-stat-error",
+            "directory-fstat-error", "inherited-directory", "iterator-error", "iterator-close-error", "directory-close-error",
+            "file-iterator-directory-close-errors", "sleep-expired", "sleep-cancelled")
+        for case in scan_cases:
+            with self.subTest(native_abort_scan=case):
+                session = session_double(self.module, "darwin")
+                session.domain_finality = True
+                session.fail("command exited -6")
+                abort = native_abort_double(session, deadline=5.0)
+                directory = Path("/Library/Logs/DiagnosticReports")
+                clock = SimpleNamespace(now=0.0)
+                events, passes, named_calls, original_iterators = [], [], [], []
+                record_bytes = native_abort_ips_bytes(abort)
+                node = SimpleNamespace(st_dev=7, st_ino=91, st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_gid=0)
+                if case == "subject-owner":
+                    node.st_uid = session.uid
+                elif case in {"admin-group-write", "subject-group-write"}:
+                    node.st_mode |= 0o020
+                    node.st_gid = 80 if case == "admin-group-write" else session.gid
+                elif case == "world-write":
+                    node.st_mode |= 0o002
+                elif case == "directory-fifo":
+                    node.st_mode = stat.S_IFIFO | 0o755
+                file_node = SimpleNamespace(st_dev=7, st_ino=92, st_mode=stat.S_IFREG | 0o600, st_uid=0, st_gid=0,
+                    st_nlink=1, st_size=len(record_bytes), st_mtime_ns=wall + 2_600_000_000,
+                    st_ctime_ns=wall + 2_600_000_000, st_birthtime_ns=wall + 2_600_000_000)
+                file_data = io.BytesIO(record_bytes)
+
+                def named(queried, *, follow_symlinks, dir_fd=None):
+                    self.assertFalse(follow_symlinks)
+                    if dir_fd is not None:
+                        self.assertEqual((queried, dir_fd), (Path("python_0.ips"), 501))
+                        self.assertEqual(case, "file-iterator-directory-close-errors")
+                        return SimpleNamespace(**vars(file_node))
+                    self.assertEqual(queried, directory)
+                    named_calls.append(queried)
+                    if case == "directory-absent":
+                        raise FileNotFoundError(errno.ENOENT, "PRIVATE-DIAGNOSTIC-CANARY")
+                    if case == "directory-stat-error":
+                        raise OSError(errno.EIO, "PRIVATE-DIAGNOSTIC-CANARY")
+                    change = {"st_mtime_ns": len(named_calls), "st_ctime_ns": len(named_calls)}
+                    if len(named_calls) > 1 and case == "directory-name-drift":
+                        change["st_ino"] = 99
+                    if len(named_calls) > 1 and case == "directory-mode-drift":
+                        change["st_mode"] = stat.S_IFDIR | 0o750
+                    return SimpleNamespace(**(vars(node) | change))
+
+                def opened(queried, flags, *, dir_fd=None):
+                    if dir_fd is not None:
+                        self.assertEqual((queried, dir_fd, flags), (Path("python_0.ips"), 501,
+                            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC))
+                        events.append(("file-open", 502))
+                        return 502
+                    self.assertEqual((queried, flags), (directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC))
+                    passes.append(len(passes) + 1)
+                    events.append(("directory-open", passes[-1]))
+                    return 501
+
+                def descriptor(fd):
+                    if fd == 502:
+                        self.assertEqual(case, "file-iterator-directory-close-errors")
+                        return SimpleNamespace(**vars(file_node))
+                    self.assertEqual(fd, 501)
+                    if case == "directory-fstat-error":
+                        raise OSError(errno.EIO, "PRIVATE-DIAGNOSTIC-CANARY")
+                    return SimpleNamespace(**vars(node))
+
+                def close(fd):
+                    self.assertIn(fd, (501, 502))
+                    event = ("descriptor-close", passes[-1], fd)
+                    self.assertNotIn(event, events)
+                    events.append(event)  # Original resource retired even if close reports an error after effect.
+                    if case == "file-iterator-directory-close-errors" or case == "directory-close-error" and fd == 501:
+                        raise OSError(errno.EIO, "PRIVATE-DIAGNOSTIC-CANARY")
+
+                def scandir(fd):
+                    self.assertEqual(fd, 501)
+                    self.assertEqual(len(original_iterators) + 1, len(passes))
+                    names = ["python_0.ips"]
+                    if case in {"absent", "sleep-expired", "sleep-cancelled"} or case == "arrived" and len(passes) == 1:
+                        names = []
+                    elif case == "unrelated-name":
+                        names = ["other_report.ips", "pythonish_report.ips", "python_report.txt"]
+                    elif case == "entries-limit":
+                        names = ["ignored.txt"] * 257
+                    elif case == "candidates-limit":
+                        names = [f"python_{index}.ips" for index in range(9)]
+                    elif case in {"multiple", "matched-and-malformed"}:
+                        names = ["python_0.ips", "python_1.ips"]
+                    owner, entries = self, iter(names)
+
+                    class OriginalIterator:
+                        def __init__(self):
+                            self.number, self.next_calls, self.closed = len(passes), 0, False
+
+                        def __next__(self):
+                            owner.assertFalse(self.closed)
+                            self.next_calls += 1
+                            owner.assertLessEqual(self.next_calls, 256)
+                            if case == "iterator-error":
+                                raise OSError(errno.EIO, "PRIVATE-DIAGNOSTIC-CANARY")
+                            return SimpleNamespace(name=next(entries))
+
+                        def close(self):
+                            owner.assertFalse(self.closed)
+                            self.closed = True
+                            events.append(("iterator-close", self.number))
+                            if case in {"iterator-close-error", "file-iterator-directory-close-errors"}:
+                                raise OSError(errno.EIO, "PRIVATE-DIAGNOSTIC-CANARY")
+
+                    iterator = OriginalIterator()
+                    original_iterators.append(iterator)  # Independent original handle, not the caller's descriptor501.
+                    return iterator
+
+                def read_report(actual, queried, *, maximum, directory_fd, fresh):
+                    self.assertIs(actual, abort)
+                    self.assertEqual((maximum, directory_fd, fresh), (self.module.MiB, 501, True))
+                    self.assertEqual(len(queried.parts), 1)
+                    if case == "byte-limit":
+                        raise self.module._NativeAbortIssue("limit", "LIMIT")
+                    if case in {"contradicted", "candidates-limit"}:
+                        return native_abort_ips_bytes(abort, body={"pid": 4243}), ()
+                    if case == "malformed" or case == "matched-and-malformed" and queried.name == "python_1.ips":
+                        return b'{"bug_type":"309"}\n[]', ()
+                    if case == "incomplete-twice" or case == "incomplete-arrived" and len(passes) == 1:
+                        return record_bytes[:-2], ()
+                    if case == "no-hint":
+                        return native_abort_ips_bytes(abort, body={"termination": {}, "threads": []}), ()
+                    return record_bytes, ()
+
+                def sleep(seconds):
+                    self.assertTrue(0 < seconds <= 1.0)
+                    events.append(("sleep", seconds))
+                    self.assertEqual(sum(event[0] == "sleep" for event in events), 1)
+                    clock.now = abort["deadline"] if case == "sleep-expired" else clock.now + seconds
+                    session.cancelled = case == "sleep-cancelled"
+
+                constants = {name: getattr(os, name) for name in ("O_RDONLY", "O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC")}
+                fake_reader = Mock(side_effect=read_report)
+                with ExitStack() as stack:
+                    stack.enter_context(patch.multiple(self.module,
+                        os=SimpleNamespace(**constants, stat=named, open=opened, fstat=descriptor, close=close, scandir=scandir,
+                            read=lambda fd, count: file_data.read(count) if fd == 502 else self.fail("unexpected original read descriptor"),
+                            get_inheritable=lambda _fd: case == "inherited-directory"),
+                        time=SimpleNamespace(monotonic=lambda: clock.now, time_ns=lambda: wall + 3_000_000_000, sleep=sleep),
+                        subprocess=SimpleNamespace(), socket=SimpleNamespace(), signal=SimpleNamespace(), resource=SimpleNamespace()))
+                    stack.enter_context(patch.object(Path, "resolve", side_effect=AssertionError("diagnostic scan cannot resolve host paths")))
+                    stack.enter_context(patch.object(Path, "open", side_effect=AssertionError("diagnostic scan may use only original fake descriptors")))
+                    if case != "file-iterator-directory-close-errors":
+                        stack.enter_context(patch.object(session, "_native_abort_read", fake_reader))
+                    expected = {"valid": "matched", "admin-group-write": "matched", "directory-time-only": "matched",
+                        "no-hint": "matched-no-hint", "arrived": "matched", "incomplete-arrived": "matched",
+                        "absent": "absent", "unrelated-name": "absent", "directory-absent": "absent",
+                        "incomplete-twice": "malformed", "contradicted": "unavailable", "malformed": "malformed",
+                        "multiple": "ambiguous", "matched-and-malformed": "ambiguous"}
+                    if case in expected:
+                        status, record = session._native_abort_ips(abort)
+                        self.assertEqual(status, expected[case])
+                        self.assertEqual(record is not None, status in {"matched", "matched-no-hint"})
+                    else:
+                        with self.assertRaises(self.module._NativeAbortIssue) as caught:
+                            session._native_abort_ips(abort)
+                        self.assertEqual(caught.exception.status, "limit" if case in {"entries-limit", "candidates-limit", "byte-limit"}
+                            else "deadline" if case == "sleep-expired" else "cancelled" if case == "sleep-cancelled" else "unavailable")
+                retry_cases = {"absent", "unrelated-name", "arrived", "incomplete-arrived", "incomplete-twice", "directory-absent",
+                               "sleep-expired", "sleep-cancelled"}
+                self.assertEqual(sum(event[0] == "sleep" for event in events), int(case in retry_cases))
+                expected_passes = 0 if case in {"directory-absent", "directory-stat-error"} else 2 if case in retry_cases - {
+                    "sleep-expired", "sleep-cancelled"} else 1
+                self.assertEqual(len(passes), expected_passes)
+                self.assertEqual(sum(event[0] == "descriptor-close" and event[2] == 501 for event in events), expected_passes)
+                for iterator in original_iterators:
+                    self.assertTrue(iterator.closed)
+                    self.assertLess(events.index(("iterator-close", iterator.number)),
+                                    events.index(("descriptor-close", iterator.number, 501)))
+                if case == "entries-limit":
+                    self.assertEqual(original_iterators[0].next_calls, 256)
+                    fake_reader.assert_not_called()
+                if case == "candidates-limit":
+                    self.assertEqual((abort["candidates"], fake_reader.call_count), (8, 8))
+                close_count = 3 if case == "file-iterator-directory-close-errors" else int(case in {"iterator-close-error", "directory-close-error"})
+                self.assertEqual((abort["close_failed"], len(session.cleanup_errors)), (bool(close_count), close_count))
+                if close_count:
+                    self.assertNotIn("sleep", [event[0] for event in events])
+                    self.assertEqual(abort["diagnostic_error"]["code"], "IPS_CLOSE")
+                self.assertTrue(session.domain_finality)
+                self.assertFalse(session._direct_producer_pending)
+                self.assertEqual(session.failure, "command exited -6")
+                self.assertNotIn("PRIVATE-DIAGNOSTIC-CANARY", repr(session.cleanup_errors) + repr(abort.get("diagnostic_error")))
+
+    def test_native_abort_binding_and_fixed_log_collector_never_renew_clocks_or_release_ambiguous_producers(self):
+        framework = Path("/fixture-tools/python/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python")
+        image = b"synthetic admitted parent image, not an executable fixture\n"
+        for case in ("framework", "canonical-framework", "selected", "relative", "absent", "foreign-provider", "ambiguous-provider",
+                     "missing", "read-error", "read-limit", "readonly-close-error", "binding-expired", "gate-shorter", "session-shorter"):
+            with self.subTest(native_abort_private_binding=case):
+                session = session_double(self.module, "darwin")
+                session.domain_finality = True
+                session.deadline = 26.0 if case == "session-shorter" else 100.0
+                state = native_state_double(session, deadline=25.0 if case == "gate-shorter" else 50.0)
+                state["files"] = {Path("/fixed/immutable-input"): {"sha256": "0" * 64}}
+                state["tools"] = {"synthetic-fixed-role": {"sha256": "1" * 64}}
+                original_files, original_tools = repr(state["files"]), repr(state["tools"])
+                original_policy = state["policy"]
+                if case == "ambiguous-provider":
+                    session.tool_prefixes = (*session.tool_prefixes, Path("/fixture-tools"))
+                origin = [] if case == "absent" else ["relative-python"] if case == "relative" else [
+                    str(session.python) if case == "selected" else "/fixture-launch/Python" if case == "canonical-framework" else
+                    "/fixture-tools/ruby/Python" if case == "foreign-provider" else str(framework)]
+                canonical = session.python if case == "selected" else Path(origin[0]) if case == "foreign-provider" else framework
+                clock = SimpleNamespace(now=20.0)
+
+                def read(abort, path, *, maximum):
+                    self.assertEqual((path, maximum), (framework, 16 * self.module.MiB))
+                    self.assertEqual(abort["deadline"], min(state["deadline"], session.deadline, 30.0))
+                    self.assertEqual((state["files"], state["tools"]),
+                        ({Path("/fixed/immutable-input"): {"sha256": "0" * 64}}, {"synthetic-fixed-role": {"sha256": "1" * 64}}))
+                    if case == "binding-expired":
+                        clock.now = abort["deadline"]
+                        session._native_abort_guard(abort)
+                    if case == "read-error":
+                        raise OSError(errno.EIO, "PRIVATE-DIAGNOSTIC-CANARY")
+                    if case == "read-limit":
+                        raise self.module._NativeAbortIssue("limit", "LIMIT")
+                    if case == "readonly-close-error":
+                        abort["close_failed"] = True
+                        raise self.module._NativeAbortIssue("unavailable", "IPS_CLOSE", close_failed=True)
+                    return image, ("private-original-image-identity",)
+
+                resolver = Mock(return_value=canonical,
+                    side_effect=FileNotFoundError(errno.ENOENT, "PRIVATE-DIAGNOSTIC-CANARY") if case == "missing" else None)
+                reader = Mock(side_effect=read)
+                with patch.multiple(self.module, sys=SimpleNamespace(orig_argv=origin), os=SimpleNamespace(),
+                        subprocess=SimpleNamespace(), socket=SimpleNamespace(), signal=SimpleNamespace(), resource=SimpleNamespace(),
+                        time=SimpleNamespace(monotonic=lambda: clock.now)), \
+                     patch.object(Path, "resolve", resolver), \
+                     patch.object(Path, "open", side_effect=AssertionError("private image fixture may not open host files")), \
+                     patch.object(session, "_native_abort_read", reader):
+                    abort = session._native_abort_prepare(state)
+                self.assertEqual(abort["deadline"], min(state["deadline"], session.deadline, 30.0))
+                self.assertEqual((state["deadline"], session.deadline),
+                    (25.0 if case == "gate-shorter" else 50.0, 26.0 if case == "session-shorter" else 100.0))
+                accepted = case in {"framework", "canonical-framework", "gate-shorter", "session-shorter"}
+                self.assertEqual(abort["images"], {str(session.python): "python-selected", "/usr/bin/sandbox-exec": "sandbox-exec"}
+                    | ({str(framework): "python-framework"} if accepted else {}))
+                self.assertEqual(abort["bindings"], {str(framework): {"identity": ("private-original-image-identity",),
+                    "sha256": hashlib.sha256(image).hexdigest()}} if accepted else {})
+                self.assertEqual((repr(state["files"]), repr(state["tools"]), state["policy"]),
+                                 (original_files, original_tools, original_policy))
+                if case in {"absent", "relative", "ambiguous-provider"}:
+                    resolver.assert_not_called()
+                else:
+                    resolver.assert_called_once_with(strict=True)
+                self.assertEqual(reader.call_count, int(case not in {"selected", "relative", "absent", "foreign-provider", "ambiguous-provider", "missing"}))
+                self.assertEqual((abort.get("disabled"), session._direct_producer_pending, session.domain_finality),
+                    ("deadline" if case == "binding-expired" else "unavailable" if case == "readonly-close-error" else None, False, True))
+                self.assertNotIn("PRIVATE-DIAGNOSTIC-CANARY", repr(abort.get("diagnostic_error")))
+
+        for case in ("valid", "five-second-cap", "no-record", "malformed", "record-limit", "reader-error", "readonly-close-error", "stat-error",
+                     "identity-drift", "expired-before", "expired-binding", "expired-return", "cancelled-before", "cancelled-return",
+                     "collector-error", "successful-observation-but-raised", "collector-interrupt"):
+            with self.subTest(native_abort_root_collector=case):
+                session = session_double(self.module, "darwin")
+                session.domain_finality = True
+                session.fail("command exited -6")
+                abort = native_abort_double(session, deadline=10.0 if case == "five-second-cap" else 4.0)
+                session.cancelled = case == "cancelled-before"
+                clock = SimpleNamespace(now=4.0 if case == "expired-before" else 0.0)
+                tool = Path("/usr/bin/log")
+                node = SimpleNamespace(st_dev=7, st_ino=91, st_mode=stat.S_IFREG | 0o555, st_uid=0, st_gid=0, st_nlink=1,
+                    st_size=len(image), st_mtime_ns=1, st_ctime_ns=2)
+                identity = self.module._native_file_key(node)
+                record = {"process": "sandboxd", "processImagePath": "/usr/libexec/sandboxd", "processID": 27, "uid": 0,
+                    "timestamp": "2026-09-10 08:40:01.250000+0000",
+                    "eventMessage": "Sandbox: python(4242) deny(1) file-read-data /dev/null",
+                    "environment": "PRIVATE-DIAGNOSTIC-CANARY"}
+                raw = b"[]" if case == "no-record" else b"not JSON" if case == "malformed" else json.dumps(
+                    [record] * (65 if case == "record-limit" else 1)).encode()
+                original = KeyboardInterrupt("PRIVATE-DIAGNOSTIC-CANARY") if case == "collector-interrupt" else ExceptionGroup(
+                    "PRIVATE-DIAGNOSTIC-CANARY", [OSError(errno.EIO, "PRIVATE-DIAGNOSTIC-CANARY")])
+                if case == "successful-observation-but-raised":
+                    original._ci_observation = {"returncode": 0, "waited": True, "stdout_eof": True, "stderr_eof": True,
+                                               "stdout_bytes": len(raw), "stderr_bytes": 0, "error_count": 1}
+
+                def read(actual, path, *, maximum):
+                    self.assertIs(actual, abort)
+                    self.assertEqual((path, maximum), (tool, 16 * self.module.MiB))
+                    self.assertFalse(session._direct_producer_pending)
+                    if case == "reader-error":
+                        raise OSError(errno.EIO, "PRIVATE-DIAGNOSTIC-CANARY")
+                    if case == "readonly-close-error":
+                        abort["close_failed"] = True
+                        raise self.module._NativeAbortIssue("unavailable", "IPS_CLOSE", close_failed=True)
+                    if case == "expired-binding":
+                        clock.now = abort["deadline"]
+                    return image, identity
+
+                def named(path, *, follow_symlinks):
+                    self.assertEqual((path, follow_symlinks), (tool, False))
+                    if case == "stat-error":
+                        raise OSError(errno.EIO, "PRIVATE-DIAGNOSTIC-CANARY")
+                    return SimpleNamespace(**(vars(node) | ({"st_ino": 92} if case == "identity-drift" else {})))
+
+                def collect(argv, *, seconds, deadline):
+                    self.assertEqual(argv, ["/usr/bin/log", "show", "--style", "json", "--start", "2026-09-10 08:40:00+0000",
+                        "--end", "2026-09-10 08:40:03+0000", "--timezone", "UTC", "--no-pager", "--predicate",
+                        '(process == "kernel" OR process == "sandboxd") AND eventMessage CONTAINS "(4242)"'])
+                    self.assertEqual((seconds, deadline), (min(5.0, abort["deadline"]), abort["deadline"]))
+                    self.assertTrue(session._direct_producer_pending)  # Custody is published BEFORE entering root collector.
+                    self.assertFalse(session.domain_finality)
+                    self.assertEqual(session.failure, "command exited -6")
+                    if case in {"collector-error", "successful-observation-but-raised", "collector-interrupt"}:
+                        raise original
+                    if case == "expired-return":
+                        clock.now = abort["deadline"]
+                    if case == "cancelled-return":
+                        session.cancelled = True
+                    return raw
+
+                collector, reader, domain = Mock(side_effect=collect), Mock(side_effect=read), Mock(return_value={})
+                with patch.multiple(self.module, os=SimpleNamespace(stat=named), subprocess=SimpleNamespace(),
+                        socket=SimpleNamespace(), signal=SimpleNamespace(), resource=SimpleNamespace(), _small_command=collector,
+                        _domain=domain, time=SimpleNamespace(monotonic=lambda: clock.now)), \
+                     patch.object(session, "_native_abort_read", reader), \
+                     patch.object(Path, "open", side_effect=AssertionError("collector fixture cannot open host files")), \
+                     patch.object(Path, "resolve", side_effect=AssertionError("bound collector fixture cannot resolve host paths")):
+                    result = session._native_abort_log(abort)
+                    pending = case in {"collector-error", "successful-observation-but-raised", "collector-interrupt"}
+                    invoked = case in {"valid", "five-second-cap", "no-record", "malformed", "record-limit", "expired-return", "cancelled-return"} or pending
+                    expected_status = "collector-error" if pending else {
+                        "valid": "matched-denial", "five-second-cap": "matched-denial", "no-record": "no-record", "malformed": "malformed", "record-limit": "limit",
+                        "expired-before": "deadline", "expired-binding": "deadline", "expired-return": "deadline",
+                        "cancelled-before": "cancelled", "cancelled-return": "cancelled"}.get(case, "unavailable")
+                    self.assertEqual(result["log_status"], expected_status)
+                    self.assertEqual(collector.call_count, int(invoked))
+                    self.assertEqual((session._direct_producer_pending, session.domain_finality), (pending, not invoked))
+                    self.assertEqual(result.get("log_sha256"), hashlib.sha256(raw).hexdigest() if invoked and not pending else None)
+                    if case in {"valid", "five-second-cap"}:
+                        self.assertEqual(result["denials"], [{"operation": "file-read-data", "resource_role": "stdio-device", "public_path": "/dev/null"}])
+                    reads_before, calls_before = reader.call_count, collector.call_count
+                    self.assertEqual(session._native_abort_log(abort), {"log_status": "unavailable"})
+                    self.assertEqual((reader.call_count, collector.call_count), (reads_before, calls_before))
+                    if pending:
+                        self.assertEqual(abort["diagnostic_error"], {"code": "LOG_COLLECTOR", "producer_pending": True})
+                        self.assertIn("native abort diagnostic metadata collector did not release custody", session.cleanup_errors)
+                        with self.assertRaises(self.module.SessionError):
+                            session.ensure_idle()
+                        with self.assertRaises(self.module.SessionError):
+                            session.close(keep_timer=True)
+                        self.assertTrue(session.closed)
+                        self.assertTrue(session._direct_producer_pending)
+                        self.assertFalse(session.domain_finality)
+                        self.assertIn("close did not establish reserved-identity finality", session.cleanup_errors)
+                    domain.assert_not_called()  # Neither a receipt nor an empty census can retire an uncertain root producer.
+                self.assertEqual((session.failure, session.deadline, abort["deadline"]),
+                                 ("command exited -6", 100.0, 10.0 if case == "five-second-cap" else 4.0))
+                self.assertNotIn("PRIVATE-DIAGNOSTIC-CANARY", json.dumps(result) + repr(session.cleanup_errors) + repr(abort.get("diagnostic_error")))
+                if case == "successful-observation-but-raised":
+                    self.assertEqual(original._ci_observation["returncode"], 0)
+                    self.assertTrue(original._ci_observation["waited"] and original._ci_observation["stdout_eof"] and original._ci_observation["stderr_eof"])
+
+    def test_native_abort_attachment_and_original_capture_keep_failure_custody_and_each_original_deadline(self):
+        session = session_double(self.module, "darwin")
+        template_abort = native_abort_double(session)
+        template = self.module.CapturedRun(b"", self.module._NATIVE_WRITE_OUTER, -6, True, True, True, True,
+            False, False, 0.15, "command exited -6", (), (0, len(self.module._NATIVE_WRITE_OUTER)))
+        ips_record = self.module._native_abort_ips_record(native_abort_ips_bytes(template_abort), template_abort)
+        for field, changed in (("platform", "linux"), ("phase", "wheel"), ("case", "outside-read-positive"), ("attempted", True),
+                ("returncode", -9), ("returncode", 0), ("waited", False), ("stdout_eof", False), ("stderr_eof", False),
+                ("domain_finality", False), ("timed_out", True), ("cancelled", True),
+                ("stderr", self.module._NATIVE_WRITE_STDERR), ("stderr", b"")):
+            with self.subTest(native_abort_ineligible=(field, changed)):
+                session = session_double(self.module, "darwin")
+                session.platform = changed if field == "platform" else "darwin"
+                session.fail("command exited -6")
+                abort = native_abort_double(session)
+                if field in {"phase", "case", "attempted"}:
+                    abort[field] = changed
+                result = dataclasses.replace(template, **{field: changed}) if field not in {"platform", "phase", "case", "attempted"} else template
+                ips, log = Mock(side_effect=AssertionError("ineligible capture must not scan")), Mock(side_effect=AssertionError("ineligible capture must not collect"))
+                with patch.multiple(self.module, os=SimpleNamespace(), subprocess=SimpleNamespace(), socket=SimpleNamespace(),
+                        signal=SimpleNamespace(SIGABRT=6), resource=SimpleNamespace(),
+                        time=SimpleNamespace(monotonic=Mock(side_effect=AssertionError("ineligible capture has no new cutoff")))), \
+                     patch.object(session, "_native_abort_ips", ips), patch.object(session, "_native_abort_log", log):
+                    self.assertIsNone(session._native_abort_attach(abort, result))
+                self.assertEqual(abort["attempted"], field == "attempted")
+                ips.assert_not_called()
+                log.assert_not_called()
+
+        for case in ("matched", "matched-no-hint", "absent", "malformed", "io-error", "readonly-close-error", "expired-before",
+                     "expired-after-scan", "cancelled-before", "cancelled-after-scan", "bad-clock", "attachment-limit"):
+            with self.subTest(native_abort_failure_attachment=case):
+                session = session_double(self.module, "darwin")
+                session.fail("command exited -6")
+                session.domain_finality = True
+                session.persisted_bytes = sum(template.persisted)
+                abort = native_abort_double(session)
+                if case == "bad-clock":
+                    abort["wall_after"] = abort["wall_before"] - 1
+                session.cancelled = case == "cancelled-before"
+                clock = SimpleNamespace(now=1.0 if case == "expired-before" else 0.0)
+
+                def scan(actual):
+                    self.assertIs(actual, abort)
+                    if case == "io-error":
+                        raise OSError(errno.EIO, "PRIVATE-DIAGNOSTIC-CANARY")
+                    if case == "readonly-close-error":
+                        abort["close_failed"] = True
+                        raise self.module._NativeAbortIssue("unavailable", "IPS_CLOSE", close_failed=True, number=errno.EIO)
+                    if case == "expired-after-scan":
+                        clock.now = abort["deadline"]
+                    if case == "cancelled-after-scan":
+                        session.cancelled = True
+                    if case in {"matched", "expired-after-scan", "cancelled-after-scan", "attachment-limit"}:
+                        return "matched", ips_record | ({"frame_roles": ["abort"] * 1024} if case == "attachment-limit" else {})
+                    return case, ips_record if case == "matched-no-hint" else None
+
+                log_result = {"log_status": "matched-denial", "log_sha256": "a" * 64,
+                    "denials": [{"operation": "file-read-data", "resource_role": "stdio-device", "public_path": "/dev/null"}]}
+                ips, log = Mock(side_effect=scan), Mock(return_value=log_result)
+                with patch.multiple(self.module, os=SimpleNamespace(), subprocess=SimpleNamespace(), socket=SimpleNamespace(),
+                        signal=SimpleNamespace(SIGABRT=6), resource=SimpleNamespace(), time=SimpleNamespace(monotonic=lambda: clock.now)), \
+                     patch.object(session, "_native_abort_ips", ips), patch.object(session, "_native_abort_log", log):
+                    attached = session._native_abort_attach(abort, template)
+                    self.assertIsNone(session._native_abort_attach(abort, template))
+                self.assertTrue(abort["attempted"])
+                self.assertEqual(ips.call_count, int(case not in {"expired-before", "cancelled-before", "bad-clock"}))
+                self.assertEqual(log.call_count, int(case in {"matched-no-hint", "absent", "malformed", "io-error", "bad-clock"}))
+                expected_status = "limit" if case == "attachment-limit" else "deadline" if case.startswith("expired-") else (
+                    "cancelled" if case.startswith("cancelled-") else "unavailable" if case in {"io-error", "readonly-close-error", "bad-clock"} else case)
+                self.assertEqual(attached["ips_status"], expected_status)
+                if case == "matched":
+                    self.assertEqual(attached["log_status"], "not-needed")
+                    self.assertEqual(attached["ips"], ips_record)
+                if case == "attachment-limit":
+                    self.assertEqual(attached, {"schema": 1, "subject": "source-outside-write-positive", "ips_status": "limit",
+                        "log_status": "limit", "diagnostic_error": {"code": "LIMIT", "producer_pending": False}})
+                self.assertLessEqual(set(attached), {"schema", "subject", "ips_status", "ips", "log_status", "log_sha256", "denials", "diagnostic_error"})
+                self.assertEqual((attached["schema"], attached["subject"]), (1, "source-outside-write-positive"))
+                serialized = json.dumps(attached, separators=(",", ":"), allow_nan=False)
+                self.assertLessEqual(len(serialized.encode()), 4096)
+                for private in ("PRIVATE-DIAGNOSTIC-CANARY", "/Users/", "PRIVATE_TOKEN", str(session.root), str(session.python)):
+                    self.assertNotIn(private, serialized)
+                self.assertEqual((session.failure, session.persisted_bytes, session.domain_finality, session._direct_producer_pending),
+                    ("command exited -6", sum(template.persisted), True, False))
+                self.assertEqual((template.returncode, template.waited, template.stdout_eof, template.stderr_eof,
+                    template.domain_finality, template.timed_out, template.cancelled, template.duration, template.primary_error,
+                    template.stdout, template.stderr, template.persisted),
+                    (-6, True, True, True, True, False, False, 0.15, "command exited -6", b"", self.module._NATIVE_WRITE_OUTER,
+                     (0, len(self.module._NATIVE_WRITE_OUTER))))
+
+        # Real original control/capture/note/attachment integration. Only effect
+        # providers are doubled; no replay, probe or native process is invoked.
+        for case in ("attached", "diagnostic-expired-before-capture", "diagnostic-expired-during-capture", "held-eof", "original-timeout"):
+            with self.subTest(native_abort_original_lifecycle=case):
+                session = session_double(self.module, "darwin")
+                state = native_state_double(session, deadline=50.0)
+                state["prepared"], session._native_preparing = False, "source"
+                rig = _Collection(self.module, session, stdout=(), stderr=(self.module._NATIVE_WRITE_OUTER,))
+                rig.exitcode, rig.snapshot_rows = -6, {}
+                if case == "held-eof":
+                    rig.hold = {1}
+                original_prepare, original_stamp = session._native_abort_prepare, session._native_abort_stamp
+                originals, stamps, observed_cutoffs = [], [], []
+
+                def prepare(actual):
+                    self.assertIs(actual, state)
+                    abort = original_prepare(actual)
+                    originals.append(abort)
+                    if case in {"diagnostic-expired-before-capture", "held-eof", "original-timeout"}:
+                        rig.now = abort["deadline"] + 0.1
+                    elif case == "diagnostic-expired-during-capture":
+                        rig.now = abort["deadline"] - 0.05
+                    rig.exit_at = rig.now + (50.0 if case == "original-timeout" else 0.08)
+                    return abort
+
+                def stamp(actual, key):
+                    self.assertIs(actual, originals[0])
+                    stamps.append((key, rig.now, session._active, session.failure))
+                    rig.events.append(("abort-stamp", key))
+                    if key == "wall_after":
+                        self.assertIs(session._active, rig.child)  # Original custody precedes optional wall metadata.
+                    if key == "wall_wait":
+                        self.assertEqual(session.failure, "command/original aggregate deadline expired" if case == "original-timeout" else "command exited -6")
+                    return original_stamp(actual, key)
+
+                def credentials(pid, uid, gid, *, deadline):
+                    self.assertEqual((pid, uid, gid), (rig.child.pid, session.uid, session.gid))
+                    self.assertIs(session._active, rig.child)
+                    observed_cutoffs.append(deadline)
+
+                ips = Mock(return_value=("matched", ips_record))
+                log = Mock(side_effect=AssertionError("expired or sufficient attachment must not invoke any collector"))
+                command = [str(session.python), "-I", "-S", "-B", str(session.entry), "--native-write-control", str(state["outside_write"])]
+                with rig.scope(), \
+                     patch.multiple(self.module, signal=SimpleNamespace(SIGABRT=6), sys=SimpleNamespace(orig_argv=[]),
+                                    _observe_original_credentials=credentials, socket=SimpleNamespace(), resource=SimpleNamespace()), \
+                     patch.object(Path, "resolve", side_effect=AssertionError("fake native control cannot resolve host paths")), \
+                     patch.object(session, "_native_check_inputs", Mock()), \
+                     patch.object(session, "_native_abort_prepare", side_effect=prepare), \
+                     patch.object(session, "_native_abort_stamp", side_effect=stamp), \
+                     patch.object(session, "_native_abort_ips", ips), patch.object(session, "_native_abort_log", log):
+                    result = session._native_control_capture(state, "outside-write-positive", command,
+                        policy=session.bootstrap / "native-write-positive-source.sb", cwd=state["cwd"], seconds=10)
+                self.assertEqual(len(originals), 1)
+                abort = originals[0]
+                self.assertEqual([row[0] for row in stamps], ["wall_before", "wall_after", "wall_wait"])
+                self.assertEqual(abort["pid"], rig.child.pid)
+                self.assertTrue(all(type(abort[key]) is int for key in ("wall_before", "wall_after", "wall_wait")))
+                self.assertLessEqual(abort["wall_before"], abort["wall_after"])
+                self.assertLessEqual(abort["wall_after"], abort["wall_wait"])
+                self.assertEqual(sum(event[0] == "popen" for event in rig.events), 1)
+                self.assertEqual(sum(event[0] == "wait-original" for event in rig.events), 1)
+                before_index = rig.events.index(("abort-stamp", "wall_before"))
+                after_index = rig.events.index(("abort-stamp", "wall_after"))
+                spawn_index = next(i for i, event in enumerate(rig.events) if event[0] == "popen")
+                self.assertLess(before_index, spawn_index)
+                self.assertLess(spawn_index, after_index)
+                self.assertEqual(len(observed_cutoffs), 1)
+                original_cutoff = observed_cutoffs[0]
+                self.assertGreater(original_cutoff, abort["deadline"])
+                if case != "attached":
+                    self.assertGreater(original_cutoff, abort["deadline"] + 9)
+                self.assertAlmostEqual(original_cutoff - stamps[0][1], 10.0, delta=0.005)
+                cleanup_cutoffs = [event[1] for event in rig.events if event[0] == "cleanup-deadline"]
+                self.assertEqual(len(cleanup_cutoffs), 1)
+                self.assertAlmostEqual(cleanup_cutoffs[0] - stamps[-1][1], 8.0, delta=0.1)
+                self.assertLessEqual(cleanup_cutoffs[0], state["deadline"])
+                self.assertEqual((state["deadline"], session.deadline), (50.0, 100.0))
+                self.assertTrue(result.waited and result.stdout_eof)
+                self.assertEqual(result.domain_finality, case != "held-eof")
+                self.assertEqual(result.stderr_eof, case != "held-eof")
+                self.assertEqual((result.timed_out, result.cancelled), (case == "original-timeout", False))
+                self.assertEqual((result.returncode, result.primary_error), (-15, "command/original aggregate deadline expired")
+                    if case == "original-timeout" else (-6, "command exited -6"))
+                self.assertEqual((result.stdout, result.stderr, result.persisted, session.persisted_bytes),
+                    (b"", self.module._NATIVE_WRITE_OUTER, (0, len(self.module._NATIVE_WRITE_OUTER)), len(self.module._NATIVE_WRITE_OUTER)))
+                self.assertEqual((bytes(rig.captures[100]), bytes(rig.captures[101])), (b"", self.module._NATIVE_WRITE_OUTER))
+                self.assertFalse(result.ok)
+                self.assertEqual(session.failure, result.primary_error)
+                self.assertIsNone(session._native_control)
+                self.assertIsNone(session._active)
+                self.assertFalse(session._busy or session._direct_producer_pending)
+                row = state["control_notes"]["outside-write-positive"]
+                self.assertFalse(row["ok"] or row["subject_ok"])
+                self.assertEqual(row["native_write_startup"], "outer")
+                self.assertEqual(row["persisted"], list(result.persisted))
+                attachment = row.get("native_abort_diagnostic")
+                if case in {"held-eof", "original-timeout"}:
+                    self.assertIsNone(attachment)
+                    self.assertFalse(abort["attempted"])
+                else:
+                    self.assertEqual(attachment["ips_status"], "matched" if case == "attached" else "deadline")
+                    self.assertEqual(attachment["log_status"], "not-needed" if case == "attached" else "deadline")
+                    self.assertTrue(abort["attempted"])
+                self.assertEqual(ips.call_count, int(case == "attached"))
+                log.assert_not_called()
+
+        # The newly added optional wall snapshot is a fallible pre-spawn seam.
+        # Only the ORIGINAL command cutoff/cancellation/failure may veto the
+        # subject here; diagnostic-only expiry is separately covered above.
+        for case in ("wall-interrupt", "wall-cancellation", "wall-first-failure", "original-cutoff", "wall-interrupt-close-error"):
+            with self.subTest(native_abort_pre_spawn=case):
+                session = session_double(self.module, "darwin")
+                state = native_state_double(session, deadline=50.0)
+                state["prepared"], session._native_preparing = False, "source"
+                rig = _Collection(self.module, session, stdout=(), stderr=())
+                if case == "wall-interrupt-close-error":
+                    rig.fd_close_errors = {0}
+                original_prepare = session._native_abort_prepare
+                originals = []
+
+                def prepare(actual):
+                    self.assertIs(actual, state)
+                    abort = original_prepare(actual)
+                    originals.append(abort)
+                    return abort
+
+                def wall_snapshot():
+                    self.assertEqual(len(rig.opened), 2)  # Original capture files are already owned.
+                    self.assertIsNone(session._active)
+                    self.assertFalse(any(event[0] == "popen" for event in rig.events))
+                    if case in {"wall-interrupt", "wall-interrupt-close-error"}:
+                        raise KeyboardInterrupt("synthetic optional wall snapshot interrupted")
+                    if case == "wall-cancellation":
+                        session.cancelled = True
+                    elif case == "wall-first-failure":
+                        session.fail("synthetic first failure during optional wall snapshot")
+                    elif case == "original-cutoff":
+                        rig.now += 11.0  # Past original start+10, still inside unchanged gate50/Session100.
+                    return 1_789_029_600_000_000_000 + int(rig.now * 1_000_000_000)
+
+                snapshot = Mock(side_effect=wall_snapshot)
+                credentials, ips, log = Mock(), Mock(), Mock()
+                command = [str(session.python), "-I", "-S", "-B", str(session.entry), "--native-write-control", str(state["outside_write"])]
+                with rig.scope(), \
+                     patch.multiple(self.module, signal=SimpleNamespace(SIGABRT=6), sys=SimpleNamespace(orig_argv=[]),
+                                    _observe_original_credentials=credentials, socket=SimpleNamespace(), resource=SimpleNamespace()), \
+                     patch.object(self.module.time, "time_ns", snapshot), \
+                     patch.object(Path, "resolve", side_effect=AssertionError("fake pre-spawn control cannot resolve host paths")), \
+                     patch.object(session, "_native_check_inputs", Mock()), \
+                     patch.object(session, "_native_abort_prepare", side_effect=prepare), \
+                     patch.object(session, "_native_abort_ips", ips), patch.object(session, "_native_abort_log", log):
+                    result = session._native_control_capture(state, "outside-write-positive", command,
+                        policy=session.bootstrap / "native-write-positive-source.sb", cwd=state["cwd"], seconds=10)
+                snapshot.assert_called_once_with()
+                credentials.assert_not_called()
+                ips.assert_not_called()
+                log.assert_not_called()
+                self.assertEqual(len(originals), 1)
+                abort = originals[0]
+                self.assertIsNone(abort["pid"])
+                self.assertIsNone(abort["wall_after"])
+                self.assertIsNone(abort["wall_wait"])
+                self.assertFalse(abort["attempted"])
+                if case in {"wall-interrupt", "wall-interrupt-close-error"}:
+                    self.assertIsNone(abort["wall_before"])
+                    self.assertEqual(abort["diagnostic_error"], {"code": "CANCELLED", "producer_pending": False})
+                for event in ("popen", "poll", "wait-original", "terminate-original", "kill-original", "stream-close", "cleanup"):
+                    self.assertNotIn(event, [row[0] for row in rig.events])
+                self.assertEqual([row for row in rig.events if row[0] == "capture-close"],
+                                 [("capture-close", 100), ("capture-close", 101)])
+                self.assertEqual(sum(row[0] == "selector-close" for row in rig.events), 1)
+                self.assertEqual((result.stdout, result.stderr, result.persisted, session.persisted_bytes), (b"", b"", (0, 0), 0))
+                self.assertEqual((result.returncode, result.waited, result.stdout_eof, result.stderr_eof, result.domain_finality),
+                                 (None, False, False, False, False))
+                self.assertEqual(result.timed_out, case == "original-cutoff")
+                self.assertEqual(result.cancelled, case in {"wall-interrupt", "wall-cancellation", "wall-interrupt-close-error"})
+                self.assertFalse(result.ok)
+                self.assertIsNotNone(result.primary_error)
+                self.assertIsNotNone(session.failure)
+                if case == "wall-first-failure":
+                    self.assertEqual(session.failure, "synthetic first failure during optional wall snapshot")
+                if case == "wall-interrupt-close-error":
+                    self.assertIn("capture close OSError", result.cleanup_errors)
+                    self.assertIn("capture close OSError", session.cleanup_errors)
+                self.assertIn("original wait or complete stream EOF missing", result.cleanup_errors)
+                self.assertEqual((state["deadline"], session.deadline), (50.0, 100.0))
+                self.assertIsNone(session._active)
+                self.assertIsNone(session._native_control)
+                self.assertFalse(session._busy or session._direct_producer_pending or session.domain_finality)
+                row = state["control_notes"]["outside-write-positive"]
+                self.assertFalse(row["ok"] or row["subject_ok"])
+                self.assertNotIn("native_abort_diagnostic", row)
+                self.assertEqual(row["persisted"], [0, 0])
 
     def test_native_input_reads_and_rechecks_keep_original_custody_bytes_and_close_errors(self):
         path, raw = Path("/synthetic/native/input.py"), b"immutable native input\n"
