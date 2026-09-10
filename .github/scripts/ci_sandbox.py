@@ -2153,10 +2153,13 @@ class Session:
         mach = " ".join(f"(global-name {q(name)})" for name in services)
         allowed_write = ([f"(literal {q(state['outside_write'])})"] if kind == "write-positive"
                          else [f"(subpath {q(state['cwd'] / name)})" for name in _NATIVE_LEAVES])
+        # Native startup opens the public root directory. Admit its data (entry
+        # names), not descendants or the general file-read* operation class.
         text = ("(version 1)\n(allow default)\n(deny network*)\n"
                 f"(deny mach-lookup (require-not (require-any {mach})))\n"
                 "(deny signal (require-not (target same-sandbox)))\n"
                 f"(deny file-read* (require-not (require-any {' '.join(reads)})))\n"
+                '(allow file-read-data (literal "/"))\n'
                 + "".join(f"(allow file-read-metadata (literal {q(path)}))\n" for path in sorted(metadata))
                 + f"(deny file-write* (require-not (require-any {' '.join(allowed_write)} (literal \"/dev/null\"))))\n")
         if kind == "aia":

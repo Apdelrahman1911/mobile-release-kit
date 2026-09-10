@@ -2167,6 +2167,15 @@ class CISandboxPureTests(unittest.TestCase):
                         data_rule = next(line for line in policy.splitlines() if line.startswith("(deny file-read* "))
                         self.assertNotIn("(literal " + q(cwd) + ")", data_rule)
                         self.assertNotIn("(subpath " + q(cwd) + ")", policy)
+                        root_data = '(allow file-read-data (literal "/"))'
+                        root_metadata = '(allow file-read-metadata (literal "/"))'
+                        lines = policy.splitlines()
+                        self.assertEqual([line for line in lines if '(literal "/")' in line],
+                                         [root_data, root_metadata])
+                        self.assertEqual(lines[lines.index(data_rule) + 1], root_data)
+                        self.assertNotIn('(literal "/")', data_rule)
+                        self.assertNotIn('(subpath "/")', policy)
+                        self.assertNotIn('(allow file-read* (literal "/"))', policy)
                 for kind, port in (("arbitrary-services", None), ("authority", 12345), ("aia", None),
                                    ("aia", True), ("aia", 1023), ("aia", 65536)):
                     with self.assertRaises(self.module.SessionError):
