@@ -7,6 +7,7 @@ autonomous system maintenance remains part of the OS TCB, not a task-owned worke
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import math
@@ -27,12 +28,13 @@ TRUST_SERVICES = ("com.apple.trustd", "com.apple.trustd.agent")
 OTHER_SERVICE = "com.apple.cfprefsd.daemon"
 MACH_SERVICES = (*TRUST_SERVICES, OTHER_SERVICE)
 MACH_PREFIX = b"MRK_NATIVE_MACH="
+MACH_APPLY_PREFIX = b"MRK_NATIVE_MACH_APPLY="
 AIA_PREFIX = b"MRK_NATIVE_AIA="
 _DENIED = (1100, 1102)  # NOT_PRIVILEGED / UNKNOWN_SERVICE; needs an outside positive.
 _CASES = ("online", "offline", "mutant", "product-offline")
 _MAX_DER = 16 * 1024
 _FAILURE_PREFIX = b"MRK_NATIVE_CONTROL_FAILED="
-_FAILURE_ROLES = frozenset(("mach", "mach-nonexpand", "aia-prepare", "aia-evaluate", "invalid"))
+_FAILURE_ROLES = frozenset(("mach", "mach-initial", "mach-nonexpand", "aia-prepare", "aia-evaluate", "invalid"))
 _FAILURE_CATEGORIES = frozenset(("NativeControlError", "TimeoutExpired", "KeyboardInterrupt", "SystemExit",
                                "MemoryError", "OSError", "ValueError", "TypeError", "AttributeError",
                                "AssertionError", "RuntimeError", "Exception", "BaseException"))
@@ -58,7 +60,8 @@ def _failure_note(error: BaseException, argv: list[str]) -> dict:
     error_count counts reported leaf errors only. A truncated note is explicitly
     incomplete; it cannot stand in for any original capture/finality fact.
     """
-    roles = {"--mach": (2, "mach"), "--mach-nonexpand": (3, "mach-nonexpand"),
+    roles = {"--mach": (2, "mach"), "--mach-initial": (3, "mach-initial"),
+             "--mach-nonexpand": (3, "mach-nonexpand"),
              "--aia-prepare": (3, "aia-prepare"), "--aia-evaluate": (3, "aia-evaluate")}
     shape = roles.get(argv[0]) if type(argv) is list and argv and type(argv[0]) is str else None
     role = shape[1] if shape is not None and len(argv) == shape[0] else "invalid"
@@ -184,9 +187,9 @@ def parse_failure(data: bytes, role: str) -> dict | None:
     return result
 
 
-def parse_mach(data: bytes) -> dict:
-    value = _parse(data, MACH_PREFIX)
-    _require(set(value) == {"schema", "codes", "released"}, "Mach record fields differ")
+def _mach_object(value: dict) -> dict:
+    _require(type(value) is dict and set(value) == {"schema", "codes", "released"}
+             and type(value["schema"]) is int and value["schema"] == 1, "Mach record fields differ")
     codes, released = value["codes"], value["released"]
     _require(type(codes) is list and type(released) is list and len(codes) == len(released) == 3,
              "Mach record inventory differs")
@@ -196,14 +199,52 @@ def parse_mach(data: bytes) -> dict:
     return value
 
 
-def require_mach_controls(positive: dict, ordinary: dict, authority: dict, nonexpand: dict) -> None:
+def parse_mach(data: bytes) -> dict:
+    return _mach_object(_parse(data, MACH_PREFIX))
+
+
+def _policy_digest(value: str) -> str:
+    _require(type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None,
+             "fixed native policy digest differs")
+    return value
+
+
+def parse_mach_application(data: bytes, role: str) -> dict:
+    _require(type(role) is str and role in {"mach-initial", "mach-nonexpand"},
+             "fixed native application role differs")
+    value = _parse(data, MACH_APPLY_PREFIX)
+    fields = {"schema", "role", "policy_sha256", "application", "after"}
+    if role == "mach-nonexpand":
+        fields.update(("before", "child"))
+    _require(set(value) == fields and value["role"] == role, "native application fields differ")
+    _policy_digest(value["policy_sha256"])
+    application = value["application"]
+    _require(type(application) is dict and set(application) == {"returned", "errno"}
+             and type(application["returned"]) is int, "native apply observation differs")
+    returned, number = application["returned"], application["errno"]
+    _require(returned == 0 and number is None
+             or role == "mach-nonexpand" and returned == -1 and type(number) is int and number == errno.EPERM,
+             "native apply outcome is not qualified")
+    for name in ("after",) if role == "mach-initial" else ("before", "after", "child"):
+        _mach_object(value[name])
+    return value
+
+
+def require_mach_controls(positive: dict, ordinary: dict, authority: dict, nonexpand: dict,
+                          *, policy_sha256: str) -> None:
     # UNKNOWN_SERVICE is not independently denial evidence. A corresponding
     # successful same-attempt outside lookup is mandatory before any negative.
-    records = [parse_mach(MACH_PREFIX + json.dumps(row).encode("ascii") + b"\n")
-               for row in (positive, ordinary, authority, nonexpand)]
-    outside, plain, allowed, nested = [row["codes"] for row in records]
+    _policy_digest(policy_sha256)
+    records = [_mach_object(row) for row in (positive, ordinary)]
+    applied = [parse_mach_application(MACH_APPLY_PREFIX + json.dumps(row, allow_nan=False).encode("ascii") + b"\n", role)
+               for row, role in ((authority, "mach-initial"), (nonexpand, "mach-nonexpand"))]
+    _require(all(row["policy_sha256"] == policy_sha256 for row in applied),
+             "native applications do not match the original owner policy")
+    outside, plain = [row["codes"] for row in records]
+    allowed = applied[0]["after"]["codes"]
+    nested = [applied[1][name]["codes"] for name in ("before", "after", "child")]
     _require(outside[2] == 0 and 0 in outside[:2], "required outside Mach positive is unavailable")
-    _require(all(code in _DENIED for code in (*plain, *nested)),
+    _require(all(code in _DENIED for codes in (plain, *nested) for code in codes),
              "ordinary or nested policy expanded Mach authority")
     _require(allowed[2] in _DENIED, "authority admitted an unallowed Mach service")
     for index in range(2):
@@ -312,17 +353,131 @@ def _command(arguments: list[str], deadline: float, *, capture: bool = False) ->
     return output
 
 
-def mach_nonexpand(policy: Path, deadline: float) -> dict:
+def _sandbox_api():
+    """Fixed verification-only private SPI; missing current-image support fails."""
+    import ctypes as C
+
+    _require(sys.platform == "darwin" and C.sizeof(C.c_void_p) == 8 and C.sizeof(C.c_int) == 4,
+             "native sandbox SPI requires the reviewed Darwin pointer/integer ABI")
+    # Apple OS/dyld premise, not a filesystem hash for a shared-cache image.
+    library = C.CDLL("/usr/lib/libsandbox.1.dylib", use_errno=True)
+    P = C.c_void_p
+
+    def bind(name, result, arguments):
+        function = getattr(library, name)
+        function.restype, function.argtypes = result, arguments
+        return function
+
+    return SimpleNamespace(
+        create_params=bind("sandbox_create_params", P, []),
+        compile_string=bind("sandbox_compile_string", P, [C.c_char_p, P, C.POINTER(P)]),
+        apply=bind("sandbox_apply", C.c_int, [P]),
+        free_profile=bind("sandbox_free_profile", None, [P]),
+        free_params=bind("sandbox_free_params", None, [P]),
+        free_error=bind("sandbox_free_error", None, [P]),
+        new_error=P, error_argument=C.byref, set_errno=C.set_errno, get_errno=C.get_errno)
+
+
+def _opaque_pointer(value: object) -> bool:
+    return type(value) is int and 0 < value < 2**64
+
+
+def _apply_policy(raw: bytes, deadline: float, *, initial: bool) -> dict:
+    """Apply a genuinely compiled profile; every original pointer is retired."""
+    _remaining(deadline)
+    _require(type(initial) is bool and type(raw) is bytes and 0 < len(raw) <= 1024 * 1024
+             and raw.isascii() and b"\0" not in raw, "fixed native policy source differs")
+    api, params, profile, error, application, errors = None, None, None, None, None, []
+    try:
+        api = _sandbox_api()
+        _remaining(deadline)
+        error = api.new_error()
+        _require(error.value is None, "compiler error output is not initially empty")
+        params = api.create_params()
+        _require(_opaque_pointer(params), "native sandbox parameter creation failed")
+        _remaining(deadline)
+        profile = api.compile_string(raw, params, api.error_argument(error))
+        _require(_opaque_pointer(profile) and error.value is None,
+                 "native sandbox compilation did not return one complete profile")
+        _remaining(deadline)
+        api.set_errno(0)
+        returned = api.apply(profile)
+        number = api.get_errno()  # Before any clock, release or other native call.
+        _require(type(returned) is int and returned in (0, -1), "native sandbox apply returned unknown status")
+        if returned == 0:
+            application = {"returned": 0, "errno": None}  # errno is unspecified on success.
+        else:
+            _require(not initial and type(number) is int and number == errno.EPERM,
+                     "native sandbox application was not a qualified permission refusal")
+            application = {"returned": -1, "errno": number}
+        _remaining(deadline)
+    except BaseException as exc:
+        errors.append(exc)
+    finally:
+        # Expiry is retained, never an excuse to skip a known pointer's release.
+        try:
+            _remaining(deadline)
+        except BaseException as exc:
+            errors.append(exc)
+        for name, pointer in (("free_profile", profile), ("free_error", error), ("free_params", params)):
+            try:
+                value = pointer.value if name == "free_error" and pointer is not None else pointer
+                if value is not None:
+                    _require(_opaque_pointer(value), "native sandbox cleanup pointer is unknown")
+                    getattr(api, name)(value)
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                try:
+                    _remaining(deadline)
+                except BaseException as exc:
+                    errors.append(exc)
+    if errors:
+        raise BaseExceptionGroup("fixed native sandbox application/cleanup failed", errors)
+    _require(application is not None, "native sandbox application did not complete")
+    return application
+
+
+def _mach_policy(policy: Path, deadline: float) -> bytes:
+    _remaining(deadline)
+    _require(sys.platform == "darwin", "native policy application requires real macOS")
     entry = Path(__file__).resolve(strict=True)
     wanted = entry.parent / "native-authority-source.sb"
-    _require(policy == wanted and policy.resolve(strict=True) == wanted,
-             "non-expansion policy is not the fixed owner policy")
-    state = policy.lstat()
-    _require(stat.S_ISREG(state.st_mode) and state.st_uid == 0 and stat.S_IMODE(state.st_mode) == 0o444,
-             "non-expansion policy custody differs")
-    result = _command(["/usr/bin/sandbox-exec", "-f", str(wanted), sys.executable,
-                       "-I", "-S", "-B", str(entry), "--mach", repr(deadline)], deadline, capture=True)
-    return parse_mach(result)
+    _require(entry.name == "ci_native_authority.py" and entry.parent.name == "bootstrap"
+             and entry.parent.parent.parent == Path("/private/tmp")
+             and policy == wanted and policy.resolve(strict=True) == wanted,
+             "native application policy is not the fixed owner input")
+    raw = _read_public(policy, 1024 * 1024, immutable_policy=True)
+    _require(raw.isascii() and b"\0" not in raw, "native policy source is not complete ASCII")
+    _remaining(deadline)
+    return raw
+
+
+def mach_initial(policy: Path, deadline: float) -> dict:
+    # The sole initial-role entry applies before any service or product probe.
+    raw = _mach_policy(policy, deadline)
+    application = _apply_policy(raw, deadline, initial=True)
+    after = _mach_object(mach_probe(deadline))
+    _remaining(deadline)
+    return {"schema": 1, "role": "mach-initial", "policy_sha256": hashlib.sha256(raw).hexdigest(),
+            "application": application, "after": after}
+
+
+def mach_nonexpand(policy: Path, deadline: float) -> dict:
+    raw = _mach_policy(policy, deadline)
+    before = _mach_object(mach_probe(deadline))
+    _require(all(code in _DENIED for code in before["codes"]), "initial ordinary Mach authority differs")
+    application = _apply_policy(raw, deadline, initial=False)
+    after = _mach_object(mach_probe(deadline))
+    _require(all(code in _DENIED for code in after["codes"]), "native application expanded Mach authority")
+    # This actual exec-child inherits the result; it does not retry application.
+    result = _command([sys.executable, "-I", "-S", "-B", str(Path(__file__).resolve(strict=True)),
+                       "--mach", repr(deadline)], deadline, capture=True)
+    child = parse_mach(result)
+    _require(all(code in _DENIED for code in child["codes"]), "inherited child expanded Mach authority")
+    _remaining(deadline)
+    return {"schema": 1, "role": "mach-nonexpand", "policy_sha256": hashlib.sha256(raw).hexdigest(),
+            "application": application, "before": before, "after": after, "child": child}
 
 
 def _port(value: int) -> int:
@@ -330,8 +485,9 @@ def _port(value: int) -> int:
     return value
 
 
-def _read_public(path: Path, maximum: int = _MAX_DER) -> bytes:
+def _read_public(path: Path, maximum: int = _MAX_DER, *, immutable_policy: bool = False) -> bytes:
     """Bounded no-follow read after the Session's original wait/UID finality."""
+    _require(type(immutable_policy) is bool, "unknown fixed native read role")
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     errors, result = [], b""
     try:
@@ -339,12 +495,19 @@ def _read_public(path: Path, maximum: int = _MAX_DER) -> bytes:
         _require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
                  and not stat.S_IMODE(before.st_mode) & 0o022 and 0 < before.st_size <= maximum,
                  "synthetic public fixture type/mode/size differs")
+        if immutable_policy:
+            _require((before.st_uid, before.st_gid, stat.S_IMODE(before.st_mode)) == (0, 0, 0o444),
+                     "fixed native policy descriptor ownership/mode differs")
         result = os.read(fd, maximum + 1)
         after = os.fstat(fd)
         _require(0 < len(result) == before.st_size <= maximum
                  and (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
                  == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns),
                  "synthetic public fixture changed during read")
+        if immutable_policy:
+            fields = ("st_mode", "st_uid", "st_gid", "st_nlink")
+            _require(all(getattr(before, name) == getattr(after, name) for name in fields),
+                     "fixed native policy descriptor custody changed during read")
     except BaseException as exc:
         errors.append(exc)
     finally:
@@ -803,7 +966,7 @@ class _Responder:
             raise BaseExceptionGroup("owned responder cleanup failed", errors)
 
 
-def admit_controls(launch, ensure_idle, scratch: Path, *, deadline: float) -> dict:
+def admit_controls(launch, ensure_idle, scratch: Path, *, deadline: float, policy_sha256: str) -> dict:
     """Original owner only. The six-case callback returns real Session captures.
 
     Session fixes source/bootstrap/argv/identity/cwd/environment/policy and keeps
@@ -811,6 +974,7 @@ def admit_controls(launch, ensure_idle, scratch: Path, *, deadline: float) -> di
     launch. The listener is never inherited by a subject.
     """
     _remaining(deadline)
+    _policy_digest(policy_sha256)
     ensure_idle()
     _scratch(scratch)
 
@@ -832,9 +996,10 @@ def admit_controls(launch, ensure_idle, scratch: Path, *, deadline: float) -> di
         _require(result is not None and result.ok is True, "native control capture did not succeed")
         return result.stdout
 
-    rows = [parse_mach(run(case)) for case in
-            ("mach-baseline", "mach-ordinary", "mach-authority", "mach-nonexpand")]
-    require_mach_controls(*rows)
+    rows = [parse_mach(run(case)) for case in ("mach-baseline", "mach-ordinary")]
+    rows.extend(parse_mach_application(run(case), role) for case, role in
+                (("mach-authority", "mach-initial"), ("mach-nonexpand", "mach-nonexpand")))
+    require_mach_controls(*rows, policy_sha256=policy_sha256)
     responder, errors, aia = None, [], None
     try:
         _remaining(deadline)
@@ -877,8 +1042,10 @@ def _main(argv: list[str]) -> int:
     _remaining(deadline)
     if argv[0] == "--mach" and len(argv) == 2:
         prefix, result = MACH_PREFIX, mach_probe(deadline)
+    elif argv[0] == "--mach-initial" and len(argv) == 3:
+        prefix, result = MACH_APPLY_PREFIX, mach_initial(Path(argv[1]), deadline)
     elif argv[0] == "--mach-nonexpand" and len(argv) == 3:
-        prefix, result = MACH_PREFIX, mach_nonexpand(Path(argv[1]), deadline)
+        prefix, result = MACH_APPLY_PREFIX, mach_nonexpand(Path(argv[1]), deadline)
     elif argv[0] in ("--aia-prepare", "--aia-evaluate") and len(argv) == 3:
         _require(re.fullmatch(r"[1-9][0-9]{3,4}", argv[1]) is not None, "invalid native fixture port")
         port = _port(int(argv[1]))

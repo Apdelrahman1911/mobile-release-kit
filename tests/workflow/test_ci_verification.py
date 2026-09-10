@@ -29,13 +29,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from .workflow_harness import load_workflow, simulate_steps
+from .workflow_harness import evaluate_condition, load_workflow, simulate_steps
 
 
 ROOT = Path(__file__).resolve().parents[2]
 CI = ROOT / ".github/workflows/ci.yml"
 HOSTED_GUARD = '''set -euo pipefail
 [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == github-hosted ]]
+'''
+LINUX_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || inputs.verification_target != 'macos' }}"
+VERIFICATION_CONCURRENCY = "release-kit-ci-${{ github.ref }}-${{ github.event_name }}-${{ inputs.verification_target || 'full' }}"
+AGGREGATE_GUARD = '''set -euo pipefail
+[[ "$LINUX_RESULT" == success && "$NATIVE_RESULT" == success ]]
 '''
 LINUX_TOOL_SETUP = '''set -euo pipefail
 if [[ ! -x /usr/bin/bwrap ]]; then
@@ -105,6 +110,16 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         self.assertEqual(workflow["permissions"], {"contents": "read"})
         self.assertEqual(workflow["env"], {"PYTHONSAFEPATH": "1"})
         self.assertNotIn("defaults", workflow)
+        # The pinned Psych loader parses YAML's unquoted `on` as true; JSON
+        # serializes that mapping key as "true". Do not invent a second parser.
+        self.assertEqual(workflow["true"], {
+            "pull_request": None, "push": {"branches": ["main"]},
+            "workflow_dispatch": {"inputs": {"verification_target": {
+                "description": "Full verification, or macOS-only candidate evidence (aggregate remains incomplete)",
+                "type": "choice", "required": True, "default": "full", "options": ["full", "macos"],
+            }}},
+        })
+        self.assertEqual(workflow["concurrency"], {"group": VERIFICATION_CONCURRENCY, "cancel-in-progress": True})
         self.assertEqual(set(workflow["jobs"]), {"test-linux", "test-native-profiles", "test"})
         text = CI.read_text(encoding="utf-8")
         self.assertNotIn("secrets.", text)
@@ -115,7 +130,11 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                 job = workflow["jobs"][name]
                 self.assertEqual(job["runs-on"], image)
                 self.assertEqual(job["timeout-minutes"], 60)
-                for forbidden in ("if", "continue-on-error", "environment", "container", "services", "strategy", "defaults", "env"):
+                if platform == "linux":
+                    self.assertEqual(job["if"], LINUX_TARGET_CONDITION)
+                else:
+                    self.assertNotIn("if", job)
+                for forbidden in ("continue-on-error", "environment", "container", "services", "strategy", "defaults", "env"):
                     self.assertNotIn(forbidden, job)
                 self.assertEqual(job.get("permissions", workflow["permissions"]), {"contents": "read"})
                 steps = job["steps"]
@@ -154,6 +173,72 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                 self.assertEqual(owner["env"], {"MRK_PYTHON": "${{ steps.python.outputs.python-path }}"})
                 self.assertEqual(owner["shell"], "bash")
                 self.assertEqual(owner["run"], coordinator_shell(platform))
+
+    def test_manual_native_candidate_routing_and_protected_aggregate_remain_fail_closed(self):
+        workflow = load_workflow(CI)
+        linux, native, aggregate = (workflow["jobs"][name] for name in ("test-linux", "test-native-profiles", "test"))
+        self.assertEqual(linux["if"], LINUX_TARGET_CONDITION)
+        self.assertNotIn("if", native)
+        for event, ref in (("pull_request", "refs/pull/1/merge"), ("push", "refs/heads/main"),
+                           ("workflow_dispatch", "refs/heads/qa006-native-candidate")):
+            for target in ("full", "macos", None, "", "unknown", "MACOS", "mAcOs", "macos "):
+                with self.subTest(candidate_route=(event, target)):
+                    context = {"github": {"event_name": event, "ref": ref}}
+                    # For this one pinned comparison and fixed ASCII fixture,
+                    # model Actions' case-insensitive string equality explicitly.
+                    # The shared restricted interpreter remains unchanged.
+                    compared = target.lower() if target is not None else None
+                    if target is not None:
+                        context["inputs"] = {"verification_target": compared}
+                    omitted = event == "workflow_dispatch" and compared == "macos"
+                    self.assertEqual(evaluate_condition(linux["if"], context, success=True, cancelled=False), not omitted)
+                    self.assertTrue(evaluate_condition(native.get("if"), context, success=True, cancelled=False))
+
+        # This is the existing fixed job, not a synthesized cross-run status.
+        # Pin every field before the harmless shell can be executed below.
+        self.assertEqual(aggregate, {
+            "needs": ["test-linux", "test-native-profiles"], "if": "${{ always() }}",
+            "runs-on": "ubuntu-24.04", "timeout-minutes": 5, "permissions": {},
+            "steps": [{"name": "Require every verification job to succeed", "env": {
+                "LINUX_RESULT": "${{ needs.test-linux.result }}",
+                "NATIVE_RESULT": "${{ needs.test-native-profiles.result }}",
+            }, "run": AGGREGATE_GUARD}],
+        })
+        self.assertTrue(evaluate_condition(aggregate["if"], {}, success=False, cancelled=True))
+        states = ["failure", "cancelled", "skipped", "queued", "unavailable", "", None]
+        pairs = [("success", "success")]
+        for state in states:
+            pairs.extend(((state, "success"), ("success", state), (state, state)))
+        body = aggregate["steps"][0]["run"]
+        for linux_result, native_result in pairs:
+            with self.subTest(protected_results=(linux_result, native_result)):
+                env = {"PATH": "/usr/bin:/bin"}
+                if linux_result is not None:
+                    env["LINUX_RESULT"] = linux_result
+                if native_result is not None:
+                    env["NATIVE_RESULT"] = native_result
+                result = subprocess.run(["bash", "--noprofile", "--norc", "-c", body],
+                                        env=env, capture_output=True, timeout=5)
+                self.assertEqual(result.returncode == 0, linux_result == native_result == "success")
+                self.assertEqual(result.stdout, b"")
+
+        group = workflow["concurrency"]["group"]
+        self.assertEqual(group, VERIFICATION_CONCURRENCY)
+        self.assertIs(workflow["concurrency"]["cancel-in-progress"], True)
+
+        def group_for(event, target):
+            # Substitute only these three already-pinned literal placeholders;
+            # this does not evaluate Actions syntax or query any workflow run.
+            return (group.replace("${{ github.ref }}", "refs/heads/same-task-ref")
+                    .replace("${{ github.event_name }}", event)
+                    .replace("${{ inputs.verification_target || 'full' }}", target or "full"))
+
+        groups = {group_for("pull_request", None), group_for("push", None),
+                  group_for("workflow_dispatch", "full"), group_for("workflow_dispatch", "macos")}
+        self.assertEqual(len(groups), 4)  # Partial dispatch cannot cancel any full event/target.
+        self.assertTrue(all("${{" not in value for value in groups))
+        for absent in (None, ""):
+            self.assertEqual(group_for("workflow_dispatch", absent), group_for("workflow_dispatch", "full"))
 
     def test_actual_guard_rejects_non_hosted_or_missing_runner_identity(self):
         workflow = load_workflow(CI)

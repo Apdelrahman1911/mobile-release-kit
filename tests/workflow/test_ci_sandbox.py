@@ -4932,7 +4932,9 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertEqual(session._native_preparing, phase)
                     self.assertEqual(state["control_seen"], list(fixed_cases[:fixed_cases.index(selected) + 1]))
                     base = [str(session.python), "-I", "-S", "-B", str(helper)]
-                    if selected == "mach-nonexpand":
+                    if selected == "mach-authority":
+                        expected = [*base, "--mach-initial", str(session.bootstrap / "native-authority-source.sb"), "1.0"]
+                    elif selected == "mach-nonexpand":
                         expected = [*base, "--mach-nonexpand", str(session.bootstrap / "native-authority-source.sb"), "1.0"]
                     elif selected.startswith("mach-"):
                         expected = [*base, "--mach", "1.0"]
@@ -4949,8 +4951,11 @@ class CISandboxPureTests(unittest.TestCase):
                     state["control_notes"][selected] = {"ok": False}
                     return self.module.CapturedRun(b"", b"", 0, True, True, True, True, False, False, 0.01, None, (), (0, 0))
 
-                def admit_controls(capture_callback, idle_callback, root, *, deadline):
+                def admit_controls(capture_callback, idle_callback, root, *, deadline, policy_sha256):
                     self.assertEqual((root, deadline), (cwd / "probes", 1.0))
+                    state = session._native_authority[phase]
+                    self.assertEqual(policy_sha256, state["files"][state["policy"]]["sha256"])
+                    self.assertEqual(policy_sha256, hashlib.sha256(files[state["policy"]]).hexdigest())
                     for selected in fixed_cases:
                         result = capture_callback(selected, **({"port": 12345} if selected.startswith("aia-") else {}))
                         self.assertTrue(result.ok)
@@ -5055,6 +5060,261 @@ class CISandboxPureTests(unittest.TestCase):
                 else:
                     loader.exec_module.assert_not_called()
 
+    def test_native_initial_owner_requires_its_exact_source_route_and_stops_before_invalid_acquisition(self):
+        direct_cases = {"old-vector", "extra-argument", "helper", "policy-argument", "policy", "cwd", "float-seconds", "command-deadline", "alternate-control"}
+        cases = ("valid", "cancelled", "cancel-input", "cancel-capture", "expire-capture", "unknown-finality", "busy", "original-owned",
+                 "direct-pending", "unadmitted", "admitting", "wheel", "different-owner", "prepared", "started", "closed", "completed",
+                 "out-of-order", "expired", "old-vector", "extra-argument", "helper", "policy-argument", "policy", "cwd", "float-seconds",
+                 "command-deadline", "alternate-control")
+        for case in cases:
+            with self.subTest(initial_owner_route=case):
+                session = session_double(self.module, "darwin")
+                phase = "wheel" if case == "wheel" else "source"
+                state = native_state_double(session, phase, deadline=50.0)
+                state["prepared"], session._native_preparing = False, phase
+                state["mach_policy"] = session.bootstrap / "native-mach-baseline.sb"
+                state["backend"] = SimpleNamespace(parse_failure=Mock(return_value=None))
+                state["control_seen"] = list(self.module._NATIVE_CONTROL_CASES[:3 if case in direct_cases else 2])
+                if case == "out-of-order":
+                    state["control_seen"] = list(self.module._NATIVE_CONTROL_CASES[:1])
+                if case in {"prepared", "started", "closed", "completed"}:
+                    state[case] = True
+                if case == "different-owner":
+                    session._native_authority["source"] = dict(state)
+                session.admitted, session._admitting = case != "unadmitted", case == "admitting"
+                session.cancelled, session._busy = case == "cancelled", case == "busy"
+                original_active = object() if case == "original-owned" else None
+                session._active, session._direct_producer_pending = original_active, case == "direct-pending"
+                command = session._native_initial_command(50.0)
+                self.assertEqual(command, [str(session.python), "-I", "-S", "-B", str(session.bootstrap / "ci_native_authority.py"),
+                    "--mach-initial", str(session.bootstrap / "native-authority-source.sb"), "50.0"])
+                if case == "old-vector":
+                    command = [*command[:5], "--mach", "50.0"]
+                elif case == "extra-argument":
+                    command.append("--unapproved")
+                elif case == "helper":
+                    command[4] = str(session.source / "unapproved.py")
+                elif case == "policy-argument":
+                    command[6] = str(session.policy)
+                elif case == "command-deadline":
+                    command[-1] = "49.0"
+                record = {"schema": 1, "role": "mach-initial", "policy_sha256": "a" * 64,
+                          "application": {"returned": 0, "errno": None},
+                          "after": {"schema": 1, "codes": [0, 1102, 1100], "released": [True, False, False]}}
+                stdout = b"MRK_NATIVE_MACH_APPLY=" + json.dumps(record).encode() + b"\n"
+                rig = _Collection(self.module, session, stdout=(stdout,))
+                rig.snapshot_rows = {}
+                if case == "expired":
+                    rig.now = 50.0
+                if case == "unknown-finality":
+                    rig.final_domain = OSError("synthetic initial finality unavailable")
+
+                def inputs(observed):
+                    self.assertIs(observed, state)
+                    self.assertTrue(session.domain_finality)
+                    self.assertFalse(session._busy)
+                    if case == "cancel-input":
+                        session.cancelled = True
+
+                def capture_open(path, flags, mode):
+                    fd = rig.open(path, flags, mode)
+                    if fd == 101 and case in {"cancel-capture", "expire-capture"}:
+                        if case == "cancel-capture":
+                            session.cancelled = True
+                        else:
+                            rig.now = 50.0
+                    return fd
+
+                real_argv = type(session)._argv.__get__(session)
+                with rig.scope(), patch.object(session, "_argv", wraps=real_argv) as argv_builder, \
+                     patch.object(session, "_native_check_inputs", side_effect=inputs), \
+                     patch.object(self.module, "_observe_original_credentials", Mock()) as credentials, \
+                     patch.object(self.module.os, "open", side_effect=capture_open), \
+                     patch.object(Path, "open", side_effect=AssertionError("initial route must use fake private descriptors")), \
+                     patch.object(Path, "stat", side_effect=AssertionError("initial route must use fake input binding")):
+                    captured = case in {"valid", "cancel-capture", "expire-capture", "unknown-finality"}
+                    if captured:
+                        result = session._native_backend_capture(state, "mach-authority")
+                        row = state["control_notes"]["mach-authority"]
+                        self.assertFalse(row["ok"])  # The other five controls are not a synthesized success.
+                        self.assertEqual(row["subject_ok"], result.ok)
+                        self.assertEqual(row["persisted"], list(result.persisted))
+                        self.assertEqual(session.persisted_bytes, sum(result.persisted))
+                        self.assertEqual(row["exceptions"], [])
+                        self.assertEqual(len(rig.opened), 2)
+                        if case == "valid":
+                            self.assertTrue(result.ok)
+                            self.assertEqual((result.stdout, result.stderr, result.persisted), (stdout, b"", (len(stdout), 0)))
+                            state["backend"].parse_failure.assert_not_called()
+                            argv_builder.assert_called_once_with(command, 180, profile="native-control")
+                        else:
+                            self.assertFalse(result.ok)
+                            self.assertIsNotNone(session.failure)
+                            self.assertEqual(row["error_count"], len(result.cleanup_errors) + (result.primary_error is not None))
+                            if case in {"cancel-capture", "expire-capture"}:
+                                self.assertFalse(result.waited or result.stdout_eof or result.stderr_eof)
+                                self.assertEqual((result.stdout, result.stderr, result.persisted), (b"", b"", (0, 0)))
+                                self.assertEqual(result.cancelled, case == "cancel-capture")
+                                self.assertEqual(result.timed_out, case == "expire-capture")
+                            else:
+                                self.assertTrue(result.waited and result.stdout_eof and result.stderr_eof)
+                                self.assertFalse(result.domain_finality)
+                                self.assertEqual(result.returncode, 0)
+                    else:
+                        with self.assertRaises(self.module.SessionError):
+                            if case in direct_cases:
+                                session._native_control_capture(state, "mach-ordinary" if case == "alternate-control" else "mach-authority", command,
+                                    policy=session.policy if case in {"policy", "alternate-control"} else state["policy"],
+                                    cwd=session.work if case == "cwd" else state["cwd"] / "probes",
+                                    seconds=30.0 if case == "float-seconds" else 30)
+                            else:
+                                session._native_backend_capture(state, "mach-authority")
+                        self.assertEqual(rig.opened, [])
+                        self.assertEqual(session.admission_results, [])
+                    spawned = case in {"valid", "unknown-finality"}
+                    self.assertEqual(sum(event[0] == "popen" for event in rig.events), int(spawned))
+                    self.assertEqual(credentials.call_count, int(spawned))
+                    if spawned:
+                        actual = next(event for event in rig.events if event[0] == "popen")
+                        self.assertEqual(actual[1], tuple([str(session.python), "-I", "-S", "-B", str(session.entry), "--enter", "darwin",
+                            str(session.uid), str(session.gid), "180", str(state["policy"]), *command]))
+                        self.assertEqual((actual[2]["user"], actual[2]["group"], actual[2]["extra_groups"]), (session.uid, session.gid, []))
+                        self.assertEqual(actual[2]["env"], session._native_environment(state))
+                self.assertIsNone(session._native_control)
+                self.assertIs(session._active, original_active)
+                if case in {"cancelled", "cancel-input"}:
+                    self.assertEqual(session.failure, "controller cancellation")
+                self.assertEqual(session.deadline, 100.0)
+
+        # The lower request/argv boundaries independently reject caller hooks;
+        # this private test-owned control is not released by an unrelated layer.
+        for field, value in (("env", {"CALLER_HOOK": "1"}), ("cpu_seconds", 179), ("seconds", 29),
+                             ("output_limit", self.module.MiB - 1), ("absolute_deadline", 49.0), ("latch", False)):
+            session = session_double(self.module, "darwin")
+            state = native_state_double(session, deadline=50.0)
+            state["prepared"], session._native_preparing = False, "source"
+            state["control_seen"] = list(self.module._NATIVE_CONTROL_CASES[:3])
+            command = session._native_initial_command(50.0)
+            control = dict(state=state, case="mach-authority", argv=command, policy=state["policy"], cwd=state["cwd"] / "probes", seconds=30)
+            session._native_control = control
+            rig = _Collection(self.module, session)
+            options = dict(cwd=control["cwd"], env={}, seconds=30, output_limit=self.module.MiB, cpu_seconds=180,
+                           latch=True, profile="native-control", absolute_deadline=50.0)
+            options[field] = value
+            with self.subTest(initial_request_field=field), rig.scope(), self.assertRaises(self.module.SessionError):
+                session._run(command, **options)
+            self.assertEqual(rig.opened, [])
+            self.assertFalse(any(event[0] == "popen" for event in rig.events))
+            self.assertIs(session._native_control, control)
+        session = session_double(self.module, "darwin")
+        with patch.multiple(self.module, os=SimpleNamespace(), subprocess=SimpleNamespace(), socket=SimpleNamespace()):
+            for profile in ("ordinary", "native-authority-source", "native-authority-wheel", "native-control"):
+                with self.subTest(initial_public_profile=profile), self.assertRaises(self.module.SessionError):
+                    session._argv(session._native_initial_command(50.0), 180, profile=profile)
+
+    def test_native_initial_entry_is_exact_after_limits_and_other_routes_keep_their_wrapper(self):
+        class ExecBoundary(Exception):
+            pass
+
+        cases = ("valid", "framework-argv0", "ordinary", "wheel", "limits-error", "identity", "reserved-range", "groups",
+                 "native-platform", "vector-platform", "uid-spelling", "cpu", "policy", "helper", "provider", "origin",
+                 "python-flags", "extra-argument", "misplaced-marker", "deadline", "deadline-spelling", "late-validation",
+                 "orig-suffix", "orig-type", "flags")
+        for case in cases:
+            with self.subTest(initial_fixed_entry=case):
+                session = session_double(self.module, "darwin")
+                command = session._native_initial_command(50.0)
+                policy = session.bootstrap / "native-authority-source.sb"
+                if case == "ordinary":
+                    command, policy = ["/usr/bin/true"], session.policy
+                elif case == "wheel":
+                    command, policy = session._native_command("wheel"), session.bootstrap / "native-authority-wheel.sb"
+                if case == "policy":
+                    command[6], policy = str(session.policy), session.policy
+                elif case == "helper":
+                    command[4] = str(session.source / "arbitrary.py")
+                elif case == "python-flags":
+                    command[2] = "-s"
+                elif case == "extra-argument":
+                    command.append("--arbitrary")
+                elif case == "misplaced-marker":
+                    command[4], command[5] = command[5], command[4]
+                elif case in {"deadline", "deadline-spelling"}:
+                    command[-1] = "10.0" if case == "deadline" else "5e1"
+                uid = 59999 if case == "reserved-range" else session.uid
+                args = ["--enter", "linux" if case == "vector-platform" else "darwin",
+                        "060001" if case == "uid-spelling" else str(uid), str(uid), "179" if case == "cpu" else "180", str(policy), *command]
+                entry = Path("/unowned/bootstrap/ci_sandbox.py") if case == "origin" else session.entry
+                python = Path("/fixture-tools/python/not-bin/python") if case == "provider" else session.python
+                flags = SimpleNamespace(isolated=1, no_site=0 if case == "flags" else 1, dont_write_bytecode=1,
+                                        ignore_environment=1, no_user_site=1, safe_path=True)
+                orig = [str(session.python), "-I", "-S", "-B", str(entry), *args]
+                if case == "framework-argv0":
+                    orig[0] = "/fixture-tools/python/Resources/Python.app/Contents/MacOS/Python"
+                elif case == "orig-suffix":
+                    orig[-1] = "49.0"
+                fake_sys = SimpleNamespace(platform="linux" if case == "native-platform" else "darwin",
+                    executable=str(python), orig_argv=tuple(orig) if case == "orig-type" else orig, flags=flags)
+                events, clocks = [], []
+                original = OSError("synthetic required limit failure")
+
+                def limits(platform, cpu):
+                    self.assertEqual(events, [])
+                    events.append("limits")
+                    if case == "limits-error":
+                        raise original
+
+                def groups(platform):
+                    self.assertEqual((platform, events[0]), ("darwin", "limits"))
+                    events.append("groups")
+                    return [uid, 20] if case == "groups" else [uid]
+
+                def resolve(path, *, strict):
+                    self.assertTrue(strict)
+                    self.assertIn(path, (entry, python))
+                    self.assertEqual(events[0], "limits")
+                    events.append("resolve")
+                    return path
+
+                def monotonic():
+                    clocks.append(1)
+                    self.assertLessEqual(len(clocks), 2)
+                    return 50.0 if case == "late-validation" and len(clocks) == 2 else 10.0
+
+                def execute(executable, vector, env):
+                    self.assertEqual(events[0], "limits")
+                    events.append("exec")
+                    raise ExecBoundary
+
+                os_double = SimpleNamespace(getuid=lambda: 0 if case == "identity" else uid,
+                    geteuid=lambda: 0 if case == "identity" else uid, getgid=lambda: uid, getegid=lambda: uid,
+                    environ={"SYNTHETIC_CLEAN_ENV": "1"}, execve=Mock(side_effect=execute))
+                with patch.multiple(self.module, __file__=str(entry), os=os_double, sys=fake_sys,
+                                    subprocess=SimpleNamespace(), socket=SimpleNamespace(), signal=SimpleNamespace(), resource=SimpleNamespace(),
+                                    time=SimpleNamespace(monotonic=monotonic), _limits=Mock(side_effect=limits),
+                                    _process_groups=Mock(side_effect=groups), _userns_zero=Mock()), \
+                     patch.object(self.module, "_native_initial_entry", wraps=self.module._native_initial_entry) as validator, \
+                     patch.object(Path, "resolve", resolve), \
+                     patch.object(Path, "stat", side_effect=AssertionError("initial entry must not inspect mutable files")), \
+                     patch.object(Path, "open", side_effect=AssertionError("initial entry has no product/file execution")):
+                    successful = case in {"valid", "framework-argv0", "ordinary", "wheel"}
+                    with self.assertRaises(ExecBoundary if successful else OSError if case == "limits-error" else self.module.SessionError) as caught:
+                        self.module._main(args)
+                    if successful:
+                        expected = command if case in {"valid", "framework-argv0"} else ["/usr/bin/sandbox-exec", "-f", str(policy), *command]
+                        os_double.execve.assert_called_once_with(expected[0], expected, {"SYNTHETIC_CLEAN_ENV": "1"})
+                    else:
+                        os_double.execve.assert_not_called()
+                    self.assertEqual(validator.call_count, int(case not in {"ordinary", "wheel", "limits-error", "identity"}))
+                    if case == "limits-error":
+                        self.assertIs(caught.exception, original)
+                    if case == "identity":
+                        self.module._limits.assert_not_called()
+                    else:
+                        self.module._limits.assert_called_once_with(args[1], int(args[4]))
+                if case == "late-validation":
+                    self.assertEqual(len(clocks), 2)
+
     def test_native_authority_run_admits_only_exact_prepared_profiles_and_keeps_original_capture(self):
         cases = ("source", "wheel", "unknown-profile", "public-control", "linux", "not-admitted", "admitting", "env", "cwd",
                  "state-root", "state-policy", "state-phase", "argv", "python-flags", "cpu", "seconds", "limit",
@@ -5157,16 +5417,20 @@ class CISandboxPureTests(unittest.TestCase):
         frame = backend._FAILURE_PREFIX + json.dumps(diagnostic).encode() + b"\n"
         known = b"sandbox-exec: sandbox_apply: Operation not permitted\n" + frame
         marker = b'MRK_SANDBOX_ERROR=[{"exception":"PRIVATE_CHILD_CANARY","lines":[1]}]\n'
-        for case in ("known", "unknown-private", "held-stderr", "overflow", "close-error", "late-cancel"):
+        for case in ("known", "unknown-private", "initial-unknown-private", "held-stderr", "overflow", "close-error", "late-cancel"):
             with self.subTest(nonexpand_private_collection=case):
                 session = session_double(self.module, "darwin")
                 state = native_state_double(session, deadline=50.0)
                 state["prepared"], session._native_preparing = False, "source"
                 state["mach_policy"] = session.bootstrap / "native-mach-baseline.sb"
-                state["control_seen"] = list(self.module._NATIVE_CONTROL_CASES[:3])
+                initial = case == "initial-unknown-private"
+                selected, role = ("mach-authority", "mach-initial") if initial else ("mach-nonexpand", "mach-nonexpand")
+                state["control_seen"] = list(self.module._NATIVE_CONTROL_CASES[:2 if initial else 3])
                 parser = Mock(wraps=backend.parse_failure)
                 state["backend"] = SimpleNamespace(parse_failure=parser)
-                raw = marker + frame if case == "unknown-private" else known
+                role_frame = backend._FAILURE_PREFIX + json.dumps({key: value for key, value in
+                    {**diagnostic, "role": role}.items() if key != "child_returncode"}).encode() + b"\n" if initial else frame
+                raw = marker + role_frame if case in {"unknown-private", "initial-unknown-private"} else known
                 if case == "overflow":
                     raw = b"PRIVATE-OVERFLOW /Users/private/signing.key\n" + b"x" * (self.module.MiB + 1) + frame
                 rig = _Collection(self.module, session, stdout=(), stderr=(raw,))
@@ -5182,7 +5446,7 @@ class CISandboxPureTests(unittest.TestCase):
                     for operation in ("open", "stat", "lstat", "resolve"):
                         stack.enter_context(patch.object(Path, operation,
                             side_effect=AssertionError("private collection bridge must not inspect host paths")))
-                    result = session._native_backend_capture(state, "mach-nonexpand")
+                    result = session._native_backend_capture(state, selected)
                     self.assertIsInstance(result, self.module.CapturedRun)
                     self.assertEqual((result.returncode, result.primary_error, session.failure),
                                      (1, "command exited 1", "command exited 1"))
@@ -5196,11 +5460,11 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertEqual((bytes(rig.captures[100]), bytes(rig.captures[101])), (result.stdout, result.stderr))
                     self.assertEqual(session.persisted_bytes, sum(result.persisted))
                     self.assertEqual(next(event[3] for event in rig.events if event[0] == "read"), "command exited 1")
-                    parser.assert_called_once_with(result.stderr, "mach-nonexpand")
+                    parser.assert_called_once_with(result.stderr, role)
                     inputs.assert_called_once_with(state)
                     credentials.assert_called_once()
                     self.assertEqual(credentials.call_args.args, (rig.child.pid, session.uid, session.gid))
-                    row = state["control_notes"]["mach-nonexpand"]
+                    row = state["control_notes"][selected]
                     self.assertEqual(session.admission_results, [row])
                     self.assertFalse(row["ok"] or row["subject_ok"])
                     for field in ("returncode", "waited", "stdout_eof", "stderr_eof", "domain_finality", "timed_out", "cancelled"):
@@ -5208,7 +5472,7 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertEqual(row["persisted"], list(result.persisted))
                     self.assertEqual(row["error_count"], len(result.cleanup_errors) + 1)
                     self.assertEqual(row["exceptions"], [])
-                    if case in {"unknown-private", "overflow"}:
+                    if case in {"unknown-private", "initial-unknown-private", "overflow"}:
                         self.assertTrue(row["native_control_diagnostics_unavailable"])
                         self.assertNotIn("native_control_error", row)
                     else:
@@ -5239,7 +5503,7 @@ class CISandboxPureTests(unittest.TestCase):
                         self.assertEqual(default_row["exceptions"], [{"exception": "PRIVATE_CHILD_CANARY", "lines": [1]}])
                         self.assertEqual(default_row["returncode"], 1)
                         self.assertFalse(default_row["ok"] or default_row["subject_ok"])
-                self.assertEqual(state["control_seen"], list(self.module._NATIVE_CONTROL_CASES[:4]))
+                self.assertEqual(state["control_seen"], list(self.module._NATIVE_CONTROL_CASES[:3 if initial else 4]))
                 self.assertFalse(state["prepared"] or state["started"] or state["completed"])
                 self.assertNotIn("aia_port", state)
                 self.assertIsNone(session._native_control)

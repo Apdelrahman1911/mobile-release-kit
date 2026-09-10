@@ -1991,6 +1991,28 @@ class Session:
                 str(self.source / "tests/workflow/run_native_profile_checks.py"), "--authority",
                 *(["--installed-wheel"] if phase == "wheel" else [])]
 
+    def _native_initial_command(self, deadline: float) -> list[str]:
+        """One source-only initial-application positive, never a caller command."""
+        return [str(self.python), "-I", "-S", "-B", str(self.bootstrap / "ci_native_authority.py"),
+                "--mach-initial", str(self.bootstrap / "native-authority-source.sb"), repr(deadline)]
+
+    def _native_initial_binding(self, state: dict, argv: list[str], *, policy: Path,
+                                cwd: Path, seconds: int) -> None:
+        if self.cancelled:
+            self._fail("controller cancellation")
+        self._guard()
+        if (self.platform != "darwin" or not self.admitted or self._admitting
+                or self._native_preparing != "source" or self._native_authority.get("source") is not state
+                or state.get("phase") != "source" or state.get("prepared") or state.get("started")
+                or state.get("closed") or state.get("completed")
+                or state.get("control_seen") != list(_NATIVE_CONTROL_CASES[:3])
+                or type(argv) is not list or argv != self._native_initial_command(state["deadline"])
+                or policy != self.bootstrap / "native-authority-source.sb" or policy != state["policy"]
+                or cwd != state["cwd"] / "probes" or type(seconds) is not int or seconds != 30):
+            raise SessionError("initial native application lacks its one fixed source-control binding")
+        self._native_state_binding(state)
+        self._native_deadline(state["deadline"])
+
     def _native_environment(self, state: dict) -> dict[str, str]:
         """No caller hooks or previous ordinary HOME/configuration are imported."""
         root = state["cwd"]
@@ -2304,7 +2326,8 @@ class Session:
                 state["backend"] = backend
                 state["native_controls"] = backend.admit_controls(
                     lambda case, *, port=None: self._native_backend_capture(state, case, port=port),
-                    lambda: self.ensure_idle(deadline=deadline), state["cwd"] / "probes", deadline=deadline)
+                    lambda: self.ensure_idle(deadline=deadline), state["cwd"] / "probes", deadline=deadline,
+                    policy_sha256=state["files"][state["policy"]]["sha256"])
                 if state["control_seen"] != list(_NATIVE_CONTROL_CASES):
                     raise SessionError("native authority control inventory is incomplete")
                 for case in _NATIVE_CONTROL_CASES:
@@ -2851,6 +2874,10 @@ class Session:
         elif (case not in policies or policy != policies[case] or seconds != bounds.get(case, 30)
                 or cwd != expected_cwd or argv[:5] != [str(self.python), "-I", "-S", "-B", str(helper)]):
             raise SessionError("native control differs from its finite immutable helper/policy catalog")
+        if case == "mach-authority":
+            self._native_initial_binding(state, argv, policy=policy, cwd=cwd, seconds=seconds)
+        elif "--mach-initial" in argv:
+            raise SessionError("initial native application is not available to another control")
         self._native_control = {"state": state, "case": case, "argv": argv, "policy": policy,
                                 "cwd": cwd, "seconds": seconds}
         exit_reason = None
@@ -2866,7 +2893,7 @@ class Session:
                                cpu_seconds=180, latch=True, profile="native-control",
                                absolute_deadline=state["deadline"])
             row = self._note_capture("native-authority-" + state["phase"] + "-" + case, result,
-                                     parse_child_notes=case != "mach-nonexpand")
+                                     parse_child_notes=case not in {"mach-authority", "mach-nonexpand"})
             state["control_notes"][case] = row
             if case in _NATIVE_STARTUP_CASES:
                 expected = b"" if case == "startup-true" else _NATIVE_STARTUP_STDOUT
@@ -2891,7 +2918,8 @@ class Session:
             if not result.ok and case in _NATIVE_CONTROL_CASES:
                 # Diagnostic-only closed fields; never replace the failed
                 # capture, its original EOF/wait/finality or missing execution.
-                role = "mach" if case in {"mach-baseline", "mach-ordinary", "mach-authority"} else case
+                role = ("mach-initial" if case == "mach-authority" else
+                        "mach" if case in {"mach-baseline", "mach-ordinary"} else case)
                 if time.monotonic() < state["deadline"]:
                     diagnostic = state["backend"].parse_failure(result.stderr, role)
                     if diagnostic is not None:
@@ -2921,6 +2949,7 @@ class Session:
             policy = policies[case]
             command = ([*base, "--mach-nonexpand", str(self.bootstrap / "native-authority-source.sb"),
                         repr(state["deadline"])] if case == "mach-nonexpand"
+                       else self._native_initial_command(state["deadline"]) if case == "mach-authority"
                        else [*base, "--mach", repr(state["deadline"])])
             seconds = 30
         else:
@@ -3243,6 +3272,11 @@ class Session:
                     or self._native_preparing != control["state"]["phase"] or argv != control["argv"]):
                 raise SessionError("native control argv lacks its private fixed catalog owner")
             policy = control["policy"]
+        if "--mach-initial" in argv:
+            if profile != "native-control" or control.get("case") != "mach-authority":
+                raise SessionError("initial native application is not a public or alternate command role")
+            self._native_initial_binding(control["state"], argv, policy=policy,
+                                         cwd=control["cwd"], seconds=control["seconds"])
         entry = [str(self.python), "-I", "-S", "-B", str(self.entry), role, self.platform,
                  str(self.uid), str(self.gid), str(cpu), str(policy), *argv]
         if self.platform == "darwin":
@@ -3459,6 +3493,12 @@ class Session:
                  and self._native_control is not None else None)
         exit_reason = (self._native_control.get("exit_reason") if profile == "native-control"
                        and self._native_control is not None else None)
+        initial_application = (profile == "native-control" and self._native_control is not None
+                               and self._native_control.get("case") == "mach-authority")
+        if initial_application:
+            if self.cancelled:
+                self._fail("controller cancellation")
+            self._guard()  # Input checks cannot authorize a cancelled acquisition.
         self._busy = True
         self.domain_finality = False
         self._run_number += 1
@@ -3493,9 +3533,9 @@ class Session:
                 self._assert_userns_boundary()
             _remaining(cutoff)  # Capture acquisition may not buy a later spawn.
             self._native_abort_stamp(abort, "wall_before")
-            if abort is not None or exit_reason is not None:
-                # Optional observation cannot authorize a late/cancelled launch.
-                # Recheck the ORIGINAL subject cutoff, never the diagnostic D.
+            if abort is not None or exit_reason is not None or initial_application:
+                # Neither observations nor capture acquisition may authorize a
+                # late/cancelled launch. Recheck the ORIGINAL subject cutoff.
                 _remaining(cutoff)
                 if self.cancelled or self.failure is not None:
                     cancelled = self.cancelled
@@ -4804,6 +4844,43 @@ def _limits(platform: str, cpu: int, *, profile: str = "ordinary") -> None:
             raise SessionError("resource limit did not take effect")
 
 
+def _native_initial_entry(argv: list[str]) -> None:
+    """Admit only the fixed unprivileged first-application control after limits.
+
+    The helper must apply the immutable policy before any probe. An ordinary
+    sandboxed process invoking this entry does not lose its inherited policy.
+    """
+    if (type(argv) is not list or len(argv) != 14 or any(type(arg) is not str for arg in argv)
+            or sys.platform != "darwin" or not 0 < len(argv[-1]) <= 64):
+        raise SessionError("invalid initial native application entry")
+    uid = os.getuid()
+    if (not 60000 <= uid < 65000 or (os.geteuid(), os.getgid(), os.getegid()) != (uid,) * 3
+            or _process_groups("darwin") != [uid]):
+        raise SessionError("initial native application lacks its reserved numerical credentials")
+    entry = Path(__file__).resolve(strict=True)
+    root = entry.parent.parent
+    python = Path(sys.executable).resolve(strict=True)
+    if (root.parent != Path("/private/tmp") or entry != root / "bootstrap/ci_sandbox.py"
+            or python.parent.name != "bin"):
+        raise SessionError("initial native application lacks its fixed entry/provider paths")
+    literal = argv[-1]
+    deadline = int(literal) if re.fullmatch(r"(?:0|[1-9][0-9]{0,19})", literal) else float(literal)
+    _remaining(deadline)
+    policy = str(root / "bootstrap/native-authority-source.sb")
+    command = [str(python), "-I", "-S", "-B", str(root / "bootstrap/ci_native_authority.py"),
+               "--mach-initial", policy, repr(deadline)]
+    expected = ["--enter", "darwin", str(uid), str(uid), "180", policy, *command]
+    flags = sys.flags
+    # The framework launcher may replace only orig_argv[0]; the original
+    # isolated suffix and canonical sys.executable must still match exactly.
+    if (argv != expected or type(sys.orig_argv) is not list
+            or sys.orig_argv[1:] != ["-I", "-S", "-B", str(entry), *expected]
+            or (flags.isolated, flags.no_site, flags.dont_write_bytecode,
+                flags.ignore_environment, flags.no_user_site, flags.safe_path) != (1, 1, 1, 1, 1, True)):
+        raise SessionError("initial native application entry differs from its one fixed vector")
+    _remaining(deadline)
+
+
 def _native_write_checkpoint(argv: list[str], *, outer: bool) -> None:
     """Two exact fixed-command checkpoints, never an execution authority."""
     if (type(outer) is not bool or type(argv) is not list
@@ -5783,7 +5860,9 @@ def _main(argv: list[str]) -> int:
             if platform == "linux":
                 _userns_zero()
             _limits(platform, int(cpu))
-        if platform == "darwin":
+        if "--mach-initial" in command:
+            _native_initial_entry(argv)
+        elif platform == "darwin":
             if len(command) == 7 and command[5] == "--native-write-control":
                 _native_write_checkpoint(argv, outer=True)
             command = ["/usr/bin/sandbox-exec", "-f", policy, *command]

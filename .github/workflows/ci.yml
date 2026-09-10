@@ -6,6 +6,13 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      verification_target:
+        description: Full verification, or macOS-only candidate evidence (aggregate remains incomplete)
+        type: choice
+        required: true
+        default: full
+        options: [full, macos]
 
 permissions:
   contents: read
@@ -14,11 +21,12 @@ env:
   PYTHONSAFEPATH: '1'
 
 concurrency:
-  group: release-kit-ci-${{ github.ref }}
+  group: release-kit-ci-${{ github.ref }}-${{ github.event_name }}-${{ inputs.verification_target || 'full' }}
   cancel-in-progress: true
 
 jobs:
   test-linux:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.verification_target != 'macos' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:

@@ -22,7 +22,8 @@ not executable instructions or evidence for this replacement.
 
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) is the entry point for
 pull requests, pushes to `main`, and manual **verification-only** dispatches.
-It selects `ubuntu-24.04` and `macos-26`, Python 3.11, Ruby 3.3.12, and pinned
+PRs, main pushes and the default manual `verification_target: full` select both
+`ubuntu-24.04` and `macos-26`, Python 3.11, Ruby 3.3.12, and pinned
 third-party Actions. Checkout does not persist Git credentials. Project package
 installation is not performed by the setup Actions or directly as the runner.
 
@@ -35,6 +36,23 @@ Both native jobs have a 60-minute job timeout and read-only contents permissions
 The separate protected status job `test` succeeds only when **both** predecessors
 actually succeed; failed, cancelled, skipped, unavailable or queued is not success.
 Never bypass branch protection or dispatch release/Store workflows for testing.
+
+For an intermediate macOS-only correction, manual `verification_target: macos`
+omits Linux but runs the **same complete macOS catalog and owner path**. Only a
+manual macOS selection can omit Linux; Actions compares its string value without
+case sensitivity. Missing, empty or nonmatching values do not omit Linux. Its
+aggregate `test` deliberately **fails** because skipped Linux is not a
+pass. This supplies platform-specific candidate evidence, never full verification
+or merge authority. Event/target-specific concurrency separates partial dispatches
+from full PR/main/manual runs.
+
+Publish intermediate candidates to a task-owned branch without an open PR and
+explicitly dispatch that reviewed ref; verify the actual source commit, workflow,
+run/attempt and image. Never dispatch the historical default-ref implementation
+or a release workflow as a fallback. Finish partial runs before advancing the issue
+PR, then require fresh full exact-source PR verification, independent acceptance,
+normal protected delivery and actual main CI. Do not combine partial runs into an
+invented full result or count an unexecuted gate as passed.
 
 ## Small implementation and command authority
 
@@ -154,7 +172,8 @@ reserved-domain finality plus the same node/current zero. Ambiguous effects, dri
 or finality failure stay failed for VM disposal; restore and descriptor-close errors
 are collected independently. Never apply this host preparation on a shared VPS.
 
-macOS uses a numeric `Popen` credential drop and inherited `sandbox-exec` policy.
+macOS ordinary/product routes use a numeric `Popen` credential drop and inherited
+`sandbox-exec` policy.
 The ordinary policy denies networking and Mach lookup, restricts writes to task work,
 protects runner/control reads, and restricts signals to the same sandbox. Native
 controls must prove inheritance through fork/exec and detached descendants.
@@ -191,6 +210,26 @@ Native controls require real outside positives and protected-read/write, inherit
 descriptor, foreign-signal and IPv4/IPv6 TCP/UDP denials under the role. Finite
 lookup-only controls distinguish known-present forbidden services from service
 absence. No trust-store mutation, service management or daemon cleanup is used.
+
+The fixed source-only first-application control uses opaque compiler/apply/free
+functions from `/usr/lib/libsandbox.1.dylib`. These are source-backed **private
+Apple SPI**, not a promised stable public API. Missing exports, incompatible
+types, compilation errors or a failed initial positive fail native admission;
+there is no library search or weaker fallback. Its exact immutable helper starts
+as the same unprivileged identity, after resource limits, and applies the fixed
+policy before any product code, Mach lookup or boundary probe. All other entry
+routes retain their sandbox wrapper.
+
+Non-expansion requires a successful first application of those exact owner-pinned
+policy bytes, actual outside/ordinary controls, and actual before/after plus an
+inherited exec-child's denied lookups. Only a completed application returning
+zero, or the ordinary negative's apply-phase `-1` with immediately saved numeric
+`EPERM`, qualifies for that comparison; unrelated errors remain failures. This
+establishes operation permission refusal and observed non-expansion, not an
+undocumented reinitialization-lock cause. Exit71 or English error text cannot
+qualify it. Every known compiler resource is independently released, and original
+capture/deadline/EOF/finality checks remain mandatory.
+
 The fixed AIA probe uses four fresh synthetic chains/unique loopback issuer URLs
 and the same probe-only loopback permission. After a common explicitly enabled
 network baseline, the online control must actually fetch and accept; the offline
