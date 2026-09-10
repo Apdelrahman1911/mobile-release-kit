@@ -178,7 +178,12 @@ def _session(module, cleanup_errors=()):
     session.entry = PurePosixPath("/synthetic/bootstrap/ci_sandbox.py")
     session.work = PurePosixPath("/synthetic/work")
     session.cleanup_errors, session.admission_results = [], []
+    session.domain_finality, session._direct_producer_pending = True, False
+    # Initial idle admission is synthetic; only the later census is under test.
+    session.ensure_idle = Mock(return_value=None)
     session._argv = Mock(return_value=(["synthetic-subject"], {"user": 60001}))
+    # Admission/sysctl ownership is tested separately, never by this fake census.
+    session._assert_userns_boundary = Mock(return_value=None)
     session._environment = Mock(return_value={"CI": "true"})
     session._cleanup = Mock(return_value=list(cleanup_errors))
     return session
@@ -521,10 +526,12 @@ class CICensusTests(unittest.TestCase):
                     session._owner_loss_preflight()
                 self.assertEqual(session.admission_results, [expected_row])
                 self.assertEqual(session.cleanup_errors, [])
+                session.ensure_idle.assert_called_once_with()
                 session._cleanup.assert_called_once_with()
                 session._argv.assert_called_once_with(
                     [str(session.python), "-I", "-S", "-B", str(session.entry), "--loss-subject"], 10,
                 )
+                session._assert_userns_boundary.assert_called_once_with()
                 session._environment.assert_called_once_with({})
                 command.assert_called_once()
                 self.assertEqual(command.call_args.kwargs, {"expected_code": 23, "deadline": 10.0})
@@ -573,6 +580,8 @@ class CICensusTests(unittest.TestCase):
                     self.assertEqual(str(raised.exception), "lost-owner native admission cleanup failed")
                 self.assertEqual(session.cleanup_errors, retained + ([timeout_note] if case == "timeout" else []))
                 self.assertEqual(session.admission_results, [])
+                session.ensure_idle.assert_called_once_with()
+                session._assert_userns_boundary.assert_called_once_with()
                 session._cleanup.assert_called_once_with()
                 self.assertGreater(tree.counts[("list", "/proc")], 0)
                 if case == "timeout":
@@ -592,6 +601,8 @@ class CICensusTests(unittest.TestCase):
             with self.assertRaises(self.module._CensusUnstable):
                 session._owner_loss_preflight()
         self.assertEqual(session.admission_results, [])
+        session.ensure_idle.assert_called_once_with()
+        session._assert_userns_boundary.assert_called_once_with()
         self.assertEqual([call.kwargs for call in reader.call_args_list], [{"deadline": 5.0}] * 8)
         self.assertEqual(clock.sleeps, [0.01] * 7)
 
@@ -603,6 +614,8 @@ class CICensusTests(unittest.TestCase):
                         self.module, "_snapshot", wraps=self.module._snapshot) as router:
                     with self.assertRaises(self.module.SessionError):
                         session._owner_loss_preflight()
+                session.ensure_idle.assert_called_once_with()
+                session._assert_userns_boundary.assert_called_once_with()
                 session._cleanup.assert_not_called()
                 router.assert_not_called()
                 self.assertEqual(tree.events, [])

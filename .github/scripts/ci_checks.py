@@ -14,6 +14,7 @@ import base64
 import contextlib
 import csv
 import email.parser
+import errno
 import hashlib
 import importlib
 import importlib.metadata
@@ -23,6 +24,7 @@ import math
 import os
 from pathlib import Path, PurePosixPath
 import re
+import resource
 import selectors
 import shutil
 import stat
@@ -44,6 +46,17 @@ MAX_WHEEL_BYTES = 64 * 1024 * 1024
 MAX_TREE_ENTRIES = 2048
 MAX_STREAM_BYTES = 8 * 1024 * 1024
 MAX_RESULT_BYTES = 256 * 1024
+PYTHON_FULL_FSIZE = (1 << 32) + 1024 * 1024
+PYTHON_FULL_WORK_TMPFS = (("tmp", 640 * 1024**2),) + tuple(
+    (name, 16 * 1024**2) for name in
+    ("home", "config", "cache", "gem-cache", "bundle-config", "bundle-home", "checks")
+)
+PYTHON_FULL_PRIVATE_TMPFS = (("/tmp", 128 * 1024**2), ("/run", 16 * 1024**2), ("/dev/shm", 16 * 1024**2))
+PROFILE_MOUNTINFO_BYTES = 256 * 1024
+PROFILE_MOUNTINFO_ROWS = 512
+FAILURE_OUTCOMES = frozenset({"error", "failure", "expected-failure", "unexpected-success", "skip"})
+FAILURE_CATEGORIES = frozenset({"os-error", "assertion-error", "value-error", "type-error", "memory-error",
+                                "exception", "base-exception", "none"})
 WHEEL_PATTERNS = (
     "test_init_transaction.py", "test_ios_entitlements.py", "test_ios_plist_binary.py",
 )
@@ -135,10 +148,12 @@ INSPECTION_ENVIRONMENT_NAMES = frozenset({
 class CheckError(RuntimeError):
     """A fixed, public-safe failure code. Raw diagnostics stay in private capture."""
 
-    def __init__(self, code: str, locations=(), *, cleanup_errors=()):
+    def __init__(self, code: str, locations=(), *, cleanup_errors=(), failure_callbacks=(), storage_profile=None):
         super().__init__(code)
         self.locations = list(locations)
         self.cleanup_errors = list(cleanup_errors)
+        self.failure_callbacks = list(failure_callbacks)
+        self.storage_profile = storage_profile
 
 
 def _require(condition: bool, code: str) -> None:
@@ -254,6 +269,321 @@ def _remaining(deadline: float, maximum: float) -> float:
     return min(value, maximum)
 
 
+def _profile_finish(primary, cleanup) -> None:
+    """Retain the original error and every independent close/removal failure."""
+    if cleanup:
+        known = type(primary) is CheckError
+        error = CheckError(str(primary) if known else "PYTHON_PROFILE_CLEANUP",
+                           cleanup_errors=([*primary.cleanup_errors] if known else [])
+                           + [label for label, _ in cleanup])
+        raise error from BaseExceptionGroup("Python storage control and owned cleanup failed",
+                                            ([primary] if primary is not None else [])
+                                            + [error for _, error in cleanup])
+    if primary is not None:
+        raise primary
+
+
+def _profile_userns_zero(deadline: float) -> int:
+    """Observe the outside owner's one fixed prohibition; never change it."""
+    path = "/proc/sys/user/max_user_namespaces"
+    descriptor, primary, cleanup, value = None, None, [], None
+    try:
+        _remaining(deadline, 3300)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        before = os.fstat(descriptor)
+        _require(stat.S_ISREG(before.st_mode) and before.st_uid == 0
+                 and not before.st_mode & 0o022, "PYTHON_PROFILE_USERNS_NODE")
+        data = os.read(descriptor, 33)
+        _remaining(deadline, 3300)
+        _require(data == b"0\n" and os.read(descriptor, 1) == b"", "PYTHON_PROFILE_USERNS_NOT_ZERO")
+        _require(_profile_identity(before) == _profile_identity(os.fstat(descriptor))
+                 == _profile_identity(os.stat(path, follow_symlinks=False)), "PYTHON_PROFILE_USERNS_DRIFT")
+        value = int(data[:-1])
+        _remaining(deadline, 3300)
+    except BaseException as error:
+        primary = error
+    if descriptor is not None:
+        try:
+            os.close(descriptor)
+        except BaseException as error:
+            cleanup.append(("PYTHON_PROFILE_USERNS_CLOSE", error))
+    _profile_finish(primary, cleanup)
+    return value
+
+
+def _profile_read_mountinfo(deadline: float) -> bytes:
+    descriptor, primary, chunks, cleanup = None, None, [], []
+    try:
+        _remaining(deadline, 3300)
+        descriptor = os.open("/proc/self/mountinfo", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        _require(stat.S_ISREG(os.fstat(descriptor).st_mode), "PYTHON_PROFILE_MOUNTINFO_TYPE")
+        count = 0
+        while True:
+            _remaining(deadline, 3300)
+            block = os.read(descriptor, min(65536, PROFILE_MOUNTINFO_BYTES - count + 1))
+            _require(type(block) is bytes, "PYTHON_PROFILE_MOUNTINFO_READ")
+            if not block:
+                break
+            count += len(block)
+            _require(count <= PROFILE_MOUNTINFO_BYTES, "PYTHON_PROFILE_MOUNTINFO_SIZE")
+            chunks.append(block)
+        _remaining(deadline, 3300)
+    except BaseException as error:
+        primary = error
+    if descriptor is not None:
+        try:
+            os.close(descriptor)  # Never retry an ambiguous close on a reused FD.
+        except BaseException as error:
+            cleanup.append(("PYTHON_PROFILE_MOUNTINFO_CLOSE", error))
+    _profile_finish(primary, cleanup)
+    return b"".join(chunks)
+
+
+def _profile_mount_table(data: bytes, deadline: float) -> dict:
+    _require(type(data) is bytes and 0 < len(data) <= PROFILE_MOUNTINFO_BYTES
+             and data.endswith(b"\n"), "PYTHON_PROFILE_MOUNTINFO_SIZE")
+    lines = data.splitlines()
+    _require(0 < len(lines) <= PROFILE_MOUNTINFO_ROWS, "PYTHON_PROFILE_MOUNTINFO_COUNT")
+    table, identities = {}, set()
+    escapes = {b"040": b" ", b"011": b"\t", b"012": b"\n", b"134": b"\\"}
+
+    def path(value):
+        _require(len(value) <= 4096 and re.search(rb"\\(?!040|011|012|134)", value) is None,
+                 "PYTHON_PROFILE_MOUNT_PATH")
+        decoded = re.sub(rb"\\(040|011|012|134)", lambda match: escapes[match[1]], value).decode("utf-8", "strict")
+        parsed = PurePosixPath(decoded)
+        _require(parsed.is_absolute() and ".." not in parsed.parts and str(parsed) == decoded
+                 and "\0" not in decoded, "PYTHON_PROFILE_MOUNT_PATH")
+        return decoded
+
+    for line in lines:
+        _remaining(deadline, 3300)
+        _require(0 < len(line) <= 8192 and line.count(b" - ") == 1, "PYTHON_PROFILE_MOUNT_ROW")
+        before, after = (part.split() for part in line.split(b" - "))
+        _require(len(before) >= 6 and len(after) == 3 and all(value.isdigit() for value in before[:2])
+                 and all(0 < int(value) < 2**64 for value in before[:2])
+                 and re.fullmatch(rb"[0-9]{1,10}:[0-9]{1,10}", before[2]) is not None,
+                 "PYTHON_PROFILE_MOUNT_ROW")
+        identifier, parent = map(int, before[:2])
+        point, root = path(before[4]), path(before[3])
+        _require(point not in table and identifier not in identities, "PYTHON_PROFILE_MOUNT_DUPLICATE")
+        options, super_options = before[5].split(b","), after[2].split(b",")
+        _require(len(options) == len(set(options)) and len(set(options) & {b"ro", b"rw"}) == 1
+                 and all(options) and all(super_options), "PYTHON_PROFILE_MOUNT_OPTIONS")
+        identities.add(identifier)
+        table[point] = {"id": identifier, "parent": parent, "root": root, "device": before[2],
+                        "options": frozenset(options), "filesystem": after[0],
+                        "super_options": frozenset(super_options)}
+    _remaining(deadline, 3300)
+    return table
+
+
+def _profile_identity(info):
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_nlink)
+
+
+def _profile_directory_current(pin, deadline: float) -> None:
+    _remaining(deadline, 3300)
+    _require(_profile_identity(os.fstat(pin["fd"])) == pin["identity"]
+             == _profile_identity(os.stat(pin["path"], follow_symlinks=False)), "PYTHON_PROFILE_DIRECTORY_DRIFT")
+
+
+def _profile_empty(pin, deadline: float) -> None:
+    entries, primary, cleanup = None, None, []
+    try:
+        _profile_directory_current(pin, deadline)
+        entries = os.scandir(pin["fd"])
+        _require(next(entries, None) is None, "PYTHON_PROFILE_CAPACITY_NOT_EMPTY")
+        _remaining(deadline, 3300)
+    except BaseException as error:
+        primary = error
+    if entries is not None:
+        try:
+            entries.close()
+        except BaseException as error:
+            cleanup.append(("PYTHON_PROFILE_SCAN_CLOSE", error))
+    _profile_finish(primary, cleanup)
+
+
+def _profile_file_control(pin, deadline: float, *, readonly=False, capacity=False) -> tuple[int, int | None]:
+    """One exclusive fixed synthetic name; no adoption or recursive cleanup."""
+    name = ".mrk-python-profile-readonly" if readonly else (
+        ".mrk-python-profile-capacity" if capacity else ".mrk-python-profile-write")
+    descriptor, identity, primary, cleanup, total, denial = None, None, None, [], 0, None
+    try:
+        _profile_directory_current(pin, deadline)
+        try:
+            descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                 0o600, dir_fd=pin["fd"])
+        except OSError as error:
+            if not readonly or error.errno != errno.EROFS:
+                raise
+            denial = error.errno
+        if descriptor is not None:
+            observed = os.fstat(descriptor)
+            _require(stat.S_ISREG(observed.st_mode) and observed.st_nlink == 1 and observed.st_size == 0
+                     and stat.S_IMODE(observed.st_mode) == 0o600
+                     and (observed.st_uid, observed.st_gid) == (os.geteuid(), os.getegid()),
+                     "PYTHON_PROFILE_FILE_IDENTITY")
+            identity = _profile_identity(observed)
+            _require(not readonly, "PYTHON_PROFILE_READONLY_CONTROL_WRITABLE")
+            if capacity:
+                block, maximum = b"\0" * 65536, 16 * 1024**2
+                for _ in range(maximum // len(block) + 2):
+                    _remaining(deadline, 3300)
+                    try:
+                        count = os.write(descriptor, block)
+                    except OSError as error:
+                        if error.errno != errno.ENOSPC:
+                            raise
+                        denial = error.errno
+                        break
+                    _require(type(count) is int and 0 < count <= len(block), "PYTHON_PROFILE_WRITE_COUNT")
+                    total += count
+                    _require(total <= maximum, "PYTHON_PROFILE_CAPACITY_NOT_ENFORCED")
+                _require(denial == errno.ENOSPC and total == maximum, "PYTHON_PROFILE_CAPACITY_DENIAL")
+            else:
+                data = b"MRK_PYTHON_PROFILE_WRITE\n"
+                while total < len(data):
+                    _remaining(deadline, 3300)
+                    count = os.write(descriptor, data[total:])
+                    _require(type(count) is int and 0 < count <= len(data) - total, "PYTHON_PROFILE_WRITE_COUNT")
+                    total += count
+            _remaining(deadline, 3300)
+            os.fsync(descriptor)
+            observed = os.fstat(descriptor)
+            _require(_profile_identity(observed) == identity and observed.st_size == total,
+                     "PYTHON_PROFILE_FILE_DRIFT")
+        _remaining(deadline, 3300)
+        _require(not readonly or denial == errno.EROFS, "PYTHON_PROFILE_READONLY_DENIAL")
+    except BaseException as error:
+        primary = error
+    if descriptor is not None:
+        try:
+            os.close(descriptor)
+        except BaseException as error:
+            cleanup.append(("PYTHON_PROFILE_FILE_CLOSE", error))
+    if identity is not None:
+        try:
+            _profile_directory_current(pin, deadline)
+            _require(_profile_identity(os.stat(name, dir_fd=pin["fd"], follow_symlinks=False)) == identity,
+                     "PYTHON_PROFILE_FILE_REPLACED")
+            os.unlink(name, dir_fd=pin["fd"])
+            try:
+                os.stat(name, dir_fd=pin["fd"], follow_symlinks=False)
+            except OSError as error:
+                if error.errno != errno.ENOENT:
+                    raise
+            else:
+                raise CheckError("PYTHON_PROFILE_FILE_REMAINS")
+        except BaseException as error:
+            cleanup.append(("PYTHON_PROFILE_FILE_REMOVE", error))
+    _profile_finish(primary, cleanup)
+    return total, denial
+
+
+def _python_full_profile(work_root: Path, *, deadline: float) -> dict:
+    """Actual Linux-only entry controls, before any project test discovery.
+
+    The 912MiB total bounds file data, not tmpfs metadata or process RAM. Only
+    the reviewed namespace entry may arrange these mounts and resource limits.
+    """
+    _remaining(deadline, 3300)
+    _require(sys.platform == "linux" and os.getuid() == os.geteuid() != 0
+             and os.getgid() == os.getegid() != 0 and not os.getgroups(), "PYTHON_PROFILE_IDENTITY")
+    _require(work_root is not None and work_root.is_absolute() and work_root.name == "checks"
+             and work_root.parent.name == "work" and work_root.resolve(strict=True) == work_root,
+             "PYTHON_PROFILE_WORK_ROOT")
+    work = work_root.parent
+    _profile_userns_zero(deadline)
+    limits = ((resource.RLIMIT_FSIZE, PYTHON_FULL_FSIZE), (resource.RLIMIT_CORE, 0),
+              (resource.RLIMIT_NOFILE, 1024), (resource.RLIMIT_NPROC, 256),
+              (resource.RLIMIT_CPU, 300), (resource.RLIMIT_AS, 4 * 1024**3))
+    file_limit = None
+    for which, wanted in limits:
+        _remaining(deadline, 3300)
+        observed = resource.getrlimit(which)
+        _require(type(observed) is tuple and len(observed) == 2 and all(type(value) is int for value in observed)
+                 and observed == (wanted, wanted), "PYTHON_PROFILE_RESOURCE_LIMIT")
+        if which == resource.RLIMIT_FSIZE:
+            file_limit = observed[0]
+    mounts = _profile_mount_table(_profile_read_mountinfo(deadline), deadline)
+    expected = [(str(work / name), size) for name, size in PYTHON_FULL_WORK_TMPFS]
+    expected.extend(PYTHON_FULL_PRIVATE_TMPFS)
+    expected_paths = {point for point, _ in expected}
+    work_mount = mounts.get(str(work))
+    _require(work_mount is not None and b"ro" in work_mount["options"], "PYTHON_PROFILE_WORK_READONLY")
+    _require(all(point == str(work) or not PurePosixPath(point).is_relative_to(work)
+                 or point in expected_paths for point in mounts), "PYTHON_PROFILE_UNEXPECTED_WORK_MOUNT")
+    devices = set()
+    for point, _ in expected:
+        row = mounts.get(point)
+        _require(row is not None and row["filesystem"] == b"tmpfs" and row["root"] == "/"
+                 and b"rw" in row["options"] and b"rw" in row["super_options"]
+                 and row["device"] not in devices and row["device"] != work_mount["device"],
+                 "PYTHON_PROFILE_TMPFS_MOUNT")
+        devices.add(row["device"])
+    pins, primary, cleanup, capacities, write_controls = [], None, [], 0, 0
+    details = None
+    try:
+        for point, size in [(str(work), None), (str(work / "wheels"), None), *expected]:
+            _remaining(deadline, 3300)
+            path = Path(point)
+            _require(path.resolve(strict=True) == path, "PYTHON_PROFILE_DIRECTORY_ALIAS")
+            descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            pin = {"fd": descriptor, "path": path, "identity": None, "capacity": size}
+            pins.append(pin)  # Custody starts before a fallible descriptor observation.
+            info, filesystem = os.fstat(descriptor), os.fstatvfs(descriptor)
+            owner = (os.geteuid(), os.getegid()) if path == work / "wheels" else (0, 0)
+            mode = 0o1777 if size is not None else 0o700 if path == work / "wheels" else 0o755
+            _require(stat.S_ISDIR(info.st_mode) and (info.st_uid, info.st_gid) == owner
+                     and stat.S_IMODE(info.st_mode) == mode, "PYTHON_PROFILE_DIRECTORY_STATE")
+            pin["identity"] = _profile_identity(info)
+            _profile_directory_current(pin, deadline)
+            _require(type(filesystem.f_flag) is int
+                     and bool(filesystem.f_flag & os.ST_RDONLY) == (size is None), "PYTHON_PROFILE_FILESYSTEM_FLAGS")
+            if size is not None:
+                _require(all(type(value) is int for value in
+                             (filesystem.f_blocks, filesystem.f_frsize, filesystem.f_bavail))
+                         and 0 < filesystem.f_frsize <= 1024**2
+                         and filesystem.f_blocks * filesystem.f_frsize == size
+                         and filesystem.f_bavail == filesystem.f_blocks, "PYTHON_PROFILE_TMPFS_CAPACITY")
+                capacities += filesystem.f_blocks * filesystem.f_frsize
+        for pin in pins[2:]:
+            _profile_file_control(pin, deadline)
+            write_controls += 1
+        _, readonly_errno = _profile_file_control(pins[1], deadline, readonly=True)
+        scratch = next(pin for pin in pins if pin["path"] == work_root)
+        _profile_empty(scratch, deadline)
+        capacity_bytes, capacity_errno = _profile_file_control(scratch, deadline, capacity=True)
+        _require(_profile_mount_table(_profile_read_mountinfo(deadline), deadline) == mounts,
+                 "PYTHON_PROFILE_MOUNT_DRIFT")
+        for pin in pins:
+            _profile_directory_current(pin, deadline)
+            if pin["capacity"] is not None:
+                filesystem = os.fstatvfs(pin["fd"])
+                _require(filesystem.f_bavail * filesystem.f_frsize == pin["capacity"],
+                         "PYTHON_PROFILE_CAPACITY_NOT_RESTORED")
+        details = {"name": "linux-python-full-v1", "logical_file_bytes": file_limit,
+                   "file_data_bytes": capacities, "tmpfs_mounts": len(devices), "write_controls": write_controls,
+                   "readonly_errno": readonly_errno, "capacity_errno": capacity_errno, "capacity_bytes": capacity_bytes,
+                   "max_user_namespaces": _profile_userns_zero(deadline)}
+        _remaining(deadline, 3300)
+    except BaseException as error:
+        primary = error
+    for pin in reversed(pins):
+        try:
+            os.close(pin["fd"])
+        except BaseException as error:
+            cleanup.append(("PYTHON_PROFILE_DIRECTORY_CLOSE", error))
+    try:
+        _remaining(deadline, 3300)
+    except BaseException as error:
+        cleanup.append(("PYTHON_PROFILE_FINAL_DEADLINE", error))
+    _profile_finish(primary, cleanup)
+    return details
+
+
 def linux_allowed_skips() -> frozenset[str]:
     return LINUX_MACOS_SKIPS
 
@@ -326,91 +656,134 @@ def _failure_locations(error, source_root: Path) -> list[dict[str, object]]:
     return result
 
 
-def run_python_tests(source_root: Path, selection: str, deadline: float, observations: list) -> dict:
-    expected = expected_python_ids(source_root, selection, deadline=deadline)
-    _remaining(deadline, 3300)
-    if selection == "full":
-        _require(sys.platform == "linux" and os.environ.get("MOBILE_RELEASE_REQUIRE_RUBY_CONTRACTS") == "1",
-                 "FULL_DISCOVERY_ENVIRONMENT")
-    else:
-        inspect_installed_wheel(source_root, deadline=deadline)
-    allowed = LINUX_MACOS_SKIPS if sys.platform == "linux" else frozenset()
-    failures = []
+def _failure_callback(identifier: str, outcome: str, error, expected) -> dict:
+    """A finite category from the actual callback, never its display string."""
+    _require(type(identifier) is str and identifier in expected
+             and type(outcome) is str and outcome in FAILURE_OUTCOMES,
+             "TEST_FAILURE_CALLBACK_ID")
+    _require((outcome in {"skip", "unexpected-success"}) == (error is None),
+             "TEST_FAILURE_CALLBACK_EXCEPTION")
+    exception = None
+    if error is not None:
+        _require(type(error) is tuple and len(error) == 3 and isinstance(error[1], BaseException),
+                 "TEST_FAILURE_CALLBACK_EXCEPTION")
+        exception = error[1]
+    category = "none"
+    for kind, label in ((OSError, "os-error"), (AssertionError, "assertion-error"),
+                        (ValueError, "value-error"), (TypeError, "type-error"), (MemoryError, "memory-error"),
+                        (Exception, "exception"), (BaseException, "base-exception")):
+        if isinstance(exception, kind):
+            category = label
+            break
+    number = exception.errno if isinstance(exception, OSError) else None
+    return {"id": identifier, "outcome": outcome, "category": category,
+            "errno": number if type(number) is int and 0 < number < 4096 else None}
 
-    class Result(unittest.TextTestResult):
-        def startTest(self, test):
-            _remaining(deadline, 3300)
-            identifier = test.id()
-            _require(identifier in expected and identifier not in {item["id"] for item in observations}, "TEST_STARTED_ID")
-            observations.append({"id": identifier, "outcome": "incomplete"})
-            super().startTest(test)
 
-        def record(self, test, outcome, error=None):
-            if error is not None:
-                failures.extend(_failure_locations(error, source_root))
-            identifier = getattr(test, "test_case", test).id()
-            rows = [row for row in observations if row["id"] == identifier]
-            if len(rows) != 1:
-                self.stop()
-                raise CheckError("TEST_EVENT_WITHOUT_START", failures[-16:])
-            if rows[0]["outcome"] in {"incomplete", "ok"}:
-                rows[0]["outcome"] = outcome
-            if outcome not in {"ok", "skip"} or outcome == "skip" and identifier not in allowed:
-                self.stop()
-
-        def addSuccess(self, test):
-            self.record(test, "ok")
-            super().addSuccess(test)
-
-        def addError(self, test, error):
-            self.record(test, "error", error)
-            super().addError(test, error)
-
-        def addFailure(self, test, error):
-            self.record(test, "failure", error)
-            super().addFailure(test, error)
-
-        def addSkip(self, test, reason):
-            self.record(test, "skip")
-            super().addSkip(test, reason)
-
-        def addExpectedFailure(self, test, error):
-            self.record(test, "expected-failure", error)
-            super().addExpectedFailure(test, error)
-
-        def addUnexpectedSuccess(self, test):
-            self.record(test, "unexpected-success")
-            super().addUnexpectedSuccess(test)
-
-        def addSubTest(self, test, subtest, error):
-            if error is not None:
-                self.record(test, "failure" if issubclass(error[0], test.failureException) else "error", error)
-            super().addSubTest(test, subtest, error)
-
-    def flatten(suite):
-        for test in suite:
-            if isinstance(test, unittest.TestSuite):
-                yield from flatten(test)
-            else:
-                yield test.id()
-
-    with contextlib.redirect_stdout(sys.stderr):
-        suite = unittest.TestSuite()
-        for pattern in ("test*.py",) if selection == "full" else WHEEL_PATTERNS:
-            loader = unittest.TestLoader()
-            suite.addTests(loader.discover(str(source_root / "tests"), pattern=pattern))
-            _require(not loader.errors, "TEST_DISCOVERY_ERROR")
-        actual = list(flatten(suite))
-        _require(len(actual) == len(set(actual)) and tuple(sorted(actual)) == expected, "TEST_LOADED_INVENTORY")
-        result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2, failfast=True, resultclass=Result).run(suite)
-    _remaining(deadline, 3300)
+def run_python_tests(source_root: Path, selection: str, deadline: float, observations: list,
+                     *, work_root: Path | None = None) -> dict:
+    failures, callbacks, profile = [], [], None
     try:
+        _remaining(deadline, 3300)
+        if selection == "full":
+            _require(sys.platform == "linux" and os.environ.get("MOBILE_RELEASE_REQUIRE_RUBY_CONTRACTS") == "1",
+                     "FULL_DISCOVERY_ENVIRONMENT")
+            profile = _python_full_profile(work_root, deadline=deadline)
+        # Even source-derived inventory/discovery follows the actual new view's
+        # admission. A failed/unknown profile cannot reach a product import.
+        expected = expected_python_ids(source_root, selection, deadline=deadline)
+        if selection != "full":
+            inspect_installed_wheel(source_root, deadline=deadline)
+        allowed = LINUX_MACOS_SKIPS if sys.platform == "linux" else frozenset()
+
+        class Result(unittest.TextTestResult):
+            def startTest(self, test):
+                _remaining(deadline, 3300)
+                identifier = test.id()
+                _require(type(identifier) is str and identifier in expected
+                         and identifier not in {item["id"] for item in observations}, "TEST_STARTED_ID")
+                observations.append({"id": identifier, "outcome": "incomplete"})
+                super().startTest(test)
+
+            def record(self, test, outcome, error=None):
+                identifier = getattr(test, "test_case", test).id()
+                rows = [row for row in observations if row["id"] == identifier]
+                if len(rows) != 1 or type(identifier) is not str or identifier not in expected:
+                    self.stop()
+                    raise CheckError("TEST_EVENT_WITHOUT_START", failures)
+                failed = outcome not in {"ok", "skip"} or outcome == "skip" and identifier not in allowed
+                if failed and len(callbacks) < 16:
+                    callbacks.append(_failure_callback(identifier, outcome, error, expected))
+                if error is not None:
+                    failures[:] = [*failures, *_failure_locations(error, source_root)][-16:]
+                if rows[0]["outcome"] in {"incomplete", "ok"}:
+                    rows[0]["outcome"] = outcome
+                if failed:
+                    self.stop()
+
+            def addSuccess(self, test):
+                self.record(test, "ok")
+                super().addSuccess(test)
+
+            def addError(self, test, error):
+                self.record(test, "error", error)
+                super().addError(test, error)
+
+            def addFailure(self, test, error):
+                self.record(test, "failure", error)
+                super().addFailure(test, error)
+
+            def addSkip(self, test, reason):
+                self.record(test, "skip")
+                super().addSkip(test, reason)
+
+            def addExpectedFailure(self, test, error):
+                self.record(test, "expected-failure", error)
+                super().addExpectedFailure(test, error)
+
+            def addUnexpectedSuccess(self, test):
+                self.record(test, "unexpected-success")
+                super().addUnexpectedSuccess(test)
+
+            def addSubTest(self, test, subtest, error):
+                if error is not None:
+                    self.record(test, "failure" if issubclass(error[0], test.failureException) else "error", error)
+                super().addSubTest(test, subtest, error)
+
+        def flatten(suite):
+            for test in suite:
+                if isinstance(test, unittest.TestSuite):
+                    yield from flatten(test)
+                else:
+                    yield test.id()
+
+        with contextlib.redirect_stdout(sys.stderr):
+            suite = unittest.TestSuite()
+            for pattern in ("test*.py",) if selection == "full" else WHEEL_PATTERNS:
+                loader = unittest.TestLoader()
+                suite.addTests(loader.discover(str(source_root / "tests"), pattern=pattern))
+                _require(not loader.errors, "TEST_DISCOVERY_ERROR")
+            actual = list(flatten(suite))
+            _require(len(actual) == len(set(actual)) and tuple(sorted(actual)) == expected, "TEST_LOADED_INVENTORY")
+            result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2, failfast=True, resultclass=Result).run(suite)
+        _remaining(deadline, 3300)
         validate_test_outcomes(expected, observations, sys.platform)
-    except CheckError as error:
-        error.locations = failures[-16:]
+        _require(result.wasSuccessful() and result.testsRun == len(expected), "TEST_RESULT")
+        details = {"executed": result.testsRun, "skipped": len(result.skipped),
+                   "failure_locations": failures, "failure_callbacks": callbacks}
+        if profile is not None:
+            details["storage_profile"] = profile
+        return details
+    except BaseException as error:
+        if type(error) is CheckError:
+            error.locations = failures or error.locations
+            error.failure_callbacks = callbacks
+            error.storage_profile = profile
+            raise
+        if callbacks or profile is not None:
+            code = "CHECK_INTERRUPTED" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "UNEXPECTED_CHECK_ERROR"
+            raise CheckError(code, failures, failure_callbacks=callbacks, storage_profile=profile) from error
         raise
-    _require(result.wasSuccessful() and result.testsRun == len(expected), "TEST_RESULT")
-    return {"executed": result.testsRun, "skipped": len(result.skipped), "failure_locations": failures}
 
 
 def _headers(data: bytes):
@@ -870,7 +1243,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--wheel", type=Path)
     parser.add_argument("--ruby", type=Path)
     args = parser.parse_args(argv)
-    observations = []
+    observations, details = [], None
     report = {"check": args.check, "ok": False, "tests": observations, "details": {}}
     try:
         _remaining(args.deadline, 3300)
@@ -884,7 +1257,8 @@ def main(argv: list[str] | None = None) -> int:
         os.umask(0o077)
         os.chdir(work)
         if args.check in {"python-full", "python-wheel"}:
-            details = run_python_tests(source, "full" if args.check == "python-full" else "wheel", args.deadline, observations)
+            details = run_python_tests(source, "full" if args.check == "python-full" else "wheel",
+                                       args.deadline, observations, work_root=work)
         elif args.check == "wheel-smoke":
             details = wheel_smoke(source, work, args.wheel.resolve(strict=True), args.ruby, args.deadline)
         else:
@@ -900,6 +1274,18 @@ def main(argv: list[str] | None = None) -> int:
         report["details"] = {"error": code, "failure_locations": locations}
         if type(error) is CheckError and error.cleanup_errors:
             report["details"]["cleanup_errors"] = error.cleanup_errors
+        if type(error) is CheckError:
+            callbacks, profile = error.failure_callbacks, error.storage_profile
+            # A final main-level deadline failure after the actual test runner
+            # returned must not erase its completed native controls. These are
+            # still diagnostics of a failed check, never replacement success.
+            if details is not None and args.check in {"python-full", "python-wheel"}:
+                callbacks = callbacks or details.get("failure_callbacks", [])
+                if profile is None:
+                    profile = details.get("storage_profile")
+            report["details"]["failure_callbacks"] = callbacks
+            if profile is not None:
+                report["details"]["storage_profile"] = profile
     encoded = _json_bytes(report)
     _require(len(encoded) <= MAX_RESULT_BYTES, "CHECK_RESULT_LIMIT")
     sys.stdout.write(RESULT_PREFIX + encoded.decode("ascii") + "\n")

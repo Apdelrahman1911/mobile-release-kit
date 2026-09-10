@@ -142,6 +142,17 @@ read-only mounts, followed by `setpriv` for the numeric credential drop, cleared
 groups, no-new-privileges and zero capabilities. No user-namespace UID translation
 is substituted. Temporary device/runtime views do not expose host control sockets.
 
+Before any test-identity launch on that disposable Linux VM, the original owner
+pins the single fixed `user.max_user_namespaces` setting, retains its original
+value, establishes zero and checks actual readback. Every bubblewrap launch must
+pass `--assert-userns-disabled`; numeric entry also requires zero. This prevents
+the test identity from creating another user namespace with new mount authority;
+dropped capabilities alone are not that guarantee. There is no alternate namespace
+mapping or weaker fallback. Conditional restoration requires genuine producer and
+reserved-domain finality plus the same node/current zero. Ambiguous effects, drift
+or finality failure stay failed for VM disposal; restore and descriptor-close errors
+are collected independently. Never apply this host preparation on a shared VPS.
+
 macOS uses a numeric `Popen` credential drop and inherited `sandbox-exec` policy.
 The candidate denies networking and Mach lookup, restricts writes to task work,
 protects runner/control reads, and restricts signals to the same sandbox. Native
@@ -161,11 +172,36 @@ process and memory bounds supplement the hosted job timeout. The current capture
 limits are 8 MiB per ordinary stream, 16 MiB for selected installer streams, and
 256 MiB persisted per attempt. A 4 GiB + 512 MiB disk reserve is maintained.
 
+The ordinary per-file logical-size limit is512MiB. Only the exact Linux
+`python-full` invocation uses `(1 << 32) + 1MiB`, preserving the genuine sparse
+ZIP64 regression rather than splitting, skipping or mocking it. This fixed
+profile makes the entire host-backed work tree read-only and overlays only
+namespace-private tmpfs leaves:640MiB work/tmp;16MiB each for work/home, config,
+cache, gem-cache, bundle-config, bundle-home and checks;128MiB /tmp;16MiB each
+for /run and /dev/shm. Their aggregate912MiB bounds **file data**, not total RAM
+or inode metadata. Dispatch also requires actual MemAvailable>=1536MiB; existing
+CPU/address-space/process/FD/deadline/output limits are unchanged.
+
+Before discovering tests, actual Linux controls verify limits, zero additional
+user namespaces, the read-only/capped mount topology and private writable roots.
+Every writable mount needs a real write/close/remove positive, the U-owned
+host-backed leaf must reject writes with EROFS, and a bounded16MiB capacity
+control must reach ENOSPC and clean its file. Failure prevents discovery. The
+real ZIP64 test asserts exact logical length, sparse allocated blocks and actual
+production parsing/stdlib extraction. Namespace disposal is not product cleanup
+and cannot convert failed or incomplete test outcomes into success.
+
 Acceptance requires the actual original launcher wait, zero return code, both
 stream EOFs, bounded and reconciled persisted bytes, and an empty reserved-identity
 process domain. A PASS-shaped footer, closed stream, or discovered PID cannot
 replace those facts. The first error stays latched; write/close/cleanup failures
 remain failures even when a previously written result looked successful.
+
+Direct admission invocations also retain pending original-producer custody until
+the real collector returns normally. An ambiguous root owner-loss helper can
+still create future test-identity work even when its current process census is
+empty. Pending custody vetoes idle/finality and Linux-setting or macOS-HOME
+restoration; diagnostic wait fields cannot clear it.
 
 Linux process finality uses two complete process/thread credential censuses.
 Only known disappearance or membership/birth-identity churn permits discarding
@@ -216,6 +252,20 @@ deadline. A genuine zombie remains a zombie even when its exit flag is set.
 Fixture readiness still needs the independent worker/pipe/marker handshake.
 No fixture selector or test canary is added to a production validator environment.
 
+The fixed Xcode26.3/toolchain/SDK inventories and their bounded intermediate
+ancestors belong to the trusted hosted-image provider. They must not be owned by
+the test identity, world-writable or writable by its only group. Internal links,
+complete inventory, hashes, executable/set-ID and signature checks remain required.
+Compiler/linker ownership may be nonroot and unrelated-group-write is permitted
+under that provider trust model and cleared supplementary groups; the signature
+tool `/usr/bin/codesign` still requires root ownership. No provider permission
+repair or alternate toolchain is attempted. Rejection diagnostics use the same
+stat/lstat observation with fixed roles/indices/predicates, never a guessed path
+or a later re-stat presented as the original failure.
+Parent-chain checks include the fixed SDK alias's own parents and every canonical
+internal-link target's parents, even outside the two inventoried roots; successful
+directory checks are shared under the same bounded inventory/deadline.
+
 Clean profile and Ruby fixture-driver environments also bind `TMPDIR`, `TMP`
 and `TEMP` to their existing canonical owned case directory. They do not inherit
 ambient temporary paths, HOME or configuration. Native assertions check the
@@ -255,6 +305,14 @@ Failure diagnostics may identify the fixed ACL attribute or whitelisted Ruby
 startup tokens from already captured stderr. They disclose no raw ACL entries,
 messages or paths. Ruby tokens are observations, not proof of an operating-system
 cause, and never change a failed admission result into success.
+
+Python failures additionally retain at most16 actual failing callbacks: only
+source-known parent method IDs, finite outcome/category labels and a real bounded
+errno (or null). Subtest parameters, exception messages/arguments/filenames are
+excluded. Original failure survives failfast's later count mismatch; the parent
+filters the schema/identities and requires an empty callback list on success.
+Only genuinely completed fixed storage controls may appear as profile observations;
+they never replace original wait/EOF/domain finality or successful test outcomes.
 
 Do not upload raw captures, writable-directory globs, private Store data or signing
 assets. Reuse evidence only for the exact applicable source/configuration/toolchain.

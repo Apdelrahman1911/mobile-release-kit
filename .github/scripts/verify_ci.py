@@ -627,12 +627,24 @@ def parse_capture(step: Step, result, paths: Paths, platform: str, checks) -> Ch
             selection = "full" if step.id == "python-full" else "wheel"
             expected = checks.expected_python_ids(paths.source, selection)
             tests = summary.get("tests")
-            if type(tests) is not list or tuple(sorted(row["id"] for row in tests)) != expected:
+            if (type(tests) is not list
+                    or any(type(row) is not dict or set(row) != {"id", "outcome"}
+                           or type(row["id"]) is not str or type(row["outcome"]) is not str for row in tests)
+                    or tuple(sorted(row["id"] for row in tests)) != expected):
                 raise VerificationError("PYTHON_COMPLETION_INVENTORY")
             allowed = checks.linux_allowed_skips() if platform == "linux" and selection == "full" else frozenset()
             skips = {row["id"] for row in tests if row["outcome"] == "skip"}
             if skips != allowed or any(row["outcome"] not in ("ok", "skip") for row in tests):
                 raise VerificationError("PYTHON_UNEXPECTED_SKIP_OR_FAILURE")
+            callbacks = python_failure_callbacks(summary["details"].get("failure_callbacks"), expected)
+            if callbacks != []:
+                raise VerificationError("PYTHON_FAILURE_CALLBACKS_ON_SUCCESS")
+            summary["details"]["failure_callbacks"] = callbacks
+            if platform == "linux" and selection == "full":
+                profile = python_storage_profile(summary["details"].get("storage_profile"))
+                if profile is None:
+                    raise VerificationError("PYTHON_STORAGE_PROFILE_MISSING_OR_INVALID")
+                summary["details"]["storage_profile"] = profile
         details["summary"] = summary
     elif step.parser != "exit":
         raise VerificationError("UNKNOWN_RESULT_PARSER")
@@ -654,7 +666,45 @@ def strict_json(text: str):
     return json.loads(text, object_pairs_hook=pairs, parse_constant=constant)
 
 
-def failure_details(result, step: Step | None = None, paths: Paths | None = None) -> dict:
+def python_failure_callbacks(data: object, expected: tuple[str, ...]) -> list[dict] | None:
+    """Filter diagnostic callbacks, never acceptance or raw exception values."""
+    if type(data) is not list or len(data) > 16:
+        return None
+    identifiers = set(expected)
+    outcomes = {"error", "failure", "expected-failure", "unexpected-success", "skip"}
+    categories = {"os-error", "assertion-error", "value-error", "type-error", "memory-error",
+                  "exception", "base-exception", "none"}
+    result = []
+    for row in data:
+        if type(row) is not dict or set(row) != {"id", "outcome", "category", "errno"}:
+            return None
+        identifier, outcome, category, number = (row[key] for key in ("id", "outcome", "category", "errno"))
+        if (type(identifier) is not str or identifier not in identifiers
+                or type(outcome) is not str or outcome not in outcomes
+                or type(category) is not str or category not in categories
+                or number is not None and (type(number) is not int or not 0 < number < 4096)
+                or category != "os-error" and number is not None
+                or (outcome in {"skip", "unexpected-success"}) != (category == "none")):
+            return None
+        result.append({"id": identifier, "outcome": outcome, "category": category, "errno": number})
+    return result
+
+
+def python_storage_profile(data: object) -> dict | None:
+    """Closed native-control observations, not an alternate execution receipt."""
+    expected = {"name": "linux-python-full-v1", "logical_file_bytes": (1 << 32) + 1024**2,
+                "file_data_bytes": 912 * 1024**2, "tmpfs_mounts": 11, "write_controls": 11,
+                "readonly_errno": 30, "capacity_errno": 28, "capacity_bytes": 16 * 1024**2,
+                "max_user_namespaces": 0}
+    if type(data) is not dict or set(data) != set(expected):
+        return None
+    if any(type(data[key]) is not type(value) or data[key] != value for key, value in expected.items()):
+        return None
+    return dict(data)
+
+
+def failure_details(result, step: Step | None = None, paths: Paths | None = None,
+                    *, checks=None, deadline: float | None = None, platform: str | None = None) -> dict:
     """Public-safe observations only; never forward raw child diagnostics."""
     value = {"returncode": result.returncode, "waited": result.waited,
              "stdout_eof": result.stdout_eof, "stderr_eof": result.stderr_eof,
@@ -684,7 +734,31 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                 and set(row) == {"file", "line"} and type(row["file"]) is str
                 and re.fullmatch(r"(?:tests/|src/|\.github/scripts/)[A-Za-z0-9_./-]{1,180}", row["file"])
                 and ".." not in Path(row["file"]).parts and type(row["line"]) is int and 0 < row["line"] < 1000000][-16:]
-        except (ValueError, KeyError, TypeError, VerificationError, RecursionError):
+            if (platform == "linux" and step is not None and step.id == "python-full"
+                    and data.get("check") == step.id and data.get("ok") is False):
+                profile = python_storage_profile(detail.get("storage_profile"))
+                if profile is not None:
+                    value["storage_profile"] = profile
+            if (step is not None and paths is not None and checks is not None
+                    and step.id in {"python-full", "python-wheel"}
+                    and data.get("check") == step.id and data.get("ok") is False
+                    and "failure_callbacks" in detail):
+                try:
+                    expected = checks.expected_python_ids(paths.source,
+                        "full" if step.id == "python-full" else "wheel", deadline=deadline)
+                    callbacks = python_failure_callbacks(detail["failure_callbacks"], expected)
+                    if callbacks is not None:
+                        value["failure_callbacks"] = callbacks
+                except Exception:
+                    # Optional diagnostics must not replace the original failure.
+                    # Do not absorb expiry of the original aggregate timer.
+                    if deadline is not None:
+                        check_clock(deadline)
+                    value["python_diagnostics_unavailable"] = True
+        except VerificationError as exc:
+            if exc.code == "AGGREGATE_DEADLINE":
+                raise
+        except (ValueError, KeyError, TypeError, RecursionError):
             pass
     if step is not None and paths is not None and step.parser == "minitest":
         try:
@@ -796,13 +870,15 @@ def perform_step(step: Step, paths: Paths, session, checks, inventory: dict,
     if step.kind == "command":
         value = session.run(list(step.argv), cwd=step.cwd, env=dict(step.env), seconds=step.seconds,
                             output_limit=(16 if "install" in step.id or step.id == "source-dependencies" else 8) * 1024**2,
-                            cpu_seconds=300 if step.id in {"bundle-install", "wheel-build", "python-full"} else 180)
+                            cpu_seconds=300 if step.id in {"bundle-install", "wheel-build", "python-full"} else 180,
+                            profile="python-full" if platform == "linux" and step.id == "python-full" else "ordinary")
         if not value.ok:
-            return CheckResult(False, failure_details(value, step, paths), "COMMAND_EXIT_OR_FINALITY")
+            return CheckResult(False, failure_details(value, step, paths, checks=checks, deadline=deadline, platform=platform),
+                               "COMMAND_EXIT_OR_FINALITY")
         try:
             return parse_capture(step, value, paths, platform, checks)
         except VerificationError as exc:
-            return CheckResult(False, failure_details(value, step, paths), exc.code)
+            return CheckResult(False, failure_details(value, step, paths, checks=checks, deadline=deadline, platform=platform), exc.code)
     if step.kind != "inspection":
         raise VerificationError("UNKNOWN_GATE_KIND")
     details = {}

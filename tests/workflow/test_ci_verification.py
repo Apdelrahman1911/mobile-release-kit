@@ -232,6 +232,153 @@ sudo() {
 
 
 class CIControllerContractTests(unittest.TestCase):
+    def test_fixed_linux_python_storage_profile_is_selected_only_for_full_discovery(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        launched = []
+
+        def run(argv, **kwargs):
+            launched.append((argv, kwargs))
+            return SimpleNamespace(ok=True)
+
+        session = SimpleNamespace(ensure_idle=lambda: None, run=run)
+        with patch.object(controller, "check_clock"), patch.object(controller, "check_capacity"), \
+                patch.object(controller, "parse_capture", return_value=controller.CheckResult(True)):
+            for platform in ("linux", "macos"):
+                for step in controller.catalog(paths, platform, deadline=1000.0):
+                    if step.kind != "command":
+                        continue
+                    result = controller.perform_step(step, paths, session, None, {}, platform, deadline=1000.0)
+                    self.assertTrue(result.ok)
+                    argv, options = launched[-1]
+                    expected = "python-full" if platform == "linux" and step.id == "python-full" else "ordinary"
+                    self.assertEqual(options["profile"], expected)
+                    self.assertEqual(argv, list(step.argv))
+                    self.assertEqual(options["cwd"], step.cwd)
+                    self.assertEqual(options["env"], dict(step.env))
+                    self.assertEqual(options["seconds"], step.seconds)
+        self.assertEqual(sum(options["profile"] == "python-full" for _, options in launched), 1)
+
+    def test_python_failure_callbacks_are_source_bound_and_keep_private_errors_out(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        identifier = "unit.synthetic.FailureContract.test_second"
+        private = "synthetic-private-message-and-filename-not-for-publication"
+        observed = []
+
+        def expected(source, selection, *, deadline):
+            observed.append((source, selection, deadline))
+            return (identifier,)
+
+        checks = SimpleNamespace(expected_python_ids=expected)
+        step = controller.Step("python-full", parser="check")
+        callback = {"id": identifier, "outcome": "error", "category": "os-error", "errno": 27}
+
+        def capture(callbacks, *, check="python-full", ok=False):
+            report = {"check": check, "ok": ok,
+                      "tests": [{"id": identifier, "outcome": "error"}],
+                      "details": {"error": "TEST_OUTCOME_COUNT", "failure_callbacks": callbacks,
+                                  "raw_exception": private}}
+            raw = ("MRK_CHECK_RESULT=" + json.dumps(report) + "\n").encode()
+            return SimpleNamespace(returncode=1, waited=True, stdout_eof=True, stderr_eof=True,
+                                   domain_finality=True, timed_out=False, cancelled=False,
+                                   stdout=raw, stderr=b"", persisted=(len(raw), 0), duration=0.1, cleanup_errors=())
+
+        value = controller.failure_details(capture([callback]), step, paths, checks=checks, deadline=1000.0)
+        self.assertEqual(value["failure_callbacks"], [callback])
+        self.assertEqual(value["helper_error"], "TEST_OUTCOME_COUNT")
+        self.assertEqual(value["returncode"], 1)
+        self.assertEqual(observed, [(ROOT, "full", 1000.0)])
+        self.assertNotIn(private, json.dumps(value))
+        valid = [callback, {**callback, "errno": None},
+                 {**callback, "outcome": "failure", "category": "assertion-error", "errno": None},
+                 {**callback, "outcome": "expected-failure", "category": "exception", "errno": None},
+                 *({**callback, "outcome": outcome, "category": "none", "errno": None}
+                   for outcome in ("skip", "unexpected-success"))]
+        for row in valid:
+            self.assertEqual(controller.python_failure_callbacks([row], (identifier,)), [row])
+        invalid = [None, {}, [callback] * 17, [{**callback, "id": private}], [{**callback, "message": private}]]
+        invalid += [[{**callback, key: item}] for key, values in (
+            ("errno", (True, False, 0, -1, 4096, "27", [])),
+            ("outcome", ("ok", "incomplete", [], True)),
+            ("category", (private, [], True, "assertion-error")),
+        ) for item in values]
+        invalid += [[{**callback, "outcome": "skip"}], [{**callback, "category": "none", "errno": None}]]
+        for index, rows in enumerate(invalid):
+            with self.subTest(callback_mutation=index):
+                value = controller.failure_details(capture(rows), step, paths, checks=checks, deadline=1000.0)
+                self.assertNotIn("failure_callbacks", value)
+                self.assertEqual(value["returncode"], 1)
+                self.assertNotIn(private, json.dumps(value))
+        for changes in ({"check": "python-wheel"}, {"ok": True}):
+            value = controller.failure_details(capture([callback], **changes), step, paths, checks=checks)
+            self.assertNotIn("failure_callbacks", value)
+        with patch.object(checks, "expected_python_ids", side_effect=OSError(private)), \
+                patch.object(controller.time, "monotonic", return_value=999.0):
+            value = controller.failure_details(capture([callback]), step, paths, checks=checks, deadline=1000.0)
+            self.assertTrue(value["python_diagnostics_unavailable"])
+            self.assertEqual(value["returncode"], 1)
+            self.assertNotIn(private, json.dumps(value))
+        with patch.object(checks, "expected_python_ids", side_effect=OSError(private)), \
+                patch.object(controller.time, "monotonic", return_value=1000.0):
+            with self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                controller.failure_details(capture([callback]), step, paths, checks=checks, deadline=1000.0)
+
+    def test_native_storage_observations_require_exact_profile_and_original_finality(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        identifier = "unit.synthetic.StorageContract.test_one"
+        step = controller.Step("python-full", parser="check")
+        checks = SimpleNamespace(expected_python_ids=lambda *_: (identifier,), linux_allowed_skips=frozenset)
+        profile = {"name": "linux-python-full-v1", "logical_file_bytes": 4296015872,
+                   "file_data_bytes": 956301312, "tmpfs_mounts": 11, "write_controls": 11,
+                   "readonly_errno": 30, "capacity_errno": 28, "capacity_bytes": 16777216,
+                   "max_user_namespaces": 0}
+
+        def capture(observation, *, ok=True, finality=True, tests=None, callbacks=()):
+            summary = {"check": "python-full", "ok": ok,
+                       "tests": tests if tests is not None else [{"id": identifier, "outcome": "ok"}],
+                       "details": {"storage_profile": observation, "failure_callbacks": list(callbacks)}}
+            raw = ("MRK_CHECK_RESULT=" + json.dumps(summary) + "\n").encode()
+            return SimpleNamespace(ok=ok, returncode=0 if ok else 1, waited=True,
+                                   stdout_eof=True, stderr_eof=True, domain_finality=finality,
+                                   primary_error=None if ok else "command failed", cleanup_errors=(),
+                                   stdout=raw, stderr=b"", persisted=(len(raw), 0), duration=0.1,
+                                   timed_out=False, cancelled=False)
+
+        result = controller.parse_capture(step, capture(profile), paths, "linux", checks)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.details["summary"]["details"]["storage_profile"], profile)
+        failed = controller.failure_details(capture(profile, ok=False), step, paths, platform="linux")
+        self.assertEqual(failed["storage_profile"], profile)
+        self.assertEqual(failed["returncode"], 1)
+        self.assertNotIn("storage_profile", controller.failure_details(
+            capture(profile, ok=False), step, paths, platform="macos"))
+
+        bad_profiles = [None, {}, {**profile, "raw_message": "private"},
+                        {**profile, "max_user_namespaces": False}, {**profile, "max_user_namespaces": 1}]
+        bad_profiles.extend({key: value for key, value in profile.items() if key != missing} for missing in profile)
+        bad_profiles.extend({**profile, key: str(value)} for key, value in profile.items() if type(value) is int)
+        for index, bad in enumerate(bad_profiles):
+            with self.subTest(mutation=index):
+                with self.assertRaisesRegex(controller.VerificationError, "PYTHON_STORAGE_PROFILE_MISSING_OR_INVALID"):
+                    controller.parse_capture(step, capture(bad), paths, "linux", checks)
+                details = controller.failure_details(capture(bad, ok=False), step, paths, platform="linux")
+                self.assertEqual(details["returncode"], 1)
+                self.assertNotIn("storage_profile", details)
+                self.assertNotIn("private", json.dumps(details))
+        with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+            controller.parse_capture(step, capture(profile, finality=False), paths, "linux", checks)
+        with self.assertRaisesRegex(controller.VerificationError, "PYTHON_COMPLETION_INVENTORY"):
+            controller.parse_capture(step, capture(profile, tests=[{
+                "id": identifier, "outcome": "ok", "extra": "private"}]), paths, "linux", checks)
+        for callbacks in ([{"id": identifier, "outcome": "error", "category": "os-error", "errno": 27}],
+                          [{"id": "private", "outcome": "error", "category": "os-error", "errno": 27}],
+                          [{"id": identifier, "raw_message": "private"}], [None]):
+            with self.subTest(success_failure_callbacks=callbacks):
+                with self.assertRaisesRegex(controller.VerificationError, "PYTHON_FAILURE_CALLBACKS_ON_SUCCESS"):
+                    controller.parse_capture(step, capture(profile, callbacks=callbacks), paths, "linux", checks)
+
     def test_complete_fixed_gate_inventory_cannot_omit_duplicate_or_reorder_a_step(self):
         controller = controller_module()
         before = ("source-copy", "source-environment", "source-dependencies", "bundler", "bundle-install",

@@ -40,6 +40,11 @@ _ANCESTOR_READ_BYTES = b"MRK_SYNTHETIC_ANCESTOR_READ\n"
 _HOME_SOCKET_BYTES = b"MRK_SYNTHETIC_HOME_SOCKET\n"
 _CENSUS_PASSES = 8
 _CENSUS_PAUSE = 0.01
+_PYTHON_FULL_FSIZE = (1 << 32) + MiB
+_PYTHON_FULL_WORK_TMPFS = (("tmp", 640 * MiB), *((name, 16 * MiB) for name in (
+    "home", "config", "cache", "gem-cache", "bundle-config", "bundle-home", "checks")))
+_PYTHON_FULL_PRIVATE_TMPFS = (("/run", 16 * MiB), ("/tmp", 128 * MiB), ("/dev/shm", 16 * MiB))
+_USERNS_PATH = Path("/proc/sys/user/max_user_namespaces")
 _ENV_KEYS = frozenset("""
 PATH LANG LC_ALL TZ HOME USER LOGNAME TMPDIR TMP TEMP XDG_CONFIG_HOME
 XDG_CACHE_HOME CI TERM PYTHONSAFEPATH PYTHONDONTWRITEBYTECODE PYTHONNOUSERSITE
@@ -396,6 +401,129 @@ def _remaining(deadline: float) -> float:
     if left <= 0:
         raise DeadlineExpired("owning absolute deadline expired")
     return left
+
+
+def _python_full_command(root: Path, deadline: float) -> list[str]:
+    """One source-defined command, never an arbitrary large-file executor."""
+    return [str(root / "work/source-venv/bin/python"), "-I", "-B",
+            str(root / "source/.github/scripts/ci_checks.py"), "--check", "python-full",
+            "--source-root", str(root / "source"), "--work-root", str(root / "work/checks"),
+            "--deadline", repr(deadline)]
+
+
+def _python_full_memory(*, deadline: float) -> None:
+    """Bounded kernel headroom admission, not a whole-process-tree memory cap."""
+    fd, raw, errors = None, bytearray(), []
+    try:
+        _remaining(deadline)
+        fd = os.open(Path("/proc/meminfo"), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+        for _ in range(128):
+            _remaining(deadline)
+            chunk = os.read(fd, min(4096, 65537 - len(raw)))
+            if not chunk:
+                break
+            raw.extend(chunk)
+            if len(raw) > 65536:
+                raise SessionError("memory headroom metadata exceeds byte bound")
+        else:
+            raise SessionError("memory headroom metadata exceeds read bound")
+        values = []
+        for line in raw.splitlines():
+            if line.startswith(b"MemAvailable:"):
+                match = re.fullmatch(rb"MemAvailable:[ \t]+([0-9]{1,12})[ \t]+kB", line)
+                if match is None:
+                    raise SessionError("memory headroom metadata has malformed availability")
+                values.append(int(match[1]) * 1024)
+        if len(values) != 1 or values[0] < 1536 * MiB:
+            raise SessionError("fixed Python profile requires at least1536MiB MemAvailable")
+        _remaining(deadline)
+    except BaseException as exc:
+        errors.append(exc)
+    if fd is not None:
+        try:
+            os.close(fd)
+        except BaseException as exc:
+            errors.append(exc)
+    try:
+        _remaining(deadline)
+    except BaseException as exc:
+        errors.append(exc)
+    if errors:
+        raise BaseExceptionGroup("Python profile memory observation/close failed", errors)
+
+
+def _userns_read(fd: int, *, deadline: float | None = None) -> int:
+    """Read the one pinned kernel value, with a fixed byte/operation bound."""
+    if deadline is not None:
+        _remaining(deadline)
+    if os.lseek(fd, 0, os.SEEK_SET) != 0:
+        raise SessionError("user-namespace value did not seek to its fixed start")
+    if deadline is not None:
+        _remaining(deadline)
+    raw = os.read(fd, 22)
+    if deadline is not None:
+        _remaining(deadline)
+    extra = os.read(fd, 1)
+    if deadline is not None:
+        _remaining(deadline)
+    if extra or re.fullmatch(rb"(?:0|[1-9][0-9]{0,19})\n", raw) is None:
+        raise SessionError("user-namespace value is not one bounded canonical decimal")
+    value = int(raw)
+    if value > (1 << 64) - 1:
+        raise SessionError("user-namespace value exceeds the fixed integer bound")
+    return value
+
+
+def _userns_node(fd: int, *, deadline: float | None = None):
+    """The fixed proc name and owned uninherited descriptor must be one node."""
+    if deadline is not None:
+        _remaining(deadline)
+    pinned = os.fstat(fd)
+    if deadline is not None:
+        _remaining(deadline)
+    named = os.stat(_USERNS_PATH, follow_symlinks=False)
+    if deadline is not None:
+        _remaining(deadline)
+    same = lambda s: (s.st_dev, s.st_ino, s.st_uid, s.st_gid, s.st_mode)
+    if (same(pinned) != same(named) or not stat.S_ISREG(pinned.st_mode)
+            or (pinned.st_uid, pinned.st_gid) != (0, 0)
+            or stat.S_IMODE(pinned.st_mode) not in {0o600, 0o644}
+            or os.get_inheritable(fd)):
+        raise SessionError("user-namespace pin/name ownership, mode or descriptor custody differs")
+    if deadline is not None:
+        _remaining(deadline)
+    return pinned
+
+
+def _userns_zero(*, deadline: float | None = None) -> None:
+    """Read-only entry assertion; the outside Session alone owns preparation."""
+    fd, errors = None, []
+    try:
+        if sys.platform != "linux":
+            raise SessionError("user-namespace entry assertion requires native Linux")
+        if deadline is not None:
+            _remaining(deadline)
+        fd = os.open(_USERNS_PATH, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+        before = _userns_node(fd, deadline=deadline)
+        if _userns_read(fd, deadline=deadline) != 0:
+            raise SessionError("user-namespace entry assertion did not observe zero")
+        after = _userns_node(fd, deadline=deadline)
+        if _home_node(before) != _home_node(after) or before.st_mode != after.st_mode:
+            raise SessionError("user-namespace entry node changed during observation")
+    except BaseException as exc:
+        errors.append(exc)
+    if fd is not None:
+        try:
+            os.close(fd)
+        except BaseException as exc:
+            errors.append(exc)
+    if deadline is not None:
+        try:
+            _remaining(deadline)
+        except BaseException as exc:
+            errors.append(exc)
+    if errors:
+        raise BaseExceptionGroup("user-namespace entry observation/close failed", errors)
 
 
 def _tool_stat_note(info, uid: int, gid: int, *, role: str) -> dict:
@@ -797,83 +925,203 @@ def _observer_artifact(path: Path, uid: int, gid: int, *, deadline: float) -> tu
 
 def _observer_toolchain(uid: int, gid: int, *, deadline: float) -> dict:
     """Bind only the selected provider installation; no PATH/config discovery."""
-    xcode = _canonical("/Applications/Xcode_26.3.app/Contents/Developer")
-    toolchain = _canonical(xcode / "Toolchains/XcodeDefault.xctoolchain")
-    sdk = _canonical((xcode / "Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk").resolve(strict=True))
+    def marked(error: BaseException, phase: str, role: str, index: int, *, info=None,
+               predicates: tuple[str, ...] | list[str] = (), tool: dict | None = None):
+        # Every caller supplies a fixed phase/role/bounded traversal index. No
+        # path, message, ACL or replacement stat enters this observation.
+        note = {"phase": phase, "role": role, "index": index, "observed": info is not None or tool is not None}
+        if info is not None or tool is not None:
+            state = _tool_stat_note(info, uid, gid, role=role) if tool is None else tool
+            note.update({key: state[key] for key in ("kind", "mode", "root_owned", "subject_owned", "subject_group")})
+            note["failed_predicates"] = list(predicates)
+        error._ci_observation = {"provider": note}
+        return error
 
-    def checked(path: Path):
+    def canonical(path: Path, role: str, *, resolve_link: bool = False) -> Path:
+        try:
+            _remaining(deadline)
+            value = _canonical(path.resolve(strict=True) if resolve_link else path)
+            _remaining(deadline)
+            return value
+        except BaseException as exc:
+            raise marked(exc, "canonical", role, 0)
+
+    def checked(path: Path, *, phase: str, role: str, index: int = 0,
+                directory: bool = False, entry: bool = False):
+        try:
+            _remaining(deadline)
+            info = path.lstat() if entry else path.stat()
+        except BaseException as exc:
+            raise marked(exc, phase, role, index)
+        link = entry and stat.S_ISLNK(info.st_mode)
+        # Symlink mode0777 is not permission to replace a name. Its owner,
+        # checked parent and checked canonical target retain the real custody.
+        predicates = [name for name, failed in (
+            ("subject-owned", info.st_uid == uid),
+            ("world-writable", not link and bool(info.st_mode & 0o002)),
+            ("subject-group-writable", not link and info.st_gid == gid and bool(info.st_mode & 0o020)),
+            ("not-ordinary", not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode) or link)),
+            ("not-directory", directory and not stat.S_ISDIR(info.st_mode))) if failed]
+        if predicates:
+            raise marked(SessionError("selected compiler/SDK provider permission/type contract failed"),
+                         phase, role, index, info=info, predicates=predicates)
         _remaining(deadline)
-        info = path.stat()
-        if (info.st_uid != 0 or info.st_mode & 0o002
-                or info.st_gid == gid and info.st_mode & 0o020
-                or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode))):
-            raise SessionError("selected compiler/SDK is not root-owned and read-only to subject")
         return info
 
+    identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid,
+                           s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+    xcode = canonical(Path("/Applications/Xcode_26.3.app/Contents/Developer"), "xcode")
+    ancestors = (xcode, *xcode.parents)
+    for index, path in enumerate(ancestors):
+        checked(path, phase="ancestor", role="xcode", index=index, directory=True)
+    intermediate = set(ancestors)
+
+    def checked_chain(path: Path, role: str) -> None:
+        """Protect names through canonical parents, not just a link's target."""
+        _remaining(deadline)
+        if not _under(path, xcode):
+            raise marked(SessionError("selected provider parent is outside Xcode"), "intermediate", role, 0)
+        chain, current = [], path
+        while current != xcode:
+            if len(chain) >= 64 or not _under(current, xcode):
+                raise marked(SessionError("selected provider parent chain exceeds its fixed bound"),
+                             "intermediate", role, 64)
+            chain.append(current)
+            current = current.parent
+        for current in reversed(chain):
+            if current in intermediate:
+                continue
+            index = len(intermediate)
+            if index >= 300000:
+                raise marked(SessionError("selected provider parent inventory exceeds its fixed bound"),
+                             "intermediate", role, 300000)
+            try:
+                _remaining(deadline)
+                if current.resolve(strict=True) != current:
+                    raise SessionError("selected provider parent has a noncanonical alias")
+                _remaining(deadline)
+            except BaseException as exc:
+                raise marked(exc, "intermediate", role, index)
+            checked(current, phase="intermediate", role=role, index=index, directory=True)
+            intermediate.add(current)  # Only successful canonical/directory checks are cached.
+
+    toolchain = canonical(xcode / "Toolchains/XcodeDefault.xctoolchain", "toolchain")
+    sdk_alias = xcode / "Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+    checked_chain(sdk_alias.parent, "sdk")
+    alias = checked(sdk_alias, phase="entry", role="sdk", entry=True)
+    sdk = canonical(sdk_alias, "sdk", resolve_link=True)
     if not _under(sdk, xcode):
-        raise SessionError("selected SDK resolves outside fixed Xcode installation")
-    for path in (xcode, *xcode.parents):
-        checked(path)
+        raise marked(SessionError("selected SDK resolves outside fixed Xcode installation"),
+                     "entry", "sdk", 0, info=alias, predicates=["outside-provider"])
+    alias_after = checked(sdk_alias, phase="entry", role="sdk", entry=True)
+    if identity(alias) != identity(alias_after):
+        raise marked(SessionError("selected SDK alias changed during binding"), "entry", "sdk", 0,
+                     info=alias_after, predicates=["identity-changed"])
+    # Include both inventory roots and the fixed alias's own parents even if
+    # its canonical target is another internal branch of the installation.
+    for role, root in (("toolchain", toolchain), ("sdk", sdk)):
+        checked_chain(root, role)
     # Follow only canonical provider links within Xcode, visiting each directory
     # once.  This includes headers/runtime files, not merely the clang pathname.
-    pending, visited, count = [toolchain, sdk], set(), 0
+    pending, visited, count = [(toolchain, "toolchain"), (sdk, "sdk")], set(), 0
     while pending:
-        current = pending.pop()
+        current, role = pending.pop()
         if current in visited:
             continue
         visited.add(current)
-        checked(current)
-        for item in current.iterdir():
-            count += 1
-            if count > 300000:
-                raise SessionError("selected compiler/SDK inventory exceeds fixed bound")
-            _remaining(deadline)
-            target = item.resolve(strict=True)
-            if not _under(target, xcode) or item.lstat().st_uid != 0:
-                raise SessionError("selected compiler/SDK link escapes provider installation")
-            info = checked(target)
-            if stat.S_ISDIR(info.st_mode):
-                pending.append(target)
-    clang, linker = (_canonical((toolchain / "usr/bin" / name).resolve(strict=True)) for name in ("clang", "ld"))
-    for role, path in (("compiler", clang), ("linker", linker)):
+        directory_info = checked(current, phase="directory", role=role, index=count, directory=True)
+        try:
+            for item in current.iterdir():
+                count += 1
+                if count > 300000:
+                    raise marked(SessionError("selected compiler/SDK inventory exceeds fixed bound"),
+                                 "directory", role, 300000, info=directory_info, predicates=["inventory-bound"])
+                entry_info = checked(item, phase="entry", role=role, index=count, entry=True)
+                try:
+                    _remaining(deadline)
+                    target = item.resolve(strict=True)
+                    _remaining(deadline)
+                except BaseException as exc:
+                    raise marked(exc, "target", role, count)
+                if not _under(target, xcode):
+                    raise marked(SessionError("selected compiler/SDK link escapes provider installation"),
+                                 "entry", role, count, info=entry_info, predicates=["outside-provider"])
+                if target != xcode:  # Xcode's own complete ancestor chain was checked first.
+                    checked_chain(target.parent, role)
+                info = checked(target, phase="target", role=role, index=count)
+                entry_after = checked(item, phase="entry", role=role, index=count, entry=True)
+                if identity(entry_info) != identity(entry_after):
+                    raise marked(SessionError("selected provider entry changed during binding"),
+                                 "entry", role, count, info=entry_after, predicates=["identity-changed"])
+                if stat.S_ISDIR(info.st_mode):
+                    pending.append((target, role))
+        except BaseException as exc:
+            if not isinstance(getattr(exc, "_ci_observation", None), dict) or "provider" not in exc._ci_observation:
+                marked(exc, "directory", role, min(count, 300000))
+            raise
+    clang = canonical(toolchain / "usr/bin/clang", "compiler", resolve_link=True)
+    linker = canonical(toolchain / "usr/bin/ld", "linker", resolve_link=True)
+    for index, (role, path) in enumerate((("compiler", clang), ("linker", linker))):
         if not _under(path, toolchain):
-            raise SessionError("compiler/linker resolves outside selected toolchain")
-        _admit_executable(path, uid, gid, root_owned=True, role=role)
-    _admit_executable(Path("/usr/bin/codesign"), uid, gid, root_owned=True, role="signature-tool")
+            raise marked(SessionError("compiler/linker resolves outside selected toolchain"),
+                         "canonical", role, index)
 
-    def digest(path: Path, maximum: int) -> str:
-        before = checked(path)
+    for index, (role, path) in enumerate((("compiler", clang), ("linker", linker),
+                                         ("signature-tool", Path("/usr/bin/codesign")))):
+        try:
+            # Fixed provider-owned clang/ld may have unrelated-group write,
+            # just like the trusted provider inventory. U has no such group.
+            _admit_executable(path, uid, gid, root_owned=role == "signature-tool", role=role)
+        except BaseException as exc:
+            original = getattr(exc, "_ci_observation", {})
+            tool = original.get("tool") if isinstance(original, dict) else None
+            raise marked(exc, "executable", role, index, tool=tool,
+                         predicates=tool["failed_predicates"] if tool is not None else ())
+
+    def digest(path: Path, maximum: int, role: str) -> str:
+        before = checked(path, phase="digest-before", role=role)
         if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= maximum:
-            raise SessionError("fixed provider file size/type unsupported")
+            raise marked(SessionError("fixed provider file size/type unsupported"), "digest-before", role, 0,
+                         info=before, predicates=["digest-size-or-type"])
         total, result = 0, hashlib.sha256()
-        with path.open("rb") as stream:
-            while chunk := stream.read(65536):
-                _remaining(deadline)
-                total += len(chunk)
-                if total > maximum:
-                    raise SessionError("fixed provider digest exceeds bound")
-                result.update(chunk)
-        after = checked(path)
-        if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
-                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
-                or total != before.st_size):
-            raise SessionError("fixed provider file changed during binding")
+        try:
+            with path.open("rb") as stream:
+                while chunk := stream.read(65536):
+                    _remaining(deadline)
+                    total += len(chunk)
+                    if total > maximum:
+                        raise SessionError("fixed provider digest exceeds bound")
+                    result.update(chunk)
+        except BaseException as exc:
+            raise marked(exc, "digest-before", role, 0)
+        after = checked(path, phase="digest-after", role=role)
+        if identity(before) != identity(after) or total != before.st_size:
+            raise marked(SessionError("fixed provider file changed during binding"), "digest-after", role, 0,
+                         info=after, predicates=["identity-changed"])
         return result.hexdigest()
 
     settings = sdk / "SDKSettings.json"
-    settings_hash = digest(settings, MiB)
-    raw = settings.read_bytes()
-    if len(raw) > MiB or hashlib.sha256(raw).hexdigest() != settings_hash:
-        raise SessionError("selected SDK settings changed")
-    data = json.loads(raw)
-    version, canonical = data.get("Version"), data.get("CanonicalName")
-    if (not isinstance(version, str) or not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){1,2}", version)
-            or canonical != "macosx" + version):
-        raise SessionError("selected SDK identity/version is unsupported")
-    _remaining(deadline)
+    settings_hash = digest(settings, MiB, "sdk")
+    try:
+        _remaining(deadline)
+        with settings.open("rb") as stream:
+            raw = stream.read(MiB + 1)
+        _remaining(deadline)
+        if len(raw) > MiB or hashlib.sha256(raw).hexdigest() != settings_hash:
+            raise SessionError("selected SDK settings changed")
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise SessionError("selected SDK settings do not contain an object")
+        version, sdk_identity = data.get("Version"), data.get("CanonicalName")
+        if (not isinstance(version, str) or not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){1,2}", version)
+                or sdk_identity != "macosx" + version):
+            raise SessionError("selected SDK identity/version is unsupported")
+        _remaining(deadline)
+    except BaseException as exc:
+        raise marked(exc, "settings", "sdk", 0)
     return {"clang": clang, "linker": linker, "sdk": sdk, "toolchain": toolchain,
-            "evidence": {"xcode": "26.3", "clang_sha256": digest(clang, 512 * MiB),
-                         "linker_sha256": digest(linker, 512 * MiB), "sdk": canonical,
+            "evidence": {"xcode": "26.3", "clang_sha256": digest(clang, 512 * MiB, "compiler"),
+                         "linker_sha256": digest(linker, 512 * MiB, "linker"), "sdk": sdk_identity,
                          "sdk_settings_sha256": settings_hash, "provider_entries": count}}
 
 
@@ -975,9 +1223,11 @@ class Session:
         self.admission_results: list[dict[str, object]] = []
         self.process_observer: Path | None = None
         self._home_state: dict | None = None
+        self._userns_state: dict | None = None
         self._handlers = {}
         self._timer_finished = False
         self._active: subprocess.Popen | None = None
+        self._direct_producer_pending = False
         if self.root.parent != Path("/private/tmp" if platform == "darwin" else "/tmp"):
             raise SessionError("task root must be a fresh canonical direct child of platform tmp")
         parent_state = self.root.parent.stat()
@@ -1176,12 +1426,18 @@ class Session:
                 raise SessionError("untrusted executable PATH component")
         return result
 
-    def _argv(self, argv: list[str], cpu: int) -> tuple[list[str], dict]:
-        entry = [str(self.python), "-I", "-S", "-B", str(self.entry), "--enter", self.platform,
+    def _argv(self, argv: list[str], cpu: int, *, profile: str = "ordinary") -> tuple[list[str], dict]:
+        if type(profile) is not str or profile not in {"ordinary", "python-full"}:
+            raise SessionError("unknown fixed command profile")
+        if profile == "python-full" and (self.platform != "linux" or cpu != 300
+                                          or argv != _python_full_command(self.root, self.deadline)):
+            raise SessionError("fixed Python profile command/platform differs")
+        role = "--enter-python-full" if profile == "python-full" else "--enter"
+        entry = [str(self.python), "-I", "-S", "-B", str(self.entry), role, self.platform,
                  str(self.uid), str(self.gid), str(cpu), str(self.policy), *argv]
         if self.platform == "darwin":
             return entry, {"user": self.uid, "group": self.gid, "extra_groups": []}
-        cmd = ["/usr/bin/bwrap", "--unshare-pid", "--unshare-net", "--unshare-ipc", "--unshare-uts",
+        cmd = ["/usr/bin/bwrap", "--assert-userns-disabled", "--unshare-pid", "--unshare-net", "--unshare-ipc", "--unshare-uts",
                "--die-with-parent", "--new-session", "--cap-drop", "ALL",
                "--cap-add", "CAP_SETUID", "--cap-add", "CAP_SETGID", "--cap-add", "CAP_SETPCAP"]
         mounted = []
@@ -1190,8 +1446,14 @@ class Session:
                 raise SessionError("broad OS bind would expose a private controller root")
             cmd += ["--ro-bind", str(p), str(p)]
             mounted.append(p)
-        cmd += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/run", "--tmpfs", "/tmp",
-                "--dir", "/dev/shm", "--tmpfs", "/dev/shm"]
+        cmd += ["--proc", "/proc", "--dev", "/dev"]
+        if profile == "python-full":
+            for path, capacity in _PYTHON_FULL_PRIVATE_TMPFS:
+                if path == "/dev/shm":
+                    cmd += ["--dir", path]
+                cmd += ["--size", str(capacity), "--perms", "01777", "--tmpfs", path]
+        else:
+            cmd += ["--tmpfs", "/run", "--tmpfs", "/tmp", "--dir", "/dev/shm", "--tmpfs", "/dev/shm"]
         # bubblewrap0.9 bind operations can auto-create ancestors0700.  This is
         # an empty namespace-local directory, NOT a bind of the owner task root;
         # its control/fixture directories remain absent from the subject view.
@@ -1200,11 +1462,28 @@ class Session:
             if not any(_under(p, existing) for existing in mounted):
                 cmd += ["--ro-bind", str(p), str(p)]
                 mounted.append(p)
-        cmd += ["--bind", str(self.work), str(self.work),
-                "--", "/usr/bin/setpriv", "--reuid", str(self.uid), "--regid", str(self.gid),
+        cmd += ["--ro-bind" if profile == "python-full" else "--bind", str(self.work), str(self.work)]
+        if profile == "python-full":
+            for name, capacity in _PYTHON_FULL_WORK_TMPFS:
+                cmd += ["--size", str(capacity), "--perms", "01777", "--tmpfs", str(self.work / name)]
+        cmd += ["--", "/usr/bin/setpriv", "--reuid", str(self.uid), "--regid", str(self.gid),
                 "--clear-groups", "--no-new-privs", "--inh-caps=-all", "--ambient-caps=-all",
                 "--bounding-set=-all", "--", *entry]
         return cmd, {}
+
+    def _check_python_full_inputs(self) -> None:
+        """The higher logical limit belongs only to frozen source test inputs."""
+        _remaining(self.deadline)
+        python = _canonical(self.work / "source-venv/bin/python")
+        _remaining(self.deadline)
+        _admit_executable(python, self.uid, self.gid, root_owned=True, role="python")
+        _remaining(self.deadline)
+        checks = _canonical(self.source / ".github/scripts/ci_checks.py")
+        _remaining(self.deadline)
+        info = checks.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise SessionError("fixed Python profile check source is not immutable controller input")
+        _remaining(self.deadline)
 
     def _headroom(self) -> None:
         info = os.statvfs(self.root)
@@ -1214,7 +1493,8 @@ class Session:
     def ensure_idle(self) -> None:
         """Required BEFORE any copy/hash/chmod/delete of task-produced paths."""
         self._guard()
-        if self._busy or self._active is not None:
+        if self._busy or self._active is not None or getattr(self, "_direct_producer_pending", False):
+            self.domain_finality = False
             self._fail("attempted mutable-output access while a producer is owned")
             raise SessionError(self.failure)
         try:
@@ -1262,18 +1542,18 @@ class Session:
         return errors
 
     def run(self, argv: list[str], *, cwd: str | Path, env: dict[str, str], seconds: float,
-            output_limit: int = 8 * MiB, cpu_seconds: int = 180) -> CapturedRun:
+            output_limit: int = 8 * MiB, cpu_seconds: int = 180, profile: str = "ordinary") -> CapturedRun:
         self._guard()
         if not self.admitted:
             raise SessionError("native admission has not completed")
         if self.platform == "darwin" and self.process_observer is None:
             raise SessionError("macOS process observer admission is missing")
         return self._run(argv, cwd=cwd, env=env, seconds=seconds,
-                         output_limit=output_limit, cpu_seconds=cpu_seconds, latch=True)
+                         output_limit=output_limit, cpu_seconds=cpu_seconds, latch=True, profile=profile)
 
     def _run(self, argv: list[str], *, cwd: str | Path, env: dict[str, str], seconds: float,
              output_limit: int = 8 * MiB, cpu_seconds: int = 180, latch: bool,
-             cancel_after: float | None = None) -> CapturedRun:
+             cancel_after: float | None = None, profile: str = "ordinary") -> CapturedRun:
         self._guard()
         if self._busy or not isinstance(argv, list) or not argv or not Path(argv[0]).is_absolute():
             raise SessionError("invalid/reentrant fixed command")
@@ -1284,10 +1564,20 @@ class Session:
             raise SessionError("command cwd outside source/private work")
         if not 0 < seconds <= 3300 or not 0 < output_limit <= 16 * MiB or not 0 < cpu_seconds <= 300:
             raise SessionError("unbounded command resource request")
+        if type(profile) is not str or profile not in {"ordinary", "python-full"}:
+            raise SessionError("unknown fixed command profile")
+        if profile == "python-full" and (self.platform != "linux" or not self.admitted or self._admitting
+                or not latch or cancel_after is not None or cwd != self.work or seconds != 900
+                or cpu_seconds != 300 or output_limit != 8 * MiB
+                or argv != _python_full_command(self.root, self.deadline)):
+            raise SessionError("fixed Python profile invocation differs from its one admitted gate")
         child_env = self._environment(env)
-        command, kwargs = self._argv(argv, cpu_seconds)
+        command, kwargs = self._argv(argv, cpu_seconds, profile=profile)
         self.ensure_idle()
         self._headroom()
+        if profile == "python-full":
+            self._check_python_full_inputs()
+            _python_full_memory(deadline=self.deadline)
         self._busy = True
         self.domain_finality = False
         self._run_number += 1
@@ -1318,6 +1608,8 @@ class Session:
                 p = self.control / f"run-{self._run_number:04d}.{suffix}"
                 paths.append(p)
                 fds.append(os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600))
+            if self.platform == "linux":
+                self._assert_userns_boundary()
             child = subprocess.Popen(command, cwd=cwd, env=child_env, stdin=subprocess.DEVNULL,
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                       close_fds=True, start_new_session=True, **kwargs)
@@ -1492,6 +1784,7 @@ class Session:
             if raw != b"MRK_NSS_ABSENT\n" or _domain(self.platform, self.uid, collision=True, deadline=self.deadline):
                 raise SessionError("numeric identity collision or incomplete admission")
             if self.platform == "linux":
+                self._prepare_userns_boundary()
                 self._prepare_provider_runtime()
             tools = {}
             tools_note = {"name": "fixed-entry-tools", "ok": False, "tools": tools}
@@ -1544,6 +1837,147 @@ class Session:
             raise
         finally:
             self._admitting = False
+
+    def _check_userns_pin(self) -> None:
+        state = self._userns_state
+        if state is None or state["fd"] is None or state["original_node"] is None:
+            raise SessionError("user-namespace boundary has no original descriptor identity")
+        current = _userns_node(state["fd"], deadline=self.deadline)
+        original = state["original_node"]
+        if _home_node(current) != _home_node(original) or current.st_mode != original.st_mode:
+            raise SessionError("user-namespace boundary original node changed")
+
+    def _prepare_userns_boundary(self) -> None:
+        """One fixed hosted-VM setting, owned before every numerical launch."""
+        if (self.platform != "linux" or sys.platform != "linux" or os.geteuid() != 0
+                or self._userns_state is not None):
+            raise SessionError("invalid or repeated user-namespace boundary preparation")
+        self.ensure_idle()
+        note = {"name": "linux-userns-preparation", "ok": False, "change_attempted": False,
+                "changed": False, "already_zero": False, "zero_observed": False, "owner_assertions": 0}
+        state = {"fd": None, "original_node": None, "original": None, "change_attempted": False,
+                 "prepared": False, "restore_attempted": False, "closed": False, "assertions": 0,
+                 "note": note}
+        self._userns_state = state
+        self.admission_results.append(note)
+        try:
+            _remaining(self.deadline)
+            state["fd"] = os.open(_USERNS_PATH, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+            state["original_node"] = _userns_node(state["fd"], deadline=self.deadline)
+            state["original"] = _userns_read(state["fd"], deadline=self.deadline)
+            self._check_userns_pin()
+            note["already_zero"] = state["original"] == 0
+            if state["original"] != 0:
+                # A failing/short write may already have an effect. Retain this
+                # fact before the seek/write; never retry that uncertain effect.
+                state["change_attempted"] = note["change_attempted"] = True
+                _remaining(self.deadline)
+                if os.lseek(state["fd"], 0, os.SEEK_SET) != 0:
+                    raise SessionError("user-namespace preparation did not seek to its fixed start")
+                _remaining(self.deadline)
+                if os.write(state["fd"], b"0\n") != 2:
+                    raise SessionError("user-namespace preparation write was incomplete")
+                _remaining(self.deadline)
+            self._check_userns_pin()
+            if _userns_read(state["fd"], deadline=self.deadline) != 0:
+                raise SessionError("user-namespace preparation did not observe actual zero")
+            self._check_userns_pin()
+            state["prepared"] = note["zero_observed"] = True
+            note["changed"] = state["change_attempted"]
+            note["ok"] = True
+        except BaseException as exc:
+            self._fail("owned Linux user-namespace preparation failed")
+            note["exceptions"] = _exception_notes(exc)
+            raise
+
+    def _assert_userns_boundary(self) -> None:
+        """Same original node/current zero immediately before each U launch."""
+        state = self._userns_state
+        try:
+            if (self.platform != "linux" or sys.platform != "linux" or os.geteuid() != 0
+                    or state is None or not state["prepared"] or state["closed"]
+                    or getattr(self, "_direct_producer_pending", False)):
+                raise SessionError("Linux launch lacks its prepared owned user-namespace boundary")
+            self._check_userns_pin()
+            if _userns_read(state["fd"], deadline=self.deadline) != 0:
+                raise SessionError("owned Linux launch assertion did not observe zero")
+            self._check_userns_pin()
+            state["assertions"] += 1
+            state["note"]["owner_assertions"] = state["assertions"]
+        except BaseException as exc:
+            self._fail("owned Linux user-namespace launch assertion failed")
+            if state is not None:
+                state["note"]["ok"] = False
+                state["note"].setdefault("assertion_failure", _exception_notes(exc))
+            raise
+
+    def _close_userns_boundary(self) -> list[BaseException]:
+        """Finality-gated one-shot original-value restore; release FD separately."""
+        state = getattr(self, "_userns_state", None)
+        if state is None or state["closed"]:
+            return []
+        state["closed"] = True
+        errors = []
+        note = {"name": "linux-userns-finalization", "ok": False, "restore_attempted": False,
+                "restored": False, "unchanged_zero": False}
+        self.admission_results.append(note)
+        try:
+            if state["fd"] is not None:
+                _remaining(self.deadline)
+                if (self._busy or self._active is not None or not self.domain_finality
+                        or getattr(self, "_direct_producer_pending", False)
+                        or _domain(self.platform, self.uid, deadline=self.deadline)):
+                    raise SessionError("user-namespace restoration lacks genuine producer/domain finality")
+                if type(state["original"]) is not int or not 0 <= state["original"] <= (1 << 64) - 1:
+                    raise SessionError("user-namespace restoration lacks its exact original value")
+                self._check_userns_pin()
+                if _userns_read(state["fd"], deadline=self.deadline) != 0:
+                    raise SessionError("user-namespace restoration vetoed by current-value drift")
+                self._check_userns_pin()
+                if state["change_attempted"]:
+                    if state["restore_attempted"]:
+                        raise SessionError("user-namespace restoration cannot retry an uncertain effect")
+                    # prepared=True authorizes launches, not recovery. Even a
+                    # failed preparation can have an owned verified-zero effect;
+                    # finality and the original pin/value above govern restore.
+                    state["restore_attempted"] = note["restore_attempted"] = True
+                    _remaining(self.deadline)
+                    if os.lseek(state["fd"], 0, os.SEEK_SET) != 0:
+                        raise SessionError("user-namespace restoration did not seek to its fixed start")
+                    _remaining(self.deadline)
+                    raw = str(state["original"]).encode("ascii") + b"\n"
+                    if os.write(state["fd"], raw) != len(raw):
+                        raise SessionError("user-namespace restoration write was incomplete")
+                    _remaining(self.deadline)
+                    self._check_userns_pin()
+                    if _userns_read(state["fd"], deadline=self.deadline) != state["original"]:
+                        raise SessionError("user-namespace restoration readback differs from its original value")
+                    self._check_userns_pin()
+                    note["restored"] = True
+                elif state["original"] == 0:
+                    note["unchanged_zero"] = True
+                else:
+                    raise SessionError("user-namespace restoration has no prior mutation custody")
+            elif state["change_attempted"]:
+                raise SessionError("user-namespace restoration lost its owned descriptor")
+        except BaseException as exc:
+            errors.append(exc)
+        # Descriptor custody ends exactly once, even on deadline, unknown
+        # finality, identity drift or a restoration error after an effect.
+        fd, state["fd"] = state["fd"], None
+        if fd is not None:
+            try:
+                os.close(fd)
+            except BaseException as exc:
+                errors.append(exc)
+        try:
+            _remaining(self.deadline)
+        except BaseException as exc:
+            errors.append(exc)
+        note["ok"] = not errors
+        if errors:
+            note["exceptions"] = _exception_notes(BaseExceptionGroup("Linux user-namespace finalization failed", errors))
+        return errors
 
     def _prepare_provider_runtime(self) -> None:
         """Root-only selected Linux provider preparation; no child module import."""
@@ -1778,8 +2212,11 @@ class Session:
         self._check_ruby_ancestors(home_mode=state["expected_mode"])
         self._check_home_pin(state["expected_mode"])
         self._check_ruby_sibling_pin(state["expected_mode"])
+        self.domain_finality = False
+        self._direct_producer_pending = True
         raw = _small_command([str(self.python), "-I", "-S", "-B", str(self.entry), "--home-positive"],
                              10, user=self.uid, group=self.gid, deadline=self.deadline)
+        self._direct_producer_pending = False
         if raw != b"MRK_HOME_POSITIVE_OK\n":
             raise SessionError("fixed HOME DAC positive did not complete")
         self.ensure_idle()
@@ -1834,6 +2271,7 @@ class Session:
         try:
             _remaining(self.deadline)
             if (self._busy or self._active is not None or not self.domain_finality
+                    or getattr(self, "_direct_producer_pending", False)
                     or _domain(self.platform, self.uid, deadline=self.deadline)):
                 raise SessionError("HOME restoration has no genuine producer/domain finality")
             if not state["prepared"]:
@@ -2084,6 +2522,7 @@ class Session:
         row["ok"] = True
 
     def _preflight(self) -> None:
+        self.ensure_idle()
         listeners, addresses = [], []
         failures = []
         try:
@@ -2093,7 +2532,12 @@ class Session:
             # is a single synthetic UID-owned0600 file, not a group capability.
             os.chown(self.outside_write, self.uid, self.gid)
             positive = self._trusted_entry(self.write_policy, ["--write-control", str(self.outside_write)])
+            if self.platform == "linux":
+                self._assert_userns_boundary()
+            self.domain_finality = False
+            self._direct_producer_pending = True
             out = _small_command(positive, 10, user=self.uid, group=self.gid, deadline=self.deadline)
+            self._direct_producer_pending = False  # Only a genuine normal collector return releases custody.
             if out != b"MRK_OUTSIDE_WRITE_POSITIVE\n":
                 raise SessionError("outside-policy numerical write positive failed")
             self.ensure_idle()
@@ -2212,6 +2656,7 @@ class Session:
 
     def _signal_preflight(self) -> None:
         """Only these original owned synthetic U processes are signal targets."""
+        self.ensure_idle()
         sentinel = subprocess.Popen(self._trusted_entry(self.cleanup_policy, ["--sentinel"]),
                                     cwd=self.work, env=self._environment({}), user=self.uid,
                                     group=self.gid, extra_groups=[], close_fds=True,
@@ -2221,8 +2666,11 @@ class Session:
         try:
             if _ready_line(sentinel.stdout, 5) != b"MRK_SENTINEL_READY\n":
                 raise SessionError("owned outside-sandbox signal control did not become ready")
+            self.domain_finality = False
+            self._direct_producer_pending = True
             raw = _small_command(self._trusted_entry(self.policy, ["--signal-case", str(sentinel.pid)]),
                                  10, user=self.uid, group=self.gid, deadline=self.deadline)
+            self._direct_producer_pending = False
             if raw != b"MRK_SIGNAL_BOUNDARY_OK\n":
                 raise SessionError("native signal boundary did not pass its actual controls")
             out, err = sentinel.communicate(b"q", timeout=2)
@@ -2255,12 +2703,21 @@ class Session:
         outside parent genuinely waits the failed owner, then observes bounded
         platform cleanup; no unknown process identity is signalled by root.
         """
+        self.ensure_idle()
         command, kwargs = self._argv([str(self.python), "-I", "-S", "-B", str(self.entry),
                                      "--loss-subject"], 10)
+        if self.platform == "linux":
+            self._assert_userns_boundary()
+        # A failed root owner helper can still be capable of a later U
+        # launch even when the current U census is empty. No diagnostic
+        # waited field can release this conservative outside-owner veto.
+        self.domain_finality = False
+        self._direct_producer_pending = True
         raw = _small_command([str(self.python), "-I", "-S", "-B", str(self.entry), "--loss-owner",
                               json.dumps({"command": command, "kwargs": kwargs,
                                           "cwd": str(self.work), "env": self._environment({})})],
                              10, expected_code=23, deadline=self.deadline)
+        self._direct_producer_pending = False
         fields = raw.split()
         if len(fields) != 2 or fields[0] != b"MRK_OWNER_LOST" or not fields[1].isdigit():
             raise SessionError("lost-owner negative control has no genuine owner observation")
@@ -2295,7 +2752,7 @@ class Session:
             return
         try:
             self._guard(allow_failure=True)
-            if self._active is not None or self._busy:
+            if self._active is not None or self._busy or getattr(self, "_direct_producer_pending", False):
                 self._fail("controller closed with an active producer")
                 if self._active is not None:
                     try:
@@ -2307,6 +2764,7 @@ class Session:
                         self.cleanup_errors.append(f"close original owned child {type(exc).__name__}")
             try:
                 self.domain_finality = (not self._busy and self._active is None
+                                        and not getattr(self, "_direct_producer_pending", False)
                                         and not _domain(self.platform, self.uid, deadline=self.deadline))
                 if not self.domain_finality:
                     self.cleanup_errors.append("close did not establish reserved-identity finality")
@@ -2318,6 +2776,14 @@ class Session:
             # Failed/unknown state is deliberately NOT walked, deleted, adopted
             # or reset.  The reservation survives until this one VM is disposed.
         finally:
+            try:
+                userns_errors = self._close_userns_boundary()
+                if userns_errors:
+                    self.cleanup_errors.extend(f"Linux user-namespace finalization {type(exc).__name__}" for exc in userns_errors)
+                    self._fail("owned Linux user-namespace finalization failed")
+            except BaseException as exc:
+                self.cleanup_errors.append(f"Linux user-namespace finalization {type(exc).__name__}")
+                self._fail("owned Linux user-namespace finalization failed")
             try:
                 home_errors = self._close_home_boundary()
                 if home_errors:
@@ -2365,9 +2831,14 @@ class Session:
             raise SessionError(self.failure)
 
 
-def _limits(platform: str, cpu: int) -> None:
+def _limits(platform: str, cpu: int, *, profile: str = "ordinary") -> None:
+    if (platform not in {"linux", "darwin"} or type(cpu) is not int or not 0 < cpu <= 300
+            or type(profile) is not str or profile not in {"ordinary", "python-full"}
+            or profile == "python-full" and (platform != "linux" or cpu != 300)):
+        raise SessionError("unsupported fixed resource profile")
+    fsize = _PYTHON_FULL_FSIZE if profile == "python-full" else 512 * MiB
     limits = [(resource.RLIMIT_CORE, 0), (resource.RLIMIT_NOFILE, 1024),
-              (resource.RLIMIT_NPROC, 256), (resource.RLIMIT_FSIZE, 512 * MiB),
+              (resource.RLIMIT_NPROC, 256), (resource.RLIMIT_FSIZE, fsize),
               (resource.RLIMIT_CPU, cpu)]
     if platform == "linux":
         limits.append((resource.RLIMIT_AS, 4 * 1024 * MiB))
@@ -2756,6 +3227,10 @@ def _observer_probe(observer: Path, foreign_pid: int, deadline: float) -> None:
 def _loss_owner(data: dict) -> None:
     if os.geteuid() != 0:
         raise SessionError("fixed synthetic owner role requires outside subject identity")
+    if sys.platform == "linux":
+        # This root fixture cannot inherit the Session's CLOEXEC pin. Its
+        # original outside caller holds that custody and bounds this read.
+        _userns_zero()
     child = subprocess.Popen(data["command"], **data["kwargs"], cwd=data["cwd"], env=data["env"],
                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                              stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True, bufsize=0)
@@ -3206,12 +3681,31 @@ def _fixture(name: str) -> int:
 def _main(argv: list[str]) -> int:
     if not argv:
         raise SessionError("this module has only fixed internal entry roles")
-    if argv[0] == "--enter" and len(argv) >= 7:
+    if argv[0] in {"--enter", "--enter-python-full"} and len(argv) >= 7:
         platform, uid, gid, cpu, policy = argv[1:6]
         if (os.getuid(), os.geteuid(), os.getgid(), os.getegid()) != (int(uid), int(uid), int(gid), int(gid)):
             raise SessionError("trusted entry did not receive dropped numerical credentials")
-        _limits(platform, int(cpu))
         command = argv[6:]
+        if argv[0] == "--enter-python-full":
+            if (platform != "linux" or sys.platform != "linux" or not 60000 <= int(uid) < 65000
+                    or uid != str(int(uid)) or gid != uid or cpu != "300"):
+                raise SessionError("fixed Python profile has incompatible native identity/platform/CPU")
+            entry = Path(__file__).resolve(strict=True)
+            root = entry.parent.parent
+            if (root.parent != Path("/tmp") or entry != root / "bootstrap/ci_sandbox.py"
+                    or policy != str(root / "bootstrap/subject.sb") or len(command) != 12
+                    or not 0 < len(command[-1]) <= 64):
+                raise SessionError("fixed Python profile entry binding differs from its one source command")
+            literal = command[-1]
+            deadline = int(literal) if re.fullmatch(r"(?:0|[1-9][0-9]{0,19})", literal) else float(literal)
+            if command != _python_full_command(root, deadline) or _remaining(deadline) > 3300:
+                raise SessionError("fixed Python profile command/deadline differs from its exact binding")
+            _userns_zero(deadline=deadline)
+            _limits(platform, int(cpu), profile="python-full")
+        else:
+            if platform == "linux":
+                _userns_zero()
+            _limits(platform, int(cpu))
         if platform == "darwin":
             command = ["/usr/bin/sandbox-exec", "-f", policy, *command]
         elif platform != "linux":
@@ -3222,6 +3716,8 @@ def _main(argv: list[str]) -> int:
         print("MRK_NSS_ABSENT", flush=True)
         return 0
     if argv[0] in {"--probe", "--leaf", "--grandchild"} and len(argv) == 2:
+        if sys.platform == "linux":
+            _userns_zero()
         data = json.loads(argv[1])
         if argv[0] == "--leaf":
             _probe_leaf(data)
@@ -3235,8 +3731,12 @@ def _main(argv: list[str]) -> int:
         _cleanup_numeric(int(argv[1]), int(argv[2]), argv[3], json.loads(argv[4]), float(argv[5]))
         return 0
     if argv[0] == "--fixture" and len(argv) == 2:
+        if sys.platform == "linux":
+            _userns_zero()
         return _fixture(argv[1])
     if argv[0] == "--write-control" and len(argv) == 2:
+        if sys.platform == "linux":
+            _userns_zero()
         _write_control(Path(argv[1]))
         return 0
     if argv == ["--home-positive"]:
@@ -3255,6 +3755,8 @@ def _main(argv: list[str]) -> int:
         _signal_subject(int(argv[1]))
         return 0
     if argv == ["--loss-subject"]:
+        if sys.platform == "linux":
+            _userns_zero()
         print("MRK_LOSS_SUBJECT_READY", flush=True)
         time.sleep(30)
         return 0

@@ -201,13 +201,18 @@ class WorkflowZipDirectoryTests(unittest.TestCase):
         struct.pack_into("<H", second_directory, 30, 12)
         second_directory += struct.pack("<HHQ", 1, 8, second_offset)
         directory = first[first_end[6]:-22] + second_directory
+        ending = self.zip64_end(count=2, directory_size=len(directory), directory_offset=directory_offset,
+                                zip64_offset=directory_offset + len(directory))
         with self.archive.open("wb") as stream:
             stream.write(first[:first_end[6]])
             stream.seek(second_offset)
             stream.write(second[:second_end[6]])
             stream.write(directory)
-            stream.write(self.zip64_end(count=2, directory_size=len(directory), directory_offset=directory_offset, zip64_offset=directory_offset + len(directory)))
-        self.assertGreater(self.archive.stat().st_size, 1 << 32)
+            stream.write(ending)
+        state = self.archive.stat()
+        self.assertEqual(state.st_size, directory_offset + len(directory) + len(ending))
+        self.assertGreater(state.st_size, 1 << 32)
+        self.assertLessEqual(state.st_blocks * 512, 1024 * 1024)
         self.assertEqual(_validate_zip_directory(self.archive), 2)
         _extract_zip(self.archive, self.destination, MAX_EVIDENCE)
         self.assertEqual({path.name: path.read_bytes() for path in self.destination.iterdir()}, {name: b'{"fixture":true}\n' for name in ("first.json", "second.json")})
