@@ -36,10 +36,20 @@ _FAILURE_ROLES = frozenset(("mach", "mach-nonexpand", "aia-prepare", "aia-evalua
 _FAILURE_CATEGORIES = frozenset(("NativeControlError", "TimeoutExpired", "KeyboardInterrupt", "SystemExit",
                                "MemoryError", "OSError", "ValueError", "TypeError", "AttributeError",
                                "AssertionError", "RuntimeError", "Exception", "BaseException"))
+_REPORTED_CHILD_ERRORS = {
+    b"sandbox-exec: sandbox_apply: Operation not permitted\n": ("sandbox-apply", "operation-not-permitted"),
+    b"sandbox-exec: sandbox_init: Operation not permitted\n": ("sandbox-init", "operation-not-permitted"),
+    b"sandbox-exec: sandbox_apply: Permission denied\n": ("sandbox-apply", "permission-denied"),
+    b"sandbox-exec: sandbox_init: Permission denied\n": ("sandbox-init", "permission-denied"),
+}
 
 
 class NativeControlError(RuntimeError):
     """A fixed native control or its independently owned cleanup failed."""
+
+
+def _valid_child_returncode(value: object) -> bool:
+    return type(value) is int and -128 <= value <= 255 and value != 0
 
 
 def _failure_note(error: BaseException, argv: list[str]) -> dict:
@@ -58,7 +68,7 @@ def _failure_note(error: BaseException, argv: list[str]) -> dict:
                   (TypeError, "TypeError"), (AttributeError, "AttributeError"),
                   (AssertionError, "AssertionError"), (RuntimeError, "RuntimeError"),
                   (Exception, "Exception"), (BaseException, "BaseException"))
-    notes, pending, inspected, truncated = [], [error], 0, False
+    notes, pending, inspected, truncated, child_statuses = [], [error], 0, False, []
     while pending and inspected < 64 and len(notes) < 16:
         current = pending.pop()
         inspected += 1
@@ -79,8 +89,15 @@ def _failure_note(error: BaseException, argv: list[str]) -> dict:
         truncated |= tb is not None or len(lines) > 8
         category = next(name for kind, name in categories if isinstance(current, kind))
         notes.append({"exception": category, "lines": lines[:8]})
-    return {"schema": 1, "role": role, "error_count": len(notes),
-            "truncated": bool(truncated or pending), "exceptions": notes}
+        if isinstance(current, NativeControlError) and "_child_returncode" in current.__dict__:
+            child_statuses.append(current.__dict__["_child_returncode"])
+    result = {"schema": 1, "role": role, "error_count": len(notes),
+              "truncated": bool(truncated or pending), "exceptions": notes}
+    # Incomplete or multiple observations cannot identify one completed child.
+    if (role == "mach-nonexpand" and not result["truncated"] and len(child_statuses) == 1
+            and _valid_child_returncode(child_statuses[0])):
+        result["child_returncode"] = child_statuses[0]
+    return result
 
 
 def _require(value: bool, message: str) -> None:
@@ -117,13 +134,27 @@ def _parse(data: bytes, prefix: bytes) -> dict:
 
 def parse_failure(data: bytes, role: str) -> dict | None:
     """One fully bounded failed-child note, never execution or success evidence."""
-    if type(role) is not str or role not in _FAILURE_ROLES:
+    if (type(role) is not str or role not in _FAILURE_ROLES
+            or type(data) is not bytes or not 0 < len(data) <= 4096):
         return None
+    reported = None
+    if role == "mach-nonexpand":
+        if data.count(_FAILURE_PREFIX) != 1:
+            return None
+        offset = data.find(_FAILURE_PREFIX)
+        preceding, data = data[:offset], data[offset:]
+        if preceding:
+            reported = _REPORTED_CHILD_ERRORS.get(preceding)
+            if reported is None:
+                return None
     try:
         value = _parse(data, _FAILURE_PREFIX)
     except (NativeControlError, ValueError, UnicodeError, RecursionError):
         return None
-    if (set(value) != {"schema", "role", "error_count", "truncated", "exceptions"}
+    fields = {"schema", "role", "error_count", "truncated", "exceptions"}
+    if role == "mach-nonexpand" and "child_returncode" in value:
+        fields.add("child_returncode")
+    if (set(value) != fields
             or value["role"] != role or type(value["truncated"]) is not bool
             or type(value["error_count"]) is not int or not 0 <= value["error_count"] <= 16
             or type(value["exceptions"]) is not list or len(value["exceptions"]) != value["error_count"]
@@ -140,8 +171,17 @@ def parse_failure(data: bytes, role: str) -> dict | None:
                 or lines != sorted(set(lines))):
             return None
         notes.append({"exception": category, "lines": list(lines)})
-    return {"schema": 1, "role": role, "error_count": len(notes),
-            "truncated": value["truncated"], "exceptions": notes}
+    result = {"schema": 1, "role": role, "error_count": len(notes),
+              "truncated": value["truncated"], "exceptions": notes}
+    if "child_returncode" in value:
+        if (not _valid_child_returncode(value["child_returncode"]) or value["truncated"]
+                or not any(row["exception"] == "NativeControlError" for row in notes)):
+            return None
+        result["child_returncode"] = value["child_returncode"]
+    if reported is not None:
+        # These labels classify reported text only, not a stage or kernel refusal.
+        result["reported_child_stage"], result["reported_child_text"] = reported
+    return result
 
 
 def parse_mach(data: bytes) -> dict:
@@ -230,9 +270,10 @@ def _command(arguments: list[str], deadline: float, *, capture: bool = False) ->
     try:
         _remaining(deadline)
         cutoff = min(deadline, time.monotonic() + 30.0)
+        # Captured Mach stderr reuses the outer Session's private bounded pipe.
         child = subprocess.Popen(arguments, stdin=subprocess.DEVNULL,
                                  stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, close_fds=True)
+                                 stderr=None if capture else subprocess.DEVNULL, close_fds=True)
         left = _remaining(cutoff)  # Popen time cannot renew the original allowance.
         if capture:
             # The sole captured child is the finite three-lookup helper, not a
@@ -240,7 +281,13 @@ def _command(arguments: list[str], deadline: float, *, capture: bool = False) ->
             output, _ = child.communicate(timeout=left)
         else:
             child.wait(timeout=left)
-        _require(child.returncode == 0, "fixed native child failed")
+        returncode = child.returncode
+        try:
+            _require(returncode == 0, "fixed native child failed")
+        except NativeControlError as exc:
+            if capture and _valid_child_returncode(returncode):
+                exc._child_returncode = returncode
+            raise
         _remaining(cutoff)
     except BaseException as exc:
         errors.append(exc)
@@ -853,8 +900,9 @@ if __name__ == "__main__":
     try:
         code = _main(sys.argv[1:])
     except BaseException as error:
-        # Keep raw paths, native exception messages and ephemeral fixture keys
-        # out of captured diagnostics. The original parent still records failure.
+        # Nested synthetic stderr uses the Session's bounded private collector.
+        # This note and its published projection exclude raw paths/messages/keys;
+        # inherited child text never authorizes success or replaces parent facts.
         print(_FAILURE_PREFIX.decode("ascii") + json.dumps(_failure_note(error, sys.argv[1:]),
                                                         separators=(",", ":")), file=sys.stderr, flush=True)
         code = 1

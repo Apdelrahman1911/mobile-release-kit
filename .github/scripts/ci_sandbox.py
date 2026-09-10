@@ -2865,7 +2865,8 @@ class Session:
             result = self._run(argv, cwd=cwd, env={}, seconds=seconds, output_limit=MiB,
                                cpu_seconds=180, latch=True, profile="native-control",
                                absolute_deadline=state["deadline"])
-            row = self._note_capture("native-authority-" + state["phase"] + "-" + case, result)
+            row = self._note_capture("native-authority-" + state["phase"] + "-" + case, result,
+                                     parse_child_notes=case != "mach-nonexpand")
             state["control_notes"][case] = row
             if case in _NATIVE_STARTUP_CASES:
                 expected = b"" if case == "startup-true" else _NATIVE_STARTUP_STDOUT
@@ -4421,14 +4422,16 @@ class Session:
             raise BaseExceptionGroup("observer native controls/owned foreign cleanup failed", errors)
         note["ok"] = True  # Includes every original wait/EOF/close and final cutoff.
 
-    def _note_capture(self, name: str, result: CapturedRun) -> dict:
+    def _note_capture(self, name: str, result: CapturedRun, *, parse_child_notes: bool = True) -> dict:
+        # Raw nested Mach stderr belongs only to its strict native parser, not
+        # to the generic child-note format. Actual capture/error facts stay intact.
         row = {"name": name, "ok": False, "subject_ok": result.ok,
                "returncode": result.returncode, "waited": result.waited,
                "stdout_eof": result.stdout_eof, "stderr_eof": result.stderr_eof,
                "domain_finality": result.domain_finality, "timed_out": result.timed_out,
                "cancelled": result.cancelled, "persisted": list(result.persisted),
                "error_count": len(result.cleanup_errors) + (result.primary_error is not None),
-               "exceptions": _child_exception_notes(result.stderr)}
+               "exceptions": _child_exception_notes(result.stderr) if parse_child_notes else []}
         launcher_error = _launcher_error(result.stderr, self.python, self.entry)
         if launcher_error is not None:
             row["launcher_error"] = launcher_error

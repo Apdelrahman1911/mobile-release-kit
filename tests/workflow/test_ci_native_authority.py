@@ -120,6 +120,39 @@ class NativeAuthorityTests(unittest.TestCase):
             self.assertLessEqual(len(raw), 4096)
             self.assertEqual(m.parse_failure(raw, "mach"), note)
 
+        # A private marker is neither an exception message nor a wait receipt.
+        # Only one complete, correctly typed original observation is projected.
+        for status in (-128, -6, 1, 255, -129, 256, 0, True, False, 1.0, "1", None):
+            with self.subTest(original_child_scalar=status):
+                observed = m.NativeControlError("PRIVATE-CHILD-MESSAGE /Users/private/signing.key")
+                observed._child_returncode = status
+                grouped = BaseExceptionGroup("PRIVATE-GROUP", [observed, OSError("PRIVATE-CLOSE")])
+                note = m._failure_note(grouped, ["--mach-nonexpand", "PRIVATE-POLICY", "PRIVATE-CUTOFF"])
+                valid = type(status) is int and -128 <= status <= 255 and status != 0
+                self.assertEqual("child_returncode" in note, valid)
+                if valid:
+                    self.assertEqual(note["child_returncode"], status)
+                self.assertEqual(note["error_count"], 2)
+                raw = m._FAILURE_PREFIX + json.dumps(note).encode() + b"\n"
+                self.assertEqual(m.parse_failure(raw, "mach-nonexpand"), note)
+                for private in ("PRIVATE", "/Users/", "signing.key", str(ROOT), "_child_returncode"):
+                    self.assertNotIn(private, raw.decode())
+                for args in (["--mach", "100.0"], ["--aia-evaluate", "12345", "100.0"], ["--mach-nonexpand", "missing"]):
+                    self.assertNotIn("child_returncode", m._failure_note(grouped, args))
+        first = m.NativeControlError("PRIVATE-FIRST")
+        first._child_returncode = -6
+        for other_status in (-6, 1, True):
+            other = m.NativeControlError("PRIVATE-SECOND")
+            other._child_returncode = other_status
+            self.assertNotIn("child_returncode", m._failure_note(BaseExceptionGroup("PRIVATE-CONFLICT", [first, other]),
+                             ["--mach-nonexpand", "PRIVATE-POLICY", "100.0"]))
+        truncated = m._failure_note(BaseExceptionGroup("PRIVATE-TRUNCATED", [first, *([foreign] * 80)]),
+                                    ["--mach-nonexpand", "PRIVATE-POLICY", "100.0"])
+        self.assertTrue(truncated["truncated"])
+        self.assertNotIn("child_returncode", truncated)
+        foreign._child_returncode = -6
+        self.assertNotIn("child_returncode", m._failure_note(foreign, ["--mach-nonexpand", "PRIVATE-POLICY", "100.0"]))
+
     def test_failed_child_diagnostic_parser_rejects_extra_data_types_and_wrong_roles(self):
         m = self.module
         good = {"schema": 1, "role": "aia-prepare", "error_count": 1, "truncated": False,
@@ -144,6 +177,55 @@ class NativeAuthorityTests(unittest.TestCase):
                 self.assertIsNone(m.parse_failure(raw, "aia-prepare"))
         self.assertIsNone(m.parse_failure(data, "mach"))
         self.assertIsNone(m.parse_failure(data, "unknown"))
+
+        nested = {**good, "role": "mach-nonexpand", "exceptions": [{"exception": "NativeControlError", "lines": [10, 20]}],
+                  "child_returncode": -6}
+        frame = encode(nested)
+        recognized = {
+            b"sandbox-exec: sandbox_apply: Operation not permitted\n": ("sandbox-apply", "operation-not-permitted"),
+            b"sandbox-exec: sandbox_init: Operation not permitted\n": ("sandbox-init", "operation-not-permitted"),
+            b"sandbox-exec: sandbox_apply: Permission denied\n": ("sandbox-apply", "permission-denied"),
+            b"sandbox-exec: sandbox_init: Permission denied\n": ("sandbox-init", "permission-denied"),
+        }
+        self.assertEqual(m.parse_failure(frame, "mach-nonexpand"), nested)
+        for preceding, (stage, text) in recognized.items():
+            for have_status in (True, False):
+                value = dict(nested)
+                if not have_status:
+                    del value["child_returncode"]
+                with self.subTest(nonexpand_reported_text=(preceding, have_status)):
+                    note = m.parse_failure(preceding + encode(value), "mach-nonexpand")
+                    self.assertEqual(note, {**value, "reported_child_stage": stage, "reported_child_text": text})
+                    self.assertNotIn(preceding.decode().strip(), json.dumps(note))
+                    for other_role in ("mach", "aia-prepare", "aia-evaluate"):
+                        self.assertIsNone(m.parse_failure(preceding + encode({**value, "role": other_role}), other_role))
+        preceding = next(iter(recognized))
+        bad_frames = (preceding[:-1] + frame, preceding.replace(b"\n", b"\r\n") + frame,
+            preceding + b"\n" + frame, preceding + frame[:-1], preceding + frame + b"suffix\n", preceding + frame + b"\n",
+            frame + preceding, frame + frame, preceding + frame + frame, frame[:20] + preceding + frame[20:],
+            b"PRIVATE-CHILD /Users/private/signing.key\n" + frame, b"\xff\n" + frame,
+            b"sandbox-exec: sandbox_apply: Operation not permitted PRIVATE\n" + frame,
+            b"x" * 4097 + frame, bytearray(frame), None,
+            frame.replace(b'"child_returncode": -6', b'"child_returncode": -6, "child_returncode": 1'))
+        for raw in bad_frames:
+            with self.subTest(nonexpand_frame=repr(raw)[:90]):
+                self.assertIsNone(m.parse_failure(raw, "mach-nonexpand"))
+        for key, value in (("child_returncode", True), ("child_returncode", False), ("child_returncode", 0),
+                           ("child_returncode", -129), ("child_returncode", 256), ("child_returncode", "1"), ("child_returncode", 1.0),
+                           ("truncated", True), ("schema", True), ("role", "mach"), ("error_count", 2),
+                           ("exceptions", [{"exception": "OSError", "lines": []}]),
+                           ("reported_child_stage", "sandbox-apply"), ("reported_child_text", "operation-not-permitted"),
+                           ("private-message", "PRIVATE-CHILD")):
+            with self.subTest(nonexpand_bad_field=(key, value)):
+                self.assertIsNone(m.parse_failure(preceding + encode({**nested, key: value}), "mach-nonexpand"))
+        for status in (-128, 1, 255):
+            value = {**nested, "child_returncode": status}
+            self.assertEqual(m.parse_failure(encode(value), "mach-nonexpand"), value)
+        # The complete transport, not just the extracted JSON suffix, owns 4KiB.
+        padded = frame[:-1] + b" " * (4096 - len(preceding) - len(frame)) + b"\n"
+        self.assertEqual(len(preceding + padded), 4096)
+        self.assertIsNotNone(m.parse_failure(preceding + padded, "mach-nonexpand"))
+        self.assertIsNone(m.parse_failure(preceding + padded[:-1] + b" \n", "mach-nonexpand"))
 
     def test_fixed_mach_inventory_and_closed_parser(self):
         m = self.module
@@ -219,11 +301,96 @@ class NativeAuthorityTests(unittest.TestCase):
         child.stdout.close.assert_called_once_with()
         self.assertTrue(process.Popen.call_args.kwargs["close_fds"])
 
+        cases = [(True, "status", value) for value in (-128, -6, 1, 255, -129, 256, True, False, 1.0, 0.0, "1", None, 0)]
+        cases += [(True, name, code) for name, code in (("nonzero-close", 1), ("zero-close", 0),
+                    ("communicate-timeout", None), ("communicate-timeout-code", -6), ("communicate-io", None))]
+        cases += [(False, "uncaptured", 0), (False, "uncaptured", 1)]
+        for capture, case, status in cases:
+            with self.subTest(original_child_observation=(capture, case, status)):
+                events = []
+                timeout_error = m.subprocess.TimeoutExpired("PRIVATE-NESTED-COMMAND", 30)
+                read_error, close_error = OSError("PRIVATE-COMMUNICATE"), OSError("PRIVATE-STDOUT-CLOSE")
+                inherited_close = Mock(side_effect=AssertionError("inherited stderr is not a new owned pipe"))
+                child = SimpleNamespace(returncode=None, stderr=SimpleNamespace(close=inherited_close))
+
+                def close_stdout():
+                    events.append("stdout-close")
+                    if case in {"nonzero-close", "zero-close"}:
+                        raise close_error
+
+                child.stdout = SimpleNamespace(close=Mock(side_effect=close_stdout)) if capture else None
+
+                def communicate(*, timeout):
+                    self.assertEqual(timeout, 30.0)
+                    self.assertIsNone(child.returncode)
+                    events.append("communicate-start")
+                    if case == "communicate-timeout-code":
+                        child.returncode = status
+                    if case.startswith("communicate-timeout"):
+                        raise timeout_error
+                    if case == "communicate-io":
+                        raise read_error
+                    child.returncode = status
+                    events.append("communicate-complete")
+                    return b"synthetic original stdout", None
+
+                def wait(*, timeout):
+                    events.append("wait")
+                    self.assertEqual(timeout, 2.0 if capture else 30.0)
+                    # Cleanup's later status is not the original communicate
+                    # observation and must never appear in the generated note.
+                    child.returncode = 23 if capture else status
+                    return child.returncode
+
+                child.communicate = Mock(side_effect=communicate)
+                child.wait = Mock(side_effect=wait)
+                child.kill = Mock(side_effect=lambda: events.append("kill"))
+                process = SimpleNamespace(DEVNULL=-3, PIPE=-1, Popen=Mock(return_value=child))
+                failed = case.startswith("communicate-") or status != 0 or case == "zero-close"
+                error = None
+                with clock(m), patch.multiple(m, subprocess=process, os=SimpleNamespace(), socket=SimpleNamespace(), threading=SimpleNamespace()):
+                    if failed:
+                        with self.assertRaises(BaseExceptionGroup) as caught:
+                            m._command(["/fixed/synthetic-child"], 100.0, capture=capture)
+                        error = caught.exception
+                    else:
+                        self.assertEqual(m._command(["/fixed/synthetic-child"], 100.0, capture=capture),
+                                         b"synthetic original stdout" if capture else b"")
+                process.Popen.assert_called_once_with(["/fixed/synthetic-child"], stdin=-3,
+                    stdout=-1 if capture else -3, stderr=None if capture else -3, close_fds=True)
+                inherited_close.assert_not_called()
+                self.assertEqual(child.communicate.call_count, int(capture))
+                if capture:
+                    child.stdout.close.assert_called_once_with()
+                    self.assertEqual(events[-1], "stdout-close")
+                cleanup_wait = capture and status is None
+                self.assertEqual(child.wait.call_count, int(not capture or cleanup_wait))
+                self.assertEqual(child.kill.call_count, int(cleanup_wait))
+                if cleanup_wait:
+                    self.assertLess(events.index("kill"), events.index("wait"))
+                if error is not None:
+                    note = m._failure_note(error, ["--mach-nonexpand", "PRIVATE-POLICY", "100.0"])
+                    completed_nonzero = capture and case in {"status", "nonzero-close"} and type(status) is int and -128 <= status <= 255 and status != 0
+                    self.assertEqual("child_returncode" in note, completed_nonzero)
+                    if completed_nonzero:
+                        self.assertIn("communicate-complete", events)
+                        self.assertEqual(note["child_returncode"], status)
+                        self.assertEqual(error.exceptions[0].__dict__["_child_returncode"], status)
+                    if case in {"nonzero-close", "zero-close"}:
+                        self.assertIs(error.exceptions[-1], close_error)
+                    if case.startswith("communicate-timeout"):
+                        self.assertIs(error.exceptions[0], timeout_error)
+                    if case == "communicate-io":
+                        self.assertIs(error.exceptions[0], read_error)
+                    self.assertNotIn("AssertionError", json.dumps(note))
+                    self.assertNotIn("PRIVATE", json.dumps(note))
+                    self.assertNotIn("child_returncode", m._failure_note(error, ["--aia-prepare", "12345", "100.0"]))
+
     def test_per_child_deadline_is_not_renewed_by_spawn_or_late_wait(self):
         m = self.module
-        for stage in ("spawn", "wait"):
+        for stage, capture in (("spawn", False), ("wait", False), ("spawn", True), ("communicate", True)):
             now = [10.0]
-            child = SimpleNamespace(returncode=None, stdout=None, kill=Mock())
+            child = SimpleNamespace(returncode=None, stdout=SimpleNamespace(close=Mock()) if capture else None, kill=Mock())
 
             def wait(*, timeout):
                 if stage == "wait":
@@ -233,18 +400,29 @@ class NativeAuthorityTests(unittest.TestCase):
 
             child.wait = Mock(side_effect=wait)
 
+            def communicate(*, timeout):
+                self.assertEqual(timeout, 30.0)
+                now[0], child.returncode = 41.0, 0
+                return b"synthetic too-late stdout", None
+
+            child.communicate = Mock(side_effect=communicate)
+
             def spawn(*_args, **_kwargs):
                 if stage == "spawn":
                     now[0] = 41.0
                 return child
 
             process = SimpleNamespace(DEVNULL=-3, PIPE=-1, Popen=spawn)
-            with self.subTest(stage=stage), patch.object(m, "time", SimpleNamespace(monotonic=lambda: now[0])), \
-                    patch.object(m, "subprocess", process), self.assertRaises(BaseExceptionGroup):
-                m._command(["/fixed/fixture"], 100.0)
+            with self.subTest(stage=(stage, capture)), patch.object(m, "time", SimpleNamespace(monotonic=lambda: now[0])), \
+                    patch.object(m, "subprocess", process), self.assertRaises(BaseExceptionGroup) as caught:
+                m._command(["/fixed/fixture"], 100.0, capture=capture)
             if stage == "spawn":
                 self.assertEqual(child.wait.call_args.kwargs["timeout"], 0.0)
                 child.kill.assert_called_once_with()
+            self.assertEqual(child.communicate.call_count, int(stage == "communicate"))
+            if capture:
+                child.stdout.close.assert_called_once_with()
+            self.assertNotIn("child_returncode", m._failure_note(caught.exception, ["--mach-nonexpand", "PRIVATE-POLICY", "100.0"]))
 
     def test_public_fixture_read_failure_still_closes_original_descriptor(self):
         m = self.module
@@ -624,6 +802,31 @@ class NativeAuthorityTests(unittest.TestCase):
             if isinstance(event, tuple):
                 self.assertEqual(events[index + 1], "idle")
         self.assertEqual(events[-2:], ["listener-close", "idle"])
+
+        diagnostic = b"sandbox-exec: sandbox_apply: Operation not permitted\n" + m._FAILURE_PREFIX + json.dumps({
+            "schema": 1, "role": "mach-nonexpand", "error_count": 1, "truncated": False,
+            "exceptions": [{"exception": "NativeControlError", "lines": []}], "child_returncode": 1}).encode() + b"\n"
+        reported = m.parse_failure(diagnostic, "mach-nonexpand")
+        self.assertIsNotNone(reported)
+        refused_cases, idle = [], Mock()
+
+        def refused_launch(case, *, port=None):
+            self.assertIsNone(port)
+            refused_cases.append(case)
+            return SimpleNamespace(ok=case != "mach-nonexpand", stdout=outputs[case], stderr=diagnostic,
+                                   native_control_error=reported)
+
+        responder_factory = Mock(side_effect=AssertionError("a failed nested control may not advance to AIA"))
+        fixtures_reader = Mock(side_effect=AssertionError("a diagnostic is not completed control authority"))
+        with clock(m), patch.object(m, "_scratch"), patch.object(m, "_Responder", responder_factory), \
+                patch.object(m, "_fixtures", fixtures_reader), self.assertRaises(m.NativeControlError):
+            m.admit_controls(refused_launch, idle, Path("/pure/probes"), deadline=100.0)
+        self.assertEqual(refused_cases, ["mach-baseline", "mach-ordinary", "mach-authority", "mach-nonexpand"])
+        self.assertEqual(idle.call_count, 5)  # Initial idle and each actual failed/successful capture remain required.
+        responder_factory.assert_not_called()
+        fixtures_reader.assert_not_called()
+        with self.assertRaises(m.NativeControlError):
+            m.parse_mach(diagnostic)  # Neither the error scalar nor reported English text is a denial record.
 
     def test_owner_failed_capture_still_collects_finality_and_responder_close_errors(self):
         m = self.module

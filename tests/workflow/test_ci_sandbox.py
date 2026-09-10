@@ -5143,6 +5143,111 @@ class CISandboxPureTests(unittest.TestCase):
                         self.assertFalse(any(event[0] == "popen" for event in rig.events))
                 self.assertEqual(session.deadline, 100.0)
 
+        # Exercise the real private collector -> native parser -> public row
+        # bridge. Loading this helper only defines inert functions; every
+        # reachable process/native/filesystem operation below is a fake seam.
+        spec = importlib.util.spec_from_file_location(
+            "_mrk_pure_native_failure_parser", ROOT / ".github/scripts/ci_native_authority.py")
+        if spec is None or spec.loader is None:
+            raise AssertionError("required fixed native failure parser is missing")
+        backend = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(backend)
+        diagnostic = {"schema": 1, "role": "mach-nonexpand", "error_count": 1, "truncated": False,
+                      "exceptions": [{"exception": "NativeControlError", "lines": []}], "child_returncode": -6}
+        frame = backend._FAILURE_PREFIX + json.dumps(diagnostic).encode() + b"\n"
+        known = b"sandbox-exec: sandbox_apply: Operation not permitted\n" + frame
+        marker = b'MRK_SANDBOX_ERROR=[{"exception":"PRIVATE_CHILD_CANARY","lines":[1]}]\n'
+        for case in ("known", "unknown-private", "held-stderr", "overflow", "close-error", "late-cancel"):
+            with self.subTest(nonexpand_private_collection=case):
+                session = session_double(self.module, "darwin")
+                state = native_state_double(session, deadline=50.0)
+                state["prepared"], session._native_preparing = False, "source"
+                state["mach_policy"] = session.bootstrap / "native-mach-baseline.sb"
+                state["control_seen"] = list(self.module._NATIVE_CONTROL_CASES[:3])
+                parser = Mock(wraps=backend.parse_failure)
+                state["backend"] = SimpleNamespace(parse_failure=parser)
+                raw = marker + frame if case == "unknown-private" else known
+                if case == "overflow":
+                    raw = b"PRIVATE-OVERFLOW /Users/private/signing.key\n" + b"x" * (self.module.MiB + 1) + frame
+                rig = _Collection(self.module, session, stdout=(), stderr=(raw,))
+                rig.exit_at, rig.exitcode, rig.snapshot_rows = 0.0, 1, {}
+                rig.hold = {1} if case == "held-stderr" else set()
+                rig.fd_close_errors = {1} if case == "close-error" else set()
+                rig.cancel_on_finality = case == "late-cancel"
+                with rig.scope(), patch.object(session, "_native_check_inputs", Mock()) as inputs, \
+                     patch.object(self.module, "_observe_original_credentials", Mock()) as credentials, \
+                     patch.multiple(backend, os=SimpleNamespace(), subprocess=SimpleNamespace(), socket=SimpleNamespace(),
+                                    threading=SimpleNamespace(), secrets=SimpleNamespace(), sys=SimpleNamespace(),
+                                    time=SimpleNamespace(monotonic=rig.monotonic)), ExitStack() as stack:
+                    for operation in ("open", "stat", "lstat", "resolve"):
+                        stack.enter_context(patch.object(Path, operation,
+                            side_effect=AssertionError("private collection bridge must not inspect host paths")))
+                    result = session._native_backend_capture(state, "mach-nonexpand")
+                    self.assertIsInstance(result, self.module.CapturedRun)
+                    self.assertEqual((result.returncode, result.primary_error, session.failure),
+                                     (1, "command exited 1", "command exited 1"))
+                    self.assertTrue(result.waited and result.stdout_eof)
+                    self.assertFalse(result.ok or result.timed_out)
+                    self.assertEqual(result.cancelled, case == "late-cancel")
+                    self.assertEqual(result.stderr_eof, case != "held-stderr")
+                    self.assertEqual(result.domain_finality, case != "held-stderr")
+                    expected = raw[:self.module.MiB] if case == "overflow" else raw
+                    self.assertEqual((result.stdout, result.stderr, result.persisted), (b"", expected, (0, len(expected))))
+                    self.assertEqual((bytes(rig.captures[100]), bytes(rig.captures[101])), (result.stdout, result.stderr))
+                    self.assertEqual(session.persisted_bytes, sum(result.persisted))
+                    self.assertEqual(next(event[3] for event in rig.events if event[0] == "read"), "command exited 1")
+                    parser.assert_called_once_with(result.stderr, "mach-nonexpand")
+                    inputs.assert_called_once_with(state)
+                    credentials.assert_called_once()
+                    self.assertEqual(credentials.call_args.args, (rig.child.pid, session.uid, session.gid))
+                    row = state["control_notes"]["mach-nonexpand"]
+                    self.assertEqual(session.admission_results, [row])
+                    self.assertFalse(row["ok"] or row["subject_ok"])
+                    for field in ("returncode", "waited", "stdout_eof", "stderr_eof", "domain_finality", "timed_out", "cancelled"):
+                        self.assertEqual(row[field], getattr(result, field))
+                    self.assertEqual(row["persisted"], list(result.persisted))
+                    self.assertEqual(row["error_count"], len(result.cleanup_errors) + 1)
+                    self.assertEqual(row["exceptions"], [])
+                    if case in {"unknown-private", "overflow"}:
+                        self.assertTrue(row["native_control_diagnostics_unavailable"])
+                        self.assertNotIn("native_control_error", row)
+                    else:
+                        self.assertEqual(row["native_control_error"], {**diagnostic,
+                            "reported_child_stage": "sandbox-apply", "reported_child_text": "operation-not-permitted"})
+                        self.assertNotIn("native_control_diagnostics_unavailable", row)
+                        self.assertNotEqual(row["native_control_error"]["child_returncode"], row["returncode"])
+                    public = json.dumps(session.admission_results)
+                    for private in ("PRIVATE_CHILD_CANARY", "PRIVATE-OVERFLOW", "MRK_SANDBOX_ERROR=", "MRK_NATIVE_CONTROL_FAILED=",
+                                    "sandbox-exec:", "Operation not permitted", "/Users/", "signing.key", str(session.root)):
+                        self.assertNotIn(private, public)
+                    if case == "held-stderr":
+                        self.assertIn("stream EOF unavailable at bounded cleanup cutoff", result.cleanup_errors)
+                        self.assertIn("original wait or complete stream EOF missing", result.cleanup_errors)
+                    elif case == "overflow":
+                        self.assertIn("per-stream or whole-attempt persisted-output limit", result.cleanup_errors)
+                        self.assertEqual(rig.chunks, [[], []])  # Overflow bytes were drained, not persisted or published.
+                    elif case == "close-error":
+                        self.assertIn("capture close OSError", result.cleanup_errors)
+                    elif case == "late-cancel":
+                        self.assertIn("late controller cancellation", result.cleanup_errors)
+                    if case == "unknown-private":
+                        # A separate pure default-note call proves the generic
+                        # structured wrapper route is unchanged. It is NOT the
+                        # raw nested-child route or a new execution receipt.
+                        ordinary = session_double(self.module, "darwin")
+                        default_row = ordinary._note_capture("synthetic-ordinary-structured-note", result)
+                        self.assertEqual(default_row["exceptions"], [{"exception": "PRIVATE_CHILD_CANARY", "lines": [1]}])
+                        self.assertEqual(default_row["returncode"], 1)
+                        self.assertFalse(default_row["ok"] or default_row["subject_ok"])
+                self.assertEqual(state["control_seen"], list(self.module._NATIVE_CONTROL_CASES[:4]))
+                self.assertFalse(state["prepared"] or state["started"] or state["completed"])
+                self.assertNotIn("aia_port", state)
+                self.assertIsNone(session._native_control)
+                self.assertFalse(session._busy)
+                self.assertIsNone(session._active)
+                self.assertEqual(sum(event[0] == "wait-original" for event in rig.events), 1)
+                self.assertEqual(sum(event[0] == "popen" for event in rig.events), 1)
+
     def test_native_postconditions_preserve_failure_accounting_and_close_only_original_resources(self):
         for case in ("input-refusal", "original-and-close-errors", "unknown-finality", "unsafe-output", "close-expired", "close-cancelled"):
             with self.subTest(native_capture_finalization=case):
