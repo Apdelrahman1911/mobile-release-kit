@@ -435,7 +435,12 @@ the original failure, and any failure marker prevents native success acceptance.
 An AIA comparison failure may additionally publish a closed original-parent
 observation after successful capture/finality and responder close/join. It includes
 only fixed case labels, exact Boolean values, bounded trust-result/chain counts,
-and fixture-derived chain/request match flags. Malformed records are unavailable;
+fixture-derived chain/request match flags and fixed `leaf/issuer/root/other`
+chain-role labels. A separate closed observation of the already-owned original
+CFError reports only OSStatus-domain signed32 codes or `no-error`, `other-domain`,
+`unavailable`; no description or arbitrary domain string is read. Diagnostic
+availability does not change the trust verdict, and no extra evaluation occurs.
+The optional four-case diagnostic extension is strictly parsed. Malformed records are unavailable;
 raw routes, certificate digests, captures and messages are excluded. These fields
 diagnose an already failed comparison, never replace its original acceptance
 oracle or qualify an earlier failed capture, cutoff or cleanup.

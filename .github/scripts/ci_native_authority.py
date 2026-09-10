@@ -663,6 +663,8 @@ class _Trust:
         self.C, self.owned = C, []
         security = C.CDLL("/System/Library/Frameworks/Security.framework/Security")
         foundation = C.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        self.foundation = foundation
+        self.error_observation = {"status": "unavailable", "code": None}
         P = C.c_void_p
 
         def bind(library, name, result, arguments):
@@ -741,6 +743,39 @@ class _Trust:
                  "native trust getter failed")
         return bool(value.value)
 
+    def _error_observation(self, error) -> dict:
+        """Public scalars from the original owned CFError, never trust authority."""
+        if not error:
+            return {"status": "no-error", "code": None}
+        unavailable = {"status": "unavailable", "code": None}
+        try:
+            C, foundation = self.C, self.foundation
+            P = C.c_void_p
+            # Get-rule domain and the public pointer-valued constant are borrowed.
+            # Resolve lazily so unavailable diagnostics do not fail a native result.
+            domain_get = foundation.CFErrorGetDomain
+            domain_get.restype, domain_get.argtypes = P, [P]
+            equal = foundation.CFEqual
+            equal.restype, equal.argtypes = C.c_ubyte, [P, P]
+            domain = domain_get(error)
+            osstatus = P.in_dll(foundation, "kCFErrorDomainOSStatus").value
+            if not domain or not osstatus:
+                return unavailable
+            matches = equal(domain, osstatus)
+            if type(matches) is not int or matches not in (0, 1):
+                return unavailable
+            if not matches:
+                return {"status": "other-domain", "code": None}
+            code_get = foundation.CFErrorGetCode
+            code_get.restype, code_get.argtypes = C.c_long, [P]
+            code = code_get(error)
+            if type(code) is not int or not -(2**31) <= code < 2**31:
+                return unavailable
+            return {"status": "osstatus", "code": code}
+        except Exception:
+            # Cancellation/SystemExit still reaches the original CF cleanup owner.
+            return unavailable
+
     def evaluate(self) -> dict:
         error = self.C.c_void_p()
         try:
@@ -761,6 +796,7 @@ class _Trust:
             size, location = self.data_length(raw), self.data_bytes(raw)
             _require(0 < size <= _MAX_DER and bool(location), "native synthetic chain encoding differs")
             hashes.append(hashlib.sha256(self.C.string_at(location, size)).hexdigest())
+        self.error_observation = self._error_observation(error.value)
         return {"accepted": bool(accepted), "error": bool(error.value), "result": result.value, "chain": hashes}
 
     def close(self) -> None:
@@ -775,7 +811,7 @@ class _Trust:
             raise BaseExceptionGroup("native CF reference cleanup failed", errors)
 
 
-def _evaluate_case(fixture: dict, deadline: float) -> dict:
+def _evaluate_case(fixture: dict, deadline: float, observations: list[dict] | None = None) -> dict:
     trust, errors, row = None, [], None
     case = fixture["case"]
     _require(case in _CASES, "unknown fixed AIA case")
@@ -808,16 +844,41 @@ def _evaluate_case(fixture: dict, deadline: float) -> dict:
                 errors.append(exc)
     if errors:
         raise BaseExceptionGroup("native AIA evaluation/cleanup failed", errors)
+    if observations is not None:
+        # Only detached Python values survive close; no getter uses a retired ref.
+        observations.append({"case": case, **trust.error_observation})
     return row
 
 
 def evaluate_aia(port: int, deadline: float) -> dict:
     fixtures = _fixtures(Path.cwd(), port, deadline)
-    return {"schema": 1, "cases": [_evaluate_case(fixture, deadline) for fixture in fixtures]}
+    observations = []
+    cases = [_evaluate_case(fixture, deadline, observations) for fixture in fixtures]
+    return {"schema": 1, "cases": cases, "error_observations": observations}
+
+
+def _aia_record(data: bytes) -> tuple[dict, list[dict]]:
+    """Recognize only the closed optional diagnostic extension, not new authority."""
+    record = _parse(data, AIA_PREFIX)
+    observations = [{"case": case, "status": "unavailable", "code": None} for case in _CASES]
+    if "error_observations" in record:
+        observations = record.pop("error_observations")
+        _require(type(observations) is list and len(observations) == len(_CASES),
+                 "native AIA diagnostic inventory differs")
+        for case, row in zip(_CASES, observations):
+            _require(type(row) is dict and set(row) == {"case", "status", "code"}
+                     and type(row["case"]) is str and row["case"] == case
+                     and type(row["status"]) is str
+                     and row["status"] in {"no-error", "osstatus", "other-domain", "unavailable"},
+                     "native AIA diagnostic fields differ")
+            _require(type(row["code"]) is int and -(2**31) <= row["code"] < 2**31
+                     if row["status"] == "osstatus" else row["code"] is None,
+                     "native AIA diagnostic code differs")
+    return record, observations
 
 
 def require_aia_controls(data: bytes, fixtures: list[dict], requests: list[tuple[str, str]]) -> dict:
-    record = _parse(data, AIA_PREFIX)
+    record, _observations = _aia_record(data)
     _require(set(record) == {"schema", "cases"} and type(record["cases"]) is list
              and len(record["cases"]) == len(fixtures) == 4, "native AIA result inventory differs")
     expected_requests, counts = [], []
@@ -847,13 +908,13 @@ def _aia_comparison_note(data: bytes, fixtures: list[dict], requests: list[tuple
     unavailable = {"schema": 1, "control": "aia-comparison",
                    "semantics": "comparison-observation-only", "available": False}
     try:
-        record = _parse(data, AIA_PREFIX)
+        record, errors = _aia_record(data)
         _require(set(record) == {"schema", "cases"} and type(record["cases"]) is list
                  and type(fixtures) is list and len(record["cases"]) == len(fixtures) == 4
                  and type(requests) is list and len(requests) <= 8, "AIA diagnostic inventory differs")
         cases, originals, expected_requests = [], {}, []
         bools = ("baseline_network", "network", "keychains", "accepted", "error")
-        for case, row, fixture in zip(_CASES, record["cases"], fixtures):
+        for case, row, fixture, error in zip(_CASES, record["cases"], fixtures, errors):
             _require(type(fixture) is dict and set(fixture) == {"case", "route", "root", "issuer", "leaf"}
                      and type(fixture["case"]) is str and fixture["case"] == case
                      and type(fixture["route"]) is str and len(fixture["route"]) <= 96
@@ -871,12 +932,15 @@ def _aia_comparison_note(data: bytes, fixtures: list[dict], requests: list[tuple
             online = case in ("online", "mutant")
             expected_chain = [hashlib.sha256(fixture[role]).hexdigest()
                               for role in (("leaf", "issuer", "root") if online else ("leaf",))]
+            roles = {hashlib.sha256(fixture[role]).hexdigest(): role for role in ("leaf", "issuer", "root")}
             issuer = hashlib.sha256(fixture["issuer"]).hexdigest()
             originals[fixture["route"]] = (case, issuer)
             if online:
                 expected_requests.append((fixture["route"], issuer))
             cases.append({"case": case, **{key: row[key] for key in bools}, "result": row["result"],
                           "chain_count": len(row["chain"]), "chain_matches": row["chain"] == expected_chain,
+                          "chain_roles": [roles.get(digest, "other") for digest in row["chain"]],
+                          "trust_error": {"status": error["status"], "code": error["code"]},
                           "request_count": 0})
         observed_requests = []
         for request in requests:

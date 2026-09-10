@@ -1175,6 +1175,312 @@ class NativeAuthorityTests(unittest.TestCase):
         self.assertEqual([call.args[0] for call in trust.release.call_args_list], [23, 22, 21])
         self.assertEqual(trust.owned, [])
 
+    def test_trust_error_observation_uses_borrowed_public_scalars_and_preserves_cancellation(self):
+        m = self.module
+        unavailable = {"status": "unavailable", "code": None}
+        for mode in ("null", "zero", "osstatus", "minimum", "maximum", "foreign", "null-domain", "null-constant",
+                     "missing-domain", "missing-equal", "missing-code", "missing-constant", "read-error",
+                     "equal-invalid", "equal-bool", "equal-shape", "code-bool", "code-float", "code-low", "code-high",
+                     "cancel", "system-exit"):
+            with self.subTest(public_error_scalar=mode):
+                domain, equal, code = Mock(return_value=201), Mock(return_value=1), Mock(return_value=-67818)
+                for function in (domain, equal, code):
+                    function.restype = function.argtypes = "unbound"
+                library = SimpleNamespace(CFErrorGetDomain=domain, CFEqual=equal, CFErrorGetCode=code)
+                pointer = SimpleNamespace(in_dll=Mock(return_value=SimpleNamespace(value=202)))
+                C = SimpleNamespace(c_void_p=pointer, c_ubyte=object(), c_long=object(),
+                                    CDLL=Mock(side_effect=AssertionError("no new library may be loaded")))
+                trust = object.__new__(m._Trust)
+                trust.C, trust.foundation, trust.owned, trust.release = C, library, [101], Mock()
+                original = KeyboardInterrupt("PRIVATE-CANCEL") if mode == "cancel" else SystemExit(7)
+                if mode.startswith("missing-") and mode != "missing-constant":
+                    delattr(library, {"missing-domain": "CFErrorGetDomain", "missing-equal": "CFEqual",
+                                      "missing-code": "CFErrorGetCode"}[mode])
+                if mode == "missing-constant":
+                    pointer.in_dll.side_effect = ValueError("PRIVATE-MISSING-CONSTANT")
+                elif mode == "null-constant":
+                    pointer.in_dll.return_value.value = None
+                if mode == "null-domain":
+                    domain.return_value = None
+                elif mode in {"read-error", "cancel"}:
+                    domain.side_effect = OSError("PRIVATE-READ-ERROR") if mode == "read-error" else original
+                if mode in {"foreign", "equal-invalid", "equal-bool", "equal-shape"}:
+                    equal.return_value = {"foreign": 0, "equal-invalid": 2, "equal-bool": True, "equal-shape": []}[mode]
+                if mode in {"minimum", "maximum", "code-bool", "code-float", "code-low", "code-high"}:
+                    code.return_value = {"minimum": -(2**31), "maximum": 2**31 - 1, "code-bool": True,
+                                         "code-float": -1.0, "code-low": -(2**31) - 1, "code-high": 2**31}[mode]
+                if mode == "system-exit":
+                    code.side_effect = original
+                error = None if mode == "null" else 0 if mode == "zero" else 101
+                with patch.multiple(m, os=SimpleNamespace(), subprocess=SimpleNamespace(), socket=SimpleNamespace(),
+                                    threading=SimpleNamespace(), time=SimpleNamespace()):
+                    if mode in {"cancel", "system-exit"}:
+                        with self.assertRaises(type(original)) as raised:
+                            trust._error_observation(error)
+                        self.assertIs(raised.exception, original)
+                    else:
+                        observed = trust._error_observation(error)
+                        expected = ({"status": "no-error", "code": None} if mode in {"null", "zero"} else
+                                    {"status": "osstatus", "code": code.return_value} if mode in {"osstatus", "minimum", "maximum"} else
+                                    {"status": "other-domain", "code": None} if mode == "foreign" else unavailable)
+                        self.assertEqual(observed, expected)
+                        self.assertNotIn("PRIVATE", json.dumps(observed))
+                C.CDLL.assert_not_called()
+                trust.release.assert_not_called()
+                self.assertEqual(trust.owned, [101])  # Neither borrowed domain is a new owned reference.
+                if mode in {"null", "zero"}:
+                    pointer.in_dll.assert_not_called()
+                    for function in (domain, equal, code):
+                        function.assert_not_called()
+                        self.assertEqual((function.restype, function.argtypes), ("unbound", "unbound"))
+                if mode in {"osstatus", "minimum", "maximum", "foreign"}:
+                    domain.assert_called_once_with(101)
+                    equal.assert_called_once_with(201, 202)
+                    pointer.in_dll.assert_called_once_with(library, "kCFErrorDomainOSStatus")
+                    self.assertEqual((domain.restype, domain.argtypes), (pointer, [pointer]))
+                    self.assertEqual((equal.restype, equal.argtypes), (C.c_ubyte, [pointer, pointer]))
+                    if mode == "foreign":
+                        code.assert_not_called()
+                        self.assertEqual((code.restype, code.argtypes), ("unbound", "unbound"))
+                    else:
+                        code.assert_called_once_with(101)
+                        self.assertEqual((code.restype, code.argtypes), (C.c_long, [pointer]))
+                if mode in {"null-domain", "null-constant", "missing-constant", "read-error", "equal-invalid", "equal-bool", "equal-shape"}:
+                    code.assert_not_called()
+
+    def test_trust_evaluation_observes_error_only_after_original_chain_and_keeps_custody(self):
+        m = self.module
+        fixture = aia_fixtures(m)[0]
+        for mode in ("observed", "unavailable", "no-error", "native-error", "result-error", "chain-error",
+                     "cancel", "system-exit", "cutoff", "close-error"):
+            with self.subTest(original_trust_collection=mode):
+                events, observations, now = [], [], [10.0]
+                earlier, closing = OSError("PRIVATE-NATIVE-ERROR"), OSError("PRIVATE-CF-CLOSE")
+                interruption = KeyboardInterrupt("PRIVATE-CANCEL") if mode == "cancel" else SystemExit(7)
+                trust = object.__new__(m._Trust)
+                trust.trust, trust.owned = 10, [10]
+                trust.error_observation = {"status": "unavailable", "code": None}
+                raw = {310: fixture["leaf"], 311: fixture["issuer"]}
+
+                def evaluate(pointer, error):
+                    self.assertEqual(pointer, 10)
+                    events.append("evaluate")
+                    error.value = None if mode == "no-error" else 110
+                    if mode == "native-error":
+                        raise earlier
+                    return mode == "no-error"
+
+                def result(pointer, value):
+                    self.assertEqual(pointer, 10)
+                    events.append("result")
+                    value.value = 4 if mode == "no-error" else 5
+                    return -1 if mode == "result-error" else 0
+
+                def read(pointer, size):
+                    events.append(("chain-bytes", pointer))
+                    self.assertIn(pointer - 100, trust.owned)
+                    self.assertEqual(size, len(raw[pointer - 100]))
+                    if mode == "chain-error" and pointer == 411:
+                        raise earlier
+                    return raw[pointer - 100]
+
+                def domain(pointer):
+                    self.assertEqual(pointer, 110)
+                    self.assertEqual(events[-2:], [("chain-bytes", 410), ("chain-bytes", 411)])
+                    self.assertEqual(trust.owned, [10, 110, 210, 310, 311])
+                    events.append("error-domain")
+                    if mode == "cancel":
+                        raise interruption
+                    return 501
+
+                def code(pointer):
+                    self.assertEqual(pointer, 110)
+                    events.append("error-code")
+                    if mode == "unavailable":
+                        raise ValueError("PRIVATE-OPTIONAL-ERROR")
+                    if mode == "system-exit":
+                        raise interruption
+                    if mode == "cutoff":
+                        now[0] = 100.0
+                    return -67818
+
+                def release(pointer):
+                    events.append(("release", pointer))
+                    if mode == "close-error" and pointer == 311:
+                        raise closing
+
+                pointer = Mock(side_effect=lambda: SimpleNamespace(value=None))
+                pointer.in_dll = Mock(return_value=SimpleNamespace(value=502))
+                trust.C = SimpleNamespace(c_void_p=pointer, c_uint32=lambda: SimpleNamespace(value=0),
+                    c_ubyte=object(), c_long=object(), byref=lambda value: value, string_at=read,
+                    CDLL=Mock(side_effect=AssertionError("synthetic evaluation cannot load native libraries")))
+                trust.foundation = SimpleNamespace(CFErrorGetDomain=Mock(side_effect=domain), CFEqual=Mock(return_value=1),
+                                                   CFErrorGetCode=Mock(side_effect=code))
+                trust.native_evaluate, trust.trust_result = Mock(side_effect=evaluate), Mock(side_effect=result)
+                trust.copy_chain, trust.array_count = Mock(return_value=210), Mock(return_value=2)
+                trust.array_item = Mock(side_effect=lambda _chain, index: 211 + index)
+                trust.cert_data = Mock(side_effect=lambda certificate: certificate + 99)
+                trust.data_length, trust.data_bytes = Mock(side_effect=lambda value: len(raw[value])), Mock(side_effect=lambda value: value + 100)
+                trust.release = Mock(side_effect=release)
+                trust.set_network, trust.get_network = Mock(), Mock(return_value=True)
+                trust.set_keychains, trust.get_keychains = Mock(), Mock(return_value=True)
+                observer = Mock(wraps=trust._error_observation)
+                trust._error_observation = observer
+                with patch.multiple(m, _Trust=Mock(return_value=trust), time=SimpleNamespace(monotonic=lambda: now[0]),
+                                    os=SimpleNamespace(), subprocess=SimpleNamespace(), socket=SimpleNamespace(), threading=SimpleNamespace()):
+                    if mode in {"observed", "unavailable", "no-error"}:
+                        row = m._evaluate_case(fixture, 100.0, observations)
+                        self.assertEqual(row, {"case": "online", "baseline_network": True, "network": True, "keychains": True,
+                            "accepted": mode == "no-error", "error": mode != "no-error", "result": 4 if mode == "no-error" else 5,
+                            "chain": [m.hashlib.sha256(raw[index]).hexdigest() for index in (310, 311)]})
+                        scalar = ({"status": "osstatus", "code": -67818} if mode == "observed" else
+                                  {"status": "no-error", "code": None} if mode == "no-error" else {"status": "unavailable", "code": None})
+                        self.assertEqual(trust.error_observation, scalar)
+                        self.assertEqual(observations, [{"case": "online", **scalar}])
+                        trust.error_observation["code"] = 123
+                        self.assertEqual(observations, [{"case": "online", **scalar}])  # Detached before publication.
+                    else:
+                        with self.assertRaises(BaseExceptionGroup) as raised:
+                            m._evaluate_case(fixture, 100.0, observations)
+                        self.assertEqual(observations, [])
+                        leaves = [leaf for child in raised.exception.exceptions for leaf in
+                                  (child.exceptions if isinstance(child, BaseExceptionGroup) else (child,))]
+                        if mode in {"native-error", "chain-error"}:
+                            self.assertIn(earlier, leaves)
+                        elif mode in {"cancel", "system-exit"}:
+                            self.assertIn(interruption, leaves)
+                        elif mode == "close-error":
+                            self.assertIn(closing, leaves)
+                        else:
+                            self.assertTrue(any(isinstance(error, m.NativeControlError) for error in leaves))
+                early = mode in {"native-error", "result-error", "chain-error"}
+                self.assertEqual(observer.call_count, 0 if early else 1)
+                if early or mode == "no-error":
+                    trust.foundation.CFErrorGetDomain.assert_not_called()
+                    trust.foundation.CFErrorGetCode.assert_not_called()
+                    pointer.in_dll.assert_not_called()
+                released = [event[1] for event in events if isinstance(event, tuple) and event[0] == "release"]
+                self.assertEqual(released, [110, 10] if mode in {"native-error", "result-error"} else
+                                 [311, 310, 210, *([] if mode == "no-error" else [110]), 10])
+                self.assertEqual(trust.owned, [])
+                self.assertNotIn(501, released)
+                self.assertNotIn(502, released)
+                trust.C.CDLL.assert_not_called()
+
+    def test_aia_error_observations_assemble_only_after_original_case_cleanup(self):
+        m = self.module
+        fixtures = aia_fixtures(m)
+        record, _requests = aia_evidence(m, fixtures)
+        scalars = [{"status": status, "code": -67818 if status == "osstatus" else None}
+                   for status in ("no-error", "osstatus", "other-domain", "unavailable")]
+        events, instances = [], []
+        test = self
+
+        class Trust:
+            def __init__(self, leaf, root):
+                self.index = next(index for index, fixture in enumerate(fixtures) if fixture["leaf"] == leaf)
+                test.assertEqual(root, fixtures[self.index]["root"])
+                self.network = self.keychains = self.closed = False
+                self.scalar = dict(scalars[self.index])
+                instances.append(self)
+
+            def set_network(self, value):
+                self.network = value
+
+            def get_network(self):
+                return self.network
+
+            def set_keychains(self, value):
+                self.keychains = value
+
+            def get_keychains(self):
+                return self.keychains
+
+            def evaluate(self):
+                events.append((self.index, "evaluate"))
+                return {key: record["cases"][self.index][key] for key in ("accepted", "error", "result", "chain")}
+
+            def close(self):
+                events.append((self.index, "close"))
+                self.closed = True
+
+            @property
+            def error_observation(self):
+                test.assertTrue(self.closed)
+                events.append((self.index, "detached-observation"))
+                return self.scalar
+
+        location = Path("/pure/probes")
+        paths = SimpleNamespace(cwd=Mock(return_value=location))
+        reader = Mock(return_value=fixtures)
+        with clock(m), patch.multiple(m, _Trust=Trust, _fixtures=reader, Path=paths, os=SimpleNamespace(),
+                                      subprocess=SimpleNamespace(), socket=SimpleNamespace(), threading=SimpleNamespace()):
+            result = m.evaluate_aia(60123, 100.0)
+            expected = {**record, "error_observations": [{"case": fixture["case"], **scalar} for fixture, scalar in zip(fixtures, scalars)]}
+            self.assertEqual(result, expected)
+            self.assertEqual(events, [(index, event) for index in range(4) for event in ("evaluate", "close", "detached-observation")])
+            paths.cwd.assert_called_once_with()
+            reader.assert_called_once_with(location, 60123, 100.0)
+            self.assertEqual(len(instances), 4)
+            instances[1].scalar["code"] = 123
+            self.assertEqual(result, expected)
+            events.clear()
+            self.assertEqual(m._evaluate_case(fixtures[0], 100.0), record["cases"][0])
+            self.assertEqual(events, [(0, "evaluate"), (0, "close")])  # Legacy callers need no observation property.
+
+    def test_aia_error_observation_extension_is_optional_strict_and_not_authority(self):
+        m = self.module
+        fixtures = aia_fixtures(m)
+        record, requests = aia_evidence(m, fixtures)
+        encode = lambda value: m.AIA_PREFIX + json.dumps(value).encode() + b"\n"
+        unavailable = {"schema": 1, "control": "aia-comparison", "semantics": "comparison-observation-only", "available": False}
+        absent = [{"case": case, "status": "unavailable", "code": None} for case in m._CASES]
+        with patch.multiple(m, os=SimpleNamespace(), subprocess=SimpleNamespace(), socket=SimpleNamespace(),
+                            threading=SimpleNamespace(), time=SimpleNamespace(), Path=SimpleNamespace()):
+            self.assertEqual(m._aia_record(encode(record)), (record, absent))
+            original = m.require_aia_controls(encode(record), fixtures, requests)
+            for status, code in (("no-error", None), ("osstatus", -(2**31)), ("osstatus", 2**31 - 1),
+                                 ("other-domain", None), ("unavailable", None)):
+                observations = [{"case": case, "status": status, "code": code} for case in m._CASES]
+                extended = {**record, "error_observations": observations}
+                with self.subTest(compatible_error_observation=(status, code)):
+                    self.assertEqual(m._aia_record(encode(extended)), (record, observations))
+                    self.assertEqual(m.require_aia_controls(encode(extended), fixtures, requests), original)
+                    note = m._aia_comparison_note(encode(extended), fixtures, requests)
+                    self.assertEqual([row["trust_error"] for row in note["cases"]], [{"status": status, "code": code}] * 4)
+                    changed = json.loads(json.dumps(extended))
+                    changed["cases"][0]["accepted"] = False
+                    for raw, observed_requests in ((encode(changed), requests), (encode(extended), [])):
+                        with self.assertRaises(m.NativeControlError):
+                            m.require_aia_controls(raw, fixtures, observed_requests)
+                        self.assertTrue(m._aia_comparison_note(raw, fixtures, observed_requests)["available"])
+            malformed = [None, {}, [], absent[:3], absent + absent[:1], list(reversed(absent)), [absent[0], absent[0], *absent[2:]]]
+            for key, value in (("case", "PRIVATE-CASE"), ("case", True), ("status", "PRIVATE-DOMAIN"), ("status", True),
+                               ("code", 1), ("PRIVATE-FIELD", "/Users/private/signing.key")):
+                malformed.append([{**absent[0], key: value}, *absent[1:]])
+            for code in (None, True, False, 1.0, "-67818", -(2**31) - 1, 2**31):
+                malformed.append([{**absent[0], "status": "osstatus", "code": code}, *absent[1:]])
+            for observations in malformed:
+                raw = encode({**record, "error_observations": observations})
+                with self.subTest(malformed_error_extension=observations):
+                    with self.assertRaises(m.NativeControlError):
+                        m._aia_record(raw)
+                    with self.assertRaises(m.NativeControlError):
+                        m.require_aia_controls(raw, fixtures, requests)
+                    self.assertEqual(m._aia_comparison_note(raw, fixtures, requests), unavailable)
+            complete = encode({**record, "error_observations": absent})
+            for raw in (complete[:-1], complete + b"PRIVATE-EXTRA\n", complete.replace(b'"status": "unavailable"',
+                        b'"status": "unavailable", "status": "unavailable"'), b"x" * 4097):
+                with self.assertRaises(m.NativeControlError):
+                    m._aia_record(raw)
+                self.assertEqual(m._aia_comparison_note(raw, fixtures, requests), unavailable)
+            extra = {**record, "error_observations": absent, "PRIVATE-EXTENSION": "/Users/private/signing.key"}
+            semantic, _observations = m._aia_record(encode(extra))
+            self.assertIn("PRIVATE-EXTENSION", semantic)  # Strip ONLY the recognized optional field.
+            with self.assertRaises(m.NativeControlError):
+                m.require_aia_controls(encode(extra), fixtures, requests)
+            self.assertEqual(m._aia_comparison_note(encode(extra), fixtures, requests), unavailable)
+
     def test_oracle_requires_online_and_mutant_fetches_and_both_offline_negatives(self):
         m = self.module
         fixtures = aia_fixtures(m)
@@ -1207,6 +1513,8 @@ class NativeAuthorityTests(unittest.TestCase):
         expected = unavailable | {"available": True, "cases": [
             {key: row[key] for key in ("case", "baseline_network", "network", "keychains", "accepted", "error", "result")}
             | {"chain_count": 3 if index in (0, 2) else 1, "chain_matches": True,
+               "chain_roles": ["leaf", "issuer", "root"] if index in (0, 2) else ["leaf"],
+               "trust_error": {"status": "unavailable", "code": None},
                "request_count": 1 if index in (0, 2) else 0} for index, row in enumerate(record["cases"])],
             "requests": [{"case": name, "issuer_matches": True} for name in ("online", "mutant")], "requests_match": True}
 
@@ -1228,7 +1536,8 @@ class NativeAuthorityTests(unittest.TestCase):
                 note = project(encode(changed))
                 wanted = json.loads(json.dumps(expected))
                 if key == "chain":
-                    wanted["cases"][index].update(chain_count=len(value), chain_matches=False)
+                    wanted["cases"][index].update(chain_count=len(value), chain_matches=False,
+                                                  chain_roles=["other"] * 3 if index == 0 else ["leaf", "other"])
                 else:
                     wanted["cases"][index][key] = value
                 self.assertEqual(note, wanted)
@@ -1248,6 +1557,19 @@ class NativeAuthorityTests(unittest.TestCase):
                              {"accepted": False, "error": True, "result": 5, "chain_count": 1, "chain_matches": False})
         with self.assertRaises(m.NativeControlError):
             m.require_aia_controls(encode(absent), fixtures, [])
+        leaf, issuer, root = record["cases"][0]["chain"]
+        foreign_issuer = record["cases"][2]["chain"][1]
+        for chain, roles in (([leaf, issuer], ["leaf", "issuer"]), ([leaf, foreign_issuer], ["leaf", "other"]),
+                             ([root, issuer, leaf], ["root", "issuer", "leaf"]), ([leaf, leaf], ["leaf", "leaf"])):
+            changed = json.loads(json.dumps(record))
+            changed["cases"][0]["chain"] = chain
+            note = project(encode(changed))
+            self.assertEqual(note["cases"][0]["chain_roles"], roles)
+            self.assertFalse(note["cases"][0]["chain_matches"])
+            for digest in (*chain, foreign_issuer):
+                self.assertNotIn(digest, json.dumps(note))
+            with self.assertRaises(m.NativeControlError):
+                m.require_aia_controls(encode(changed), fixtures, requests)
 
         unknown = ("/mrk-aia/" + "f" * 32 + "/online.der", "e" * 64)
         for observed, labels, matches, counts in (
@@ -1407,6 +1729,8 @@ class NativeAuthorityTests(unittest.TestCase):
                             if mode == "comparison":
                                 self.assertEqual(error._ci_observation, real_project(outputs["aia-evaluate"], fixtures, requests))
                                 self.assertFalse(error._ci_observation["requests_match"])
+                                self.assertEqual(error._ci_observation["cases"][0]["chain_roles"], ["leaf", "issuer", "root"])
+                                self.assertEqual(error._ci_observation["cases"][0]["trust_error"], {"status": "unavailable", "code": None})
                                 self.assertEqual(parent._exception_notes(error),
                                     [{"exception": "NativeControlError", "lines": [], "observation": error._ci_observation}])
                             else:
