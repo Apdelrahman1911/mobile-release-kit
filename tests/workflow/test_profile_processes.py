@@ -21,6 +21,7 @@ from mobile_release.ios_profiles import (
 )
 
 from .profile_process_fixture import backpressure_case, kill_owned_group, run_case
+from .process_fixture import process_state
 
 
 @unittest.skipUnless(os.name == "posix", "release workers require POSIX process groups")
@@ -151,10 +152,10 @@ class ProfileGroupCleanupTests(unittest.TestCase):
                 # macOS EPERM path is real, not a mocked permission failure.
                 limit = time.monotonic() + 5
                 while True:
-                    state = subprocess.run(["ps", "-p", str(process.pid), "-o", "stat="],
-                                           capture_output=True, text=True, timeout=2).stdout.strip()
-                    if state.startswith("Z"):
+                    state = process_state(process.pid, group=process.pid, deadline=limit)
+                    if state == "zombie":
                         break
+                    self.assertNotEqual(state, "absent", "unreaped child disappeared before zombie observation")
                     self.assertLess(time.monotonic(), limit, "owned child never reached zombie state")
                     time.sleep(.01)
                 if sys.platform == "darwin":

@@ -22,7 +22,7 @@ if __name__ == "__main__":
     # outside the checkout. Only the fixture itself comes from the source tree.
     sys.path[:0] = [sys.argv.pop(1), str(ROOT / "tests")]
 
-from workflow.process_fixture import alive, assert_dead, record
+from workflow.process_fixture import alive, assert_dead, assert_live, observer_environment, record
 
 CANARIES = ("GH_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS", "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
             "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8", "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD",
@@ -71,7 +71,7 @@ def await_ready(root, process):
     while not ready(root) and time.monotonic() < limit:
         time.sleep(.01)
     assert ready(root), "independent fixture readiness watchdog expired"
-    assert alive(int((root / "child.pid").read_text()))
+    assert_live(int((root / "child.pid").read_text()), deadline=limit)
 
 
 def fixture(root, directory, mode, parent):
@@ -195,6 +195,7 @@ def driver(root, directory, mode, parent):
         assert native[:4] == [sys.executable, "-I", "-S", "-B"]
         assert expected_parent == os.getpid()
         assert path.is_dir() and (path.stat().st_mode & 0o777) == 0o700
+        assert path.parent == root, "profile scratch escaped the owned fixture directory"
         assert (path / "cms.der").read_bytes() == b"fictional-profile-canary"
         assert (path / "cms.der").stat().st_mode & 0o777 == 0o600
         scratches.append(path)
@@ -233,7 +234,8 @@ def driver(root, directory, mode, parent):
             return super().register(*args, **kwargs)
 
         def select(self, timeout=None):
-            exited_with_pipe = ready(root) and launched[0].poll() is not None and alive(int((root / "child.pid").read_text()))
+            exited_with_pipe = (ready(root) and launched[0].poll() is not None
+                                and alive(int((root / "child.pid").read_text()), group=launched[0].pid))
             result = super().select(timeout)
             if exited_with_pipe and not result:
                 waits.append(True)
@@ -267,9 +269,9 @@ def driver(root, directory, mode, parent):
                 result = "cancelled"
         assert result is not None
         assert len(launched) == 1
-        assert_dead(launched[0].pid)
+        assert_dead(launched[0].pid, group=launched[0].pid)
         assert ready(root)
-        assert_dead(int((root / "child.pid").read_text()))
+        assert_dead(int((root / "child.pid").read_text()), group=launched[0].pid)
         assert all(not path.exists() for path in scratches)
         assert all(signal.getsignal(sig) == handler for sig, handler in previous.items())
         if mode == "pipe-timeout":
@@ -278,7 +280,7 @@ def driver(root, directory, mode, parent):
         assert worker["group"] == launched[0].pid
         if mode in ACTUAL_SUPERVISOR_MODES:
             assert worker["parent"] == launched[0].pid
-            assert_dead(worker["pid"])
+            assert_dead(worker["pid"], group=launched[0].pid)
         assert not set(CANARIES) & worker["environment"].keys()
         record(root / "result.json", json.dumps({"result": result, "deadBeforeFallback": True,
                                                 "scratchRemoved": True, "orphanPipeObserved": bool(waits)}))
@@ -292,7 +294,8 @@ def driver(root, directory, mode, parent):
 
 
 def run_case(root: Path, mode: str) -> dict:
-    environment = {"PATH": os.environ["PATH"]}
+    environment = {"PATH": os.environ["PATH"], "TMPDIR": str(root), "TMP": str(root), "TEMP": str(root)}
+    environment.update(observer_environment())
     process = subprocess.Popen(command("driver", root, root, mode), env=environment,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     try:
@@ -311,7 +314,7 @@ def run_case(root: Path, mode: str) -> dict:
             worker = json.loads((root / "worker.json").read_text())
             assert worker["parent"] == worker["group"] == supervisor_pid
             for pid in (supervisor_pid, worker["pid"], int((root / "child.pid").read_text())):
-                assert_dead(pid)
+                assert_dead(pid, group=supervisor_pid)
             scratch = Path((root / "scratch-path").read_text())
             assert scratch.is_dir() and scratch.stat().st_mode & 0o777 == 0o700
             if mode in PARENT_DEATH_MODES:
@@ -348,8 +351,8 @@ def backpressure_case(root: Path) -> dict:
         output, errors = process.communicate(timeout=3)
         assert not errors and 0 < len(output) < 4 * 1024 * 1024
         assert (root / "backpressure-observed").is_file()
-        assert_dead(int((root / "child.pid").read_text()))
-        assert_dead(json.loads((root / "worker.json").read_text())["pid"])
+        assert_dead(int((root / "child.pid").read_text()), group=process.pid)
+        assert_dead(json.loads((root / "worker.json").read_text())["pid"], group=process.pid)
         return {"deadBeforeFallback": True, "backpressureObserved": True}
     finally:
         kill_owned_group(process.pid, process=process)

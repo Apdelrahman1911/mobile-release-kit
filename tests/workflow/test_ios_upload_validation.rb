@@ -8,9 +8,11 @@ require "rbconfig"
 require "json"
 require "digest"
 require_relative "../../fastlane/ios_upload_validation"
+require_relative "upload_process_fixture"
 
 class IosUploadValidationTest < Minitest::Test
   Gate = MobileReleaseKit::IosUploadValidation
+  include UploadProcessFixture::Contracts
 
   def setup
     @root = File.realpath(Dir.mktmpdir("mrk-upload-gate-"))
@@ -36,7 +38,11 @@ class IosUploadValidationTest < Minitest::Test
   end
 
   def teardown
-    FileUtils.remove_entry(@root)
+    if UploadProcessFixture.cleanup_unresolved?(@root)
+      warn "Preserve unresolved synthetic process evidence: #{@root}"
+    else
+      FileUtils.remove_entry(@root)
+    end
   end
 
   def interpreter(source)
@@ -59,6 +65,14 @@ class IosUploadValidationTest < Minitest::Test
       intent_sha256: "a" * 64, environment: environment,
       tooling_directory: @tooling_directory,
     }.merge(overrides))
+  end
+
+  def process_case(mode)
+    UploadProcessFixture.run(platform: "ios", root: @root, mode: mode, parameters: {
+      python: @python, module_root: @module_root, app_root: @app,
+      config_path: @config, intent_path: @intent, ipa_path: @ipa,
+      intent_sha256: "a" * 64, tooling_directory: @tooling_directory,
+    })
   end
 
   def test_real_spawn_has_constant_isolated_argv_no_store_authority_or_app_python_path
@@ -127,52 +141,6 @@ class IosUploadValidationTest < Minitest::Test
     refute_includes error.message, "private-profile"
     pid = JSON.parse(File.read(@capture)).fetch("pid")
     assert_raises(Errno::ESRCH) { Process.kill(0, pid) }
-  end
-
-  def test_deadline_terminates_validator_without_authorizing_upload
-    interpreter("sleep 60")
-    prior = Gate::MAX_SECONDS
-    Gate.send(:remove_const, :MAX_SECONDS)
-    Gate.const_set(:MAX_SECONDS, 0.25)
-    real_spawn = Open3.method(:popen3)
-    pid = nil
-    error = Open3.stub(:popen3, lambda do |*args, **options, &block|
-      real_spawn.call(*args, **options) do |stdin, stdout, stderr, waiter|
-        pid = waiter.pid
-        block.call(stdin, stdout, stderr, waiter)
-      end
-    end) { assert_raises(MobileReleaseKit::ContractError) { validate } }
-    assert_includes error.message, "timed out"
-    refute_nil pid
-    assert_raises(Errno::ESRCH) { Process.kill(0, pid) }
-  ensure
-    Gate.send(:remove_const, :MAX_SECONDS)
-    Gate.const_set(:MAX_SECONDS, prior)
-  end
-
-  def test_deadline_terminates_inherited_pipe_children_after_validator_parent_exits
-    child_record = File.join(@root, "validator-child")
-    interpreter("child = fork { sleep 60 }; File.write(#{child_record.inspect}, child.to_s); exit 0")
-    prior = Gate::MAX_SECONDS
-    Gate.send(:remove_const, :MAX_SECONDS)
-    Gate.const_set(:MAX_SECONDS, 3)
-    error = assert_raises(MobileReleaseKit::ContractError) { validate }
-    assert_includes error.message, "timed out"
-    child = Integer(File.read(child_record), 10)
-    # An orphaned, killed child can remain a zombie briefly until the OS reaps
-    # it. Either absence or zombie proves it cannot keep inspecting files.
-    state, status = Open3.capture2("ps", "-o", "stat=", "-p", child.to_s)
-    assert !status.success? || state.strip.start_with?("Z"), "validator's inherited-pipe child survived its deadline"
-  ensure
-    if child
-      begin
-        Process.kill("KILL", child)
-      rescue Errno::ESRCH
-        nil
-      end
-    end
-    Gate.send(:remove_const, :MAX_SECONDS)
-    Gate.const_set(:MAX_SECONDS, prior)
   end
 
   def test_incomplete_unknown_duplicate_or_mismatched_result_rejects

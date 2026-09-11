@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 import subprocess
@@ -232,39 +233,66 @@ class ReusableWorkflowContractTests(unittest.TestCase):
                 self.assertNotRegex(text, r"(?m)^\s+config_path\s*:")
 
     def test_shared_ci_is_credential_free(self) -> None:
+        from .test_ci_verification import ci_module, controller_module, coordinator_shell, fixture_paths
+
         text = read(SHARED_CI)
         self.assertNotIn("secrets.", text)
         self.assertNotRegex(text, r"(?m)^\s*environment\s*:")
-        self.assertIn("python -m unittest discover", text)
-        self.assertIn("test_fastlane_support.rb", text)
-        self.assertIn("FASTLANE_SKIP_UPDATE_CHECK: 'true'", text)
-        self.assertIn("bundle exec ruby fastlane/run_lane.rb --validate", text)
-        self.assertIn("ACTIONLINT_VERSION: 1.7.12", text)
-        self.assertIn(
-            "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
-            text,
-        )
-        self.assertEqual(1, text.count("-ignore 'property \"workflow_(repository|sha|ref)\""))
-        self.assertIn("test_workflow_yaml.rb", text)
-        self.assertIn("bundle exec ruby tests/workflow/test_supply_wif.rb", text)
-        self.assertIn("Smoke-test the installed wheel outside the checkout", text)
-        self.assertIn("pip wheel --no-deps", text)
-        self.assertIn('cd "$smoke_dir"', text)
-        self.assertIn('"$venv_dir/bin/mobile-release" --version', text)
-        self.assertIn('"$venv_dir/bin/mobile-release" init', text)
-        self.assertIn("init --apply", text)
-        self.assertIn("init --recover", text)
-        self.assertIn("--tooling-repository example/mobile-release-kit", text)
-        self.assertIn("test -f .github/workflows/mobile-production-submit.yml", text)
-        self.assertIn("from mobile_release.tooling import resolve_tooling_root", text)
-        for packaged in (
-            "fastlane/Fastfile",
-            "fastlane/play_store.rb",
-            "schemas/project.schema.json",
-            "templates/mobile-release.json",
-            "templates/workflows/mobile-production-submit.yml",
-        ):
-            self.assertIn(packaged, text)
+        workflow = load_workflow(SHARED_CI)
+        for platform, job in (("linux", "test-linux"), ("macos", "test-native-profiles")):
+            self.assertEqual(workflow["jobs"][job]["steps"][-1]["run"], coordinator_shell(platform))
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        catalog = controller.catalog(paths, "linux", deadline=12345.0)
+        gates = {step.id: step for step in catalog}
+        self.assertEqual(len(gates), len(catalog))
+        python = gates["python-full"]
+        self.assertEqual(python.argv[:6], (str(paths.source_python), "-I", "-B", str(paths.checks), "--check", "python-full"))
+        self.assertEqual(dict(python.env)["MOBILE_RELEASE_REQUIRE_RUBY_CONTRACTS"], "1")
+        self.assertEqual(dict(python.env)["FASTLANE_SKIP_UPDATE_CHECK"], "true")
+        ruby = {Path(step.argv[len(paths.bundle) + 2]).name for step in catalog if step.id.startswith("ruby-")}
+        self.assertEqual(ruby, {
+            "test_fastlane_support.rb", "test_play_store.rb", "test_play_lanes.rb", "test_apple_store.rb",
+            "test_apple_lanes.rb", "test_apple_production.rb", "test_apple_production_lane.rb",
+            "test_apple_asset_upload.rb", "test_ios_upload_validation.rb", "test_android_upload_validation.rb",
+            "test_native_upload_validation.rb", "test_native_signal_observation.rb",
+            "test_workflow_yaml.rb", "test_supply_wif.rb",
+        })
+        self.assertEqual(gates["fastfile"].argv, (*paths.bundle, "exec", str(paths.ruby),
+                                              str(ROOT / "fastlane/run_lane.rb"), "--validate"))
+        lock = json.loads(read(ROOT / ".github/verification-tools.json"))
+        self.assertEqual(lock["actionlint"]["version"], "1.7.12")
+        self.assertEqual(lock["actionlint"]["sha256"], "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8")
+        lint = gates["actionlint"].argv
+        self.assertEqual(lint[:4], (str(paths.inputs / "actionlint/actionlint"), "-no-color", "-ignore",
+                                  'property "workflow_(repository|sha|ref)" is not defined in object type'))
+        self.assertEqual(lint[4:], tuple(map(str, sorted(WORKFLOWS.glob("*.yml")) + sorted(TEMPLATES.glob("*.yml")))))
+        build = gates["wheel-build"]
+        self.assertEqual(build.argv, (str(paths.source_python), "-I", "-B", "-m", "pip", "wheel", "--no-index",
+                                     "--find-links", str(paths.inputs / "python"), "--no-deps", "--wheel-dir",
+                                     str(paths.work / "wheels"), str(paths.work / "wheel-build")))
+        self.assertNotIn("PIP_NO_BUILD_ISOLATION", dict(build.env))
+        smoke = gates["wheel-smoke"]
+        self.assertEqual(smoke.argv[:6], (str(paths.wheel_python), "-I", "-B", str(paths.checks), "--check", "wheel-smoke"))
+        self.assertEqual(smoke.argv[smoke.argv.index("--wheel") + 1], str(paths.wheel))
+        self.assertEqual(smoke.parser, "check")
+        self.assertFalse(smoke.cwd.is_relative_to(ROOT))
+        ids = [step.id for step in catalog]
+        self.assertLess(ids.index("wheel-build"), ids.index("wheel-inspect"))
+        self.assertLess(ids.index("wheel-inspect"), ids.index("wheel-install"))
+        self.assertLess(ids.index("wheel-install"), ids.index("wheel-smoke"))
+        checks = ci_module("ci_checks")
+        self.assertEqual(checks.TOOLING_REPOSITORY, "example/mobile-release-kit")
+        self.assertEqual(checks.TOOLING_SHA, "1" * 40)
+        self.assertEqual(set(checks.TOOLING_FILES), {
+            "Gemfile", "Gemfile.lock", "fastlane/Fastfile", "fastlane/play_store.rb", "fastlane/apple_store.rb",
+            "fastlane/apple_production.rb", "fastlane/apple_asset_upload.rb", "fastlane/apple_create_retry.rb",
+            "fastlane/ios_upload_validation.rb", "fastlane/android_upload_validation.rb", "fastlane/native_upload_validation.rb",
+            "fastlane/release_support.rb", "fastlane/run_lane.rb", "schemas/project.schema.json", "schemas/candidate.schema.json",
+            "schemas/receipt.schema.json", "schemas/store-operation-intent.schema.json", "templates/mobile-release.json",
+            "templates/workflows/mobile-preflight.yml", "templates/workflows/mobile-candidate.yml",
+            "templates/workflows/mobile-external-testing.yml", "templates/workflows/mobile-production-submit.yml",
+        })
 
     def test_android_play_state_journals_are_retained_after_credential_cleanup(self) -> None:
         for workflow, receipt in (("candidate", "android-internal.json"), ("external-testing", "android-external.json"), ("production-submit", "android-production-draft.json")):
