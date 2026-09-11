@@ -13,9 +13,12 @@ require_relative "upload_process_fixture"
 class IosUploadValidationTest < Minitest::Test
   Gate = MobileReleaseKit::IosUploadValidation
   include UploadProcessFixture::Contracts
+  prepend UploadProcessFixture::CaseGuard
 
   def setup
+    UploadProcessFixture.assert_domain_reusable!
     @root = File.realpath(Dir.mktmpdir("mrk-upload-gate-"))
+    @capture_observations = []
     @app = File.join(@root, "app")
     FileUtils.mkdir_p(File.join(@app, "release"))
     @config = File.join(@app, "release/mobile-release.json")
@@ -38,14 +41,22 @@ class IosUploadValidationTest < Minitest::Test
   end
 
   def teardown
-    if UploadProcessFixture.cleanup_unresolved?(@root)
+    return unless @root # A refused entry acquired no new fixture directory.
+
+    unresolved_capture = (@capture_observations || []).any? { |item| !(item.finalized? || item.no_producers?) }
+    if UploadProcessFixture.cleanup_unresolved?(@root) || unresolved_capture
       warn "Preserve unresolved synthetic process evidence: #{@root}"
+      flunk "direct adapter capture did not establish producer finality" if unresolved_capture
+      unless UploadProcessFixture.expected_unknown_retention?(@root)
+        flunk "adapter fixture retained unexpected process custody"
+      end
     else
       FileUtils.remove_entry(@root)
     end
   end
 
   def interpreter(source)
+    UploadProcessFixture.assert_domain_reusable!
     # A toolkit-owned fake executable exercises the REAL no-shell spawn, pipe
     # limits, deadline, child cleanup, argv, cwd and environment behavior. It
     # is not an IPA/native-signature fixture or an application hook.
@@ -59,12 +70,14 @@ class IosUploadValidationTest < Minitest::Test
   end
 
   def validate(environment: {}, **overrides)
-    Gate.current!(**{
-      python: @python, module_root: @module_root, app_root: @app,
-      config_path: @config, intent_path: @intent, ipa_path: @ipa,
-      intent_sha256: "a" * 64, environment: environment,
-      tooling_directory: @tooling_directory,
-    }.merge(overrides))
+    observe_capture do
+      Gate.current!(**{
+        python: @python, module_root: @module_root, app_root: @app,
+        config_path: @config, intent_path: @intent, ipa_path: @ipa,
+        intent_sha256: "a" * 64, environment: environment,
+        tooling_directory: @tooling_directory,
+      }.merge(overrides))
+    end
   end
 
   def process_case(mode)
@@ -73,6 +86,32 @@ class IosUploadValidationTest < Minitest::Test
       config_path: @config, intent_path: @intent, ipa_path: @ipa,
       intent_sha256: "a" * 64, tooling_directory: @tooling_directory,
     })
+  end
+
+  def observe_capture
+    UploadProcessFixture.assert_domain_reusable!
+    observation = UploadProcessFixture::CaptureObservation.new(
+      native: MobileReleaseKit::NativeUploadValidation, root: @root,
+    )
+    @capture_observations << observation
+    observation.observe { yield }
+  end
+
+  def assert_capture_finalized(observation)
+    refute observation.unknown?, "capture retained uncertain child/task/descriptor custody"
+    assert observation.finalized?, "capture returned without genuine waits, EOF, joins and closes"
+  end
+
+  def python_executable
+    stdout, stderr, status = UploadProcessFixture.capture_command(
+      [ENV.fetch("MOBILE_RELEASE_TEST_PYTHON", "python3"), "-I", "-S", "-c", "import sys;print(sys.executable)"],
+      seconds: 5,
+    )
+    assert_equal 0, status, "supported Python interpreter is required for the isolation contract"
+    assert_empty stderr
+    executable = stdout.strip
+    assert executable.start_with?(File::SEPARATOR), "Python discovery did not return an absolute interpreter"
+    executable
   end
 
   def test_real_spawn_has_constant_isolated_argv_no_store_authority_or_app_python_path
@@ -104,6 +143,7 @@ class IosUploadValidationTest < Minitest::Test
   def test_relative_command_and_app_substitute_module_are_rejected_before_spawn
     assert_raises(MobileReleaseKit::ContractError) { validate(python: "python3") }
     assert_raises(MobileReleaseKit::ContractError) { validate(python: "#{@python}\n-fake") }
+    UploadProcessFixture.assert_domain_reusable!
     FileUtils.mkdir_p(File.join(@app, "mobile_release"))
     File.write(File.join(@app, "mobile_release/ios_upload_validation.py"), "raise RuntimeError('application code')")
     assert_raises(MobileReleaseKit::ContractError) { validate(module_root: @app) }
@@ -130,8 +170,9 @@ class IosUploadValidationTest < Minitest::Test
     interpreter('STDOUT.sync = true; STDOUT.write("x" * 70_000); sleep 60')
     error = assert_raises(MobileReleaseKit::ContractError) { validate }
     assert_includes error.message, "safety bound"
-    pid = JSON.parse(File.read(@capture)).fetch("pid")
-    assert_raises(Errno::ESRCH) { Process.kill(0, pid) }
+    assert File.file?(@capture), "the real validator never entered"
+    # A late numeric PID probe is not child or process-group lifetime authority.
+    assert_capture_finalized(@capture_observations.last)
   end
 
   def test_private_stderr_is_bounded_and_never_forwarded
@@ -139,8 +180,8 @@ class IosUploadValidationTest < Minitest::Test
     error = assert_raises(MobileReleaseKit::ContractError) { validate }
     assert_includes error.message, "safety bound"
     refute_includes error.message, "private-profile"
-    pid = JSON.parse(File.read(@capture)).fetch("pid")
-    assert_raises(Errno::ESRCH) { Process.kill(0, pid) }
+    assert File.file?(@capture), "the real validator never entered"
+    assert_capture_finalized(@capture_observations.last)
   end
 
   def test_incomplete_unknown_duplicate_or_mismatched_result_rejects
@@ -178,28 +219,25 @@ class IosUploadValidationTest < Minitest::Test
   end
 
   def test_real_python_bootstrap_ignores_app_modules_pythonpath_home_and_sitecustomize
-    python = ENV.fetch("MOBILE_RELEASE_TEST_PYTHON", "python3")
-    stdout, _stderr, status = Open3.capture3(python, "-I", "-S", "-c", "import sys;print(sys.executable)")
-    assert status.success?, "supported Python interpreter is required for the isolation contract"
-    executable = stdout.strip
+    executable = python_executable
     marker = File.join(@root, "APP_CODE_EXECUTED")
     poison = "open(#{marker.inspect}, 'w').write('unsafe application import')\nraise RuntimeError('app code ran')\n"
     File.write(File.join(@app, "sitecustomize.py"), poison)
     File.write(File.join(@app, "mobile_release.py"), poison)
     File.write(File.join(@app, "unsafe.pth"), "import sitecustomize\n")
-    output = Gate.capture_validator(
-      { "PYTHONPATH" => @app, "PYTHONHOME" => @app, "PYTHONUSERBASE" => @app, "HOME" => @app },
-      [executable, "-I", "-S", "-c", Gate::BOOTSTRAP, @module_root, "--help"], @app,
-    )
+    output = observe_capture do
+      Gate.capture_validator(
+        { "PYTHONPATH" => @app, "PYTHONHOME" => @app, "PYTHONUSERBASE" => @app, "HOME" => @app },
+        [executable, "-I", "-S", "-c", Gate::BOOTSTRAP, @module_root, "--help"], @app,
+      )
+    end
     assert_includes output, "--operation-intent"
     assert_includes output, "--intent-sha256"
     refute File.exist?(marker), "application Python or site hooks executed inside a Store validator"
   end
 
   def test_fixed_bootstrap_runs_from_installed_package_layout_without_any_site_startup
-    python = ENV.fetch("MOBILE_RELEASE_TEST_PYTHON", "python3")
-    stdout, _stderr, status = Open3.capture3(python, "-I", "-S", "-c", "import sys;print(sys.executable)")
-    assert status.success?, "supported Python interpreter is required for the installation contract"
+    executable = python_executable
     installed_modules = File.join(@root, "prefix/lib/python/site-packages")
     installed_tooling = File.join(@root, "prefix/share/mobile-release-kit/fastlane")
     FileUtils.mkdir_p(installed_modules)
@@ -210,14 +248,18 @@ class IosUploadValidationTest < Minitest::Test
     File.write(File.join(installed_modules, "sitecustomize.py"), poison)
     File.write(File.join(installed_modules, "usercustomize.py"), poison)
     File.write(File.join(installed_modules, "unsafe.pth"), "import sitecustomize\n")
+    # This is a copied Python layout contract, NOT actual installed Ruby capture
+    # evidence; test_installed_ruby_capture.rb exercises the real wheel helpers.
     # Data-file tooling and package modules live in different wheel locations.
     # The actual installed CLI supplies this exact module root; -S must not
     # run even that directory's .pth files or import a stale user installation.
-    output = Gate.capture_validator(
-      { "HOME" => @app, "PYTHONUSERBASE" => @app, "PYTHONPATH" => @app },
-      [stdout.strip, "-I", "-S", "-c", Gate::BOOTSTRAP, installed_modules, "--help"],
-      installed_tooling,
-    )
+    output = observe_capture do
+      Gate.capture_validator(
+        { "HOME" => @app, "PYTHONUSERBASE" => @app, "PYTHONPATH" => @app },
+        [executable, "-I", "-S", "-c", Gate::BOOTSTRAP, installed_modules, "--help"],
+        installed_tooling,
+      )
+    end
     assert_includes output, "--operation-intent"
     assert_includes output, "--intent-sha256"
     refute File.exist?(marker)

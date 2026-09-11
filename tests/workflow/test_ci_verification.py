@@ -34,6 +34,45 @@ from .workflow_harness import evaluate_condition, load_workflow, simulate_steps
 
 ROOT = Path(__file__).resolve().parents[2]
 CI = ROOT / ".github/workflows/ci.yml"
+_PYTHON_POISON_FIXTURES = (
+    ("poison-wait-loss", "unit.test_native_process.NativeProcessLifecycleTests.test_native_consumed_wait_result_loss_never_retries_numeric_custody"),
+    ("poison-startup-error", "unit.test_native_process.NativeProcessLifecycleTests.test_native_error_startup_is_unknown_not_a_wait_receipt"),
+    ("poison-full-zero", "workflow.test_profile_processes.ProfileProcessTests.test_unknown_malformed_c_full_zero_retains_scratch"),
+    ("poison-full-failure", "workflow.test_profile_processes.ProfileProcessTests.test_unknown_malformed_c_full_failure_retains_scratch"),
+    ("poison-marker-parent-death", "workflow.test_profile_processes.ProfileProcessTests.test_unknown_marker_parent_death_requires_domain_disposal"),
+    ("poison-committed-parent-death", "workflow.test_profile_processes.ProfileProcessTests.test_unknown_committed_parent_death_requires_domain_disposal"),
+    ("poison-orphan", "workflow.test_profile_processes.ProfileProcessTests.test_killed_ancestor_cannot_strand_independent_native_worker_group"),
+    ("poison-payload-writer-close-failure", "workflow.test_profile_processes.ProfileGroupCleanupTests.test_unknown_payload_writer_close_failure_retains_scratch"),
+    ("poison-payload-reader-close-failure", "workflow.test_profile_processes.ProfileGroupCleanupTests.test_unknown_payload_reader_close_failure_retains_scratch"),
+    ("poison-payload-reader-close-unresolved", "workflow.test_profile_processes.ProfileGroupCleanupTests.test_unknown_payload_reader_close_unresolved_retains_scratch"),
+    ("poison-read-restored-term-fatal", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_read_restored_term_fatal"),
+    ("poison-source-restored-term-fatal", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_source_restored_term_fatal"),
+    ("poison-capture-restored-term-fatal", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_capture_restored_term_fatal"),
+    ("poison-capture-control-close-failure", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_capture_control_close_failure"),
+    ("poison-capture-status-close-failure", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_capture_status_close_failure"),
+    ("poison-capture-payload-close-failure", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_capture_payload_close_failure"),
+    ("poison-capture-payload-close-unresolved", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_capture_payload_close_unresolved"),
+    ("poison-source-control-close-failure", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_source_control_close_failure"),
+    ("poison-source-status-close-failure", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_source_status_close_failure"),
+    ("poison-source-payload-close-failure", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_source_payload_close_failure"),
+    ("poison-source-payload-close-unresolved", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_source_payload_close_unresolved"),
+    ("poison-source-scratch-cleanup-failure", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_source_scratch_cleanup_failure"),
+    ("poison-source-scratch-cleanup-unresolved", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_source_scratch_cleanup_unresolved"),
+    ("poison-read-raw-close-before-completion", "unit.test_default_cancellation.ProfileResourceIOTests.test_unknown_read_raw_close_before_completion"),
+    ("poison-read-raw-close-after-completion", "unit.test_default_cancellation.ProfileResourceIOTests.test_unknown_read_raw_close_after_completion"),
+    ("poison-source-raw-close-before-completion", "unit.test_default_cancellation.ProfileResourceIOTests.test_unknown_source_raw_close_before_completion"),
+    ("poison-source-raw-close-after-completion", "unit.test_default_cancellation.ProfileResourceIOTests.test_unknown_source_raw_close_after_completion"),
+    ("poison-unpublished-scratch", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_attempted_unpublished_scratch_acquisition_retains_unknown_across_unwind_and_gc"),
+    ("poison-directory-replacement", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_directory_replacement"),
+    ("poison-symlink-replacement", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_symlink_replacement"),
+    ("poison-unexpected-child", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_unexpected_child"),
+    ("poison-keyboard-interrupt-cleanup-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_keyboard_interrupt_cleanup_failure"),
+    ("poison-keyboard-interrupt-restore-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_keyboard_interrupt_restore_failure"),
+    ("poison-keyboard-interrupt-cleanup-and-restore-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_keyboard_interrupt_cleanup_and_restore_failure"),
+    ("poison-system-exit-cleanup-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_cleanup_failure"),
+    ("poison-system-exit-restore-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_restore_failure"),
+    ("poison-system-exit-cleanup-and-restore-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_cleanup_and_restore_failure"),
+)
 HOSTED_GUARD = '''set -euo pipefail
 [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == github-hosted ]]
 '''
@@ -83,7 +122,9 @@ def fixture_paths(controller):
     # roots are synthetic; no files beneath those paths are created or opened.
     return controller.Paths(source=ROOT, work=Path("/fixture/work"), inputs=Path("/fixture/inputs"),
                             python=Path("/fixture/python/bin/python"), ruby=Path("/fixture/ruby/bin/ruby"),
-                            java_home=Path("/fixture/jdk21"))
+                            java_home=Path("/fixture/jdk21"), compatibility_runtimes=tuple(
+                                (Path(f"/fixture/python{line}/bin/python"), Path(f"/fixture/python{line}"))
+                                for line in ("312", "313", "314")))
 
 
 def coordinator_shell(platform: str) -> str:
@@ -93,10 +134,12 @@ def coordinator_shell(platform: str) -> str:
     return '''set -euo pipefail
 ruby_executable="$(command -v ruby)"
 [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]]
+[[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]]
 sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin PYTHONSAFEPATH=1 \\
   "$MRK_PYTHON" -I -B .github/scripts/verify_ci.py \\
   --platform PLATFORM --source "$GITHUB_WORKSPACE" \\
   --python "$MRK_PYTHON" --ruby "$ruby_executable" \\
+  --python-312 "$MRK_PYTHON_312" --python-313 "$MRK_PYTHON_313" --python-314 "$MRK_PYTHON_314" \\
   --runner-home "$HOME" --runner-temp "$RUNNER_TEMP" \\
   --commit "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \\
   --run-attempt "$GITHUB_RUN_ATTEMPT" --image "$ImageOS/$ImageVersion" \\
@@ -138,7 +181,7 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                     self.assertNotIn(forbidden, job)
                 self.assertEqual(job.get("permissions", workflow["permissions"]), {"contents": "read"})
                 steps = job["steps"]
-                self.assertEqual(len(steps), 6 if platform == "linux" else 5)
+                self.assertEqual(len(steps), 9 if platform == "linux" else 8)
                 for step in steps:
                     self.assertNotIn("if", step)
                     self.assertNotIn("continue-on-error", step)
@@ -155,22 +198,32 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                 self.assertEqual(set(steps[2]), {"name", "id", "uses", "with"})
                 self.assertEqual(steps[2]["uses"], "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97")
                 self.assertEqual(steps[2]["with"], {"python-version": "3.11"})
-                self.assertEqual(steps[3]["uses"], "ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b")
-                self.assertEqual(set(steps[3]), {"name", "uses", "with"})
-                self.assertEqual(steps[3]["with"], {
+                for index, line in enumerate(("312", "313", "314"), start=3):
+                    self.assertEqual(set(steps[index]), {"name", "id", "uses", "with"})
+                    self.assertEqual(steps[index]["id"], "python" + line)
+                    self.assertEqual(steps[index]["uses"], steps[2]["uses"])
+                    self.assertEqual(steps[index]["with"], {"python-version": "3." + line[1:]})
+                self.assertEqual(steps[6]["uses"], "ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b")
+                self.assertEqual(set(steps[6]), {"name", "uses", "with"})
+                self.assertEqual(steps[6]["with"], {
                     "ruby-version": "3.3.12", "bundler": "none", "bundler-cache": False,
                 })
-                for step in steps[1:4]:
+                for step in steps[1:7]:
                     self.assertNotIn("run", step)
                     self.assertNotIn("env", step)
                 if platform == "linux":
-                    self.assertEqual(set(steps[4]), {"name", "shell", "run"})
-                    self.assertEqual(steps[4]["shell"], "bash")
-                    self.assertEqual(steps[4]["run"], LINUX_TOOL_SETUP)
-                    self.assertNotIn("env", steps[4])
+                    self.assertEqual(set(steps[7]), {"name", "shell", "run"})
+                    self.assertEqual(steps[7]["shell"], "bash")
+                    self.assertEqual(steps[7]["run"], LINUX_TOOL_SETUP)
+                    self.assertNotIn("env", steps[7])
                 owner = steps[-1]
                 self.assertEqual(set(owner), {"name", "shell", "env", "run"})
-                self.assertEqual(owner["env"], {"MRK_PYTHON": "${{ steps.python.outputs.python-path }}"})
+                self.assertEqual(owner["env"], {
+                    "MRK_PYTHON": "${{ steps.python.outputs.python-path }}",
+                    "MRK_PYTHON_312": "${{ steps.python312.outputs.python-path }}",
+                    "MRK_PYTHON_313": "${{ steps.python313.outputs.python-path }}",
+                    "MRK_PYTHON_314": "${{ steps.python314.outputs.python-path }}",
+                })
                 self.assertEqual(owner["shell"], "bash")
                 self.assertEqual(owner["run"], coordinator_shell(platform))
 
@@ -266,6 +319,8 @@ sudo() {
 '''
         env = {
             "PATH": "/usr/bin:/bin", "MRK_PYTHON": "/fixture/python/bin/python",
+            "MRK_PYTHON_312": "/fixture/python312/bin/python", "MRK_PYTHON_313": "/fixture/python313/bin/python",
+            "MRK_PYTHON_314": "/fixture/python314/bin/python",
             "FIXTURE_RUBY": "/fixture/ruby/bin/ruby", "GITHUB_WORKSPACE": "/fixture/source with spaces",
             "HOME": "/fixture/runner home", "RUNNER_TEMP": "/fixture/runner temp",
             "GITHUB_SHA": "1" * 40, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
@@ -280,6 +335,8 @@ sudo() {
                 "-n", "env", "-i", "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "PYTHONSAFEPATH=1",
                 env["MRK_PYTHON"], "-I", "-B", ".github/scripts/verify_ci.py", "--platform", platform,
                 "--source", env["GITHUB_WORKSPACE"], "--python", env["MRK_PYTHON"], "--ruby", env["FIXTURE_RUBY"],
+                "--python-312", env["MRK_PYTHON_312"], "--python-313", env["MRK_PYTHON_313"],
+                "--python-314", env["MRK_PYTHON_314"],
                 "--runner-home", env["HOME"], "--runner-temp", env["RUNNER_TEMP"],
                 "--commit", env["GITHUB_SHA"], "--run-id", env["GITHUB_RUN_ID"],
                 "--run-attempt", env["GITHUB_RUN_ATTEMPT"], "--image", "fixture-image/20260909.1",
@@ -294,7 +351,7 @@ sudo() {
                                             capture_output=True, timeout=5)
                     self.assertEqual(result.returncode, status, result.stderr)
                     self.assertEqual(result.stdout.decode().split("\0"), [*expected, ""])
-            for key in ("MRK_PYTHON", "FIXTURE_RUBY"):
+            for key in ("MRK_PYTHON", "FIXTURE_RUBY", "MRK_PYTHON_312", "MRK_PYTHON_313", "MRK_PYTHON_314"):
                 with self.subTest(platform=platform, relative_runtime=key):
                     result = subprocess.run(["bash", "--noprofile", "--norc", "-c", fixture + body],
                                             env={**env, "FIXTURE_STATUS": "0", key: "relative-runtime"},
@@ -321,16 +378,22 @@ class CIControllerContractTests(unittest.TestCase):
         """Only data and fake calls: no Session, product import or native work."""
         controller = controller_module()
         paths = fixture_paths(controller)
-        authority = ci_module("ci_checks").NATIVE_AUTHORITY_IDS
+        checks = ci_module("ci_checks")
+        authority = checks.NATIVE_AUTHORITY_IDS
         ordinary = ("unit.synthetic.OrdinaryTests.test_first", "unit.synthetic.OrdinaryTests.test_second")
+        poison = {name: (identifier,) for name, identifier in zip(checks.PYTHON_POISON_PARTITIONS, checks.PYTHON_POISON_IDS)}
         inventories = {"authority": authority, "ordinary": ordinary,
-                       "all": tuple(sorted(authority + ordinary))}
-        step = next(item for item in controller.catalog(paths, "macos", deadline=2500.0)
-                    if item.id == "native-profile-" + phase)
+                       **poison, "all": tuple(sorted(authority + ordinary + checks.PYTHON_POISON_IDS))}
+        python = paths.source_python if phase == "source" else paths.wheel_python
+        step = controller.Step("native-profile-" + phase,
+            argv=(str(python), "-I", "-B", str(ROOT / "tests/workflow/run_native_profile_checks.py"),
+                  *(("--installed-wheel",) if phase == "wheel" else ())), cwd=paths.work,
+            env=tuple(sorted(controller.native_phase_environment(paths, "macos", phase).items())), seconds=900, parser="native")
         rig = SimpleNamespace(controller=controller, paths=paths, step=step, now=100.0,
                               inventories=inventories, events=[], captures=[], changes={},
                               prepare_error=None, idle_error=None, run_error=None,
-                              prepare_advance=100.0, run_advance=50.0)
+                              prepare_advance=100.0, run_advance=1.0, parsed=[], phase=phase,
+                              idle_failure_after=None)
 
         def identities(source, partition, *, deadline):
             self.assertEqual(source, ROOT)
@@ -344,7 +407,8 @@ class CIControllerContractTests(unittest.TestCase):
 
         def idle(*, deadline):
             rig.events.append(("idle", deadline))
-            if rig.idle_error is not None and rig.captures:
+            if (rig.idle_error is not None and rig.captures
+                    and (rig.idle_failure_after is None or len(rig.captures) >= rig.idle_failure_after)):
                 raise rig.idle_error
 
         def prepare(selected, *, deadline):
@@ -354,17 +418,37 @@ class CIControllerContractTests(unittest.TestCase):
                 raise rig.prepare_error
 
         def run(argv, **options):
-            partition = "authority" if "--authority" in argv else "ordinary"
+            partition = ("authority" if "--authority" in argv else "ordinary" if "--ordinary" in argv else
+                         next((name for name in controller.PYTHON_POISON_PARTITIONS if f"--{name}-{phase}" in argv), "healthy"))
             rig.events.append(("run", argv, options))
             if rig.run_error is not None:
                 raise rig.run_error
             ids = rig.inventories[partition]
             text = "".join(f"{name.rsplit('.', 1)[1]} ({name}) ... ok\n" for name in ids)
             text += f"\nRan {len(ids)} tests in 0.01s\n\nOK\n"
+            stdout = b""
+            if partition in controller.PYTHON_POISON_PARTITIONS:
+                package = (paths.work / "source-build/src/mobile_release" if phase == "source" else
+                           paths.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
+                prefix = str(paths.python.parent.parent)
+                metadata = {"schema": "mrk-native-python-runtime-v1", "phase": phase, "implementation": "cpython",
+                    "version": [3, 11, 1], "executable": str(python), "base_prefix": prefix, "base_exec_prefix": prefix,
+                    "prefix": prefix, "exec_prefix": prefix, "isolated": True, "package_root": str(package),
+                    "origins": {"mobile_release": str(package / "__init__.py"),
+                                "mobile_release._native_process": str(package / "_native_process.py")}}
+                stdout = (controller.NATIVE_PYTHON_RUNTIME_PREFIX + json.dumps(metadata) + "\n").encode()
+            elif partition == "healthy":
+                detail = {"failure_callbacks": []}
+                if phase == "source":
+                    detail["storage_profile"] = {"name": "linux-python-full-v1", "logical_file_bytes": 4296015872,
+                        "file_data_bytes": 956301312, "tmpfs_mounts": 11, "write_controls": 11,
+                        "readonly_errno": 30, "capacity_errno": 28, "capacity_bytes": 16777216, "max_user_namespaces": 0}
+                stdout = ("MRK_CHECK_RESULT=" + json.dumps({"check": rig.step.id, "ok": True,
+                    "tests": [{"id": identifier, "outcome": "ok"} for identifier in ids], "details": detail}) + "\n").encode()
             values = dict(ok=True, returncode=0, waited=True, stdout_eof=True, stderr_eof=True,
-                          domain_finality=True, primary_error=None, cleanup_errors=(), stdout=b"",
+                          domain_finality=True, primary_error=None, cleanup_errors=(), stdout=stdout,
                           stderr=text.encode(), duration=rig.run_advance, timed_out=False,
-                          cancelled=False, persisted=(0, len(text)))
+                          cancelled=False, persisted=(len(stdout), len(text)))
             capture = SimpleNamespace(**{**values, **rig.changes.get(partition, {})})
             rig.captures.append(capture)
             rig.now += rig.run_advance
@@ -374,31 +458,69 @@ class CIControllerContractTests(unittest.TestCase):
         rig.session = SimpleNamespace(ensure_idle=idle, prepare_native_authority=prepare, run=run)
         return rig
 
+    def _python_gate_fixture(self, phase="source", *, deadline=2500.0):
+        rig = self._native_gate_fixture(phase)
+        controller, paths = rig.controller, rig.paths
+        healthy = rig.inventories["ordinary"]
+        poison = {name: rig.inventories[name] for name in controller.PYTHON_POISON_PARTITIONS}
+        rig.inventories = {"healthy": healthy, **poison,
+            "all": tuple(sorted(healthy + tuple(identifier for ids in poison.values() for identifier in ids)))}
+        name = "python-full" if phase == "source" else "python-wheel"
+        python = paths.source_python if phase == "source" else paths.wheel_python
+        rig.step = controller.Step(name, argv=(str(python), "-I", "-B", str(paths.checks), "--check", name,
+            "--source-root", str(ROOT), "--work-root", str(paths.work / "checks"), "--deadline", repr(deadline)),
+            cwd=paths.work, env=tuple(sorted(controller.native_phase_environment(paths, "linux", phase).items())),
+            seconds=900, parser="check")
+
+        def identities(source, selection, partition, *, deadline):
+            self.assertEqual(source, ROOT)
+            self.assertEqual(selection, "full" if phase == "source" else "wheel")
+            rig.events.append(("inventory", partition, deadline))
+            return rig.inventories[partition]
+
+        rig.checks.python_capture_ids = identities
+        rig.checks.linux_allowed_skips = frozenset
+        return rig
+
     def _perform_native_fixture(self, rig, *, step=None, platform="macos", deadline=2500.0):
+        original_parser = rig.controller.parse_capture
+
+        def parse(part, captured, *args, **kwargs):
+            rig.parsed.append(captured)
+            return original_parser(part, captured, *args, **kwargs)
+
         with patch.object(rig.controller.time, "monotonic", side_effect=lambda: rig.now), \
-                patch.object(rig.controller, "check_capacity"):
+                patch.object(rig.controller, "check_capacity"), patch.object(rig.controller, "parse_capture", side_effect=parse):
             return rig.controller.perform_step(step or rig.step, rig.paths, rig.session, rig.checks,
                                                {}, platform, deadline=deadline)
 
-    def test_native_gate_keeps_two_real_capture_records_and_one_source_wheel_cutoff(self):
+    def test_native_gate_keeps_every_original_capture_record_and_one_source_wheel_cutoff(self):
         for phase, original_deadline, cutoff in (("source", 2500.0, 1000.0), ("wheel", 800.0, 800.0)):
             with self.subTest(phase=phase):
                 rig = self._native_gate_fixture(phase)
+                parts = ("authority", "ordinary", *rig.controller.PYTHON_POISON_PARTITIONS)
                 result = self._perform_native_fixture(rig, deadline=original_deadline)
                 self.assertTrue(result.ok, result)
                 self.assertEqual(result.details["stage"], "complete")
                 self.assertEqual(result.details["completed"], list(rig.inventories["all"]))
-                self.assertEqual(result.details["tests"], 7)
+                self.assertEqual(result.details["tests"], len(rig.inventories["all"]))
                 self.assertNotIn("returncode", result.details)  # No invented aggregate capture.
                 records = result.details["partitions"]
-                self.assertEqual([row["status"] for row in records], ["PASS", "PASS"])
+                self.assertEqual([row["partition"] for row in records], list(parts))
+                self.assertEqual([row["status"] for row in records], ["PASS"] * len(parts))
                 calls = [event for event in rig.events if event[0] == "run"]
-                self.assertEqual(len(calls), 2)
+                self.assertEqual(len(calls), len(parts))
                 python = rig.paths.source_python if phase == "source" else rig.paths.wheel_python
                 entry = str(ROOT / "tests/workflow/run_native_profile_checks.py")
                 tail = [] if phase == "source" else ["--installed-wheel"]
                 self.assertEqual(calls[0][1], [str(python), "-I", "-S", "-B", entry, "--authority", *tail])
                 self.assertEqual(calls[1][1], [str(python), "-I", "-B", entry, "--ordinary", *tail])
+                for index, partition in enumerate(rig.controller.PYTHON_POISON_PARTITIONS, 2):
+                    self.assertEqual(calls[index][1], [str(python), "-I", "-S", "-B", entry, f"--{partition}-{phase}"])
+                    self.assertEqual(calls[index][2]["profile"], "ordinary")
+                    self.assertEqual(calls[index][2]["cwd"], rig.paths.work)
+                    self.assertEqual(calls[index][2]["env"], dict(rig.step.env))
+                    self.assertEqual(records[index]["runtime"]["phase"], phase)
                 self.assertEqual(calls[0][2]["env"], {})
                 self.assertEqual(calls[0][2]["cwd"], rig.paths.work / ("native-authority-" + phase))
                 self.assertEqual(calls[0][2]["profile"], "native-authority-" + phase)
@@ -413,6 +535,7 @@ class CIControllerContractTests(unittest.TestCase):
                     self.assertEqual(records[index]["capture"],
                                      rig.controller.capture_observations(rig.captures[index]))
                     self.assertEqual(records[index]["completed"], list(rig.inventories[records[index]["partition"]]))
+                    self.assertIs(rig.parsed[index], rig.captures[index])
                 self.assertEqual([event for event in rig.events if event[0] == "prepare"], [("prepare", phase, cutoff)])
                 package = (rig.paths.work / "source-build/src/mobile_release" if phase == "source"
                            else rig.paths.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
@@ -431,7 +554,7 @@ class CIControllerContractTests(unittest.TestCase):
                 self.assertEqual(rig.events, [])
         self.assertEqual(self._perform_native_fixture(rig, platform="linux").error, "NATIVE_GATE_CONTRACT")
         self.assertEqual(rig.events, [])
-        for mutation in ("missing", "duplicate", "overlap", "expanded-authority"):
+        for mutation in ("missing", "duplicate", "overlap", "expanded-authority", "pooled-poison", "missing-poison"):
             with self.subTest(mutation=mutation):
                 rig = self._native_gate_fixture()
                 if mutation == "missing":
@@ -440,17 +563,24 @@ class CIControllerContractTests(unittest.TestCase):
                     rig.inventories["ordinary"] *= 2
                 elif mutation == "overlap":
                     rig.inventories["ordinary"] += rig.inventories["authority"][:1]
-                else:
+                elif mutation == "expanded-authority":
                     rig.inventories["authority"] += rig.inventories["ordinary"][:1]
+                elif mutation == "pooled-poison":
+                    rig.inventories["poison-wait-loss"] += rig.inventories["poison-startup-error"]
+                else:
+                    rig.inventories["poison-startup-error"] = ()
                 result = self._perform_native_fixture(rig)
                 self.assertEqual(result.error, "NATIVE_PARTITION_UNION")
                 self.assertFalse(any(event[0] in {"package", "prepare", "run"} for event in rig.events))
-                self.assertEqual([row["status"] for row in result.details["partitions"]], ["UNEXECUTED"] * 2)
+                self.assertEqual([row["status"] for row in result.details["partitions"]],
+                                 ["UNEXECUTED"] * (2 + len(controller.PYTHON_POISON_PARTITIONS)))
 
     def test_native_gate_failure_preserves_original_capture_and_never_runs_later_partition(self):
         failure = OSError("synthetic private failure; must not be published")
+        parts = ("authority", "ordinary", *controller_module().PYTHON_POISON_PARTITIONS)
         for mode in ("preparation", "launch", "exit", "wait", "stdout-eof", "stderr-eof", "finality",
-                     "timeout", "cancel", "primary", "cleanup", "parser", "idle", "diagnostic", "ordinary"):
+                     "timeout", "cancel", "primary", "cleanup", "parser", "idle", "diagnostic", "ordinary",
+                     *parts[2:], "poison-origin"):
             with self.subTest(mode=mode):
                 rig = self._native_gate_fixture()
                 fields = {"exit": {"returncode": 1}, "wait": {"waited": False},
@@ -469,6 +599,10 @@ class CIControllerContractTests(unittest.TestCase):
                     rig.idle_error = failure
                 elif mode == "ordinary":
                     rig.changes["ordinary"] = {"returncode": 1}
+                elif mode in parts[2:]:
+                    rig.changes[mode] = {"returncode": 1}
+                elif mode == "poison-origin":
+                    rig.changes["poison-wait-loss"] = {"stdout": b"foreign metadata\n"}
                 else:
                     rig.changes["authority"] = fields[mode]
                 with contextlib.ExitStack() as stack:
@@ -478,11 +612,12 @@ class CIControllerContractTests(unittest.TestCase):
                 self.assertFalse(result.ok)
                 self.assertNotIn(str(failure), json.dumps(result.details))
                 records = result.details["partitions"]
-                expected_count = 0 if mode in {"preparation", "launch"} else 2 if mode == "ordinary" else 1
+                failed_index = parts.index(mode) if mode in parts else 2 if mode == "poison-origin" else 0
+                expected_count = 0 if mode in {"preparation", "launch"} else failed_index + 1
                 self.assertEqual(len(rig.captures), expected_count)
-                self.assertEqual(records[1]["status"], "FAIL" if mode == "ordinary" else "UNEXECUTED")
-                if mode == "ordinary":
-                    self.assertEqual(records[0]["status"], "PASS")
+                for index, row in enumerate(records):
+                    self.assertEqual(row["status"], "UNEXECUTED" if mode == "preparation" or index > failed_index
+                                     else "FAIL" if index == failed_index else "PASS")
                 if mode == "preparation":
                     self.assertEqual(records[0]["status"], "UNEXECUTED")
                 for index, capture in enumerate(rig.captures):
@@ -493,16 +628,17 @@ class CIControllerContractTests(unittest.TestCase):
                     self.assertIn("idle_error", records[0])
                     self.assertIn("diagnostic_error", records[0])
 
-    def test_native_gate_deadline_covers_preparation_both_captures_and_final_reconciliation(self):
-        for mode in ("preparation", "authority", "ordinary", "union"):
+    def test_native_gate_deadline_covers_preparation_every_original_and_final_reconciliation(self):
+        parts = ("authority", "ordinary", *controller_module().PYTHON_POISON_PARTITIONS)
+        for mode in ("preparation", *parts, "union"):
             with self.subTest(mode=mode):
                 rig = self._native_gate_fixture()
                 if mode == "preparation":
                     rig.prepare_advance = 900.0
-                elif mode == "authority":
-                    rig.run_advance = 800.0
-                elif mode == "ordinary":
-                    rig.run_advance = 400.0
+                elif mode in parts:
+                    # One original cutoff: preparation has already consumed
+                    # 100s. Expire during this exact original, not a renewed one.
+                    rig.run_advance = 801.0 / (parts.index(mode) + 1)
                 reconciliations = []
 
                 def late_sorted(values, *args, **kwargs):
@@ -519,46 +655,160 @@ class CIControllerContractTests(unittest.TestCase):
                     result = self._perform_native_fixture(rig)
                 self.assertFalse(result.ok)
                 self.assertEqual(result.error, "AGGREGATE_DEADLINE")
-                self.assertEqual(len(rig.captures), {"preparation": 0, "authority": 1, "ordinary": 2, "union": 2}[mode])
+                self.assertEqual(len(rig.captures), 0 if mode == "preparation" else len(parts) if mode == "union"
+                                 else parts.index(mode) + 1)
                 records = result.details["partitions"]
                 if mode == "preparation":
-                    self.assertEqual([row["status"] for row in records], ["UNEXECUTED"] * 2)
+                    self.assertEqual([row["status"] for row in records], ["UNEXECUTED"] * len(parts))
                 elif mode == "authority":
                     self.assertEqual(records[1]["status"], "UNEXECUTED")
                 elif mode == "union":
-                    self.assertEqual([row["status"] for row in records], ["PASS"] * 2)
+                    self.assertEqual([row["status"] for row in records], ["PASS"] * len(parts))
                     self.assertEqual(len(reconciliations), 2)
                 for index, capture in enumerate(rig.captures):
                     self.assertEqual(records[index]["capture"]["persisted"], list(capture.persisted))
 
     def test_fixed_linux_python_storage_profile_is_selected_only_for_full_discovery(self):
-        controller = controller_module()
-        paths = fixture_paths(controller)
-        launched = []
+        profiles = []
+        for phase, original_deadline, cutoff in (("source", 2500.0, 1000.0), ("wheel", 800.0, 800.0)):
+            with self.subTest(phase=phase):
+                rig = self._python_gate_fixture(phase, deadline=original_deadline)
+                parts = ("healthy", *rig.controller.PYTHON_POISON_PARTITIONS)
+                result = self._perform_native_fixture(rig, platform="linux", deadline=original_deadline)
+                self.assertTrue(result.ok, result)
+                rows = result.details["partitions"]
+                self.assertEqual([row["partition"] for row in rows], list(parts))
+                self.assertEqual([row["status"] for row in rows], ["PASS"] * len(parts))
+                self.assertEqual(result.details["completed"], list(rig.inventories["all"]))
+                self.assertEqual(result.details["tests"], len(rig.inventories["all"]))
+                self.assertNotIn("returncode", result.details)
+                calls = [event for event in rig.events if event[0] == "run"]
+                self.assertEqual(len(calls), len(parts))
+                self.assertEqual(calls[0][1], list(rig.step.argv))
+                self.assertEqual(calls[0][1][-2:], ["--deadline", repr(original_deadline)])
+                python = rig.paths.source_python if phase == "source" else rig.paths.wheel_python
+                entry = str(ROOT / "tests/workflow/run_native_profile_checks.py")
+                for index, (_, argv, options) in enumerate(calls):
+                    profiles.append(options["profile"])
+                    self.assertEqual(options["profile"], "python-full" if index == 0 and phase == "source" else "ordinary")
+                    self.assertEqual(options["cpu_seconds"], 300 if index == 0 and phase == "source" else 180)
+                    self.assertEqual(options["seconds"], 900)
+                    self.assertEqual(options["absolute_deadline"], cutoff)
+                    self.assertEqual(options["output_limit"], 8 * 1024**2)
+                    self.assertEqual(options["cwd"], rig.paths.work)
+                    self.assertEqual(options["env"], dict(rig.step.env))
+                    self.assertIs(rig.parsed[index], rig.captures[index])
+                    self.assertEqual(rows[index]["capture"], rig.controller.capture_observations(rig.captures[index]))
+                    if index:
+                        self.assertEqual(argv, [str(python), "-I", "-S", "-B", entry,
+                                               f"--{rows[index]['partition']}-{phase}"])
+                        self.assertEqual(rows[index]["tests"], 1)
+                        self.assertEqual(rows[index]["runtime"]["phase"], phase)
+                self.assertEqual("storage_profile" in rows[0]["summary"]["details"], phase == "source")
+                self.assertFalse(any(event[0] == "prepare" for event in rig.events))
+                self.assertTrue(all(event[-1] == cutoff for event in rig.events if event[0] != "run"))
+                positions = [index for index, event in enumerate(rig.events) if event[0] == "run"]
+                for index, position in enumerate(positions):
+                    self.assertEqual(rig.events[position - 1], ("idle", cutoff))
+                    end = positions[index + 1] if index + 1 < len(positions) else len(rig.events)
+                    self.assertIn(("idle", cutoff), rig.events[position + 1:end])
+        self.assertEqual(profiles.count("python-full"), 1)
 
-        def run(argv, **kwargs):
-            launched.append((argv, kwargs))
-            return SimpleNamespace(ok=True)
+    def test_python_gate_rejects_contract_partition_and_singleton_origin_drift(self):
+        for phase in ("source", "wheel"):
+            for fault in ("argv", "profile-shape", "healthy-omission", "duplicate", "pooled", "missing", "origin"):
+                with self.subTest(phase=phase, fault=fault):
+                    rig = self._python_gate_fixture(phase)
+                    parts = ("healthy", *rig.controller.PYTHON_POISON_PARTITIONS)
+                    step = rig.step
+                    if fault == "argv":
+                        step = dataclasses.replace(step, argv=(*step.argv[:-1], "1000.0"))
+                    elif fault == "profile-shape":
+                        step = dataclasses.replace(step, seconds=899)
+                    elif fault == "healthy-omission":
+                        rig.inventories["healthy"] = rig.inventories["healthy"][:-1]
+                    elif fault == "duplicate":
+                        rig.inventories["healthy"] *= 2
+                    elif fault == "pooled":
+                        rig.inventories["poison-wait-loss"] += rig.inventories["poison-startup-error"]
+                    elif fault == "missing":
+                        rig.inventories["poison-startup-error"] = ()
+                    else:
+                        original_run = rig.session.run
 
-        session = SimpleNamespace(ensure_idle=lambda: None, run=run)
-        with patch.object(controller, "check_clock"), patch.object(controller, "check_capacity"), \
-                patch.object(controller, "parse_capture", return_value=controller.CheckResult(True)):
-            for platform in ("linux", "macos"):
-                for step in controller.catalog(paths, platform, deadline=1000.0):
-                    # Native authority has a distinct two-capture contract;
-                    # the focused tests below cover that path independently.
-                    if step.kind != "command" or step.parser == "native":
-                        continue
-                    result = controller.perform_step(step, paths, session, None, {}, platform, deadline=1000.0)
-                    self.assertTrue(result.ok)
-                    argv, options = launched[-1]
-                    expected = "python-full" if platform == "linux" and step.id == "python-full" else "ordinary"
-                    self.assertEqual(options["profile"], expected)
-                    self.assertEqual(argv, list(step.argv))
-                    self.assertEqual(options["cwd"], step.cwd)
-                    self.assertEqual(options["env"], dict(step.env))
-                    self.assertEqual(options["seconds"], step.seconds)
-        self.assertEqual(sum(options["profile"] == "python-full" for _, options in launched), 1)
+                        def run(argv, **options):
+                            value = original_run(argv, **options)
+                            if "--poison-wait-loss-" + phase in argv:
+                                record = json.loads(value.stdout.decode().split("=", 1)[1])
+                                record["package_root"] = "/foreign/source/mobile_release"
+                                value.stdout = (rig.controller.NATIVE_PYTHON_RUNTIME_PREFIX + json.dumps(record) + "\n").encode()
+                            return value
+
+                        rig.session.run = run
+                    result = self._perform_native_fixture(rig, step=step, platform="linux")
+                    self.assertFalse(result.ok)
+                    self.assertEqual(len(rig.captures), 2 if fault == "origin" else 0)
+                    if fault == "origin":
+                        self.assertEqual(result.error, "NATIVE_PYTHON_RUNTIME_ORIGIN")
+                        self.assertEqual([row["status"] for row in result.details["partitions"]],
+                                         ["PASS", "FAIL", *(["UNEXECUTED"] * (len(parts) - 2))])
+                    else:
+                        self.assertEqual(result.error, "PYTHON_GATE_CONTRACT" if fault in {"argv", "profile-shape"} else "PYTHON_CAPTURE_UNION")
+                        self.assertEqual([row["status"] for row in result.details["partitions"]], ["UNEXECUTED"] * len(parts))
+
+    def test_python_gate_stops_after_each_failed_original_and_keeps_one_cutoff(self):
+        parts = ("healthy", *controller_module().PYTHON_POISON_PARTITIONS)
+        for phase in ("source", "wheel"):
+            for failed, partition in enumerate(parts):
+                for fault in ("exit", "wait", "stdout", "stderr", "domain", "timeout", "cancel", "cleanup", "idle", "deadline"):
+                    with self.subTest(phase=phase, partition=partition, fault=fault):
+                        rig = self._python_gate_fixture(phase)
+                        fields = {"exit": {"returncode": 1}, "wait": {"waited": False},
+                                  "stdout": {"stdout_eof": False}, "stderr": {"stderr_eof": False},
+                                  "domain": {"domain_finality": False}, "timeout": {"timed_out": True},
+                                  "cancel": {"cancelled": True}, "cleanup": {"cleanup_errors": ("CLOSE",)}}
+                        if fault == "idle":
+                            rig.idle_error, rig.idle_failure_after = OSError("PRIVATE_IDLE_ERROR"), failed + 1
+                        elif fault == "deadline":
+                            rig.run_advance = 901.0 / (failed + 1)
+                        else:
+                            rig.changes[partition] = fields[fault]
+                        result = self._perform_native_fixture(rig, platform="linux")
+                        self.assertFalse(result.ok)
+                        self.assertEqual(len(rig.captures), failed + 1)
+                        rows = result.details["partitions"]
+                        self.assertEqual([row["status"] for row in rows],
+                            ["PASS"] * failed + ["FAIL"] + ["UNEXECUTED"] * (len(parts) - failed - 1))
+                        self.assertNotIn("PRIVATE_IDLE_ERROR", json.dumps(result.details))
+                        for index, capture in enumerate(rig.captures):
+                            for field, value in rig.controller.capture_observations(capture).items():
+                                self.assertEqual(rows[index]["capture"][field], value)
+                        self.assertTrue(all(event[2]["absolute_deadline"] == 1000.0
+                                            for event in rig.events if event[0] == "run"))
+                        if fault == "deadline":
+                            self.assertEqual(result.error, "AGGREGATE_DEADLINE")
+
+        for phase in ("source", "wheel"):
+            with self.subTest(phase=phase, expiry="final-union"):
+                rig = self._python_gate_fixture(phase)
+                reconciliations = []
+
+                def late_sorted(values, *args, **kwargs):
+                    result = sorted(values, *args, **kwargs)
+                    if type(values) is list and tuple(result) == rig.inventories["all"]:
+                        reconciliations.append(True)
+                        if len(reconciliations) == 2:
+                            rig.now = 1000.0
+                    return result
+
+                with patch.object(rig.controller, "sorted", create=True, side_effect=late_sorted):
+                    result = self._perform_native_fixture(rig, platform="linux")
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error, "AGGREGATE_DEADLINE")
+                self.assertEqual(len(reconciliations), 2)
+                self.assertEqual(len(rig.captures), len(parts))
+                self.assertEqual([row["status"] for row in result.details["partitions"]], ["PASS"] * len(parts))
+                self.assertEqual(result.details["tests"], len(rig.inventories["all"]))
 
     def test_python_failure_callbacks_are_source_bound_and_keep_private_errors_out(self):
         controller = controller_module()
@@ -567,11 +817,11 @@ class CIControllerContractTests(unittest.TestCase):
         private = "synthetic-private-message-and-filename-not-for-publication"
         observed = []
 
-        def expected(source, selection, *, deadline):
-            observed.append((source, selection, deadline))
+        def expected(source, selection, partition, *, deadline):
+            observed.append((source, selection, partition, deadline))
             return (identifier,)
 
-        checks = SimpleNamespace(expected_python_ids=expected)
+        checks = SimpleNamespace(python_capture_ids=expected)
         step = controller.Step("python-full", parser="check")
         callback = {"id": identifier, "outcome": "error", "category": "os-error", "errno": 27}
 
@@ -589,7 +839,7 @@ class CIControllerContractTests(unittest.TestCase):
         self.assertEqual(value["failure_callbacks"], [callback])
         self.assertEqual(value["helper_error"], "TEST_OUTCOME_COUNT")
         self.assertEqual(value["returncode"], 1)
-        self.assertEqual(observed, [(ROOT, "full", 1000.0)])
+        self.assertEqual(observed, [(ROOT, "full", "healthy", 1000.0)])
         self.assertNotIn(private, json.dumps(value))
         valid = [callback, {**callback, "errno": None},
                  {**callback, "outcome": "failure", "category": "assertion-error", "errno": None},
@@ -614,13 +864,13 @@ class CIControllerContractTests(unittest.TestCase):
         for changes in ({"check": "python-wheel"}, {"ok": True}):
             value = controller.failure_details(capture([callback], **changes), step, paths, checks=checks)
             self.assertNotIn("failure_callbacks", value)
-        with patch.object(checks, "expected_python_ids", side_effect=OSError(private)), \
+        with patch.object(checks, "python_capture_ids", side_effect=OSError(private)), \
                 patch.object(controller.time, "monotonic", return_value=999.0):
             value = controller.failure_details(capture([callback]), step, paths, checks=checks, deadline=1000.0)
             self.assertTrue(value["python_diagnostics_unavailable"])
             self.assertEqual(value["returncode"], 1)
             self.assertNotIn(private, json.dumps(value))
-        with patch.object(checks, "expected_python_ids", side_effect=OSError(private)), \
+        with patch.object(checks, "python_capture_ids", side_effect=OSError(private)), \
                 patch.object(controller.time, "monotonic", return_value=1000.0):
             with self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
                 controller.failure_details(capture([callback]), step, paths, checks=checks, deadline=1000.0)
@@ -630,7 +880,7 @@ class CIControllerContractTests(unittest.TestCase):
         paths = fixture_paths(controller)
         identifier = "unit.synthetic.StorageContract.test_one"
         step = controller.Step("python-full", parser="check")
-        checks = SimpleNamespace(expected_python_ids=lambda *_: (identifier,), linux_allowed_skips=frozenset)
+        checks = SimpleNamespace(python_capture_ids=lambda *_, **__: (identifier,), linux_allowed_skips=frozenset)
         profile = {"name": "linux-python-full-v1", "logical_file_bytes": 4296015872,
                    "file_data_bytes": 956301312, "tmpfs_mounts": 11, "write_controls": 11,
                    "readonly_errno": 30, "capacity_errno": 28, "capacity_bytes": 16777216,
@@ -684,25 +934,32 @@ class CIControllerContractTests(unittest.TestCase):
         controller = controller_module()
         before = ("source-copy", "source-environment", "source-dependencies", "bundler", "bundle-install",
                   "editable-install", "source-freeze", "source-pip-check", "bundle-check")
-        ruby = ("ruby-support", "ruby-native-capture", "ruby-native-signal-observation",
+        ruby = ("ruby-support", "ruby-native-spawn", "ruby-native-owner", "ruby-native-capture", "ruby-native-signal-observation",
                 "ruby-play_store", "ruby-play_lanes", "ruby-apple_store",
                 "ruby-apple_lanes", "ruby-apple_production", "ruby-apple_production_lane", "ruby-apple_asset_upload",
                 "ruby-ios_upload_validation", "ruby-android_upload_validation", "ruby-workflow-yaml", "ruby-supply-wif")
         wheel = ("wheel-copy", "wheel-build", "wheel-inspect", "wheel-environment", "wheel-pip", "wheel-install",
-                 "wheel-freeze", "wheel-pip-check", "wheel-smoke", "wheel-consumer")
+                 "wheel-freeze", "wheel-pip-check")
+        compatibility_source = ("python-compat-312-source", "python-compat-313-source", "python-compat-314-source")
+        compatibility_wheel = ("python-compat-312-wheel", "python-compat-313-wheel", "python-compat-314-wheel")
         expected = {
-            "linux": (*before, "python-full", *ruby, "fastfile", "actionlint", "jdk-signers", *wheel,
-                      "python-wheel", "source-integrity"),
-            "macos": (*before, "native-tools", "ruby-native-capture",
+            "linux": (*before, "native-process-abi-source", *compatibility_source, "python-full", *ruby,
+                      "ruby-packaged-capture-source", "fastfile", "actionlint", "jdk-signers", *wheel,
+                      "native-process-abi-wheel", *compatibility_wheel, "wheel-smoke", "wheel-consumer",
+                      "ruby-packaged-capture-wheel", "python-wheel", "source-integrity"),
+            "macos": (*before, "native-tools", "native-process-abi-source", *compatibility_source,
+                      "ruby-native-spawn", "ruby-native-owner", "ruby-native-capture",
                       "ruby-native-signal-observation",
-                      "ruby-ios_upload_validation", "ruby-android_upload_validation", "native-profile-source", *wheel,
-                      "native-profile-wheel", "source-integrity"),
+                      "ruby-ios_upload_validation", "ruby-android_upload_validation", "ruby-packaged-capture-source",
+                      "native-profile-source", *wheel, "native-process-abi-wheel", *compatibility_wheel,
+                      "wheel-smoke", "wheel-consumer", "ruby-packaged-capture-wheel", "native-profile-wheel", "source-integrity"),
         }
         for platform in expected:
             steps = controller.catalog(fixture_paths(controller), platform, deadline=1000.0)
             with self.subTest(platform=platform):
                 self.assertEqual(tuple(step.id for step in steps), expected[platform])
                 self.assertEqual(controller.required_gate_ids(platform), expected[platform])
+                self.assertEqual(len(steps), 51 if platform == "linux" else 39)
                 if platform == "macos":
                     ids = tuple(step.id for step in steps)
                     for gate in ("ruby-native-capture", "ruby-native-signal-observation",
@@ -996,18 +1253,176 @@ class CIControllerContractTests(unittest.TestCase):
 
 
 class CIProductEvidenceContractTests(unittest.TestCase):
+    def test_fixed_poison_partitions_preserve_full_wheel_and_authority_disjoint_union(self):
+        checks = ci_module("ci_checks")
+        poison = tuple(identifier for _name, identifier in _PYTHON_POISON_FIXTURES)
+        parts = tuple(name for name, _identifier in _PYTHON_POISON_FIXTURES)
+        self.assertEqual(checks.PYTHON_POISON_CASES, _PYTHON_POISON_FIXTURES)
+        self.assertEqual(checks.PYTHON_POISON_IDS, poison)
+        self.assertEqual(checks.PYTHON_POISON_PARTITIONS, parts)
+        self.assertEqual(controller_module().PYTHON_POISON_PARTITIONS, parts)
+        self.assertEqual(len(set(parts)), len(parts))
+        self.assertEqual(len(set(poison)), len(poison))
+        healthy = ("unit.synthetic.Contracts.test_first", "unit.synthetic.Contracts.test_second")
+        complete = tuple(sorted(healthy + poison))
+        for selection in ("full", "wheel"):
+            with patch.object(checks, "expected_python_ids", return_value=complete) as source:
+                self.assertEqual(checks.python_capture_ids(ROOT, selection, "all", deadline=42.0), complete)
+                self.assertEqual(checks.python_capture_ids(ROOT, selection, "healthy", deadline=42.0), healthy)
+                selected = [checks.python_capture_ids(ROOT, selection, name, deadline=42.0) for name in parts]
+                self.assertEqual(selected, [(identifier,) for identifier in poison])
+                self.assertEqual(tuple(sorted(healthy + tuple(identifier for ids in selected for identifier in ids))), complete)
+                self.assertTrue(all(call.args == (ROOT, selection) and call.kwargs == {"deadline": 42.0}
+                                    for call in source.call_args_list))
+                for invalid in ("ordinary", "authority", "all-poison", poison[0], None, True, []):
+                    with self.assertRaises(checks.CheckError):
+                        checks.python_capture_ids(ROOT, selection, invalid)
+        authority = checks.NATIVE_AUTHORITY_IDS
+        with patch.object(checks, "expected_python_ids", return_value=tuple(sorted(authority + complete))):
+            self.assertEqual(checks.native_partition_ids(ROOT, "authority"), authority)
+            self.assertEqual(checks.native_partition_ids(ROOT, "ordinary"), healthy)
+            self.assertEqual(tuple(checks.native_partition_ids(ROOT, part) for part in parts),
+                             tuple((identifier,) for identifier in poison))
+        for changed in (healthy, tuple(sorted(healthy + poison[:1])), tuple(sorted(complete + poison[:1])),
+                        tuple(reversed(complete)), poison, list(complete)):
+            with patch.object(checks, "expected_python_ids", return_value=changed), self.assertRaises(checks.CheckError):
+                checks.python_capture_ids(ROOT, "full", "healthy")
+        for missing in poison:
+            incomplete = tuple(identifier for identifier in complete if identifier != missing)
+            for selection in ("full", "wheel", "native"):
+                inventory = tuple(sorted(authority + incomplete)) if selection == "native" else incomplete
+                with self.subTest(selection=selection, missing=missing), \
+                        patch.object(checks, "expected_python_ids", return_value=inventory), \
+                        self.assertRaisesRegex(checks.CheckError, "PYTHON_POISON_INVENTORY"):
+                    if selection == "native":
+                        checks.native_partition_ids(ROOT, "ordinary")
+                    else:
+                        checks.python_capture_ids(ROOT, selection, "healthy")
+        for selection in ("native", "all", None, True, []):
+            with self.assertRaises(checks.CheckError):
+                checks.python_capture_ids(ROOT, selection, "healthy")
+
+    def test_python_healthy_discovery_withholds_only_poison_and_stops_on_actual_adverse_callbacks(self):
+        checks = ci_module("ci_checks")
+        poison = checks.PYTHON_POISON_IDS
+        healthy = tuple(f"unit.synthetic.HealthyContracts.test_{name}" for name in ("first", "subject", "third"))
+        complete = tuple(sorted(healthy + poison))
+        for selection in ("full", "wheel"):
+            for outcome in ("success", "allowed-skip", "error", "failure", "skip", "subtest", "expected-failure", "unexpected-success",
+                            "missing-poison", "duplicate-discovery"):
+                with self.subTest(selection=selection, outcome=outcome):
+                    events, observations, retained = [], [], []
+
+                    class Fixture(unittest.TestCase):
+                        def __init__(self, identifier):
+                            super().__init__("runTest")
+                            self.identifier = identifier
+
+                        def id(self):
+                            return self.identifier
+
+                        def runTest(self):
+                            events.append(self.identifier)
+                            if self.identifier in poison:
+                                raise AssertionError("a poison fixture must never execute in the healthy capture")
+                            if self.identifier != healthy[1]:
+                                return
+                            if outcome in {"error", "expected-failure"}:
+                                raise OSError(5, "PRIVATE_FAKE_FAILURE")
+                            if outcome == "failure":
+                                self.fail("PRIVATE_FAKE_FAILURE")
+                            if outcome in {"skip", "allowed-skip"}:
+                                self.skipTest("PRIVATE_FAKE_SKIP")
+                            if outcome == "subtest":
+                                for _ in range(3):
+                                    with self.subTest():
+                                        raise OSError(5, "PRIVATE_FAKE_SUBTEST")
+
+                    class ExpectedFixture(Fixture):
+                        @unittest.expectedFailure
+                        def runTest(self):
+                            super().runTest()
+
+                    class RetainingRunner(unittest.TextTestRunner):
+                        def _makeResult(self):
+                            result = super()._makeResult()
+                            retained.append(result)
+                            return result
+
+                    loaded = [Fixture(healthy[0]),
+                              (ExpectedFixture if outcome in {"expected-failure", "unexpected-success"} else Fixture)(healthy[1]),
+                              Fixture(healthy[2]), *(Fixture(identifier) for identifier in poison)]
+                    if outcome == "missing-poison":
+                        loaded.pop()
+                    elif outcome == "duplicate-discovery":
+                        loaded.append(Fixture(poison[0]))
+                    suite = unittest.TestSuite(loaded)
+                    framework = SimpleNamespace(TestSuite=unittest.TestSuite, TextTestResult=unittest.TextTestResult,
+                        TextTestRunner=RetainingRunner,
+                        TestLoader=lambda: SimpleNamespace(errors=[], discover=lambda *_args, **_kwargs: suite))
+                    with patch.object(checks, "unittest", framework), \
+                            patch.object(checks, "expected_python_ids", return_value=complete), \
+                            patch.object(checks, "WHEEL_PATTERNS", ("test_fixed_fixture.py",)), \
+                            patch.object(checks, "LINUX_MACOS_SKIPS", frozenset({healthy[1]}) if outcome == "allowed-skip" else frozenset()), \
+                            patch.object(checks, "_remaining", return_value=10.0), \
+                            patch.object(checks, "_python_full_profile", return_value={"fixture": "admitted"}), \
+                            patch.object(checks, "inspect_installed_wheel", return_value=None) as installed, \
+                            patch.object(checks, "sys", SimpleNamespace(platform="linux", stderr=io.StringIO())), \
+                            patch.object(checks, "os", SimpleNamespace(environ={"MOBILE_RELEASE_REQUIRE_RUBY_CONTRACTS": "1"})):
+                        if outcome in {"success", "allowed-skip"}:
+                            detail = checks.run_python_tests(ROOT, selection, 1000.0, observations, work_root=Path("/fixture/checks"))
+                            self.assertEqual(detail["executed"], 3)
+                            self.assertEqual(detail["failure_callbacks"], [])
+                            self.assertEqual(detail["skipped"], int(outcome == "allowed-skip"))
+                            self.assertEqual(events, list(healthy))
+                            self.assertEqual(installed.call_count, 2 if selection == "wheel" else 0)
+                        else:
+                            with self.assertRaises(checks.CheckError) as raised:
+                                checks.run_python_tests(ROOT, selection, 1000.0, observations, work_root=Path("/fixture/checks"))
+                            if outcome in {"missing-poison", "duplicate-discovery"}:
+                                self.assertEqual(events, [])
+                                self.assertEqual(str(raised.exception), "TEST_LOADED_INVENTORY")
+                            else:
+                                self.assertEqual(events, list(healthy[:2]))
+                                self.assertEqual(len(raised.exception.failure_callbacks), 1)
+                                self.assertTrue(retained[0].failfast)
+                                self.assertTrue(retained[0].shouldStop)
+                                # A caller clearing unittest's ordinary stop
+                                # flag still cannot start another test body.
+                                retained[0].failfast = retained[0].shouldStop = False
+                                with self.assertRaisesRegex(checks.CheckError, "TEST_CONTINUED_AFTER_FAILURE"):
+                                    retained[0].startTest(Fixture(healthy[2]))
+                                self.assertTrue(retained[0].shouldStop)
+                    self.assertFalse(set(events) & set(poison))
+
     def test_native_partition_authority_is_exact_and_cannot_silently_expand(self):
         checks = ci_module("ci_checks")
         deadline = time.monotonic() + 30.0
         complete = checks.expected_python_ids(ROOT, "native", deadline=deadline)
         authority = checks.native_partition_ids(ROOT, "authority", deadline=deadline)
         ordinary = checks.native_partition_ids(ROOT, "ordinary", deadline=deadline)
+        poison = tuple(identifier for name, _identifier in _PYTHON_POISON_FIXTURES
+                       for identifier in checks.native_partition_ids(ROOT, name, deadline=deadline))
         self.assertEqual(authority, checks.NATIVE_AUTHORITY_IDS)
         self.assertEqual(len(authority), 5)
         self.assertTrue(ordinary)
         self.assertFalse(set(authority) & set(ordinary))
-        self.assertEqual(tuple(sorted(authority + ordinary)), complete)
+        self.assertEqual(tuple(sorted(authority + ordinary + poison)), complete)
+        self.assertEqual(set(poison), {identifier for _name, identifier in _PYTHON_POISON_FIXTURES})
+        self.assertEqual(len(set(authority + ordinary + poison)), len(complete))
         self.assertEqual(checks.native_partition_ids(ROOT, "all", deadline=deadline), complete)
+        for prefix in ("unit.test_native_process.", "unit.test_profile_process_owner.", "unit.test_inspection_budget."):
+            self.assertTrue(any(identifier.startswith(prefix) for identifier in ordinary))
+            self.assertFalse(any(identifier.startswith(prefix) for identifier in authority))
+        self.assertEqual(checks.NATIVE_PATTERNS, (
+            "test_ios_profile_authority.py", "test_ios_profile_trust.py", "test_ios_profile_installation.py",
+            "test_default_cancellation.py", "test_profile_processes.py", "test_macho_native.py",
+            "test_native_process.py", "test_profile_process_owner.py", "test_inspection_budget.py"))
+        self.assertEqual(set(checks.WHEEL_PATTERNS), {
+            "test_init_transaction.py", "test_ios_entitlements.py", "test_ios_plist_binary.py",
+            "test_native_process.py", "test_profile_process_owner.py", "test_default_cancellation.py",
+            "test_profile_processes.py", "test_inspection_budget.py", "test_ios_profile_installation.py",
+            "test_ios_profile_trust.py"})
         for invalid in ("unknown", "Authority", "", None, True, []):
             with self.subTest(partition=invalid), self.assertRaisesRegex(checks.CheckError, "NATIVE_PARTITION"):
                 checks.native_partition_ids(ROOT, invalid, deadline=deadline)
@@ -1019,6 +1434,25 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                     patch.object(checks, "expected_python_ids", return_value=changed), \
                     self.assertRaises(checks.CheckError):
                 checks.native_partition_ids(ROOT, "authority", deadline=deadline)
+
+    def test_native_compatibility_selectors_are_exact_ordinary_three_and_no_child_one(self):
+        checks = ci_module("ci_checks")
+        expected = tuple(sorted("unit.test_native_process.NativeProcessCompatibilityTests." + name for name in (
+            "test_native_public_api_atomic_duplication", "test_native_helper_and_validator_fd_maps",
+            "test_native_exact_terminal_wait_receipts")))
+        self.assertEqual(checks.native_compatibility_ids(ROOT), expected)
+        public = ("unit.test_native_process.NativeProcessCompatibilityTests.test_native_public_api_atomic_duplication",)
+        self.assertEqual(checks.native_compatibility_ids(ROOT, public_only=True), public)
+        self.assertTrue(set(expected) <= set(checks.native_partition_ids(ROOT, "ordinary")))
+        self.assertFalse(set(expected) & set(checks.NATIVE_AUTHORITY_IDS))
+        for changed in (expected[:2], expected + expected[:1], tuple(sorted(expected + (
+                "unit.test_native_process.NativeProcessCompatibilityTests.test_unreviewed",)))):
+            with patch.object(checks, "native_partition_ids", return_value=changed), self.assertRaisesRegex(
+                    checks.CheckError, "NATIVE_COMPATIBILITY_INVENTORY"):
+                checks.native_compatibility_ids(ROOT)
+        for invalid in (None, 0, 1, "public", [], {}):
+            with self.assertRaisesRegex(checks.CheckError, "NATIVE_COMPATIBILITY_SELECTION"):
+                checks.native_compatibility_ids(ROOT, public_only=invalid)
 
     def test_native_package_inspection_requires_complete_bytes_and_immutable_ordinary_nodes(self):
         checks = ci_module("ci_checks")
@@ -1225,7 +1659,10 @@ class CIProductEvidenceContractTests(unittest.TestCase):
 
     def test_expected_wheel_test_inventory_is_static_and_rejects_omissions_and_duplicate_methods(self):
         checks = ci_module("ci_checks")
-        names = ("test_init_transaction.py", "test_ios_entitlements.py", "test_ios_plist_binary.py")
+        names = ("test_init_transaction.py", "test_ios_entitlements.py", "test_ios_plist_binary.py",
+                 "test_native_process.py", "test_profile_process_owner.py", "test_default_cancellation.py",
+                 "test_profile_processes.py", "test_inspection_budget.py", "test_ios_profile_installation.py",
+                 "test_ios_profile_trust.py")
         with tempfile.TemporaryDirectory(prefix="mrk-ci-ast-") as temporary:
             source = Path(temporary)
             directory = source / "tests/unit"

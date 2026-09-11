@@ -10,12 +10,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from mobile_release.errors import ValidationError
+from mobile_release.errors import StoreOperationError, ValidationError
 from mobile_release.provenance import (
     validate_create_retry_inventory,
     validate_receipt_chain,
     validate_receipt_raw_binding,
 )
+from mobile_release.stores import _require_fastlane_bundle, _runtime_environment
 
 from unit.apple_contract_helpers import apple_samples, wrap_apple_contracts
 
@@ -121,21 +122,22 @@ class AppleContractTests(unittest.TestCase):
             self.skipTest(reason)
 
         if not shutil.which("ruby") or not shutil.which("bundle"):
-            unavailable("Ruby 3.3 and the locked Fastlane bundle are unavailable")
+            unavailable("Ruby 3.3.12, Fiddle 1.1.2 and the locked Fastlane bundle are unavailable")
         # Never pass Store/signing/GitHub credentials, user-controlled preload
         # flags or caller Gemfiles into the credential-free simulation.
         names = {"PATH", "HOME", "GEM_HOME", "GEM_PATH", "BUNDLE_PATH", "LANG", "LC_ALL", "TMPDIR"}
-        env = {name: os.environ[name] for name in names if os.environ.get(name)}
+        env = _runtime_environment({name: os.environ[name] for name in names if os.environ.get(name)})
         env.update({
             "BUNDLE_GEMFILE": str(ROOT / "Gemfile"), "BUNDLE_FROZEN": "true",
             "FASTLANE_SKIP_UPDATE_CHECK": "true", "FASTLANE_OPT_OUT_USAGE": "true",
         })
-        ruby = subprocess.run(["ruby", "-e", "print RUBY_VERSION"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60)
-        if ruby.returncode or not ruby.stdout.startswith("3.3."):
-            unavailable("the actual lane contract requires the repository's Ruby 3.3.x")
-        bundle = subprocess.run(["bundle", "check"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60)
-        if bundle.returncode:
-            unavailable("the actual lane contract requires bundle install from the pinned lockfile")
+        try:
+            # Admission and export must use the same narrow bundle context;
+            # ambient deployment/without settings cannot select another bundle.
+            with patch.dict(os.environ, env, clear=True):
+                _require_fastlane_bundle(ROOT)
+        except StoreOperationError as error:
+            unavailable(str(error))
         with tempfile.TemporaryDirectory(prefix="mrk-apple-contract-") as temporary:
             root = Path(temporary)
             outputs = [root / f"export-{index}.json" for index in range(2)]

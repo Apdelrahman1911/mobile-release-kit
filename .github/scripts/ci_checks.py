@@ -46,6 +46,7 @@ MAX_WHEEL_BYTES = 64 * 1024 * 1024
 MAX_TREE_ENTRIES = 2048
 MAX_STREAM_BYTES = 8 * 1024 * 1024
 MAX_RESULT_BYTES = 256 * 1024
+MAX_NATIVE_ABI_BYTES = 8192
 PYTHON_FULL_FSIZE = (1 << 32) + 1024 * 1024
 PYTHON_FULL_WORK_TMPFS = (("tmp", 640 * 1024**2),) + tuple(
     (name, 16 * 1024**2) for name in
@@ -59,11 +60,15 @@ FAILURE_CATEGORIES = frozenset({"os-error", "assertion-error", "value-error", "t
                                 "exception", "base-exception", "none"})
 WHEEL_PATTERNS = (
     "test_init_transaction.py", "test_ios_entitlements.py", "test_ios_plist_binary.py",
+    "test_native_process.py", "test_profile_process_owner.py", "test_default_cancellation.py",
+    "test_profile_processes.py", "test_inspection_budget.py", "test_ios_profile_installation.py",
+    "test_ios_profile_trust.py",
 )
 NATIVE_PATTERNS = (
     "test_ios_profile_authority.py", "test_ios_profile_trust.py",
     "test_ios_profile_installation.py", "test_default_cancellation.py",
     "test_profile_processes.py", "test_macho_native.py",
+    "test_native_process.py", "test_profile_process_owner.py", "test_inspection_budget.py",
 )
 # Only this source-known class may run with the fixed native trust-service role.
 # A newly added method must not silently enlarge that role's callset.
@@ -76,6 +81,62 @@ NATIVE_AUTHORITY_IDS = tuple(sorted(
         "test_signed_outer_cannot_authorize_unsigned_or_substituted_inner_profile",
     )
 ))
+# Ordinary compatibility controls only. This never changes the five-method
+# native trust-service role or delegates method selection to a child report.
+NATIVE_COMPATIBILITY_IDS = tuple(sorted(
+    "unit.test_native_process.NativeProcessCompatibilityTests." + name for name in (
+        "test_native_public_api_atomic_duplication",
+        "test_native_helper_and_validator_fd_maps",
+        "test_native_exact_terminal_wait_receipts",
+    )
+))
+NATIVE_PUBLIC_API_IDS = (
+    "unit.test_native_process.NativeProcessCompatibilityTests.test_native_public_api_atomic_duplication",
+)
+# These literal real negative proofs deliberately retain UNKNOWN custody. Each must
+# be the sole test in its own original ordinary Session capture, never skipped
+# or pooled with a later test in the same interpreter.
+PYTHON_POISON_CASES = (
+    ("poison-wait-loss", "unit.test_native_process.NativeProcessLifecycleTests.test_native_consumed_wait_result_loss_never_retries_numeric_custody"),
+    ("poison-startup-error", "unit.test_native_process.NativeProcessLifecycleTests.test_native_error_startup_is_unknown_not_a_wait_receipt"),
+    ("poison-full-zero", "workflow.test_profile_processes.ProfileProcessTests.test_unknown_malformed_c_full_zero_retains_scratch"),
+    ("poison-full-failure", "workflow.test_profile_processes.ProfileProcessTests.test_unknown_malformed_c_full_failure_retains_scratch"),
+    ("poison-marker-parent-death", "workflow.test_profile_processes.ProfileProcessTests.test_unknown_marker_parent_death_requires_domain_disposal"),
+    ("poison-committed-parent-death", "workflow.test_profile_processes.ProfileProcessTests.test_unknown_committed_parent_death_requires_domain_disposal"),
+    ("poison-orphan", "workflow.test_profile_processes.ProfileProcessTests.test_killed_ancestor_cannot_strand_independent_native_worker_group"),
+    ("poison-payload-writer-close-failure", "workflow.test_profile_processes.ProfileGroupCleanupTests.test_unknown_payload_writer_close_failure_retains_scratch"),
+    ("poison-payload-reader-close-failure", "workflow.test_profile_processes.ProfileGroupCleanupTests.test_unknown_payload_reader_close_failure_retains_scratch"),
+    ("poison-payload-reader-close-unresolved", "workflow.test_profile_processes.ProfileGroupCleanupTests.test_unknown_payload_reader_close_unresolved_retains_scratch"),
+    ("poison-read-restored-term-fatal", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_read_restored_term_fatal"),
+    ("poison-source-restored-term-fatal", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_source_restored_term_fatal"),
+    ("poison-capture-restored-term-fatal", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_capture_restored_term_fatal"),
+    ("poison-capture-control-close-failure", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_capture_control_close_failure"),
+    ("poison-capture-status-close-failure", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_capture_status_close_failure"),
+    ("poison-capture-payload-close-failure", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_capture_payload_close_failure"),
+    ("poison-capture-payload-close-unresolved", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_capture_payload_close_unresolved"),
+    ("poison-source-control-close-failure", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_source_control_close_failure"),
+    ("poison-source-status-close-failure", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_source_status_close_failure"),
+    ("poison-source-payload-close-failure", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_source_payload_close_failure"),
+    ("poison-source-payload-close-unresolved", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_source_payload_close_unresolved"),
+    ("poison-source-scratch-cleanup-failure", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_source_scratch_cleanup_failure"),
+    ("poison-source-scratch-cleanup-unresolved", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_source_scratch_cleanup_unresolved"),
+    ("poison-read-raw-close-before-completion", "unit.test_default_cancellation.ProfileResourceIOTests.test_unknown_read_raw_close_before_completion"),
+    ("poison-read-raw-close-after-completion", "unit.test_default_cancellation.ProfileResourceIOTests.test_unknown_read_raw_close_after_completion"),
+    ("poison-source-raw-close-before-completion", "unit.test_default_cancellation.ProfileResourceIOTests.test_unknown_source_raw_close_before_completion"),
+    ("poison-source-raw-close-after-completion", "unit.test_default_cancellation.ProfileResourceIOTests.test_unknown_source_raw_close_after_completion"),
+    ("poison-unpublished-scratch", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_attempted_unpublished_scratch_acquisition_retains_unknown_across_unwind_and_gc"),
+    ("poison-directory-replacement", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_directory_replacement"),
+    ("poison-symlink-replacement", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_symlink_replacement"),
+    ("poison-unexpected-child", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_unexpected_child"),
+    ("poison-keyboard-interrupt-cleanup-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_keyboard_interrupt_cleanup_failure"),
+    ("poison-keyboard-interrupt-restore-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_keyboard_interrupt_restore_failure"),
+    ("poison-keyboard-interrupt-cleanup-and-restore-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_keyboard_interrupt_cleanup_and_restore_failure"),
+    ("poison-system-exit-cleanup-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_cleanup_failure"),
+    ("poison-system-exit-restore-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_restore_failure"),
+    ("poison-system-exit-cleanup-and-restore-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_cleanup_and_restore_failure"),
+)
+PYTHON_POISON_PARTITIONS = tuple(name for name, _identifier in PYTHON_POISON_CASES)
+PYTHON_POISON_IDS = tuple(identifier for _name, identifier in PYTHON_POISON_CASES)
 # Exact method identities, not a count, file-wide exemption or skip-message match.
 LINUX_MACOS_SKIPS = frozenset({
     "unit.test_ios_profile_authority.NativeProfileAuthorityTests.test_actual_signature_integrity_and_exact_signer_are_checked_before_policy",
@@ -101,6 +162,7 @@ TOOLING_FILES = (
     "fastlane/apple_store.rb", "fastlane/apple_production.rb", "fastlane/apple_asset_upload.rb",
     "fastlane/apple_create_retry.rb", "fastlane/ios_upload_validation.rb",
     "fastlane/android_upload_validation.rb", "fastlane/native_upload_validation.rb",
+    "fastlane/native_process_spawn.rb", "fastlane/native_upload_process.rb",
     "fastlane/release_support.rb", "fastlane/run_lane.rb", "schemas/candidate.schema.json",
     "schemas/project.schema.json", "schemas/receipt.schema.json",
     "schemas/store-operation-intent.schema.json", "templates/mobile-release.json",
@@ -194,6 +256,145 @@ def _json(data: bytes) -> object:
         raise CheckError("JSON_NONFINITE")
 
     return json.loads(data.decode("utf-8", "strict"), object_pairs_hook=pairs, parse_constant=constant)
+
+
+def _native_abi_record(family: str, architecture: str) -> dict:
+    """The reviewed public LP64 declarations, not a runtime admission receipt.
+
+    Actual compiler/header, interpreter/module origins and child finality belong
+    to the outside-identity controller. Neither this template nor a matching
+    record authorizes a process, a descriptor action or a signal by itself.
+    """
+    linux = family == "linux-glibc"
+
+    def field(offset, size):
+        return {"offset": offset, "size": size}
+
+    def function(*arguments, variadic=False):
+        return {"return": "int", "args": list(arguments), "variadic": variadic}
+
+    return {
+        "schema": "mrk-native-process-abi-v1",
+        "family": family,
+        "architecture": architecture,
+        "byteorder": "little",
+        "scalars": {
+            "pointer": {"size": 8, "align": 8},
+            "int": {"size": 4, "align": 4},
+            "short": {"size": 2, "align": 2},
+            "long": {"size": 8, "align": 8},
+            "pid_t": {"size": 4, "align": 4, "signed": True},
+        },
+        "sigaction": {
+            "size": 152 if linux else 16,
+            "align": 8,
+            "fields": {
+                "handler": field(0, 8),
+                "mask": field(8, 128 if linux else 4),
+                "flags": field(136 if linux else 12, 4),
+                "restorer": field(144, 8) if linux else None,
+            },
+        },
+        "file_actions": {
+            "kind": "struct" if linux else "pointer_slot",
+            "size": 80 if linux else 8,
+            "align": 8,
+            "fields": {
+                "allocated": field(0, 4), "used": field(4, 4),
+                "actions": field(8, 8), "pad": field(16, 64),
+            } if linux else {},
+        },
+        "spawn_attributes": None if linux else {
+            "kind": "pointer_slot", "size": 8, "align": 8, "fields": {},
+        },
+        "constants": {
+            "SIG_IGN": 1, "SA_NOCLDWAIT": 2 if linux else 32,
+            "SIGCHLD": 17 if linux else 20, "NSIG": 65 if linux else 32,
+            "F_DUPFD_CLOEXEC": 1030 if linux else 67,
+            "F_GETFD": 1, "F_GETFL": 3, "FD_CLOEXEC": 1,
+            "O_RDONLY": 0, "O_WRONLY": 1, "O_RDWR": 2, "O_ACCMODE": 3,
+            "POSIX_SPAWN_CLOEXEC_DEFAULT": None if linux else 16384,
+        },
+        "functions": {
+            "close": function("int"),
+            "fcntl": function("int", "int", variadic=True),
+            "sigaction": function("int", "pointer", "pointer"),
+            "posix_spawn": function(*("pointer",) * 6),
+            "posix_spawn_file_actions_init": function("pointer"),
+            "posix_spawn_file_actions_destroy": function("pointer"),
+            "posix_spawn_file_actions_adddup2": function("pointer", "int", "int"),
+            "posix_spawn_file_actions_addclosefrom_np": function("pointer", "int") if linux else None,
+            "posix_spawnattr_init": None if linux else function("pointer"),
+            "posix_spawnattr_destroy": None if linux else function("pointer"),
+            "posix_spawnattr_setflags": None if linux else function("pointer", "short"),
+            "posix_spawnattr_getflags": None if linux else function("pointer", "pointer"),
+        },
+    }
+
+
+def _native_abi_equal(actual: object, expected: object) -> bool:
+    # JSON equality alone permits True == 1 and 8.0 == 8. Neither is this ABI.
+    if type(actual) is not type(expected):
+        return False
+    if type(expected) is dict:
+        return actual.keys() == expected.keys() and all(
+            _native_abi_equal(actual[key], value) for key, value in expected.items()
+        )
+    if type(expected) is list:
+        return len(actual) == len(expected) and all(
+            _native_abi_equal(left, right) for left, right in zip(actual, expected)
+        )
+    return actual == expected
+
+
+def parse_abi_record(data: bytes) -> dict:
+    """Parse only the finite public-header/declaration observation grammar.
+
+    No file reads, product imports, native calls or process creation occur here.
+    All parse/schema failures have the same public-safe message.
+    """
+    try:
+        if (type(data) is not bytes or not 1 <= len(data) <= MAX_NATIVE_ABI_BYTES
+                or not data.endswith(b"\n")):
+            raise ValueError
+        body = data[:-1]
+        if (not body.startswith(b"{") or not body.endswith(b"}")
+                or any(value < 0x20 or value > 0x7e for value in body)):
+            raise ValueError
+
+        def pairs(items):
+            result = {}
+            for key, value in items:
+                if key in result:
+                    raise ValueError
+                result[key] = value
+            return result
+
+        def constant(_value):
+            raise ValueError
+
+        value = json.loads(body.decode("ascii"), object_pairs_hook=pairs, parse_constant=constant)
+        if type(value) is not dict:
+            raise ValueError
+        family, architecture = value.get("family"), value.get("architecture")
+        if (type(family) is not str or family not in {"linux-glibc", "darwin"}
+                or type(architecture) is not str or architecture not in {"x86_64", "arm64"}
+                or not _native_abi_equal(value, _native_abi_record(family, architecture))):
+            raise ValueError
+        return value
+    except (ValueError, TypeError, RecursionError, OverflowError):
+        raise ValueError("NATIVE_PROCESS_ABI_RECORD") from None
+
+
+def compare_abi_records(header: bytes, python: bytes, ruby: bytes) -> None:
+    """Require all three original observations to describe the same public ABI.
+
+    Return no receipt or success flag: genuine capture/origin/finality checks
+    remain mandatory outside this pure comparison.
+    """
+    records = [parse_abi_record(data) for data in (header, python, ruby)]
+    if any(not _native_abi_equal(record, records[0]) for record in records[1:]):
+        raise ValueError("NATIVE_PROCESS_ABI_MISMATCH")
 
 
 def _read_regular(path: Path, maximum: int = MAX_FILE_BYTES, *, deadline: float | None = None) -> bytes:
@@ -640,17 +841,53 @@ def expected_python_ids(source_root: Path, selection: str = "full", *, deadline:
     return tuple(sorted(result))
 
 
+def _python_capture_partition(complete: tuple[str, ...], partition: str) -> tuple[str, ...]:
+    """Fixed healthy/singleton division, never a caller-supplied ID list."""
+    _require(type(partition) is str and partition in {"all", "healthy", *PYTHON_POISON_PARTITIONS},
+             "PYTHON_CAPTURE_PARTITION")
+    _require(type(complete) is tuple and bool(complete)
+             and all(type(identifier) is str for identifier in complete)
+             and tuple(sorted(set(complete))) == complete
+             and set(PYTHON_POISON_IDS) <= set(complete), "PYTHON_POISON_INVENTORY")
+    healthy = tuple(identifier for identifier in complete if identifier not in PYTHON_POISON_IDS)
+    _require(bool(healthy) and len(healthy) + len(PYTHON_POISON_IDS) == len(complete)
+             and tuple(sorted(healthy + PYTHON_POISON_IDS)) == complete, "PYTHON_CAPTURE_UNION")
+    parts = {name: (identifier,) for name, identifier in zip(PYTHON_POISON_PARTITIONS, PYTHON_POISON_IDS)}
+    return {"all": complete, "healthy": healthy, **parts}[partition]
+
+
+def python_capture_ids(source_root: Path, selection: str, partition: str = "all", *,
+                       deadline: float | None = None) -> tuple[str, ...]:
+    """Linux full/wheel coverage; every fixed singleton ID must precede splitting."""
+    _require(type(selection) is str and selection in {"full", "wheel"}, "PYTHON_CAPTURE_SELECTION")
+    return _python_capture_partition(expected_python_ids(source_root, selection, deadline=deadline), partition)
+
+
 def native_partition_ids(source_root: Path, partition: str = "all", *, deadline: float | None = None) -> tuple[str, ...]:
-    """Exact disjoint native partitions, derived without importing test code."""
-    _require(type(partition) is str and partition in {"all", "ordinary", "authority"}, "NATIVE_PARTITION")
+    """Authority5, healthy ordinary and source-bound intentional-UNKNOWN originals."""
+    _require(type(partition) is str and partition in {"all", "ordinary", "authority", *PYTHON_POISON_PARTITIONS},
+             "NATIVE_PARTITION")
     complete = expected_python_ids(source_root, "native", deadline=deadline)
     prefix = "unit.test_ios_profile_authority.NativeProfileAuthorityTests."
     authority = tuple(identifier for identifier in complete if identifier.startswith(prefix))
     _require(authority == NATIVE_AUTHORITY_IDS, "NATIVE_AUTHORITY_INVENTORY")
-    ordinary = tuple(identifier for identifier in complete if identifier not in authority)
-    _require(bool(ordinary) and len(set(ordinary) | set(authority)) == len(complete)
-             and not set(ordinary) & set(authority), "NATIVE_PARTITION_UNION")
-    return {"all": complete, "ordinary": ordinary, "authority": authority}[partition]
+    ordinary_complete = tuple(identifier for identifier in complete if identifier not in authority)
+    ordinary = _python_capture_partition(ordinary_complete, "healthy")
+    poison = {name: _python_capture_partition(ordinary_complete, name) for name in PYTHON_POISON_PARTITIONS}
+    joined = authority + ordinary + tuple(identifier for ids in poison.values() for identifier in ids)
+    _require(len(joined) == len(set(joined)) and tuple(sorted(joined)) == complete, "NATIVE_PARTITION_UNION")
+    return {"all": complete, "ordinary": ordinary, "authority": authority, **poison}[partition]
+
+
+def native_compatibility_ids(source_root: Path, *, public_only: bool = False,
+                             deadline: float | None = None) -> tuple[str, ...]:
+    """Closed source-known controls, never a generic selector or native role."""
+    _require(type(public_only) is bool, "NATIVE_COMPATIBILITY_SELECTION")
+    ordinary = native_partition_ids(source_root, "ordinary", deadline=deadline)
+    prefix = "unit.test_native_process.NativeProcessCompatibilityTests."
+    actual = tuple(identifier for identifier in ordinary if identifier.startswith(prefix))
+    _require(actual == NATIVE_COMPATIBILITY_IDS, "NATIVE_COMPATIBILITY_INVENTORY")
+    return NATIVE_PUBLIC_API_IDS if public_only else actual
 
 
 def validate_test_outcomes(expected, outcomes, platform: str) -> None:
@@ -707,6 +944,7 @@ def _failure_callback(identifier: str, outcome: str, error, expected) -> dict:
 def run_python_tests(source_root: Path, selection: str, deadline: float, observations: list,
                      *, work_root: Path | None = None) -> dict:
     failures, callbacks, profile = [], [], None
+    state = {"failed": False}
     try:
         _remaining(deadline, 3300)
         if selection == "full":
@@ -715,13 +953,17 @@ def run_python_tests(source_root: Path, selection: str, deadline: float, observa
             profile = _python_full_profile(work_root, deadline=deadline)
         # Even source-derived inventory/discovery follows the actual new view's
         # admission. A failed/unknown profile cannot reach a product import.
-        expected = expected_python_ids(source_root, selection, deadline=deadline)
+        complete = expected_python_ids(source_root, selection, deadline=deadline)
+        expected = _python_capture_partition(complete, "healthy")
         if selection != "full":
             inspect_installed_wheel(source_root, deadline=deadline)
         allowed = LINUX_MACOS_SKIPS if sys.platform == "linux" else frozenset()
 
         class Result(unittest.TextTestResult):
             def startTest(self, test):
+                if state["failed"]:
+                    self.stop()
+                    raise CheckError("TEST_CONTINUED_AFTER_FAILURE", failures)
                 _remaining(deadline, 3300)
                 identifier = test.id()
                 _require(type(identifier) is str and identifier in expected
@@ -730,20 +972,29 @@ def run_python_tests(source_root: Path, selection: str, deadline: float, observa
                 super().startTest(test)
 
             def record(self, test, outcome, error=None):
-                identifier = getattr(test, "test_case", test).id()
+                try:
+                    identifier = getattr(test, "test_case", test).id()
+                except BaseException:
+                    state["failed"] = True
+                    self.stop()
+                    raise
+                failed = outcome not in {"ok", "skip"} or outcome == "skip" and identifier not in allowed
+                if failed:
+                    # Stop before optional diagnostic attribution or superclass
+                    # reporting can fail; neither may authorize another body.
+                    state["failed"] = True
+                    self.stop()
                 rows = [row for row in observations if row["id"] == identifier]
                 if len(rows) != 1 or type(identifier) is not str or identifier not in expected:
+                    state["failed"] = True
                     self.stop()
                     raise CheckError("TEST_EVENT_WITHOUT_START", failures)
-                failed = outcome not in {"ok", "skip"} or outcome == "skip" and identifier not in allowed
                 if failed and len(callbacks) < 16:
                     callbacks.append(_failure_callback(identifier, outcome, error, expected))
                 if error is not None:
                     failures[:] = [*failures, *_failure_locations(error, source_root)][-16:]
                 if rows[0]["outcome"] in {"incomplete", "ok"}:
                     rows[0]["outcome"] = outcome
-                if failed:
-                    self.stop()
 
             def addSuccess(self, test):
                 self.record(test, "ok")
@@ -779,7 +1030,7 @@ def run_python_tests(source_root: Path, selection: str, deadline: float, observa
                 if isinstance(test, unittest.TestSuite):
                     yield from flatten(test)
                 else:
-                    yield test.id()
+                    yield test
 
         with contextlib.redirect_stdout(sys.stderr):
             suite = unittest.TestSuite()
@@ -787,12 +1038,21 @@ def run_python_tests(source_root: Path, selection: str, deadline: float, observa
                 loader = unittest.TestLoader()
                 suite.addTests(loader.discover(str(source_root / "tests"), pattern=pattern))
                 _require(not loader.errors, "TEST_DISCOVERY_ERROR")
-            actual = list(flatten(suite))
-            _require(len(actual) == len(set(actual)) and tuple(sorted(actual)) == expected, "TEST_LOADED_INVENTORY")
+            loaded = tuple(flatten(suite))
+            actual = tuple(test.id() for test in loaded)
+            _require(len(actual) == len(set(actual)) and tuple(sorted(actual)) == complete, "TEST_LOADED_INVENTORY")
+            # Discovery still proves the complete source inventory. Only the
+            # source-fixed poison methods are withheld for their singleton owners.
+            suite = unittest.TestSuite(test for test in loaded if test.id() in expected)
+            _require(tuple(sorted(test.id() for test in flatten(suite))) == expected, "TEST_HEALTHY_INVENTORY")
             result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2, failfast=True, resultclass=Result).run(suite)
         _remaining(deadline, 3300)
         validate_test_outcomes(expected, observations, sys.platform)
-        _require(result.wasSuccessful() and result.testsRun == len(expected), "TEST_RESULT")
+        _require(result.wasSuccessful() and not state["failed"] and result.testsRun == len(expected), "TEST_RESULT")
+        if selection != "full":
+            # Recheck the actual installed module/resource closure after all
+            # lifecycle controls; a source fallback cannot become wheel proof.
+            inspect_installed_wheel(source_root, deadline=deadline)
         details = {"executed": result.testsRun, "skipped": len(result.skipped),
                    "failure_locations": failures, "failure_callbacks": callbacks}
         if profile is not None:

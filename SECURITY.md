@@ -42,13 +42,14 @@ The final public-release decision is intentionally outside automation.
   borrow parent grants. Fresh per-slice certificate extraction prevents stale-leaf reuse.
   Both profile CMS layers additionally require real signatures and the exact production Apple
   iOS provisioning issuer under independently pinned roots, with keychain/network lookup disabled.
-  Native workers have independent parent-liveness/deadline/process-group containment and no
-  inherited Store/signing capabilities. This is offline issuance, not live revocation status;
+  Native workers require independent parent-liveness/deadline/process-group containment
+  and no inherited Store/signing capabilities; see the process-ownership contract below.
+  This is offline issuance, not live revocation status;
   see [profile authority](docs/ios-profile-authority.md). The separately confirmed QA-003
   global local-signing concurrency blocker remains open; atomic profile installation is not
   a lifetime lease and does not justify a READY verdict. QA-004 also remains open:
   default cancellation can interrupt outer build-input scratch/client restoration.
-  The corrected inner profile/signing/native-resource cleanup does not cover that owner.
+  Inner profile/signing/native-resource ownership does not cover that outer owner.
 - Historical Android recovery retains authenticated original signing/identity evidence rather than
   requiring an accepted build to remain eligible for a new upload. Every actual new AAB send repeats
   current pinned native validation in a credential-free child, full Store-state classification and a
@@ -78,6 +79,97 @@ The final public-release decision is intentionally outside automation.
   256-bit key. Neither private values nor guessable plain hashes enter evidence. Retain its original
   key version for recovery; rotation is an explicit owner responsibility.
 
+## Native validation process ownership
+
+The QA-007 contract applies to current AAB/IPA validation and the private profile
+authentication capture. It is not a generic subprocess API or protection from a
+hostile same-process reaper. The outer→custodian, custodian→keeper and
+keeper→validator edges each require exclusive consumption of the original direct
+child's status and continuing waitability, from before native creation through
+libc startup/error cleanup and final accounting. Open3 waiters, `Process.detach`,
+catch-all waits and implicit subprocess cleanup must not acquire those statuses.
+Cooperating callers may wait their own different exact children.
+
+Admission reads native `sigaction(SIGCHLD, NULL, ...)` without changing caller
+policy. `SIG_IGN`, `SA_NOCLDWAIT`, unknown ABI or failed inspection rejects before
+creation. Blocking SIGCHLD alone is not automatic status disposal; a nonreaping
+custom handler need not be replaced. Only fixed helpers reset their own policy
+and assert it again. Callers must maintain this prerequisite: an admission
+snapshot is not a universal detector of future status theft or policy changes.
+
+The fixed outer owner, custodian, keeper and validator have separate lifetimes.
+The custodian owns a private session. The keeper establishes the validator group
+with its original PID, starts the validator there, then moves out before READY.
+Its live or unreaped original identity reserves that group until the custodian
+permanently retires **every** group signal/probe, including signal zero. The
+custodian alone may then consume the keeper's status. A saved PID, observed exit,
+permission error or success-shaped result is not lifetime authority.
+
+Before the first potentially consuming direct-child wait, including a nonblocking
+poll, its numeric signal/probe route is permanently retired and the in-flight
+wait is recorded. Only an actually returned no-result permits another poll.
+`ECHILD`, lost publication or ambiguous consumption is absorbing **UNKNOWN**,
+not permission to probe, signal or wait a guessed replacement identity.
+
+Public `posix_spawn` admission uses Ruby Fiddle with `need_gvl: false` or
+CPython `ctypes.CDLL`, rooted native buffers and explicit creator/descriptor custody.
+Intended sources are atomically duplicated CLOEXEC at descriptors >=8; there is no
+non-atomic fallback. Child file actions install only helper descriptors 0–7 or
+validator descriptors 0–2, closing other inherited copies before interpreter
+execution. The owner must never enumerate, close or change foreign descriptors
+to simulate this boundary. Imports do not acquire capture processes/descriptors,
+tasks or native admission. Unknown native-call settlement retains the required
+buffers and leases instead of freeing resources still in use.
+
+Cleanup begins on validator termination, failure, cancellation or deadline,
+without waiting for result EOF or COMMIT. Unused Ruby writers close after handoff;
+profile output closes after descendant finality and **before** COMMIT. A FINAL
+frame is only an offer: acceptance requires genuine original validator/keeper/
+custodian wait receipts from their respective owners, group absence before
+retirement, actual EOFs, owned closes, joined tasks and final
+error/cancellation/deadline checks. Failure or proved no-attempt branches need no
+success-only COMMIT and invent no status.
+
+Producer finality and validation success are separate. A positively settled
+lifecycle failure is not automatically UNKNOWN. Only genuine custodian/keeper
+exits `0` (settled normal/rejection handling) and `2` (positively settled lifecycle
+failure) can support finality; exit `1`, other codes and signals cannot. A failed
+FINAL needs genuine custodian exit `2` and every finality obligation above, not
+just the exit code. This helper-only convention does not change the validator's
+application exit codes or authorize successful validation. A custodian/keeper
+error, cancellation, deadline or uncertain close after its terminal offer must
+force the unconfirmed helper outcome, not a positively finalized failure. Final
+outer caller-error and cancellation checks still veto validation acceptance
+after settled cleanup.
+
+Deadlines and the first failure's single cleanup grace cannot be renewed by a
+late result or repeated cancellation. Original caller interruption is preserved
+separately from cleanup errors; private native output and automatic task exception
+reports are not diagnostics. A native syscall that outlives its cutoff is not a
+joined task or a successful cleanup. The deadline owner remains runnable; it does
+not forcibly cancel a thread that still holds native resources.
+
+Private profile scratch has an explicit mode-0700 owner, not an automatic
+temporary-directory finalizer. Removal requires genuine no-producer/finalized
+evidence and the unchanged exact directory identity. UNKNOWN survives exceptions,
+garbage collection and outer unwind, retaining still-required task/native/FD
+custody and preventing silent reuse in that process. End that process and establish
+producer finality before exact-owned-path cleanup or use disposable-runner teardown;
+never infer safe deletion from a marker, empty process snapshot or similar name.
+Cleanup is bounded and no-follow, not recursive deletion of unexpected content.
+This requires a cooperative namespace: a final identity recheck is not an atomic
+conditional unlink against hostile concurrent same-UID pathname replacement.
+
+Verification controls that intentionally retain UNKNOWN have no exception to this
+custody rule. A passing negative assertion or a nested driver's wait/EOF cannot
+clear retained records, authorize reuse/removal or supply a missing native receipt.
+They require genuine enclosing-domain disposal, not a newly acquired observer.
+
+These are implementation and verification requirements, not a native pass or an
+overall READY verdict. Required source/installed-platform evidence remains
+separate from fixture readiness and VM disposal. QA-003 signing lifetime and
+QA-004 outer restoration remain independent open blockers.
+
 ## Supply-chain rules
 
 - Consumers explicitly select the shared repository, pin its workflows by full commit SHA, and
@@ -91,7 +183,16 @@ The final public-release decision is intentionally outside automation.
   labels. Trusted custom runner groups are outside the shared contract.
 - Workflow Python calls use safe-path mode and `python -P`, preventing an application package in the current directory from shadowing the pinned release module.
 - Runtime dependencies are locked and upgraded through reviewed pull requests.
-- Store jobs use exact Ruby 3.3.12 and the Bundler 4.0.16/Gem checksums recorded by the lockfile.
+- Store jobs and capture require exact Ruby 3.3.12, Fiddle 1.1.2 and Bundler 4.0.16
+  with the Gem checksums recorded by the lockfile. Missing dependencies reject;
+  capture does not install gems or select another runtime. Runtime/ABI upgrades
+  require reviewed source and genuine native revalidation.
+- Store runtime probes and lanes pin `BUNDLER_VERSION=4.0.16`,
+  `BUNDLE_IGNORE_CONFIG=1`, `BUNDLE_AUTO_INSTALL=false` and `BUNDLE_FROZEN=true`
+  after environment allowlisting. Explicit admitted bundle locations remain
+  supported; ambient configuration cannot authorize automatic installation or
+  lockfile rewriting. Admission checks both the isolated helper's default Fiddle
+  and the locked bundle's actual loaded origin, not one version string for both.
 - A candidate records repository ID, commit, Git tree, configuration/metadata hashes, final artifact hashes, public signers, Store build IDs, and original authorization/actual execution/final producer identities.
 - Promotion never rebuilds.
 - Reruns fail closed when source, bytes, signer, Store identity, or receipts disagree.

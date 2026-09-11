@@ -2,16 +2,18 @@
 
 ## Scope and current status
 
-This documents the smaller QA-006 verification candidate: fixed checks inside
-fresh, disposable GitHub-hosted Linux and macOS job VMs. The selected architecture
-does not constitute implementation acceptance or a passing native run. Confirm
-the final reviewed source and actual Actions results before claiming delivery.
+This documents fixed checks inside fresh, disposable GitHub-hosted Linux and
+macOS job VMs, including the separate QA-007 production process-ownership
+requirements. A documented contract or selected architecture is not implementation
+acceptance or a passing native run. Bind the final reviewed source, complete
+inventories and actual Actions results before claiming delivery.
 
-QA-006 corrects Ruby descendant **test-fixture** readiness and makes required
-verification safe and reliable. Its fixtures must distinguish startup, genuine
-readiness, a reaped leader, live pipe-holding descendants, and cleanup failure.
-It does not fix **QA-007**, the separate production native process-group lifetime
-authority finding. VM disposal cannot prove that the library cleaned its workers.
+The QA-006 Ruby descendant **test-fixture** readiness boundary remains required:
+fixtures distinguish startup, genuine readiness, a reaped leader, live
+pipe-holding descendants and cleanup failure. That fixture correction does not
+itself prove the QA-007 production native process-group lifetime correction.
+New owner/protocol/ABI regressions need their own source and installed evidence;
+historical gate/method totals and VM disposal cannot prove library cleanup.
 
 Do not run the native/process suites or the CI controller on a shared VPS,
 developer login session, or self-hosted runner. Root access is not authorization
@@ -23,9 +25,17 @@ not executable instructions or evidence for this replacement.
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) is the entry point for
 pull requests, pushes to `main`, and manual **verification-only** dispatches.
 PRs, main pushes and the default manual `verification_target: full` select both
-`ubuntu-24.04` and `macos-26`, Python 3.11, Ruby 3.3.12, and pinned
-third-party Actions. Checkout does not persist Git credentials. Project package
-installation is not performed by the setup Actions or directly as the runner.
+`ubuntu-24.04` and `macos-26`, primary Python 3.11, exact Ruby 3.3.12/Fiddle 1.1.2,
+Bundler 4.0.16, and pinned third-party Actions. Checkout does not persist Git
+credentials. Project package installation is not performed by the setup Actions
+or directly as the runner.
+
+The workflow also supplies three distinct setup outputs for fixed CPython 3.12,
+3.13 and 3.14 compatibility controls. The controller remains bound to its original
+3.11 output; later ambient PATH or `pythonLocation` cannot select it. Internal
+`--python-312`, `--python-313` and `--python-314` inputs bind those exact selected
+executables, not arbitrary alternative interpreter routes. A setup step is not
+native admission or a compatibility pass.
 
 Before dispatch, verify repository/organization runner policy: no self-hosted
 runner may match these labels. The first-step `runner.environment` assertion is
@@ -98,6 +108,17 @@ Its exact bytes (or absence) must remain unchanged through preparation and final
 recheck; no provider nodes are created afterwards. No ACL is rewritten or removed.
 Existing executable/runtime checks and read-only mounts remain mandatory;
 permission preparation is not a substitute for native controls.
+
+The normal compatibility path has the exact ordered Linux provider roles
+`python`, `ruby`, `jdk`, `python312`, `python313`, `python314`. Each selected Python
+executable must resolve directly inside its narrow installation `bin`; broad
+HOME/toolcache/framework ancestors cannot stand in for that prefix. Missing,
+swapped, overlapping or extra roots reject. All selected roots are inventoried
+before any permission change under the original aggregate cutoff and existing
+ACL/identity/size bounds; no unselected runtime is repaired. macOS admits only
+the corresponding exact selected runtime prefixes, without a new ancestor-
+metadata, HOME, network or Mach exception. The legacy three-role shape remains
+only for bounded owner-contract controls, not a way to omit required CI versions.
 
 On the disposable macOS VM, the selected Ruby may be beneath runner HOME with
 mode `0750`. The owner pins that exact directory and may add only other-search
@@ -190,8 +211,9 @@ unchanged and cannot acquire this grant by applying a second sandbox policy.
 
 The same collision-admitted numeric identity executes precisely the five existing
 `NativeProfileAuthorityTests` methods after `openssl-version` then `system-code`.
-The remaining 72 native methods run separately under ordinary policy after
-`clang-discovery` then `dsymutil-discovery`. Authority runs first, ordinary second.
+All remaining source-derived native methods run separately under ordinary policy
+after `clang-discovery` then `dsymutil-discovery`. Authority runs first, ordinary
+second.
 OpenSSL is checked before its authority consumers; compiler tools are checked
 before their ordinary consumers. Routing is fixed before execution, never selected
 as a fallback after failure.
@@ -203,19 +225,23 @@ source/wheel logical gate. Standalone `all` retains the original four-command
 order in both source and installed-wheel forms: `openssl-version`,
 `clang-discovery`, `dsymutil-discovery`, then `system-code`.
 
-Source and installed-wheel gates each require two genuine successful captures,
-their exact nonempty/disjoint/complete method union, and no skips. Each original
-capture retains its own wait, EOF, exit, finality, cleanup and persisted-output facts;
-there is no manufactured combined process result. Failure retains completed and
-unexecuted partition information and never authorizes a later launch. A prerequisite
-failure stops before that partition's inventory, product imports or tests; earlier
-authority success cannot satisfy a failed logical gate.
+Source and installed-wheel gates each require the original authority capture,
+the healthy ordinary capture and every selected fixed intentional-UNKNOWN
+singleton under ordinary policy. Their exact disjoint method union must be
+complete, with no skips; the [isolation contract](#intentional-unknown-test-isolation)
+and source catalog determine the parts, not a historical capture count.
+Each original capture retains its own wait, EOF, exit, domain finality/disposal,
+cleanup and persisted-output facts; there is no manufactured combined process
+result. Failure retains completed and unexecuted partition information and never
+authorizes a later launch. A prerequisite failure stops before that partition's
+inventory, product imports or tests; earlier authority success cannot satisfy a
+failed logical gate.
 
 Authority entry uses the selected Python with `-I -S -B`, explicit immutable
 package specifications, fixed test helpers and fresh exclusive scratch. No
 site/.pth startup, ambient configuration or prior writable work is admitted.
 Parent inspection compares every selected package module/resource with the
-source, including installed-wheel bytes and immutable modes. The unchanged
+source, including installed-wheel bytes and immutable modes. The fixed
 profile worker uses the same selected package. Its parent directory may be
 listed for Python's package finder, but sibling file/module bytes remain denied;
 listing a directory is not a site-packages subtree read grant.
@@ -323,9 +349,9 @@ limits are 8 MiB per ordinary stream, 16 MiB for selected installer streams, and
 256 MiB persisted per attempt. A 4 GiB + 512 MiB disk reserve is maintained.
 
 Each logical native source/wheel gate fixes `min(aggregate_deadline, start+900)`
-before package inspection or role preparation. Both subcaptures, preparation,
-parsers, process finality and final union reconciliation use that same absolute
-cutoff; the second capture does not receive a new900-second budget. Exhausting
+before package inspection or role preparation. All original part captures,
+preparation, parsers, process finality and final union reconciliation use that
+same absolute cutoff; no later part receives a new 900-second budget. Exhausting
 the aggregate/explicit endpoint fails immediately, without a renewed grace
 period. Original-handle cleanup still runs; uncertain finality cannot pass.
 
@@ -385,14 +411,18 @@ inventory; it does not waive the product behaviors that inventory was meant to t
 
 | Platform | Required gate families |
 |---|---|
-| Linux | Offline source installation; full Python discovery; all listed Ruby suites, including native/iOS/Android descendant regressions; Fastfile validation; first-party/template actionlint; real JDK signer checks; wheel build/inspection/install/smoke/consumer and selected installed-wheel Python checks; source integrity. |
-| macOS | Offline source installation; exact Xcode 26.3/native tools; the three upload-process Ruby suites and separate native signal-observation proof; source native-profile gate; wheel build/inspection/install/smoke/consumer; installed-wheel native-profile gate; source integrity. |
+| Linux | Offline source installation; ABI/runtime compatibility gates; full Python discovery; all listed Ruby suites, including native/iOS/Android descendant regressions and actual packaged capture; Fastfile validation; first-party/template actionlint; real JDK signer checks; wheel build/inspection/install/smoke/consumer and selected installed-wheel Python checks; source integrity. |
+| macOS | Offline source installation; exact Xcode 26.3/native tools; ABI/runtime compatibility gates; all fixed Ruby primitive/helper/capture/adapter suites and separate native signal-observation proof; source native-profile gate; wheel build/inspection/install/smoke/consumer, including actual installed Ruby capture; installed-wheel native-profile gate; source integrity. |
 
-The four macOS Ruby gates depend on ordinary admission, including the admitted
+The macOS Ruby gates depend on ordinary admission, including the admitted
 process observer, but not profile-authority admission, so run before the source
-native-profile gate. All 27 gates remain required; any failure stops later gates.
+native-profile gate. The source catalog selects **51 Linux gates and 39 macOS
+gates**; these are required inventory counts, not completed or passing runs.
+Every selected gate remains required and any failure stops later gates. Recompute
+inventories when source changes; historical native totals cannot stand in for
+the complete current source-derived method identities and outcomes.
 
-The original 13-method native suite and both 26-method adapters run without the
+The native capture suite and both platform adapter suites run without the
 separate signal-proof instrumentation. An additional fixed Ruby invocation on
 both platforms observes the three real first-close outcomes and post-reap
 teardown adversary. Its actual production signal observations and fixture
@@ -447,11 +477,207 @@ files/Apple roots, module and Ruby bootstrap help, and a real consumer's
 preview/apply/recover behavior outside the checkout. Source imports cannot stand
 in for installed-wheel evidence. Build artifacts are consumed only after finality.
 
+The new runtime inventory includes `fastlane/native_process_spawn.rb`,
+`fastlane/native_upload_process.rb`, `mobile_release/_native_process.py` and
+`mobile_release/_profile_process.py`, in addition to the existing outer capture
+and profile entry points. Required tooling lists, wheel members, proof-copy inputs
+and incomplete-install checks must agree. Reading a bootstrap string, loading a
+copied source layout or checking `--help` is not the installed Ruby proof: an
+actual bounded capture must load the installed helpers from outside the checkout,
+with original wait/EOF/finality and complete successful outcomes.
+Origin observations measure the outer loaded methods and genuine fixed custodian
+spawn; keeper selection is bound transitively by that custodian's reviewed source.
+They are not independent child-local origin measurements.
+Missing-helper controls must use a separate actual installation of the same
+checked wheel, leaving the frozen positive installation untouched. Default
+tooling resolution must reject an incomplete selected origin rather than borrow
+a checkout-like decoy or another release; an explicitly selected complete tooling
+root remains supported. Removal of negative-fixture files requires their original
+producer/capture finality, not a guessed successful install.
+
 Python discovery is compared with source-derived exact method identities and
 terminal outcomes. Linux's explicit macOS-only skip set remains **skipped**, not
 passed; those native behaviors require the real macOS gate. Unexpected skips,
 empty/incomplete discovery, expected failures and missing outcomes fail. Ruby
 and native parsers require complete successful method records and exact totals.
+
+### Intentional-UNKNOWN test isolation
+
+Some native-process and real-resource controls deliberately leave product custody
+UNKNOWN. Each selected control requires its own fixed singleton **original
+Session capture**, separate from the healthy complement. This applies to the
+approved Python full/wheel/native selections and the Ruby owner, native capture
+and platform adapter gates. The [fixed catalog](../.github/scripts/verify_ci.py)
+and literal runner inventories define the exact IDs and order. Their disjoint
+union must cover each approved selection exactly once; a global method total
+does not authorize expanding an installed-wheel selection or pooling negatives.
+
+Python singletons retain separate finite primitive, profile and default/resource
+family import closures, with exact selected source or actual installed-wheel
+origins. The primitive runner does not gain workflow imports from another family.
+There is no generic caller-supplied method selector or broad workflow import grant.
+
+Within each gate, all parts share its original cutoff: 900 seconds for the affected
+Python gates, 120 for the Ruby owner, 180 for native capture and 300 for each
+adapter, always clamped to the original 3300-second aggregate endpoint. The
+macOS authority capture and 2+2 prerequisite routing remain unchanged. These
+splits add no logical gates, jobs, builds, permission profiles or observers.
+
+Before any next part, the existing Session must establish the preceding original
+capture's actual wait, stream EOFs, domain finality/disposal and `ensure_idle`.
+Each part retains its own result and byte accounting. Success and failure parsers
+both use that part's exact IDs; missing, duplicate, failed or unexecuted parts
+cannot pass or be replaced with a merged process result. Unexpected failure or
+UNKNOWN in a healthy row stops further work. Adverse-state and retained-custody
+guards run at every case/setup entry, before any temporary-directory or native
+acquisition; ordinary mixed discovery cannot bypass them.
+
+An expected UNKNOWN assertion is **not** confirmed product cleanup. Required
+custody records and any remaining scratch stay retained through probe/interpreter
+exit until genuine outer-domain disposal. A nested driver's wait/EOF or descendant
+cleanup cannot supply a missing original native receipt or prove every child joined.
+Keep the real FD-close/reuse, original exception-identity, scratch-identity and
+descendant-finality assertions; isolation does not replace those oracles.
+Within the affected fixture, only permitted bounded cleanup of already-owned
+resources and sanitized reporting remain after UNKNOWN: no fresh observer,
+producer or workspace, numeric retry, registry reset or speculative recursive
+removal. The existing Session's independently authorized disposal remains
+mandatory; it does not retrospectively turn UNKNOWN into a product finality receipt.
+
+Known-timely ordinary timeout, backpressure, rejection and I/O-fault fixtures must
+still prove settled cleanup; accepting UNKNOWN instead would hide a failure.
+Hard-loss controls must distinguish actual descendant cleanup from fixture EOF
+fallback using already-admitted, source-bound evidence, without a new observer
+after UNKNOWN. The missing original outer receipt remains disposal-required.
+
+The fixed QA-007 catalog additions are:
+
+| Gates | Required scope |
+|---|---|
+| `native-process-abi-source`, `native-process-abi-wheel` | Original public-header/compiler evidence, actual per-phase runtime declarations and no-child native API controls before that phase's process tests; each logical gate is bounded to 300 seconds. |
+| `python-compat-312-source`, `python-compat-313-source`, `python-compat-314-source`, and matching `-wheel` gates | Six ordinary-policy gates with genuine captures of actual selected runtimes, package origins, atomic FD/native APIs, exact pre-exec maps and real child waits; each complete gate is bounded to 120 seconds. |
+| `ruby-native-spawn`, `ruby-native-owner` | Complete source-derived primitive and owner/protocol regression identities, in addition to the existing capture/adapter suites. |
+| `ruby-packaged-capture-source`, `ruby-packaged-capture-wheel` | Real source/installed capture and adapter finality; the wheel gate also owns the separate same-wheel missing-helper installation. Each logical gate has one 300-second cutoff, including preparation and finality. |
+
+All use the original 3300-second aggregate deadline. Compatibility gates do not
+rerun the whole project matrix, rebuild the wheel or install dependencies for
+three more interpreters. Their isolated package-only loader must use the same
+already-checked source or actual installed `py3-none-any` wheel bytes, with real
+module origins; changing `sys.prefix` or copying a source tree is not installation.
+They do not replace the required macOS native source/wheel selections or change
+their independent authority/ordinary routing and singleton isolation.
+
+The test-only public-header reporter uses only the admitted distribution
+`/usr/bin/x86_64-linux-gnu-gcc-13` on the hosted Linux x86_64 profile, or the exact
+already-admitted macOS clang/linker/SDK binding. Linux compiler captures use
+literal `/usr/bin:/bin`, not work/venv/Bundler binaries or injected compiler search
+paths. Missing tools fail; there is no PATH compiler discovery, installation,
+runtime C extension or unconfined root build. Compiler version, build, reporter,
+runtime declarations and native controls retain separate original ordinary
+captures with real wait/EOF/domain finality. Reusing the original frozen header
+record across phases/minors requires unchanged source/compiler/configuration;
+each actual runtime declaration and native control still executes.
+
+### QA-007 runtime and lifecycle evidence
+
+The production contract is described in [SECURITY](../SECURITY.md#native-validation-process-ownership)
+and [profile authority](ios-profile-authority.md#isolation-deadlines-and-installation).
+Its admission/control matrix is additional required coverage, not a replacement
+for existing native, upload, entitlement, recovery or fixture tests:
+
+- Admit exact Ruby 3.3.12/Fiddle 1.1.2 in the outer Store integration **and** fixed
+  helper, checking actual loaded origins rather than version text alone. Resolve
+  the required public native APIs without runtime installation,
+  private runtime symbols or a permissive fallback. Python metadata remains
+  `>=3.11`; real bounded compatibility controls for CPython 3.11, 3.12, 3.13 and
+  3.14 are required. An unavailable line, unsupported ABI or mocked result is not
+  a compatibility pass. Additional provider preparation needs its own reviewed
+  admission; a version declaration does not grant new paths or permissions.
+- Compare the actual supported little-endian LP64 Linux-glibc/Darwin x86_64 and
+  arm64/aarch64 public headers, scalar sizes, layouts, constants and signatures.
+  Linux requires public closefrom file actions; Darwin requires public
+  `POSIX_SPAWN_CLOEXEC_DEFAULT`. Reject missing facilities and unknown ABI before
+  acquisition. Do not silently treat musl, another interpreter or Windows as an
+  admitted native platform. A header/declaration match on one runner is not a
+  native pass for another ABI or interpreter build.
+- Exercise the real Ruby **variadic** Fiddle `fcntl` call for
+  `F_DUPFD_CLOEXEC` (Linux 1030, Darwin 67), minimum descriptor 8, with a private
+  Function per creator. Require actual atomic flags, unchanged original source
+  and concurrent independent-instance behavior. Missing variadic support,
+  `EINVAL`, lost return publication and a non-atomic fallback mutant must reject;
+  post-hoc `F_SETFD` cannot repair the required acquisition boundary.
+- Prove read-only SIGCHLD inspection preserves nonreaping caller policy and
+  rejects `SIG_IGN`/`SA_NOCLDWAIT` before creation. Keep exclusive exact-child
+  waiting and continuing waitability through native startup/publication. An
+  earlier policy snapshot is not proof against arbitrary later status theft.
+- Prove all inherited non-protocol descriptors close before interpreter startup,
+  including deliberately inheritable sentinels and colliding low descriptors.
+  Helpers receive exactly the 0–7 map; validators receive only 0–2. Original
+  foreign descriptors and flags remain unchanged. Endpoint metadata alone is not
+  pipe-pair proof: owned pipe creation and the exact handoff map must establish
+  topology. Resource publication, native buffers, acquisition records, source
+  leases and creators need real settlement; no import-time acquisition, blanket
+  FD sweep or runtime finalizer may hide it.
+  Immutable spawn specifications do not freeze the owner's mutable acquisition,
+  publication, wait or retirement records. The real Fiddle/CDLL call must release
+  the GVL/GIL so its deadline owner can run; a thread wrapper around a blocking
+  language constructor is not that evidence.
+- Observe custodian/keeper/validator creation and the keeper's move out of its
+  still-reserved target group. No numeric group request may occur after group
+  retirement or the first consuming keeper wait. No direct numeric route may
+  survive its child's first consuming poll. Ruby `nil` or Python `(0, 0)` must be
+  a genuine return, never an empty slot; `ECHILD`, wrong/lost wait publication and
+  ambiguous startup are UNKNOWN. Decisive mutants must be vetoed before a
+  stale-identity syscall, not demonstrated by signaling an unrelated process.
+- Withhold COMMIT until **real EOF**: descendant cleanup and the Python payload
+  write/close must progress first, and unused Ruby writer copies must already
+  close. Permanent withholding fails at the original cutoff. Exercise pre-RUN
+  no-attempt, real pre-READY child exit, ordinary rejection, unknown publication,
+  partial/duplicate/extra terminal fields and close/join failure without invented
+  statuses, absence or success-only phases. A never-started creator needs positive
+  closed-launch/empty-effect proof; an attempted but unpublished task is not
+  absent, and neither case permits a fabricated join.
+  The closed v1 protocol permits a bounded 128 KiB configuration, at most 1 KiB
+  per later frame and 16 frames per direction, with fixed fields/edges/phases.
+  Validator stdout/stderr never supply control authority.
+- Exercise success, rejection, timeout, independent stdout/stderr overflow,
+  dead validator with live pipe holders, closed pipes with live work, setup
+  failure, cancellation and parent loss. Keep Ruby's maximum 3600 seconds and
+  independent 64 KiB stream bounds with one five-second first-failure grace;
+  Python's 30/25/20/3-second caps remain clamped to the existing inspection
+  endpoint. No late return, repeated signal, READY or EOF starts a new allowance.
+- Require genuine V/K/C wait receipts, group absence before retirement, real
+  data/status EOFs, every owned close, joined tasks and final latches before
+  accepting the FINAL offer. Retain the first actual caller cancellation object
+  (`Interrupt`/`KeyboardInterrupt` or `SystemExit`) separately from sanitized
+  operational and cleanup failures; automatic task exception reporting must not
+  leak private data. Include cancellation in the return/close/publication tail,
+  not only during normal capture.
+  Distinguish positively settled lifecycle failure from UNKNOWN. Only genuine
+  custodian/keeper exits `0` (settled normal/rejection) or `2` (settled lifecycle
+  failure) can support finality; exit `1`, other codes and signals cannot. A failed
+  FINAL needs actual custodian exit `2` and all finality proof, not just a nonzero
+  exit. Custodian/keeper post-offer error, cancellation, deadline or close
+  uncertainty must veto that helper's confirmed-finality outcome. Final outer
+  caller cancellation still vetoes acceptance after physically settled cleanup.
+  These private helper outcomes do not change the validator's public application
+  exit codes or turn rejection into success.
+- Prove explicit mode-0700 scratch ownership and unchanged identity before
+  removal. NO_PRODUCERS needs actual closed no-acquisition proof; FINALIZED needs
+  complete real accounting. Unknown creation/wait/close/join retains required
+  scratch/native/FD/task custody through exceptions, garbage collection and outer
+  unwind and prevents silent same-process reuse. A native stall exceeding its
+  cutoff cannot be relabeled joined or safe for deletion; native `settled` is not
+  a task join or producer-finality receipt.
+
+These controls require applicable native source and installed paths on the
+admitted Linux/macOS platforms. Pure parser/state tests, a copied helper tree,
+protocol flags or disposal of the verification VM do not substitute for real
+runtime/ABI/process observations. The final catalog must reconcile every new
+method identity, partition and outcome without changing the five-method authority
+partition, 2+2 prerequisites or shared 900-second native logical-gate cutoff.
+Every required healthy/singleton capture needs its own genuine finality/disposal;
+no control is claimed passed merely because it is listed here.
 
 ## Evidence, local work and remaining limitations
 

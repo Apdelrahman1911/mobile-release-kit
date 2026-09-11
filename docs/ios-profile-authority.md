@@ -68,36 +68,97 @@ public Apple regression CA certificates are not current consumer signing assets.
 
 ## Isolation, deadlines and installation
 
-Two fixed toolkit-only Python processes use `-I -S -B`, private HOME/TMPDIR,
-literal system PATH and no inherited Store, signing, OIDC or injection variables.
-An independent supervisor owns the native worker/OpenSSL process group, watches
-its original parent and enforces a 25-second limit even if an ancestor validator
-is killed. Parent capture is bounded to 30 seconds, OpenSSL to 20 seconds, within
-the shared artifact inspection deadline. Backpressured output remains bounded;
-failure or interruption cannot authorize a partial result. Native output and
-profile contents never appear in diagnostic errors.
+### Original-child and group ownership
 
-The supervisor retains group ownership even on success: it emits one bounded,
-versioned private completion frame, then unconditionally kills its own group,
-including itself. Only the exact complete frame **and** intentional kill status
-can succeed; ordinary exit, partial marker, extra bytes or a kill alone reject.
-The terminal marker commits already verified content, not a checksum-based trust
-claim. No new authorization check follows it. Parent deadlines and cancellation
-still override completed output. This closes the success handoff race when the
-original parent dies before it can clean up descendants.
-Parent shutdown has a separate three-second bound and requires both a reaped
-leader and observed process-group absence. macOS can return `EPERM` for an
-already-zombie group; this triggers bounded reap/retry, never permission-based
-success. Unresolved shutdown fails closed, even after a complete result, while
-output handles and replaced cancellation handlers still receive cleanup.
+The QA-007 native contract uses an outer capture owner, a custodian, a moving
+keeper and the profile-validation worker. The fixed Python helpers use `-I -S -B`,
+private HOME/TMPDIR, literal system PATH and no inherited Store, signing, OIDC or
+injection variables. The custodian establishes a private session; the keeper
+starts the worker/OpenSSL in a group named by the keeper's original PID, then
+moves itself into the custodian's group before READY. Its live or unreaped
+identity reserves the worker group for cleanup even after the worker exits.
 
-The parent owns mode-0700 temporary workspaces and mode-0600 inputs. Catchable
-failure/cancellation removes owned scratch and kills/reaps the owned group,
-including unexpected descendants after apparent success. Parent SIGKILL, power
-loss or runner destruction cannot execute a `finally` block: private scratch can
-remain, including a creation-before-spawn window. Hosted-runner disposal or
-explicit cleanup of the **exact owned path** is required; never delete other
-tasks' similarly named directories.
+Each original direct child needs an exclusive consuming waiter and continuing
+waitability, starting **before** native creation, including libc startup/error
+cleanup. Read-only native SIGCHLD inspection rejects `SIG_IGN` and `SA_NOCLDWAIT`
+without changing the caller's handler. Only helpers reset their own policy and
+assert it. A blocked SIGCHLD or nonreaping custom handler is not rejected merely
+for being nondefault. Callers must not steal these child statuses or later enable
+automatic disposal; admission cannot detect every outside violation. See the
+[complete native ownership prerequisites](../SECURITY.md#native-validation-process-ownership).
+
+The custodian alone consumes the keeper's status, **after** permanently retiring
+every worker-group signal/probe, including signal zero. For every child, numeric
+signal/probe routes retire before the first potentially consuming wait, including
+a nonblocking poll. Only a genuinely returned no-result permits another poll.
+An ambiguous wait/publication or `ECHILD` is UNKNOWN, never authority to retry a
+numeric identity. `EPERM`, an apparent zombie or a completed result is not group
+absence; reaping the reservation and then probing again is forbidden.
+
+Native `posix_spawn` actions install only fixed helper descriptors 0–7 and worker
+descriptors 0–2, with other inherited descriptors closed **before** interpreter
+execution. Owned atomic CLOEXEC duplicates and native buffers remain leased until
+their actual creator settles. No caller descriptor census, foreign close or
+inherit-then-repair fallback substitutes for this boundary. Imports acquire no
+capture processes/descriptors, tasks or native admission.
+
+### Deadlines and result acceptance
+
+The capture, custodian and OpenSSL limits remain 30, 25 and 20 seconds, with one
+three-second cleanup grace. All are clamped to the caller's shared
+`InspectionDeadline`; nesting, late spawn publication, repeated cancellation or
+backpressure must not restart a timeout. The independent custodian watches parent
+loss and starts descendant cleanup on genuine worker termination or any failure,
+cancellation or deadline. It must not wait for COMMIT or output EOF to start the
+cleanup needed to produce that EOF.
+
+After genuine worker/keeper receipts and confirmed group cleanup, the custodian
+reads the bounded verified-content file, emits the existing bounded completion
+frame and **actually closes** its output writer. Only then can the outer owner
+observe real output EOF, validate the result and request COMMIT. COMMIT is not
+permission to begin cleanup. A failed, rejected or never-started transaction does
+not wait for success-only COMMIT and must not invent child statuses.
+
+The separate versioned control protocol has closed no-attempt, reaped and unknown
+terminal forms. Its FINAL is only an **offer**, not an accepted result or the
+custodian's own wait receipt. Acceptance additionally requires the genuine
+custodian wait, status EOF, exact earlier worker/keeper receipts, actual group
+absence before retirement, all owned closes and task joins, and final pending
+cancellation/error/deadline checks. A kill status, payload marker, protocol PID
+or success flag alone cannot pass. Cleanup/close failures veto apparent success;
+native output, profile contents and private exception text are never diagnostics.
+Producer finality is distinct from authentication success: a proved settled
+rejection or lifecycle failure may permit exact-owned scratch cleanup, not
+acceptance of a failed profile. A failed FINAL requires the corresponding genuine
+custodian outcome and all the proof above. Custodian/keeper error, cancellation,
+deadline or close uncertainty after its terminal offer must force an unconfirmed
+helper outcome. Final caller cancellation still vetoes authentication acceptance
+after physically settled cleanup.
+Neither the completion marker nor the control protocol supplies Apple issuer
+authority; the independent CMS signature and production-purpose trust gates above
+remain mandatory.
+
+### Scratch, installation and cancellation
+
+Profile scratch uses explicit mode-0700 `mkdtemp` ownership and mode-0600 inputs,
+not an automatic temporary-directory finalizer. `CaptureFinality` and
+`ScratchLease` permit removal only with genuine `NO_PRODUCERS` or `FINALIZED`
+evidence **and the unchanged exact directory identity**. A null PID is not proof
+that creation was never attempted. UNKNOWN creation, wait, close or task settlement
+retains required scratch/native/FD custody across exceptions, garbage collection
+and outer unwind; a later capture must not silently abandon it in the same process.
+Cleanup uses bounded expected entries and no-follow directory-relative operations;
+unexpected entries or a replaced/symlinked scratch root remain failure, not
+permission to recurse or remove a different tree. The namespace must cooperate:
+the final identity check and removal are not one atomic inode-conditional
+operation against hostile concurrent same-UID replacement.
+
+Catchable cancellation attempts bounded cleanup; it does not promise deletion
+when finality is unknown. SIGKILL, power loss or runner destruction cannot run
+cleanup, and a native call can outlive its deadline without becoming a joined
+task. End the affected process and establish producer finality before inspecting
+or removing the **exact owned path**, or dispose of the hosted VM. Never delete
+other tasks' similarly named directories or retry signals against guessed PIDs.
 
 Local credential checks authenticate before P12 extraction. Temporary signing
 authenticates one snapshot and checks current dates/UUID before any keychain
@@ -111,12 +172,12 @@ Default main-thread cancellation is deferred across file-descriptor/inode
 registration, the installation-to-caller cleanup handoff, and fixed keychain,
 profile and authentication-resource cleanup. `cancellation.py` registers cleanup
 before acquisition, protects its first instruction and exit dispatch, and claims
-each cleanup attempt only once. Parent raw descriptors, selectors, worker groups
-and private scratch have explicit owners; authentication capture borrows the
+each cleanup attempt only once. Parent raw descriptors, child/task records, private
+channels and scratch have explicit owners; authentication capture borrows the
 outer guard until scratch cleanup finishes. A selector/descriptor failure cannot
-skip independent group, stream or scratch cleanup. Cancellation during restoration
-cannot return success; body errors survive successful cleanup, and cleanup or
-handler-restoration failures remain errors rather than being hidden by cancellation.
+skip independent child, stream or scratch-finality accounting. Cancellation during
+restoration cannot return success; body errors survive successful cleanup, and
+cleanup or handler-restoration failures remain errors rather than being hidden by cancellation.
 
 This guard catches only default main-thread SIGINT/SIGTERM, installs SIGINT first
 and restores it last. It does not replace custom handlers or install handlers from
@@ -152,15 +213,15 @@ today's issuer policy, renew profiles, rebuild or re-sign. Every actual new send
 including a separately authorized retry, must pass current validation. Do not
 repin an existing evidence chain to manufacture stronger historical assurance.
 
-Credential-free regression coverage:
+Required credential-free regression coverage (not a claim that a run passed):
 
 - `test_ios_profile_authority.py`: malformed CMS, real signature/tamper checks,
   real public Apple production-policy positive and wrong-purpose negatives.
 - `test_ios_profile_trust.py`: native ABI, statuses, explicit anchors, disabled
   lookups, result/chain/name checks and CF ownership failure injection.
-- `test_profile_processes.py`: real process groups, spawn/IO cancellation,
-  orphaned pipes, ancestor kill before/after actual supervisor completion,
-  malformed/partial frames, output overflow/backpressure and owned cleanup.
+- `test_profile_processes.py` and the native ownership suites: real original-child
+  reservation, spawn/IO cancellation, orphaned pipes, ancestor loss, closed
+  terminal schemas, output overflow/backpressure and cleanup before COMMIT.
 - `test_ios_profile_installation.py`: exact snapshots, collision/symlink/FIFO
   rejection, partial writes, atomic-link interruption, real acquisition/handoff/
   cleanup signals, failed ownership registration and foreign-file preservation.
@@ -170,6 +231,21 @@ Credential-free regression coverage:
   cleanup and exact before-fallback resource assertions.
 - Existing entitlement, current-upload and recovery suites: rejection before
   Store access and no retrospective authentication of accepted candidates.
+
+Native ownership controls must cover read-only SIGCHLD admission, original wait
+publication and UNKNOWN retirement, actual pre-exec descriptor closure, shared
+deadlines, creator/task settlement, exact scratch identity and retained uncertain
+scratch through exceptions/GC. Closed schemas and mocks are not native ABI or
+cleanup proof. Recompute the complete source and installed-wheel method inventory
+from the final source; historical native totals do not include new regressions.
+
+Intentional-UNKNOWN process/resource controls use the fixed singleton captures
+and healthy complements in the [isolation contract](verification.md#intentional-unknown-test-isolation).
+An expected negative result retains actual custody until genuine outer-domain
+disposal; it cannot clear registries, authorize another case or acquire a new
+observer to replace a missing original receipt. Known-timely ordinary timeout,
+backpressure and I/O-fault fixtures must still prove settled cleanup, not pass
+by accepting unexpected UNKNOWN.
 
 Use the [disposable hosted verification workflow](verification.md). Its macOS
 source and installed-wheel gates each require complete authority and ordinary

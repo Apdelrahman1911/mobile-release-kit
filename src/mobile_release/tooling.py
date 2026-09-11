@@ -21,6 +21,8 @@ REQUIRED_TOOLING_FILES = (
     "fastlane/ios_upload_validation.rb",
     "fastlane/android_upload_validation.rb",
     "fastlane/native_upload_validation.rb",
+    "fastlane/native_process_spawn.rb",
+    "fastlane/native_upload_process.rb",
     "fastlane/release_support.rb",
     "fastlane/run_lane.rb",
     "schemas/candidate.schema.json",
@@ -92,9 +94,15 @@ def resolve_tooling_root(
         return resolved if _complete_tooling_root(resolved) else None
     search = candidates
     if search is None:
+        module = Path(__file__).resolve()
+        source_root = module.parents[2]
+        # The executing module selects one origin. An incomplete wheel must not
+        # borrow checkout-like assets placed next to site-packages, and an
+        # incomplete checkout must not silently borrow another installed release.
         search = (
-            Path(__file__).resolve().parents[2],
-            Path(sysconfig.get_path("data")) / "share/mobile-release-kit",
+            (source_root,)
+            if module == source_root / "src/mobile_release/tooling.py"
+            else (Path(sysconfig.get_path("data")) / "share/mobile-release-kit",)
         )
     for candidate in search:
         try:

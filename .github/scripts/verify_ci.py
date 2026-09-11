@@ -8,9 +8,12 @@ inert; no old verification framework, account service or PASS-file is used.
 from __future__ import annotations
 
 import argparse
+import base64
+import csv
 import dataclasses
 import hashlib
 import importlib.util
+import io
 import json
 import math
 import os
@@ -32,9 +35,86 @@ DISK_RESERVE = 4 * 1024**3 + 512 * 1024**2
 MINITEST_FOOTER = (r"(?m)^(\d{1,9}) runs, (\d{1,9}) assertions, (\d{1,9}) failures, "
                    r"(\d{1,9}) errors, (\d{1,9}) skips[ \t]*$")
 NATIVE_DIAGNOSTIC_PREFIX = "MRK_NATIVE_DIAGNOSTIC="
+NATIVE_PYTHON_RUNTIME_PREFIX = "MRK_NATIVE_PYTHON_RUNTIME="
+NATIVE_RUBY_RUNTIME_PREFIX = "MRK_NATIVE_RUBY_RUNTIME="
+PYTHON_POISON_PARTITIONS = (
+    "poison-wait-loss",
+    "poison-startup-error",
+    "poison-full-zero",
+    "poison-full-failure",
+    "poison-marker-parent-death",
+    "poison-committed-parent-death",
+    "poison-orphan",
+    "poison-payload-writer-close-failure",
+    "poison-payload-reader-close-failure",
+    "poison-payload-reader-close-unresolved",
+    "poison-read-restored-term-fatal",
+    "poison-source-restored-term-fatal",
+    "poison-capture-restored-term-fatal",
+    "poison-capture-control-close-failure",
+    "poison-capture-status-close-failure",
+    "poison-capture-payload-close-failure",
+    "poison-capture-payload-close-unresolved",
+    "poison-source-control-close-failure",
+    "poison-source-status-close-failure",
+    "poison-source-payload-close-failure",
+    "poison-source-payload-close-unresolved",
+    "poison-source-scratch-cleanup-failure",
+    "poison-source-scratch-cleanup-unresolved",
+    "poison-read-raw-close-before-completion",
+    "poison-read-raw-close-after-completion",
+    "poison-source-raw-close-before-completion",
+    "poison-source-raw-close-after-completion",
+    "poison-unpublished-scratch",
+    "poison-directory-replacement",
+    "poison-symlink-replacement",
+    "poison-unexpected-child",
+    "poison-keyboard-interrupt-cleanup-failure",
+    "poison-keyboard-interrupt-restore-failure",
+    "poison-keyboard-interrupt-cleanup-and-restore-failure",
+    "poison-system-exit-cleanup-failure",
+    "poison-system-exit-restore-failure",
+    "poison-system-exit-cleanup-and-restore-failure",
+)
+RUBY_OWNER_POISON_PARTITIONS = (
+    ("custodian-preoffer-close", "NativeUploadRoleTest#test_native_custodian_preoffer_close_fault_cannot_claim_settled_failure"),
+    ("custodian-postoffer-tail", "NativeUploadRoleTest#test_native_custodian_postoffer_tail_fault_downgrades_intended_two_to_unknown_one"),
+    ("keeper-preoffer-close", "NativeUploadRoleTest#test_native_keeper_preoffer_close_fault_preserves_v_receipt_but_not_cleanup"),
+    ("keeper-postoffer-tail", "NativeUploadRoleTest#test_native_keeper_postoffer_tail_fault_cannot_launder_confirmed_cleanup"),
+    ("custodian-before-exit-arm", "NativeUploadRoleTest#test_native_custodian_before_exit_arm_callback_rejects_saved_settled_failure"),
+    ("custodian-after-exit-arm", "NativeUploadRoleTest#test_native_custodian_after_exit_arm_signal_cannot_accept_saved_settled_failure"),
+    ("keeper-before-exit-arm", "NativeUploadRoleTest#test_native_keeper_before_exit_arm_callback_invalidates_saved_release"),
+    ("keeper-after-exit-arm", "NativeUploadRoleTest#test_native_keeper_after_exit_arm_signal_cannot_accept_saved_release"),
+)
+RUBY_PROBE_POISON_PARTITIONS = (
+    ("ownership-unknown-capture-spawn", "test_process_ownership_unknown_creation_through_real_capture"),
+    ("ownership-unknown-capture-reap", "test_process_ownership_unknown_wait_through_real_capture"),
+    ("ownership-unknown-capture-echild", "test_process_ownership_echild_after_original_wait_through_real_capture"),
+    ("ownership-unknown-run-spawn", "test_process_ownership_unknown_creation_through_real_run"),
+    ("ownership-unknown-run-reap", "test_process_ownership_unknown_wait_through_real_run"),
+    ("ownership-unknown-run-echild", "test_process_ownership_echild_after_original_wait_through_real_run"),
+    ("kill-startup", "test_driver_loss_during_startup_retains_unknown_native_custody"),
+    ("kill-descendant", "test_driver_loss_with_inherited_pipes_retains_unknown_native_custody"),
+    ("ownership-observation", "test_indeterminate_observations_never_prove_readiness_or_renew_native_death_budget"),
+)
+RUBY_NATIVE_CAPTURE_POISON_PARTITIONS = (
+    ("native-setup-no-cleanup", "NativeUploadValidationTest#test_missing_native_cleanup_requires_eof_and_cannot_pass_the_production_oracle"),
+    ("kill-native-setup", "NativeUploadValidationTest#test_hard_driver_loss_stops_all_previously_bound_native_roles"),
+    ("native-order-cleanup-before-caller-interrupt", "NativeUploadValidationTest#test_native_cleanup_error_precedes_later_caller_interrupt_and_retains_unknown"),
+    ("native-order-cleanup-before-caller-system-exit", "NativeUploadValidationTest#test_native_cleanup_error_precedes_later_caller_system_exit_and_retains_unknown"),
+)
+RUBY_PARTITION_CONTRACTS = (
+    ("ruby-native-owner", "test_native_upload_process.rb", 52, 44, 120, None),
+    ("ruby-native-capture", "test_native_upload_validation.rb", 21, 17, 180, "NativeUploadValidationTest"),
+    ("ruby-ios_upload_validation", "test_ios_upload_validation.rb", 32, 23, 300, "IosUploadValidationTest"),
+    ("ruby-android_upload_validation", "test_android_upload_validation.rb", 32, 23, 300, "AndroidUploadValidationTest"),
+)
+PARTITIONED_RUBY_GATES = tuple(row[0] for row in RUBY_PARTITION_CONTRACTS)
 RUBY_SUITES = (
     ("ruby-support", "test_fastlane_support.rb", 12),
-    ("ruby-native-capture", "test_native_upload_validation.rb", 13),
+    ("ruby-native-spawn", "test_native_process_spawn.rb", 0),
+    ("ruby-native-owner", "test_native_upload_process.rb", 0),
+    ("ruby-native-capture", "test_native_upload_validation.rb", 0),
     # Separate process: proof instrumentation never changes the original suite.
     ("ruby-native-signal-observation", "test_native_signal_observation.rb", 1),
     ("ruby-play_store", "test_play_store.rb", 0),
@@ -44,22 +124,70 @@ RUBY_SUITES = (
     ("ruby-apple_production", "test_apple_production.rb", 0),
     ("ruby-apple_production_lane", "test_apple_production_lane.rb", 0),
     ("ruby-apple_asset_upload", "test_apple_asset_upload.rb", 0),
-    ("ruby-ios_upload_validation", "test_ios_upload_validation.rb", 26),
-    ("ruby-android_upload_validation", "test_android_upload_validation.rb", 26),
+    ("ruby-ios_upload_validation", "test_ios_upload_validation.rb", 0),
+    ("ruby-android_upload_validation", "test_android_upload_validation.rb", 0),
     ("ruby-workflow-yaml", "test_workflow_yaml.rb", 0),
     ("ruby-supply-wif", "test_supply_wif.rb", 0),
 )
 NATIVE_RUBY_IDS = (
-    "ruby-native-capture", "ruby-native-signal-observation",
+    "ruby-native-spawn", "ruby-native-owner", "ruby-native-capture", "ruby-native-signal-observation",
     "ruby-ios_upload_validation", "ruby-android_upload_validation",
 )
+RUBY_PUBLIC_API_IDS = tuple(sorted((
+    "NativeProcessSpawnTests#test_public_atomic_cloexec_duplication_uses_independent_creator_functions",
+    "NativeProcessSpawnTests#test_public_spawn_containers_and_read_only_sigchld_admission",
+)))
+PACKAGED_RUBY_COMMON_IDS = tuple(sorted(
+    "PackagedRubyCaptureTest#" + name for name in (
+        "test_actual_capture_and_helper_origins_are_bound",
+        "test_success_through_both_adapters_has_true_finality",
+        "test_rejection_through_both_adapters_is_private_and_finalized",
+        "test_reaped_validator_descendant_is_cleaned_before_fallback",
+        "test_independent_stdout_stderr_bounds_preserve_cleanup",
+        "test_source_app_path_and_preload_poison_cannot_replace_helpers",
+    )
+))
+PACKAGED_RUBY_MISSING_IDS = tuple(sorted(
+    "InstalledRubyCaptureMissingHelperTest#" + name for name in (
+        "test_missing_installed_process_helper_refuses_fallback",
+        "test_missing_installed_spawn_helper_refuses_fallback",
+    )
+))
+PACKAGED_RUBY_GATES = ("ruby-packaged-capture-source", "ruby-packaged-capture-wheel")
+COMPATIBILITY_SOURCE_GATES = tuple(f"python-compat-{line}-source" for line in ("312", "313", "314"))
+COMPATIBILITY_WHEEL_GATES = tuple(f"python-compat-{line}-wheel" for line in ("312", "313", "314"))
+RUBY_ABI_DECLARATION = r'''require "json"
+require "digest"
+raise "fixed ABI declaration arguments" unless ARGV.length == 2 && %w[source wheel].include?(ARGV[1])
+helper, phase = ARGV
+raise "fixed ABI helper origin" unless helper.start_with?("/") && File.realpath(helper) == helper
+require helper
+native = MobileReleaseKit::NativeProcessSpawn
+abi = native.declared_abi
+runtime = native.runtime_info
+locations = %i[declared_abi runtime_info].to_h do |name|
+  location = native.method(name).source_location
+  raise "fixed ABI method origin" unless location && location[0] == helper && location[1].is_a?(Integer) && location[1] > 0
+  [name.to_s, location]
+end
+raise "fixed ABI loaded origin" unless $LOADED_FEATURES.count { |path| path == helper } == 1
+raise "fixed ABI declaration stability" unless abi == native.declared_abi
+record = JSON.generate(abi) + "\n"
+observation = {"schema" => "mrk-native-ruby-runtime-v1", "phase" => phase,
+  "helper_sha256" => Digest::SHA256.file(helper).hexdigest, "source_locations" => locations, "runtime" => runtime}
+metadata = "MRK_NATIVE_RUBY_RUNTIME=" + JSON.generate(observation) + "\n"
+raise "fixed ABI output bound" unless record.bytesize.between?(1, 8192) && metadata.bytesize <= 65536
+raise "fixed ABI short publication" unless STDOUT.write(record) == record.bytesize && STDERR.write(metadata) == metadata.bytesize
+STDOUT.flush
+STDERR.flush
+'''
 _BEFORE_TESTS = (
     "source-copy", "source-environment", "source-dependencies", "bundler",
     "bundle-install", "editable-install", "source-freeze", "source-pip-check", "bundle-check",
 )
 _WHEEL = (
     "wheel-copy", "wheel-build", "wheel-inspect", "wheel-environment", "wheel-pip",
-    "wheel-install", "wheel-freeze", "wheel-pip-check", "wheel-smoke", "wheel-consumer",
+    "wheel-install", "wheel-freeze", "wheel-pip-check",
 )
 
 
@@ -78,6 +206,7 @@ class Paths:
     ruby: Path
     version: str = "0.3.0"
     java_home: Path | None = None
+    compatibility_runtimes: tuple[tuple[Path, Path], ...] = ()
 
     @property
     def source_python(self) -> Path:
@@ -128,14 +257,51 @@ class Report:
     error: str | None
 
 
+@dataclasses.dataclass
+class NativeABIState:
+    """Outside-owner memory retaining originals, never a serialized receipt."""
+    compiler_capture: object | None = None
+    build_capture: object | None = None
+    header_capture: object | None = None
+    compiler: Path | None = None
+    compiler_sha256: str | None = None
+    source_sha256: str | None = None
+    binary_sha256: str | None = None
+    platform: str | None = None
+    architecture: str | None = None
+    phases: dict[str, tuple[object, object, object]] = dataclasses.field(default_factory=dict)
+
+
 def required_gate_ids(platform: str) -> tuple[str, ...]:
     if platform == "linux":
-        return (*_BEFORE_TESTS, "python-full", *(row[0] for row in RUBY_SUITES),
-                "fastfile", "actionlint", "jdk-signers", *_WHEEL, "python-wheel", "source-integrity")
+        return (*_BEFORE_TESTS, "native-process-abi-source", *COMPATIBILITY_SOURCE_GATES,
+                "python-full", *(row[0] for row in RUBY_SUITES), "ruby-packaged-capture-source",
+                "fastfile", "actionlint", "jdk-signers", *_WHEEL, "native-process-abi-wheel",
+                *COMPATIBILITY_WHEEL_GATES, "wheel-smoke", "wheel-consumer", "ruby-packaged-capture-wheel",
+                "python-wheel", "source-integrity")
     if platform == "macos":
-        return (*_BEFORE_TESTS, "native-tools", *NATIVE_RUBY_IDS, "native-profile-source",
-                *_WHEEL, "native-profile-wheel", "source-integrity")
+        return (*_BEFORE_TESTS, "native-tools", "native-process-abi-source", *COMPATIBILITY_SOURCE_GATES,
+                *NATIVE_RUBY_IDS, "ruby-packaged-capture-source", "native-profile-source",
+                *_WHEEL, "native-process-abi-wheel", *COMPATIBILITY_WHEEL_GATES,
+                "wheel-smoke", "wheel-consumer", "ruby-packaged-capture-wheel",
+                "native-profile-wheel", "source-integrity")
     raise VerificationError("UNSUPPORTED_PLATFORM")
+
+
+def compatibility_paths(paths: Paths) -> tuple[tuple[Path, Path], ...]:
+    """Only the three prebound narrow provider roles, with no ambient lookup."""
+    pairs = paths.compatibility_runtimes
+    if (type(pairs) is not tuple or len(pairs) != 3
+            or any(type(pair) is not tuple or len(pair) != 2
+                   or any(not isinstance(path, Path) or not path.is_absolute() or ".." in path.parts for path in pair)
+                   or pair[0].parent.name != "bin" or pair[0].parent.parent != pair[1] for pair in pairs)):
+        raise VerificationError("COMPATIBILITY_RUNTIME_BINDING")
+    roots = [paths.python.parent.parent, paths.ruby.parent.parent,
+             *((paths.java_home,) if paths.java_home is not None else ()), *(pair[1] for pair in pairs)]
+    if any(left == right or left.is_relative_to(right) or right.is_relative_to(left)
+           for index, left in enumerate(roots) for right in roots[index + 1:]):
+        raise VerificationError("COMPATIBILITY_RUNTIME_BINDING")
+    return pairs
 
 
 def environment(paths: Paths, platform: str) -> tuple[tuple[str, str], ...]:
@@ -175,6 +341,24 @@ def environment(paths: Paths, platform: str) -> tuple[tuple[str, str], ...]:
     return tuple(sorted(env.items()))
 
 
+def packaged_ruby_argv(paths: Paths, phase: str, *, deadline: float) -> tuple[str, ...]:
+    """Closed fixture CLI: project source root, or the actual wheel prefix."""
+    if phase not in {"source", "wheel"}:
+        raise VerificationError("PACKAGED_RUBY_GATE_CONTRACT")
+    prefix = paths.source if phase == "source" else paths.work / "wheel-venv"
+    tooling = paths.source / "fastlane" if phase == "source" else prefix / "share/mobile-release-kit/fastlane"
+    filter_ = (r"/\APackagedRubyCaptureTest#/" if phase == "source"
+               else r"/\A(?:PackagedRubyCaptureTest|InstalledRubyCaptureMissingHelperTest)#/")
+    return tuple(map(str, (*paths.bundle, "exec", paths.ruby,
+        paths.source / "tests/workflow/test_installed_ruby_capture.rb",
+        "--capture-phase", phase, "--capture-tooling-root", tooling, "--capture-prefix", prefix,
+        "--capture-source-root", paths.source, "--capture-python",
+        paths.source_python if phase == "source" else paths.wheel_python,
+        *(("--capture-wheel", paths.wheel, "--negative-prefix", paths.work / "ruby-negative")
+          if phase == "wheel" else ()),
+        "--capture-deadline", repr(deadline), "--verbose", "--name", filter_)))
+
+
 def catalog(paths: Paths, platform: str, *, deadline: float) -> tuple[Step, ...]:
     """Finite data-only dispatch; materialization/launches belong to the caller."""
     required_gate_ids(platform)
@@ -184,6 +368,7 @@ def catalog(paths: Paths, platform: str, *, deadline: float) -> tuple[Step, ...]
         raise VerificationError("LOCAL_SIGNING_MATRIX_REQUIRES_CATALOG_AMENDMENT")
     if type(deadline) is not float or not math.isfinite(deadline):
         raise VerificationError("INVALID_DEADLINE")
+    pairs = compatibility_paths(paths)
     env = environment(paths, platform)
     steps: dict[str, Step] = {}
 
@@ -205,6 +390,15 @@ def catalog(paths: Paths, platform: str, *, deadline: float) -> tuple[Step, ...]
     for name in ("source-copy", "source-freeze", "wheel-copy", "wheel-inspect", "wheel-freeze",
                  "wheel-consumer", "source-integrity"):
         operation(name)
+    for phase in ("source", "wheel"):
+        name = "native-process-abi-" + phase
+        steps[name] = Step(name, kind="native-abi", seconds=300)
+        for line, (executable, _prefix) in zip(("312", "313", "314"), pairs):
+            name = f"python-compat-{line}-{phase}"
+            steps[name] = Step(name, kind="python-compatibility", seconds=120,
+                               argv=(str(executable), "-I", "-S", "-B",
+                                     str(paths.source / "tests/workflow/run_native_profile_checks.py"),
+                                     f"--compat-{line}-{phase}"), cwd=paths.work, env=env)
     command("source-environment", python(paths.python, "-m", "venv", "--copies", paths.work / "source-venv"), seconds=180)
     command("source-dependencies", python(paths.source_python, "-m", "pip", "install", "--no-index", "--no-compile",
             "--find-links", paths.inputs / "python", "--require-hashes",
@@ -224,14 +418,17 @@ def catalog(paths: Paths, platform: str, *, deadline: float) -> tuple[Step, ...]
     command("native-profile-source", python(paths.source_python, native), seconds=900, parser="native")
     for name, filename, count in RUBY_SUITES:
         if not count and name != "ruby-supply-wif":
-            # The actual complete source provides the number of literal tests.
-            # Dynamically generated adapter contracts have explicit reviewed totals.
-            count = ruby_literal_tests(paths.source / "tests/workflow" / filename)
+            # Immutable source supplies exact identities, not runtime test counts.
+            count = len(ruby_expected_ids(paths.source, name))
         command(name, (*paths.bundle, "exec", paths.ruby, paths.source / "tests/workflow" / filename,
                         *(("--verbose",) if name != "ruby-supply-wif" else ())),
-                seconds=180 if name in {"ruby-native-capture", "ruby-native-signal-observation"}
+                seconds=120 if name == "ruby-native-owner" else
+                180 if name in {"ruby-native-capture", "ruby-native-signal-observation", "ruby-native-spawn"}
                 else 300 if name in NATIVE_RUBY_IDS else 180,
                 parser="supply" if name == "ruby-supply-wif" else "minitest", tests=count)
+    for phase, name in zip(("source", "wheel"), PACKAGED_RUBY_GATES):
+        command(name, packaged_ruby_argv(paths, phase, deadline=deadline),
+                seconds=300, parser="minitest", tests=len(ruby_expected_ids(paths.source, name)))
     command("fastfile", (*paths.bundle, "exec", paths.ruby, paths.source / "fastlane/run_lane.rb", "--validate"), seconds=180)
     workflow_paths = sorted((paths.source / ".github/workflows").glob("*.yml"))
     workflow_paths += sorted((paths.source / "templates/workflows").glob("*.yml"))
@@ -253,8 +450,13 @@ def catalog(paths: Paths, platform: str, *, deadline: float) -> tuple[Step, ...]
     wheel_env = dict(env)
     wheel_env["PATH"] = str(paths.wheel_python.parent) + ":" + wheel_env["PATH"]
     wheel_env["MOBILE_RELEASE_TEST_PYTHON"] = str(paths.wheel_python)
-    for name in ("wheel-pip", "wheel-install", "wheel-pip-check", "wheel-smoke", "python-wheel", "native-profile-wheel"):
+    for name in ("wheel-pip", "wheel-install", "wheel-pip-check", "wheel-smoke", "python-wheel", "native-profile-wheel",
+                 "ruby-packaged-capture-wheel", *COMPATIBILITY_WHEEL_GATES):
         steps[name] = dataclasses.replace(steps[name], env=tuple(sorted(wheel_env.items())))
+    installed_env = dict(steps["ruby-packaged-capture-wheel"].env)
+    installed_env["BUNDLE_GEMFILE"] = str(paths.work / "wheel-venv/share/mobile-release-kit/Gemfile")
+    steps["ruby-packaged-capture-wheel"] = dataclasses.replace(
+        steps["ruby-packaged-capture-wheel"], env=tuple(sorted(installed_env.items())))
     return tuple(steps[name] for name in required_gate_ids(platform))
 
 
@@ -268,10 +470,16 @@ def ruby_literal_tests(path: Path) -> int:
 
 def ruby_expected_ids(source: Path, gate: str) -> tuple[str, ...]:
     """The fixed suite's real method identities, including its shared contracts."""
-    rows = [row for row in RUBY_SUITES if row[0] == gate and row[0] != "ruby-supply-wif"]
-    if len(rows) != 1:
-        raise VerificationError("RUBY_SUITE_UNKNOWN")
-    raw = (source / "tests/workflow" / rows[0][1]).read_text(encoding="utf-8")
+    if gate in PACKAGED_RUBY_GATES:
+        filename = "test_installed_ruby_capture.rb"
+    elif gate in {"ruby-native-public-source", "ruby-native-public-wheel"}:
+        filename = "test_native_process_spawn.rb"
+    else:
+        rows = [row for row in RUBY_SUITES if row[0] == gate and row[0] != "ruby-supply-wif"]
+        if len(rows) != 1:
+            raise VerificationError("RUBY_SUITE_UNKNOWN")
+        filename = rows[0][1]
+    raw = (source / "tests/workflow" / filename).read_text(encoding="utf-8")
     classes = list(re.finditer(r"(?m)^class ([A-Za-z0-9_:]+) < Minitest::Test[^\S\n]*$", raw))
     if not classes:
         raise VerificationError("RUBY_STATIC_INVENTORY")
@@ -285,12 +493,13 @@ def ruby_expected_ids(source: Path, gate: str) -> tuple[str, ...]:
             raise VerificationError("RUBY_SHARED_CONTRACT_AMBIGUOUS")
         shared = sections[1].split("\nif $PROGRAM_NAME == __FILE__", 1)[0]
         literal = re.findall(r"(?m)^    def (test_[A-Za-z0-9_]+)\s*$", shared)
-        if (len(literal) != 11 or shared.count("%w[async signals policies unknown].each do |family|") != 1
+        if (len(literal) != 18 or not {name for _mode, name in RUBY_PROBE_POISON_PARTITIONS} <= set(literal)
+                or shared.count("%w[async signals policies].each do |family|") != 1
                 or shared.count('define_method("test_process_ownership_#{family}_through_both_real_fixture_callers")') != 1):
             raise VerificationError("RUBY_DYNAMIC_CONTRACT_DRIFT")
         extra.extend(literal)
         extra.extend(f"test_process_ownership_{family}_through_both_real_fixture_callers"
-                     for family in ("async", "signals", "policies", "unknown"))
+                     for family in ("async", "signals", "policies"))
     result = []
     for owner in classes:
         # These reviewed files use ordinary top-level classes and unindented
@@ -304,7 +513,63 @@ def ruby_expected_ids(source: Path, gate: str) -> tuple[str, ...]:
         result.extend(f"{owner[1]}#{name}" for name in names)
     if len(result) != len(set(result)):
         raise VerificationError("RUBY_DUPLICATE_METHOD")
+    if gate in PACKAGED_RUBY_GATES:
+        if tuple(sorted(result)) != tuple(sorted(PACKAGED_RUBY_COMMON_IDS + PACKAGED_RUBY_MISSING_IDS)):
+            raise VerificationError("PACKAGED_RUBY_STATIC_INVENTORY")
+        return PACKAGED_RUBY_COMMON_IDS if gate.endswith("-source") else tuple(sorted(result))
+    if gate in {"ruby-native-public-source", "ruby-native-public-wheel"}:
+        if not set(RUBY_PUBLIC_API_IDS) <= set(result):
+            raise VerificationError("RUBY_NATIVE_PUBLIC_INVENTORY")
+        return RUBY_PUBLIC_API_IDS
     return tuple(sorted(result))
+
+
+def _ruby_partition_contract(gate: str) -> tuple:
+    """The only four admitted Ruby partition gates; no caller-owned contract."""
+    if type(gate) is not str or gate not in PARTITIONED_RUBY_GATES:
+        raise VerificationError("RUBY_PARTITION_GATE_CONTRACT")
+    _gate, filename, total, healthy, seconds, owner = next(row for row in RUBY_PARTITION_CONTRACTS if row[0] == gate)
+    poison = (RUBY_OWNER_POISON_PARTITIONS if gate == "ruby-native-owner" else
+              RUBY_NATIVE_CAPTURE_POISON_PARTITIONS if gate == "ruby-native-capture" else
+              tuple((mode, owner + "#" + method) for mode, method in RUBY_PROBE_POISON_PARTITIONS))
+    return filename, total, healthy, seconds, poison
+
+
+def ruby_capture_ids(source: Path, gate: str, partition: str = "all", *, deadline: float | None = None) -> tuple[str, ...]:
+    """Complete source inventory, its exact healthy complement and fixed singletons."""
+    _filename, total, healthy_count, _seconds, parts = _ruby_partition_contract(gate)
+    if type(partition) is not str or partition not in {"all", "healthy", *dict(parts)}:
+        raise VerificationError("RUBY_PARTITION_SELECTION")
+    if deadline is not None:
+        check_clock(deadline)
+    complete = ruby_expected_ids(source, gate)
+    poison = tuple(identifier for _name, identifier in parts)
+    if (type(complete) is not tuple or len(complete) != total
+            or any(type(identifier) is not str or not re.fullmatch(r"[A-Za-z0-9_:]+#test_[A-Za-z0-9_]+", identifier)
+                   for identifier in complete)
+            or tuple(sorted(set(complete))) != complete or not set(poison) <= set(complete)):
+        raise VerificationError("RUBY_PARTITION_STATIC_INVENTORY")
+    healthy = tuple(identifier for identifier in complete if identifier not in poison)
+    if len(healthy) != healthy_count or tuple(sorted(healthy + poison)) != complete:
+        raise VerificationError("RUBY_PARTITION_UNION")
+    if deadline is not None:
+        check_clock(deadline)
+    return {"all": complete, "healthy": healthy,
+            **{name: (identifier,) for name, identifier in parts}}[partition]
+
+
+def ruby_capture_argv(paths: Paths, gate: str, partition: str, *, deadline: float) -> tuple[str, ...]:
+    """Source-bound complete-ID filters only, never a caller-supplied method."""
+    if partition == "all":
+        raise VerificationError("RUBY_MIXED_CAPTURE")
+    filename, _total, _healthy, _seconds, _parts = _ruby_partition_contract(gate)
+    expected = ruby_capture_ids(paths.source, gate, partition, deadline=deadline)
+    # The static identity grammar above contains no regexp metacharacters.
+    # Match complete class#method IDs; an identically named method in another
+    # class is not a substitute for this original source obligation.
+    filter_ = "/\\A(?:" + "|".join(expected) + ")\\z/"
+    return (*paths.bundle, "exec", str(paths.ruby),
+            str(paths.source / "tests/workflow" / filename), "--verbose", "--name", filter_)
 
 
 def execute_pipeline(steps: tuple[Step, ...], perform: Callable[[Step], CheckResult], *, platform: str) -> Report:
@@ -652,8 +917,9 @@ def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, de
         runs, assertions, failures, errors, skips = map(int, matches[0])
         if runs != step.expected_tests or assertions < 1 or failures or errors or skips:
             raise VerificationError("MINITEST_RESULT_REJECTED")
-        expected = ruby_expected_ids(paths.source, step.id)
-        completed, structure = minitest_records(stdout, expected)
+        expected = (ruby_capture_ids(paths.source, step.id, step.native_partition, deadline=deadline)
+                    if step.id in PARTITIONED_RUBY_GATES else ruby_expected_ids(paths.source, step.id))
+        completed, structure = minitest_records(stdout, expected, deadline=deadline)
         if structure["reasons"] or len(completed) != runs or len(expected) != runs or tuple(sorted(completed)) != expected:
             raise VerificationError("MINITEST_COMPLETION_INVENTORY")
         details.update(tests=runs, assertions=assertions, completed=completed)
@@ -690,7 +956,7 @@ def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, de
         # independently verifies expected complete identities after real finality.
         if step.id in ("python-full", "python-wheel"):
             selection = "full" if step.id == "python-full" else "wheel"
-            expected = checks.expected_python_ids(paths.source, selection)
+            expected = checks.python_capture_ids(paths.source, selection, "healthy", deadline=deadline)
             tests = summary.get("tests")
             if (type(tests) is not list
                     or any(type(row) is not dict or set(row) != {"id", "outcome"}
@@ -832,6 +1098,155 @@ def capture_observations(result) -> dict:
             "seconds": round(result.duration, 3), "cleanup_error_count": len(result.cleanup_errors)}
 
 
+def require_original_finality(result) -> None:
+    if (result.ok is not True or type(result.returncode) is not int or result.returncode != 0
+            or result.waited is not True or result.stdout_eof is not True or result.stderr_eof is not True
+            or result.domain_finality is not True or result.timed_out is not False or result.cancelled is not False
+            or result.primary_error is not None or result.cleanup_errors
+            or type(result.stdout) is not bytes or type(result.stderr) is not bytes):
+        raise VerificationError("COMMAND_EXIT_OR_FINALITY")
+
+
+def original_native_capture(session, argv, paths: Paths, rows: list[dict], name: str, *,
+                            deadline: float, seconds: int, env: dict, output_limit: int = 65536):
+    """One original ordinary capture plus idle closure under the same cutoff.
+
+    Never synthesize/merge CapturedRun objects. Semantic parsing follows this
+    function; even later rejection retains the original wait/EOF facts.
+    """
+    check_clock(deadline)
+    session.ensure_idle(deadline=deadline)
+    row = {"stage": name, "status": "RUNNING"}
+    rows.append(row)
+    result = session.run(list(map(str, argv)), cwd=paths.work, env=env, seconds=seconds,
+                         cpu_seconds=180, output_limit=output_limit, profile="ordinary", absolute_deadline=deadline)
+    row["capture"] = capture_observations(result)
+    primary = None
+    try:
+        require_original_finality(result)
+    except BaseException as exc:
+        primary = exc
+    try:
+        session.ensure_idle(deadline=deadline)
+    except BaseException as exc:
+        if primary is None:
+            primary = exc
+        else:
+            row["idle_error"] = error_details(exc)
+    if primary is not None:
+        row["status"] = "FAIL"
+        raise primary
+    check_clock(deadline)
+    row["status"] = "FINALIZED"
+    return result
+
+
+def native_runtime_record(raw: bytes, prefix: str) -> dict:
+    if (type(raw) is not bytes or not 0 < len(raw) <= 64 * 1024 or not raw.endswith(b"\n")
+            or raw.count(b"\n") != 1 or any(value < 0x20 or value > 0x7e for value in raw[:-1])):
+        raise VerificationError("NATIVE_RUNTIME_RECORD")
+    text = raw.decode("ascii")
+    if not text.startswith(prefix):
+        raise VerificationError("NATIVE_RUNTIME_RECORD")
+    try:
+        value = strict_json(text[len(prefix):-1])
+    except (ValueError, TypeError, RecursionError):
+        raise VerificationError("NATIVE_RUNTIME_RECORD") from None
+    if type(value) is not dict:
+        raise VerificationError("NATIVE_RUNTIME_RECORD")
+    return value
+
+
+def native_python_observation(raw: bytes, paths: Paths, *, minor: int, phase: str,
+                              executable: Path, prefix: Path) -> dict:
+    """Compare actual child metadata with the prebound narrow provider pair."""
+    data = native_runtime_record(raw, NATIVE_PYTHON_RUNTIME_PREFIX)
+    package = (paths.work / "source-build/src/mobile_release" if phase == "source"
+               else paths.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
+    expected = {"schema", "phase", "implementation", "version", "executable", "base_prefix", "base_exec_prefix",
+                "prefix", "exec_prefix", "isolated", "package_root", "origins"}
+    if (set(data) != expected or data["schema"] != "mrk-native-python-runtime-v1"
+            or type(data["phase"]) is not str or data["phase"] != phase
+            or data["implementation"] != "cpython" or data["isolated"] is not True
+            or type(data["version"]) is not list or len(data["version"]) != 3
+            or any(type(value) is not int for value in data["version"])
+            or data["version"][:2] != [3, minor] or not 0 <= data["version"][2] < 1000
+            or data["executable"] != str(executable) or data["base_prefix"] != str(prefix)
+            or data["base_exec_prefix"] != str(prefix)
+            or data["prefix"] != str(prefix) or data["exec_prefix"] != str(prefix)
+            or data["package_root"] != str(package) or type(data["origins"]) is not dict
+            or not {"mobile_release", "mobile_release._native_process"} <= data["origins"].keys()
+            or len(data["origins"]) > 128):
+        raise VerificationError("NATIVE_PYTHON_RUNTIME_ORIGIN")
+    for name, origin in data["origins"].items():
+        if type(name) is not str or not re.fullmatch(r"mobile_release(?:\.[A-Za-z_][A-Za-z0-9_]*)?", name):
+            raise VerificationError("NATIVE_PYTHON_RUNTIME_ORIGIN")
+        wanted = package / ("__init__.py" if name == "mobile_release" else name.split(".")[1] + ".py")
+        if type(origin) is not str or origin != str(wanted):
+            raise VerificationError("NATIVE_PYTHON_RUNTIME_ORIGIN")
+    return {"phase": phase, "version": ".".join(map(str, data["version"])), "implementation": "cpython",
+            "isolated": True, "origin_scope": "measured-loaded-modules", "module_count": len(data["origins"])}
+
+
+def native_ruby_observation(raw: bytes, paths: Paths, *, phase: str, bundled: bool,
+                            platform: str, deadline: float) -> dict:
+    data = native_runtime_record(raw, NATIVE_RUBY_RUNTIME_PREFIX)
+    tooling = paths.source if phase == "source" else paths.work / "wheel-venv/share/mobile-release-kit"
+    helper = tooling / "fastlane/native_process_spawn.rb"
+    if (set(data) != {"schema", "phase", "helper_sha256", "source_locations", "runtime"}
+            or data["schema"] != "mrk-native-ruby-runtime-v1" or data["phase"] != phase
+            or type(data["source_locations"]) is not dict
+            or set(data["source_locations"]) != {"declared_abi", "runtime_info"}
+            or type(data["runtime"]) is not dict
+            or data["helper_sha256"] != hashlib.sha256(read_regular(helper, deadline=deadline)).hexdigest()):
+        raise VerificationError("NATIVE_RUBY_RUNTIME_ORIGIN")
+    for location in data["source_locations"].values():
+        if (type(location) is not list or len(location) != 2 or location[0] != str(helper)
+                or type(location[1]) is not int or not 0 < location[1] <= 100000):
+            raise VerificationError("NATIVE_RUBY_RUNTIME_ORIGIN")
+    runtime = data["runtime"]
+    fields = {"schema", "ruby_engine", "ruby_version", "fiddle_version", "family", "architecture",
+              "ruby_executable", "origin", "ruby_library_root", "native_extension_roots", "fiddle_features", "gemfile"}
+    if (set(runtime) != fields or runtime["schema"] != "mrk-native-process-runtime-v1"
+            or runtime["ruby_engine"] != "ruby" or runtime["ruby_version"] != "3.3.12"
+            or runtime["fiddle_version"] != "1.1.2"
+            or runtime["family"] != ("linux-glibc" if platform == "linux" else "darwin")
+            or runtime["architecture"] != os.uname().machine or runtime["ruby_executable"] != str(paths.ruby)
+            or runtime["origin"] != ("bundle" if bundled else "default")
+            or runtime["gemfile"] != (str(tooling / "Gemfile") if bundled else None)
+            or type(runtime["fiddle_features"]) is not dict
+            or set(runtime["fiddle_features"]) != {"fiddle", "version", "function", "closure", "extension"}
+            or type(runtime["native_extension_roots"]) is not list
+            or not 1 <= len(runtime["native_extension_roots"]) <= 2):
+        raise VerificationError("NATIVE_RUBY_RUNTIME_ORIGIN")
+    allowed = (paths.ruby.parent.parent, paths.work / "bundle") if bundled else (paths.ruby.parent.parent,)
+
+    def origin_path(value):
+        if type(value) is not str or not value.startswith("/") or len(value) > 4096:
+            raise VerificationError("NATIVE_RUBY_RUNTIME_ORIGIN")
+        path = Path(value)
+        if (path.resolve(strict=True) != path or not any(path.is_relative_to(root) for root in allowed)):
+            raise VerificationError("NATIVE_RUBY_RUNTIME_ORIGIN")
+        return path
+
+    library = origin_path(runtime["ruby_library_root"])
+    extensions = tuple(origin_path(value) for value in runtime["native_extension_roots"])
+    if len(set(extensions)) != len(extensions):
+        raise VerificationError("NATIVE_RUBY_RUNTIME_ORIGIN")
+    feature_hashes = {}
+    for name, value in runtime["fiddle_features"].items():
+        path = origin_path(value)
+        if name == "extension":
+            if path.parent not in extensions or path.name not in {"fiddle.so", "fiddle.bundle"}:
+                raise VerificationError("NATIVE_RUBY_RUNTIME_ORIGIN")
+        elif path != library / ("fiddle.rb" if name == "fiddle" else f"fiddle/{name}.rb"):
+            raise VerificationError("NATIVE_RUBY_RUNTIME_ORIGIN")
+        feature_hashes[name] = hashlib.sha256(read_regular(path, deadline=deadline, maximum=64 * 1024**2)).hexdigest()
+    return {"phase": phase, "version": "3.3.12", "fiddle_version": "1.1.2",
+            "origin": runtime["origin"], "origin_scope": "measured-loaded-methods-and-features",
+            "helper_sha256": data["helper_sha256"], "feature_sha256": feature_hashes}
+
+
 def failure_details(result, step: Step | None = None, paths: Paths | None = None,
                     *, checks=None, deadline: float | None = None, platform: str | None = None) -> dict:
     """Public-safe observations only; never forward raw child diagnostics."""
@@ -864,12 +1279,12 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                 if profile is not None:
                     value["storage_profile"] = profile
             if (step is not None and paths is not None and checks is not None
-                    and step.id in {"python-full", "python-wheel"}
+                    and step.id in {"python-full", "python-wheel"} and step.parser == "check"
                     and data.get("check") == step.id and data.get("ok") is False
                     and "failure_callbacks" in detail):
                 try:
-                    expected = checks.expected_python_ids(paths.source,
-                        "full" if step.id == "python-full" else "wheel", deadline=deadline)
+                    expected = checks.python_capture_ids(paths.source,
+                        "full" if step.id == "python-full" else "wheel", "healthy", deadline=deadline)
                     callbacks = python_failure_callbacks(detail["failure_callbacks"], expected)
                     if callbacks is not None:
                         value["failure_callbacks"] = callbacks
@@ -888,7 +1303,8 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
         try:
             if deadline is not None:
                 check_clock(deadline)
-            expected_ids = ruby_expected_ids(paths.source, step.id)
+            expected_ids = (ruby_capture_ids(paths.source, step.id, step.native_partition, deadline=deadline)
+                            if step.id in PARTITIONED_RUBY_GATES else ruby_expected_ids(paths.source, step.id))
             expected = set(expected_ids)
             text = result.stdout.decode("utf-8", "replace")
             _, value["minitest_structure"] = minitest_records(text, expected_ids, deadline=deadline)
@@ -898,9 +1314,11 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
             value["failed_tests"] = sorted(expected.intersection(failed))
             allowed = {"tests/workflow/" + row[1] for row in RUBY_SUITES}
             allowed.update("tests/workflow/" + name for name in
-                           ("upload_process_fixture.rb", "upload_process_ownership.rb"))
+                           ("upload_process_fixture.rb", "upload_process_ownership.rb",
+                            "test_installed_ruby_capture.rb", "installed_ruby_capture_fixture.rb"))
             allowed.update("fastlane/" + name for name in
                            ("native_upload_validation.rb", "ios_upload_validation.rb",
+                            "native_process_spawn.rb", "native_upload_process.rb",
                             "android_upload_validation.rb", "release_support.rb"))
             locations = re.findall(r"((?:tests/workflow|fastlane)/[A-Za-z0-9_]+\.rb):([1-9][0-9]{0,5})", text)
             value["ruby_locations"] = sorted({(name, int(line)) for name, line in locations
@@ -911,8 +1329,10 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
             if deadline is not None:
                 check_clock(deadline)
             value["ruby_diagnostics_unavailable"] = True
-    if step is not None and paths is not None and checks is not None and step.id in {
-            "native-profile-source", "native-profile-wheel"}:
+    if (step is not None and paths is not None and checks is not None
+            and (step.id in {"native-profile-source", "native-profile-wheel"}
+                 or step.id in {"python-full", "python-wheel"} and step.parser == "native"
+                 and step.native_partition in PYTHON_POISON_PARTITIONS)):
         stderr = result.stderr.decode("utf-8", "replace")
         lowered = stderr.lower()
         # These fixed tokens are observations of captured text, not diagnoses
@@ -961,7 +1381,7 @@ def make_layout(paths: Paths, session, *, deadline: float) -> None:
     os.chown(paths.work, 0, 0)
     os.chmod(paths.work, 0o755)
     for name in ("source-venv", "wheel-venv", "bundler", "bundle", "gem-cache",
-                 "bundle-config", "bundle-home", "wheels", "checks"):
+                 "bundle-config", "bundle-home", "wheels", "checks", "native-process-abi", "ruby-negative"):
         check_clock(deadline)
         path = paths.work / name
         path.mkdir(mode=0o700)
@@ -1017,19 +1437,310 @@ def tool_evidence(paths: Paths, session, platform: str, *, deadline: float) -> d
     return data
 
 
+def native_compiler_binding(session, platform: str, *, deadline: float) -> tuple[Path, dict, str]:
+    """Consume only the successfully admitted toolchain map; no rediscovery."""
+    tools = session.native_process_toolchain
+    expected = {"gcc", "evidence"} if platform == "linux" else {"clang", "linker", "sdk", "toolchain", "evidence"}
+    if type(tools) is not dict or set(tools) != expected or type(tools["evidence"]) is not dict:
+        raise VerificationError("NATIVE_COMPILER_BINDING")
+    compiler = tools["gcc" if platform == "linux" else "clang"]
+    if not isinstance(compiler, Path) or not compiler.is_absolute() or compiler.resolve(strict=True) != compiler:
+        raise VerificationError("NATIVE_COMPILER_BINDING")
+    if platform == "linux":
+        if (os.uname().machine != "x86_64" or not compiler.is_relative_to(Path("/usr"))
+                or compiler != Path("/usr/bin/x86_64-linux-gnu-gcc-13").resolve(strict=True)
+                or set(tools["evidence"]) != {"gcc_sha256", "provider", "compiler_family"}
+                or tools["evidence"]["provider"] != "ubuntu-24.04-distribution"
+                or tools["evidence"]["compiler_family"] != "gcc-13"):
+            raise VerificationError("NATIVE_COMPILER_BINDING")
+    elif platform != "macos" or not compiler.is_relative_to(tools["toolchain"]):
+        raise VerificationError("NATIVE_COMPILER_BINDING")
+    digest = hashlib.sha256(read_regular(compiler, deadline=deadline, maximum=512 * 1024**2)).hexdigest()
+    if tools["evidence"].get("gcc_sha256" if platform == "linux" else "clang_sha256") != digest:
+        raise VerificationError("NATIVE_COMPILER_CHANGED")
+    return compiler, tools, digest
+
+
+def native_compiler_version(result, platform: str) -> str:
+    require_original_finality(result)
+    text = result.stdout.decode("ascii", "strict")
+    lines = text.splitlines()
+    pattern = (r"x86_64-linux-gnu-gcc-13 \([ -~]{1,160}\) 13\.[0-9]{1,3}\.[0-9]{1,3}"
+               if platform == "linux" else r"Apple clang version [A-Za-z0-9 ._()+-]{1,160}")
+    if (result.stderr or not text.endswith("\n") or not 1 <= len(lines) <= 10
+            or not re.fullmatch(pattern, lines[0])
+            or any(len(line) > 1024 or any(ord(char) < 32 or ord(char) > 126 for char in line) for line in lines)):
+        raise VerificationError("NATIVE_COMPILER_VERSION")
+    return lines[0]
+
+
+def retain_native_header(paths: Paths, session, checks, platform: str, state: NativeABIState,
+                         rows: list[dict], *, deadline: float) -> dict:
+    if (type(state) is not NativeABIState or any(value is not None for value in (
+            state.compiler_capture, state.build_capture, state.header_capture, state.compiler,
+            state.compiler_sha256, state.source_sha256, state.binary_sha256, state.platform, state.architecture))
+            or state.phases):
+        raise VerificationError("NATIVE_ABI_REPEATED_PRODUCER")
+    compiler, tools, compiler_hash = native_compiler_binding(session, platform, deadline=deadline)
+    source = paths.source / "tests/workflow/native_process_abi.c"
+    source_hash = hashlib.sha256(read_regular(source, deadline=deadline, maximum=65536)).hexdigest()
+    binary = paths.work / "native-process-abi/header-record"
+    if list(binary.parent.iterdir()):
+        raise VerificationError("NATIVE_ABI_OUTPUT_EXISTS")
+    # GCC's assembler/linker must never search mutable work, venv or Bundler
+    # directories. No CPATH/GCC_EXEC_PREFIX/COMPILER_PATH or arbitrary -B/-I.
+    env = {"PATH": "/usr/bin:/bin"} if platform == "linux" else {
+        "DEVELOPER_DIR": "/Applications/Xcode_26.3.app/Contents/Developer",
+    }
+    version_argv = (compiler, "--version") if platform == "linux" else (compiler, "--no-default-config", "--version")
+    version = original_native_capture(session, version_argv, paths, rows, "compiler-version",
+                                      deadline=deadline, seconds=15, env=env)
+    compiler_version = native_compiler_version(version, platform)
+    rows[-1]["status"] = "PASS"
+    architecture = os.uname().machine
+    if platform == "linux":
+        argv = (compiler, "-D_GNU_SOURCE", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+                source, "-o", binary)
+    else:
+        if architecture not in {"arm64", "x86_64"}:
+            raise VerificationError("NATIVE_ABI_ARCHITECTURE")
+        argv = (compiler, "--no-default-config", "-fno-modules", "-std=c11", "-D_DARWIN_C_SOURCE",
+                "-O2", "-Wall", "-Wextra", "-Werror", "-arch", architecture,
+                "-isysroot", tools["sdk"], "-B", tools["toolchain"] / "usr/bin",
+                "-Wl,-adhoc_codesign", source, "-o", binary)
+    compiled = original_native_capture(session, argv, paths, rows, "compiler-build", deadline=deadline,
+                                       seconds=120, env=env)
+    if compiled.stdout or compiled.stderr or list(binary.parent.iterdir()) != [binary]:
+        raise VerificationError("NATIVE_ABI_BUILD_OUTPUT")
+    # Reading/sealing is legal only now: the original compiler is waited, both
+    # captures ended, and the Session verified every producer is gone.
+    binary_hash = hashlib.sha256(read_regular(binary, deadline=deadline, maximum=8 * 1024**2)).hexdigest()
+    if not binary.stat().st_mode & 0o111:
+        raise VerificationError("NATIVE_ABI_BINARY_MODE")
+    freeze_tree(binary.parent, deadline=deadline)
+    if hashlib.sha256(read_regular(binary, deadline=deadline, maximum=8 * 1024**2)).hexdigest() != binary_hash:
+        raise VerificationError("NATIVE_ABI_BINARY_CHANGED")
+    rows[-1]["status"] = "PASS"
+    header = original_native_capture(session, (binary,), paths, rows, "public-header-and-no-child-controls",
+                                     deadline=deadline, seconds=30, env={}, output_limit=8192)
+    if header.stderr:
+        raise VerificationError("NATIVE_ABI_HEADER_OUTPUT")
+    record = checks.parse_abi_record(header.stdout)
+    if record["family"] != ("linux-glibc" if platform == "linux" else "darwin") or record["architecture"] != architecture:
+        raise VerificationError("NATIVE_ABI_HOST_MISMATCH")
+    rows[-1]["status"] = "PASS"
+    state.compiler_capture, state.build_capture, state.header_capture = version, compiled, header
+    state.compiler, state.compiler_sha256, state.source_sha256 = compiler, compiler_hash, source_hash
+    state.binary_sha256, state.platform, state.architecture = binary_hash, platform, architecture
+    return {"compiler_version": compiler_version, "compiler_sha256": compiler_hash,
+            "source_sha256": source_hash, "binary_sha256": binary_hash,
+            "header_sha256": hashlib.sha256(header.stdout).hexdigest(),
+            "family": record["family"], "architecture": architecture, "toolchain": tools["evidence"]}
+
+
+def require_retained_header(paths: Paths, session, platform: str, state: NativeABIState, *, deadline: float) -> None:
+    if (type(state) is not NativeABIState or state.platform != platform or state.architecture != os.uname().machine
+            or state.header_capture is None or state.compiler_capture is None or state.build_capture is None):
+        raise VerificationError("NATIVE_ABI_ORIGINAL_HEADER_REQUIRED")
+    for result in (state.compiler_capture, state.build_capture, state.header_capture):
+        require_original_finality(result)
+    compiler, _tools, digest = native_compiler_binding(session, platform, deadline=deadline)
+    if compiler != state.compiler or digest != state.compiler_sha256:
+        raise VerificationError("NATIVE_ABI_COMPILER_DRIFT")
+    for path, maximum, wanted in (
+        (paths.source / "tests/workflow/native_process_abi.c", 65536, state.source_sha256),
+        (paths.work / "native-process-abi/header-record", 8 * 1024**2, state.binary_sha256),
+    ):
+        info = path.lstat()
+        if (info.st_uid != 0 or info.st_mode & 0o222
+                or hashlib.sha256(read_regular(path, deadline=deadline, maximum=maximum)).hexdigest() != wanted):
+            raise VerificationError("NATIVE_ABI_FROZEN_SOURCE_OR_BINARY_DRIFT")
+
+
+def python_declaration_argv(paths: Paths, executable: Path, minor: int, phase: str) -> tuple[str, ...]:
+    return (str(executable), "-I", "-S", "-B", str(paths.source / "tests/workflow/run_native_profile_checks.py"),
+            f"--abi-3{minor}-{phase}")
+
+
+def parse_native_python_controls(result, expected: tuple[str, ...]) -> list[str]:
+    require_original_finality(result)
+    stderr = result.stderr.decode("utf-8", "strict")
+    if any(line.startswith(NATIVE_DIAGNOSTIC_PREFIX) for line in stderr.splitlines()):
+        raise VerificationError("NATIVE_FAILURE_DIAGNOSTIC_ON_SUCCESS")
+    footers = re.findall(r"(?m)^Ran (\d+) tests? in [0-9.]+s\s*$", stderr)
+    if footers != [str(len(expected))] or re.findall(r"(?m)^(OK)[ \t]*$", stderr) != ["OK"] or "skipped" in stderr:
+        raise VerificationError("NATIVE_COMPATIBILITY_RESULT")
+    completed = re.findall(r"(?m)^(test_[A-Za-z0-9_]+) \(([A-Za-z0-9_.]+)\) \.\.\. ok\s*$", stderr)
+    observed = tuple(sorted(owner if owner.endswith("." + name) else f"{owner}.{name}" for name, owner in completed))
+    if observed != expected:
+        raise VerificationError("NATIVE_COMPATIBILITY_INVENTORY")
+    return list(observed)
+
+
+def native_phase_environment(paths: Paths, platform: str, phase: str, *, ruby: bool = False) -> dict:
+    env = dict(environment(paths, platform))
+    if phase == "wheel":
+        env["PATH"] = str(paths.wheel_python.parent) + ":" + env["PATH"]
+        env["MOBILE_RELEASE_TEST_PYTHON"] = str(paths.wheel_python)
+        if ruby:
+            env["BUNDLE_GEMFILE"] = str(paths.work / "wheel-venv/share/mobile-release-kit/Gemfile")
+    return env
+
+
+def perform_native_abi_gate(step: Step, paths: Paths, session, checks, platform: str,
+                            state: NativeABIState, *, deadline: float) -> CheckResult:
+    cutoff = min(deadline, time.monotonic() + 300.0)
+    details = {"stage": "contract", "captures": []}
+    rows = details["captures"]
+    try:
+        phase = {"native-process-abi-source": "source", "native-process-abi-wheel": "wheel"}.get(step.id)
+        if phase is None or step != Step(step.id, kind="native-abi", seconds=300) or type(state) is not NativeABIState:
+            raise VerificationError("NATIVE_ABI_GATE_CONTRACT")
+        check_clock(cutoff)
+        session.ensure_idle(deadline=cutoff)
+        check_clock(cutoff)
+        check_capacity(paths.work, 64 * 1024**2)
+        if phase == "source":
+            details["header"] = retain_native_header(paths, session, checks, platform, state, rows, deadline=cutoff)
+        elif set(state.phases) != {"source"}:
+            raise VerificationError("NATIVE_ABI_PHASE_ORDER")
+        require_retained_header(paths, session, platform, state, deadline=cutoff)
+        details["stage"] = "package"
+        package = (paths.work / "source-build/src/mobile_release" if phase == "source"
+                   else paths.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
+        details["package"] = checks.inspect_native_package(paths.source, package, deadline=cutoff)
+        tooling = paths.source if phase == "source" else paths.work / "wheel-venv/share/mobile-release-kit"
+        for name in ("Gemfile", "Gemfile.lock", "fastlane/native_process_spawn.rb",
+                     "fastlane/native_upload_process.rb", "fastlane/native_upload_validation.rb"):
+            if read_regular(tooling / name, deadline=cutoff) != read_regular(paths.source / name, deadline=cutoff):
+                raise VerificationError("NATIVE_ABI_TOOLING_BYTES")
+        python = paths.source_python if phase == "source" else paths.wheel_python
+        python_prefix = Path(sys.base_prefix).resolve(strict=True)
+        env = native_phase_environment(paths, platform, phase)
+        details["stage"] = "declarations"
+        py = original_native_capture(session, python_declaration_argv(paths, python, 11, phase), paths, rows,
+                                     "python-declaration", deadline=cutoff, seconds=30, env=env)
+        python_info = native_python_observation(py.stderr, paths, minor=11, phase=phase,
+                                                executable=python, prefix=python_prefix)
+        declarations, ruby_info = [], []
+        for bundled in (True, False):
+            argv = ((*paths.bundle, "exec", str(paths.ruby)) if bundled else
+                    (str(paths.ruby), "--disable-gems", "--disable=rubyopt"))
+            ruby = original_native_capture(session, (*argv, "-e", RUBY_ABI_DECLARATION,
+                                            tooling / "fastlane/native_process_spawn.rb", phase), paths, rows,
+                                            "ruby-bundle-declaration" if bundled else "ruby-default-declaration",
+                                            deadline=cutoff, seconds=30,
+                                            env=native_phase_environment(paths, platform, phase, ruby=True) if bundled else {})
+            ruby_info.append(native_ruby_observation(ruby.stderr, paths, phase=phase, bundled=bundled,
+                                                     platform=platform, deadline=cutoff))
+            checks.compare_abi_records(state.header_capture.stdout, py.stdout, ruby.stdout)
+            rows[-1]["status"] = "PASS"
+            declarations.append(ruby)
+        # The Python observation is not marked complete merely by parsing its
+        # JSON. Both actual Ruby contexts and the actual C header must agree.
+        next(row for row in rows if row["stage"] == "python-declaration")["status"] = "PASS"
+        details.update(python=python_info, ruby=ruby_info, stage="public-controls")
+        public_ids = checks.native_compatibility_ids(paths.source, public_only=True, deadline=cutoff)
+        public = original_native_capture(session, (str(python), "-I", "-S", "-B",
+                                          str(paths.source / "tests/workflow/run_native_profile_checks.py"),
+                                          f"--public-311-{phase}"), paths, rows, "python-public-controls",
+                                          deadline=cutoff, seconds=60, env=env)
+        native_python_observation(public.stdout, paths, minor=11, phase=phase, executable=python, prefix=python_prefix)
+        completed = parse_native_python_controls(public, public_ids)
+        rows[-1].update(status="PASS", completed=completed)
+        ruby_ids = ruby_expected_ids(paths.source, "ruby-native-public-" + phase)
+        names = "|".join(re.escape(identifier.split("#", 1)[1]) for identifier in ruby_ids)
+        filter_ = "/\\A(?:" + names + ")\\z/"
+        ruby_argv = (*paths.bundle, "exec", str(paths.ruby),
+                     str(paths.source / "tests/workflow/test_native_process_spawn.rb"),
+                     *(("--installed-tooling-root", str(paths.work / "wheel-venv")) if phase == "wheel" else ()),
+                     "--name", filter_, "--verbose")
+        ruby_env = native_phase_environment(paths, platform, phase, ruby=True)
+        ruby_step = Step("ruby-native-public-" + phase, argv=ruby_argv, cwd=paths.work,
+                         env=tuple(sorted(ruby_env.items())), seconds=60, parser="minitest", expected_tests=len(ruby_ids))
+        ruby_public = original_native_capture(session, ruby_argv, paths, rows, "ruby-public-controls",
+                                              deadline=cutoff, seconds=60, env=ruby_env)
+        parsed = parse_capture(ruby_step, ruby_public, paths, platform, checks, deadline=cutoff)
+        rows[-1].update(status="PASS", completed=parsed.details["completed"])
+        # Both original declaration objects remain in outside-owner memory;
+        # consumers never reopen a producer-created JSON/PASS file as evidence.
+        state.phases[phase] = (py, *declarations)
+        details.update(stage="complete", phase=phase,
+                       header_sha256=hashlib.sha256(state.header_capture.stdout).hexdigest())
+        check_clock(cutoff)
+        return CheckResult(True, details)
+    except BaseException as exc:
+        if rows and rows[-1]["status"] in {"RUNNING", "FINALIZED"}:
+            rows[-1]["status"] = "FAIL"
+        details["failure"] = error_details(exc)
+        return CheckResult(False, details, exc.code if isinstance(exc, VerificationError) else "NATIVE_ABI_GATE_FAILURE")
+
+
+def perform_compatibility_gate(step: Step, paths: Paths, session, checks, platform: str,
+                               state: NativeABIState, *, deadline: float) -> CheckResult:
+    cutoff = min(deadline, time.monotonic() + 120.0)
+    details = {"stage": "contract", "captures": []}
+    rows = details["captures"]
+    try:
+        fixed = {f"python-compat-{line}-{phase}": (minor, phase, pair)
+                 for line, minor, pair in zip(("312", "313", "314"), (12, 13, 14), compatibility_paths(paths))
+                 for phase in ("source", "wheel")}
+        if step.id not in fixed:
+            raise VerificationError("NATIVE_COMPATIBILITY_GATE_CONTRACT")
+        minor, phase, (python, prefix) = fixed[step.id]
+        argv = (str(python), "-I", "-S", "-B", str(paths.source / "tests/workflow/run_native_profile_checks.py"),
+                f"--compat-3{minor}-{phase}")
+        env = native_phase_environment(paths, platform, phase)
+        expected_step = Step(step.id, kind="python-compatibility", argv=argv, cwd=paths.work,
+                             env=tuple(sorted(env.items())), seconds=120)
+        if step != expected_step or type(state) is not NativeABIState or phase not in state.phases:
+            raise VerificationError("NATIVE_COMPATIBILITY_GATE_CONTRACT")
+        check_clock(cutoff)
+        session.ensure_idle(deadline=cutoff)
+        check_capacity(paths.work, 64 * 1024**2)
+        require_retained_header(paths, session, platform, state, deadline=cutoff)
+        details["stage"] = "declaration"
+        declaration = original_native_capture(session, python_declaration_argv(paths, python, minor, phase),
+                                               paths, rows, "python-declaration", deadline=cutoff, seconds=120, env=env)
+        info = native_python_observation(declaration.stderr, paths, minor=minor, phase=phase,
+                                         executable=python, prefix=prefix)
+        for ruby in state.phases[phase][1:]:
+            require_original_finality(ruby)
+            checks.compare_abi_records(state.header_capture.stdout, declaration.stdout, ruby.stdout)
+        rows[-1]["status"] = "PASS"
+        details.update(runtime=info, executable_sha256=hashlib.sha256(
+            read_regular(python, deadline=cutoff, maximum=64 * 1024**2)).hexdigest(), stage="controls")
+        expected = checks.native_compatibility_ids(paths.source, deadline=cutoff)
+        controls = original_native_capture(session, argv, paths, rows, "python-controls", deadline=cutoff,
+                                            seconds=120, env=env, output_limit=8 * 1024**2)
+        native_python_observation(controls.stdout, paths, minor=minor, phase=phase, executable=python, prefix=prefix)
+        completed = parse_native_python_controls(controls, expected)
+        rows[-1].update(status="PASS", completed=completed)
+        details.update(stage="complete", tests=len(completed), completed=completed)
+        check_clock(cutoff)
+        return CheckResult(True, details)
+    except BaseException as exc:
+        if rows and rows[-1]["status"] in {"RUNNING", "FINALIZED"}:
+            rows[-1]["status"] = "FAIL"
+        details["failure"] = error_details(exc)
+        return CheckResult(False, details, exc.code if isinstance(exc, VerificationError) else "NATIVE_COMPATIBILITY_GATE_FAILURE")
+
+
 def perform_native_gate(step: Step, paths: Paths, session, checks,
                         platform: str, *, deadline: float) -> CheckResult:
-    """Two original captures, one logical gate and one never-renewed cutoff.
+    """Authority, healthy and literal singleton originals share one logical cutoff.
 
-    The catalog retains the standalone representative command. Only these two
-    fixed gate identities may use this partitioned protocol; the Session admits
-    the narrower authority argv independently. No merged CapturedRun is made.
+    The catalog retains its representative command. Only these two fixed gate
+    identities use this native protocol; authority5 keeps its independently
+    admitted argv. Each intentional-UNKNOWN proof has its own ordinary domain.
     """
     started = time.monotonic()
     details = {"stage": "contract", "partitions": [
-        {"partition": name, "status": "UNEXECUTED"} for name in ("authority", "ordinary")
+        {"partition": name, "status": "UNEXECUTED"}
+        for name in ("authority", "ordinary", *PYTHON_POISON_PARTITIONS)
     ]}
     active = None
+    originals = []  # Root each original capture through the complete logical proof.
     try:
         check_clock(deadline)
         cutoff = min(deadline, started + 900.0)
@@ -1051,12 +1762,13 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
         check_capacity(paths.work, 64 * 1024**2)
         details["stage"] = "inventory"
         inventories = {name: checks.native_partition_ids(paths.source, name, deadline=cutoff)
-                       for name in ("all", "authority", "ordinary")}
+                       for name in ("all", "authority", "ordinary", *PYTHON_POISON_PARTITIONS)}
+        joined = tuple(identifier for row in details["partitions"] for identifier in inventories[row["partition"]])
         if (any(type(ids) is not tuple or not ids or tuple(sorted(set(ids))) != ids
                 for ids in inventories.values())
                 or len(inventories["authority"]) != 5
-                or set(inventories["authority"]) & set(inventories["ordinary"])
-                or tuple(sorted(inventories["authority"] + inventories["ordinary"])) != inventories["all"]):
+                or any(len(inventories[name]) != 1 for name in PYTHON_POISON_PARTITIONS)
+                or len(joined) != len(set(joined)) or tuple(sorted(joined)) != inventories["all"]):
             raise VerificationError("NATIVE_PARTITION_UNION")
         details["stage"] = "package"
         package = (paths.work / "source-build/src/mobile_release" if phase == "source"
@@ -1072,20 +1784,26 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
             check_clock(cutoff)
             session.ensure_idle(deadline=cutoff)
             authority = partition == "authority"
+            poison = partition in PYTHON_POISON_PARTITIONS
             part = dataclasses.replace(step, native_partition=partition,
-                argv=(str(python), "-I", *(("-S",) if authority else ()), "-B", str(entry),
-                      "--" + partition, *tail),
+                argv=(str(python), "-I", *(("-S",) if authority or poison else ()), "-B", str(entry),
+                      *((f"--{partition}-{phase}",) if poison else ("--" + partition, *tail))),
                 cwd=paths.work / f"native-authority-{phase}" if authority else step.cwd,
                 env=() if authority else step.env)
             row["status"] = "RUNNING"
             value = session.run(list(part.argv), cwd=part.cwd, env=dict(part.env), seconds=900,
                                 output_limit=8 * 1024**2, cpu_seconds=180,
-                                profile=f"native-authority-{phase}" if authority else "ordinary",
-                                absolute_deadline=cutoff)
+                                 profile=f"native-authority-{phase}" if authority else "ordinary",
+                                 absolute_deadline=cutoff)
+            originals.append(value)
             row["capture"] = capture_observations(value)
             primary = None
             try:
+                require_original_finality(value)
                 parsed = parse_capture(part, value, paths, platform, checks, deadline=cutoff)
+                if poison:
+                    row["runtime"] = native_python_observation(value.stdout, paths, minor=11, phase=phase,
+                        executable=python, prefix=paths.python.parent.parent)
             except BaseException as exc:
                 primary = exc
             try:
@@ -1104,6 +1822,7 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
                     # available even if the diagnostic parser is interrupted.
                     row["diagnostic_error"] = error_details(exc)
                 raise primary
+            check_clock(cutoff)
             observed = tuple(parsed.details["completed"])
             if observed != inventories[partition]:
                 raise VerificationError("NATIVE_PARTITION_RESULT")
@@ -1123,12 +1842,394 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
         return CheckResult(False, details, exc.code if isinstance(exc, VerificationError) else "NATIVE_GATE_FAILURE")
 
 
+def perform_python_gate(step: Step, paths: Paths, session, checks,
+                        platform: str, *, deadline: float) -> CheckResult:
+    """Healthy Linux full/wheel plus fixed original ordinary singleton domains.
+
+    The full healthy capture keeps its exact admitted aggregate-deadline argv
+    and storage profile. The original gate cutoff is an independent, tighter
+    Session bound for every part, preparation, stream/domain finality and idle.
+    """
+    started = time.monotonic()
+    details = {"stage": "contract", "partitions": [
+        {"partition": name, "status": "UNEXECUTED"} for name in ("healthy", *PYTHON_POISON_PARTITIONS)
+    ]}
+    active = None
+    originals = []
+    try:
+        check_clock(deadline)
+        cutoff = min(deadline, started + 900.0)
+        phase = {"python-full": "source", "python-wheel": "wheel"}.get(step.id)
+        if platform != "linux" or phase is None:
+            raise VerificationError("PYTHON_GATE_CONTRACT")
+        selection = "full" if phase == "source" else "wheel"
+        python = paths.source_python if phase == "source" else paths.wheel_python
+        env = tuple(sorted(native_phase_environment(paths, platform, phase).items()))
+        expected = Step(step.id, argv=(str(python), "-I", "-B", str(paths.checks), "--check", step.id,
+            "--source-root", str(paths.source), "--work-root", str(paths.work / "checks"), "--deadline", repr(deadline)),
+            cwd=paths.work, env=env, seconds=900, parser="check")
+        if step != expected:
+            raise VerificationError("PYTHON_GATE_CONTRACT")
+        session.ensure_idle(deadline=cutoff)
+        check_clock(cutoff)
+        check_capacity(paths.work, 64 * 1024**2)
+        details["stage"] = "inventory"
+        inventories = {name: checks.python_capture_ids(paths.source, selection, name, deadline=cutoff)
+                       for name in ("all", "healthy", *PYTHON_POISON_PARTITIONS)}
+        joined = tuple(identifier for row in details["partitions"] for identifier in inventories[row["partition"]])
+        if (any(type(ids) is not tuple or not ids or tuple(sorted(set(ids))) != ids for ids in inventories.values())
+                or any(len(inventories[name]) != 1 for name in PYTHON_POISON_PARTITIONS)
+                or len(joined) != len(set(joined)) or tuple(sorted(joined)) != inventories["all"]):
+            raise VerificationError("PYTHON_CAPTURE_UNION")
+        details["stage"] = "package"
+        package = (paths.work / "source-build/src/mobile_release" if phase == "source"
+                   else paths.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
+        details["package"] = checks.inspect_native_package(paths.source, package, deadline=cutoff)
+        completed = []
+        for row in details["partitions"]:
+            active = row
+            partition = row["partition"]
+            healthy = partition == "healthy"
+            details["stage"] = partition
+            check_clock(cutoff)
+            session.ensure_idle(deadline=cutoff)
+            part = step if healthy else dataclasses.replace(step, parser="native", native_partition=partition,
+                argv=(str(python), "-I", "-S", "-B", str(paths.source / "tests/workflow/run_native_profile_checks.py"),
+                      f"--{partition}-{phase}"))
+            row["status"] = "RUNNING"
+            value = session.run(list(part.argv), cwd=part.cwd, env=dict(part.env), seconds=900,
+                output_limit=8 * 1024**2, cpu_seconds=300 if healthy and selection == "full" else 180,
+                profile="python-full" if healthy and selection == "full" else "ordinary", absolute_deadline=cutoff)
+            originals.append(value)
+            row["capture"] = capture_observations(value)
+            primary = None
+            try:
+                require_original_finality(value)
+                parsed = parse_capture(part, value, paths, platform, checks, deadline=cutoff)
+                if not healthy:
+                    row["runtime"] = native_python_observation(value.stdout, paths, minor=11, phase=phase,
+                        executable=python, prefix=paths.python.parent.parent)
+            except BaseException as exc:
+                primary = exc
+            try:
+                session.ensure_idle(deadline=cutoff)
+            except BaseException as exc:
+                if primary is None:
+                    primary = exc
+                else:
+                    row["idle_error"] = error_details(exc)
+            if primary is not None:
+                try:
+                    row["capture"] = failure_details(value, part, paths, checks=checks,
+                        deadline=cutoff, platform=platform)
+                except BaseException as exc:
+                    row["diagnostic_error"] = error_details(exc)
+                raise primary
+            check_clock(cutoff)
+            if healthy:
+                row["summary"] = parsed.details["summary"]
+                observed = tuple(sorted(item["id"] for item in row["summary"]["tests"]))
+            else:
+                observed = tuple(parsed.details["completed"])
+            if observed != inventories[partition]:
+                raise VerificationError("PYTHON_CAPTURE_RESULT")
+            row.update(status="PASS", tests=len(observed), completed=list(observed))
+            completed.extend(observed)
+        details["stage"] = "union"
+        check_clock(cutoff)
+        if tuple(sorted(completed)) != inventories["all"] or len(completed) != len(set(completed)):
+            raise VerificationError("PYTHON_CAPTURE_UNION")
+        details.update(stage="complete", tests=len(completed), completed=sorted(completed))
+        check_clock(cutoff)
+        return CheckResult(True, details)
+    except BaseException as exc:
+        if active is not None and active["status"] == "RUNNING":
+            active["status"] = "FAIL"
+        details["failure"] = error_details(exc)
+        return CheckResult(False, details, exc.code if isinstance(exc, VerificationError) else "PYTHON_GATE_FAILURE")
+
+
+def perform_partitioned_ruby_gate(step: Step, paths: Paths, session, checks, platform: str,
+                                  state: NativeABIState | None, *, deadline: float) -> CheckResult:
+    """One of four closed Ruby gates, each retaining its original total cutoff.
+
+    The catalog keeps every original logical gate. No child exit, parsed footer or
+    retained UNKNOWN is a substitute for each original Session's finality/idle.
+    Filenames, method partitions, counts and budgets come only from the literal
+    per-gate contract, never from caller-provided IDs, paths or options.
+    """
+    started = time.monotonic()
+    details = {"stage": "contract", "partitions": []}
+    active = None
+    originals = []
+    try:
+        check_clock(deadline)
+        filename, total, healthy_count, seconds, poison = _ruby_partition_contract(step.id)
+        cutoff = min(deadline, started + seconds)
+        details["partitions"] = [{"partition": name, "status": "UNEXECUTED"} for name in ("healthy", *dict(poison))]
+        expected = Step(step.id, argv=(*paths.bundle, "exec", str(paths.ruby),
+            str(paths.source / "tests/workflow" / filename), "--verbose"),
+            cwd=paths.work, env=environment(paths, platform), seconds=seconds, parser="minitest", expected_tests=total)
+        if (platform not in {"linux", "macos"} or step != expected
+                or type(state) is not NativeABIState or "source" not in state.phases):
+            raise VerificationError("RUBY_PARTITION_GATE_CONTRACT")
+        session.ensure_idle(deadline=cutoff)
+        check_clock(cutoff)
+        check_capacity(paths.work, 64 * 1024**2)
+        details["stage"] = "header"
+        require_retained_header(paths, session, platform, state, deadline=cutoff)
+        if type(state.phases["source"]) is not tuple or len(state.phases["source"]) != 3:
+            raise VerificationError("RUBY_PARTITION_SOURCE_ABI_REQUIRED")
+        for original in state.phases["source"]:
+            require_original_finality(original)
+        details["stage"] = "inventory"
+        inventories = {name: ruby_capture_ids(paths.source, step.id, name, deadline=cutoff)
+                       for name in ("all", "healthy", *dict(poison))}
+        joined = tuple(identifier for row in details["partitions"] for identifier in inventories[row["partition"]])
+        if (any(type(ids) is not tuple or not ids or tuple(sorted(set(ids))) != ids for ids in inventories.values())
+                or len(inventories["all"]) != total or len(inventories["healthy"]) != healthy_count
+                or any(inventories[name] != (identifier,) for name, identifier in poison)
+                or len(joined) != len(set(joined)) or tuple(sorted(joined)) != inventories["all"]):
+            raise VerificationError("RUBY_PARTITION_UNION")
+        completed = []
+        for row in details["partitions"]:
+            active = row
+            partition = row["partition"]
+            details["stage"] = partition
+            check_clock(cutoff)
+            session.ensure_idle(deadline=cutoff)
+            part = dataclasses.replace(step, native_partition=partition,
+                argv=ruby_capture_argv(paths, step.id, partition, deadline=cutoff), expected_tests=len(inventories[partition]))
+            row["status"] = "RUNNING"
+            value = session.run(list(part.argv), cwd=part.cwd, env=dict(part.env), seconds=seconds,
+                output_limit=8 * 1024**2, cpu_seconds=180, profile="ordinary", absolute_deadline=cutoff)
+            originals.append(value)
+            row["capture"] = capture_observations(value)
+            primary = None
+            try:
+                require_original_finality(value)
+                parsed = parse_capture(part, value, paths, platform, checks, deadline=cutoff)
+            except BaseException as exc:
+                primary = exc
+            try:
+                session.ensure_idle(deadline=cutoff)
+            except BaseException as exc:
+                if primary is None:
+                    primary = exc
+                else:
+                    row["idle_error"] = error_details(exc)
+            if primary is not None:
+                try:
+                    row["capture"] = failure_details(value, part, paths, checks=checks, deadline=cutoff, platform=platform)
+                except BaseException as exc:
+                    row["diagnostic_error"] = error_details(exc)
+                raise primary
+            check_clock(cutoff)
+            observed = tuple(sorted(parsed.details["completed"]))
+            if observed != inventories[partition]:
+                raise VerificationError("RUBY_PARTITION_RESULT")
+            row.update(status="PASS", tests=len(observed), completed=list(observed), assertions=parsed.details["assertions"])
+            completed.extend(observed)
+        details["stage"] = "union"
+        check_clock(cutoff)
+        if tuple(sorted(completed)) != inventories["all"] or len(completed) != len(set(completed)):
+            raise VerificationError("RUBY_PARTITION_UNION")
+        details.update(stage="complete", tests=len(completed), completed=sorted(completed))
+        check_clock(cutoff)
+        return CheckResult(True, details)
+    except BaseException as exc:
+        if active is not None and active["status"] == "RUNNING":
+            active["status"] = "FAIL"
+        details["failure"] = error_details(exc)
+        return CheckResult(False, details, exc.code if isinstance(exc, VerificationError) else "RUBY_PARTITION_GATE_FAILURE")
+
+
+def negative_prefix_custody(paths: Paths, session, *, deadline: float) -> tuple[int, ...]:
+    """A fixed mutable leaf below the root-held work parent, never a caller path."""
+    check_clock(deadline)
+    prefix = paths.work / "ruby-negative"
+    info = prefix.lstat()
+    if (prefix.resolve(strict=True) != prefix or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != session.uid or info.st_gid != session.gid or stat.S_IMODE(info.st_mode) != 0o700):
+        raise VerificationError("NEGATIVE_PREFIX_CUSTODY")
+    return info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode
+
+
+def dispose_negative_ruby_prefix(paths: Paths, session, identity: tuple[int, ...], *, deadline: float) -> None:
+    """Only outer Session finality permits root's descriptor-safe disposal."""
+    check_clock(deadline)
+    session.ensure_idle(deadline=deadline)
+    if negative_prefix_custody(paths, session, deadline=deadline) != identity:
+        raise VerificationError("NEGATIVE_PREFIX_CUSTODY_CHANGED")
+    if not shutil.rmtree.avoids_symlink_attacks:
+        raise VerificationError("SAFE_DISPOSAL_UNAVAILABLE")
+    parent = os.open(paths.work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.stat("ruby-negative", dir_fd=parent, follow_symlinks=False)
+        if (info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode) != identity:
+            raise VerificationError("NEGATIVE_PREFIX_CUSTODY_CHANGED")
+        check_clock(deadline)
+        shutil.rmtree("ruby-negative", dir_fd=parent)
+        try:
+            os.stat("ruby-negative", dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise VerificationError("NEGATIVE_PREFIX_NOT_REMOVED")
+    finally:
+        close_owned(parent)
+    check_clock(deadline)
+
+
+def inspect_negative_ruby_prefix(paths: Paths, session, checks, wheel_sha256: str, *, deadline: float) -> dict:
+    """Actual same-wheel installation, inspected only after outer producer idle.
+
+    The prefix stays subject-owned/private for the two missing-helper tests.
+    Its positive counterpart remains frozen; no permission change or copying
+    of repository helpers can establish this negative installation.
+    """
+    prefix = paths.work / "ruby-negative"
+    negative_prefix_custody(paths, session, deadline=deadline)
+    files, directories = checks._tree(prefix, deadline=deadline)
+    site = prefix / "lib/python3.11/site-packages"
+    relative_site = "lib/python3.11/site-packages/"
+    dist = relative_site + f"mobile_release_kit-{paths.version}.dist-info/"
+    package = checks._source_package(paths.source, deadline=deadline)
+    expected = {relative_site + "mobile_release/" + name: data for name, data in package.items()}
+    expected.update({"share/mobile-release-kit/" + name: read_regular(paths.source / name, deadline=deadline)
+                     for name in checks.TOOLING_FILES})
+    generated = {dist + name for name in ("METADATA", "WHEEL", "entry_points.txt", "top_level.txt", "RECORD",
+                                         "licenses/LICENSE", "INSTALLER", "REQUESTED", "direct_url.json")}
+    generated.add("bin/mobile-release")
+    names = set(expected) | generated
+    parents = {parent.as_posix() for name in names for parent in Path(name).parents if parent != Path(".")}
+    if (set(files) != names or directories != parents
+            or any(files[name] != data for name, data in expected.items())):
+        raise VerificationError("NEGATIVE_PREFIX_INVENTORY")
+    for relative in (*sorted(directories), *sorted(files)):
+        check_clock(deadline)
+        path = prefix / relative
+        current = path.lstat()
+        if (current.st_uid != session.uid or current.st_gid != session.gid or current.st_mode & 0o7022
+                or stat.S_ISREG(current.st_mode) and current.st_nlink != 1):
+            raise VerificationError("NEGATIVE_PREFIX_CUSTODY")
+        if relative in files:
+            if read_regular(path, deadline=deadline) != files[relative]:
+                raise VerificationError("NEGATIVE_PREFIX_CHANGED")
+            if relative != dist + "RECORD" and files[relative] != read_regular(
+                    paths.work / "wheel-venv" / relative, deadline=deadline):
+                raise VerificationError("NEGATIVE_PREFIX_POSITIVE_BYTES")
+    direct = strict_json(files[dist + "direct_url.json"].decode("utf-8", "strict"))
+    if (type(direct) is not dict or direct.get("url") != paths.wheel.as_uri()
+            or type(direct.get("archive_info")) is not dict
+            or type(direct["archive_info"].get("hashes")) is not dict
+            or direct["archive_info"]["hashes"].get("sha256") != wheel_sha256):
+        raise VerificationError("NEGATIVE_PREFIX_WHEEL_ORIGIN")
+    raw = files[dist + "RECORD"]
+    if len(raw) > 256 * 1024:
+        raise VerificationError("NEGATIVE_PREFIX_RECORD_BOUND")
+    rows = list(csv.reader(io.StringIO(raw.decode("utf-8", "strict")), strict=True))
+    if len(rows) != len(files) or any(len(row) != 3 for row in rows):
+        raise VerificationError("NEGATIVE_PREFIX_RECORD_INVENTORY")
+    seen = set()
+    for name, digest, size in rows:
+        check_clock(deadline)
+        if (not name or len(name) > 4096 or name.startswith("/") or "\\" in name
+                or any(ord(char) < 32 or ord(char) == 127 for char in name)):
+            raise VerificationError("NEGATIVE_PREFIX_RECORD_PATH")
+        path = (site / name).resolve(strict=True)
+        if not path.is_relative_to(prefix):
+            raise VerificationError("NEGATIVE_PREFIX_RECORD_PATH")
+        relative = path.relative_to(prefix).as_posix()
+        if relative not in files or relative in seen:
+            raise VerificationError("NEGATIVE_PREFIX_RECORD_INVENTORY")
+        seen.add(relative)
+        if relative == dist + "RECORD":
+            if digest or size:
+                raise VerificationError("NEGATIVE_PREFIX_RECORD_SELF")
+        else:
+            wanted = "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(files[relative]).digest()).rstrip(b"=").decode("ascii")
+            if digest != wanted or size != str(len(files[relative])):
+                raise VerificationError("NEGATIVE_PREFIX_RECORD_BYTES")
+    if seen != set(files):
+        raise VerificationError("NEGATIVE_PREFIX_RECORD_INVENTORY")
+    return {"files": len(files), "wheel_sha256": wheel_sha256,
+            "record_sha256": hashlib.sha256(raw).hexdigest(), "positive_prefix_untouched": True}
+
+
+def perform_packaged_ruby_gate(step: Step, paths: Paths, session, checks, platform: str,
+                               *, deadline: float) -> CheckResult:
+    cutoff = min(deadline, time.monotonic() + 300.0)
+    details = {"captures": []}
+    rows = details["captures"]
+    try:
+        phase = {"ruby-packaged-capture-source": "source", "ruby-packaged-capture-wheel": "wheel"}.get(step.id)
+        if (phase is None or step.kind != "command" or step.seconds != 300
+                or step.cwd != paths.work or step.parser != "minitest"
+                or step.argv != packaged_ruby_argv(paths, phase, deadline=deadline)
+                or step.env != tuple(sorted(native_phase_environment(paths, platform, phase, ruby=True).items()))
+                or step.expected_tests != len(ruby_expected_ids(paths.source, step.id))):
+            raise VerificationError("PACKAGED_RUBY_GATE_CONTRACT")
+        bounded = dataclasses.replace(step, argv=packaged_ruby_argv(paths, phase, deadline=cutoff))
+        check_clock(cutoff)
+        session.ensure_idle(deadline=cutoff)
+        check_capacity(paths.work, 64 * 1024**2)
+        wheel_sha256 = None
+        if step.id == "ruby-packaged-capture-wheel":
+            prefix = paths.work / "ruby-negative"
+            identity = negative_prefix_custody(paths, session, deadline=cutoff)
+            with os.scandir(prefix) as entries:
+                if next(entries, None) is not None:
+                    raise VerificationError("NEGATIVE_PREFIX_GATE_CONTRACT")
+            wheel_sha256 = checks.inspect_project_wheel(paths.wheel, paths.source, deadline=cutoff)["sha256"]
+            pip = (paths.wheel_python, "-I", "-B", "-m", "pip", "install", "--ignore-installed", "--no-index",
+                   "--no-deps", "--no-compile", "--no-cache-dir", "--prefix", prefix, paths.wheel)
+            original_native_capture(session, pip, paths, rows, "negative-prefix-install", deadline=cutoff,
+                                    seconds=300, env=dict(bounded.env), output_limit=8 * 1024**2)
+            details["negative_prefix"] = inspect_negative_ruby_prefix(paths, session, checks, wheel_sha256, deadline=cutoff)
+            if negative_prefix_custody(paths, session, deadline=cutoff) != identity:
+                raise VerificationError("NEGATIVE_PREFIX_CUSTODY_CHANGED")
+            rows[-1]["status"] = "PASS"
+        value = original_native_capture(session, bounded.argv, paths, rows, "actual-packaged-capture",
+                                        deadline=cutoff, seconds=300, env=dict(bounded.env), output_limit=8 * 1024**2)
+        parsed = parse_capture(bounded, value, paths, platform, checks, deadline=cutoff)
+        if wheel_sha256 is not None:
+            # Local task/child closure allowed the suite's own mutations. Only
+            # now does genuine OUTER Session finality permit root reinspection.
+            after = inspect_negative_ruby_prefix(paths, session, checks, wheel_sha256, deadline=cutoff)
+            if after != details["negative_prefix"]:
+                raise VerificationError("NEGATIVE_PREFIX_NOT_RESTORED")
+            dispose_negative_ruby_prefix(paths, session, identity, deadline=cutoff)
+            details["negative_prefix"]["removed_after_outer_finality"] = True
+        rows[-1].update(status="PASS", completed=parsed.details["completed"])
+        details.update(tests=parsed.details["tests"], completed=parsed.details["completed"],
+                       origin_scope={"outer": "measured-loaded-methods", "custodian": "genuine-fixed-spawn",
+                                     "keeper": "source-bound-by-fixed-custodian", "child_local_measurement": False})
+        check_clock(cutoff)
+        return CheckResult(True, details)
+    except BaseException as exc:
+        if rows and rows[-1]["status"] in {"RUNNING", "FINALIZED"}:
+            rows[-1]["status"] = "FAIL"
+        details["failure"] = error_details(exc)
+        return CheckResult(False, details, exc.code if isinstance(exc, VerificationError) else "PACKAGED_RUBY_GATE_FAILURE")
+
+
 def perform_step(step: Step, paths: Paths, session, checks, inventory: dict,
-                 platform: str, *, deadline: float) -> CheckResult:
+                 platform: str, *, deadline: float, native_abi: NativeABIState | None = None) -> CheckResult:
+    if step.id in {"native-process-abi-source", "native-process-abi-wheel"}:
+        return perform_native_abi_gate(step, paths, session, checks, platform, native_abi, deadline=deadline)
+    if step.id in {*COMPATIBILITY_SOURCE_GATES, *COMPATIBILITY_WHEEL_GATES}:
+        return perform_compatibility_gate(step, paths, session, checks, platform, native_abi, deadline=deadline)
+    if step.id in PACKAGED_RUBY_GATES:
+        return perform_packaged_ruby_gate(step, paths, session, checks, platform, deadline=deadline)
     if step.id in {"native-profile-source", "native-profile-wheel"}:
         # Compute the native gate's absolute endpoint before any preparation,
         # census, capacity check or package inspection can consume its budget.
         return perform_native_gate(step, paths, session, checks, platform, deadline=deadline)
+    if step.id in {"python-full", "python-wheel"}:
+        return perform_python_gate(step, paths, session, checks, platform, deadline=deadline)
+    if step.id in PARTITIONED_RUBY_GATES:
+        return perform_partitioned_ruby_gate(step, paths, session, checks, platform, native_abi, deadline=deadline)
     check_clock(deadline)
     session.ensure_idle()
     # Allow room for this gate's finite install/build rather than filling the VM.
@@ -1142,7 +2243,7 @@ def perform_step(step: Step, paths: Paths, session, checks, inventory: dict,
             return CheckResult(False, failure_details(value, step, paths, checks=checks, deadline=deadline, platform=platform),
                                "COMMAND_EXIT_OR_FINALITY")
         try:
-            return parse_capture(step, value, paths, platform, checks)
+            return parse_capture(step, value, paths, platform, checks, deadline=deadline)
         except VerificationError as exc:
             return CheckResult(False, failure_details(value, step, paths, checks=checks, deadline=deadline, platform=platform), exc.code)
     if step.kind != "inspection":
@@ -1272,7 +2373,8 @@ def finalize_report(report: dict, session, *, summary: Path | None, runner_temp:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--platform", choices=("linux", "macos"), required=True)
-    for name in ("source", "python", "ruby", "runner-home", "runner-temp", "summary"):
+    for name in ("source", "python", "ruby", "runner-home", "runner-temp", "summary",
+                 "python-312", "python-313", "python-314"):
         parser.add_argument("--" + name, type=Path, required=True)
     for name in ("commit", "run-id", "run-attempt", "image"):
         parser.add_argument("--" + name, required=True)
@@ -1301,11 +2403,22 @@ def main(argv: list[str] | None = None) -> int:
         python, ruby = args.python.resolve(strict=True), args.ruby.resolve(strict=True)
         if python != Path(sys.executable).resolve() or python.parent.name != "bin" or ruby.parent.name != "bin":
             raise VerificationError("TRUSTED_RUNTIME_BINDING")
+        compatibility = []
+        for line in ("312", "313", "314"):
+            selected = getattr(args, "python_" + line)
+            if not selected.is_absolute() or ".." in selected.parts:
+                raise VerificationError("COMPATIBILITY_RUNTIME_BINDING")
+            executable = selected.resolve(strict=True)
+            info = executable.lstat()
+            if executable.parent.name != "bin" or not stat.S_ISREG(info.st_mode) or not info.st_mode & 0o111:
+                raise VerificationError("COMPATIBILITY_RUNTIME_BINDING")
+            compatibility.append((executable, canonical_directory(executable.parent.parent)))
+        compatibility = tuple(compatibility)
         if (args.platform == "linux") != (args.java_home is not None):
             raise VerificationError("PLATFORM_TOOL_CONTRACT")
         java = canonical_directory(args.java_home) if args.java_home else None
         prefixes = tuple(dict.fromkeys((Path(sys.base_prefix).resolve(strict=True), ruby.parent.parent,
-                                       *((java,) if java else ()))))
+                                       *((java,) if java else ()), *(pair[1] for pair in compatibility))))
         parent = Path("/tmp" if args.platform == "linux" else "/private/tmp")
         check_capacity(parent, 256 * 1024**2)
         root = Path(tempfile.mkdtemp(prefix=f"mrk-ci-{args.run_id}-{args.run_attempt}-", dir=parent))
@@ -1318,8 +2431,9 @@ def main(argv: list[str] | None = None) -> int:
         checks = _module(directory, "ci_checks")
         session = sandbox.Session("linux" if args.platform == "linux" else "darwin", root,
                                   python=python, ruby=ruby, runner_home=runner_home, runner_temp=runner_temp,
-                                  tool_prefixes=prefixes, deadline=deadline)
-        paths = Paths(root / "source", session.work, root / "inputs", python, ruby, java_home=java)
+                                  tool_prefixes=prefixes, compatibility_runtimes=compatibility, deadline=deadline)
+        paths = Paths(root / "source", session.work, root / "inputs", python, ruby, java_home=java,
+                      compatibility_runtimes=compatibility)
         steps = catalog(paths, args.platform, deadline=deadline)
         report["rows"] = [{"id": step.id, "status": "UNEXECUTED"} for step in steps]
         report["phase"] = "input-preparation"
@@ -1332,10 +2446,12 @@ def main(argv: list[str] | None = None) -> int:
         make_layout(paths, session, deadline=deadline)
         report["tools"] = tool_evidence(paths, session, args.platform, deadline=deadline)
         report["phase"] = "product-gates"
+        native_abi = NativeABIState()
 
         def perform(step):
             print("MRK_CI_GATE=" + step.id, flush=True)
-            return perform_step(step, paths, session, checks, inventory, args.platform, deadline=deadline)
+            return perform_step(step, paths, session, checks, inventory, args.platform,
+                                deadline=deadline, native_abi=native_abi)
 
         result = execute_pipeline(steps, perform, platform=args.platform)
         report["rows"] = list(result.rows)

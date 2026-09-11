@@ -46,6 +46,21 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
+      - name: Set up the fixed Python 3.12 compatibility runtime
+        id: python312
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Set up the fixed Python 3.13 compatibility runtime
+        id: python313
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Set up the fixed Python 3.14 compatibility runtime
+        id: python314
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
       - name: Set up pinned Ruby without project installation
         uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
         with:
@@ -67,15 +82,20 @@ jobs:
       - name: Require isolated Linux source and installed-wheel verification
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_PYTHON_312: ${{ steps.python312.outputs.python-path }}
+          MRK_PYTHON_313: ${{ steps.python313.outputs.python-path }}
+          MRK_PYTHON_314: ${{ steps.python314.outputs.python-path }}
         shell: bash
         run: |
           set -euo pipefail
           ruby_executable="$(command -v ruby)"
           [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]]
+          [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]]
           sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin PYTHONSAFEPATH=1 \
             "$MRK_PYTHON" -I -B .github/scripts/verify_ci.py \
             --platform linux --source "$GITHUB_WORKSPACE" \
             --python "$MRK_PYTHON" --ruby "$ruby_executable" \
+            --python-312 "$MRK_PYTHON_312" --python-313 "$MRK_PYTHON_313" --python-314 "$MRK_PYTHON_314" \
             --runner-home "$HOME" --runner-temp "$RUNNER_TEMP" \
             --commit "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT" --image "$ImageOS/$ImageVersion" \
@@ -102,6 +122,21 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
+      - name: Set up the fixed Python 3.12 compatibility runtime
+        id: python312
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Set up the fixed Python 3.13 compatibility runtime
+        id: python313
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Set up the fixed Python 3.14 compatibility runtime
+        id: python314
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
       - name: Set up pinned Ruby without project installation
         uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
         with:
@@ -111,15 +146,20 @@ jobs:
       - name: Require isolated macOS source and installed-wheel verification
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_PYTHON_312: ${{ steps.python312.outputs.python-path }}
+          MRK_PYTHON_313: ${{ steps.python313.outputs.python-path }}
+          MRK_PYTHON_314: ${{ steps.python314.outputs.python-path }}
         shell: bash
         run: |
           set -euo pipefail
           ruby_executable="$(command -v ruby)"
           [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]]
+          [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]]
           sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin PYTHONSAFEPATH=1 \
             "$MRK_PYTHON" -I -B .github/scripts/verify_ci.py \
             --platform macos --source "$GITHUB_WORKSPACE" \
             --python "$MRK_PYTHON" --ruby "$ruby_executable" \
+            --python-312 "$MRK_PYTHON_312" --python-313 "$MRK_PYTHON_313" --python-314 "$MRK_PYTHON_314" \
             --runner-home "$HOME" --runner-temp "$RUNNER_TEMP" \
             --commit "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT" --image "$ImageOS/$ImageVersion" \

@@ -235,10 +235,10 @@ def load_assets(source_root: Path, platform: str) -> tuple[dict, list[dict], lis
         raise PreparationError("unsupported_preparation_platform")
     manifest_bytes = read_data(source_root / ".github/verification-tools.json", 128 * 1024)
     manifest = json.loads(manifest_bytes, object_pairs_hook=unique_pairs)
-    if (type(manifest) is not dict or set(manifest) != {"schema", "python", "ruby", "gemfile_lock_sha256", "locked_gem_count", "wheels", "bundler", "actionlint"}
+    if (type(manifest) is not dict or set(manifest) != {"schema", "python", "ruby", "fiddle", "gemfile_lock_sha256", "locked_gem_count", "wheels", "bundler", "actionlint"}
             or type(manifest["schema"]) is not int or manifest["schema"] != 1
-            or manifest["python"] != "3.11" or manifest["ruby"] != "3.3.12"
-            or type(manifest["locked_gem_count"]) is not int or manifest["locked_gem_count"] != 98
+            or manifest["python"] != "3.11" or manifest["ruby"] != "3.3.12" or manifest["fiddle"] != "1.1.2"
+            or type(manifest["locked_gem_count"]) is not int or manifest["locked_gem_count"] != 99
             or type(manifest["wheels"]) is not list or len(manifest["wheels"]) != 10):
         raise PreparationError("invalid_tool_manifest")
     by_platform = {name: {} for name in ("linux", "macos")}
@@ -302,7 +302,8 @@ def load_assets(source_root: Path, platform: str) -> tuple[dict, list[dict], lis
         if not match or match[1] in checksums:
             raise PreparationError("invalid_gem_checksum_inventory")
         checksums[match[1]] = (match[2], match[3])
-    if (len(specs) != 98 or set(specs) != set(checksums) or "bundler" in specs
+    if (len(specs) != 99 or set(specs) != set(checksums) or "bundler" in specs
+            or specs.get("fiddle") != manifest["fiddle"]
             or any(version != checksums[name][0] for name, version in specs.items())):
         raise PreparationError("incomplete_gem_checksum_inventory")
     gems = [{"name": name, "version": version, "filename": f"{name}-{version}.gem",

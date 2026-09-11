@@ -19,6 +19,7 @@ from mobile_release.inspection import InspectionDeadline, MAX_INSPECTION_SECONDS
 from mobile_release.ios_artifacts import inspect_ios_artifact_set, snapshot_ios_artifacts
 
 from .ios_artifact_helpers import artifact_set, fat_image, native_image, packed_artifact_set, table_image
+from .ios_profile_helpers import framed_cms, pem
 
 
 class InspectionBudgetTests(unittest.TestCase):
@@ -32,6 +33,24 @@ class InspectionBudgetTests(unittest.TestCase):
     def table_bounds(raw):
         size = struct.unpack_from("<I", raw, 20)[0]
         return struct.unpack_from("<II", raw, 32 + size - 8)
+
+    def test_absolute_deadline_is_read_only_and_never_renewed_by_observation(self):
+        with patch("mobile_release.inspection.time.monotonic", return_value=10.25) as clock:
+            deadline = InspectionDeadline()
+            original = 10.25 + MAX_INSPECTION_SECONDS
+            self.assertEqual(deadline.expires_at, original)
+            for value in (original + 1, float("inf")):
+                with self.subTest(value=value), self.assertRaises(AttributeError):
+                    deadline.expires_at = value
+            with self.assertRaises(AttributeError):
+                del deadline.expires_at
+            clock.return_value = original - .25
+            deadline.check()
+            self.assertEqual(deadline.expires_at, original)
+            clock.return_value = original
+            with self.assertRaisesRegex(ValidationError, "shared time bound"):
+                deadline.check()
+            self.assertEqual(deadline.expires_at, original)
 
     def test_many_sections_and_records_use_real_indexed_lookup_and_chunked_reads(self):
         self.path.write_bytes(table_image(sections=4096, records=20000))
@@ -260,6 +279,59 @@ class InspectionBudgetTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValidationError, "shared time bound"):
                         operation()
                 run.assert_not_called()
+
+
+class ProfileNativeDeadlineTests(unittest.TestCase):
+    """Real CMS framing/file checks, but no process or issuer-policy execution."""
+
+    def test_native_profile_uses_absolute_cutoff_and_existing_twenty_second_cap(self):
+        from mobile_release import ios_profile_auth as auth
+
+        now = 8_000_000_000
+        certificate = b"\x30\x01\0"
+        for cutoff, timeout in ((None, 20), (now + 60_000_000_000, 20), (now + 3_000_000_000, 3)):
+            with self.subTest(cutoff=cutoff), tempfile.TemporaryDirectory(prefix="mrk-profile-clock-") as name:
+                root = Path(name)
+                with patch.object(auth.time, "monotonic_ns", return_value=now) as clock:
+                    def native(_argv, **options):
+                        self.assertEqual(options["timeout"], timeout)
+                        (root / "native-content.bin").write_bytes(b"fictional payload")
+                        (root / "native-signer.pem").write_bytes(pem(certificate))
+                        clock.return_value = now + 1_000_000_000
+                        return types.SimpleNamespace(returncode=0)
+
+                    with patch.object(auth.subprocess, "run", side_effect=native) as run, patch.object(auth, "verify_profile_signer") as trust:
+                        kwargs = {} if cutoff is None else {"deadline_ns": cutoff}
+                        self.assertEqual(auth.verify_cms(framed_cms(), root, **kwargs), b"fictional payload")
+                    self.assertEqual(run.call_count, 1)
+                    trust.assert_called_once_with(certificate, (certificate,))
+
+    def test_expiry_before_native_after_native_and_after_trust_vetoes_valid_content(self):
+        from mobile_release import ios_profile_auth as auth
+
+        now, cutoff = 8_000_000_000, 11_000_000_000
+        for phase in ("before-native", "after-native", "after-trust"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory(prefix="mrk-profile-clock-") as name:
+                root = Path(name)
+                initial = cutoff if phase == "before-native" else now
+                with patch.object(auth.time, "monotonic_ns", return_value=initial) as clock:
+                    def native(_argv, **options):
+                        self.assertEqual(options["timeout"], 3)
+                        (root / "native-content.bin").write_bytes(b"fictional payload")
+                        (root / "native-signer.pem").write_bytes(pem(b"\x30\x01\0"))
+                        if phase == "after-native":
+                            clock.return_value = cutoff
+                        return types.SimpleNamespace(returncode=0)
+
+                    def policy(*_args):
+                        if phase == "after-trust":
+                            clock.return_value = cutoff
+
+                    with patch.object(auth.subprocess, "run", side_effect=native) as run, patch.object(auth, "verify_profile_signer", side_effect=policy) as trust:
+                        with self.assertRaisesRegex(ValidationError, "authentication timed out"):
+                            auth.verify_cms(framed_cms(), root, deadline_ns=cutoff)
+                    self.assertEqual(run.call_count, int(phase != "before-native"))
+                    self.assertEqual(trust.call_count, int(phase == "after-trust"))
 
 
 if __name__ == "__main__":

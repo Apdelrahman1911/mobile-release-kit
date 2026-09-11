@@ -256,6 +256,7 @@ class ReusableWorkflowContractTests(unittest.TestCase):
             "test_apple_lanes.rb", "test_apple_production.rb", "test_apple_production_lane.rb",
             "test_apple_asset_upload.rb", "test_ios_upload_validation.rb", "test_android_upload_validation.rb",
             "test_native_upload_validation.rb", "test_native_signal_observation.rb",
+            "test_native_process_spawn.rb", "test_native_upload_process.rb", "test_installed_ruby_capture.rb",
             "test_workflow_yaml.rb", "test_supply_wif.rb",
         })
         self.assertEqual(gates["fastfile"].argv, (*paths.bundle, "exec", str(paths.ruby),
@@ -288,6 +289,7 @@ class ReusableWorkflowContractTests(unittest.TestCase):
             "Gemfile", "Gemfile.lock", "fastlane/Fastfile", "fastlane/play_store.rb", "fastlane/apple_store.rb",
             "fastlane/apple_production.rb", "fastlane/apple_asset_upload.rb", "fastlane/apple_create_retry.rb",
             "fastlane/ios_upload_validation.rb", "fastlane/android_upload_validation.rb", "fastlane/native_upload_validation.rb",
+            "fastlane/native_process_spawn.rb", "fastlane/native_upload_process.rb",
             "fastlane/release_support.rb", "fastlane/run_lane.rb", "schemas/project.schema.json", "schemas/candidate.schema.json",
             "schemas/receipt.schema.json", "schemas/store-operation-intent.schema.json", "templates/mobile-release.json",
             "templates/workflows/mobile-preflight.yml", "templates/workflows/mobile-candidate.yml",
