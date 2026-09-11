@@ -33,6 +33,8 @@ AIA_PREFIX = b"MRK_NATIVE_AIA="
 _DENIED = (1100, 1102)  # NOT_PRIVILEGED / UNKNOWN_SERVICE; needs an outside positive.
 _CASES = ("online", "offline", "mutant", "product-offline")
 _CONTRAST_CASE = "online-full-chain-offline"
+_ROOT_CONTRAST_CASE = "online-root-only-offline"
+_SIGNATURE_CASES = ("leaf-by-issuer", "issuer-by-root", "root-by-root", "issuer-signature-mutant")
 _MAX_DER = 16 * 1024
 _FAILURE_PREFIX = b"MRK_NATIVE_CONTROL_FAILED="
 _FAILURE_ROLES = frozenset(("mach", "mach-initial", "mach-nonexpand", "aia-prepare", "aia-evaluate", "invalid"))
@@ -655,6 +657,51 @@ def _fixtures(work: Path, port: int, deadline: float) -> list[dict]:
     return records
 
 
+def _signature_envelope(raw: bytes) -> tuple[bytes, bytes]:
+    """Extract original signed bytes for the fixed generated RSA/SHA256 profile.
+
+    Later TBSCertificate fields remain opaque. This is not a general certificate
+    parser or a validity oracle; the original native evaluations parse the DER.
+    """
+    _require(type(raw) is bytes and 0 < len(raw) <= _MAX_DER, "synthetic signature envelope size differs")
+
+    def field(start: int, tag: int, limit: int) -> tuple[int, int]:
+        _require(0 <= start < limit <= len(raw) and start + 2 <= limit and raw[start] == tag,
+                 "synthetic signature envelope tag or bound differs")
+        size, content = raw[start + 1], start + 2
+        if size & 0x80:
+            count = size & 0x7f
+            _require(count in (1, 2) and content + count <= limit and raw[content] != 0,
+                     "synthetic signature envelope length differs")
+            size = int.from_bytes(raw[content:content + count], "big")
+            _require(size >= 128 and (count == 1 or size >= 256),
+                     "synthetic signature envelope length is not minimal")
+            content += count
+        _require(content + size <= limit, "synthetic signature envelope crosses its enclosing bound")
+        return content, content + size
+
+    body, end = field(0, 0x30, len(raw))
+    _require(end == len(raw), "synthetic signature envelope has trailing bytes")
+    tbs, tbs_end = field(body, 0x30, end)
+    version = b"\xa0\x03\x02\x01\x02"
+    _require(tbs + len(version) <= tbs_end and raw[tbs:tbs + len(version)] == version,
+             "synthetic signature envelope version differs")
+    serial, serial_end = field(tbs + len(version), 0x02, tbs_end)
+    value = raw[serial:serial_end]
+    _require(0 < len(value) <= 20 and not value[0] & 0x80 and any(value)
+             and (len(value) == 1 or value[0] != 0 or value[1] & 0x80),
+             "synthetic signature envelope serial differs")
+    algorithm = b"\x30\x0d\x06\x09\x2a\x86\x48\x86\xf7\x0d\x01\x01\x0b\x05\x00"
+    _require(serial_end + len(algorithm) <= tbs_end
+             and raw[serial_end:serial_end + len(algorithm)] == algorithm
+             and tbs_end + len(algorithm) <= end and raw[tbs_end:tbs_end + len(algorithm)] == algorithm,
+             "synthetic signature envelope algorithm differs")
+    signature, signature_end = field(tbs_end + len(algorithm), 0x03, end)
+    _require(signature_end == end and signature_end - signature == 257 and raw[signature] == 0,
+             "synthetic signature envelope bit string differs")
+    return raw[body:tbs_end], raw[signature + 1:signature_end]
+
+
 class _Trust:
     """One fresh real BasicX509 trust object, with explicit CF reference custody."""
 
@@ -695,7 +742,7 @@ class _Trust:
         self.copy_chain = bind(security, "SecTrustCopyCertificateChain", P, [P])
         try:
             policy = self._own(policy_create())
-            # All four original cases present only the leaf. The sole separate
+            # All four original cases present only the leaf. A separate
             # post-original offline contrast supplies the complete same chain.
             certificates = [self._certificate(leaf)]
             if issuer is not None:
@@ -780,59 +827,67 @@ class _Trust:
             # Cancellation/SystemExit still reaches the original CF cleanup owner.
             return unavailable
 
-    def _anchor_observation(self, root_bytes: bytes, issuer_bytes: bytes) -> dict:
-        """Public readback/name equality, not service-side receipt or acceptance.
-
-        Every Copy-rule reference joins this trust's original cleanup owner,
-        including an out pointer acquired before a failed diagnostic returns.
-        """
-        unavailable = {"available": False, "anchors": None, "issuer_subject_equal": None}
+    def _signature_observation(self, fixture: dict) -> dict:
+        """Finite public-key checks, not trust-service or certificate-path authority."""
+        unavailable = {"available": False, "keys": None, "checks": None}
         try:
-            C, security, foundation = self.C, self.security, self.foundation
+            _require(fixture["case"] == "online", "native signature fixture differs")
+            envelopes = {role: _signature_envelope(fixture[role]) for role in ("leaf", "issuer", "root")}
+            C, security = self.C, self.security
             P = C.c_void_p
 
-            def bind(library, name, result, arguments):
-                function = getattr(library, name)
+            def bind(name, result, arguments):
+                function = getattr(security, name)
                 function.restype, function.argtypes = result, arguments
                 return function
 
-            copy_anchors = bind(security, "SecTrustCopyCustomAnchorCertificates", C.c_int32, [P, C.POINTER(P)])
-            pointer = P()
-            try:
-                status = copy_anchors(self.trust, C.byref(pointer))
-            finally:
-                if pointer.value:
-                    self.owned.append(pointer.value)
-            # Success with a null output is unavailable, not an observed empty
-            # array. In particular CFArrayGetCount must never receive NULL.
-            _require(type(status) is int and status == 0 and bool(pointer.value),
-                     "native custom anchor readback is unavailable")
-            count = self.array_count(pointer.value)
-            _require(type(count) is int and 0 <= count <= 3, "native custom anchor count differs")
-            hashes = []
-            for index in range(count):
-                certificate = self.array_item(pointer.value, index)  # Borrowed from the owned array.
-                _require(bool(certificate), "native custom anchor item is unavailable")
-                raw = self._own(self.cert_data(certificate))
-                size, location = self.data_length(raw), self.data_bytes(raw)
-                _require(type(size) is int and 0 < size <= _MAX_DER and bool(location),
-                         "native custom anchor encoding differs")
-                hashes.append(hashlib.sha256(C.string_at(location, size)).hexdigest())
-            copy_issuer = bind(security, "SecCertificateCopyNormalizedIssuerSequence", P, [P])
-            copy_subject = bind(security, "SecCertificateCopyNormalizedSubjectSequence", P, [P])
-            equal = bind(foundation, "CFEqual", C.c_ubyte, [P, P])
-            issuer_name = self._own(copy_issuer(self._certificate(issuer_bytes)))
-            root_name = self._own(copy_subject(self._certificate(root_bytes)))
-            for name in (issuer_name, root_name):
-                size = self.data_length(name)
-                _require(type(size) is int and 0 < size <= _MAX_DER,
-                         "native normalized name size differs")
-            matches = equal(issuer_name, root_name)
-            _require(type(matches) is int and matches in (0, 1), "native normalized name comparison differs")
-            return {"available": True, "anchors": hashes, "issuer_subject_equal": bool(matches)}
+            copy_key = bind("SecCertificateCopyKey", P, [P])
+            block_size = bind("SecKeyGetBlockSize", C.c_size_t, [P])
+            supported = bind("SecKeyIsAlgorithmSupported", C.c_ubyte, [P, C.c_long, P])
+            verify = bind("SecKeyVerifySignature", C.c_ubyte, [P, P, P, P, C.POINTER(P)])
+            algorithm = P.in_dll(security, "kSecKeyAlgorithmRSASignatureMessagePKCS1v15SHA256").value
+            _require(_opaque_pointer(algorithm), "native signature algorithm is unavailable")
+            keys, pointers, checks = [], {}, []
+            for name in ("issuer", "root"):
+                key = copy_key(self._certificate(fixture[name]))
+                _require(key is None or _opaque_pointer(key), "native copied key shape differs")
+                if key is None:
+                    keys.append({"key": name, "present": False, "block_bytes": None, "verify_supported": None})
+                    continue
+                self._own(key)
+                size = block_size(key)
+                _require(type(size) is int and 0 <= size <= _MAX_DER, "native key block size differs")
+                allowed = supported(key, 1, algorithm)  # Public kSecKeyOperationTypeVerify.
+                _require(type(allowed) is int and allowed in (0, 1), "native signature support shape differs")
+                keys.append({"key": name, "present": True, "block_bytes": size, "verify_supported": bool(allowed)})
+                if size == 256 and allowed == 1:
+                    pointers[name] = key
+            for case, role, name in zip(_SIGNATURE_CASES, ("leaf", "issuer", "root", "issuer"),
+                                        ("issuer", "root", "root", "root")):
+                if name not in pointers:
+                    checks.append({"case": case, "executed": False, "accepted": None, "error": None,
+                                   "trust_error": None})
+                    continue
+                message, signature = envelopes[role]
+                if case == "issuer-signature-mutant":
+                    signature = signature[:-1] + bytes((signature[-1] ^ 1,))
+                message_data = self._own(self.data_create(None, message, len(message)))
+                signature_data = self._own(self.data_create(None, signature, len(signature)))
+                error = P()
+                try:
+                    accepted = verify(pointers[name], algorithm, message_data, signature_data, C.byref(error))
+                finally:
+                    # Copy/Create outputs and after-effect error outputs remain
+                    # in the original trust owner until its independent close.
+                    if error.value:
+                        self.owned.append(error.value)
+                _require(type(accepted) is int and accepted in (0, 1), "native signature result shape differs")
+                checks.append({"case": case, "executed": True, "accepted": bool(accepted),
+                               "error": bool(error.value), "trust_error": self._error_observation(error.value)})
+            return {"available": True, "keys": keys, "checks": checks}
         except Exception:
-            # Cancellation/SystemExit and every eventual real close failure
-            # remain failures. Only optional diagnostic reads become unavailable.
+            # Do not overwrite the original evaluation's error observation.
+            # Cancellation/SystemExit and actual eventual close errors propagate.
             return unavailable
 
     def evaluate(self) -> dict:
@@ -870,9 +925,8 @@ class _Trust:
             raise BaseExceptionGroup("native CF reference cleanup failed", errors)
 
 
-def _evaluate_case(fixture: dict, deadline: float, observations: list[dict] | None = None,
-                   anchor_observations: list[dict] | None = None) -> dict:
-    trust, errors, row, anchor = None, [], None, None
+def _evaluate_case(fixture: dict, deadline: float, observations: list[dict] | None = None) -> dict:
+    trust, errors, row = None, [], None
     case = fixture["case"]
     _require(case in _CASES, "unknown fixed AIA case")
     try:
@@ -894,9 +948,6 @@ def _evaluate_case(fixture: dict, deadline: float, observations: list[dict] | No
         result = trust.evaluate()
         _remaining(deadline)
         row = {"case": case, "baseline_network": True, "network": network, "keychains": keychains, **result}
-        if anchor_observations is not None:
-            anchor = trust._anchor_observation(fixture["root"], fixture["issuer"])
-            _remaining(deadline)
     except BaseException as exc:
         errors.append(exc)
     finally:
@@ -911,20 +962,17 @@ def _evaluate_case(fixture: dict, deadline: float, observations: list[dict] | No
     if observations is not None:
         # Only detached Python values survive close; no getter uses a retired ref.
         observations.append({"case": case, **trust.error_observation})
-    if anchor_observations is not None:
-        anchor_observations.append({"case": case, "available": anchor["available"],
-                                    "anchors": None if anchor["anchors"] is None else list(anchor["anchors"]),
-                                    "issuer_subject_equal": anchor["issuer_subject_equal"]})
     return row
 
 
-def _evaluate_full_chain_contrast(fixture: dict, deadline: float) -> dict:
-    """One fresh offline evaluation after all original cases have closed."""
-    _require(fixture["case"] == "online", "native full-chain contrast fixture differs")
-    trust, errors, result = None, [], None
+def _evaluate_offline_contrast(fixture: dict, deadline: float, *, root_only: bool = False) -> tuple[dict, dict | None]:
+    """Fixed fresh offline comparisons, strictly after all original case closes."""
+    _require(fixture["case"] == "online" and type(root_only) is bool, "native offline contrast fixture differs")
+    trust, errors, result, crypto = None, [], None, None
     try:
         _remaining(deadline)
-        trust = _Trust(fixture["leaf"], fixture["root"], issuer=fixture["issuer"])
+        trust = (_Trust(fixture["root"], fixture["root"]) if root_only else
+                 _Trust(fixture["leaf"], fixture["root"], issuer=fixture["issuer"]))
         trust.set_network(False)
         trust.set_keychains(False)
         network, keychains = trust.get_network(), trust.get_keychains()
@@ -932,6 +980,9 @@ def _evaluate_full_chain_contrast(fixture: dict, deadline: float) -> dict:
         _remaining(deadline)
         result = trust.evaluate()
         _remaining(deadline)
+        if not root_only:
+            crypto = trust._signature_observation(fixture)
+            _remaining(deadline)
     except BaseException as exc:
         errors.append(exc)
     finally:
@@ -943,17 +994,19 @@ def _evaluate_full_chain_contrast(fixture: dict, deadline: float) -> dict:
     if errors:
         raise BaseExceptionGroup("native full-chain contrast/cleanup failed", errors)
     _remaining(deadline)
-    return {"case": _CONTRAST_CASE, "network": network, "keychains": keychains, **result,
-            "trust_error": dict(trust.error_observation)}
+    return ({"case": _ROOT_CONTRAST_CASE if root_only else _CONTRAST_CASE,
+             "network": network, "keychains": keychains, **result,
+             "trust_error": dict(trust.error_observation)}, crypto)
 
 
 def evaluate_aia(port: int, deadline: float) -> dict:
     fixtures = _fixtures(Path.cwd(), port, deadline)
-    observations, anchors = [], []
-    cases = [_evaluate_case(fixture, deadline, observations, anchors) for fixture in fixtures]
-    contrast = _evaluate_full_chain_contrast(fixtures[0], deadline)
+    observations = []
+    cases = [_evaluate_case(fixture, deadline, observations) for fixture in fixtures]
+    contrast, crypto = _evaluate_offline_contrast(fixtures[0], deadline)
+    root_contrast, _ = _evaluate_offline_contrast(fixtures[0], deadline, root_only=True)
     return {"schema": 1, "cases": cases, "error_observations": observations,
-            "chain_observations": {"anchors": anchors, "contrast": contrast}}
+            "chain_observations": {"contrasts": [contrast, root_contrast], "crypto": crypto}}
 
 
 def _aia_record(data: bytes) -> tuple[dict, list[dict], dict | None]:
@@ -976,38 +1029,61 @@ def _aia_record(data: bytes) -> tuple[dict, list[dict], dict | None]:
     chains = None
     if "chain_observations" in record:
         chains = record.pop("chain_observations")
-        _require(type(chains) is dict and set(chains) == {"anchors", "contrast"}
-                 and type(chains["anchors"]) is list and len(chains["anchors"]) == len(_CASES),
+        _require(type(chains) is dict and set(chains) == {"contrasts", "crypto"}
+                 and type(chains["contrasts"]) is list and len(chains["contrasts"]) == 2,
                  "native AIA chain diagnostic inventory differs")
-        for case, row in zip(_CASES, chains["anchors"]):
-            _require(type(row) is dict and set(row) == {"case", "available", "anchors", "issuer_subject_equal"}
+
+        def check_error(error):
+            _require(type(error) is dict and set(error) == {"status", "code"}
+                     and type(error["status"]) is str
+                     and error["status"] in {"no-error", "osstatus", "other-domain", "unavailable"},
+                     "native AIA contrast error fields differ")
+            _require(type(error["code"]) is int and -(2**31) <= error["code"] < 2**31
+                     if error["status"] == "osstatus" else error["code"] is None,
+                     "native AIA contrast error code differs")
+
+        for case, row, maximum in zip((_CONTRAST_CASE, _ROOT_CONTRAST_CASE), chains["contrasts"], (3, 1)):
+            bools = ("network", "keychains", "accepted", "error")
+            _require(type(row) is dict and set(row) == {"case", *bools, "result", "chain", "trust_error"}
                      and type(row["case"]) is str and row["case"] == case
-                     and type(row["available"]) is bool, "native AIA anchor diagnostic fields differ")
-            if row["available"]:
-                _require(type(row["anchors"]) is list and len(row["anchors"]) <= 3
-                         and all(type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None
-                                 for value in row["anchors"])
-                         and type(row["issuer_subject_equal"]) is bool, "native AIA anchor observation differs")
-            else:
-                _require(row["anchors"] is None and row["issuer_subject_equal"] is None,
-                         "unavailable native AIA anchor observation differs")
-        row = chains["contrast"]
-        bools = ("network", "keychains", "accepted", "error")
-        _require(type(row) is dict and set(row) == {"case", *bools, "result", "chain", "trust_error"}
-                 and type(row["case"]) is str and row["case"] == _CONTRAST_CASE
-                 and all(type(row[key]) is bool for key in bools)
-                 and type(row["result"]) is int and 0 <= row["result"] <= 0xffffffff
-                 and type(row["chain"]) is list and 1 <= len(row["chain"]) <= 3
-                 and all(type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None
-                         for value in row["chain"]), "native AIA contrast observation differs")
-        error = row["trust_error"]
-        _require(type(error) is dict and set(error) == {"status", "code"}
-                 and type(error["status"]) is str
-                 and error["status"] in {"no-error", "osstatus", "other-domain", "unavailable"},
-                 "native AIA contrast error fields differ")
-        _require(type(error["code"]) is int and -(2**31) <= error["code"] < 2**31
-                 if error["status"] == "osstatus" else error["code"] is None,
-                 "native AIA contrast error code differs")
+                     and all(type(row[key]) is bool for key in bools)
+                     and type(row["result"]) is int and 0 <= row["result"] <= 0xffffffff
+                     and type(row["chain"]) is list and 1 <= len(row["chain"]) <= maximum
+                     and all(type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+                             for value in row["chain"]), "native AIA contrast observation differs")
+            check_error(row["trust_error"])
+        crypto = chains["crypto"]
+        _require(type(crypto) is dict and set(crypto) == {"available", "keys", "checks"}
+                 and type(crypto["available"]) is bool, "native signature observation fields differ")
+        if not crypto["available"]:
+            _require(crypto["keys"] is None and crypto["checks"] is None, "unavailable native signature observation differs")
+        else:
+            _require(type(crypto["keys"]) is list and len(crypto["keys"]) == 2
+                     and type(crypto["checks"]) is list and len(crypto["checks"]) == 4,
+                     "native signature observation inventory differs")
+            eligible = {}
+            for name, row in zip(("issuer", "root"), crypto["keys"]):
+                _require(type(row) is dict and set(row) == {"key", "present", "block_bytes", "verify_supported"}
+                         and type(row["key"]) is str and row["key"] == name and type(row["present"]) is bool,
+                         "native key observation fields differ")
+                if row["present"]:
+                    _require(type(row["block_bytes"]) is int and 0 <= row["block_bytes"] <= _MAX_DER
+                             and type(row["verify_supported"]) is bool, "native key observation shape differs")
+                else:
+                    _require(row["block_bytes"] is None and row["verify_supported"] is None,
+                             "absent native key observation differs")
+                eligible[name] = row["present"] and row["block_bytes"] == 256 and row["verify_supported"]
+            for case, name, row in zip(_SIGNATURE_CASES, ("issuer", "root", "root", "root"), crypto["checks"]):
+                _require(type(row) is dict and set(row) == {"case", "executed", "accepted", "error", "trust_error"}
+                         and type(row["case"]) is str and row["case"] == case and type(row["executed"]) is bool
+                         and row["executed"] is eligible[name], "native signature check fields or eligibility differ")
+                if row["executed"]:
+                    _require(type(row["accepted"]) is bool and type(row["error"]) is bool,
+                             "executed native signature result differs")
+                    check_error(row["trust_error"])
+                else:
+                    _require(row["accepted"] is None and row["error"] is None and row["trust_error"] is None,
+                             "unexecuted native signature result differs")
     return record, observations, chains
 
 
@@ -1071,20 +1147,10 @@ def _aia_comparison_note(data: bytes, fixtures: list[dict], requests: list[tuple
             originals[fixture["route"]] = (case, issuer)
             if online:
                 expected_requests.append((fixture["route"], issuer))
-            anchor_note = {"available": False, "anchor_count": None, "anchors_match": None,
-                           "anchor_roles": None, "issuer_subject_equal": None}
-            anchor = None if chains is None else chains["anchors"][len(cases)]
-            if anchor is not None and anchor["available"]:
-                root = hashlib.sha256(fixture["root"]).hexdigest()
-                anchor_note = {"available": True, "anchor_count": len(anchor["anchors"]),
-                               "anchors_match": anchor["anchors"] == [root],
-                               "anchor_roles": ["root" if digest == root else "other" for digest in anchor["anchors"]],
-                               "issuer_subject_equal": anchor["issuer_subject_equal"]}
             cases.append({"case": case, **{key: row[key] for key in bools}, "result": row["result"],
                           "chain_count": len(row["chain"]), "chain_matches": row["chain"] == expected_chain,
                           "chain_roles": [roles.get(digest, "other") for digest in row["chain"]],
                           "trust_error": {"status": error["status"], "code": error["code"]},
-                          "anchor_observation": anchor_note,
                           "request_count": 0})
         observed_requests = []
         for request in requests:
@@ -1097,18 +1163,24 @@ def _aia_comparison_note(data: bytes, fixtures: list[dict], requests: list[tuple
             for row in cases:
                 if row["case"] == case:
                     row["request_count"] += 1
-        contrast = {"available": False}
+        contrasts, crypto = [], {"available": False, "keys": None, "checks": None}
         if chains is not None:
-            row, fixture = chains["contrast"], fixtures[0]
+            fixture = fixtures[0]
             roles = {hashlib.sha256(fixture[role]).hexdigest(): role for role in ("leaf", "issuer", "root")}
-            expected_chain = [hashlib.sha256(fixture[role]).hexdigest() for role in ("leaf", "issuer", "root")]
-            contrast = {"available": True, "case": _CONTRAST_CASE,
-                        **{key: row[key] for key in ("network", "keychains", "accepted", "error", "result")},
-                        "chain_count": len(row["chain"]), "chain_matches": row["chain"] == expected_chain,
-                        "chain_roles": [roles.get(digest, "other") for digest in row["chain"]],
-                        "trust_error": dict(row["trust_error"])}
-        return {**unavailable, "available": True, "cases": cases, "requests": observed_requests, "contrast": contrast,
-                "requests_match": requests == expected_requests}
+            for row, expected_roles in zip(chains["contrasts"], (("leaf", "issuer", "root"), ("root",))):
+                expected_chain = [hashlib.sha256(fixture[role]).hexdigest() for role in expected_roles]
+                contrasts.append({"available": True, "case": row["case"],
+                                  **{key: row[key] for key in ("network", "keychains", "accepted", "error", "result")},
+                                  "chain_count": len(row["chain"]), "chain_matches": row["chain"] == expected_chain,
+                                  "chain_roles": [roles.get(digest, "other") for digest in row["chain"]],
+                                  "trust_error": dict(row["trust_error"])})
+            observed = chains["crypto"]
+            if observed["available"]:
+                crypto = {"available": True, "keys": [dict(row) for row in observed["keys"]],
+                          "checks": [{**row, "trust_error": None if row["trust_error"] is None
+                                      else dict(row["trust_error"])} for row in observed["checks"]]}
+        return {**unavailable, "available": True, "cases": cases, "requests": observed_requests,
+                "contrasts": contrasts, "crypto": crypto, "requests_match": requests == expected_requests}
     except (NativeControlError, ValueError, TypeError, KeyError, RecursionError):
         return unavailable
 

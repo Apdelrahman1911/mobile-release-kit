@@ -439,16 +439,33 @@ fixture-derived chain/request match flags and fixed `leaf/issuer/root/other`
 chain-role labels. A separate closed observation of the already-owned original
 CFError reports only OSStatus-domain signed32 codes or `no-error`, `other-domain`,
 `unavailable`; no description or arbitrary domain string is read. Diagnostic
-availability does not change the trust verdict. Public custom-anchor readback and
-native normalized issuer/root-subject equality are observed without reevaluating
-the original trusts. Only anchor availability/count, same-fixture root match,
-`root/other` roles and native name equality are published, never DER names or hashes.
+availability does not change the trust verdict. The previously observed optional
+custom-anchor/name diagnostics are retired from execution, not counted as trust
+acceptance; their implementation and failed native evidence remain in history.
+
 After all four original leaf-only cases have closed, one fresh full-presented-chain
 offline contrast uses the same online fixture, root-only custom anchor, policy and
-cutoff, with both network and keychain lookup disabled and read back. Its closed
-result/error/chain observations cannot rescue an original failure or by themselves
-identify a parent-discovery defect. The optional error and chain diagnostic
-extensions are strictly parsed under the unchanged4096-byte record bound. Malformed
+cutoff, with both network and keychain lookup disabled and read back. Before that
+original owner's close, fixed public native key APIs observe issuer/root key
+availability, block size and RSA/SHA256 verification support. Eligible keys check
+three original certificate-signature edges and one detached, single-bit altered
+issuer-signature negative. The bounded fixed-profile DER envelope reader supplies
+the original complete TBSCertificate TLV, never re-encoded fields or a guessed
+digest. Remaining TBS fields are opaque; this is not a general X.509 validity parser.
+Copied key/data/error references, including after-effect CFError outputs, retain
+the original close owner. Unavailable keys and unexecuted checks are explicit;
+ordinary unavailable diagnostics never suppress cancellation, cutoff or cleanup
+failure. Only closed scalar observations survive successful close/post-close cutoff.
+
+One final fresh offline contrast presents the same root as both leaf input and
+sole custom anchor. Its expected chain role is `root`, not the original `leaf`.
+Neither contrast can seed an earlier original evaluation. Positive signatures
+require an actually executed rejecting altered-signature control for interpretation;
+they do not establish trust-service or path acceptance. Root-only acceptance alone
+does not prove CA/key-usage/path-length eligibility when that root is a parent.
+No diagnostic can rescue an original failure or identify a root cause by itself.
+The optional error and finite two-contrast/key/signature diagnostic extensions
+are strictly parsed under the unchanged4096-byte record bound. Malformed
 records are unavailable; raw routes, certificate digests, captures and messages are
 excluded. These fields diagnose an already failed comparison, never replace its
 original acceptance oracle or qualify an earlier failed capture, cutoff or cleanup.
