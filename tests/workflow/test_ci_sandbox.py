@@ -97,10 +97,27 @@ def native_state_double(session, phase="source", *, deadline=1.0):
                                 "wheel-venv/lib/python3.11/site-packages/mobile_release"),
         pins=[], files={}, trees={}, prepared=True, started=False, completed=False, closed=False,
         control_seen=[], startup_seen=[], control_notes={}, native_controls={"synthetic-inert-fixture": True}, outside_fd=None,
+        baseline_attempted=False, baseline_ready=False, baseline_der=None,
         outside_write=session.fixture_controls / f"native-authority-{phase}-outside-write",
         outside_read=session.work / "home" / f"native-authority-{phase}-read",
         sibling_read=session.work / f"{phase}-venv/lib/python3.11/site-packages/pip/__init__.py")
     session._native_authority[phase] = state
+    return state
+
+
+def native_baseline_state_double(session, *, deadline=50.0, consumed=False):
+    """Only synthetic data for the real fixed binding, never native admission."""
+    state = native_state_double(session, deadline=deadline)
+    state["prepared"], session._native_preparing = False, "source"
+    state["control_seen"] = ["mach-baseline", "mach-ordinary", "mach-authority", "mach-nonexpand", "aia-prepare", "aia-evaluate"]
+    if consumed:
+        state["control_seen"].append("aia-offline-baseline")
+    state["baseline_attempted"] = state["baseline_ready"] = True
+    state["baseline_der"] = tuple(b"\x30PRIVATE-SYNTHETIC-" + role.encode() for role in ("leaf", "issuer", "root"))
+    for index, (role, raw) in enumerate(zip(("leaf", "issuer", "root"), state["baseline_der"])):
+        path = session.bootstrap / f"native-aia-baseline-{role}.der"
+        state["files"][path] = {"identity": (7, 800 + index, stat.S_IFREG | 0o444, 0, 0, 1, len(raw), 11, 12),
+            "sha256": hashlib.sha256(raw).hexdigest(), "root_owned": True, "maximum": 16 * 1024}
     return state
 
 
@@ -4798,6 +4815,11 @@ class CISandboxPureTests(unittest.TestCase):
                 helper, helper_source = session.bootstrap / "ci_native_authority.py", session.source / ".github/scripts/ci_native_authority.py"
                 payload = b"inert fixed helper bytes, never imported\n"
                 controls = {"synthetic-inert-fixture": True}
+                originals = tuple(b"\x30original-online-" + role.encode() for role in ("leaf", "issuer", "root"))
+                baseline_note = {"schema": 1, "control": "aia-offline-baseline", "semantics": "comparison-observation-only",
+                    "available": True, "case": "online-full-chain-offline-baseline", "network": False, "keychains": False,
+                    "accepted": False, "error": True, "result": 5, "chain_count": 2, "chain_matches": False,
+                    "chain_roles": ["leaf", "issuer"], "trust_error": {"status": "osstatus", "code": -25318}}
                 if phase == "wheel":
                     session._native_authority["source"] = dict(completed=True, closed=True, native_controls=controls)
                 clock, nodes, files, fds, acquired, events = SimpleNamespace(now=0.0), {}, {}, {}, [], []
@@ -4850,12 +4872,12 @@ class CISandboxPureTests(unittest.TestCase):
                     for path in (session.root, session.work, session.bootstrap):
                         pin(state, path, modes=(0o755,))
 
-                def add_file(state, path, **_options):
+                def add_file(state, path, *, root_owned=True, maximum=16 * self.module.MiB):
                     self.assertIn(path, files)
                     raw = files[path]
                     self.assertEqual((nodes[path]["st_uid"], nodes[path]["st_gid"]), (0, 0))
                     state["files"][path] = dict(identity=self.module._native_file_key(SimpleNamespace(**nodes[path])),
-                        sha256=hashlib.sha256(raw).hexdigest(), root_owned=True, maximum=16 * self.module.MiB)
+                        sha256=hashlib.sha256(raw).hexdigest(), root_owned=root_owned, maximum=maximum)
                     return raw
 
                 def private_file(path, raw, mode=0o600, *, root_owned=False):
@@ -4865,8 +4887,18 @@ class CISandboxPureTests(unittest.TestCase):
                     events.append(("private-file", path, mode, root_owned, inherited))
                     node(path, mode=mode, owner=inherited, raw=raw)
                     if root_owned:
-                        self.assertEqual((path, raw, mode, inherited), (session.work / "home" / f"native-authority-{phase}-read",
-                                         b"MRK_NATIVE_PREVIOUS_SCRATCH\n", 0o444, (0, session.gid)))
+                        if path.parent == session.bootstrap:
+                            self.assertEqual(phase, "source")
+                            state = session._native_authority[phase]
+                            self.assertTrue(state["baseline_attempted"])
+                            self.assertFalse(state["baseline_ready"])
+                            self.assertEqual(state["control_seen"], list(fixed_cases[:6]))
+                            expected_files = {session.bootstrap / f"native-aia-baseline-{role}.der": data
+                                              for role, data in zip(("leaf", "issuer", "root"), originals)}
+                            self.assertEqual((raw, mode, inherited), (expected_files[path], 0o444, (0, 0)))
+                        else:
+                            self.assertEqual((path, raw, mode, inherited), (session.work / "home" / f"native-authority-{phase}-read",
+                                             b"MRK_NATIVE_PREVIOUS_SCRATCH\n", 0o444, (0, session.gid)))
                         nodes[path].update(st_uid=0, st_gid=0)
                         if case.startswith("read-creator-failure-"):
                             session.fail("synthetic original read-canary creation failure")
@@ -4927,7 +4959,9 @@ class CISandboxPureTests(unittest.TestCase):
                     if case in {"boundary-failure", "cleanup-errors"}:
                         raise original
 
-                fixed_cases = ("mach-baseline", "mach-ordinary", "mach-authority", "mach-nonexpand", "aia-prepare", "aia-evaluate")
+                fixed_cases = ("mach-baseline", "mach-ordinary", "mach-authority", "mach-nonexpand", "aia-prepare", "aia-evaluate",
+                               "aia-offline-baseline")
+                self.assertEqual(self.module._NATIVE_CONTROL_CASES, fixed_cases)
 
                 def capture(state, selected, command, *, policy, cwd: Path, seconds):
                     self.assertEqual(phase, "source")
@@ -4940,32 +4974,48 @@ class CISandboxPureTests(unittest.TestCase):
                         expected = [*base, "--mach-nonexpand", str(session.bootstrap / "native-authority-source.sb"), "1.0"]
                     elif selected.startswith("mach-"):
                         expected = [*base, "--mach", "1.0"]
+                    elif selected == "aia-offline-baseline":
+                        expected = [*base, "--aia-offline-baseline", "1.0"]
+                        self.assertTrue(state["baseline_ready"] and state["baseline_attempted"])
+                        self.assertIs(state["baseline_der"], originals)
                     else:
                         expected = [*base, "--" + selected, "12345", "1.0"]
                     self.assertEqual(command, expected)
                     policies = {"mach-baseline": state["mach_policy"], "mach-ordinary": session.policy,
                         "mach-authority": state["policy"], "mach-nonexpand": session.policy,
-                        "aia-prepare": state["policy"], "aia-evaluate": session.bootstrap / "native-aia-source.sb"}
+                        "aia-prepare": state["policy"], "aia-evaluate": session.bootstrap / "native-aia-source.sb",
+                        "aia-offline-baseline": session.bootstrap / "native-aia-source.sb"}
                     self.assertEqual(policy, policies[selected])
                     self.assertEqual(cwd, state["cwd"] / "probes")
-                    self.assertEqual(seconds, 300 if selected == "aia-prepare" else 120 if selected == "aia-evaluate" else 30)
+                    self.assertEqual(seconds, 300 if selected == "aia-prepare" else 120 if selected in {"aia-evaluate", "aia-offline-baseline"} else 30)
                     events.append(("control", selected))
                     state["control_notes"][selected] = {"ok": False}
                     return self.module.CapturedRun(b"", b"", 0, True, True, True, True, False, False, 0.01, None, (), (0, 0))
 
-                def admit_controls(capture_callback, idle_callback, root, *, deadline, policy_sha256):
+                def admit_controls(capture_callback, idle_callback, root, *, deadline, policy_sha256, freeze_baseline):
                     self.assertEqual((root, deadline), (cwd / "probes", 1.0))
                     state = session._native_authority[phase]
                     self.assertEqual(policy_sha256, state["files"][state["policy"]]["sha256"])
                     self.assertEqual(policy_sha256, hashlib.sha256(files[state["policy"]]).hexdigest())
                     for selected in fixed_cases:
-                        result = capture_callback(selected, **({"port": 12345} if selected.startswith("aia-") else {}))
+                        if selected == "aia-offline-baseline":
+                            self.assertEqual(state["control_seen"], list(fixed_cases[:6]))
+                            self.assertIsNone(freeze_baseline(originals))
+                        result = capture_callback(selected, **({"port": 12345} if selected in {"aia-prepare", "aia-evaluate"} else {}))
                         self.assertTrue(result.ok)
                         self.assertTrue(all(not row["ok"] for row in session._native_authority[phase]["control_notes"].values()))
                         idle_callback()
                     return controls
 
-                backend = SimpleNamespace(admit_controls=admit_controls)
+                def project(data, original):
+                    self.assertEqual(data, b"")  # The integration supplies an inert captured result, not a native receipt.
+                    self.assertIs(original, originals)
+                    self.assertTrue(session.domain_finality)
+                    self.assertEqual(session._native_authority[phase]["control_seen"], list(fixed_cases))
+                    events.append(("baseline-project",))
+                    return dict(baseline_note)
+
+                backend = SimpleNamespace(admit_controls=admit_controls, baseline_comparison_note=Mock(side_effect=project))
                 loader = SimpleNamespace(exec_module=Mock())  # Never import/evaluate the actual native helper.
                 spec = SimpleNamespace(loader=loader)
                 fake_imports = SimpleNamespace(util=SimpleNamespace(spec_from_file_location=Mock(return_value=spec),
@@ -5004,7 +5054,14 @@ class CISandboxPureTests(unittest.TestCase):
                         self.assertTrue(state["prepared"])
                         self.assertFalse(state["started"] or state["closed"])
                         self.assertEqual(state["native_controls"], controls)
-                        self.assertEqual(state["control_notes"], {selected: {"ok": True} for selected in fixed_cases} if phase == "source" else {})
+                        wanted_notes = {selected: {"ok": True} for selected in fixed_cases} if phase == "source" else {}
+                        if phase == "source":
+                            wanted_notes["aia-offline-baseline"]["aia_baseline"] = baseline_note
+                            self.assertTrue(state["baseline_attempted"] and state["baseline_ready"])
+                            backend.baseline_comparison_note.assert_called_once_with(b"", originals)
+                        else:
+                            backend.baseline_comparison_note.assert_not_called()
+                        self.assertEqual(state["control_notes"], wanted_notes)
                         self.assertEqual([event for event in events if event[0] == "direct-boundaries"], [("direct-boundaries", phase)])
                         self.assertEqual([event[1] for event in events if event[0] == "control"], list(fixed_cases) if phase == "source" else [])
                         count = len(events)
@@ -5039,6 +5096,10 @@ class CISandboxPureTests(unittest.TestCase):
                 self.assertEqual(session.deadline, 100.0)
                 read_path = session.work / "home" / f"native-authority-{phase}-read"
                 opted = [event for event in events if event[0] == "private-file" and event[3]]
+                baseline_files = [event for event in opted if event[1].parent == session.bootstrap]
+                opted = [event for event in opted if event not in baseline_files]
+                self.assertEqual([event[1] for event in baseline_files],
+                    [session.bootstrap / f"native-aia-baseline-{role}.der" for role in ("leaf", "issuer", "root")] if case == "source" else [])
                 if read_path in nodes:
                     self.assertEqual(opted, [("private-file", read_path, 0o444, True, (0, session.gid))])
                     self.assertEqual((nodes[read_path]["st_uid"], nodes[read_path]["st_gid"]), (0, 0))
@@ -5061,6 +5122,457 @@ class CISandboxPureTests(unittest.TestCase):
                     loader.exec_module.assert_called_once_with(backend)
                 else:
                     loader.exec_module.assert_not_called()
+
+    def test_native_aia_baseline_snapshot_is_once_only_original_bytes_and_keeps_private_custody(self):
+        modes = ("valid", "maximum", "linux", "wheel", "different-owner", "not-preparing", "prepared", "started", "completed",
+                 "closed", "unadmitted", "admitting", "prior-failure", "cancelled", "busy", "original-owned", "direct-pending",
+                 "active-control", "out-of-order", "attempted", "ready", "expired", "domain-error", "domain-present",
+                 "tuple-type", "short-tuple", "duplicate", "empty", "bytearray", "not-der", "large",
+                 "pre-input-error", "cancel-input", "create-collision", "write-and-close", "close-error", "read-error",
+                 "read-mismatch", "post-input-error", "post-input-cancel", "post-input-cutoff", "file-budget", "byte-budget")
+        for mode in modes:
+            with self.subTest(immutable_baseline_snapshot=mode):
+                session = session_double(self.module, "linux" if mode == "linux" else "darwin")
+                phase = "wheel" if mode == "wheel" else "source"
+                state = native_state_double(session, phase, deadline=50.0)
+                state["prepared"], session._native_preparing = False, phase
+                state["control_seen"] = ["mach-baseline", "mach-ordinary", "mach-authority", "mach-nonexpand", "aia-prepare", "aia-evaluate"]
+                originals = tuple(b"\x30original-online-" + role.encode() for role in ("leaf", "issuer", "root"))
+                if mode == "maximum":
+                    originals = tuple(b"\x30" + bytes((index + 1,)) * (16 * 1024 - 1) for index in range(3))
+                supplied = {"tuple-type": list(originals), "short-tuple": originals[:2], "duplicate": (originals[0],) * 3,
+                    "empty": (b"", *originals[1:]), "bytearray": (bytearray(originals[0]), *originals[1:]),
+                    "not-der": (b"not a sequence", *originals[1:]), "large": (b"\x30" * (16 * 1024 + 1), *originals[1:])}.get(mode, originals)
+                paths = tuple(session.bootstrap / f"native-aia-baseline-{role}.der" for role in ("leaf", "issuer", "root"))
+                state["pins"] = [{"path": path, "fd": 900 + index, "node": ("original-pin", index)}
+                                 for index, path in enumerate((session.root, session.work, session.bootstrap))]
+                pins = [dict(pin) for pin in state["pins"]]
+                saved_file = {"identity": (7, 99, stat.S_IFREG | 0o444, 0, 0, 1, 9, 11, 12),
+                              "sha256": hashlib.sha256(b"unchanged").hexdigest(), "root_owned": True, "maximum": 16 * self.module.MiB}
+                state["files"] = {state["policy"]: saved_file}
+                if mode == "file-budget":
+                    state["files"].update({session.bootstrap / f"original-{index}.dat": dict(saved_file) for index in range(1023)})
+                elif mode == "byte-budget":
+                    state["files"][state["policy"]] = {**saved_file, "identity": (*saved_file["identity"][:6], 128 * self.module.MiB, 11, 12)}
+                original_files = {path: dict(row) for path, row in state["files"].items()}
+                if mode in {"prepared", "started", "completed", "closed"}:
+                    state[mode] = True
+                elif mode == "different-owner":
+                    session._native_authority["source"] = dict(state)
+                elif mode == "not-preparing":
+                    session._native_preparing = None
+                elif mode == "out-of-order":
+                    state["control_seen"] = state["control_seen"][:5]
+                elif mode in {"attempted", "ready"}:
+                    state["baseline_" + mode] = True
+                session.admitted, session._admitting = mode != "unadmitted", mode == "admitting"
+                session.cancelled, session._busy = mode == "cancelled", mode == "busy"
+                session._active = object() if mode == "original-owned" else None
+                session._direct_producer_pending = mode == "direct-pending"
+                session._native_control = object() if mode == "active-control" else None
+                if mode == "prior-failure":
+                    session.fail("original snapshot owner failure")
+                now, events, nodes, contents, fds, checks = [50.0 if mode == "expired" else 10.0], [], {}, {}, {}, []
+                primary, closing = OSError("PRIVATE-ORIGINAL-SNAPSHOT"), OSError("PRIVATE-SNAPSHOT-CLOSE")
+
+                def opened(path, flags, permissions):
+                    self.assertIn(path, paths)
+                    self.assertEqual(flags, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC)
+                    self.assertEqual(permissions, 0o444)
+                    self.assertTrue(state["baseline_attempted"])
+                    self.assertFalse(state["baseline_ready"])
+                    self.assertIs(state["baseline_der"], originals)
+                    self.assertTrue(session.domain_finality)
+                    events.append(("create", path))
+                    if mode == "create-collision" and path == paths[1]:
+                        raise FileExistsError("PRIVATE-COLLISION")
+                    self.assertNotIn(path, nodes)
+                    fd = 800 + len(nodes)
+                    nodes[path] = dict(st_dev=7, st_ino=fd, st_mode=stat.S_IFREG | 0o400, st_uid=0, st_gid=session.gid,
+                                       st_nlink=1, st_size=0, st_mtime_ns=11, st_ctime_ns=12)
+                    contents[path], fds[fd] = bytearray(), path
+                    return fd
+
+                def fchown(fd, uid, gid):
+                    self.assertEqual((uid, gid), (0, 0))
+                    events.append(("owner", fds[fd]))
+                    nodes[fds[fd]].update(st_uid=uid, st_gid=gid)
+
+                def write(fd, raw):
+                    path = fds[fd]
+                    self.assertEqual((nodes[path]["st_uid"], nodes[path]["st_gid"]), (0, 0))
+                    count = min(4096, len(raw))
+                    contents[path].extend(raw[:count])
+                    nodes[path]["st_size"] = len(contents[path])
+                    if mode == "write-and-close" and path == paths[1]:
+                        raise primary
+                    return count
+
+                def chmod(fd, permissions):
+                    self.assertEqual(permissions, 0o444)
+                    nodes[fds[fd]]["st_mode"] = stat.S_IFREG | permissions
+
+                def close(fd):
+                    path = fds.pop(fd)
+                    events.append(("close", path))
+                    if mode in {"write-and-close", "close-error"} and path == paths[1]:
+                        raise closing  # Already retired: never retry an ambiguous close.
+
+                def read(path, *, deadline, uid, gid, root_owned, maximum):
+                    self.assertEqual((deadline, uid, gid, root_owned, maximum), (50.0, session.uid, session.gid, True, 16 * 1024))
+                    self.assertNotIn(path, fds.values())
+                    self.assertEqual(events[-1], ("close", path))
+                    events.append(("bind", path))
+                    if mode == "read-error" and path == paths[1]:
+                        raise primary
+                    raw = bytes(contents[path])
+                    if mode == "read-mismatch" and path == paths[1]:
+                        raw = b"\x30substituted"
+                    return raw, self.module._native_file_key(SimpleNamespace(**nodes[path]))
+
+                def check(observed):
+                    self.assertIs(observed, state)
+                    self.assertTrue(session.domain_finality)
+                    self.assertFalse(session._busy)
+                    checks.append(len(nodes))
+                    if mode == "pre-input-error" or mode == "post-input-error" and nodes:
+                        raise primary
+                    if mode == "cancel-input" or mode == "post-input-cancel" and nodes:
+                        session.cancelled = True
+                    if mode == "post-input-cutoff" and nodes:
+                        now[0] = 50.0
+
+                domain = Mock(return_value={4242} if mode == "domain-present" else set(),
+                              side_effect=primary if mode == "domain-error" else None)
+                constants = {name: getattr(os, name) for name in ("O_WRONLY", "O_CREAT", "O_EXCL", "O_NOFOLLOW", "O_CLOEXEC")}
+                fake_os = SimpleNamespace(**constants, open=opened, write=write, fchown=fchown, fchmod=chmod, fsync=Mock(), close=close,
+                    fstat=lambda fd: SimpleNamespace(**nodes[fds[fd]]), get_inheritable=lambda fd: False,
+                    path=SimpleNamespace(basename=os.path.basename))
+                with patch.multiple(self.module, os=fake_os, time=SimpleNamespace(monotonic=lambda: now[0]),
+                        subprocess=SimpleNamespace(), socket=SimpleNamespace(), signal=SimpleNamespace(), selectors=SimpleNamespace(),
+                        resource=SimpleNamespace(), _domain=domain, _native_file=read), \
+                     patch.object(session, "_headroom", Mock()), patch.object(session, "_native_check_inputs", side_effect=check), ExitStack() as stack:
+                    forbidden = [stack.enter_context(patch.object(Path, name, side_effect=AssertionError("snapshot must use original fake private descriptors")))
+                                 for name in ("open", "resolve", "stat", "lstat", "mkdir", "chmod", "unlink", "rmdir", "iterdir", "read_bytes")]
+                    if mode in {"valid", "maximum"}:
+                        self.assertIsNone(session._native_freeze_baseline(state, supplied))
+                        self.assertTrue(state["baseline_ready"] and state["baseline_attempted"])
+                        self.assertIs(state["baseline_der"], originals)
+                        self.assertEqual(tuple(bytes(contents[path]) for path in paths), originals)
+                        self.assertEqual([event[1] for event in events if event[0] == "create"], list(paths))
+                        self.assertEqual(checks[0], 0)
+                        self.assertEqual(checks[-1], 3)
+                        self.assertGreaterEqual(len(checks), 2)
+                        for path, raw in zip(paths, originals):
+                            self.assertEqual(state["files"][path], {"identity": self.module._native_file_key(SimpleNamespace(**nodes[path])),
+                                "sha256": hashlib.sha256(raw).hexdigest(), "root_owned": True, "maximum": 16 * 1024})
+                    else:
+                        with self.assertRaises((self.module.SessionError, OSError, BaseExceptionGroup)) as caught:
+                            session._native_freeze_baseline(state, supplied)
+                        if mode != "ready":
+                            self.assertFalse(state["baseline_ready"])
+                        errors, pending = [], [caught.exception]
+                        while pending:
+                            error = pending.pop()
+                            if isinstance(error, BaseExceptionGroup):
+                                pending.extend(error.exceptions)
+                            else:
+                                errors.append(error)
+                        if mode in {"write-and-close", "read-error", "pre-input-error", "post-input-error", "domain-error"}:
+                            self.assertIn(primary, errors)
+                        if mode in {"write-and-close", "close-error"}:
+                            self.assertIn(closing, errors)
+                        if nodes:
+                            self.assertTrue(state["baseline_attempted"])
+                            self.assertIsNotNone(session.failure)
+                    if mode in {"valid", "maximum"} or nodes:
+                        count = len(events)
+                        with self.assertRaises(self.module.SessionError):
+                            session._native_freeze_baseline(state, originals)
+                        self.assertEqual(len(events), count)  # Neither successful nor partial snapshots may retry.
+                    for operation in forbidden:
+                        operation.assert_not_called()
+                self.assertEqual(fds, {})
+                if mode not in {"valid", "maximum", "create-collision", "write-and-close", "close-error", "read-error", "read-mismatch",
+                                "post-input-error", "post-input-cancel", "post-input-cutoff", "file-budget", "byte-budget"}:
+                    self.assertEqual(events, [])
+                self.assertEqual([event[1] for event in events if event[0] == "close"], list(nodes))
+                self.assertEqual(state["pins"], pins)
+                self.assertEqual({path: state["files"][path] for path in original_files}, original_files)
+                self.assertEqual((state["deadline"], session.deadline), (50.0, 100.0))
+                if mode == "prior-failure":
+                    self.assertEqual(session.failure, "original snapshot owner failure")
+
+    def test_native_aia_baseline_owner_binds_seventh_capture_and_finality_before_projection(self):
+        # Inert parser definitions only. Native, provider, process, descriptor and
+        # clock effects are the same existing _Collection doubles used below.
+        spec = importlib.util.spec_from_file_location(
+            "_mrk_pure_aia_baseline_parser", ROOT / ".github/scripts/ci_native_authority.py")
+        if spec is None or spec.loader is None:
+            raise AssertionError("required fixed baseline parser is missing")
+        backend = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(backend)
+        direct = {"argv-type", "old-vector", "extra-argument", "helper", "python-flags", "deadline-vector", "policy", "cwd",
+                  "float-seconds", "mixed-markers", "alternate-control"}
+        capture_failures = {"cancel-capture", "failure-capture", "expire-capture", "unknown-finality", "held-stderr", "exit-error", "close-error"}
+        after_capture = {"malformed", "extra-stderr", "post-idle-error", "post-input-error", "post-input-cancel", "post-input-cutoff",
+                         "post-input-tuple", "projection-interrupt", "projection-cancel", "projection-cutoff", "projection-tuple"}
+        cases = ("positive", "negative", "foreign", *sorted(capture_failures), *sorted(after_capture), *sorted(direct),
+                 "linux", "wheel", "unadmitted", "admitting", "different-owner", "not-preparing", "prepared", "started", "completed", "closed",
+                 "busy", "original-owned", "direct-pending", "cancelled", "prior-failure", "cancel-input", "failure-input", "expired",
+                 "out-of-order", "duplicate", "port", "snapshot-unready", "snapshot-unattempted", "tuple-type", "tuple-changed",
+                 "missing-binding", "binding-hash", "binding-size", "binding-limit", "binding-owner", "binding-identity")
+        for case in cases:
+            with self.subTest(baseline_owner_route=case):
+                session = session_double(self.module, "linux" if case == "linux" else "darwin")
+                state = native_baseline_state_double(session, consumed=case in direct)
+                originals = state["baseline_der"]
+                state["backend"] = SimpleNamespace(parse_failure=Mock(wraps=backend.parse_failure))
+                if case == "wheel":
+                    state["phase"], session._native_preparing = "wheel", "wheel"
+                elif case == "different-owner":
+                    session._native_authority["source"] = dict(state)
+                elif case == "not-preparing":
+                    session._native_preparing = None
+                elif case in {"prepared", "started", "completed", "closed"}:
+                    state[case] = True
+                elif case == "out-of-order":
+                    state["control_seen"] = state["control_seen"][:5]
+                elif case == "duplicate":
+                    state["control_seen"].append("aia-offline-baseline")
+                elif case == "snapshot-unready":
+                    state["baseline_ready"] = False
+                elif case == "snapshot-unattempted":
+                    state["baseline_attempted"] = False
+                elif case == "tuple-type":
+                    state["baseline_der"] = list(originals)
+                elif case == "tuple-changed":
+                    state["baseline_der"] = (b"\x30different", *originals[1:])
+                leaf_path = session.bootstrap / "native-aia-baseline-leaf.der"
+                if case == "missing-binding":
+                    del state["files"][leaf_path]
+                elif case.startswith("binding-"):
+                    row = state["files"][leaf_path]
+                    if case == "binding-hash":
+                        row["sha256"] = "a" * 64
+                    elif case == "binding-size":
+                        row["identity"] = (*row["identity"][:6], len(originals[0]) + 1, 11, 12)
+                    else:
+                        field, value = {"binding-limit": ("maximum", 16 * self.module.MiB), "binding-owner": ("root_owned", False),
+                                        "binding-identity": ("identity", list(row["identity"]))}[case]
+                        row[field] = value
+                session.admitted, session._admitting = case != "unadmitted", case == "admitting"
+                session._busy, session._direct_producer_pending = case == "busy", case == "direct-pending"
+                original_active = object() if case == "original-owned" else None
+                session._active, session.cancelled = original_active, case == "cancelled"
+                if case == "prior-failure":
+                    session.fail("original baseline owner failure")
+                command = session._native_aia_baseline_command(50.0)
+                self.assertEqual(command, [str(session.python), "-I", "-S", "-B", str(session.bootstrap / "ci_native_authority.py"),
+                                          "--aia-offline-baseline", "50.0"])
+                if case == "old-vector":
+                    command = [*command[:5], "--aia-evaluate", "12345", "50.0"]
+                elif case == "extra-argument":
+                    command.append("12345")
+                elif case == "helper":
+                    command[4] = str(session.source / "unapproved.py")
+                elif case == "python-flags":
+                    command[2] = "-s"
+                elif case == "deadline-vector":
+                    command[-1] = "49.0"
+                elif case == "mixed-markers":
+                    command.append("--mach-initial")
+                elif case == "argv-type":
+                    command = tuple(command)
+                hashes = [hashlib.sha256(raw).hexdigest() for raw in originals]
+                record = {"schema": 1, "case": "online-full-chain-offline-baseline", "network": False, "keychains": False,
+                          "accepted": case != "negative", "error": case == "negative", "result": 5 if case == "negative" else 4,
+                          "chain": hashes[:2] if case == "negative" else [hashes[0], "f" * 64, hashes[2]] if case == "foreign" else hashes,
+                          "trust_error": {"status": "osstatus", "code": -25318} if case == "negative" else {"status": "no-error", "code": None}}
+                stdout = backend.AIA_BASELINE_PREFIX + json.dumps({} if case == "malformed" else record).encode() + b"\n"
+                private = b'MRK_SANDBOX_ERROR=[{"exception":"PRIVATE_CHILD_CANARY","lines":[1]}]\n'
+                rig = _Collection(self.module, session, stdout=() if case == "exit-error" else (stdout,),
+                                  stderr=(private,) if case in {"extra-stderr", "exit-error"} else ())
+                rig.snapshot_rows = {}
+                if case == "expired":
+                    rig.now = 50.0
+                elif case == "unknown-finality":
+                    rig.final_domain = OSError("PRIVATE-UNKNOWN-FINALITY")
+                elif case == "held-stderr":
+                    rig.hold = {1}
+                    rig.now = 49.0  # Reach the original 50s cutoff, not the fake selector's safety budget.
+                elif case == "exit-error":
+                    rig.exitcode = 1
+                elif case == "close-error":
+                    rig.fd_close_errors = {1}
+                primary = KeyboardInterrupt("PRIVATE-PROJECTION-CANCEL") if case == "projection-interrupt" else OSError("PRIVATE-BASELINE-POSTCONDITION")
+                checked = []
+
+                def inputs(observed):
+                    self.assertIs(observed, state)
+                    self.assertTrue(session.domain_finality)
+                    self.assertFalse(session._busy)
+                    checked.append(len(rig.opened))
+                    if not rig.opened:
+                        if case == "cancel-input":
+                            session.cancelled = True
+                        elif case == "failure-input":
+                            session.fail("original failure during baseline input check")
+                    else:
+                        if case == "post-input-error":
+                            raise primary
+                        elif case == "post-input-cancel":
+                            session.cancelled = True
+                        elif case == "post-input-cutoff":
+                            rig.now = 50.0
+                        elif case == "post-input-tuple":
+                            state["baseline_der"] = tuple(list(originals))
+
+                def capture_open(path, flags, mode):
+                    fd = rig.open(path, flags, mode)
+                    if fd == 101:
+                        if case == "cancel-capture":
+                            session.cancelled = True
+                        elif case == "failure-capture":
+                            session.fail("original failure during baseline capture acquisition")
+                        elif case == "expire-capture":
+                            rig.now = 50.0
+                    return fd
+
+                def domain(platform, uid, **options):
+                    if case == "post-idle-error" and rig.opened and session._native_control is None:
+                        raise primary
+                    return rig.domain(platform, uid, **options)
+
+                def project(data, original):
+                    self.assertEqual(data, stdout)
+                    self.assertIs(original, originals)
+                    self.assertIsNone(session._active)
+                    self.assertTrue(session.domain_finality)
+                    self.assertEqual(checked[-1], 2)
+                    self.assertEqual(state["control_seen"], list(self.module._NATIVE_CONTROL_CASES))
+                    self.assertEqual(sum(event[0] == "capture-close" for event in rig.events), 2)
+                    if case == "projection-interrupt":
+                        raise primary
+                    result = backend.baseline_comparison_note(data, original)
+                    if case == "projection-cancel":
+                        session.cancelled = True
+                    elif case == "projection-cutoff":
+                        rig.now = 50.0
+                    elif case == "projection-tuple":
+                        state["baseline_der"] = tuple(list(originals))
+                    return result
+
+                projector = Mock(side_effect=project)
+                state["backend"].baseline_comparison_note = projector
+                real_argv = type(session)._argv.__get__(session)
+                with rig.scope(), patch.object(session, "_argv", wraps=real_argv) as argv_builder, \
+                     patch.object(session, "_native_check_inputs", side_effect=inputs), \
+                     patch.multiple(self.module, _observe_original_credentials=Mock(), _domain=domain,
+                         _child_exception_notes=Mock(side_effect=AssertionError("baseline cannot interpret generic child notes"))), \
+                     patch.object(self.module.os, "open", side_effect=capture_open), \
+                     patch.multiple(backend, os=SimpleNamespace(), subprocess=SimpleNamespace(), socket=SimpleNamespace(),
+                                    threading=SimpleNamespace(), secrets=SimpleNamespace(), Path=SimpleNamespace(), time=SimpleNamespace()), ExitStack() as stack:
+                    for operation in ("open", "stat", "lstat", "resolve", "iterdir"):
+                        stack.enter_context(patch.object(Path, operation, side_effect=AssertionError("baseline capture cannot inspect host paths")))
+                    returns = case in {"positive", "negative", "foreign"} | capture_failures
+                    if returns:
+                        result = session._native_backend_capture(state, "aia-offline-baseline")
+                    else:
+                        expected = (KeyboardInterrupt if case == "projection-interrupt" else backend.NativeControlError if case == "malformed"
+                                    else OSError if case in {"post-idle-error", "post-input-error"} else self.module.SessionError)
+                        with self.assertRaises(expected) as caught:
+                            if case in direct:
+                                session._native_control_capture(state, "mach-ordinary" if case == "alternate-control" else "aia-offline-baseline", command,
+                                    policy=session.policy if case in {"policy", "alternate-control"} else session.bootstrap / "native-aia-source.sb",
+                                    cwd=session.work if case == "cwd" else state["cwd"] / "probes",
+                                    seconds=30 if case == "alternate-control" else 120.0 if case == "float-seconds" else 120)
+                            else:
+                                session._native_backend_capture(state, "aia-offline-baseline", port=12345 if case == "port" else None)
+                        if case in {"post-idle-error", "post-input-error", "projection-interrupt"}:
+                            self.assertIs(caught.exception, primary)
+                    spawned = case in {"positive", "negative", "foreign"} | after_capture | (capture_failures - {"cancel-capture", "failure-capture", "expire-capture"})
+                    self.assertEqual(sum(event[0] == "popen" for event in rig.events), int(spawned))
+                    self.assertEqual(self.module._observe_original_credentials.call_count, int(spawned))
+                    self.module._child_exception_notes.assert_not_called()
+                    if spawned:
+                        actual = next(event for event in rig.events if event[0] == "popen")
+                        self.assertEqual(actual[1], tuple([str(session.python), "-I", "-S", "-B", str(session.entry), "--enter", "darwin",
+                            str(session.uid), str(session.gid), "180", str(session.bootstrap / "native-aia-source.sb"), *command]))
+                        self.assertEqual((actual[2]["user"], actual[2]["group"], actual[2]["extra_groups"]), (session.uid, session.gid, []))
+                        self.assertEqual(actual[2]["env"], session._native_environment(state))
+                        self.assertEqual(actual[2]["cwd"], state["cwd"] / "probes")
+                        self.assertEqual((actual[2]["stdin"], actual[2]["stdout"], actual[2]["stderr"], actual[2]["close_fds"], actual[2]["start_new_session"]),
+                                         (-3, -1, -1, True, True))
+                    if case in {"positive", "negative", "foreign"}:
+                        self.assertTrue(result.ok and result.waited and result.stdout_eof and result.stderr_eof and result.domain_finality)
+                        self.assertEqual((result.stdout, result.stderr, result.persisted), (stdout, b"", (len(stdout), 0)))
+                        projector.assert_called_once_with(stdout, originals)
+                        row = state["control_notes"]["aia-offline-baseline"]
+                        self.assertEqual(row["aia_baseline"], backend.baseline_comparison_note(stdout, originals))
+                        self.assertEqual(row["aia_baseline"]["chain_matches"], case == "positive")
+                        self.assertEqual(row["aia_baseline"]["accepted"], case != "negative")
+                        self.assertFalse(row["ok"] or state["prepared"] or state["started"])
+                        self.assertTrue(row["subject_ok"])
+                        self.assertEqual(row["persisted"], [len(stdout), 0])
+                    else:
+                        self.assertNotIn("aia_baseline", state["control_notes"].get("aia-offline-baseline", {}))
+                        if case in capture_failures:
+                            self.assertFalse(result.ok)
+                            self.assertIsNotNone(session.failure)
+                            projector.assert_not_called()
+                            if case == "held-stderr":
+                                self.assertTrue(result.timed_out and result.waited and result.stdout_eof)
+                                self.assertFalse(result.stderr_eof)
+                                self.assertLess(rig.select_calls, 512)
+                            if not spawned:
+                                self.assertFalse(result.waited or result.stdout_eof or result.stderr_eof or result.domain_finality)
+                                self.assertEqual(result.persisted, (0, 0))
+                        elif case in after_capture:
+                            self.assertIsNotNone(session.failure)
+                        else:
+                            self.assertEqual(rig.opened, [])
+                            projector.assert_not_called()
+                    if rig.opened:
+                        self.assertEqual(len(rig.opened), 2)
+                        self.assertEqual(sum(event[0] == "capture-close" for event in rig.events), 2)
+                        self.assertEqual(session.persisted_bytes, sum(len(value) for value in rig.captures.values()))
+                        count = len(rig.events)
+                        with self.assertRaises(self.module.SessionError):
+                            session._native_backend_capture(state, "aia-offline-baseline")
+                        self.assertEqual(len(rig.events), count)
+                    if state["control_notes"]:
+                        public = json.dumps(state["control_notes"])
+                        for private_value in ("PRIVATE", "/private/tmp", "\"chain\"", *hashes, *(raw.decode() for raw in originals)):
+                            self.assertNotIn(private_value, public)
+                self.assertIsNone(session._native_control)
+                self.assertIs(session._active, original_active)
+                self.assertEqual((state["deadline"], session.deadline), (50.0, 100.0))
+
+        # The lower request layer and public argv profiles cannot borrow this
+        # exact private seventh case for caller env/bounds or another command.
+        for field, value in (("env", {"CALLER_HOOK": "1"}), ("cpu_seconds", 179), ("seconds", 119),
+                             ("output_limit", self.module.MiB - 1), ("absolute_deadline", 49.0), ("latch", False)):
+            session = session_double(self.module, "darwin")
+            state = native_baseline_state_double(session, consumed=True)
+            command = session._native_aia_baseline_command(50.0)
+            control = dict(state=state, case="aia-offline-baseline", argv=command,
+                           policy=session.bootstrap / "native-aia-source.sb", cwd=state["cwd"] / "probes", seconds=120)
+            session._native_control = control
+            rig = _Collection(self.module, session)
+            options = dict(cwd=control["cwd"], env={}, seconds=120, output_limit=self.module.MiB, cpu_seconds=180,
+                           latch=True, profile="native-control", absolute_deadline=50.0)
+            options[field] = value
+            with self.subTest(baseline_request_field=field), rig.scope(), self.assertRaises(self.module.SessionError):
+                session._run(command, **options)
+            self.assertEqual(rig.opened, [])
+            self.assertFalse(any(event[0] == "popen" for event in rig.events))
+            self.assertIs(session._native_control, control)
+        session = session_double(self.module, "darwin")
+        with patch.multiple(self.module, os=SimpleNamespace(), subprocess=SimpleNamespace(), socket=SimpleNamespace()):
+            for profile in ("ordinary", "native-authority-source", "native-authority-wheel", "native-control"):
+                with self.subTest(baseline_public_profile=profile), self.assertRaises(self.module.SessionError):
+                    session._argv(session._native_aia_baseline_command(50.0), 180, profile=profile)
 
     def test_native_initial_owner_requires_its_exact_source_route_and_stops_before_invalid_acquisition(self):
         direct_cases = {"old-vector", "extra-argument", "helper", "policy-argument", "policy", "cwd", "float-seconds", "command-deadline", "alternate-control"}
@@ -5213,6 +5725,129 @@ class CISandboxPureTests(unittest.TestCase):
             for profile in ("ordinary", "native-authority-source", "native-authority-wheel", "native-control"):
                 with self.subTest(initial_public_profile=profile), self.assertRaises(self.module.SessionError):
                     session._argv(session._native_initial_command(50.0), 180, profile=profile)
+
+    def test_native_aia_baseline_entry_is_exact_after_limits_and_other_routes_keep_their_wrapper(self):
+        class ExecBoundary(Exception):
+            pass
+
+        cases = ("valid", "framework-argv0", "ordinary", "wheel", "initial", "limits-error", "identity", "gid", "reserved-low", "reserved-high",
+                 "groups", "native-platform", "vector-platform", "uid-spelling", "cpu", "policy", "helper", "provider", "python-argument",
+                 "origin", "cwd", "cwd-alias", "python-flags", "extra-argument", "misplaced-marker", "embedded-marker", "mixed-markers",
+                 "deadline", "deadline-nan", "deadline-spelling", "deadline-size", "late-validation", "orig-suffix", "orig-type", "flags")
+        for case in cases:
+            with self.subTest(baseline_fixed_entry=case):
+                session = session_double(self.module, "darwin")
+                command = session._native_aia_baseline_command(50.0)
+                policy = session.bootstrap / "native-aia-source.sb"
+                if case == "ordinary":
+                    command, policy = ["/usr/bin/true"], session.policy
+                elif case == "wheel":
+                    command, policy = session._native_command("wheel"), session.bootstrap / "native-authority-wheel.sb"
+                elif case == "initial":
+                    command, policy = session._native_initial_command(50.0), session.bootstrap / "native-authority-source.sb"
+                elif case == "policy":
+                    policy = session.policy
+                elif case == "helper":
+                    command[4] = str(session.source / "arbitrary.py")
+                elif case == "python-flags":
+                    command[2] = "-s"
+                elif case == "python-argument":
+                    command[0] = "/unadmitted/bin/python"
+                elif case == "extra-argument":
+                    command.append("12345")
+                elif case == "misplaced-marker":
+                    command[4], command[5] = command[5], command[4]
+                elif case == "embedded-marker":
+                    command = ["/usr/bin/true", "--aia-offline-baseline", "50.0"]
+                elif case == "mixed-markers":
+                    command.append("--mach-initial")
+                elif case in {"deadline", "deadline-nan", "deadline-spelling", "deadline-size"}:
+                    command[-1] = {"deadline": "10.0", "deadline-nan": "nan", "deadline-spelling": "5e1", "deadline-size": "0" * 65}[case]
+                uid = 59999 if case == "reserved-low" else 65000 if case == "reserved-high" else session.uid
+                args = ["--enter", "linux" if case == "vector-platform" else "darwin", "060001" if case == "uid-spelling" else str(uid),
+                        str(uid), "179" if case == "cpu" else "180", str(policy), *command]
+                if case == "valid":
+                    self.assertEqual(len(args), 13)
+                entry = Path("/unowned/bootstrap/ci_sandbox.py") if case == "origin" else session.entry
+                python = Path("/fixture-tools/python/not-bin/python") if case == "provider" else session.python
+                cwd = session.work / ("native-authority-wheel/probes" if case == "cwd" else "native-authority-source/probes")
+                flags = SimpleNamespace(isolated=1, no_site=0 if case == "flags" else 1, dont_write_bytecode=1,
+                                        ignore_environment=1, no_user_site=1, safe_path=True)
+                orig = [str(session.python), "-I", "-S", "-B", str(entry), *args]
+                if case == "framework-argv0":
+                    orig[0] = "/fixture-tools/python/Resources/Python.app/Contents/MacOS/Python"
+                elif case == "orig-suffix":
+                    orig[-1] = "49.0"
+                fake_sys = SimpleNamespace(platform="linux" if case == "native-platform" else "darwin", executable=str(python),
+                                           orig_argv=tuple(orig) if case == "orig-type" else orig, flags=flags)
+                events, clocks = [], []
+                original = OSError("PRIVATE-REQUIRED-LIMIT")
+
+                def limits(platform, cpu):
+                    self.assertEqual(events, [])
+                    events.append("limits")
+                    if case == "limits-error":
+                        raise original
+
+                def groups(platform):
+                    self.assertEqual((platform, events[0]), ("darwin", "limits"))
+                    events.append("groups")
+                    return [uid, 20] if case == "groups" else [uid]
+
+                def resolve(path, *, strict):
+                    self.assertTrue(strict)
+                    self.assertIn(path, (entry, python, cwd))
+                    self.assertEqual(events[0], "limits")
+                    events.append("resolve")
+                    return session.work / "aliased-probes" if case == "cwd-alias" and path == cwd else path
+
+                def monotonic():
+                    clocks.append(1)
+                    self.assertLessEqual(len(clocks), 2)
+                    return 50.0 if case == "late-validation" and len(clocks) == 2 else 10.0
+
+                def execute(executable, vector, env):
+                    self.assertEqual(events[0], "limits")
+                    events.append("exec")
+                    raise ExecBoundary
+
+                fake_os = SimpleNamespace(getuid=lambda: 0 if case == "identity" else uid,
+                    geteuid=lambda: 0 if case == "identity" else uid, getgid=lambda: uid + 1 if case == "gid" else uid,
+                    getegid=lambda: uid, environ={"SYNTHETIC_CLEAN_ENV": "1"}, execve=Mock(side_effect=execute))
+                with patch.multiple(self.module, __file__=str(entry), os=fake_os, sys=fake_sys,
+                        subprocess=SimpleNamespace(), socket=SimpleNamespace(), signal=SimpleNamespace(), resource=SimpleNamespace(),
+                        time=SimpleNamespace(monotonic=monotonic), _limits=Mock(side_effect=limits),
+                        _process_groups=Mock(side_effect=groups), _userns_zero=Mock()), \
+                     patch.object(self.module, "_native_aia_baseline_entry", wraps=self.module._native_aia_baseline_entry) as validator, \
+                     patch.object(self.module, "_native_initial_entry", wraps=self.module._native_initial_entry) as initial, \
+                     patch.object(Path, "resolve", resolve), patch.object(Path, "cwd", return_value=cwd), \
+                     patch.object(Path, "open", side_effect=AssertionError("fixed baseline entry has no arbitrary file operation")), \
+                     patch.object(Path, "stat", side_effect=AssertionError("entry must use only fake canonical observations")):
+                    successful = case in {"valid", "framework-argv0", "ordinary", "wheel", "initial"}
+                    with self.assertRaises(ExecBoundary if successful else OSError if case == "limits-error" else self.module.SessionError) as caught:
+                        self.module._main(args)
+                    if successful:
+                        expected = ["/usr/bin/sandbox-exec", "-f", str(policy), *command] if case in {"ordinary", "wheel"} else command
+                        fake_os.execve.assert_called_once_with(expected[0], expected, {"SYNTHETIC_CLEAN_ENV": "1"})
+                    else:
+                        fake_os.execve.assert_not_called()
+                    excluded = {"ordinary", "wheel", "initial", "limits-error", "identity", "gid", "mixed-markers"}
+                    self.assertEqual(validator.call_count, int(case not in excluded))
+                    self.assertEqual(initial.call_count, int(case == "initial"))
+                    if case in {"identity", "gid"}:
+                        self.module._limits.assert_not_called()
+                    else:
+                        self.module._limits.assert_called_once_with(args[1], int(args[4]))
+                    if case == "limits-error":
+                        self.assertIs(caught.exception, original)
+                    if case == "late-validation":
+                        self.assertEqual(len(clocks), 2)
+
+        with patch.multiple(self.module, os=SimpleNamespace(), sys=SimpleNamespace(platform="darwin"),
+                            subprocess=SimpleNamespace(), socket=SimpleNamespace(), time=SimpleNamespace()):
+            for invalid in (None, tuple(args), [], [*args[:-1], True]):
+                with self.subTest(baseline_entry_shape=invalid), self.assertRaises(self.module.SessionError):
+                    self.module._native_aia_baseline_entry(invalid)
 
     def test_native_initial_entry_is_exact_after_limits_and_other_routes_keep_their_wrapper(self):
         class ExecBoundary(Exception):
@@ -5765,7 +6400,7 @@ class CISandboxPureTests(unittest.TestCase):
                     for private in ("PRIVATE_CHILD_CANARY", "PRIVATE-AIA-MESSAGE", "/Users/", "signing.key", "opaque_identifier_9",
                                     "MRK_SANDBOX_ERROR=", "MRK_NATIVE_CONTROL_FAILED=", "sandbox-exec:", str(session.root)):
                         self.assertNotIn(private, public)
-                self.assertEqual(state["control_seen"], list(self.module._NATIVE_CONTROL_CASES))
+                self.assertEqual(state["control_seen"], list(self.module._NATIVE_CONTROL_CASES[:6]))
                 self.assertEqual(state["aia_port"], 12345)
                 self.assertFalse(state["prepared"] or state["started"] or state["completed"])
                 self.assertIsNone(session._native_control)

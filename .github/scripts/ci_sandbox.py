@@ -50,7 +50,7 @@ _NATIVE_PHASES = ("source", "wheel")
 _NATIVE_PROFILES = frozenset("native-authority-" + phase for phase in _NATIVE_PHASES)
 _NATIVE_LEAVES = ("home", "tmp", "config", "cache", "probes")
 _NATIVE_CONTROL_CASES = ("mach-baseline", "mach-ordinary", "mach-authority", "mach-nonexpand",
-                         "aia-prepare", "aia-evaluate")
+                         "aia-prepare", "aia-evaluate", "aia-offline-baseline")
 _NATIVE_TRUST_SERVICES = ("com.apple.trustd", "com.apple.trustd.agent")
 _NATIVE_OTHER_SERVICE = "com.apple.cfprefsd.daemon"
 _NATIVE_WRITE_OUTER = b"MRK_NATIVE_WRITE_OUTER\n"
@@ -2070,6 +2070,95 @@ class Session:
         self._native_state_binding(state)
         self._native_deadline(state["deadline"])
 
+    def _native_aia_baseline_command(self, deadline: float) -> list[str]:
+        """One immutable, source-only full-chain comparison; no caller arguments."""
+        return [str(self.python), "-I", "-S", "-B", str(self.bootstrap / "ci_native_authority.py"),
+                "--aia-offline-baseline", repr(deadline)]
+
+    def _native_freeze_baseline(self, state: dict, originals: tuple[bytes, bytes, bytes]) -> None:
+        """Snapshot only the original parent's three public DER values at idle.
+
+        The original U-owned probes directory and its pins are never changed.
+        Partial creations remain in this failed VM; no retry or adoption follows.
+        """
+        if self.cancelled:
+            self._fail("controller cancellation")
+        self._guard()
+        if (type(state) is not dict or self.platform != "darwin" or not self.admitted or self._admitting
+                or self.process_observer is None or self._native_preparing != "source"
+                or self._native_authority.get("source") is not state or state.get("phase") != "source"
+                or state.get("prepared") or state.get("started") or state.get("completed") or state.get("closed")
+                or self._native_control is not None or self._busy or self._active is not None
+                or self._direct_producer_pending or state.get("control_seen") != list(_NATIVE_CONTROL_CASES[:6])
+                or state.get("baseline_attempted", False) is not False
+                or state.get("baseline_ready", False) is not False):
+            raise SessionError("native baseline snapshot lacks its original one-shot source owner")
+        if (type(originals) is not tuple or len(originals) != 3
+                or any(type(raw) is not bytes or not 0 < len(raw) <= 16 * 1024 or not raw.startswith(b"\x30")
+                       for raw in originals) or len(set(originals)) != 3):
+            raise SessionError("native baseline snapshot is not the fixed original DER triple")
+        self._native_state_binding(state)
+        self._native_deadline(state["deadline"])
+        self.ensure_idle(deadline=state["deadline"])
+        self._native_check_inputs(state)
+        if self.cancelled:
+            self._fail("controller cancellation")
+        self._guard()
+        self._native_deadline(state["deadline"])
+        state["baseline_attempted"], state["baseline_ready"] = True, False
+        state["baseline_der"] = originals  # Retain the original immutable tuple before any creation.
+        try:
+            for role, raw in zip(("leaf", "issuer", "root"), originals):
+                if self.cancelled:
+                    self._fail("controller cancellation")
+                self._guard()
+                self._native_deadline(state["deadline"])
+                path = self.bootstrap / f"native-aia-baseline-{role}.der"
+                _private_file(path, raw, 0o444, root_owned=True)
+                if self._native_add_file(state, path, root_owned=True, maximum=16 * 1024) != raw:
+                    raise SessionError("native baseline immutable snapshot differs from original bytes")
+            self._native_check_inputs(state)
+            if self.cancelled:
+                self._fail("controller cancellation")
+            self._guard()
+            self._native_deadline(state["deadline"])
+            state["baseline_ready"] = True
+        except BaseException:
+            state["baseline_ready"] = False
+            self._fail("native baseline immutable snapshot failed")
+            raise
+
+    def _native_aia_baseline_binding(self, state: dict, argv: list[str], *, policy: Path,
+                                     cwd: Path, seconds: int) -> None:
+        if self.cancelled:
+            self._fail("controller cancellation")
+        self._guard()
+        if (type(state) is not dict or self.platform != "darwin" or not self.admitted or self._admitting
+                or self.process_observer is None or self._native_preparing != "source"
+                or self._native_authority.get("source") is not state or state.get("phase") != "source"
+                or state.get("prepared") or state.get("started") or state.get("closed") or state.get("completed")
+                or self._busy or self._active is not None or self._direct_producer_pending
+                or state.get("control_seen") != list(_NATIVE_CONTROL_CASES)
+                or state.get("baseline_attempted") is not True or state.get("baseline_ready") is not True
+                or type(argv) is not list or argv != self._native_aia_baseline_command(state["deadline"])
+                or policy != self.bootstrap / "native-aia-source.sb"
+                or cwd != state["cwd"] / "probes" or type(seconds) is not int or seconds != 120):
+            raise SessionError("native baseline lacks its exact fixed source-control binding")
+        originals = state.get("baseline_der")
+        if (type(originals) is not tuple or len(originals) != 3
+                or any(type(raw) is not bytes or not 0 < len(raw) <= 16 * 1024 or not raw.startswith(b"\x30")
+                       for raw in originals) or len(set(originals)) != 3):
+            raise SessionError("native baseline lost the original DER triple")
+        for role, raw in zip(("leaf", "issuer", "root"), originals):
+            row = state["files"].get(self.bootstrap / f"native-aia-baseline-{role}.der")
+            if (type(row) is not dict or row.get("root_owned") is not True or row.get("maximum") != 16 * 1024
+                    or row.get("sha256") != hashlib.sha256(raw).hexdigest()
+                    or type(row.get("identity")) is not tuple or len(row["identity"]) != 9
+                    or row["identity"][6] != len(raw)):
+                raise SessionError("native baseline snapshot has no original immutable input binding")
+        self._native_state_binding(state)
+        self._native_deadline(state["deadline"])
+
     def _native_environment(self, state: dict) -> dict[str, str]:
         """No caller hooks or previous ordinary HOME/configuration are imported."""
         root = state["cwd"]
@@ -2384,7 +2473,8 @@ class Session:
                 state["native_controls"] = backend.admit_controls(
                     lambda case, *, port=None: self._native_backend_capture(state, case, port=port),
                     lambda: self.ensure_idle(deadline=deadline), state["cwd"] / "probes", deadline=deadline,
-                    policy_sha256=state["files"][state["policy"]]["sha256"])
+                    policy_sha256=state["files"][state["policy"]]["sha256"],
+                    freeze_baseline=lambda originals: self._native_freeze_baseline(state, originals))
                 if state["control_seen"] != list(_NATIVE_CONTROL_CASES):
                     raise SessionError("native authority control inventory is incomplete")
                 for case in _NATIVE_CONTROL_CASES:
@@ -2900,9 +2990,10 @@ class Session:
                     "mach-authority": state["policy"], "mach-nonexpand": self.policy,
                     "aia-prepare": state["policy"],
                     "aia-evaluate": self.bootstrap / "native-aia-source.sb",
+                    "aia-offline-baseline": self.bootstrap / "native-aia-source.sb",
                     "outside-write-positive": self.bootstrap / f"native-write-positive-{state['phase']}.sb",
                     "outside-read-positive": self.policy, "native-isolation": state["policy"]}
-        bounds = {"aia-prepare": 300, "aia-evaluate": 120,
+        bounds = {"aia-prepare": 300, "aia-evaluate": 120, "aia-offline-baseline": 120,
                   "outside-write-positive": 10, "outside-read-positive": 10}
         helper = self.bootstrap / "ci_native_authority.py" if case in _NATIVE_CONTROL_CASES else self.entry
         expected_cwd = state["cwd"] / "probes" if case in _NATIVE_CONTROL_CASES else state["cwd"]
@@ -2935,6 +3026,10 @@ class Session:
             self._native_initial_binding(state, argv, policy=policy, cwd=cwd, seconds=seconds)
         elif "--mach-initial" in argv:
             raise SessionError("initial native application is not available to another control")
+        if case == "aia-offline-baseline":
+            self._native_aia_baseline_binding(state, argv, policy=policy, cwd=cwd, seconds=seconds)
+        elif "--aia-offline-baseline" in argv:
+            raise SessionError("native baseline is not available to another control")
         aia_text_case = state["phase"] == "source" and case == "aia-evaluate"
         self._native_control = {"state": state, "case": case, "argv": argv, "policy": policy,
                                 "cwd": cwd, "seconds": seconds}
@@ -2951,7 +3046,8 @@ class Session:
                                cpu_seconds=180, latch=True, profile="native-control",
                                absolute_deadline=state["deadline"])
             row = self._note_capture("native-authority-" + state["phase"] + "-" + case, result,
-                                     parse_child_notes=case not in {"mach-authority", "mach-nonexpand"} and not aia_text_case)
+                                     parse_child_notes=case not in {"mach-authority", "mach-nonexpand", "aia-offline-baseline"}
+                                     and not aia_text_case)
             state["control_notes"][case] = row
             if case in _NATIVE_STARTUP_CASES:
                 expected = b"" if case == "startup-true" else _NATIVE_STARTUP_STDOUT
@@ -3014,6 +3110,13 @@ class Session:
                        else self._native_initial_command(state["deadline"]) if case == "mach-authority"
                        else [*base, "--mach", repr(state["deadline"])])
             seconds = 30
+        elif case == "aia-offline-baseline":
+            if port is not None or state.get("baseline_ready") is not True:
+                raise SessionError("native baseline requires its immutable snapshot and has no port input")
+            originals = state.get("baseline_der")
+            command = self._native_aia_baseline_command(state["deadline"])
+            policy = self.bootstrap / "native-aia-source.sb"  # Binding only; never a policy-off switch.
+            seconds = 120
         else:
             if type(port) is not int or not 1024 <= port <= 65535:
                 raise SessionError("AIA control lacks the original owned responder port")
@@ -3031,8 +3134,30 @@ class Session:
             if case == "aia-prepare":
                 policy = state["policy"]  # Fixture creation has no network requirement.
         state["control_seen"].append(case)  # No retry after ambiguous launch or collection.
-        return self._native_control_capture(state, case, command, policy=policy,
-                                            cwd=state["cwd"] / "probes", seconds=seconds)
+        result = self._native_control_capture(state, case, command, policy=policy,
+                                              cwd=state["cwd"] / "probes", seconds=seconds)
+        if case == "aia-offline-baseline" and result.ok:
+            try:
+                self.ensure_idle(deadline=state["deadline"])
+                self._native_check_inputs(state)
+                if self.cancelled:
+                    self._fail("controller cancellation")
+                self._guard()
+                self._native_deadline(state["deadline"])
+                if state.get("baseline_der") is not originals or result.stderr != b"":
+                    raise SessionError("native baseline original inputs or closed output differ")
+                observation = state["backend"].baseline_comparison_note(result.stdout, originals)
+                if self.cancelled:
+                    self._fail("controller cancellation")
+                self._guard()
+                self._native_deadline(state["deadline"])
+                if state.get("baseline_der") is not originals:
+                    raise SessionError("native baseline original tuple changed during projection")
+                state["control_notes"][case]["aia_baseline"] = observation
+            except BaseException:
+                self._fail("native baseline comparison/finality failed")
+                raise
+        return result  # Negative trust data cannot change the original capture or AIA oracle.
 
     def _native_boundary_controls(self, state: dict) -> None:
         """Real positives/negatives under EACH phase's actual authority policy."""
@@ -3339,6 +3464,11 @@ class Session:
                 raise SessionError("initial native application is not a public or alternate command role")
             self._native_initial_binding(control["state"], argv, policy=policy,
                                          cwd=control["cwd"], seconds=control["seconds"])
+        if "--aia-offline-baseline" in argv:
+            if profile != "native-control" or control.get("case") != "aia-offline-baseline":
+                raise SessionError("native baseline is not a public or alternate command role")
+            self._native_aia_baseline_binding(control["state"], argv, policy=policy,
+                                               cwd=control["cwd"], seconds=control["seconds"])
         entry = [str(self.python), "-I", "-S", "-B", str(self.entry), role, self.platform,
                  str(self.uid), str(self.gid), str(cpu), str(policy), *argv]
         if self.platform == "darwin":
@@ -3557,7 +3687,9 @@ class Session:
                        and self._native_control is not None else None)
         initial_application = (profile == "native-control" and self._native_control is not None
                                and self._native_control.get("case") == "mach-authority")
-        if initial_application:
+        offline_baseline = (profile == "native-control" and self._native_control is not None
+                            and self._native_control.get("case") == "aia-offline-baseline")
+        if initial_application or offline_baseline:
             if self.cancelled:
                 self._fail("controller cancellation")
             self._guard()  # Input checks cannot authorize a cancelled acquisition.
@@ -3595,7 +3727,7 @@ class Session:
                 self._assert_userns_boundary()
             _remaining(cutoff)  # Capture acquisition may not buy a later spawn.
             self._native_abort_stamp(abort, "wall_before")
-            if abort is not None or exit_reason is not None or initial_application:
+            if abort is not None or exit_reason is not None or initial_application or offline_baseline:
                 # Neither observations nor capture acquisition may authorize a
                 # late/cancelled launch. Recheck the ORIGINAL subject cutoff.
                 _remaining(cutoff)
@@ -4943,6 +5075,43 @@ def _native_initial_entry(argv: list[str]) -> None:
     _remaining(deadline)
 
 
+def _native_aia_baseline_entry(argv: list[str]) -> None:
+    """Validate only the fixed trusted offline comparison after resource limits.
+
+    The policy pathname is a binding field, not an application claim. This
+    entry never removes an inherited sandbox and admits no caller-selected code.
+    """
+    if (type(argv) is not list or len(argv) != 13 or any(type(arg) is not str for arg in argv)
+            or sys.platform != "darwin" or not 0 < len(argv[-1]) <= 64):
+        raise SessionError("invalid fixed native baseline entry")
+    uid = os.getuid()
+    if (not 60000 <= uid < 65000 or (os.geteuid(), os.getgid(), os.getegid()) != (uid,) * 3
+            or _process_groups("darwin") != [uid]):
+        raise SessionError("native baseline lacks its reserved numerical credentials")
+    entry = Path(__file__).resolve(strict=True)
+    root = entry.parent.parent
+    python = Path(sys.executable).resolve(strict=True)
+    cwd = Path.cwd()
+    if (root.parent != Path("/private/tmp") or entry != root / "bootstrap/ci_sandbox.py"
+            or python.parent.name != "bin" or cwd != root / "work/native-authority-source/probes"
+            or cwd != cwd.resolve(strict=True)):
+        raise SessionError("native baseline lacks its fixed entry/provider/cwd paths")
+    literal = argv[-1]
+    deadline = int(literal) if re.fullmatch(r"(?:0|[1-9][0-9]{0,19})", literal) else float(literal)
+    _remaining(deadline)
+    policy = str(root / "bootstrap/native-aia-source.sb")
+    command = [str(python), "-I", "-S", "-B", str(root / "bootstrap/ci_native_authority.py"),
+               "--aia-offline-baseline", repr(deadline)]
+    expected = ["--enter", "darwin", str(uid), str(uid), "180", policy, *command]
+    flags = sys.flags
+    if (argv != expected or type(sys.orig_argv) is not list
+            or sys.orig_argv[1:] != ["-I", "-S", "-B", str(entry), *expected]
+            or (flags.isolated, flags.no_site, flags.dont_write_bytecode,
+                flags.ignore_environment, flags.no_user_site, flags.safe_path) != (1, 1, 1, 1, 1, True)):
+        raise SessionError("native baseline entry differs from its one fixed vector")
+    _remaining(deadline)
+
+
 def _native_write_checkpoint(argv: list[str], *, outer: bool) -> None:
     """Two exact fixed-command checkpoints, never an execution authority."""
     if (type(outer) is not bool or type(argv) is not list
@@ -5922,8 +6091,12 @@ def _main(argv: list[str]) -> int:
             if platform == "linux":
                 _userns_zero()
             _limits(platform, int(cpu))
+        if "--mach-initial" in command and "--aia-offline-baseline" in command:
+            raise SessionError("fixed native entry markers cannot be combined")
         if "--mach-initial" in command:
             _native_initial_entry(argv)
+        elif "--aia-offline-baseline" in command:
+            _native_aia_baseline_entry(argv)
         elif platform == "darwin":
             if len(command) == 7 and command[5] == "--native-write-control":
                 _native_write_checkpoint(argv, outer=True)

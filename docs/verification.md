@@ -217,8 +217,8 @@ Apple SPI**, not a promised stable public API. Missing exports, incompatible
 types, compilation errors or a failed initial positive fail native admission;
 there is no library search or weaker fallback. Its exact immutable helper starts
 as the same unprivileged identity, after resource limits, and applies the fixed
-policy before any product code, Mach lookup or boundary probe. All other entry
-routes retain their sandbox wrapper.
+policy before any product code, Mach lookup or boundary probe. Other entry routes
+retain their sandbox wrapper except for the exact trusted offline baseline below.
 
 Non-expansion requires a successful first application of those exact owner-pinned
 policy bytes, actual outside/ordinary controls, and actual before/after plus an
@@ -243,6 +243,41 @@ product settings. BasicX509 itself defaults offline: this is not a default-true
 claim or proof about deleting the production setter alone. Production policies
 and the five real test methods are unchanged. All probe resources have their
 original bounded owner and independent cleanup/finality checks.
+
+A preplanned seventh source-preparation control, `aia-offline-baseline`, follows
+the unchanged original six. Original evaluator finality and responder close/join
+precede structural-only validation of the complete current three-contrast record;
+trust/signature verdicts and chain/request matches do not select or suppress it.
+After an exact equality reread of all fixtures, the owner exclusively snapshots
+the original online leaf/issuer/root DER into root-owned immutable inputs. No
+private keys, regenerated certificates or earlier-run fixtures are admitted.
+
+For this comparison only, the exact trusted helper omits this project's sandbox
+wrapper, retaining the same reserved unprivileged identity, environment and resource
+bounds. The policy pathname is binding-only, not proof of application. It evaluates
+one fresh full-presented-chain trust with both lookup flags explicitly false and
+read back; no original cases, signatures or responder are rerun. This is neither a general
+policy-off entry nor a way to shed inherited confinement. Ordinary/product
+containment stays unchanged.
+
+All input/cancellation/failure/cleanup/idle guards and the original source-gate
+deadline remain mandatory; no launch occurs from an exception handler or after a
+latched failure. Only after the separate baseline capture/projection and finality/
+idle/input/cutoff checks does the unchanged original four-case oracle run once on
+original inputs. A completed negative baseline is valid diagnostic data; a positive
+is not required. Neither outcome rescues an original failure or waives a gate.
+Missing, malformed or unavailable baseline evidence fails preparation; it is not
+an observed negative.
+
+Its separate frame retains the 4096-byte bound. The original parent's capture note
+contains only fixture-derived chain roles/counts/matches and closed scalar/error
+fields; raw DER/hashes/paths remain private. Inside-failure/outside-success
+localizes context, not a specific permission or authority to expand policy;
+failure in both identifies no certificate/service defect. Later execution, a new
+process, immutable input paths/ownership and the omitted wrapper leave cache/time/
+service/launch-context differences. False lookup flags prove neither kernel network
+isolation nor control of autonomous trustd activity. This comparison does not
+establish the OS/provider trust basis.
 
 The original canonical `/usr/bin/codesign` and clean system launch are part of the
 Apple OS/provider trust basis for its default offline verification semantics.

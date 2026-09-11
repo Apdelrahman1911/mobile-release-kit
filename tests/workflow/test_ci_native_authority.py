@@ -83,6 +83,14 @@ def aia_chain_observations(module, fixtures):
                                    {"status": "no-error", "code": None}} for index, case in enumerate(module._SIGNATURE_CASES)]}}
 
 
+def aia_baseline_evidence(module, originals, *, accepted=True):
+    """One synthetic baseline record, never native execution or capture authority."""
+    return {"schema": 1, "case": module._AIA_BASELINE_CASE, "network": False, "keychains": False,
+            "accepted": accepted, "error": not accepted, "result": 4 if accepted else 5,
+            "chain": [module.hashlib.sha256(raw).hexdigest() for raw in (originals if accepted else originals[:2])],
+            "trust_error": {"status": "no-error", "code": None} if accepted else {"status": "osstatus", "code": -25318}}
+
+
 def der_tlv(tag, body):
     """Test-authored definite-length envelope bytes, never a certificate library."""
     size = len(body)
@@ -118,17 +126,25 @@ class NativeAuthorityTests(unittest.TestCase):
         initial = Mock(return_value=mach_application("mach-initial"))
         nested = Mock(return_value=mach_application("mach-nonexpand", returned=-1, number=1))
         prepare, evaluate, printed = Mock(), Mock(return_value={"schema": 1, "cases": []}), Mock()
+        originals = tuple(aia_fixtures(m)[0][role] for role in ("leaf", "issuer", "root"))
+        baseline = Mock(return_value=aia_baseline_evidence(m, originals))
         with clock(m), patch.multiple(m, Path=PurePath, __file__=str(prefix / "ci_native_authority.py"),
                                      os=identity, sys=SimpleNamespace(platform="darwin"), mach_probe=mach,
-                                     mach_initial=initial, mach_nonexpand=nested, prepare_aia=prepare, evaluate_aia=evaluate), \
+                                     mach_initial=initial, mach_nonexpand=nested, prepare_aia=prepare,
+                                     evaluate_aia=evaluate, evaluate_aia_baseline=baseline), \
                 patch.object(m, "print", printed, create=True):
             for args in (["--mach", "100.0"], ["--mach-initial", str(prefix / "native-authority-source.sb"), "100.0"],
                          ["--mach-nonexpand", str(prefix / "native-authority-source.sb"), "100.0"],
-                         ["--aia-prepare", "60123", "100.0"], ["--aia-evaluate", "60123", "100.0"]):
+                         ["--aia-prepare", "60123", "100.0"], ["--aia-evaluate", "60123", "100.0"],
+                         ["--aia-offline-baseline", "100.0"]):
                 self.assertEqual(m._main(args), 0)
             for args in (["--mach-nonexpand", "100.0"], ["--mach", "extra", "100.0"],
                          ["--mach-initial", "100.0"], ["--mach-initial", "policy", "extra", "100.0"],
-                         ["--aia-evaluate", "060123", "100.0"], ["--arbitrary-role", "100.0"]):
+                         ["--aia-evaluate", "060123", "100.0"], ["--arbitrary-role", "100.0"],
+                         ["--aia-offline-baseline", "60123", "100.0"], ["--aia-offline-baseline", "/private/input.der", "100.0"],
+                         ["--aia-offline-baseline", "100.0", "extra", "100.0"], ["--aia-offline-baseline", "10.0"],
+                         ["--aia-offline-baseline", "nan"], ["--aia-offline-baseline", "inf"],
+                         ["--aia-offline-baseline", "-inf"], ["--aia-offline-baseline"]):
                 with self.subTest(args=args), self.assertRaises(m.NativeControlError):
                     m._main(args)
         mach.assert_called_once_with(100.0)
@@ -136,11 +152,14 @@ class NativeAuthorityTests(unittest.TestCase):
         nested.assert_called_once_with(prefix / "native-authority-source.sb", 100.0)
         prepare.assert_called_once_with(60123, 100.0)
         evaluate.assert_called_once_with(60123, 100.0)
-        self.assertEqual(printed.call_count, 5)
+        baseline.assert_called_once_with(100.0)
+        self.assertEqual(printed.call_count, 6)
         for index, role in ((1, "mach-initial"), (2, "mach-nonexpand")):
             data = printed.call_args_list[index].args[0].encode() + b"\n"
             expected = initial.return_value if role == "mach-initial" else nested.return_value
             self.assertEqual(m.parse_mach_application(data, role), expected)
+        data = printed.call_args_list[-1].args[0].encode() + b"\n"
+        self.assertTrue(m.baseline_comparison_note(data, originals)["chain_matches"])
 
     def test_failure_attribution_is_bounded_closed_and_never_copies_private_values(self):
         m = self.module
@@ -191,11 +210,19 @@ class NativeAuthorityTests(unittest.TestCase):
                 for private in ("PRIVATE", "/Users/", "signing.key", str(ROOT), "_child_returncode"):
                     self.assertNotIn(private, raw.decode())
                 for args in (["--mach", "100.0"], ["--mach-initial", "PRIVATE-POLICY", "100.0"],
-                             ["--aia-evaluate", "12345", "100.0"], ["--mach-nonexpand", "missing"]):
+                             ["--aia-evaluate", "12345", "100.0"], ["--aia-offline-baseline", "100.0"],
+                             ["--mach-nonexpand", "missing"]):
                     self.assertNotIn("child_returncode", m._failure_note(grouped, args))
         initial = m._failure_note(native, ["--mach-initial", "PRIVATE-POLICY", "100.0"])
         self.assertEqual(initial["role"], "mach-initial")
         self.assertEqual(m.parse_failure(m._FAILURE_PREFIX + json.dumps(initial).encode() + b"\n", "mach-initial"), initial)
+        baseline = m._failure_note(native, ["--aia-offline-baseline", "PRIVATE-DEADLINE"])
+        self.assertEqual(baseline["role"], "aia-offline-baseline")
+        raw = m._FAILURE_PREFIX + json.dumps(baseline).encode() + b"\n"
+        self.assertEqual(m.parse_failure(raw, "aia-offline-baseline"), baseline)
+        self.assertNotIn("PRIVATE", raw.decode())
+        for args in (["--aia-offline-baseline"], ["--aia-offline-baseline", "PRIVATE-PATH", "100.0"]):
+            self.assertEqual(m._failure_note(native, args)["role"], "invalid")
         first = m.NativeControlError("PRIVATE-FIRST")
         first._child_returncode = -6
         for other_status in (-6, 1, True):
@@ -234,6 +261,11 @@ class NativeAuthorityTests(unittest.TestCase):
                 self.assertIsNone(m.parse_failure(raw, "aia-prepare"))
         self.assertIsNone(m.parse_failure(data, "mach"))
         self.assertIsNone(m.parse_failure(data, "unknown"))
+        baseline = {**good, "role": "aia-offline-baseline"}
+        self.assertEqual(m.parse_failure(encode(baseline), "aia-offline-baseline"), baseline)
+        self.assertIsNone(m.parse_failure(data, "aia-offline-baseline"))
+        self.assertIsNone(m.parse_failure(encode(baseline), "aia-evaluate"))
+        self.assertIsNone(m.parse_failure(encode({**baseline, "child_returncode": 1}), "aia-offline-baseline"))
 
         nested = {**good, "role": "mach-nonexpand", "exceptions": [{"exception": "NativeControlError", "lines": [10, 20]}],
                   "child_returncode": -6}
@@ -254,7 +286,7 @@ class NativeAuthorityTests(unittest.TestCase):
                     note = m.parse_failure(preceding + encode(value), "mach-nonexpand")
                     self.assertEqual(note, {**value, "reported_child_stage": stage, "reported_child_text": text})
                     self.assertNotIn(preceding.decode().strip(), json.dumps(note))
-                    for other_role in ("mach", "mach-initial", "aia-prepare", "aia-evaluate"):
+                    for other_role in ("mach", "mach-initial", "aia-prepare", "aia-evaluate", "aia-offline-baseline"):
                         self.assertIsNone(m.parse_failure(preceding + encode({**value, "role": other_role}), other_role))
         preceding = next(iter(recognized))
         bad_frames = (preceding[:-1] + frame, preceding.replace(b"\n", b"\r\n") + frame,
@@ -927,6 +959,175 @@ class NativeAuthorityTests(unittest.TestCase):
             m._read_public(Path("/pure/synthetic.der"))
         self.assertEqual(len(raised.exception.exceptions), 2)
         fake_os.close.assert_called_once_with(11)
+
+    def test_baseline_snapshots_require_fixed_immutable_original_descriptor_custody(self):
+        m, test = self.module, self
+        roles = ("leaf", "issuer", "root")
+        changed_fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        cases = [(mode, None, None) for mode in ("valid", "maximum", "before-cutoff", "entry-relative", "entry-alias",
+                                                "entry-name", "entry-bootstrap", "entry-root", "duplicate-DER", "not-DER")]
+        cases += [(mode, target, None) for target in ("session", "bootstrap", "entry") for mode in
+                  ("origin-type", "origin-owner", "origin-group", "origin-mode", "origin-stat-error", "origin-stat-cutoff")]
+        cases += [("origin-drift", target, field) for target in ("session", "bootstrap", "entry") for field in changed_fields]
+        cases += [("origin-hardlink", "entry", None)]
+        cases += [(mode, role, None) for role in roles for mode in
+                  ("snapshot-alias", "snapshot-missing", "snapshot-type", "snapshot-owner", "snapshot-group", "snapshot-mode",
+                   "snapshot-hardlink", "snapshot-empty", "snapshot-large", "snapshot-stat-error", "snapshot-stat-cutoff",
+                   "open-error", "first-stat-error", "second-stat-error", "read-error", "read-cancel", "close-error",
+                   "read-close-error", "short-read", "long-read", "late-read", "late-close", "descriptor-owner",
+                   "descriptor-group", "descriptor-mode", "descriptor-type", "descriptor-hardlink")]
+        cases += [("name-drift", role, field) for role in roles for field in changed_fields]
+        cases += [("descriptor-drift", "issuer", field) for field in changed_fields]
+        for mode, target, field in cases:
+            with self.subTest(immutable_baseline=(mode, target, field)):
+                events, stats, now, fd_stats = [], {}, [100.0 if mode == "before-cutoff" else 10.0], {}
+                earlier = KeyboardInterrupt("PRIVATE-READ-CANCEL") if mode == "read-cancel" else OSError("PRIVATE-READ")
+                closing = OSError("PRIVATE-CLOSE")
+
+                class PurePath(PurePosixPath):
+                    def resolve(self, *, strict):
+                        test.assertTrue(strict)
+                        if mode == "entry-alias" and self == entry:
+                            return self.with_name("aliased.py")
+                        if self in path_roles:
+                            role = path_roles[self]
+                            if mode == "snapshot-alias" and role == target:
+                                return self.with_name("unadmitted.der")
+                            if mode == "snapshot-missing" and role == target:
+                                raise FileNotFoundError("PRIVATE-MISSING")
+                        return self
+
+                    def lstat(self):
+                        key = path_keys[self]
+                        index = stats.get(key, 0)
+                        stats[key] = index + 1
+                        events.append(("lstat", key))
+                        if key == target and mode in {"origin-stat-error", "snapshot-stat-error"}:
+                            raise earlier
+                        if key == target and mode in {"origin-stat-cutoff", "snapshot-stat-cutoff"}:
+                            now[0] = 100.0
+                        value = node(key)
+                        if index and key == target and mode in {"origin-drift", "name-drift"}:
+                            value[field] += 1
+                        return SimpleNamespace(**value)
+
+                entry = PurePath({"entry-relative": "private/tmp/mrk-pure/bootstrap/ci_native_authority.py",
+                                  "entry-name": "/private/tmp/mrk-pure/bootstrap/other.py",
+                                  "entry-bootstrap": "/private/tmp/mrk-pure/other/ci_native_authority.py",
+                                  "entry-root": "/unowned/tmp/mrk-pure/bootstrap/ci_native_authority.py"}.get(
+                                      mode, "/private/tmp/mrk-pure/bootstrap/ci_native_authority.py"))
+                paths = {role: entry.parent / f"native-aia-baseline-{role}.der" for role in roles}
+                path_roles = {path: role for role, path in paths.items()}
+                path_keys = {entry.parent.parent: "session", entry.parent: "bootstrap", entry: "entry", **path_roles}
+                raw = {role: b"\x30" + role.encode() for role in roles}
+                if mode == "maximum":
+                    raw = {role: b"\x30" + role[:1].encode() * (m._MAX_DER - 1) for role in roles}
+                if mode == "duplicate-DER":
+                    raw["root"] = raw["issuer"]
+                if mode == "not-DER":
+                    raw["leaf"] = b"PRIVATE-NOT-DER"
+
+                def node(key, *, descriptor=False):
+                    regular = key not in {"session", "bootstrap"}
+                    value = dict(st_dev=7, st_ino=90 + list(path_keys.values()).index(key),
+                                 st_mode=(stat.S_IFREG | 0o444) if regular else (stat.S_IFDIR | 0o755),
+                                 st_uid=0, st_gid=0, st_nlink=1 if regular else 2,
+                                 st_size=len(raw[key]) if key in roles else 1024, st_mtime_ns=11, st_ctime_ns=12)
+                    if key == target:
+                        prefix = "descriptor-" if descriptor else "origin-" if key not in roles else "snapshot-"
+                        kind = mode.removeprefix(prefix) if mode.startswith(prefix) else None
+                        if kind == "type":
+                            value["st_mode"] = stat.S_IFLNK | 0o444
+                        if kind in {"owner", "group", "mode", "hardlink", "empty", "large"}:
+                            name, replacement = {"owner": ("st_uid", 60123), "group": ("st_gid", 20),
+                                "mode": ("st_mode", (stat.S_IFREG | 0o440) if regular else (stat.S_IFDIR | 0o775)),
+                                "hardlink": ("st_nlink", 2), "empty": ("st_size", 0),
+                                "large": ("st_size", m._MAX_DER + 1)}[kind]
+                            value[name] = replacement
+                    return value
+
+                descriptors = {71 + index: role for index, role in enumerate(roles)}
+                constants = {name: getattr(m.os, name) for name in ("O_RDONLY", "O_NOFOLLOW", "O_NONBLOCK")}
+
+                def opened(path, flags):
+                    self.assertIn(path, path_roles)
+                    self.assertEqual(flags, constants["O_RDONLY"] | constants["O_NOFOLLOW"] | constants["O_NONBLOCK"])
+                    role = path_roles[path]
+                    events.append(("open", role))
+                    if mode == "open-error" and role == target:
+                        raise earlier
+                    return 71 + roles.index(role)
+
+                def fstat(fd):
+                    role = descriptors[fd]
+                    index = fd_stats.get(fd, 0)
+                    self.assertLess(index, 2)
+                    fd_stats[fd] = index + 1
+                    events.append(("fstat", role))
+                    if role == target and mode == ("first-stat-error" if index == 0 else "second-stat-error"):
+                        raise earlier
+                    value = node(role, descriptor=True)
+                    if index and mode == "descriptor-drift" and role == target:
+                        value[field] += 1
+                    return SimpleNamespace(**value)
+
+                def read(fd, maximum):
+                    role = descriptors[fd]
+                    self.assertEqual(maximum, m._MAX_DER + 1)
+                    events.append(("read", role))
+                    if role == target:
+                        if mode in {"read-error", "read-cancel", "read-close-error"}:
+                            raise earlier
+                        if mode == "late-read":
+                            now[0] = 100.0
+                        if mode == "short-read":
+                            return raw[role][:-1]
+                        if mode == "long-read":
+                            return raw[role] + b"x"
+                    return raw[role]
+
+                def close(fd):
+                    role = descriptors[fd]
+                    events.append(("close", role))
+                    if role == target:
+                        if mode in {"close-error", "read-close-error"}:
+                            raise closing
+                        if mode == "late-close":
+                            now[0] = 100.0
+
+                denied = Mock(side_effect=AssertionError("reader must not reach native/fixture/child operations"))
+                with patch.multiple(m, Path=PurePath, __file__=str(entry), time=SimpleNamespace(monotonic=lambda: now[0]),
+                    os=SimpleNamespace(**constants, open=opened, fstat=fstat, read=read, close=close),
+                    subprocess=SimpleNamespace(TimeoutExpired=m.subprocess.TimeoutExpired), socket=SimpleNamespace(), threading=SimpleNamespace(),
+                    _Trust=denied, _fixtures=denied, prepare_aia=denied, _command=denied):
+                    if mode in {"valid", "maximum"}:
+                        self.assertEqual(m._baseline_der(100.0), tuple(raw[role] for role in roles))
+                        self.assertEqual([role for operation, role in events if operation == "open"], list(roles))
+                        self.assertEqual([key for operation, key in events[-3:]], ["session", "bootstrap", "entry"])
+                    else:
+                        with self.assertRaises((m.NativeControlError, BaseExceptionGroup, OSError)) as caught:
+                            m._baseline_der(100.0)
+                        error = caught.exception
+                        if mode == "read-close-error":
+                            self.assertEqual(error.exceptions, (earlier, closing))
+                        if mode == "read-cancel":
+                            self.assertEqual(error.exceptions, (earlier,))
+                        public = json.dumps(m._failure_note(error, ["--aia-offline-baseline", "PRIVATE-CUTOFF"]))
+                        self.assertNotIn("PRIVATE", public)
+                        self.assertNotIn(str(entry.parent), public)
+                denied.assert_not_called()
+                opened_roles = [role for operation, role in events if operation == "open"
+                                and not (mode == "open-error" and role == target)]
+                self.assertEqual([role for operation, role in events if operation == "close"], opened_roles)
+                if mode == "before-cutoff" or mode.startswith("entry-"):
+                    self.assertEqual(events, [])
+                if mode.startswith("origin-") and mode != "origin-drift":
+                    self.assertFalse(any(operation == "open" for operation, _ in events))
+                if mode.startswith("snapshot-"):
+                    self.assertNotIn(("open", target), events)
+                if target in roles:
+                    self.assertTrue(all(roles.index(role) <= roles.index(target)
+                                        for operation, role in events if operation == "open"))
 
     def test_preparation_uses_only_fixed_local_openssl_and_removes_only_its_temporary_files(self):
         m = self.module
@@ -1913,6 +2114,220 @@ class NativeAuthorityTests(unittest.TestCase):
                     m._evaluate_offline_contrast(original, 100.0, role=role)
         constructor.assert_not_called()
 
+    def test_baseline_evaluation_is_one_original_full_chain_without_replay(self):
+        m, test = self.module, self
+        originals = tuple(aia_fixtures(m)[0][role] for role in ("leaf", "issuer", "root"))
+        modes = ("accepted", "rejected", "read-error", "read-cancel", "read-cutoff", "before-cutoff",
+                 "constructor-error", "constructor-cancel", "constructor-cutoff", "network-set-error", "keys-set-error",
+                 "network-get-error", "keys-get-error", "network-true", "network-number", "network-none",
+                 "keys-true", "keys-number", "keys-none", "evaluate-error", "cancel", "system-exit", "close-error",
+                 "close-cancel", "evaluate-and-close", "evaluate-cutoff", "close-cutoff")
+        for mode in modes:
+            with self.subTest(baseline_evaluation=mode):
+                now, events, closed = [100.0 if mode == "before-cutoff" else 10.0], [], [False]
+                earlier = (KeyboardInterrupt("PRIVATE-CANCEL") if mode in {"read-cancel", "constructor-cancel", "cancel"}
+                           else SystemExit("PRIVATE-EXIT") if mode == "system-exit" else OSError("PRIVATE-EVALUATION"))
+                closing = KeyboardInterrupt("PRIVATE-CLOSE-CANCEL") if mode == "close-cancel" else OSError("PRIVATE-CLOSE")
+                raw = aia_baseline_evidence(m, originals, accepted=mode != "rejected")
+                scalar = dict(raw["trust_error"])
+                result = {key: raw[key] for key in ("accepted", "error", "result", "chain")}
+
+                def read(deadline):
+                    self.assertEqual(deadline, 100.0)
+                    m._remaining(deadline)
+                    events.append("read")
+                    if mode in {"read-error", "read-cancel"}:
+                        raise earlier
+                    if mode == "read-cutoff":
+                        now[0] = 100.0
+                    return originals
+
+                def evaluate():
+                    self.assertFalse(closed[0])
+                    trust.set_network.assert_called_once_with(False)
+                    trust.set_keychains.assert_called_once_with(False)
+                    trust.get_network.assert_called_once_with()
+                    trust.get_keychains.assert_called_once_with()
+                    events.append("evaluate")
+                    if mode in {"evaluate-error", "cancel", "system-exit", "evaluate-and-close"}:
+                        raise earlier
+                    if mode == "evaluate-cutoff":
+                        now[0] = 100.0
+                    return result
+
+                def close():
+                    self.assertFalse(closed[0])
+                    closed[0] = True
+                    events.append("close")
+                    if mode in {"close-error", "close-cancel", "evaluate-and-close"}:
+                        raise closing
+                    if mode == "close-cutoff":
+                        now[0] = 100.0
+
+                class Trust:
+                    @property
+                    def error_observation(self):
+                        test.assertTrue(closed[0])
+                        events.append("detached-observation")
+                        return scalar
+
+                trust = Trust()
+                trust.set_network = Mock(side_effect=earlier if mode == "network-set-error" else None)
+                trust.set_keychains = Mock(side_effect=earlier if mode == "keys-set-error" else None)
+                trust.get_network = Mock(side_effect=earlier if mode == "network-get-error" else None,
+                    return_value={"network-true": True, "network-number": 0, "network-none": None}.get(mode, False))
+                trust.get_keychains = Mock(side_effect=earlier if mode == "keys-get-error" else None,
+                    return_value={"keys-true": True, "keys-number": 0, "keys-none": None}.get(mode, False))
+                trust.evaluate, trust.close = Mock(side_effect=evaluate), Mock(side_effect=close)
+                denied = Mock(side_effect=AssertionError("baseline must not replay any other operation"))
+                trust._signature_observation = denied
+
+                def construct(leaf, root, *, issuer):
+                    self.assertEqual((leaf, issuer, root), originals)
+                    events.append("construct")
+                    if mode in {"constructor-error", "constructor-cancel"}:
+                        raise earlier
+                    if mode == "constructor-cutoff":
+                        now[0] = 100.0
+                    return trust
+
+                reader, constructor, remaining = Mock(side_effect=read), Mock(side_effect=construct), Mock(wraps=m._remaining)
+                with patch.multiple(m, _baseline_der=reader, _Trust=constructor, _remaining=remaining,
+                    time=SimpleNamespace(monotonic=lambda: now[0]), os=SimpleNamespace(), subprocess=SimpleNamespace(),
+                    socket=SimpleNamespace(), threading=SimpleNamespace(), Path=SimpleNamespace(), _command=denied,
+                    _fixtures=denied, prepare_aia=denied, evaluate_aia=denied, _evaluate_case=denied,
+                    _evaluate_offline_contrast=denied, _signature_envelope=denied, _Responder=denied):
+                    if mode in {"accepted", "rejected"}:
+                        observed = m.evaluate_aia_baseline(100.0)
+                        self.assertEqual(observed, raw)
+                        scalar["status"] = "unavailable"
+                        self.assertEqual(observed, raw)
+                        self.assertEqual(events, ["read", "construct", "evaluate", "close", "detached-observation"])
+                    else:
+                        expected = (type(earlier) if mode in {"read-error", "read-cancel"} else
+                                    m.NativeControlError if mode in {"before-cutoff", "close-cutoff"} else BaseExceptionGroup)
+                        with self.assertRaises(expected) as caught:
+                            m.evaluate_aia_baseline(100.0)
+                        errors = caught.exception.exceptions if isinstance(caught.exception, BaseExceptionGroup) else (caught.exception,)
+                        if mode in {"read-error", "read-cancel", "constructor-error", "constructor-cancel", "network-set-error",
+                                    "keys-set-error", "network-get-error", "keys-get-error", "evaluate-error", "cancel",
+                                    "system-exit", "evaluate-and-close"}:
+                            self.assertIs(errors[0], earlier)
+                        if mode in {"close-error", "close-cancel", "evaluate-and-close"}:
+                            self.assertIs(errors[-1], closing)
+                            self.assertEqual(len(errors), 2 if mode == "evaluate-and-close" else 1)
+                        self.assertNotIn("detached-observation", events)
+                reader.assert_called_once_with(100.0)
+                self.assertTrue(remaining.called)
+                self.assertTrue(all(call.args == (100.0,) and not call.kwargs for call in remaining.call_args_list))
+                denied.assert_not_called()
+                acquired = mode not in {"before-cutoff", "read-error", "read-cancel", "read-cutoff", "constructor-error", "constructor-cancel"}
+                self.assertEqual(trust.close.call_count, int(acquired))
+                if mode not in {"before-cutoff", "read-error", "read-cancel", "read-cutoff"}:
+                    constructor.assert_called_once_with(originals[0], originals[2], issuer=originals[1])
+                else:
+                    constructor.assert_not_called()
+                evaluated = mode in {"accepted", "rejected", "evaluate-error", "cancel", "system-exit", "close-error",
+                                     "close-cancel", "evaluate-and-close", "evaluate-cutoff", "close-cutoff"}
+                self.assertEqual(trust.evaluate.call_count, int(evaluated))
+
+    def test_baseline_projection_is_closed_bounded_and_never_acceptance_authority(self):
+        m = self.module
+        originals = tuple(aia_fixtures(m)[0][role] for role in ("leaf", "issuer", "root"))
+        self.assertEqual(m.AIA_BASELINE_PREFIX, b"MRK_NATIVE_AIA_BASELINE=")
+        self.assertEqual(m._AIA_BASELINE_CASE, "online-full-chain-offline-baseline")
+        encode = lambda value: m.AIA_BASELINE_PREFIX + json.dumps(value, separators=(",", ":")).encode() + b"\n"
+        denied = Mock(side_effect=AssertionError("projection cannot acquire resources or run an acceptance oracle"))
+
+        def project(data, original=originals):
+            with patch.multiple(m, os=SimpleNamespace(), subprocess=SimpleNamespace(), socket=SimpleNamespace(),
+                threading=SimpleNamespace(), time=SimpleNamespace(), Path=SimpleNamespace(), _baseline_der=denied,
+                _Trust=denied, _fixtures=denied, _Responder=denied, prepare_aia=denied, evaluate_aia=denied,
+                evaluate_aia_baseline=denied, require_aia_controls=denied, _command=denied):
+                return m.baseline_comparison_note(data, original)
+
+        expected = {"schema": 1, "control": "aia-offline-baseline", "semantics": "comparison-observation-only",
+                    "available": True, "case": "online-full-chain-offline-baseline", "network": False, "keychains": False,
+                    "accepted": True, "error": False, "result": 4, "chain_count": 3, "chain_matches": True,
+                    "chain_roles": ["leaf", "issuer", "root"], "trust_error": {"status": "no-error", "code": None}}
+        row = aia_baseline_evidence(m, originals)
+        self.assertEqual(project(encode(row)), expected)
+        negative = aia_baseline_evidence(m, originals, accepted=False)
+        note = project(encode(negative))
+        self.assertEqual(note, {**expected, "accepted": False, "error": True, "result": 5, "chain_count": 2,
+                                "chain_matches": False, "chain_roles": ["leaf", "issuer"],
+                                "trust_error": {"status": "osstatus", "code": -25318}})
+        for chain, labels in ((list(reversed(row["chain"])), ["root", "issuer", "leaf"]),
+                              (["0" * 64], ["other"]), ([row["chain"][0]] * 3, ["leaf"] * 3)):
+            note = project(encode({**row, "chain": chain}))
+            self.assertTrue(note["available"])
+            self.assertEqual(note["chain_roles"], labels)
+            self.assertFalse(note["chain_matches"])
+        note = project(encode(row), tuple(reversed(originals)))
+        self.assertEqual(note["chain_roles"], ["root", "issuer", "leaf"])
+        self.assertFalse(note["chain_matches"])
+        for status, code in (("no-error", None), ("unavailable", None), ("other-domain", None),
+                             ("osstatus", -(2**31)), ("osstatus", 2**31 - 1), ("osstatus", 0)):
+            for result in (0, 0xffffffff):
+                note = project(encode({**negative, "result": result, "trust_error": {"status": status, "code": code}}))
+                self.assertTrue(note["available"])
+                self.assertEqual(note["result"], result)
+                self.assertEqual(note["trust_error"], {"status": status, "code": code})
+                public = json.dumps(note)
+                for private in ("PRIVATE", "synthetic-", "/mrk-aia/", ".der", '"chain"', *row["chain"], *(raw.decode() for raw in originals)):
+                    self.assertNotIn(private, public)
+                self.assertLess(len(public), 4096)
+
+        frame = encode(row)
+        malformed = [None, frame.decode(), bytearray(frame), b"", frame[:-1], frame + b"\n", frame + b"PRIVATE-OUTPUT\n",
+                     frame + frame, b"prefix " + frame, m.AIA_PREFIX + frame[len(m.AIA_BASELINE_PREFIX):],
+                     m.AIA_BASELINE_PREFIX + b"[]\n", m.AIA_BASELINE_PREFIX + b"null\n", b"x" * 4097,
+                     m.AIA_BASELINE_PREFIX + b"[" * 1800 + b"]" * 1800 + b"\n",
+                     frame.replace(b'"schema":1', b'"schema":1,"schema":1'),
+                     frame.replace(b'"status":"no-error"', b'"status":"no-error","status":"no-error"'),
+                     frame.replace(b'"code":null', b'"code":null,"code":null'),
+                     frame.replace(b'"schema":1', b'"schema":NaN'), frame.replace(b'"result":4', b'"result":Infinity'),
+                     frame.replace(b'"case":"online', b'"case":"\xffonline')]
+        for key in row:
+            changed = dict(row)
+            del changed[key]
+            malformed.append(encode(changed))
+        for key, value in (("schema", True), ("schema", 2), ("case", True), ("case", m._CONTRAST_CASE),
+            ("network", True), ("network", 0), ("keychains", True), ("keychains", None), ("accepted", 1), ("error", "false"),
+            ("result", True), ("result", -1), ("result", 0x100000000), ("result", 4.0), ("chain", []),
+            ("chain", ["0" * 64] * 4), ("chain", "PRIVATE-CHAIN"), ("chain", [True]), ("chain", ["A" * 64]),
+            ("chain", ["0" * 63]), ("chain", ["0" * 65]), ("chain", ["g" * 64]), ("PRIVATE-FIELD", "/Users/private/signing.key"),
+            ("trust_error", None), ("trust_error", []), ("trust_error", {"status": "osstatus"}),
+            ("trust_error", {"status": "PRIVATE-STATUS", "code": None}), ("trust_error", {"status": True, "code": None}),
+            ("trust_error", {"status": "no-error", "code": 0}), ("trust_error", {"status": "other-domain", "code": -1}),
+            ("trust_error", {"status": "unavailable", "code": True}), ("trust_error", {"status": "osstatus", "code": None}),
+            ("trust_error", {"status": "osstatus", "code": True}), ("trust_error", {"status": "osstatus", "code": 1.0}),
+            ("trust_error", {"status": "osstatus", "code": -(2**31) - 1}),
+            ("trust_error", {"status": "osstatus", "code": 2**31}),
+            ("trust_error", {"status": "no-error", "code": None, "message": "PRIVATE-MESSAGE"})):
+            malformed.append(encode({**row, key: value}))
+        for data in malformed:
+            with self.subTest(malformed_baseline=repr(data)[:80]), self.assertRaises(m.NativeControlError):
+                project(data)
+        for original in (None, list(originals), originals[:2], (*originals, originals[0]),
+                         (originals[0], originals[0], originals[2]), (b"", *originals[1:]),
+                         (b"PRIVATE-NOT-DER", *originals[1:]), (bytearray(originals[0]), *originals[1:]),
+                         (b"\x30" * (m._MAX_DER + 1), *originals[1:]), (True, *originals[1:])):
+            with self.subTest(malformed_original=type(original).__name__), self.assertRaises(m.NativeControlError):
+                project(frame, original)
+        maximum_originals = tuple(b"\x30" + bytes((index,)) * (m._MAX_DER - 1) for index in (1, 2, 3))
+        maximum = {**aia_baseline_evidence(m, maximum_originals), "accepted": False, "error": False,
+                   "result": 0xffffffff, "trust_error": {"status": "osstatus", "code": -(2**31)}}
+        maximum_frame = encode(maximum)
+        self.assertLess(len(maximum_frame), 4096)
+        self.assertTrue(project(maximum_frame, maximum_originals)["chain_matches"])
+        padded = maximum_frame[:-1] + b" " * (4096 - len(maximum_frame)) + b"\n"
+        self.assertEqual(len(padded), 4096)
+        self.assertEqual(project(padded, maximum_originals), project(maximum_frame, maximum_originals))
+        with self.assertRaises(m.NativeControlError):
+            project(padded[:-1] + b" \n", maximum_originals)
+        denied.assert_not_called()
+
     def test_aia_error_observations_assemble_only_after_original_case_cleanup(self):
         m = self.module
         fixtures = aia_fixtures(m)
@@ -2479,12 +2894,14 @@ class NativeAuthorityTests(unittest.TestCase):
             ("mach-nonexpand", mach_application("mach-nonexpand", returned=-1, number=1)))})
         extended = {**record, "chain_observations": aia_chain_observations(m, fixtures)}
         outputs.update({"aia-prepare": b"MRK_AIA_PREPARED\n", "aia-evaluate": m.AIA_PREFIX + json.dumps(extended).encode() + b"\n"})
+        original_der = tuple(fixtures[0][role] for role in ("leaf", "issuer", "root"))
+        outputs["aia-offline-baseline"] = m.AIA_BASELINE_PREFIX + json.dumps(aia_baseline_evidence(m, original_der)).encode() + b"\n"
         real_compare, real_project = m.require_aia_controls, m._aia_comparison_note
         scratch = Path("/pure/probes")
         for mode in ("comparison", "formatting-error", "formatting-cancel", "success", "capture-error", "capture-refused", "finality-error",
-                     "close-error", "deadline", "final-idle-error"):
+                     "close-error", "deadline", "post-close-idle-error", "final-idle-error"):
             with self.subTest(comparison_owner_gate=mode):
-                events, originals, now, closed, last = [], [], [10.0], [False], [None]
+                events, originals, now, closed, last, compared = [], [], [10.0], [False], [None], [False]
                 earlier = OSError("PRIVATE-EARLIER-ERROR /Users/private/signing.key")
                 formatter = (KeyboardInterrupt("PRIVATE-FORMATTING-CANCEL") if mode == "formatting-cancel"
                              else ValueError("PRIVATE-FORMATTING-ERROR"))
@@ -2500,7 +2917,8 @@ class NativeAuthorityTests(unittest.TestCase):
                 def idle():
                     events.append(("idle", last[0]))
                     if (mode == "finality-error" and last[0] == "aia-evaluate" and not closed[0]
-                            or mode == "final-idle-error" and closed[0]):
+                            or mode == "post-close-idle-error" and closed[0]
+                            or mode == "final-idle-error" and compared[0]):
                         raise earlier
 
                 def close():
@@ -2513,6 +2931,7 @@ class NativeAuthorityTests(unittest.TestCase):
 
                 def compare(data, actual_fixtures, actual_requests):
                     events.append("compare")
+                    compared[0] = True
                     self.assertTrue(closed[0])
                     self.assertLess(now[0], 100.0)
                     self.assertIs(data, outputs["aia-evaluate"])
@@ -2525,41 +2944,54 @@ class NativeAuthorityTests(unittest.TestCase):
                         raise
 
                 def project(data, actual_fixtures, actual_requests):
-                    events.append("project")
+                    events.append("project" if compared[0] else "preflight")
                     self.assertTrue(closed[0])
-                    self.assertEqual(len(originals), 1)
+                    self.assertEqual(len(originals), int(compared[0]))
                     self.assertIs(data, outputs["aia-evaluate"])
                     self.assertIs(actual_fixtures, fixtures)
                     self.assertIs(actual_requests, requests)
-                    if mode in {"formatting-error", "formatting-cancel"}:
+                    if compared[0] and mode in {"formatting-error", "formatting-cancel"}:
                         raise formatter
                     return real_project(data, actual_fixtures, actual_requests)
+
+                def freeze(original):
+                    self.assertEqual(original, original_der)
+                    self.assertFalse(compared[0])
+                    self.assertTrue(closed[0])
+                    self.assertEqual(projector.call_count, 1)
+                    self.assertEqual(reader.call_count, 2)
+                    events.append("snapshot")
 
                 responder = SimpleNamespace(port=60123, requests=requests, start=Mock(side_effect=lambda rows: events.append("start")),
                                             close=Mock(side_effect=close))
                 comparator, projector = Mock(side_effect=compare), Mock(side_effect=project)
+                reader, snapshot = Mock(return_value=fixtures), Mock(side_effect=freeze)
                 with patch.multiple(m, time=SimpleNamespace(monotonic=lambda: now[0]), os=SimpleNamespace(),
                     subprocess=SimpleNamespace(), socket=SimpleNamespace(), threading=SimpleNamespace(), secrets=SimpleNamespace(),
-                    Path=SimpleNamespace(), _scratch=Mock(return_value=scratch), _fixtures=Mock(return_value=fixtures),
+                    Path=SimpleNamespace(), _scratch=Mock(return_value=scratch), _fixtures=reader,
                     _Responder=Mock(return_value=responder), require_aia_controls=comparator, _aia_comparison_note=projector), \
                      patch.object(parent, "os", SimpleNamespace(path=SimpleNamespace(basename=lambda value: value.rsplit("/", 1)[-1]))):
                     if mode == "success":
-                        result = m.admit_controls(launch, idle, scratch, deadline=100.0, policy_sha256="a" * 64)
+                        result = m.admit_controls(launch, idle, scratch, deadline=100.0, policy_sha256="a" * 64,
+                                                  freeze_baseline=snapshot)
                         self.assertTrue(result["cleanup_ok"])
                         self.assertTrue(result["aia"]["final_disable_mutation_detected"])
                         self.assertEqual(result["aia"]["request_counts"], [1, 0, 1, 0])
-                        projector.assert_not_called()
+                        projector.assert_called_once_with(outputs["aia-evaluate"], fixtures, requests)
                     else:
                         expected_error = (m.NativeControlError if mode in {"comparison", "formatting-error", "formatting-cancel", "deadline"}
-                                          else OSError if mode == "final-idle-error" else BaseExceptionGroup)
+                                          else OSError if mode in {"post-close-idle-error", "final-idle-error"} else BaseExceptionGroup)
                         with self.assertRaises(expected_error) as raised:
-                            m.admit_controls(launch, idle, scratch, deadline=100.0, policy_sha256="a" * 64)
+                            m.admit_controls(launch, idle, scratch, deadline=100.0, policy_sha256="a" * 64,
+                                             freeze_baseline=snapshot)
                         error = raised.exception
                         if mode in {"comparison", "formatting-error", "formatting-cancel"}:
                             self.assertEqual(len(originals), 1)
                             self.assertIs(error, originals[0])
-                            projector.assert_called_once_with(outputs["aia-evaluate"], fixtures, requests)
-                            self.assertEqual(events[-3:], ["close", "compare", "project"])
+                            self.assertEqual(projector.call_count, 2)
+                            self.assertTrue(all(call.args == (outputs["aia-evaluate"], fixtures, requests)
+                                                and not call.kwargs for call in projector.call_args_list))
+                            self.assertEqual(events[-2:], ["compare", "project"])
                             if mode == "comparison":
                                 self.assertEqual(error._ci_observation, real_project(outputs["aia-evaluate"], fixtures, requests))
                                 self.assertFalse(error._ci_observation["requests_match"])
@@ -2576,9 +3008,9 @@ class NativeAuthorityTests(unittest.TestCase):
                                 self.assertIsNot(error, formatter)
                                 self.assertEqual(parent._exception_notes(error), [{"exception": "NativeControlError", "lines": []}])
                         else:
-                            projector.assert_not_called()
+                            self.assertEqual(projector.call_count, int(mode == "final-idle-error"))
                             self.assertFalse(hasattr(error, "_ci_observation"))
-                            if mode == "final-idle-error":
+                            if mode in {"post-close-idle-error", "final-idle-error"}:
                                 self.assertIs(error, earlier)
                             if isinstance(error, BaseExceptionGroup):
                                 leaves = [leaf for child in error.exceptions for leaf in
@@ -2596,7 +3028,18 @@ class NativeAuthorityTests(unittest.TestCase):
                     responder.start.assert_called_once_with({fixture["route"]: fixture["issuer"] for fixture in fixtures})
                     responder.close.assert_called_once_with()
                 captures = [event for event in events if isinstance(event, tuple) and event[0] == "capture"]
-                self.assertEqual(captures, [("capture", case, None if case.startswith("mach-") else 60123) for case in outputs])
+                reached_baseline = mode in {"comparison", "formatting-error", "formatting-cancel", "success", "final-idle-error"}
+                self.assertEqual(captures, [("capture", case, 60123 if case in {"aia-prepare", "aia-evaluate"} else None)
+                                            for case in list(outputs)[:7 if reached_baseline else 6]])
+                self.assertEqual(reader.call_count, 2 if reached_baseline else 1)
+                if reached_baseline:
+                    snapshot.assert_called_once_with(original_der)
+                    self.assertLess(events.index("close"), events.index("preflight"))
+                    self.assertLess(events.index("preflight"), events.index("snapshot"))
+                    self.assertLess(events.index("snapshot"), events.index(("capture", "aia-offline-baseline", None)))
+                    self.assertLess(events.index(("idle", "aia-offline-baseline")), events.index("compare"))
+                else:
+                    snapshot.assert_not_called()
                 for index, event in enumerate(events):
                     if isinstance(event, tuple) and event[0] == "capture":
                         self.assertEqual(events[index + 1], ("idle", event[1]))
@@ -2638,7 +3081,7 @@ class NativeAuthorityTests(unittest.TestCase):
                     with self.assertRaises(m.NativeControlError):
                         m._fixtures(base, 60123, 100.0)
 
-    def test_owner_orchestration_keeps_six_real_captures_and_finality_order(self):
+    def test_owner_orchestration_keeps_original_six_then_baseline_and_finality_order(self):
         m = self.module
         fixtures = aia_fixtures(m)
         record, requests = aia_evidence(m, fixtures)
@@ -2649,7 +3092,12 @@ class NativeAuthorityTests(unittest.TestCase):
                         "mach-nonexpand": mach_application("mach-nonexpand", returned=-1, number=1)}
         outputs.update({name: m.MACH_APPLY_PREFIX + json.dumps(row).encode() + b"\n" for name, row in applications.items()})
         outputs["aia-prepare"] = b"MRK_AIA_PREPARED\n"
+        record["chain_observations"] = aia_chain_observations(m, fixtures)
         outputs["aia-evaluate"] = m.AIA_PREFIX + json.dumps(record).encode() + b"\n"
+        originals = tuple(fixtures[0][role] for role in ("leaf", "issuer", "root"))
+        # A completed negative baseline is valid observation data, not a new gate.
+        outputs["aia-offline-baseline"] = (m.AIA_BASELINE_PREFIX
+            + json.dumps(aia_baseline_evidence(m, originals, accepted=False)).encode() + b"\n")
         responder = SimpleNamespace(port=60123, requests=requests, start=lambda _rows: events.append("listener-start"),
                                     close=lambda: events.append("listener-close"))
 
@@ -2660,19 +3108,55 @@ class NativeAuthorityTests(unittest.TestCase):
         def idle():
             events.append("idle")
 
-        with clock(m), patch.object(m, "_scratch"), patch.object(m, "_fixtures", return_value=fixtures), \
-                patch.object(m, "_Responder", return_value=responder):
-            result = m.admit_controls(launch, idle, Path("/pure/probes"), deadline=100.0, policy_sha256="a" * 64)
+        def read(scratch, port, deadline):
+            self.assertEqual((scratch, port, deadline), (Path("/pure/probes"), 60123, 100.0))
+            events.append("fixtures")
+            return fixtures
+
+        def freeze(raw):
+            self.assertEqual(raw, originals)
+            self.assertEqual(events[-3:], ["idle", "preflight", "fixtures"])
+            events.append("snapshot")
+
+        real_project, real_baseline, real_compare = m._aia_comparison_note, m.baseline_comparison_note, m.require_aia_controls
+
+        def project(data, original, observed):
+            events.append("preflight")
+            return real_project(data, original, observed)
+
+        def baseline(data, original):
+            events.append("baseline-project")
+            return real_baseline(data, original)
+
+        def compare(data, original, observed):
+            self.assertEqual(events[-3:], [("capture", "aia-offline-baseline", None), "idle", "baseline-project"])
+            events.append("compare")
+            return real_compare(data, original, observed)
+
+        snapshot, reader, comparator = Mock(side_effect=freeze), Mock(side_effect=read), Mock(side_effect=compare)
+        baseline_projector, projector = Mock(side_effect=baseline), Mock(side_effect=project)
+        scratch = Path("/pure/probes")
+        with clock(m), patch.multiple(m, _scratch=Mock(), _fixtures=reader, _Responder=Mock(return_value=responder),
+            _aia_comparison_note=projector, baseline_comparison_note=baseline_projector, require_aia_controls=comparator,
+            os=SimpleNamespace(), subprocess=SimpleNamespace(), socket=SimpleNamespace(), threading=SimpleNamespace(), Path=SimpleNamespace()):
+            result = m.admit_controls(launch, idle, scratch, deadline=100.0, policy_sha256="a" * 64,
+                                      freeze_baseline=snapshot)
         self.assertTrue(result["cleanup_ok"])
         self.assertEqual(result["mach"]["authority"], applications["mach-authority"])
         self.assertEqual(result["mach"]["nonexpand"], applications["mach-nonexpand"])
         captures = [event for event in events if isinstance(event, tuple)]
-        self.assertEqual(captures, [("capture", name, None if name.startswith("mach-") else 60123)
+        self.assertEqual(captures, [("capture", name, 60123 if name in {"aia-prepare", "aia-evaluate"} else None)
                                    for name in outputs])
         for index, event in enumerate(events):
             if isinstance(event, tuple):
                 self.assertEqual(events[index + 1], "idle")
-        self.assertEqual(events[-2:], ["listener-close", "idle"])
+        self.assertEqual(events[-10:], ["listener-close", "idle", "preflight", "fixtures", "snapshot",
+                                       ("capture", "aia-offline-baseline", None), "idle", "baseline-project", "compare", "idle"])
+        self.assertEqual(reader.call_count, 2)
+        snapshot.assert_called_once_with(originals)
+        projector.assert_called_once_with(outputs["aia-evaluate"], fixtures, requests)
+        baseline_projector.assert_called_once_with(outputs["aia-offline-baseline"], originals)
+        comparator.assert_called_once_with(outputs["aia-evaluate"], fixtures, requests)
 
         diagnostic = b"sandbox-exec: sandbox_apply: Operation not permitted\n" + m._FAILURE_PREFIX + json.dumps({
             "schema": 1, "role": "mach-nonexpand", "error_count": 1, "truncated": False,
@@ -2689,13 +3173,16 @@ class NativeAuthorityTests(unittest.TestCase):
 
         responder_factory = Mock(side_effect=AssertionError("a failed nested control may not advance to AIA"))
         fixtures_reader = Mock(side_effect=AssertionError("a diagnostic is not completed control authority"))
+        snapshot = Mock(return_value=None)
         with clock(m), patch.object(m, "_scratch"), patch.object(m, "_Responder", responder_factory), \
                 patch.object(m, "_fixtures", fixtures_reader), self.assertRaises(m.NativeControlError):
-            m.admit_controls(refused_launch, idle, Path("/pure/probes"), deadline=100.0, policy_sha256="a" * 64)
+            m.admit_controls(refused_launch, idle, Path("/pure/probes"), deadline=100.0, policy_sha256="a" * 64,
+                             freeze_baseline=snapshot)
         self.assertEqual(refused_cases, ["mach-baseline", "mach-ordinary", "mach-authority", "mach-nonexpand"])
         self.assertEqual(idle.call_count, 5)  # Initial idle and each actual failed/successful capture remain required.
         responder_factory.assert_not_called()
         fixtures_reader.assert_not_called()
+        snapshot.assert_not_called()
         with self.assertRaises(m.NativeControlError):
             m.parse_mach(diagnostic)  # Neither the error scalar nor reported English text is a denial record.
         for case in ("owner-hash-missing", "owner-hash-bool", "owner-hash-uppercase", "initial-hash", "negative-hash",
@@ -2723,12 +3210,230 @@ class NativeAuthorityTests(unittest.TestCase):
             with self.subTest(application_owner_mutation=case), clock(m), patch.object(m, "_scratch"), \
                  patch.object(m, "_Responder", responder_factory), patch.object(m, "_fixtures", fixtures_reader), \
                  self.assertRaises(m.NativeControlError):
-                m.admit_controls(attempted, Mock(), Path("/pure/probes"), deadline=100.0, policy_sha256=owner_hash)
+                m.admit_controls(attempted, Mock(), Path("/pure/probes"), deadline=100.0, policy_sha256=owner_hash,
+                                 freeze_baseline=snapshot)
             self.assertFalse(any(name.startswith("aia-") for name in actual))
             if case.startswith("owner-hash-"):
                 self.assertEqual(actual, [])
             responder_factory.assert_not_called()
             fixtures_reader.assert_not_called()
+            snapshot.assert_not_called()
+
+    def test_owner_baseline_structural_snapshot_and_capture_failures_stop_before_oracle(self):
+        m = self.module
+        semantic_failures = {"original-negative", "flags-mismatch", "request-digest"}
+        successes = {"contrast-negative", "crypto-unavailable", "crypto-negative", "baseline-negative"}
+        structural_failures = {"missing-contrasts", "short-contrasts", "bad-cases", "bad-framing", "malformed-fixture", "malformed-request"}
+        preflight_failures = {"preflight-error", "preflight-cancel", "preflight-cutoff"}
+        reread_failures = {"reread-DER-drift", "reread-route-drift", "reread-error", "reread-cutoff"}
+        snapshot_failures = {"snapshot-error", "snapshot-cancel", "snapshot-return", "snapshot-cutoff"}
+        capture_failures = {"baseline-launch-error", "baseline-capture-refused", "baseline-capture-missing", "baseline-finality-error",
+                            "baseline-launch-and-finality", "baseline-finality-cancel", "baseline-malformed", "baseline-cutoff",
+                            "baseline-projection-cutoff"}
+        modes = ({"callback-invalid"} | semantic_failures | successes | structural_failures
+                 | preflight_failures | reread_failures | snapshot_failures | capture_failures)
+        real_project, real_baseline, real_compare = m._aia_comparison_note, m.baseline_comparison_note, m.require_aia_controls
+        scratch = Path("/pure/probes")
+        for mode in sorted(modes):
+            with self.subTest(baseline_owner_boundary=mode):
+                fixtures = aia_fixtures(m)
+                originals = tuple(fixtures[0][role] for role in ("leaf", "issuer", "root"))
+                record, requests = aia_evidence(m, fixtures)
+                record["chain_observations"] = aia_chain_observations(m, fixtures)
+                if mode == "original-negative":
+                    record["cases"][0].update(accepted=False, error=True, result=5, chain=record["cases"][0]["chain"][:1])
+                if mode == "flags-mismatch":
+                    record["cases"][0]["network"] = False
+                if mode == "request-digest":
+                    requests[0] = (requests[0][0], "0" * 64)
+                if mode == "contrast-negative":
+                    contrast = record["chain_observations"]["contrasts"][0]
+                    contrast.update(accepted=False, error=True, result=5, chain=contrast["chain"][:2],
+                                    trust_error={"status": "osstatus", "code": -25318})
+                if mode == "crypto-unavailable":
+                    record["chain_observations"]["crypto"] = {"available": False, "keys": None, "checks": None}
+                if mode == "crypto-negative":
+                    record["chain_observations"]["crypto"]["checks"][0].update(accepted=False, error=True,
+                        trust_error={"status": "osstatus", "code": -67808})
+                if mode == "missing-contrasts":
+                    del record["chain_observations"]
+                if mode == "short-contrasts":
+                    record["chain_observations"]["contrasts"].pop()
+                if mode == "bad-cases":
+                    record["cases"].pop()
+                if mode == "malformed-fixture":
+                    fixtures[0]["leaf"] = b"PRIVATE-NOT-DER"
+                if mode == "malformed-request":
+                    requests[0] = list(requests[0])
+                outputs = {name: m.MACH_PREFIX + json.dumps(row).encode() + b"\n" for name, row in (
+                    ("mach-baseline", mach_row([0, 1102, 0])), ("mach-ordinary", mach_row([1100] * 3)))}
+                outputs.update({name: m.MACH_APPLY_PREFIX + json.dumps(row).encode() + b"\n" for name, row in (
+                    ("mach-authority", mach_application("mach-initial")),
+                    ("mach-nonexpand", mach_application("mach-nonexpand", returned=-1, number=1)))})
+                outputs["aia-prepare"] = b"MRK_AIA_PREPARED\n"
+                outputs["aia-evaluate"] = m.AIA_PREFIX + json.dumps(record, separators=(",", ":")).encode() + b"\n"
+                if mode == "bad-framing":
+                    outputs["aia-evaluate"] += b"PRIVATE-EXTRA\n"
+                outputs["aia-offline-baseline"] = m.AIA_BASELINE_PREFIX + json.dumps(
+                    aia_baseline_evidence(m, originals, accepted=mode != "baseline-negative")).encode() + b"\n"
+                if mode == "baseline-malformed":
+                    outputs["aia-offline-baseline"] = b"PRIVATE-NOT-BASELINE\n"
+                now, events, last, closed, compared, original_errors = [10.0], [], [None], [False], [False], []
+                earlier = KeyboardInterrupt("PRIVATE-CANCEL") if mode in {"preflight-cancel", "snapshot-cancel"} else OSError("PRIVATE-ORIGINAL")
+                finality = KeyboardInterrupt("PRIVATE-FINALITY-CANCEL") if mode == "baseline-finality-cancel" else OSError("PRIVATE-FINALITY")
+
+                def launch(case, *, port=None):
+                    self.assertEqual(port, 60123 if case in {"aia-prepare", "aia-evaluate"} else None)
+                    events.append(("capture", case))
+                    last[0] = case
+                    if case == "aia-offline-baseline":
+                        self.assertTrue(closed[0])
+                        self.assertFalse(compared[0])
+                        snapshot.assert_called_once_with(originals)
+                        if mode in {"baseline-launch-error", "baseline-launch-and-finality"}:
+                            raise earlier
+                        if mode == "baseline-capture-missing":
+                            return None
+                        if mode == "baseline-cutoff":
+                            now[0] = 100.0
+                    return SimpleNamespace(ok=not (case == "aia-offline-baseline" and mode == "baseline-capture-refused"), stdout=outputs[case])
+
+                def idle():
+                    events.append(("idle", last[0]))
+                    if last[0] == "aia-offline-baseline" and mode in {
+                            "baseline-finality-error", "baseline-finality-cancel", "baseline-launch-and-finality"}:
+                        raise finality
+
+                def close():
+                    events.append("close")
+                    closed[0] = True
+
+                def read(path, port, deadline):
+                    self.assertEqual((path, port, deadline), (scratch, 60123, 100.0))
+                    events.append("fixtures")
+                    if reader.call_count == 2:
+                        self.assertTrue(closed[0])
+                        self.assertFalse(compared[0])
+                        if mode == "reread-error":
+                            raise earlier
+                        if mode == "reread-cutoff":
+                            now[0] = 100.0
+                        if mode in {"reread-DER-drift", "reread-route-drift"}:
+                            changed = [dict(fixture) for fixture in fixtures]
+                            # An offline (not snapshotted online) field changing still rejects.
+                            changed[1]["root" if mode == "reread-DER-drift" else "route"] += b"changed" if mode == "reread-DER-drift" else "changed"
+                            return changed
+                    return fixtures
+
+                def project(data, actual, observed):
+                    self.assertTrue(closed[0])
+                    self.assertIs(data, outputs["aia-evaluate"])
+                    self.assertIs(actual, fixtures)
+                    self.assertIs(observed, requests)
+                    events.append("diagnostic" if compared[0] else "preflight")
+                    if mode in {"preflight-error", "preflight-cancel"}:
+                        raise earlier
+                    note = real_project(data, actual, observed)
+                    if mode == "preflight-cutoff":
+                        now[0] = 100.0
+                    return note
+
+                def freeze(raw):
+                    self.assertIs(type(raw), tuple)
+                    self.assertEqual(raw, originals)
+                    self.assertTrue(all(value is fixtures[0][role] for value, role in zip(raw, ("leaf", "issuer", "root"))))
+                    self.assertTrue(closed[0])
+                    self.assertFalse(compared[0])
+                    self.assertEqual(reader.call_count, 2)
+                    events.append("snapshot")
+                    if mode in {"snapshot-error", "snapshot-cancel"}:
+                        raise earlier
+                    if mode == "snapshot-cutoff":
+                        now[0] = 100.0
+                    return False if mode == "snapshot-return" else None
+
+                def baseline(data, original):
+                    events.append("baseline-project")
+                    note = real_baseline(data, original)
+                    if mode == "baseline-projection-cutoff":
+                        now[0] = 100.0
+                    return note
+
+                def compare(data, actual, observed):
+                    self.assertIs(data, outputs["aia-evaluate"])
+                    self.assertIs(actual, fixtures)
+                    self.assertIs(observed, requests)
+                    self.assertEqual(events[-1], "baseline-project")
+                    events.append("compare")
+                    compared[0] = True
+                    try:
+                        return real_compare(data, actual, observed)
+                    except m.NativeControlError as error:
+                        original_errors.append(error)
+                        raise
+
+                reader, snapshot = Mock(side_effect=read), Mock(side_effect=freeze)
+                comparator, projector, baseline_projector = Mock(side_effect=compare), Mock(side_effect=project), Mock(side_effect=baseline)
+                responder = SimpleNamespace(port=60123, requests=requests, start=Mock(), close=Mock(side_effect=close))
+                denied = Mock(side_effect=AssertionError("fake owner may not run a native operation or acquire a real resource"))
+                with patch.multiple(m, time=SimpleNamespace(monotonic=lambda: now[0]), os=SimpleNamespace(), subprocess=SimpleNamespace(),
+                    socket=SimpleNamespace(), threading=SimpleNamespace(), secrets=SimpleNamespace(), Path=SimpleNamespace(),
+                    _scratch=Mock(return_value=scratch), _fixtures=reader, _Responder=Mock(return_value=responder),
+                    _aia_comparison_note=projector, baseline_comparison_note=baseline_projector, require_aia_controls=comparator,
+                    _Trust=denied, _baseline_der=denied, prepare_aia=denied, evaluate_aia=denied, evaluate_aia_baseline=denied, _command=denied):
+                    if mode in successes:
+                        result = m.admit_controls(launch, idle, scratch, deadline=100.0, policy_sha256="a" * 64, freeze_baseline=snapshot)
+                        self.assertTrue(result["cleanup_ok"])
+                        self.assertTrue(result["aia"]["final_disable_mutation_detected"])
+                    else:
+                        grouped = mode in {"baseline-launch-error", "baseline-finality-error", "baseline-finality-cancel", "baseline-launch-and-finality"}
+                        direct = mode in {"preflight-error", "preflight-cancel", "reread-error", "snapshot-error", "snapshot-cancel"}
+                        expected = BaseExceptionGroup if grouped else type(earlier) if direct else m.NativeControlError
+                        with self.assertRaises(expected) as caught:
+                            m.admit_controls(launch, idle, scratch, deadline=100.0, policy_sha256="a" * 64,
+                                             freeze_baseline=None if mode == "callback-invalid" else snapshot)
+                        error = caught.exception
+                        if grouped:
+                            self.assertEqual(error.exceptions, (earlier, finality) if mode == "baseline-launch-and-finality" else
+                                             (earlier,) if mode == "baseline-launch-error" else (finality,))
+                        if direct:
+                            self.assertIs(error, earlier)
+                        if mode in semantic_failures:
+                            self.assertEqual(original_errors, [error])
+                            self.assertTrue(error._ci_observation["available"])
+                        else:
+                            self.assertFalse(hasattr(error, "_ci_observation"))
+                denied.assert_not_called()
+                reached_baseline = mode in successes | semantic_failures | capture_failures
+                reached_snapshot = reached_baseline or mode in snapshot_failures
+                reached_reread = reached_snapshot or mode in reread_failures
+                self.assertEqual(reader.call_count, 0 if mode == "callback-invalid" else 2 if reached_reread else 1)
+                self.assertEqual(snapshot.call_count, int(reached_snapshot))
+                self.assertEqual(comparator.call_count, int(mode in successes | semantic_failures))
+                captures = [event[1] for event in events if type(event) is tuple and event[0] == "capture"]
+                self.assertEqual(captures, list(outputs)[:0 if mode == "callback-invalid" else 7 if reached_baseline else 6])
+                for index, event in enumerate(events):
+                    if type(event) is tuple and event[0] == "capture":
+                        self.assertEqual(events[index + 1], ("idle", event[1]))
+                if mode != "callback-invalid":
+                    responder.close.assert_called_once_with()
+                    self.assertLess(events.index(("idle", "aia-evaluate")), events.index("close"))
+                    self.assertLess(events.index("close"), events.index("preflight"))
+                if reached_snapshot:
+                    self.assertLess(events.index("preflight"), events.index("snapshot"))
+                if reached_baseline:
+                    self.assertLess(events.index("snapshot"), events.index(("capture", "aia-offline-baseline")))
+                if mode in successes | semantic_failures:
+                    comparator.assert_called_once_with(outputs["aia-evaluate"], fixtures, requests)
+                    baseline_projector.assert_called_once_with(outputs["aia-offline-baseline"], originals)
+                    self.assertLess(events.index(("idle", "aia-offline-baseline")), events.index("compare"))
+
+        # Required keyword custody is checked before any callback or resource use.
+        launch, idle = Mock(), Mock()
+        with self.assertRaises(TypeError):
+            m.admit_controls(launch, idle, scratch, deadline=100.0, policy_sha256="a" * 64)
+        launch.assert_not_called()
+        idle.assert_not_called()
 
     def test_owner_failed_capture_still_collects_finality_and_responder_close_errors(self):
         m = self.module
@@ -2753,13 +3458,16 @@ class NativeAuthorityTests(unittest.TestCase):
             if last[0] == "aia-evaluate":
                 raise OSError("unknown finality")
 
+        snapshot = Mock(return_value=None)
         with clock(m), patch.object(m, "_scratch"), patch.object(m, "_fixtures", return_value=fixtures), \
                 patch.object(m, "_Responder", return_value=responder), self.assertRaises(BaseExceptionGroup) as raised:
-            m.admit_controls(launch, idle, Path("/pure/probes"), deadline=100.0, policy_sha256="a" * 64)
+            m.admit_controls(launch, idle, Path("/pure/probes"), deadline=100.0, policy_sha256="a" * 64,
+                             freeze_baseline=snapshot)
         self.assertEqual(len(raised.exception.exceptions), 2)
         self.assertEqual(len(raised.exception.exceptions[0].exceptions), 2)
         responder.close.assert_called_once_with()
         self.assertEqual(calls[-1], "aia-evaluate")
+        snapshot.assert_not_called()
 
 
 if __name__ == "__main__":

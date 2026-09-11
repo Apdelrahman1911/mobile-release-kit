@@ -30,15 +30,18 @@ MACH_SERVICES = (*TRUST_SERVICES, OTHER_SERVICE)
 MACH_PREFIX = b"MRK_NATIVE_MACH="
 MACH_APPLY_PREFIX = b"MRK_NATIVE_MACH_APPLY="
 AIA_PREFIX = b"MRK_NATIVE_AIA="
+AIA_BASELINE_PREFIX = b"MRK_NATIVE_AIA_BASELINE="
 _DENIED = (1100, 1102)  # NOT_PRIVILEGED / UNKNOWN_SERVICE; needs an outside positive.
 _CASES = ("online", "offline", "mutant", "product-offline")
 _CONTRAST_CASE = "online-full-chain-offline"
 _ISSUER_ROOT_CONTRAST_CASE = "online-issuer-root-offline"
 _LEAF_ISSUER_CONTRAST_CASE = "online-leaf-issuer-offline"
+_AIA_BASELINE_CASE = "online-full-chain-offline-baseline"
 _SIGNATURE_CASES = ("leaf-by-issuer", "issuer-by-root", "root-by-root", "issuer-signature-mutant")
 _MAX_DER = 16 * 1024
 _FAILURE_PREFIX = b"MRK_NATIVE_CONTROL_FAILED="
-_FAILURE_ROLES = frozenset(("mach", "mach-initial", "mach-nonexpand", "aia-prepare", "aia-evaluate", "invalid"))
+_FAILURE_ROLES = frozenset(("mach", "mach-initial", "mach-nonexpand", "aia-prepare", "aia-evaluate",
+                           "aia-offline-baseline", "invalid"))
 _FAILURE_CATEGORIES = frozenset(("NativeControlError", "TimeoutExpired", "KeyboardInterrupt", "SystemExit",
                                "MemoryError", "OSError", "ValueError", "TypeError", "AttributeError",
                                "AssertionError", "RuntimeError", "Exception", "BaseException"))
@@ -66,7 +69,8 @@ def _failure_note(error: BaseException, argv: list[str]) -> dict:
     """
     roles = {"--mach": (2, "mach"), "--mach-initial": (3, "mach-initial"),
              "--mach-nonexpand": (3, "mach-nonexpand"),
-             "--aia-prepare": (3, "aia-prepare"), "--aia-evaluate": (3, "aia-evaluate")}
+             "--aia-prepare": (3, "aia-prepare"), "--aia-evaluate": (3, "aia-evaluate"),
+             "--aia-offline-baseline": (2, "aia-offline-baseline")}
     shape = roles.get(argv[0]) if type(argv) is list and argv and type(argv[0]) is str else None
     role = shape[1] if shape is not None and len(argv) == shape[0] else "invalid"
     categories = ((NativeControlError, "NativeControlError"), (subprocess.TimeoutExpired, "TimeoutExpired"),
@@ -658,6 +662,55 @@ def _fixtures(work: Path, port: int, deadline: float) -> list[dict]:
     return records
 
 
+def _baseline_tuple(originals: tuple) -> tuple[bytes, bytes, bytes]:
+    """One ordered public-DER triple, not caller-selected paths or trust authority."""
+    _require(type(originals) is tuple and len(originals) == 3
+             and all(type(raw) is bytes and 0 < len(raw) <= _MAX_DER and raw.startswith(b"\x30")
+                     for raw in originals) and len(set(originals)) == 3,
+             "native baseline original DER inventory differs")
+    return originals
+
+
+def _baseline_der(deadline: float) -> tuple[bytes, bytes, bytes]:
+    """Read only the original owner's three immutable fixed bootstrap snapshots."""
+    _remaining(deadline)
+    entry = Path(__file__)
+    _require(entry.is_absolute() and entry == entry.resolve(strict=True)
+             and entry.name == "ci_native_authority.py" and entry.parent.name == "bootstrap"
+             and entry.parent.parent.parent == Path("/private/tmp"), "native baseline helper origin differs")
+
+    def identity(path):
+        _remaining(deadline)
+        info = path.lstat()
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    originals, pins = [], []
+    for path in (entry.parent.parent, entry.parent, entry):
+        node = identity(path)
+        regular = path == entry
+        _require((stat.S_ISREG(node[2]) if regular else stat.S_ISDIR(node[2]))
+                 and node[3:5] == (0, 0) and stat.S_IMODE(node[2]) == (0o444 if regular else 0o755)
+                 and (not regular or node[5] == 1), "native baseline immutable origin custody differs")
+        pins.append((path, node))
+    for role in ("leaf", "issuer", "root"):
+        path = entry.parent / f"native-aia-baseline-{role}.der"
+        _remaining(deadline)
+        _require(path == path.resolve(strict=True), "native baseline snapshot has an alias")
+        node = identity(path)
+        _require(stat.S_ISREG(node[2]) and node[3:5] == (0, 0) and stat.S_IMODE(node[2]) == 0o444
+                 and node[5] == 1 and 0 < node[6] <= _MAX_DER, "native baseline snapshot custody differs")
+        _remaining(deadline)
+        raw = _read_public(path, immutable_policy=True)
+        _remaining(deadline)
+        _require(identity(path) == node, "native baseline snapshot name changed during read")
+        originals.append(raw)
+    for path, node in pins:
+        _require(identity(path) == node, "native baseline immutable origin changed during read")
+    _remaining(deadline)
+    return _baseline_tuple(tuple(originals))
+
+
 def _signature_envelope(raw: bytes) -> tuple[bytes, bytes]:
     """Extract original signed bytes for the fixed generated RSA/SHA256 profile.
 
@@ -1018,6 +1071,35 @@ def evaluate_aia(port: int, deadline: float) -> dict:
             "chain_observations": {"contrasts": [contrast, issuer_contrast, leaf_contrast], "crypto": crypto}}
 
 
+def evaluate_aia_baseline(deadline: float) -> dict:
+    """One fixed full-chain observation; never replay originals, signatures or sockets."""
+    leaf, issuer, root = _baseline_der(deadline)
+    trust, errors, result = None, [], None
+    try:
+        _remaining(deadline)
+        trust = _Trust(leaf, root, issuer=issuer)
+        trust.set_network(False)
+        trust.set_keychains(False)
+        network, keychains = trust.get_network(), trust.get_keychains()
+        _require(network is False and keychains is False, "native baseline getters differ")
+        _remaining(deadline)
+        result = trust.evaluate()
+        _remaining(deadline)
+    except BaseException as exc:
+        errors.append(exc)
+    finally:
+        if trust is not None:
+            try:
+                trust.close()
+            except BaseException as exc:
+                errors.append(exc)
+    if errors:
+        raise BaseExceptionGroup("native baseline evaluation/cleanup failed", errors)
+    _remaining(deadline)
+    return {"schema": 1, "case": _AIA_BASELINE_CASE, "network": network, "keychains": keychains,
+            **result, "trust_error": dict(trust.error_observation)}
+
+
 def _aia_record(data: bytes) -> tuple[dict, list[dict], dict | None]:
     """Recognize only closed optional diagnostic extensions, not new authority."""
     record = _parse(data, AIA_PREFIX)
@@ -1196,6 +1278,38 @@ def _aia_comparison_note(data: bytes, fixtures: list[dict], requests: list[tuple
         return unavailable
 
 
+def baseline_comparison_note(data: bytes, originals: tuple) -> dict:
+    """Strict original-byte projection; only the owner supplies capture/finality facts."""
+    originals = _baseline_tuple(originals)
+    try:
+        row = _parse(data, AIA_BASELINE_PREFIX)
+        bools = ("network", "keychains", "accepted", "error")
+        _require(set(row) == {"schema", "case", *bools, "result", "chain", "trust_error"}
+                 and type(row["case"]) is str and row["case"] == _AIA_BASELINE_CASE
+                 and all(type(row[key]) is bool for key in bools)
+                 and row["network"] is False and row["keychains"] is False
+                 and type(row["result"]) is int and 0 <= row["result"] <= 0xffffffff
+                 and type(row["chain"]) is list and 1 <= len(row["chain"]) <= 3
+                 and all(type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+                         for value in row["chain"]), "native baseline result fields differ")
+        error = row["trust_error"]
+        _require(type(error) is dict and set(error) == {"status", "code"}
+                 and type(error["status"]) is str
+                 and error["status"] in {"no-error", "osstatus", "other-domain", "unavailable"},
+                 "native baseline trust error fields differ")
+        _require(type(error["code"]) is int and -(2**31) <= error["code"] < 2**31
+                 if error["status"] == "osstatus" else error["code"] is None,
+                 "native baseline trust error code differs")
+        expected = [hashlib.sha256(raw).hexdigest() for raw in originals]
+        roles = dict(zip(expected, ("leaf", "issuer", "root")))
+        return {"schema": 1, "control": "aia-offline-baseline", "semantics": "comparison-observation-only",
+                "available": True, "case": _AIA_BASELINE_CASE, **{key: row[key] for key in bools},
+                "result": row["result"], "chain_count": len(row["chain"]), "chain_matches": row["chain"] == expected,
+                "chain_roles": [roles.get(digest, "other") for digest in row["chain"]], "trust_error": dict(error)}
+    except (ValueError, TypeError, KeyError, RecursionError) as exc:
+        raise NativeControlError("native baseline comparison is malformed") from exc
+
+
 class _Responder:
     """One original owner's finite HTTP responder; no service requests or proxies."""
 
@@ -1320,8 +1434,9 @@ class _Responder:
             raise BaseExceptionGroup("owned responder cleanup failed", errors)
 
 
-def admit_controls(launch, ensure_idle, scratch: Path, *, deadline: float, policy_sha256: str) -> dict:
-    """Original owner only. The six-case callback returns real Session captures.
+def admit_controls(launch, ensure_idle, scratch: Path, *, deadline: float, policy_sha256: str,
+                   freeze_baseline) -> dict:
+    """Original owner only. The seven-case callback returns real Session captures.
 
     Session fixes source/bootstrap/argv/identity/cwd/environment/policy and keeps
     every original capture. No receipt, callback from U, or caller URL grants a
@@ -1329,6 +1444,7 @@ def admit_controls(launch, ensure_idle, scratch: Path, *, deadline: float, polic
     """
     _remaining(deadline)
     _policy_digest(policy_sha256)
+    _require(callable(freeze_baseline), "native baseline snapshot lacks its original owner")
     ensure_idle()
     _scratch(scratch)
 
@@ -1375,6 +1491,21 @@ def admit_controls(launch, ensure_idle, scratch: Path, *, deadline: float, polic
     if errors:
         raise BaseExceptionGroup("native AIA controls/owned responder cleanup failed", errors)
     _remaining(deadline)
+    ensure_idle()
+    # This is structural admission of a preplanned observation, not an early
+    # acceptance decision or a branch selected by a failed trust verdict.
+    structural = _aia_comparison_note(output, fixtures, responder.requests)
+    _require(structural.get("available") is True and len(structural.get("contrasts", ())) == 3,
+             "native baseline requires complete original comparison structure")
+    _remaining(deadline)
+    _require(_fixtures(scratch, responder.port, deadline) == fixtures,
+             "native baseline original fixture bytes changed")
+    originals = _baseline_tuple(tuple(fixtures[0][role] for role in ("leaf", "issuer", "root")))
+    _remaining(deadline)
+    _require(freeze_baseline(originals) is None, "native baseline snapshot returned an unexpected value")
+    _remaining(deadline)
+    baseline_comparison_note(run("aia-offline-baseline"), originals)
+    _remaining(deadline)
     try:
         aia = require_aia_controls(output, fixtures, responder.requests)
     except NativeControlError as original:
@@ -1417,6 +1548,8 @@ def _main(argv: list[str]) -> int:
             print("MRK_AIA_PREPARED", flush=True)
             return 0
         prefix, result = AIA_PREFIX, evaluate_aia(port, deadline)
+    elif argv[0] == "--aia-offline-baseline" and len(argv) == 2:
+        prefix, result = AIA_BASELINE_PREFIX, evaluate_aia_baseline(deadline)
     else:
         raise NativeControlError("unknown fixed native helper role")
     _remaining(deadline)
