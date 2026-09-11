@@ -171,9 +171,11 @@ Credential-free regression coverage:
 - Existing entitlement, current-upload and recovery suites: rejection before
   Store access and no retrospective authentication of accepted candidates.
 
-`python -I tests/workflow/run_native_profile_checks.py` is required on macOS CI
-and rejects skips/missing prerequisites. Protected `test` requires both Linux
-and macOS jobs; the installed-wheel native gate checks resources outside checkout.
+Use the [disposable hosted verification workflow](verification.md). Its macOS
+source and installed-wheel gates each require complete authority and ordinary
+native partitions without skips or missing prerequisites; standalone runner
+invocation is not the supported CI entry point. Protected `test` requires both
+Linux and macOS success; the installed-wheel gate checks resources outside checkout.
 Synthetic signed-profile success uses an explicitly named issuer-policy seam;
 the real policy rejects that same input. These tests plus the genuine public
 Apple authority positive **are not** a current protected Distribution

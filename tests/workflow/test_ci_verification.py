@@ -693,9 +693,9 @@ class CIControllerContractTests(unittest.TestCase):
         expected = {
             "linux": (*before, "python-full", *ruby, "fastfile", "actionlint", "jdk-signers", *wheel,
                       "python-wheel", "source-integrity"),
-            "macos": (*before, "native-tools", "native-profile-source", "ruby-native-capture",
+            "macos": (*before, "native-tools", "ruby-native-capture",
                       "ruby-native-signal-observation",
-                      "ruby-ios_upload_validation", "ruby-android_upload_validation", *wheel,
+                      "ruby-ios_upload_validation", "ruby-android_upload_validation", "native-profile-source", *wheel,
                       "native-profile-wheel", "source-integrity"),
         }
         for platform in expected:
@@ -703,6 +703,13 @@ class CIControllerContractTests(unittest.TestCase):
             with self.subTest(platform=platform):
                 self.assertEqual(tuple(step.id for step in steps), expected[platform])
                 self.assertEqual(controller.required_gate_ids(platform), expected[platform])
+                if platform == "macos":
+                    ids = tuple(step.id for step in steps)
+                    for gate in ("ruby-native-capture", "ruby-native-signal-observation",
+                                 "ruby-ios_upload_validation", "ruby-android_upload_validation"):
+                        self.assertLess(ids.index("native-tools"), ids.index(gate))
+                        self.assertLess(ids.index(gate), ids.index("native-profile-source"))
+                    self.assertLess(ids.index("native-profile-source"), ids.index("native-profile-wheel"))
             altered = [(), steps[:-1], (*steps, steps[-1]), (steps[1], steps[0], *steps[2:]),
                        (dataclasses.replace(steps[0], id="unknown-gate"), *steps[1:])]
             altered.extend((*steps[:index], *steps[index + 1:]) for index in range(len(steps)))

@@ -330,7 +330,11 @@ inventory; it does not waive the product behaviors that inventory was meant to t
 | Platform | Required gate families |
 |---|---|
 | Linux | Offline source installation; full Python discovery; all listed Ruby suites, including native/iOS/Android descendant regressions; Fastfile validation; first-party/template actionlint; real JDK signer checks; wheel build/inspection/install/smoke/consumer and selected installed-wheel Python checks; source integrity. |
-| macOS | Offline source installation; exact Xcode 26.3/native tools; source native-profile gate, the three upload-process Ruby suites and separate native signal-observation proof; wheel build/inspection/install/smoke/consumer; installed-wheel native-profile gate; source integrity. |
+| macOS | Offline source installation; exact Xcode 26.3/native tools; the three upload-process Ruby suites and separate native signal-observation proof; source native-profile gate; wheel build/inspection/install/smoke/consumer; installed-wheel native-profile gate; source integrity. |
+
+The four macOS Ruby gates depend on ordinary admission, including the admitted
+process observer, but not profile-authority admission, so run before the source
+native-profile gate. All 27 gates remain required; any failure stops later gates.
 
 The original 13-method native suite and both 26-method adapters run without the
 separate signal-proof instrumentation. An additional fixed Ruby invocation on
@@ -457,14 +461,21 @@ the original close owner. Unavailable keys and unexecuted checks are explicit;
 ordinary unavailable diagnostics never suppress cancellation, cutoff or cleanup
 failure. Only closed scalar observations survive successful close/post-close cutoff.
 
-One final fresh offline contrast presents the same root as both leaf input and
-sole custom anchor. Its expected chain role is `root`, not the original `leaf`.
-Neither contrast can seed an earlier original evaluation. Positive signatures
+Two subsequent fresh offline contrasts isolate each attachment: the same issuer
+as the only input with the root as sole anchor, then the same leaf as the only input
+with the issuer as sole anchor. Their expected chains are `issuer/root` and
+`leaf/issuer`, respectively. Each starts only after its predecessor's original
+close and post-close cutoff, with both lookup flags verified false. The previously
+observed root-only contrast is retired from execution; its source and native
+evidence remain in history, not proof about newly generated roots.
+No contrast can seed an earlier original evaluation. Positive signatures
 require an actually executed rejecting altered-signature control for interpretation;
-they do not establish trust-service or path acceptance. Root-only acceptance alone
-does not prove CA/key-usage/path-length eligibility when that root is a parent.
+they do not establish trust-service or path acceptance. One-hop acceptance does
+not prove three-certificate composition, and a failed hop does not identify a
+particular policy or service defect. The contrasts can share service cache effects
+and are not a claim of identical independent cache states.
 No diagnostic can rescue an original failure or identify a root cause by itself.
-The optional error and finite two-contrast/key/signature diagnostic extensions
+The optional error and finite three-contrast/key/signature diagnostic extensions
 are strictly parsed under the unchanged4096-byte record bound. Malformed
 records are unavailable; raw routes, certificate digests, captures and messages are
 excluded. These fields diagnose an already failed comparison, never replace its

@@ -74,7 +74,8 @@ def aia_chain_observations(module, fixtures):
                            "chain": [module.hashlib.sha256(fixtures[0][role]).hexdigest() for role in roles],
                            "trust_error": {"status": "no-error", "code": None}}
                           for case, roles in ((module._CONTRAST_CASE, ("leaf", "issuer", "root")),
-                                              (module._ROOT_CONTRAST_CASE, ("root",)))],
+                                              (module._ISSUER_ROOT_CONTRAST_CASE, ("issuer", "root")),
+                                              (module._LEAF_ISSUER_CONTRAST_CASE, ("leaf", "issuer")))],
             "crypto": {"available": True, "keys": [{"key": role, "present": True, "block_bytes": 256, "verify_supported": True}
                                                   for role in ("issuer", "root")],
                        "checks": [{"case": case, "executed": True, "accepted": index != 3, "error": index == 3,
@@ -1667,13 +1668,14 @@ class NativeAuthorityTests(unittest.TestCase):
         fixture = aia_fixtures(m)[0]
         # Actual __init__, with a test-authored ctypes module; no CDLL can reach
         # the platform. The two small builders use the actual _own/close methods.
-        for mode in ("leaf-only", "full-chain", "root-only", "after-effect", "after-effect-close", "after-effect-cancel"):
+        for mode in ("leaf-only", "full-chain", "issuer-root", "leaf-issuer", "after-effect", "after-effect-close", "after-effect-cancel"):
             with self.subTest(presented_certificates=mode):
                 acquired, released, certificates, arrays, instances = [], [], {}, {}, []
                 earlier = KeyboardInterrupt("PRIVATE-CANCEL") if mode == "after-effect-cancel" else OSError("PRIVATE-TRUST-CREATE")
                 closing = OSError("PRIVATE-CF-CLOSE")
-                complete = mode not in {"leaf-only", "root-only"}
-                leaf = fixture["root"] if mode == "root-only" else fixture["leaf"]
+                complete = mode not in {"leaf-only", "issuer-root", "leaf-issuer"}
+                leaf = fixture["issuer"] if mode == "issuer-root" else fixture["leaf"]
+                anchor = fixture["issuer"] if mode == "leaf-issuer" else fixture["root"]
 
                 def acquire(pointer):
                     acquired.append(pointer)
@@ -1730,7 +1732,7 @@ class NativeAuthorityTests(unittest.TestCase):
                     if mode.startswith("after-effect"):
                         expected_error = BaseExceptionGroup if mode == "after-effect-close" else type(earlier)
                         with self.assertRaises(expected_error) as raised:
-                            m._Trust(leaf, fixture["root"], **arguments)
+                            m._Trust(leaf, anchor, **arguments)
                         if mode == "after-effect-close":
                             self.assertIs(raised.exception.exceptions[0], earlier)
                             self.assertEqual(raised.exception.exceptions[1].exceptions, (closing,))
@@ -1739,19 +1741,18 @@ class NativeAuthorityTests(unittest.TestCase):
                         security.SecTrustSetAnchorCertificates.assert_not_called()
                         security.SecTrustSetAnchorCertificatesOnly.assert_not_called()
                     else:
-                        trust = m._Trust(leaf, fixture["root"], **arguments)
+                        trust = m._Trust(leaf, anchor, **arguments)
                         self.assertIs(trust, instances[0])
                         self.assertIs(trust.security, security)
                         self.assertIs(trust.foundation, foundation)
                         self.assertEqual(trust.error_observation, {"status": "unavailable", "code": None})
-                        self.assertEqual([certificates[value] for value in arrays[202]], [fixture["root"]])
+                        self.assertEqual([certificates[value] for value in arrays[202]], [anchor])
                         security.SecTrustSetAnchorCertificates.assert_called_once_with(900, 202)
                         security.SecTrustSetAnchorCertificatesOnly.assert_called_once_with(900, 1)
                         self.assertEqual(trust.owned, acquired)
                         trust.close()
                 self.assertEqual([certificates[value] for value in arrays[201]],
-                                 [fixture[role] for role in (("leaf", "issuer", "root") if complete else
-                                                            ("root",) if mode == "root-only" else ("leaf",))])
+                                 [fixture[role] for role in ("leaf", "issuer", "root")] if complete else [leaf])
                 self.assertEqual(len(arrays), 1 if mode.startswith("after-effect") else 2)
                 self.assertEqual(released, list(reversed(acquired)))
                 self.assertEqual(instances[0].owned, [])
@@ -1770,17 +1771,21 @@ class NativeAuthorityTests(unittest.TestCase):
         fixture = aia_fixtures(m)[0]
         chain = [m.hashlib.sha256(fixture[role]).hexdigest() for role in ("leaf", "issuer", "root")]
         test = self
-        modes = [(False, mode) for mode in ("accepted", "rejected", "network-true", "network-number", "keys-true", "keys-number",
+        modes = [("full", mode) for mode in ("accepted", "rejected", "network-true", "network-number", "keys-true", "keys-number",
             "setter-error", "constructor-error", "constructor-cutoff", "evaluate-error", "cancel", "close-error", "evaluate-and-close",
             "before-cutoff", "evaluate-cutoff", "close-cutoff", "signature-unavailable", "signature-cancel", "signature-cutoff", "signature-and-close")]
-        modes += [(True, mode) for mode in ("accepted", "rejected", "close-cutoff")]
-        for root_only, mode in modes:
-            with self.subTest(offline_contrast=(root_only, mode)):
+        modes += [(role, mode) for role in ("issuer-root", "leaf-issuer") for mode in ("accepted", "rejected", "close-cutoff")]
+        for role, mode in modes:
+            with self.subTest(offline_contrast=(role, mode)):
+                leaf_role, anchor_role, expected_chain, label = {
+                    "full": ("leaf", "root", chain, m._CONTRAST_CASE),
+                    "issuer-root": ("issuer", "root", chain[1:], m._ISSUER_ROOT_CONTRAST_CASE),
+                    "leaf-issuer": ("leaf", "issuer", chain[:2], m._LEAF_ISSUER_CONTRAST_CASE)}[role]
                 now, closed, events = [100.0 if mode == "before-cutoff" else 10.0], [False], []
                 earlier = KeyboardInterrupt("PRIVATE-CANCEL") if mode in {"cancel", "signature-cancel"} else OSError("PRIVATE-CONTRAST")
                 closing = OSError("PRIVATE-CLOSE")
                 scalar = {"status": "osstatus", "code": -25318} if mode == "rejected" else {"status": "no-error", "code": None}
-                original_chain = chain[-1:] if root_only else chain[:1] if mode == "rejected" else list(chain)
+                original_chain = expected_chain[:1] if mode == "rejected" else list(expected_chain)
                 result = {"accepted": mode != "rejected", "error": mode == "rejected", "result": 5 if mode == "rejected" else 4,
                           "chain": original_chain}
                 crypto = ({"available": False, "keys": None, "checks": None} if mode == "signature-unavailable" else
@@ -1789,6 +1794,10 @@ class NativeAuthorityTests(unittest.TestCase):
                 def evaluate():
                     events.append("evaluate")
                     self.assertFalse(closed[0])
+                    trust.set_network.assert_called_once_with(False)
+                    trust.set_keychains.assert_called_once_with(False)
+                    trust.get_network.assert_called_once_with()
+                    trust.get_keychains.assert_called_once_with()
                     if mode in {"evaluate-error", "evaluate-and-close", "cancel"}:
                         raise earlier
                     if mode == "evaluate-cutoff":
@@ -1797,7 +1806,7 @@ class NativeAuthorityTests(unittest.TestCase):
 
                 def observe(original):
                     self.assertIs(original, fixture)
-                    self.assertFalse(root_only)
+                    self.assertEqual(role, "full")
                     self.assertFalse(closed[0])
                     self.assertEqual(events[-1], "evaluate")
                     events.append("signature")
@@ -1831,8 +1840,8 @@ class NativeAuthorityTests(unittest.TestCase):
                 trust._signature_observation = Mock(side_effect=observe)
 
                 def construct(leaf, root, **kwargs):
-                    self.assertEqual((leaf, root), (fixture["root"] if root_only else fixture["leaf"], fixture["root"]))
-                    self.assertEqual(kwargs, {} if root_only else {"issuer": fixture["issuer"]})
+                    self.assertEqual((leaf, root), (fixture[leaf_role], fixture[anchor_role]))
+                    self.assertEqual(kwargs, {"issuer": fixture["issuer"]} if role == "full" else {})
                     events.append("construct")
                     if mode == "constructor-error":
                         raise earlier  # Constructor owns its own partial references (covered above).
@@ -1845,18 +1854,18 @@ class NativeAuthorityTests(unittest.TestCase):
                                     os=SimpleNamespace(), subprocess=SimpleNamespace(), socket=SimpleNamespace(),
                                     threading=SimpleNamespace(), Path=SimpleNamespace()):
                     if mode in {"accepted", "rejected", "signature-unavailable"}:
-                        observed, diagnostic = m._evaluate_offline_contrast(fixture, 100.0, root_only=root_only)
-                        expected = {"case": m._ROOT_CONTRAST_CASE if root_only else m._CONTRAST_CASE,
+                        observed, diagnostic = m._evaluate_offline_contrast(fixture, 100.0, role=role)
+                        expected = {"case": label,
                                     "network": False, "keychains": False, **result, "trust_error": dict(scalar)}
                         self.assertEqual(observed, expected)
-                        self.assertEqual(diagnostic, None if root_only else crypto)
+                        self.assertEqual(diagnostic, crypto if role == "full" else None)
                         scalar["status"] = "unavailable"
                         self.assertEqual(observed, expected)
-                        self.assertEqual(events, ["construct", "evaluate", *([] if root_only else ["signature"]), "close", "detached-observation"])
+                        self.assertEqual(events, ["construct", "evaluate", *(["signature"] if role == "full" else []), "close", "detached-observation"])
                     else:
                         expected_error = m.NativeControlError if mode == "close-cutoff" else BaseExceptionGroup
                         with self.assertRaises(expected_error) as raised:
-                            m._evaluate_offline_contrast(fixture, 100.0, root_only=root_only)
+                            m._evaluate_offline_contrast(fixture, 100.0, role=role)
                         errors = raised.exception.exceptions if isinstance(raised.exception, BaseExceptionGroup) else (raised.exception,)
                         if mode in {"constructor-error", "setter-error", "evaluate-error", "evaluate-and-close", "cancel",
                                     "signature-cancel", "signature-and-close"}:
@@ -1872,8 +1881,8 @@ class NativeAuthorityTests(unittest.TestCase):
                 if mode == "before-cutoff":
                     constructor.assert_not_called()
                 else:
-                    constructor.assert_called_once_with(fixture["root"] if root_only else fixture["leaf"], fixture["root"],
-                                                        **({} if root_only else {"issuer": fixture["issuer"]}))
+                    constructor.assert_called_once_with(fixture[leaf_role], fixture[anchor_role],
+                                                        **({"issuer": fixture["issuer"]} if role == "full" else {}))
                 if mode in {"before-cutoff", "constructor-error"}:
                     trust.close.assert_not_called()
                     trust.set_network.assert_not_called()
@@ -1889,16 +1898,19 @@ class NativeAuthorityTests(unittest.TestCase):
                     trust.evaluate.assert_not_called()
                 else:
                     trust.evaluate.assert_called_once_with()
-                if not root_only and mode in {"accepted", "rejected", "close-error", "close-cutoff", "signature-unavailable",
-                                              "signature-cancel", "signature-cutoff", "signature-and-close"}:
+                if role == "full" and mode in {"accepted", "rejected", "close-error", "close-cutoff", "signature-unavailable",
+                                               "signature-cancel", "signature-cutoff", "signature-and-close"}:
                     trust._signature_observation.assert_called_once_with(fixture)
                 else:
                     trust._signature_observation.assert_not_called()
         constructor = Mock(side_effect=AssertionError("wrong fixture must reject before acquisition"))
+        class Role(str):
+            pass
         with clock(m), patch.object(m, "_Trust", constructor):
-            for original, root_only in ((aia_fixtures(m)[1], False), (fixture, 1), (fixture, None)):
-                with self.assertRaises(m.NativeControlError):
-                    m._evaluate_offline_contrast(original, 100.0, root_only=root_only)
+            for original, role in [(aia_fixtures(m)[1], "full"), *((fixture, value) for value in
+                                  (None, 1, True, [], {}, "", "root-only", "Full", "unknown", Role("full")))]:
+                with self.subTest(rejected_role=role), self.assertRaises(m.NativeControlError):
+                    m._evaluate_offline_contrast(original, 100.0, role=role)
         constructor.assert_not_called()
 
     def test_aia_error_observations_assemble_only_after_original_case_cleanup(self):
@@ -1908,25 +1920,34 @@ class NativeAuthorityTests(unittest.TestCase):
         chains = aia_chain_observations(m, fixtures)
         scalars = [{"status": status, "code": -67818 if status == "osstatus" else None}
                    for status in ("no-error", "osstatus", "other-domain", "unavailable")]
-        events, instances, failure = [], [], [None]
+        events, instances, failure, now, negative = [], [], [None], [10.0], [False]
+        original_fixtures = [dict(fixture) for fixture in fixtures]
         original_error = OSError("PRIVATE-ORIGINAL-CASE")
         test = self
 
         class Trust:
             def __init__(self, leaf, root, *, issuer=None):
-                index = 0 if leaf == fixtures[0]["root"] else next(index for index, fixture in enumerate(fixtures) if fixture["leaf"] == leaf)
-                test.assertEqual(root, fixtures[index]["root"])
-                self.index = 5 if leaf == fixtures[0]["root"] else 4 if issuer is not None else index
                 if issuer is not None:
-                    test.assertEqual((index, issuer), (0, fixtures[0]["issuer"]))
+                    self.index = 4
+                    test.assertEqual((leaf, root, issuer), (fixtures[0]["leaf"], fixtures[0]["root"], fixtures[0]["issuer"]))
+                elif (leaf, root) == (fixtures[0]["issuer"], fixtures[0]["root"]):
+                    self.index = 5
+                elif (leaf, root) == (fixtures[0]["leaf"], fixtures[0]["issuer"]):
+                    self.index = 6
+                else:
+                    self.index = next(index for index, fixture in enumerate(fixtures) if fixture["leaf"] == leaf)
+                    test.assertEqual(root, fixtures[self.index]["root"])
                 if self.index >= 4:
                     test.assertEqual(len(instances), self.index)
                     test.assertTrue(all(instance.closed for instance in instances))
                     test.assertEqual(events[-1], (self.index - 1, "detached-observation"))
-                if self.index == 5:
+                    test.assertLess(now[0], 100.0)
+                if self.index >= 5:
                     test.assertIsNone(issuer)
                 self.network = self.keychains = self.closed = False
-                self.scalar = dict(scalars[index] if self.index < 4 else chains["contrasts"][self.index - 4]["trust_error"])
+                self.scalar = dict(scalars[self.index] if self.index < 4 else chains["contrasts"][self.index - 4]["trust_error"])
+                if negative[0] and self.index >= 4:
+                    self.scalar = {"status": "osstatus", "code": -25318}
                 instances.append(self)
                 events.append((self.index, "construct"))
 
@@ -1950,10 +1971,13 @@ class NativeAuthorityTests(unittest.TestCase):
                     test.assertIs(self.network, False)
                     test.assertIs(self.keychains, False)
                 row = chains["contrasts"][self.index - 4] if self.index >= 4 else record["cases"][self.index]
-                return {key: row[key] for key in ("accepted", "error", "result", "chain")}
+                result = {key: row[key] for key in ("accepted", "error", "result", "chain")}
+                if negative[0] and self.index >= 4:
+                    result.update(accepted=False, error=True, result=5, chain=result["chain"][:1])
+                return result
 
             def _signature_observation(self, original):
-                test.assertEqual(self.index, 4)  # Never a live getter on the original four or root-only trust.
+                test.assertEqual(self.index, 4)  # Never a live getter on the original four or either one-hop trust.
                 test.assertFalse(self.closed)
                 test.assertIs(original, fixtures[0])
                 test.assertEqual(events[-1], (self.index, "evaluate"))
@@ -1967,6 +1991,8 @@ class NativeAuthorityTests(unittest.TestCase):
                 self.closed = True
                 if failure[0] == (self.index, "close"):
                     raise original_error
+                if failure[0] == (self.index, "cutoff"):
+                    now[0] = 100.0
 
             @property
             def error_observation(self):
@@ -1977,7 +2003,7 @@ class NativeAuthorityTests(unittest.TestCase):
         location = Path("/pure/probes")
         paths = SimpleNamespace(cwd=Mock(return_value=location))
         reader = Mock(return_value=fixtures)
-        with clock(m), patch.multiple(m, _Trust=Trust, _fixtures=reader, Path=paths, os=SimpleNamespace(),
+        with patch.multiple(m, time=SimpleNamespace(monotonic=lambda: now[0]), _Trust=Trust, _fixtures=reader, Path=paths, os=SimpleNamespace(),
                                       subprocess=SimpleNamespace(), socket=SimpleNamespace(), threading=SimpleNamespace()):
             result = m.evaluate_aia(60123, 100.0)
             expected = {**record, "error_observations": [{"case": fixture["case"], **scalar} for fixture, scalar in zip(fixtures, scalars)],
@@ -1986,26 +2012,40 @@ class NativeAuthorityTests(unittest.TestCase):
             self.assertEqual(events, [(index, event) for index in range(4)
                                      for event in ("construct", "evaluate", "close", "detached-observation")]
                              + [(4, event) for event in ("construct", "evaluate", "signature", "close", "detached-observation")]
-                             + [(5, event) for event in ("construct", "evaluate", "close", "detached-observation")])
+                             + [(index, event) for index in (5, 6) for event in ("construct", "evaluate", "close", "detached-observation")])
             paths.cwd.assert_called_once_with()
             reader.assert_called_once_with(location, 60123, 100.0)
-            self.assertEqual(len(instances), 6)
+            self.assertEqual(len(instances), 7)
             instances[1].scalar["code"] = 123
             instances[4].scalar["status"] = "unavailable"
             self.assertEqual(result, expected)
             events.clear()
             self.assertEqual(m._evaluate_case(fixtures[0], 100.0), record["cases"][0])
             self.assertEqual(events, [(0, "construct"), (0, "evaluate"), (0, "close")])  # Legacy callers need no observations.
-            for index, failed_event in ((1, "evaluate"), (1, "close"), (4, "signature"), (4, "close")):
+            events.clear()
+            instances.clear()
+            negative[0] = True
+            observed = m.evaluate_aia(60123, 100.0)
+            self.assertEqual(observed["cases"], record["cases"])
+            self.assertEqual([row["accepted"] for row in observed["chain_observations"]["contrasts"]], [False] * 3)
+            self.assertEqual(len(instances), 7)  # A completed negative is data, not an exception that skips the next role.
+            self.assertTrue(all(instance.closed for instance in instances))
+            negative[0] = False
+            for index, failed_event in ((1, "evaluate"), (1, "close"), (4, "signature"), (4, "close"), (4, "cutoff"),
+                                        (5, "evaluate"), (5, "close"), (5, "cutoff"), (6, "cutoff")):
                 events.clear()
                 instances.clear()
+                now[0] = 10.0
                 failure[0] = (index, failed_event)
-                with self.subTest(original_failure=failure[0]), self.assertRaises(BaseExceptionGroup) as raised:
+                expected_error = m.NativeControlError if failed_event == "cutoff" else BaseExceptionGroup
+                with self.subTest(original_failure=failure[0]), self.assertRaises(expected_error) as raised:
                     m.evaluate_aia(60123, 100.0)
-                self.assertIn(original_error, raised.exception.exceptions)
+                if failed_event != "cutoff":
+                    self.assertIn(original_error, raised.exception.exceptions)
                 self.assertEqual(len(instances), index + 1)  # No later original or contrast can run after this failure.
                 self.assertTrue(all(instance.closed for instance in instances))
                 self.assertNotIn((index, "detached-observation"), events)
+            self.assertEqual(fixtures, original_fixtures)
 
     def test_aia_error_observation_extension_is_optional_strict_and_not_authority(self):
         m = self.module
@@ -2062,7 +2102,8 @@ class NativeAuthorityTests(unittest.TestCase):
 
     def test_chain_observation_extension_is_strict_private_and_not_authority(self):
         m = self.module
-        self.assertEqual((m._CONTRAST_CASE, m._ROOT_CONTRAST_CASE), ("online-full-chain-offline", "online-root-only-offline"))
+        self.assertEqual((m._CONTRAST_CASE, m._ISSUER_ROOT_CONTRAST_CASE, m._LEAF_ISSUER_CONTRAST_CASE),
+                         ("online-full-chain-offline", "online-issuer-root-offline", "online-leaf-issuer-offline"))
         self.assertEqual(m._SIGNATURE_CASES, ("leaf-by-issuer", "issuer-by-root", "root-by-root", "issuer-signature-mutant"))
         fixtures = aia_fixtures(m)
         record, requests = aia_evidence(m, fixtures)
@@ -2085,7 +2126,8 @@ class NativeAuthorityTests(unittest.TestCase):
                 value["contrasts"][0].update(network=True, keychains=True)
             elif label == "foreign":
                 value["contrasts"][0]["chain"][1] = foreign_issuer
-                value["contrasts"][1]["chain"][0] = foreign_root
+                value["contrasts"][1]["chain"][1] = foreign_root
+                value["contrasts"][2]["chain"][1] = foreign_issuer
             elif label == "unavailable":
                 value["crypto"] = dict(no_crypto)
             elif label == "mutant-accept":
@@ -2123,13 +2165,16 @@ class NativeAuthorityTests(unittest.TestCase):
                     self.assertTrue(note["available"])
                     self.assertTrue(note["requests_match"])
                     self.assertEqual(note["crypto"], value["crypto"])
-                    self.assertEqual(len(note["contrasts"]), 2)
+                    self.assertEqual(len(note["contrasts"]), 3)
                     for index, row in enumerate(value["contrasts"]):
-                        roles = (["leaf"] if label == "negative" else ["leaf", "other", "root"] if label == "foreign"
-                                 else ["leaf", "issuer", "root"]) if index == 0 else ["other"] if label == "foreign" else ["root"]
+                        roles = [["leaf", "issuer", "root"], ["issuer", "root"], ["leaf", "issuer"]][index]
+                        if label == "negative":
+                            roles = roles[:1]
+                        elif label == "foreign":
+                            roles[1] = "other"
                         self.assertEqual(note["contrasts"][index], {"available": True,
                             **{key: row[key] for key in ("case", "network", "keychains", "accepted", "error", "result", "trust_error")},
-                            "chain_count": len(row["chain"]), "chain_matches": label != "foreign" and not (label == "negative" and index == 0),
+                            "chain_count": len(row["chain"]), "chain_matches": label not in {"foreign", "negative"},
                             "chain_roles": roles})
                     # Missing/rejecting/unexpectedly accepting diagnostics retain
                     # their observation, never original acceptance authority.
@@ -2150,8 +2195,13 @@ class NativeAuthorityTests(unittest.TestCase):
 
             malformed = [None, [], {}, {"contrasts": chains["contrasts"]}, {**chains, "PRIVATE": "TBS-BYTES"},
                          {"anchors": [], "contrast": chains["contrasts"][0]}]  # Retired private schema cannot be a new receipt.
-            for contrasts in (None, {}, [], chains["contrasts"][:1], chains["contrasts"] * 2, list(reversed(chains["contrasts"])),
-                              [chains["contrasts"][0]] * 2, [None, chains["contrasts"][1]]):
+            retired = clone(chains)
+            retired["contrasts"] = [retired["contrasts"][0], {**retired["contrasts"][1], "case": "online-root-only-offline",
+                                     "chain": [m.hashlib.sha256(fixtures[0]["root"]).hexdigest()]}]
+            malformed.append(retired)  # The former two-row full/root-only receipt is not current-source evidence.
+            for contrasts in (None, {}, [], chains["contrasts"][:1], chains["contrasts"][:2], chains["contrasts"] + chains["contrasts"][:1],
+                              chains["contrasts"] * 2, list(reversed(chains["contrasts"])), [chains["contrasts"][0]] * 3,
+                              [None, *chains["contrasts"][1:]]):
                 malformed.append({**chains, "contrasts": contrasts})
             for key, bad in (("case", "online"), ("case", True), ("network", 0), ("keychains", 0), ("accepted", 1), ("error", None),
                              ("result", True), ("result", -1), ("result", 2**32), ("result", 4.0),
@@ -2160,13 +2210,14 @@ class NativeAuthorityTests(unittest.TestCase):
                 value = clone(chains)
                 value["contrasts"][0][key] = bad
                 malformed.append(value)
-            for change in ("root-two", "missing-field"):
-                value = clone(chains)
-                if change == "root-two":
-                    value["contrasts"][1]["chain"] *= 2
-                else:
-                    del value["contrasts"][0]["error"]
-                malformed.append(value)
+            for index in (1, 2):
+                for key, bad in (("case", "online-root-only-offline"), ("chain", []), ("chain", ["a" * 64] * 3)):
+                    value = clone(chains)
+                    value["contrasts"][index][key] = bad
+                    malformed.append(value)
+            value = clone(chains)
+            del value["contrasts"][0]["error"]
+            malformed.append(value)
             for crypto in (None, [], {}, {**no_crypto, "available": 0}, {**no_crypto, "keys": []}, {**no_crypto, "checks": []},
                            {**chains["crypto"], "PRIVATE": "SIGNATURE-BYTES"}):
                 malformed.append({**chains, "crypto": crypto})
@@ -2239,7 +2290,7 @@ class NativeAuthorityTests(unittest.TestCase):
                 row.update(status="osstatus", code=-(2**31))
             for index, row in enumerate(maximum["chain_observations"]["contrasts"]):
                 row.update(network=False, keychains=False, accepted=False, error=False, result=0xffffffff,
-                           chain=["f" * 64] * (3 if index == 0 else 1), trust_error={"status": "osstatus", "code": -(2**31)})
+                           chain=["f" * 64] * (3 if index == 0 else 2), trust_error={"status": "osstatus", "code": -(2**31)})
             for row in maximum["chain_observations"]["crypto"]["checks"]:
                 row.update(accepted=False, error=False, trust_error={"status": "osstatus", "code": -(2**31)})
             raw = encode(maximum)
@@ -2248,7 +2299,7 @@ class NativeAuthorityTests(unittest.TestCase):
             self.assertEqual(m._aia_record(raw), expected)
             note = m._aia_comparison_note(raw, fixtures, requests)
             self.assertTrue(note["available"])
-            self.assertEqual([row["chain_roles"] for row in note["contrasts"]], [["other"] * 3, ["other"]])
+            self.assertEqual([row["chain_roles"] for row in note["contrasts"]], [["other"] * 3, ["other"] * 2, ["other"] * 2])
             self.assertEqual(note["crypto"], maximum["chain_observations"]["crypto"])
             self.assertNotIn("f" * 64, json.dumps(note))
             with self.assertRaises(m.NativeControlError):
@@ -2515,7 +2566,7 @@ class NativeAuthorityTests(unittest.TestCase):
                                 self.assertEqual(error._ci_observation["cases"][0]["chain_roles"], ["leaf", "issuer", "root"])
                                 self.assertEqual(error._ci_observation["cases"][0]["trust_error"], {"status": "unavailable", "code": None})
                                 self.assertEqual([row["chain_roles"] for row in error._ci_observation["contrasts"]],
-                                                 [["leaf", "issuer", "root"], ["root"]])
+                                                 [["leaf", "issuer", "root"], ["issuer", "root"], ["leaf", "issuer"]])
                                 self.assertTrue(all(row["available"] for row in error._ci_observation["contrasts"]))
                                 self.assertEqual(error._ci_observation["crypto"], extended["chain_observations"]["crypto"])
                                 self.assertEqual(parent._exception_notes(error),

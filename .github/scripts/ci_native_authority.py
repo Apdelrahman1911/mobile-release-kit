@@ -33,7 +33,8 @@ AIA_PREFIX = b"MRK_NATIVE_AIA="
 _DENIED = (1100, 1102)  # NOT_PRIVILEGED / UNKNOWN_SERVICE; needs an outside positive.
 _CASES = ("online", "offline", "mutant", "product-offline")
 _CONTRAST_CASE = "online-full-chain-offline"
-_ROOT_CONTRAST_CASE = "online-root-only-offline"
+_ISSUER_ROOT_CONTRAST_CASE = "online-issuer-root-offline"
+_LEAF_ISSUER_CONTRAST_CASE = "online-leaf-issuer-offline"
 _SIGNATURE_CASES = ("leaf-by-issuer", "issuer-by-root", "root-by-root", "issuer-signature-mutant")
 _MAX_DER = 16 * 1024
 _FAILURE_PREFIX = b"MRK_NATIVE_CONTROL_FAILED="
@@ -965,14 +966,19 @@ def _evaluate_case(fixture: dict, deadline: float, observations: list[dict] | No
     return row
 
 
-def _evaluate_offline_contrast(fixture: dict, deadline: float, *, root_only: bool = False) -> tuple[dict, dict | None]:
+def _evaluate_offline_contrast(fixture: dict, deadline: float, *, role: str = "full") -> tuple[dict, dict | None]:
     """Fixed fresh offline comparisons, strictly after all original case closes."""
-    _require(fixture["case"] == "online" and type(root_only) is bool, "native offline contrast fixture differs")
+    _require(fixture["case"] == "online" and type(role) is str and role in ("full", "issuer-root", "leaf-issuer"),
+             "native offline contrast fixture or role differs")
     trust, errors, result, crypto = None, [], None, None
     try:
         _remaining(deadline)
-        trust = (_Trust(fixture["root"], fixture["root"]) if root_only else
-                 _Trust(fixture["leaf"], fixture["root"], issuer=fixture["issuer"]))
+        if role == "full":
+            trust = _Trust(fixture["leaf"], fixture["root"], issuer=fixture["issuer"])
+        elif role == "issuer-root":
+            trust = _Trust(fixture["issuer"], fixture["root"])
+        else:
+            trust = _Trust(fixture["leaf"], fixture["issuer"])
         trust.set_network(False)
         trust.set_keychains(False)
         network, keychains = trust.get_network(), trust.get_keychains()
@@ -980,7 +986,7 @@ def _evaluate_offline_contrast(fixture: dict, deadline: float, *, root_only: boo
         _remaining(deadline)
         result = trust.evaluate()
         _remaining(deadline)
-        if not root_only:
+        if role == "full":
             crypto = trust._signature_observation(fixture)
             _remaining(deadline)
     except BaseException as exc:
@@ -994,7 +1000,9 @@ def _evaluate_offline_contrast(fixture: dict, deadline: float, *, root_only: boo
     if errors:
         raise BaseExceptionGroup("native full-chain contrast/cleanup failed", errors)
     _remaining(deadline)
-    return ({"case": _ROOT_CONTRAST_CASE if root_only else _CONTRAST_CASE,
+    case = {"full": _CONTRAST_CASE, "issuer-root": _ISSUER_ROOT_CONTRAST_CASE,
+            "leaf-issuer": _LEAF_ISSUER_CONTRAST_CASE}[role]
+    return ({"case": case,
              "network": network, "keychains": keychains, **result,
              "trust_error": dict(trust.error_observation)}, crypto)
 
@@ -1004,9 +1012,10 @@ def evaluate_aia(port: int, deadline: float) -> dict:
     observations = []
     cases = [_evaluate_case(fixture, deadline, observations) for fixture in fixtures]
     contrast, crypto = _evaluate_offline_contrast(fixtures[0], deadline)
-    root_contrast, _ = _evaluate_offline_contrast(fixtures[0], deadline, root_only=True)
+    issuer_contrast, _ = _evaluate_offline_contrast(fixtures[0], deadline, role="issuer-root")
+    leaf_contrast, _ = _evaluate_offline_contrast(fixtures[0], deadline, role="leaf-issuer")
     return {"schema": 1, "cases": cases, "error_observations": observations,
-            "chain_observations": {"contrasts": [contrast, root_contrast], "crypto": crypto}}
+            "chain_observations": {"contrasts": [contrast, issuer_contrast, leaf_contrast], "crypto": crypto}}
 
 
 def _aia_record(data: bytes) -> tuple[dict, list[dict], dict | None]:
@@ -1030,7 +1039,7 @@ def _aia_record(data: bytes) -> tuple[dict, list[dict], dict | None]:
     if "chain_observations" in record:
         chains = record.pop("chain_observations")
         _require(type(chains) is dict and set(chains) == {"contrasts", "crypto"}
-                 and type(chains["contrasts"]) is list and len(chains["contrasts"]) == 2,
+                 and type(chains["contrasts"]) is list and len(chains["contrasts"]) == 3,
                  "native AIA chain diagnostic inventory differs")
 
         def check_error(error):
@@ -1042,7 +1051,8 @@ def _aia_record(data: bytes) -> tuple[dict, list[dict], dict | None]:
                      if error["status"] == "osstatus" else error["code"] is None,
                      "native AIA contrast error code differs")
 
-        for case, row, maximum in zip((_CONTRAST_CASE, _ROOT_CONTRAST_CASE), chains["contrasts"], (3, 1)):
+        for case, row, maximum in zip((_CONTRAST_CASE, _ISSUER_ROOT_CONTRAST_CASE, _LEAF_ISSUER_CONTRAST_CASE),
+                                     chains["contrasts"], (3, 2, 2)):
             bools = ("network", "keychains", "accepted", "error")
             _require(type(row) is dict and set(row) == {"case", *bools, "result", "chain", "trust_error"}
                      and type(row["case"]) is str and row["case"] == case
@@ -1167,7 +1177,8 @@ def _aia_comparison_note(data: bytes, fixtures: list[dict], requests: list[tuple
         if chains is not None:
             fixture = fixtures[0]
             roles = {hashlib.sha256(fixture[role]).hexdigest(): role for role in ("leaf", "issuer", "root")}
-            for row, expected_roles in zip(chains["contrasts"], (("leaf", "issuer", "root"), ("root",))):
+            for row, expected_roles in zip(chains["contrasts"], (("leaf", "issuer", "root"),
+                                                               ("issuer", "root"), ("leaf", "issuer"))):
                 expected_chain = [hashlib.sha256(fixture[role]).hexdigest() for role in expected_roles]
                 contrasts.append({"available": True, "case": row["case"],
                                   **{key: row[key] for key in ("network", "keychains", "accepted", "error", "result")},

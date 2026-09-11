@@ -133,7 +133,7 @@ def required_gate_ids(platform: str) -> tuple[str, ...]:
         return (*_BEFORE_TESTS, "python-full", *(row[0] for row in RUBY_SUITES),
                 "fastfile", "actionlint", "jdk-signers", *_WHEEL, "python-wheel", "source-integrity")
     if platform == "macos":
-        return (*_BEFORE_TESTS, "native-tools", "native-profile-source", *NATIVE_RUBY_IDS,
+        return (*_BEFORE_TESTS, "native-tools", *NATIVE_RUBY_IDS, "native-profile-source",
                 *_WHEEL, "native-profile-wheel", "source-integrity")
     raise VerificationError("UNSUPPORTED_PLATFORM")
 
