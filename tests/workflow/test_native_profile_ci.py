@@ -629,6 +629,12 @@ class NativeProfileCITests(unittest.TestCase):
 
     def test_native_partitions_place_prerequisites_and_preserve_failure_and_pins(self):
         gate = run_native_profile_checks
+        commands = {
+            "authority": (("openssl-version", ("/usr/bin/openssl", "version")),
+                          ("system-code", ("/usr/bin/codesign", "--verify", "--strict", "/usr/bin/true"))),
+            "ordinary": (("clang-discovery", ("/usr/bin/xcrun", "--find", "clang")),
+                         ("dsymutil-discovery", ("/usr/bin/xcrun", "--find", "dsymutil"))),
+        }  # Independent literal expectations, never the production selector.
         for partition, wheel, outcome in itertools.product(("authority", "ordinary"), (False, True),
                                                            ("success", "error", "skip")):
             with self.subTest(partition=partition, wheel=wheel, outcome=outcome):
@@ -650,9 +656,9 @@ class NativeProfileCITests(unittest.TestCase):
                     fixture.inventory.assert_called_once_with(partition)
                     selection.assert_called_once_with(_FIXTURE_IDS)
                     fixture.loader.assert_not_called()
-                    self.assertEqual(fixture.calls, [] if partition == "ordinary" else [
+                    self.assertEqual(fixture.calls, [
                         (command, {"stdin": subprocess.DEVNULL, "check": True, "timeout": 30})
-                        for _role, command in _NATIVE_COMMANDS])
+                        for _role, command in commands[partition]])
                     if partition == "authority":
                         runtime.assert_called_once_with(wheel)
                         self.assertEqual(bootstrap.call_args_list[0].args, ("mobile_release", package))
@@ -660,14 +666,15 @@ class NativeProfileCITests(unittest.TestCase):
                         self.assertEqual(origins.call_count, 3 if outcome == "success" else 2)
                         self.assertEqual(origins.call_args_list[0].args, (package,))
                         self.assertEqual(origins.call_args_list[1].kwargs, {"tests_loaded": True})
-                        self.assertEqual(fixture.events[:8], ["authority-runtime"] + ["prerequisite"] * 4
+                        self.assertEqual(fixture.events[:6], ["authority-runtime"] + ["prerequisite"] * 2
                                          + ["inventory", "bootstrap:mobile_release", "bootstrap:unit"])
                     else:
                         runtime.assert_not_called()
                         self.assertEqual([call.args for call in bootstrap.call_args_list], [
                             ("unit", gate.ROOT / "tests/unit"), ("workflow", gate.ROOT / "tests/workflow")])
                         origins.assert_not_called()
-                        self.assertEqual(fixture.events[:4], ["inventory", "bootstrap:unit", "bootstrap:workflow", "product-import"])
+                        self.assertEqual(fixture.events[:6], ["prerequisite"] * 2
+                                         + ["inventory", "bootstrap:unit", "bootstrap:workflow", "product-import"])
                     self.assertEqual(fixture.product_values[-1].apple_roots.call_count,
                                      1 if wheel or partition == "authority" else 0)
                 self.assertEqual(executed, ["before", "subject", "after"])
@@ -678,20 +685,61 @@ class NativeProfileCITests(unittest.TestCase):
                     self.assertEqual(envelopes[0]["records"][0]["id"], _FIXTURE_IDS[1])
                     self.assertEqual(envelopes[0]["records"][0]["outcome"], outcome)
 
-        original = subprocess.CalledProcessError(1, "PRIVATE_NATIVE_COMMAND")
-        for failure in ("runtime", "prerequisite"):
-            def fail(_index):
-                raise original
+        failures = [("authority", wheel, None) for wheel in (False, True)]
+        failures += list(itertools.product(("authority", "ordinary"), (False, True), (0, 1)))
+        for partition, wheel, failed_index in failures:
+            with self.subTest(partition=partition, wheel=wheel, failed_prerequisite=failed_index):
+                original = subprocess.CalledProcessError(1, "PRIVATE_NATIVE_COMMAND", output=b"PRIVATE_NATIVE_OUTPUT",
+                                                        stderr=b"PRIVATE_NATIVE_STDERR")
+                package = gate.ROOT.parent / ("work/wheel-venv/lib/python3.11/site-packages/mobile_release" if wheel
+                                              else "work/source-build/src/mobile_release")
 
-            with _inert_native_gate(run_effect=fail) as fixture, \
-                    patch.object(gate, "_authority_package_root", side_effect=original if failure == "runtime" else None), \
-                    patch.object(gate, "_fixed_package") as bootstrap:
-                with self.assertRaises(subprocess.CalledProcessError) as raised:
-                    gate.run(partition="authority")
-            self.assertIs(raised.exception, original)
-            bootstrap.assert_not_called()
-            fixture.inventory.assert_not_called()
-            self.assertEqual(len(fixture.calls), 0 if failure == "runtime" else 1)
+                def fail(index):
+                    if index == failed_index:
+                        raise original
+
+                def authority_runtime(value):
+                    fixture.events.append("authority-runtime")
+                    if failed_index is None:
+                        raise original
+                    return package
+
+                runner = Mock(side_effect=AssertionError("prerequisite failure must precede native test execution"))
+                with _inert_native_gate(run_effect=fail, runner=runner) as fixture, \
+                        patch.object(gate, "_authority_package_root", side_effect=authority_runtime) as runtime, \
+                        patch.object(gate, "_fixed_package") as bootstrap, \
+                        patch.object(gate, "_selected_suite") as selection, \
+                        patch.object(gate, "_authority_origins") as origins:
+                    with self.assertRaises(subprocess.CalledProcessError) as raised:
+                        gate.run(partition=partition, installed_wheel=wheel)
+                self.assertIs(raised.exception, original)
+                consumed = () if failed_index is None else commands[partition][:failed_index + 1]
+                self.assertEqual(fixture.calls, [
+                    (command, {"stdin": subprocess.DEVNULL, "check": True, "timeout": 30})
+                    for _role, command in consumed])
+                self.assertEqual(fixture.events, (["authority-runtime"] if partition == "authority" else [])
+                                 + ["prerequisite"] * len(consumed))
+                if partition == "authority":
+                    runtime.assert_called_once_with(wheel)
+                else:
+                    runtime.assert_not_called()
+                bootstrap.assert_not_called()
+                fixture.inventory.assert_not_called()
+                fixture.products.assert_not_called()
+                fixture.loader.assert_not_called()
+                fixture.discover.assert_not_called()
+                fixture.product_values[-1].apple_roots.assert_not_called()
+                selection.assert_not_called()
+                origins.assert_not_called()
+                runner.assert_not_called()
+                envelopes = _native_envelopes(fixture.stderr.getvalue())
+                if failed_index is None:
+                    self.assertEqual(envelopes, [])
+                else:
+                    self.assertEqual(envelopes, [{"schema": 1, "phase": "prerequisite", "records": [
+                        {"id": commands[partition][failed_index][0], "outcome": "error", "category": "nonzero-exit",
+                         "errno": None, "returncode": 1}]}])
+                    self.assertNotIn("PRIVATE", json.dumps(envelopes))
 
     def test_native_authority_runtime_binds_phase_and_rejects_sites_paths_and_hooks(self):
         gate = run_native_profile_checks

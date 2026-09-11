@@ -189,13 +189,27 @@ tests, builds, arbitrary commands or user-supplied inputs. Ordinary policy stays
 unchanged and cannot acquire this grant by applying a second sandbox policy.
 
 The same collision-admitted numeric identity executes precisely the five existing
-`NativeProfileAuthorityTests` methods and the four unchanged tool prerequisites.
-The remaining native tests run separately under ordinary policy. Source and
-installed-wheel gates each require two genuine successful captures, their exact
-nonempty/disjoint/complete method union, and no skips. Each original capture
-retains its own wait, EOF, exit, finality, cleanup and persisted-output facts;
+`NativeProfileAuthorityTests` methods after `openssl-version` then `system-code`.
+The remaining 72 native methods run separately under ordinary policy after
+`clang-discovery` then `dsymutil-discovery`. Authority runs first, ordinary second.
+OpenSSL is checked before its authority consumers; compiler tools are checked
+before their ordinary consumers. Routing is fixed before execution, never selected
+as a fallback after failure.
+
+This explicitly amends the earlier rule that all four prerequisites precede any
+native test: each prerequisite must precede its applicable consumers. All four
+unchanged commands still execute exactly once per successfully completed
+source/wheel logical gate. Standalone `all` retains the original four-command
+order in both source and installed-wheel forms: `openssl-version`,
+`clang-discovery`, `dsymutil-discovery`, then `system-code`.
+
+Source and installed-wheel gates each require two genuine successful captures,
+their exact nonempty/disjoint/complete method union, and no skips. Each original
+capture retains its own wait, EOF, exit, finality, cleanup and persisted-output facts;
 there is no manufactured combined process result. Failure retains completed and
-unexecuted partition information and never authorizes a later launch.
+unexecuted partition information and never authorizes a later launch. A prerequisite
+failure stops before that partition's inventory, product imports or tests; earlier
+authority success cannot satisfy a failed logical gate.
 
 Authority entry uses the selected Python with `-I -S -B`, explicit immutable
 package specifications, fixed test helpers and fresh exclusive scratch. No
@@ -473,10 +487,12 @@ Native source/wheel failures can identify the actual failing fixed prerequisite
 at most16 source-known test/fixture callbacks. Only finite category/outcome labels
 and bounded actual errno/returncode values are published; unknown attribution is
 omitted. Repeated failing subtests may share their parent method ID, but duplicate
-diagnostic envelopes are rejected. The four prerequisite commands, order, native
-checks and timeouts are unchanged. Optional fixed stderr-token labels report
-observed text, not a proven operating-system cause. Diagnostic failure preserves
-the original failure, and any failure marker prevents native success acceptance.
+diagnostic envelopes are rejected. The four prerequisite commands, native checks
+and timeouts are unchanged. Partitioned gates use the 2+2 prerequisite routing
+above; standalone `all` retains the original command order. Optional fixed
+stderr-token labels report observed text, not a proven operating-system cause.
+Diagnostic failure preserves the original failure, and any failure marker prevents
+native success acceptance.
 
 An AIA comparison failure may additionally publish a closed original-parent
 observation after successful capture/finality and responder close/join. It includes

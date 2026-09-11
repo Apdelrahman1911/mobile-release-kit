@@ -336,7 +336,14 @@ def run(*, installed_wheel=False, partition="all") -> int:
         print("FAIL: required native Apple profile verification needs macOS", file=sys.stderr)
         return 1
     package = _authority_package_root(installed_wheel) if partition == "authority" else None
-    for role, command in (() if partition == "ordinary" else PREREQUISITES):
+    # Check each tool before its consumers in the fixed partition, not as a
+    # fallback after failure. Standalone all retains the original command order.
+    prerequisites = {
+        "all": PREREQUISITES,
+        "authority": (PREREQUISITES[0], PREREQUISITES[3]),
+        "ordinary": PREREQUISITES[1:3],
+    }[partition]
+    for role, command in prerequisites:
         try:
             subprocess.run(command, stdin=subprocess.DEVNULL, check=True, timeout=30)
         except BaseException as error:
