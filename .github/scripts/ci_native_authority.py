@@ -573,7 +573,9 @@ def prepare_aia(port: int, deadline: float) -> None:
         nonce = secrets.token_hex(16)
         url = f"http://127.0.0.1:{port}" + _route(nonce, case)
         config = work / f"{case}.cnf"
-        _write_new(config, ("[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=unused\n"
+        # Some providers prioritize prompt=no's configured DN over -subj. Keep
+        # the role-specific CLI subject authoritative; -batch prevents prompting.
+        _write_new(config, ("[req]\ndistinguished_name=dn\n[dn]\nCN=unused\n"
                            "[root]\nbasicConstraints=critical,CA:true,pathlen:1\n"
                            "keyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n"
                            "[issuer]\nbasicConstraints=critical,CA:true,pathlen:0\n"
@@ -588,7 +590,7 @@ def prepare_aia(port: int, deadline: float) -> None:
             key, pem, csr = Path(str(stem) + ".key"), Path(str(stem) + ".pem"), Path(str(stem) + ".csr")
             temporary.extend((key, pem))
             subject = f"/CN=MRK synthetic {role} {nonce}"
-            args = ["/usr/bin/openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes", "-sha256",
+            args = ["/usr/bin/openssl", "req", "-batch", "-new", "-newkey", "rsa:2048", "-nodes", "-sha256",
                     "-config", str(config), "-subj", subject, "-keyout", str(key)]
             if role == "root":
                 args += ["-x509", "-days", "1", "-set_serial", "1", "-extensions", "root", "-out", str(pem)]

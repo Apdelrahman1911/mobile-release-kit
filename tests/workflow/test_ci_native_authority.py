@@ -1131,6 +1131,7 @@ class NativeAuthorityTests(unittest.TestCase):
 
     def test_preparation_uses_only_fixed_local_openssl_and_removes_only_its_temporary_files(self):
         m = self.module
+        cases = ("online", "offline", "mutant", "product-offline")
         for failure in (None, "child", "unlink"):
             events, writes, removed = [], {}, []
 
@@ -1183,14 +1184,34 @@ class NativeAuthorityTests(unittest.TestCase):
                 self.assertEqual(len(removed), 36)
                 self.assertTrue(all(name.endswith((".key", ".pem", ".csr", ".cnf")) for name in removed))
                 manifest = json.loads(writes["aia.json"])
-                self.assertEqual([row["case"] for row in manifest["cases"]], list(m._CASES))
-                for index, case in enumerate(m._CASES):
+                self.assertEqual([row["case"] for row in manifest["cases"]], list(cases))
+                self.assertEqual({name for name in writes if name.endswith(".cnf")}, {f"{case}.cnf" for case in cases})
+                expected_requests = []
+                for index, case in enumerate(cases):
+                    config = writes[f"{case}.cnf"]
+                    self.assertNotIn(b"prompt=no", config)
+                    self.assertTrue(config.startswith(b"[req]\ndistinguished_name=dn\n[dn]\nCN=unused\n"))
                     expected = f"authorityInfoAccess=caIssuers;URI:http://127.0.0.1:60123/mrk-aia/{index:032x}/{case}.der\n"
-                    self.assertIn(expected.encode(), writes[f"{case}.cnf"])
-                for argv in (row for row in events if row[1] == "req"):
+                    self.assertIn(expected.encode(), config)
+                    # Expected roles/nonces come from this fixed test inventory,
+                    # never by interpreting a subject or filename from argv.
+                    for role in ("root", "issuer", "leaf"):
+                        stem = str(PurePath.cwd() / f"{case}-{role}")
+                        expected_requests.append((str(PurePath.cwd() / f"{case}.cnf"),
+                            f"/CN=MRK synthetic {role} {index:032x}", stem + ".key",
+                            stem + (".pem" if role == "root" else ".csr")))
+                requests = [argv for argv in events if argv[1] == "req"]
+                self.assertEqual(len(requests), 12)
+                observed_requests = []
+                for argv in requests:
+                    for flag in ("-batch", "-subj", "-config", "-keyout", "-out"):
+                        self.assertEqual(argv.count(flag), 1)
                     self.assertIn("-config", argv)
                     self.assertIn("-sha256", argv)
                     self.assertEqual(argv[argv.index("-newkey") + 1], "rsa:2048")
+                    observed_requests.append(tuple(argv[argv.index(flag) + 1]
+                        for flag in ("-config", "-subj", "-keyout", "-out")))
+                self.assertEqual(observed_requests, expected_requests)
 
     def test_responder_setup_failure_does_not_lose_listener_close_error(self):
         m = self.module

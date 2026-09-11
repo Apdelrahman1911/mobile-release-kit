@@ -244,6 +244,13 @@ claim or proof about deleting the production setter alone. Production policies
 and the five real test methods are unchanged. All probe resources have their
 original bounded owner and independent cleanup/finality checks.
 
+Each request's exact `-subj` value is `/CN=MRK synthetic {role} {nonce}`, using its
+fixed root/issuer/leaf role and case nonce, with explicit `-batch` for noninteractive
+operation. `prompt=no` is omitted because provider implementations may prioritize
+the configuration DN over `-subj`. This compatibility correction does not establish
+historical runner DER or native success. Chain specifications, policies, the
+original oracle and deadlines remain unchanged.
+
 A preplanned seventh source-preparation control, `aia-offline-baseline`, follows
 the unchanged original six. Original evaluator finality and responder close/join
 precede structural-only validation of the complete current three-contrast record;
