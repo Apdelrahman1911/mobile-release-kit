@@ -921,7 +921,7 @@ class NativeProfileCITests(unittest.TestCase):
                 compatibility.assert_not_called()
                 runner.run.assert_called_once_with(suite)
                 framework.TextTestRunner.assert_called_once_with(stream=runtime.stderr, verbosity=2,
-                                                                 failfast=True, resultclass=result_type)
+                                                                 failfast=True, descriptions=False, resultclass=result_type)
                 native.declared_abi.assert_not_called()
                 native.acquire.assert_not_called()
                 process.run.assert_not_called()
@@ -1182,6 +1182,7 @@ class NativeProfileCITests(unittest.TestCase):
                 self.assertEqual(framework.TextTestRunner.call_args.kwargs["stream"], runtime.stderr)
                 self.assertTrue(framework.TextTestRunner.call_args.kwargs["failfast"])
                 self.assertEqual(framework.TextTestRunner.call_args.kwargs["verbosity"], 2)
+                self.assertIs(framework.TextTestRunner.call_args.kwargs["descriptions"], False)
                 self.assertEqual(origins.call_count, 3)
                 self.assertTrue(all(call.args == (minor, phase, package) for call in origins.call_args_list))
                 native.declared_abi.assert_not_called()
@@ -1190,6 +1191,83 @@ class NativeProfileCITests(unittest.TestCase):
                 # Only its actual nonzero return prevents it becoming credit.
                 self.assertEqual(runtime.stdout.getvalue(), gate.RUNTIME_PREFIX +
                                  json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n")
+
+    def test_native_text_entrypoints_keep_documented_cases_in_exact_completion_records(self):
+        """Real stdlib formatting of inert cases, never product/native execution."""
+        gate, controller = run_native_profile_checks, controller_module()
+        paths = fixture_paths(controller)
+        public_id = "unit.test_native_process.NativeProcessCompatibilityTests.test_native_public_api_atomic_duplication"
+        poison_partition, poison_id = _PYTHON_POISON_FIXTURES[0]
+        for entrypoint in ("public", "isolated", "ordinary"):
+            with self.subTest(entrypoint=entrypoint):
+                identifier = poison_id if entrypoint == "isolated" else public_id
+                expected, executed = (identifier,), []
+
+                def documented(case):
+                    """A documented inert case; never a product/native test."""
+                    executed.append(case.id())
+
+                module_name, owner, method = identifier.rsplit(".", 2)
+                fixture_type = type(owner, (unittest.TestCase,), {
+                    "__module__": module_name, "__qualname__": owner, method: documented,
+                })
+                module = ModuleType(module_name)
+                setattr(module, owner, fixture_type)
+                case = fixture_type(method)
+                self.assertEqual(case.id(), identifier)
+                suite = unittest.TestSuite([case])
+                runtime = SimpleNamespace(platform="darwin", modules={},
+                    executable=str(gate.ROOT.parent / "work/source-venv/bin/python"),
+                    stdout=io.StringIO(), stderr=io.StringIO())
+                metadata = {"phase": "source", "version": [3, 11, 1]}
+                checks = SimpleNamespace(native_compatibility_ids=Mock(return_value=expected),
+                                         native_partition_ids=Mock(return_value=expected))
+                loader = SimpleNamespace(exec_module=Mock())
+                inventory = SimpleNamespace(spec_from_file_location=Mock(return_value=SimpleNamespace(loader=loader)),
+                                            module_from_spec=Mock(return_value=checks))
+                framework = SimpleNamespace(TextTestResult=unittest.TextTestResult,
+                                             TextTestRunner=Mock(wraps=unittest.TextTestRunner))
+                process = SimpleNamespace(run=Mock(return_value=SimpleNamespace(returncode=0)), DEVNULL=subprocess.DEVNULL)
+                # Every import, inventory, origin and command boundary is inert.
+                # The production entrypoint still constructs its real resultclass
+                # and TextTestRunner; do not manufacture a desired transcript.
+                with patch.dict(sys.modules, {module_name: module}), patch.multiple(gate,
+                        sys=runtime, subprocess=process, unittest=framework,
+                        importlib=SimpleNamespace(import_module=Mock(return_value=SimpleNamespace()), util=inventory),
+                        _isolated_compatibility_runtime=Mock(), _fixed_package=Mock(),
+                        _compatibility_origins=Mock(return_value=metadata),
+                        _expected_native_ids=Mock(return_value=expected), _selected_suite=Mock(return_value=suite),
+                        _isolated_negative_origins=Mock(return_value=metadata),
+                        _isolated_reporting_bindings=Mock(return_value=()),
+                        _product_modules=Mock(return_value=()), _ordinary_product_origins=Mock()):
+                    if entrypoint == "public":
+                        status = gate.run_compatibility(minor=11, phase="source", operation="public")
+                    elif entrypoint == "isolated":
+                        status = gate.run_isolated_negative(partition=poison_partition, phase="source")
+                    else:
+                        status = gate.run(partition="ordinary")
+                self.assertEqual(status, 0)
+                self.assertEqual(executed, [identifier])
+                framework.TextTestRunner.assert_called_once()
+                options = framework.TextTestRunner.call_args.kwargs
+                self.assertIs(options["stream"], runtime.stderr)
+                self.assertEqual(options["verbosity"], 2)
+                self.assertIs(options["failfast"], True)
+                self.assertIs(options["descriptions"], False)
+                self.assertTrue(issubclass(options["resultclass"], unittest.TextTestResult))
+                self.assertEqual(process.run.call_count, 2 if entrypoint == "ordinary" else 0)
+                text = runtime.stderr.getvalue()
+                self.assertNotIn(documented.__doc__, text)
+                # Data-only original double: parsing this real formatter output
+                # does not assert hosted capture/finality or a native-test pass.
+                capture = SimpleNamespace(ok=True, returncode=0, waited=True, stdout_eof=True, stderr_eof=True,
+                    domain_finality=True, timed_out=False, cancelled=False, primary_error=None, cleanup_errors=(),
+                    stdout=runtime.stdout.getvalue().encode(), stderr=text.encode(), duration=.01)
+                self.assertEqual(controller.parse_native_python_controls(capture, expected), [identifier])
+                step = controller.Step("native-profile-source", parser="native",
+                    native_partition=poison_partition if entrypoint == "isolated" else "ordinary")
+                parsed = controller.parse_capture(step, capture, paths, "macos", checks)
+                self.assertEqual(parsed.details["completed"], [identifier])
 
     def test_compatibility_metadata_measures_each_loaded_product_origin_and_rejects_workflow_imports(self):
         gate = run_native_profile_checks

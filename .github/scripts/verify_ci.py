@@ -1400,28 +1400,45 @@ def inspect_editable(paths: Paths, *, deadline: float) -> dict:
     return {"editable": True, "backend": "setuptools==80.9.0", "source_copy": "source-build/src"}
 
 
-def validate_tool_permissions(prefixes: tuple[Path, ...], session, *, deadline: float) -> None:
+def validate_tool_permissions(prefixes: tuple[Path, ...], session, *, deadline: float,
+                              roles: tuple[tuple[str, Path], ...] = ()) -> None:
     """Provider runtimes are trusted, but the numerical subject cannot edit them.
 
     This is a bounded permissions check, not a homemade OS/package source map.
     System runtime symlinks are allowed; their actual destinations are checked.
     """
     count = 0
-    for root in prefixes:
+    for prefix_index, root in enumerate(prefixes):
         for directory, dirs, files in os.walk(root, followlinks=False, onerror=walk_error):
             check_clock(deadline)
             for path in (Path(directory), *(Path(directory) / name for name in dirs + files)):
                 count += 1
                 if count > 100000:
                     raise VerificationError("PROVIDER_RUNTIME_INVENTORY_BOUND")
-                info = path.stat()  # Provider-controlled links, not mutable outputs.
+                try:
+                    info = path.stat()  # Provider-controlled links, not mutable outputs.
+                except OSError as original:
+                    # Diagnostic data only: retain this exact failed operation,
+                    # never retry or infer this node's kind from an earlier stat.
+                    try:
+                        selected = tuple(role for role, prefix in roles if prefix == root)
+                        role = selected[0] if len(selected) == 1 else "unbound"
+                        original._mrk_provider_stat = (role, prefix_index, count, path.relative_to(root).parts)
+                    except BaseException:
+                        pass  # Optional diagnostics must not replace the original failure.
+                    raise
                 if (info.st_uid == session.uid or info.st_mode & 0o002
                         or info.st_gid == session.gid and info.st_mode & 0o020):
                     raise VerificationError("PROVIDER_RUNTIME_SUBJECT_WRITABLE")
 
 
 def tool_evidence(paths: Paths, session, platform: str, *, deadline: float) -> dict:
-    validate_tool_permissions(session.tool_prefixes, session, deadline=deadline)
+    roles = (("python", paths.python.parent.parent), ("ruby", paths.ruby.parent.parent))
+    if paths.java_home is not None:
+        roles += (("jdk", paths.java_home),)
+    roles += tuple((role, pair[1]) for role, pair in zip(
+        ("python312", "python313", "python314"), paths.compatibility_runtimes))
+    validate_tool_permissions(session.tool_prefixes, session, deadline=deadline, roles=roles)
     data = {"python": {"version": sys.version.split()[0], "sha256": hashlib.sha256(
                 read_regular(paths.python, deadline=deadline, maximum=64 * 1024**2)).hexdigest()},
             "ruby": {"sha256": hashlib.sha256(read_regular(paths.ruby, deadline=deadline,
@@ -2284,9 +2301,37 @@ def perform_step(step: Step, paths: Paths, session, checks, inventory: dict,
 
 def error_details(exc: BaseException) -> dict:
     frames = traceback.extract_tb(exc.__traceback__)
-    return {"error": exc.code if isinstance(exc, VerificationError) else "CONTROLLER_FAILURE",
-            "exception": type(exc).__name__,
-            "location": [Path(frames[-1].filename).name, frames[-1].lineno] if frames else []}
+    details = {"error": exc.code if isinstance(exc, VerificationError) else "CONTROLLER_FAILURE",
+               "exception": type(exc).__name__,
+               "location": [Path(frames[-1].filename).name, frames[-1].lineno] if frames else []}
+    # Only an exact trusted controller filename supplies this extra callsite;
+    # never publish absolute paths or trust an unrelated matching basename.
+    own_frames = [frame for frame in frames if frame.filename == __file__]
+    if own_frames:
+        details["controller_location"] = ["verify_ci.py", own_frames[-1].lineno]
+    if isinstance(exc, OSError):
+        try:
+            if type(exc.errno) is int and 0 <= exc.errno <= 4095:
+                details["errno"] = exc.errno
+            context = getattr(exc, "_mrk_provider_stat", None)
+            if type(context) is tuple and len(context) == 4:
+                role, prefix_index, node_index, components = context
+                if (type(role) is str and role in {"python", "ruby", "jdk", "python312", "python313", "python314", "unbound"}
+                        and type(prefix_index) is int and 0 <= prefix_index < 16
+                        and type(node_index) is int and 1 <= node_index <= 100000):
+                    note = {"operation": "provider-stat", "runtime_role": role,
+                            "prefix_index": prefix_index, "node_index": node_index}
+                    if (type(components) is tuple and len(components) <= 32
+                            and all(type(part) is str and part not in {".", ".."}
+                                    and re.fullmatch(r"[A-Za-z0-9_.+@-]{1,128}", part) for part in components)
+                            and sum(map(len, components)) <= 1024):
+                        note["relative_components"] = list(components)
+                    else:
+                        note["relative_components_omitted"] = True
+                    details["provider_stat"] = note
+        except BaseException:
+            pass  # No diagnostic/property/formatting error may mask the real OSError.
+    return details
 
 
 def publish_summary(path: Path, report: dict, *, runner_temp: Path, deadline: float) -> None:
@@ -2443,7 +2488,9 @@ def main(argv: list[str] | None = None) -> int:
         report["phase"] = "native-admission"
         session.admit()
         report["admission"] = session.admission_results
+        report["phase"] = "work-layout"
         make_layout(paths, session, deadline=deadline)
+        report["phase"] = "tool-evidence"
         report["tools"] = tool_evidence(paths, session, args.platform, deadline=deadline)
         report["phase"] = "product-gates"
         native_abi = NativeABIState()

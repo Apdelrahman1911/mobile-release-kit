@@ -384,7 +384,7 @@ def run_compatibility(*, minor: int, phase: str, operation: str) -> int:
     suite = _selected_suite(expected)
     _compatibility_origins(minor, phase, package)
     state = {"failed": False, "records": []}
-    result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2, failfast=True,
+    result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2, failfast=True, descriptions=False,
                                     resultclass=_result_class(expected, state)).run(suite)
     after = _compatibility_origins(minor, phase, package)
     _emit_runtime(after, sys.stdout)
@@ -502,7 +502,7 @@ def run_isolated_negative(*, partition: str, phase: str) -> int:
     bindings = _isolated_reporting_bindings(partition)
     state = {"failed": False, "records": []}
     try:
-        result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2, failfast=True,
+        result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2, failfast=True, descriptions=False,
                                         resultclass=_result_class(expected, state)).run(suite)
         # Only pre-owned, in-memory reporting follows the proof. In particular
         # do not call an origin checker that resolves paths or import new code.
@@ -722,7 +722,7 @@ def run(*, installed_wheel=False, partition="all") -> int:
         _ordinary_product_origins(installed_wheel)
     state = {"failed": False, "records": []}
     try:
-        result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2, failfast=True,
+        result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2, failfast=True, descriptions=False,
                                          resultclass=_result_class(expected, state)).run(suite)
         if result.skipped:
             print("FAIL: required native verification must not contain skipped tests", file=sys.stderr)

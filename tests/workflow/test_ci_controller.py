@@ -1226,6 +1226,95 @@ class CICoordinatorFilesystemTests(unittest.TestCase):
 
 
 class CICoordinatorResultTests(unittest.TestCase):
+    def test_provider_stat_failure_keeps_exact_error_single_operation_and_scoped_diagnostics(self):
+        controller = controller_module()
+        private = "private-diagnostic-fixture-not-for-publication"
+        for platform, wanted_role in (("macos", "python313"), ("linux", "jdk")):
+            for diagnostic_fault in (False, True):
+                with self.subTest(platform=platform, diagnostic_fault=diagnostic_fault):
+                    paths = fixture_paths(controller)
+                    if platform == "macos":
+                        paths = dataclasses.replace(paths, java_home=None)
+                    roles = [("python", paths.python.parent.parent), ("ruby", paths.ruby.parent.parent)]
+                    if paths.java_home is not None:
+                        roles.append(("jdk", paths.java_home))
+                    roles += [(role, pair[1]) for role, pair in zip(
+                        ("python312", "python313", "python314"), paths.compatibility_runtimes)]
+                    prefixes = tuple(prefix for _, prefix in roles)
+                    index = next(i for i, (role, _) in enumerate(roles) if role == wanted_role)
+                    failed = prefixes[index] / "missing-target"
+                    original = FileNotFoundError(2, private, "/private/" + private)
+                    observed = []
+
+                    def walk(root, **kwargs):
+                        self.assertIs(kwargs["followlinks"], False)
+                        return iter([(str(root), [], ["missing-target"] if root == prefixes[index] else [])])
+
+                    def stat_node(path, *args, **kwargs):
+                        observed.append(path)
+                        if path == failed:
+                            raise original
+                        return SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | 0o755)
+
+                    session = SimpleNamespace(uid=60001, gid=60001, tool_prefixes=prefixes,
+                                              run=Mock(side_effect=AssertionError("no tool launch after failed inventory")))
+                    fault = (patch.object(Path, "relative_to", side_effect=RuntimeError("synthetic diagnostic failure"))
+                             if diagnostic_fault else nullcontext())
+                    with patch.object(controller.os, "walk", side_effect=walk), \
+                            patch.object(Path, "stat", stat_node), \
+                            patch.object(Path, "lstat", side_effect=AssertionError("no metadata retry")), \
+                            patch.object(Path, "readlink", side_effect=AssertionError("no link reread")), \
+                            patch.object(controller, "read_regular", side_effect=AssertionError("no later tool read")), \
+                            patch.object(controller, "time", SimpleNamespace(monotonic=lambda: 10.0)), fault:
+                        try:
+                            controller.tool_evidence(paths, session, platform, deadline=20.0)
+                        except FileNotFoundError as caught:
+                            self.assertIs(caught, original)
+                            details = controller.error_details(caught)
+                        else:
+                            self.fail("missing provider target must still reject")
+                    self.assertEqual(observed, [*prefixes[:index + 1], failed])
+                    session.run.assert_not_called()
+                    self.assertEqual(details["errno"], 2)
+                    self.assertEqual(details["exception"], "FileNotFoundError")
+                    self.assertEqual(details["controller_location"][0], "verify_ci.py")
+                    if diagnostic_fault:
+                        self.assertNotIn("provider_stat", details)
+                    else:
+                        self.assertEqual(details["provider_stat"], {
+                            "operation": "provider-stat", "runtime_role": wanted_role,
+                            "prefix_index": index, "node_index": index + 2,
+                            "relative_components": ["missing-target"],
+                        })
+                    for hidden in (private, "/private/", str(prefixes[index]), "synthetic diagnostic failure"):
+                        self.assertNotIn(hidden, json.dumps(details))
+
+    def test_provider_diagnostics_omit_unsafe_components_and_untrusted_traceback_paths(self):
+        controller = controller_module()
+        original = FileNotFoundError(2, "private-message", "/private/not-for-reporting")
+        frames = [SimpleNamespace(filename=controller.__file__, lineno=120),
+                  SimpleNamespace(filename="/private/foreign/verify_ci.py", lineno=900)]
+        unsafe = (("unsafe\ncomponent",), ("x" * 129,), tuple("part" for _ in range(33)),
+                  tuple("x" * 128 for _ in range(9)), ("..",), ("/absolute",))
+        for components in unsafe:
+            with self.subTest(components_shape=(len(components), len(components[0]))):
+                original._mrk_provider_stat = ("python314", 4, 27, components)
+                with patch.object(controller.traceback, "extract_tb", return_value=frames):
+                    details = controller.error_details(original)
+                self.assertEqual(details["provider_stat"], {
+                    "operation": "provider-stat", "runtime_role": "python314", "prefix_index": 4,
+                    "node_index": 27, "relative_components_omitted": True,
+                })
+                self.assertEqual(details["controller_location"], ["verify_ci.py", 120])
+                self.assertEqual(details["location"], ["verify_ci.py", 900])
+                self.assertNotIn("/private/", json.dumps(details))
+                self.assertNotIn("private-message", json.dumps(details))
+        original._mrk_provider_stat = ("private-invalid-role", True, 27, ("safe",))
+        with patch.object(controller.traceback, "extract_tb", return_value=frames[1:]):
+            details = controller.error_details(original)
+        self.assertNotIn("controller_location", details)
+        self.assertNotIn("provider_stat", details)
+
     def test_failed_ruby_diagnostics_keep_only_source_known_ids_and_locations(self):
         controller = controller_module()
         paths = fixture_paths(controller)
