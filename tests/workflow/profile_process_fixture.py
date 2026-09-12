@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import selectors
 import shutil
 import signal
@@ -37,6 +38,34 @@ BAD_FRAME_MODES = {"full-zero", "full-failure"}
 PAYLOAD_MUTATION_MODES = {"overflow", "partial-marker", "extra-frame", "concatenated-frame"}
 UNKNOWN_PROFILE_MODES = {*BAD_FRAME_MODES, *PARENT_DEATH_MODES, "orphan",
                          "payload-writer-close-failure", "payload-reader-close-failure", "payload-reader-close-unresolved"}
+
+_DRIVER_FAILURE_MODES = frozenset({"failure", "read-failure", "partial-write-failure", "overflow",
+                                   "partial-marker", "extra-frame", "concatenated-frame"})
+_DRIVER_FAILURE_FILES = (
+    "tests/workflow/profile_process_fixture.py", "tests/workflow/process_fixture.py",
+    "src/mobile_release/_profile_process.py", "src/mobile_release/_native_process.py",
+    "src/mobile_release/ios_profiles.py", "src/mobile_release/inspection.py", "src/mobile_release/errors.py",
+)
+_DRIVER_EXCEPTION_CATEGORIES = {
+    name.encode("ascii"): category
+    for category, names in (
+        ("assertion-error", ("AssertionError",)),
+        ("os-error", ("OSError", "BlockingIOError", "ChildProcessError", "ConnectionError", "BrokenPipeError",
+                      "ConnectionAbortedError", "ConnectionRefusedError", "ConnectionResetError", "FileExistsError",
+                      "FileNotFoundError", "InterruptedError", "IsADirectoryError", "NotADirectoryError",
+                      "PermissionError", "ProcessLookupError", "TimeoutError")),
+        ("value-error", ("ValueError", "UnicodeError", "UnicodeDecodeError", "UnicodeEncodeError", "UnicodeTranslateError")),
+        ("type-error", ("TypeError",)),
+        ("memory-error", ("MemoryError",)),
+        ("exception", ("Exception", "RuntimeError", "RecursionError", "NotImplementedError", "SystemError",
+                       "EOFError", "AttributeError", "ImportError", "ModuleNotFoundError", "LookupError",
+                       "IndexError", "KeyError", "NameError", "UnboundLocalError", "StopIteration", "StopAsyncIteration",
+                       "ArithmeticError", "FloatingPointError", "OverflowError", "ZeroDivisionError", "BufferError",
+                       "ReferenceError", "SyntaxError", "IndentationError", "TabError", "ExceptionGroup")),
+        ("base-exception", ("BaseException", "SystemExit", "KeyboardInterrupt", "GeneratorExit", "BaseExceptionGroup")),
+    )
+    for name in names
+}
 
 
 _RETAINED_WORKSPACES = []
@@ -73,6 +102,59 @@ def assert_fixture_idle():
                 for item in getattr(module, name, ()):
                     retain_fixture_custody(item)
     assert not _FIXTURE_ADVERSE, "retained fixture domain requires original Session disposal before another case"
+
+
+def _report_driver_failure(mode, returncode, stderr):
+    """Optional bounded observations, only after the rejected driver's cleanup.
+
+    This examines already-captured bytes, not private files or live processes.
+    Unknown text stays unknown; neither these observations nor a successful
+    write establish nested product finality or the initiating failure's cause.
+    """
+    try:
+        if (type(mode) is not str or mode not in _DRIVER_FAILURE_MODES
+                or type(returncode) is not int or not -255 <= returncode <= 255 or returncode == 0
+                or type(stderr) is not bytes):
+            return
+        tail = stderr[-65536:]
+        if len(stderr) > 65536:
+            # The first retained line may be partial: never interpret it.
+            tail = tail.partition(b"\n")[2]
+        lines = tail.splitlines()
+        header = next((index for index in range(len(lines) - 1, -1, -1)
+                       if lines[index] == b"Traceback (most recent call last):"), None)
+        category, locations = "unknown", []
+        suffixes = [(name.encode("ascii"), name) for name in _DRIVER_FAILURE_FILES]
+        suffixes += [(name[4:].encode("ascii"), name) for name in _DRIVER_FAILURE_FILES if name.startswith("src/")]
+        if header is not None:
+            for line in lines[header + 1:]:
+                frame = re.fullmatch(rb'  File "([^"\r\n]+)", line ([1-9][0-9]{0,5})(?:, in [^\r\n]+)?', line)
+                if frame is not None:
+                    path, number = frame.groups()
+                    for suffix, name in suffixes:
+                        if path == suffix or path.endswith(b"/" + suffix):
+                            locations.append({"file": name, "line": int(number)})
+                            locations = locations[-4:]
+                            break
+                elif line and not line.startswith((b" ", b"\t")):
+                    token = re.fullmatch(rb"([A-Za-z_][A-Za-z0-9_.]{0,127})(?::[^\r\n]*)?", line)
+                    if token is not None:
+                        category = _DRIVER_EXCEPTION_CATEGORIES.get(token[1], "unknown")
+                    # Only this last traceback's terminal token counts. Later
+                    # multiline messages must not replace an unknown category.
+                    break
+        record = {"schema": 1, "mode": mode, "returncode": returncode,
+                  "category": category, "locations": locations}
+        line = "MRK_PROFILE_FIXTURE_FAILURE=" + json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n"
+        if len(line) <= 2048:  # The rebuilt line is ASCII, so chars == bytes.
+            # Ordinary existing captured stderr, not a new nonblocking transport.
+            # Driver close accounting already ran; the original Session owns its
+            # unchanged cutoff. No explicit flush, retry or descriptor mutation.
+            sys.stderr.write(line)
+    except BaseException:
+        # This optional failure-only side effect cannot replace the assertion
+        # which the caller is already re-raising. Never wrap acquisition/cleanup.
+        pass
 
 
 class FixtureWorkspace:
@@ -1336,12 +1418,22 @@ def run_case(workspace: FixtureWorkspace, mode: str) -> dict:
             signalled.append(selected_signal)
             record(root / "completion-signal-delivered", str(int(selected_signal)))
     started = time.monotonic()
-    with FixtureDriver(command("driver", root, root, mode), env=environment) as controller:
-        stdout, stderr = controller.finish(timeout=12, on_tick=tick)
-        killed_parent = mode == "orphan" or mode in PARENT_DEATH_MODES
-        assert controller.process.returncode == (-signal.SIGKILL if killed_parent else 0), "profile fixture driver failed"
-        assert not stdout and not stderr, "profile fixture emitted unexpected output"
-        assert controller.receipt is not None
+    driver_failure = None
+    try:
+        with FixtureDriver(command("driver", root, root, mode), env=environment) as controller:
+            stdout, stderr = controller.finish(timeout=12, on_tick=tick)
+            killed_parent = mode == "orphan" or mode in PARENT_DEATH_MODES
+            if controller.process.returncode != (-signal.SIGKILL if killed_parent else 0):
+                driver_failure = (controller.process.returncode, stderr)
+            assert controller.process.returncode == (-signal.SIGKILL if killed_parent else 0), "profile fixture driver failed"
+            assert not stdout and not stderr, "profile fixture emitted unexpected output"
+            assert controller.receipt is not None
+    except AssertionError:
+        # The original __exit__ and close/UNKNOWN accounting precede optional
+        # output. Acquisition/finish/other assertions simply re-raise unchanged.
+        if driver_failure is not None:
+            _report_driver_failure(mode, *driver_failure)
+        raise
     try:
         if killed_parent:
             workspace.retain()

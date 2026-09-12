@@ -37,6 +37,31 @@ MINITEST_FOOTER = (r"(?m)^(\d{1,9}) runs, (\d{1,9}) assertions, (\d{1,9}) failur
 NATIVE_DIAGNOSTIC_PREFIX = "MRK_NATIVE_DIAGNOSTIC="
 NATIVE_PYTHON_RUNTIME_PREFIX = "MRK_NATIVE_PYTHON_RUNTIME="
 NATIVE_RUBY_RUNTIME_PREFIX = "MRK_NATIVE_RUBY_RUNTIME="
+PROFILE_FIXTURE_FAILURE_PREFIX = "MRK_PROFILE_FIXTURE_FAILURE="
+PROFILE_FIXTURE_FAILURE_ID = (
+    "workflow.test_profile_processes.ProfileProcessTests."
+    "test_failure_overflow_and_io_failure_reject_partial_content_without_leaking_workers"
+)
+PROFILE_FIXTURE_FAILURE_MODES = (
+    "failure", "read-failure", "partial-write-failure", "overflow", "partial-marker",
+    "extra-frame", "concatenated-frame",
+)
+PROFILE_FIXTURE_FAILURE_FILES = (
+    "tests/workflow/profile_process_fixture.py", "tests/workflow/process_fixture.py",
+    *("src/mobile_release/" + name + ".py" for name in
+      ("_profile_process", "_native_process", "ios_profiles", "inspection", "errors")),
+)
+FIXTURE_BOOTSTRAP_FAILURE_PREFIX = "MRK_FIXTURE_BOOTSTRAP_FAILURE="
+FIXTURE_BOOTSTRAP_FAILURE_CONDITIONS = {
+    "configuration": ("directory_read", "record_read", "record_parse", "record_schema",
+                      "directory_identity", "parent_identity", "deadline_type", "request_schema",
+                      "stdio_identity", "deadline"),
+    "admission_open": ("fifo_open", "fifo_cloexec", "fifo_identity"),
+    "session": ("setsid", "session_identity", "chdir", "cwd_identity", "ready_record"),
+    "admission_wait": ("deadline", "grant_read", "grant_select", "grant_value"),
+    "admission_close": ("close",),
+    "exec_attempt": ("attempt_record", "deadline", "exec"),
+}
 PYTHON_POISON_PARTITIONS = (
     "poison-wait-loss",
     "poison-startup-error",
@@ -1064,6 +1089,71 @@ def python_storage_profile(data: object) -> dict | None:
     return dict(data)
 
 
+def _fixture_failure_record(raw: bytes, prefix: str, maximum: int,
+                            *, deadline: float | None = None) -> dict | None:
+    """One bounded record from the original capture, never a success receipt."""
+    if deadline is not None:
+        check_clock(deadline)
+    try:
+        if type(raw) is not bytes:
+            return None
+        marker, found, record = prefix.encode("ascii"), False, None
+        for line in raw.split(b"\n"):
+            if deadline is not None:
+                check_clock(deadline)
+            if not line.startswith(marker):
+                continue
+            if found or len(line) + 1 > maximum:
+                return None
+            found = True
+            try:
+                record = strict_json(line[len(marker):].decode("ascii"))
+            except (UnicodeError, ValueError, VerificationError, RecursionError):
+                return None
+        return record if type(record) is dict else None
+    finally:
+        # Malformed optional observations cannot absorb the original cutoff.
+        if deadline is not None:
+            check_clock(deadline)
+
+
+def profile_fixture_failure(raw: bytes, *, deadline: float | None = None) -> dict | None:
+    data = _fixture_failure_record(raw, PROFILE_FIXTURE_FAILURE_PREFIX, 2048, deadline=deadline)
+    if (type(data) is not dict or set(data) != {"schema", "mode", "returncode", "category", "locations"}
+            or type(data["schema"]) is not int or data["schema"] != 1
+            or type(data["mode"]) is not str or data["mode"] not in PROFILE_FIXTURE_FAILURE_MODES
+            or type(data["returncode"]) is not int or not -255 <= data["returncode"] <= 255 or data["returncode"] == 0
+            or type(data["category"]) is not str or data["category"] not in {
+                "assertion-error", "os-error", "value-error", "type-error", "memory-error",
+                "exception", "base-exception", "unknown"}
+            or type(data["locations"]) is not list or len(data["locations"]) > 4):
+        return None
+    locations = []
+    for row in data["locations"]:
+        if (type(row) is not dict or set(row) != {"file", "line"}
+                or type(row["file"]) is not str or row["file"] not in PROFILE_FIXTURE_FAILURE_FILES
+                or type(row["line"]) is not int or not 0 < row["line"] < 1000000):
+            return None
+        locations.append({"file": row["file"], "line": row["line"]})
+    if deadline is not None:
+        check_clock(deadline)
+    return {"schema": 1, "mode": data["mode"], "returncode": data["returncode"],
+            "category": data["category"], "locations": locations}
+
+
+def fixture_bootstrap_failure(raw: bytes, *, deadline: float | None = None) -> dict | None:
+    data = _fixture_failure_record(raw, FIXTURE_BOOTSTRAP_FAILURE_PREFIX, 256, deadline=deadline)
+    if (type(data) is not dict or set(data) != {"schema", "stage", "condition"}
+            or type(data["schema"]) is not int or data["schema"] != 1
+            or type(data["stage"]) is not str or data["stage"] not in FIXTURE_BOOTSTRAP_FAILURE_CONDITIONS
+            or type(data["condition"]) is not str
+            or data["condition"] not in FIXTURE_BOOTSTRAP_FAILURE_CONDITIONS[data["stage"]]):
+        return None
+    if deadline is not None:
+        check_clock(deadline)
+    return {"schema": 1, "stage": data["stage"], "condition": data["condition"]}
+
+
 def native_failure_diagnostic(text: str, expected: tuple[str, ...], *, deadline: float | None = None) -> dict | None:
     """Accept only bounded actual-failure attribution, never execution authority."""
     if deadline is not None:
@@ -1316,6 +1406,11 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                     callbacks = python_failure_callbacks(detail["failure_callbacks"], expected)
                     if callbacks is not None:
                         value["failure_callbacks"] = callbacks
+                        if any(row["id"] == PROFILE_FIXTURE_FAILURE_ID and row["outcome"] in {"error", "failure"}
+                               for row in callbacks):
+                            diagnostic = profile_fixture_failure(result.stderr, deadline=deadline)
+                            if diagnostic is not None:
+                                value["profile_fixture_failure"] = diagnostic
                 except Exception:
                     # Optional diagnostics must not replace the original failure.
                     # Do not absorb expiry of the original aggregate timer.
@@ -1364,6 +1459,14 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
             value["ruby_locations"] = sorted(locations)
             footers = re.findall(MINITEST_FOOTER, text)
             value["minitest_observations"] = [list(map(int, row)) for row in footers[:2]]
+            if (step.id in {"ruby-native-capture", "ruby-ios_upload_validation", "ruby-android_upload_validation"}
+                    and (getattr(result, "ok", None) is False or result.returncode != 0
+                         or result.timed_out or result.cancelled or not result.domain_finality
+                         or not result.waited or not result.stdout_eof or not result.stderr_eof
+                         or result.cleanup_errors or value["minitest_structure"]["reasons"])):
+                diagnostic = fixture_bootstrap_failure(result.stderr, deadline=deadline)
+                if diagnostic is not None:
+                    value["fixture_bootstrap_failure"] = diagnostic
         except (VerificationError, OSError, UnicodeError):
             if deadline is not None:
                 check_clock(deadline)

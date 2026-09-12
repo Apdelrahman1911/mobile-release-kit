@@ -564,6 +564,16 @@ module UploadProcessFixture
   # the admitted production SpawnSpec. The native creator maps ONLY 0..2. Every
   # readiness/control file below is opened by the child AFTER that exec.
   class OwnedChild
+    BOOTSTRAP_FAILURE_CONDITIONS = {
+      "configuration" => %w[directory_read record_read record_parse record_schema directory_identity parent_identity
+                              deadline_type request_schema stdio_identity deadline],
+      "admission_open" => %w[fifo_open fifo_cloexec fifo_identity],
+      "session" => %w[setsid session_identity chdir cwd_identity ready_record],
+      "admission_wait" => %w[deadline grant_read grant_select grant_value],
+      "admission_close" => %w[close],
+      "exec_attempt" => %w[attempt_record deadline exec],
+    }.transform_values(&:freeze).freeze
+
     attr_reader :pid, :status, :phase, :acquisition, :creator, :child,
                 :stdout_reader, :stderr_reader, :launch_directory
 
@@ -930,10 +940,53 @@ module UploadProcessFixture
           return
         end
         if File.exist?(File.join(@launch_directory, "failure.json"))
-          raise Failure.new("process-ownership", "bootstrap refused admission")
+          original = Failure.new("process-ownership", "bootstrap refused admission")
+          remember_error(original) # Close first-error/admission BEFORE optional observation.
+          snapshot_bootstrap_failure
+          raise original
         end
         sleep [10_000_000, [@run_deadline_ns - UploadProcessFixture.clock_ns, 0].max].min / 1_000_000_000.0
       end
+    end
+
+    def snapshot_bootstrap_failure
+      return if @bootstrap_failure_read_attempted
+      @bootstrap_failure_read_attempted = true
+      @bootstrap_failure_cutoff_ns = [@run_deadline_ns, @creator.cleanup_deadline_ns].min
+      return unless UploadProcessFixture.clock_ns < @bootstrap_failure_cutoff_ns
+      raw = self.class.bounded_file(File.join(@launch_directory, "failure.json"), limit: 1024)
+      return unless UploadProcessFixture.clock_ns < @bootstrap_failure_cutoff_ns
+      return unless raw.instance_of?(String) && raw.bytesize <= 1024
+      value = JSON.parse(raw, create_additions: false, max_nesting: 4)
+      unless value.instance_of?(Hash) && value.keys.sort == %w[condition pid stage version] &&
+             value["version"].instance_of?(Integer) && value["version"] == 1 &&
+             value["pid"].instance_of?(Integer) && value["pid"] == @pid &&
+             value["stage"].instance_of?(String) && value["condition"].instance_of?(String) &&
+             BOOTSTRAP_FAILURE_CONDITIONS.fetch(value["stage"], []).include?(value["condition"]) &&
+             JSON.generate(value) == raw
+        return
+      end
+      return unless UploadProcessFixture.clock_ns < @bootstrap_failure_cutoff_ns
+      # No PID, original record or authority survives this diagnostic projection.
+      @bootstrap_failure_snapshot = {"stage" => value.fetch("stage").freeze,
+        "condition" => value.fetch("condition").freeze}.freeze
+      nil
+    rescue Exception
+      nil # Optional observation cannot replace the ALREADY latched refusal.
+    end
+
+    def report_bootstrap_failure
+      return if @bootstrap_failure_report_attempted || !@bootstrap_failure_snapshot
+      @bootstrap_failure_report_attempted = true
+      return unless @bootstrap_failure_cutoff_ns && UploadProcessFixture.clock_ns < @bootstrap_failure_cutoff_ns
+      line = "MRK_FIXTURE_BOOTSTRAP_FAILURE=#{JSON.generate({"schema" => 1}.merge(@bootstrap_failure_snapshot))}\n"
+      return unless line.ascii_only? && line.bytesize <= 256 && UploadProcessFixture.clock_ns < @bootstrap_failure_cutoff_ns
+      # Ordinary captured output AFTER stop's original cleanup attempts. No
+      # nonblocking/flush/descriptor-policy claim, retry or renewed cutoff.
+      STDERR.write(line)
+      nil
+    rescue Exception
+      nil # Preserve stop's original return/error, including a failed close.
     end
 
     def grant_exec
@@ -1152,6 +1205,8 @@ module UploadProcessFixture
         end
       end
       raise
+    ensure
+      report_bootstrap_failure
     end
 
     def complete?
@@ -1178,44 +1233,78 @@ module UploadProcessFixture
     # changes caller/foreign descriptor flags.
     def self.bootstrap(directory)
       stage = "configuration"
+      condition = "directory_read"
       expected_directory = identity(UploadProcessFixture.owned_fixture_directory(directory))
+      condition = "record_read"
       raw = bounded_file(File.join(directory, "configuration.json"))
+      condition = "record_parse"
       config = JSON.parse(raw)
+      condition = "record_schema"
       unless config.keys.sort == %w[directory fifo parentPid request runDeadlineNs stdio version] &&
-             config["version"] == 1 && config["directory"] == expected_directory &&
-             config["parentPid"] == Process.ppid && config["runDeadlineNs"].is_a?(Integer) &&
-             config["request"].is_a?(Hash) && config["request"].keys.sort == %w[argv cwd environment executable] &&
-             config["stdio"] == [STDIN, STDOUT, STDERR].map { |io| identity(io.stat) }
+             config["version"] == 1
+        raise Failure.new("process-ownership", "bootstrap configuration rejected")
+      end
+      condition = "directory_identity"
+      unless config["directory"] == expected_directory
+        raise Failure.new("process-ownership", "bootstrap configuration rejected")
+      end
+      condition = "parent_identity"
+      unless config["parentPid"] == Process.ppid
+        raise Failure.new("process-ownership", "bootstrap configuration rejected")
+      end
+      condition = "deadline_type"
+      unless config["runDeadlineNs"].is_a?(Integer)
+        raise Failure.new("process-ownership", "bootstrap configuration rejected")
+      end
+      condition = "request_schema"
+      unless config["request"].is_a?(Hash) && config["request"].keys.sort == %w[argv cwd environment executable]
+        raise Failure.new("process-ownership", "bootstrap configuration rejected")
+      end
+      condition = "stdio_identity"
+      unless config["stdio"] == [STDIN, STDOUT, STDERR].map { |io| identity(io.stat) }
         raise Failure.new("process-ownership", "bootstrap configuration rejected")
       end
       request = config.fetch("request")
       cutoff = config.fetch("runDeadlineNs")
+      condition = "deadline"
       raise Failure.new("process-ownership", "bootstrap configuration expired") unless UploadProcessFixture.clock_ns < cutoff
       stage = "admission_open"
+      condition = "fifo_open"
       control = File.open(File.join(directory, "admission.fifo"), File::RDONLY | File::NONBLOCK | File::NOFOLLOW)
+      condition = "fifo_cloexec"
       control.close_on_exec = true
+      condition = "fifo_identity"
       unless control.close_on_exec? && identity(control.stat) == config.fetch("fifo") && control.stat.pipe?
         raise Failure.new("process-ownership", "bootstrap admission identity rejected")
       end
       stage = "session"
+      condition = "setsid"
       Process.setsid
+      condition = "session_identity"
       unless Process.getpgrp == Process.pid && Process.getsid(0) == Process.pid
         raise Failure.new("process-ownership", "bootstrap private session failed")
       end
+      condition = "chdir"
       Dir.chdir(request.fetch("cwd"))
+      condition = "cwd_identity"
       raise Failure.new("process-ownership", "bootstrap cwd changed") unless Dir.pwd == request.fetch("cwd")
+      condition = "ready_record"
       digest = Digest::SHA256.hexdigest(raw)
       write_record(File.join(directory, "ready.json"), {"version" => 1, "pid" => Process.pid,
         "pgid" => Process.getpgrp, "sid" => Process.getsid(0), "configurationSha256" => digest, "cwd" => Dir.pwd})
       stage = "admission_wait"
       grant = +"".b
       until grant == "GO\n"
+        condition = "deadline"
         raise Failure.new("process-ownership", "bootstrap grant deadline expired") unless UploadProcessFixture.clock_ns < cutoff
+        condition = "grant_read"
         chunk = control.read_nonblock(4 - grant.bytesize, exception: false)
+        condition = "grant_value"
         case chunk
         when nil
           raise Failure.new("process-ownership", "bootstrap owner closed admission")
         when :wait_readable
+          condition = "grant_select"
           IO.select([control], nil, nil, [10_000_000, [cutoff - UploadProcessFixture.clock_ns, 0].max].min / 1_000_000_000.0)
         when String
           grant << chunk
@@ -1225,19 +1314,24 @@ module UploadProcessFixture
         end
       end
       stage = "admission_close"
+      condition = "close"
       control.close # A lost/failed close prohibits the only exec; never retry.
       control = nil
       stage = "exec_attempt"
+      condition = "attempt_record"
       write_record(File.join(directory, "exec-attempt.json"), {"version" => 1, "pid" => Process.pid,
         "configurationSha256" => digest, "argvSha256" => Digest::SHA256.hexdigest(JSON.generate(request.fetch("argv"))),
         "cwd" => Dir.pwd})
       # GO and this record attest admission/attempt ONLY, not successful driver
       # execution. The CLI supplies its own receipt and original wait separately.
+      condition = "deadline"
       raise Failure.new("process-ownership", "bootstrap exec deadline expired") unless UploadProcessFixture.clock_ns < cutoff
+      condition = "exec"
       Process.exec(request.fetch("environment"), *request.fetch("argv"), unsetenv_others: true)
     rescue Exception
       begin
-        write_record(File.join(directory, "failure.json"), {"version" => 1, "stage" => stage, "pid" => Process.pid})
+        write_record(File.join(directory, "failure.json"), {"version" => 1, "stage" => stage,
+          "condition" => condition, "pid" => Process.pid})
       rescue Exception
         nil
       end

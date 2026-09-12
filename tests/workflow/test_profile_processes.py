@@ -448,6 +448,141 @@ class ProfileFixtureBookkeepingTests(unittest.TestCase):
             wait.assert_called_once_with(cutoff=5)
             observe.assert_not_called()
 
+        # Failure attribution sees only inert captured bytes. It is neither a
+        # new observer nor permission to recover a retained fixture domain.
+        private = b"synthetic-private-prefix-message-and-class"
+        header = b"Traceback (most recent call last):\n"
+        raw = (header + b'  File "/' + private + b'/tests/workflow/profile_process_fixture.py", line 1199, in driver\n'
+               b'    raise AssertionError("' + private + b'")\nAssertionError: ' + private + b"\n")
+        prefix = "MRK_PROFILE_FIXTURE_FAILURE="
+
+        def diagnostic(stderr=raw, *, mode="failure", code=1, write_error=None, short_write=False):
+            writes = []
+            def write(value):
+                writes.append(value)
+                if write_error is not None:
+                    raise write_error
+                return 1 if short_write else len(value)
+            with patch.object(fixture.sys, "stderr", SimpleNamespace(write=write)):
+                fixture._report_driver_failure(mode, code, stderr)
+            if not writes:
+                return None
+            self.assertEqual(len(writes), 1)
+            text = writes[0]
+            self.assertTrue(text.isascii() and text.startswith(prefix) and text.endswith("\n"))
+            self.assertLessEqual(len(text.encode("ascii")), 2048)
+            self.assertNotIn(private.decode("ascii"), text)
+            result = fixture.json.loads(text[len(prefix):])
+            self.assertEqual(set(result), {"schema", "mode", "returncode", "category", "locations"})
+            self.assertEqual(result["schema"], 1)
+            return result
+
+        observed = diagnostic()
+        self.assertEqual(observed, {"schema": 1, "mode": "failure", "returncode": 1,
+                                   "category": "assertion-error", "locations": [
+                                       {"file": "tests/workflow/profile_process_fixture.py", "line": 1199}]})
+        bare = raw.rsplit(b"AssertionError:", 1)[0] + b"AssertionError\n"
+        self.assertEqual(diagnostic(bare), observed)
+        final = (header + b'  File "/' + private + b'/site-packages/mobile_release/ios_profiles.py", line 52, in capture\n'
+                 b'  File "/' + private + b'/tests/workflow/not_profile_process_fixture.py", line 53\n'
+                 b'  File "/' + private + b'/tests/workflow/profile_process_fixture.py.extra", line 54\n'
+                 b"private.CustomProblem: " + private + b"\nOSError: later message must not replace the final token\n")
+        later = diagnostic(raw + b"\nDuring handling of the above exception, another exception occurred:\n\n" + final)
+        self.assertEqual(later["category"], "unknown")
+        self.assertEqual(later["locations"], [{"file": "src/mobile_release/ios_profiles.py", "line": 52}])
+        self.assertNotIn("CustomProblem", fixture.json.dumps(later))
+        for token, category in ((b"PermissionError", "os-error"), (b"UnicodeDecodeError", "value-error"),
+                                (b"TypeError", "type-error"), (b"MemoryError", "memory-error"),
+                                (b"RuntimeError", "exception"), (b"KeyboardInterrupt", "base-exception")):
+            self.assertEqual(diagnostic(header + token + b": " + private + b"\n")["category"], category)
+        frames = b"".join(b'  File "tests/workflow/process_fixture.py", line ' + str(number).encode() + b"\n"
+                          for number in (1, 2, 3, 4, 5, 999999, 0, 1000000))
+        self.assertEqual(diagnostic(header + frames + b"AssertionError\n")["locations"],
+                         [{"file": "tests/workflow/process_fixture.py", "line": number} for number in (3, 4, 5, 999999)])
+        self.assertEqual(diagnostic(b"x" * 70000 + b"\n" + raw), observed)
+        for missing in (b"", b"\xff\xfe\nprivate.NotAnException: " + private, raw + b"x" * 65536,
+                        b"x" * 70000 + b"not a complete traceback\nAssertionError\n"):
+            value = diagnostic(missing)
+            self.assertEqual((value["category"], value["locations"]), ("unknown", []))
+        for mode in ("failure", "read-failure", "partial-write-failure", "overflow", "partial-marker",
+                     "extra-frame", "concatenated-frame"):
+            self.assertEqual(diagnostic(mode=mode)["mode"], mode)
+        for code in (-255, 255):
+            self.assertEqual(diagnostic(code=code)["returncode"], code)
+        for mode in (private.decode(), True, [], None):
+            self.assertIsNone(diagnostic(mode=mode))
+        for code in (-256, 0, 256, True, False, "1", None):
+            self.assertIsNone(diagnostic(code=code))
+        for stderr in (None, "not bytes", bytearray(raw)):
+            self.assertIsNone(diagnostic(stderr))
+        for error in (OSError("modeled output failure"), KeyboardInterrupt("modeled optional reporting interruption")):
+            self.assertEqual(diagnostic(write_error=error), observed)
+        self.assertEqual(diagnostic(short_write=True), observed)  # No partial-write retry.
+        with patch.object(fixture.json, "dumps", return_value="x" * 2048):
+            self.assertIsNone(diagnostic())
+        with patch.object(fixture.json, "dumps", side_effect=MemoryError("modeled serialization failure")):
+            self.assertIsNone(diagnostic())
+
+        for fault in ("status", "write-error", "write-interruption", "short-write", "matching-status", "finish", "acquisition"):
+            sequence = []
+            first = AssertionError("modeled " + fault + " failure")
+            expected_message = ("profile fixture emitted unexpected output" if fault == "matching-status" else
+                                "modeled " + fault + " failure" if fault in {"finish", "acquisition"} else
+                                "profile fixture driver failed")
+            class InertDriver:
+                def __init__(self, *args, **kwargs):
+                    if fault == "acquisition":
+                        raise first
+                    self.process = SimpleNamespace(returncode=0 if fault == "matching-status" else 1)
+                    self.receipt = object()  # Inert only; rejection precedes receipt acceptance.
+                def __enter__(self):
+                    sequence.append(("enter",))
+                    return self
+                def finish(self, *, timeout, on_tick):
+                    sequence.append(("finish",))
+                    if timeout != 12 or not callable(on_tick):
+                        raise AssertionError("fixture changed its original finish contract")
+                    if fault == "finish":
+                        raise first
+                    return (b"unexpected" if fault == "matching-status" else b""), raw
+                def __exit__(self, kind, value, traceback):
+                    sequence.append(("exit", kind, value))
+                    return False
+            def write(value):
+                sequence.append(("write", value))
+                if fault == "write-error":
+                    raise OSError("modeled optional output failure")
+                if fault == "write-interruption":
+                    raise KeyboardInterrupt("modeled optional output interruption")
+                return 1 if fault == "short-write" else len(value)
+            workspace = SimpleNamespace(path=fixture.Path("/synthetic/fixture"))
+            with self.subTest(diagnostic_fault=fault), patch.object(fixture, "FixtureDriver", InertDriver), \
+                 patch.object(fixture, "command", return_value=("inert",)), \
+                 patch.object(fixture, "observer_environment", return_value={}), \
+                 patch.object(fixture.time, "monotonic", return_value=0), \
+                 patch.object(fixture.sys, "stderr", SimpleNamespace(write=write)), \
+                 patch.object(fixture.Path, "read_text", side_effect=AssertionError("rejected driver read a file")) as read, \
+                 patch.object(fixture, "ready", side_effect=AssertionError("inert driver invoked readiness")) as ready:
+                with self.assertRaisesRegex(AssertionError, expected_message) as raised:
+                    fixture.run_case(workspace, "failure")
+                read.assert_not_called()
+                ready.assert_not_called()
+            if fault == "acquisition":
+                self.assertEqual(sequence, [])
+                self.assertIs(raised.exception, first)
+                continue
+            self.assertEqual([row[0] for row in sequence[:3]], ["enter", "finish", "exit"])
+            self.assertIs(sequence[2][1], AssertionError)
+            self.assertIs(sequence[2][2], raised.exception)
+            if fault in {"matching-status", "finish"}:
+                self.assertEqual(len(sequence), 3)
+                if fault == "finish":
+                    self.assertIs(raised.exception, first)
+            else:
+                self.assertEqual(len(sequence), 4)
+                self.assertEqual(sequence[3][0], "write")  # Actual original exit precedes this sole attempt.
+                self.assertEqual(fixture.json.loads(sequence[3][1][len(prefix):]), observed)
+
     def test_partial_binding_entry_restores_prior_and_changed_targets_preserving_the_first_error(self):
         real_patch = patch.object
         original_helper, original_worker = owner.helper_argv, owner._worker_argv

@@ -688,6 +688,146 @@ class NativeUploadValidationTest < Minitest::Test
         assert_equal "unknown or mismatched fixture mode/platform/parameters", error.message
         assert_equal ["input.json"], Dir.children(@root)
       end
+
+      # Inert bootstrap diagnostics: no original child, native receipt, actual
+      # process operation or new IO is supplied by these doubles. The real stop
+      # body sees only an empty acquisition and never an unretired numeric route.
+      owner_class = UploadProcessFixture::OwnedChild
+      record = {"version" => 1, "stage" => "configuration", "condition" => "directory_identity", "pid" => 701}
+      good = JSON.generate(record)
+      exercise = lambda do |raw, diagnostic: true, read_error: nil, write_result: :full, cleanup_error: nil, expiry: nil|
+        now, reads, first = 1, 0, nil
+        events, writes, read_observations, report_attempts, removed = Array.new(5) { [] }
+        directory = "/inert-mrk-bootstrap"
+        owner = owner_class.new(root: @root, deadline_ns: 20, hard_deadline_ns: 30)
+        creator, acquisition = Object.new, Object.new
+        creator.define_singleton_method(:first_error) { first }
+        creator.define_singleton_method(:cancelled?) { !first.nil? }
+        creator.define_singleton_method(:cancel!) do |error:, reason_code:|
+          first ||= error
+          events << :latch
+          true
+        end
+        creator.define_singleton_method(:record_cleanup_error) do |error|
+          first ||= error
+          events << :cleanup_latch
+          nil
+        end
+        creator.define_singleton_method(:cleanup_deadline_ns) { now = 10 if expiry == :before_read; 10 }
+        creator.define_singleton_method(:close_launch!) do
+          events << :creator_close
+          Kernel.raise cleanup_error if cleanup_error
+          nil
+        end
+        acquisition.define_singleton_method(:close_launch!) { events << :acquisition_close; nil }
+        acquisition.define_singleton_method(:resources) { {} }
+        acquisition.define_singleton_method(:not_attempted?) { false }
+        {creator: creator, acquisition: acquisition, pid: 701, phase: :reaped, creation_finished: true,
+         launch_directory: directory, directory_identity: :inert_directory}.each do |name, value|
+          owner.instance_variable_set(:"@#{name}", value)
+        end
+        owner.define_singleton_method(:signal) { |*| Kernel.raise "inert diagnostic attempted numeric signaling" }
+        owner.define_singleton_method(:poll_wait) { Kernel.raise "inert diagnostic attempted a process wait" }
+        owner.define_singleton_method(:fail_unknown!) do |_error|
+          @phase = :unknown
+          events << :unknown # No real acquisition exists to poison the case domain.
+        end
+        original_close = owner.method(:close_resources)
+        owner.define_singleton_method(:close_resources) { events << :close_resources; original_close.call }
+        reader = lambda do |path, limit:|
+          reads += 1
+          events << :read
+          read_observations << [path, limit, first, owner.instance_variable_get(:@primary), events.dup]
+          raise read_error if read_error
+          now = 10 if expiry == :after_read
+          raw
+        end
+        sink = lambda do |line|
+          events << :write
+          writes << line
+          report_attempts << owner.instance_variable_get(:@bootstrap_failure_report_attempted)
+          raise write_result if write_result.is_a?(Exception)
+          write_result == :short ? 1 : line.bytesize
+        end
+        File.stub(:exist?, ->(path) { path == File.join(directory, "failure.json") }) do
+          owner_class.stub(:bounded_file, reader) do
+            owner_class.stub(:identity, ->(_stat) { :inert_directory }) do
+              UploadProcessFixture.stub(:owned_fixture_directory, ->(_path) { :inert_stat }) do
+                FileUtils.stub(:remove_entry, ->(path) { removed << path; events << :remove_entry }) do
+                  UploadProcessFixture.stub(:clock_ns, -> { now }) do
+                    STDERR.stub(:write, sink) do
+                      original = assert_raises(UploadProcessFixture::Failure) { owner.wait_ready }
+                      assert_same first, original
+                      assert_equal ["process-ownership", "bootstrap refused admission"], [original.kind, original.message]
+                      assert_equal "not_attempted", owner.instance_variable_get(:@go_state)
+                      assert_empty writes # wait_ready only snapshots; it never publishes.
+                      owner.snapshot_bootstrap_failure
+                      assert_equal expiry == :before_read ? 0 : 1, reads
+                      # Assert OUTSIDE the no-throw diagnostic callbacks: their
+                      # rescue must never swallow this test's own assertions.
+                      read_observations.each do |path, limit, latched, primary, sequence|
+                        assert_equal File.join(directory, "failure.json"), path
+                        assert_equal 1024, limit
+                        assert_same original, latched
+                        assert_same original, primary
+                        assert_equal %i[latch read], sequence
+                      end
+                      snapshot = diagnostic && !read_error && !%i[before_read after_read].include?(expiry)
+                      expected = {"stage" => "configuration", "condition" => "directory_identity"}
+                      if snapshot
+                        assert_equal expected, owner.instance_variable_get(:@bootstrap_failure_snapshot)
+                      else
+                        assert_nil owner.instance_variable_get(:@bootstrap_failure_snapshot)
+                      end
+                      now = 10 if expiry == :before_emit
+                      if cleanup_error
+                        assert_same cleanup_error, assert_raises(IOError) { owner.stop }
+                        assert_raises(UploadProcessFixture::Failure) { owner.stop }
+                      else
+                        assert_equal true, owner.stop
+                        assert_equal true, owner.stop
+                      end
+                      assert_same original, first
+                      assert_same original, owner.instance_variable_get(:@primary)
+                      assert_equal 10, owner.instance_variable_get(:@bootstrap_failure_cutoff_ns)
+                      assert_equal snapshot && expiry != :before_emit ? 1 : 0, writes.length
+                      assert_equal [true] * writes.length, report_attempts
+                      assert_equal cleanup_error ? [] : [directory], removed
+                      assert_includes events, :close_resources
+                      unless writes.empty?
+                        assert_operator events.index(:close_resources), :<, events.index(:write)
+                        assert_operator events.index(:remove_entry), :<, events.index(:write) unless cleanup_error
+                      end
+                      writes.each do |line|
+                        assert_equal "MRK_FIXTURE_BOOTSTRAP_FAILURE=#{JSON.generate({"schema" => 1}.merge(expected))}\n", line
+                        assert line.ascii_only?
+                        assert_operator line.bytesize, :<=, 256
+                        refute_includes line, "pid"
+                        refute_includes line, "701"
+                        refute_includes line, "private-marker"
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+      exercise.call(good)
+      invalid = ["not-json", "[]", "x" * 1025, " #{good}",
+        good.sub('"pid":701', '"pid":701,"pid":701'),
+        JSON.generate(record.reject { |key, _| key == "condition" }),
+        JSON.generate(record.merge("private-marker" => "must not escape")),
+        JSON.generate(record.merge("version" => 1.0)), JSON.generate(record.merge("pid" => 702)),
+        JSON.generate(record.merge("pid" => 701.0)), JSON.generate(record.merge("stage" => "private-marker")),
+        JSON.generate(record.merge("condition" => "setsid"))]
+      invalid.each { |bytes| exercise.call(bytes, diagnostic: false) }
+      exercise.call(good, read_error: IOError.new("private-marker"))
+      %i[before_read after_read before_emit].each { |expiry| exercise.call(good, expiry: expiry) }
+      exercise.call(good, write_result: :short)
+      exercise.call(good, write_result: IOError.new("private-marker"))
+      exercise.call(good, cleanup_error: IOError.new("original cleanup error"), write_result: IOError.new("private-marker"))
     end
   end
 
