@@ -315,8 +315,10 @@ def _require_fastlane_bundle(tooling_root: Path) -> None:
             "online preflight or a Store lane."
         )
     bundler = run(["bundle", "--version"])
+    # Pinned Bundler 4's --version prints the bare version; its help command
+    # alone adds the human-readable "Bundler version" prefix.
     if (bundler is None or bundler.returncode
-            or bundler.stdout.strip() != "Bundler version 4.0.16"):
+            or bundler.stdout.strip() != "4.0.16"):
         raise StoreOperationError(
             "Bundler 4.0.16 is unavailable for the pinned Store tooling. Install it under Ruby 3.3.12; "
             "dependencies are never installed automatically."

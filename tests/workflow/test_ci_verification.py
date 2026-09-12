@@ -1104,15 +1104,25 @@ class CIControllerContractTests(unittest.TestCase):
         def capture(text, **changes):
             values = dict(ok=True, returncode=0, waited=True, stdout_eof=True, stderr_eof=True,
                           domain_finality=True, primary_error=None, cleanup_errors=(), stdout=text.encode(),
-                          stderr=b"", duration=0.03, timed_out=False, cancelled=False,
-                          persisted=(len(text), 0))
-            return SimpleNamespace(**{**values, **changes})
+                          stderr=b"", duration=0.03, timed_out=False, cancelled=False)
+            values.update(changes)
+            values.setdefault("persisted", (len(values["stdout"]), len(values["stderr"])))
+            return SimpleNamespace(**values)
 
         with patch.object(controller, "ruby_expected_ids", return_value=expected):
             for transcript in (clean, noisy):
                 actual = controller.parse_capture(step, capture(transcript + footer), paths, "linux", None)
                 self.assertEqual(actual.details["completed"], list(expected))
                 self.assertEqual(actual.details["assertions"], 5)
+                completed, structure = controller.minitest_records(transcript + footer, expected)
+                self.assertEqual(completed, list(expected))
+                self.assertEqual(structure["reasons"], [])
+                self.assertEqual(structure["start_records"], [
+                    {"ordinal": index + 1, "id": identifier, "terminal": "success"}
+                    for index, identifier in enumerate(expected)])
+                self.assertEqual(structure["adverse_records"], [])
+                self.assertEqual(structure["start_records_omitted"], 0)
+                self.assertEqual(structure["adverse_records_omitted"], 0)
             cases = (
                 expected[0] + " = missing terminal\n" + second + footer,
                 first + expected[1] + " = missing terminal\n" + footer,
@@ -1137,6 +1147,115 @@ class CIControllerContractTests(unittest.TestCase):
             self.assertNotIn("PRIVATE_UNKNOWN", json.dumps(diagnostic))
             self.assertNotIn("test_secret", json.dumps(diagnostic))
             self.assertEqual(diagnostic["minitest_observations"], [[2, 5, 0, 0, 0]])
+
+            interrupted = (expected[0] + " = PRIVATE_MESSAGE\n0.01 s = F\n"
+                           + expected[1] + " = unfinished\n")
+            stdout_locations = "/PRIVATE_ROOT/fastlane/native_upload_process.rb:70: PRIVATE_MESSAGE\n"
+            stderr_locations = ("/PRIVATE_ROOT/tests/workflow/test_native_upload_process.rb:31: PRIVATE_MESSAGE\n"
+                                "/PRIVATE_ROOT/fastlane/private_unknown.rb:99: PRIVATE_MESSAGE\n"
+                                "/PRIVATE_ROOT/tests/workflow/private_unknown.rb:99: PRIVATE_MESSAGE\n")
+            # Stderr lookalikes cannot supply stdout's missing footer or names.
+            stderr_text = clean + footer + expected[0] + ":\n" + stderr_locations
+            partial = capture(interrupted + stdout_locations, stderr=stderr_text.encode())
+            with self.assertRaisesRegex(controller.VerificationError, "MINITEST_RESULT_MISSING"):
+                controller.parse_capture(step, partial, paths, "macos", None)
+            diagnostic = controller.failure_details(partial, step, paths)
+            interrupted_rows = [
+                {"ordinal": 1, "id": expected[0], "terminal": "failure"},
+                {"ordinal": 2, "id": expected[1], "terminal": "missing"},
+            ]
+            self.assertEqual(diagnostic["minitest_structure"], {
+                "reasons": ["footer-count", "missing-ids", "terminal-count", "terminal-status"],
+                "expected_count": 2, "started_count": 2, "completed_count": 0,
+                "missing_ids": list(expected), "duplicate_ids": [], "unknown_count": 0,
+                "start_records": interrupted_rows, "adverse_records": interrupted_rows,
+                "start_records_omitted": 0, "adverse_records_omitted": 0,
+            })
+            self.assertEqual(diagnostic["ruby_locations"], [
+                ("fastlane/native_upload_process.rb", 70),
+                ("tests/workflow/test_native_upload_process.rb", 31),
+            ])
+            self.assertEqual(diagnostic["failed_tests"], [])
+            self.assertEqual(diagnostic["minitest_observations"], [])
+            for private in ("PRIVATE_ROOT", "PRIVATE_MESSAGE", "private_unknown"):
+                self.assertNotIn(private, json.dumps(diagnostic))
+            with self.assertRaisesRegex(controller.VerificationError, "MINITEST_COMPLETION_INVENTORY"):
+                controller.parse_capture(step, capture(first + footer, stderr=second.encode()), paths, "macos", None)
+
+            for terminal, classification, reason in (
+                ("0.01 s = .\n", "success", None),
+                ("0.01 s = F\n", "failure", "terminal-status"),
+                ("0.01 s = E\n", "error", "terminal-status"),
+                ("0.01 s = S\n", "skip", "terminal-status"),
+                ("0.01 s = ?\n", "missing", "terminal-count"),
+                ("0.01 s = .\n0.01 s = .\n", "ambiguous", "terminal-count"),
+            ):
+                with self.subTest(classification=classification):
+                    completed, structure = controller.minitest_records(
+                        expected[0] + " = " + terminal + second + footer, expected)
+                    row = {"ordinal": 1, "id": expected[0], "terminal": classification}
+                    self.assertEqual(structure["start_records"], [
+                        row, {"ordinal": 2, "id": expected[1], "terminal": "success"}])
+                    self.assertEqual(structure["adverse_records"], [] if reason is None else [row])
+                    self.assertEqual(completed, list(expected) if reason is None else [expected[1]])
+                    self.assertEqual(structure["reasons"], [] if reason is None else ["missing-ids", reason])
+
+            _, duplicate = controller.minitest_records(first + first + footer, expected)
+            self.assertEqual(duplicate["start_records"], [
+                {"ordinal": ordinal, "id": expected[0], "terminal": "success"} for ordinal in (1, 2)])
+            self.assertEqual(duplicate["adverse_records"], [])
+            self.assertEqual(duplicate["reasons"], ["duplicate-id", "missing-ids"])
+            completed, after_footer = controller.minitest_records(clean + footer + first, expected)
+            after_row = {"ordinal": 3, "id": expected[0], "terminal": "after-footer"}
+            self.assertEqual(after_footer["start_records"], [
+                {"ordinal": index + 1, "id": identifier, "terminal": "success"}
+                for index, identifier in enumerate(expected)] + [after_row])
+            self.assertEqual(after_footer["adverse_records"], [after_row])
+            self.assertEqual(completed, list(expected))
+            self.assertEqual(after_footer["reasons"], ["duplicate-id", "record-after-footer", "record-count"])
+
+            private_start = "PRIVATE_UNKNOWN#test_secret = 0.01 s = F\n"
+            _, unknown = controller.minitest_records(first + private_start + second + footer, expected)
+            self.assertEqual(unknown["start_records"], [
+                {"ordinal": 1, "id": expected[0], "terminal": "success"},
+                {"ordinal": 3, "id": expected[1], "terminal": "success"},
+            ])
+            self.assertEqual(unknown["adverse_records"], [])
+            self.assertEqual(unknown["unknown_count"], 1)
+            self.assertEqual(unknown["reasons"], ["record-count", "terminal-status", "unknown-id"])
+            self.assertNotIn("PRIVATE_UNKNOWN", json.dumps(unknown))
+            self.assertNotIn("test_secret", json.dumps(unknown))
+
+            many = tuple(f"SyntheticTests#test_{index:02d}" for index in range(35))
+            many_text = ("".join(identifier + " = 0.01 s = .\n" for identifier in many[:16])
+                         + private_start + "".join(identifier + " = 0.01 s = F\n" for identifier in many[16:]))
+            completed, bounded = controller.minitest_records(many_text, many)
+            self.assertEqual(completed, list(many[:16]))
+            self.assertEqual(bounded["start_records"], [
+                {"ordinal": index + 1, "id": identifier, "terminal": "success"}
+                for index, identifier in enumerate(many[:16])])
+            self.assertEqual(bounded["adverse_records"], [
+                {"ordinal": index + 18, "id": identifier, "terminal": "failure"}
+                for index, identifier in enumerate(many[16:32])])
+            self.assertEqual(bounded["start_records_omitted"], 19)
+            self.assertEqual(bounded["adverse_records_omitted"], 3)
+            self.assertEqual(bounded["started_count"], 36)
+            self.assertEqual(bounded["unknown_count"], 1)
+            self.assertNotIn("PRIVATE_UNKNOWN", json.dumps(bounded))
+            self.assertNotIn("test_secret", json.dumps(bounded))
+
+            stdout_rows = [("fastlane/native_upload_process.rb", line) for line in range(60, 30, -1)]
+            stderr_rows = [("fastlane/native_process_spawn.rb", line) for line in range(20, 0, -1)] + stdout_rows[-1:]
+
+            def location_text(rows):
+                return "".join(f"/PRIVATE_ROOT/{name}:{line}: PRIVATE_MESSAGE\n" for name, line in rows)
+
+            diagnostic = controller.failure_details(capture(interrupted + location_text(stdout_rows),
+                stderr=(location_text(stderr_rows) + stderr_locations).encode()), step, paths)
+            self.assertEqual(diagnostic["ruby_locations"], sorted(set(stdout_rows + stderr_rows))[:32])
+            for private in ("PRIVATE_ROOT", "PRIVATE_MESSAGE", "private_unknown"):
+                self.assertNotIn(private, json.dumps(diagnostic))
+
             for field, value in (("returncode", False), ("waited", False), ("stdout_eof", False),
                                  ("stderr_eof", False), ("domain_finality", False),
                                  ("primary_error", "fixture"), ("cleanup_errors", ("fixture",))):
@@ -1145,6 +1264,30 @@ class CIControllerContractTests(unittest.TestCase):
             with patch.object(controller.time, "monotonic", return_value=100.0):
                 with self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
                     controller.failure_details(capture(clean + footer), step, paths, deadline=100.0)
+            original_finditer = controller.re.finditer
+            location_pattern = r"((?:tests/workflow|fastlane)/[A-Za-z0-9_]+\.rb):([1-9][0-9]{0,5})"
+            for expiry in ("during", "after"):
+                expired = [False]
+
+                def expiring_locations(pattern, text):
+                    matches = original_finditer(pattern, text)
+                    if pattern != location_pattern or text != stderr_locations:
+                        yield from matches
+                        return
+                    for match in matches:
+                        if expiry == "during":
+                            expired[0] = True
+                        yield match
+                        if expiry == "during":
+                            self.fail("expired location scan continued")
+                    expired[0] = True
+
+                with self.subTest(expiry=expiry), \
+                        patch.object(controller.re, "finditer", side_effect=expiring_locations), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 100.0 if expired[0] else 99.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(capture(clean + footer, stderr=stderr_locations.encode()),
+                                               step, paths, deadline=100.0)
 
     def test_native_failure_diagnostics_are_source_bound_and_cannot_authorize_success(self):
         controller = controller_module()

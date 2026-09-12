@@ -1060,7 +1060,7 @@ class CliBuildTests(unittest.TestCase):
                     return subprocess.CompletedProcess(argv, 0, stdout="3.3.12", stderr="")
                 if argv == ["bundle", "--version"]:
                     return subprocess.CompletedProcess(
-                        argv, 0, stdout="Bundler version 4.0.16", stderr=""
+                        argv, 0, stdout="4.0.16", stderr=""
                     )
                 if argv == ["bundle", "check"]:
                     return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
@@ -1218,7 +1218,7 @@ class CliBuildTests(unittest.TestCase):
                 if argv[:2] == ["ruby", "-e"]:
                     return subprocess.CompletedProcess(argv, 0, stdout="3.3.12", stderr="")
                 if argv == ["bundle", "--version"]:
-                    return subprocess.CompletedProcess(argv, 0, stdout="Bundler version 4.0.16", stderr="")
+                    return subprocess.CompletedProcess(argv, 0, stdout="4.0.16", stderr="")
                 return subprocess.CompletedProcess(argv, 1, stdout="", stderr="missing")
 
             with patch.dict(
@@ -1310,12 +1310,16 @@ class CliBuildTests(unittest.TestCase):
 
     def test_store_runtime_admission_rejects_wrong_pins_and_unconfirmed_fiddle_before_lane(self) -> None:
         marker = "MRK_RUNTIME_3.3.12_FIDDLE_1.1.2"
-        expected_outputs = ("3.3.12", "Bundler version 4.0.16", "", marker, marker)
+        expected_outputs = ("3.3.12", "4.0.16", "", marker, marker)
         cases = (
+            ("pinned-runtime", None, "", 0, "", ""),
             ("older-ruby", 0, "3.3.11", 0, "", "Ruby 3.3.12"),
             ("other-ruby", 0, "3.4.0", 0, "", "Ruby 3.3.12"),
             ("missing-ruby", 0, "", 1, "", "Ruby 3.3.12"),
-            ("wrong-bundler", 1, "Bundler version 4.0.17", 0, "", "Bundler 4.0.16"),
+            ("wrong-bundler", 1, "4.0.17", 0, "", "Bundler 4.0.16"),
+            ("legacy-bundler-output", 1, "Bundler version 4.0.16", 0, "", "Bundler 4.0.16"),
+            ("simulated-bundler-output", 1, "4.0.16 (simulating Bundler 4.0.17)", 0, "", "Bundler 4.0.16"),
+            ("appended-bundler-output", 1, "4.0.16\nunexpected", 0, "", "Bundler 4.0.16"),
             ("missing-bundler", 1, "", 1, "", "Bundler 4.0.16"),
             ("missing-bundle", 2, "", 1, "", "Pinned Fastlane dependencies"),
             ("wrong-default-fiddle", 3, "MRK_RUNTIME_3.3.12_FIDDLE_1.1.3", 0, "", "loaded origin"),
@@ -1337,6 +1341,7 @@ class CliBuildTests(unittest.TestCase):
                 self.assertEqual(kwargs["env"]["BUNDLE_IGNORE_CONFIG"], "1")
                 self.assertEqual(kwargs["env"]["BUNDLE_AUTO_INSTALL"], "false")
                 self.assertEqual(kwargs["env"]["BUNDLE_FROZEN"], "true")
+                self.assertNotIn("BUNDLE_SIMULATE_VERSION", kwargs["env"])
                 if index == failed:
                     return subprocess.CompletedProcess(argv, code, stdout=output, stderr=stderr)
                 return subprocess.CompletedProcess(argv, 0, stdout=expected_outputs[index], stderr="")
@@ -1344,26 +1349,35 @@ class CliBuildTests(unittest.TestCase):
             with self.subTest(label=label), patch.dict(os.environ, {
                 "BUNDLE_PATH": "/fictional/pinned-bundle", "BUNDLE_AUTO_INSTALL": "true",
                 "BUNDLER_VERSION": "99.0.0", "BUNDLE_IGNORE_CONFIG": "0", "BUNDLE_FROZEN": "false",
+                "BUNDLE_SIMULATE_VERSION": "4.0.17",
             }, clear=True), patch("mobile_release.stores.shutil.which", return_value="/fictional/ruby"), patch(
                 "mobile_release.stores.subprocess.run", side_effect=fake
-            ):
-                with self.assertRaisesRegex(StoreOperationError, diagnostic) as raised:
+            ), patch.object(subprocess, "Popen", side_effect=AssertionError("unexpected real admission process")) as popen:
+                if failed is None:
                     _require_fastlane_bundle(tooling)
-                self.assertNotIn("fictional private diagnostic", str(raised.exception))
-                self.assertEqual(len(calls), failed + 1)
+                else:
+                    with self.assertRaisesRegex(StoreOperationError, diagnostic) as raised:
+                        _require_fastlane_bundle(tooling)
+                    self.assertNotIn("fictional private diagnostic", str(raised.exception))
+                expected_calls = 5 if failed is None else failed + 1
+                self.assertEqual(len(calls), expected_calls)
+                self.assertEqual(calls[:3], [["ruby", "-e", "print RUBY_VERSION"],
+                                            ["bundle", "--version"], ["bundle", "check"]][:expected_calls])
                 self.assertFalse(any("install" in call for call in calls))
-                if failed >= 3:
+                if expected_calls >= 4:
                     self.assertIn("--disable=rubyopt,gems,did_you_mean,error_highlight,syntax_suggest,rjit,yjit", calls[3])
                     self.assertEqual(calls[3][-1], str(tooling / "fastlane/native_process_spawn.rb"))
-                if failed >= 4:
+                if expected_calls == 5:
                     self.assertEqual(calls[4][:3], ["bundle", "exec", "ruby"])
                     self.assertEqual(calls[4][-1], calls[3][-1])
+                popen.assert_not_called()
         with patch("mobile_release.stores.shutil.which", return_value=None), patch(
             "mobile_release.stores.subprocess.run"
-        ) as run:
+        ) as run, patch.object(subprocess, "Popen", side_effect=AssertionError("unexpected real admission process")) as popen:
             with self.assertRaisesRegex(StoreOperationError, "Ruby 3.3.12"):
                 _require_fastlane_bundle(tooling)
             run.assert_not_called()
+            popen.assert_not_called()
 
     def test_offline_build_reports_private_dependency_token_gate_before_gradle(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

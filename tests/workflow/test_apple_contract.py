@@ -37,7 +37,7 @@ CASES = {
 class _RuntimeAdmissionTrace:
     """Observe the existing five calls, without changing their execution."""
 
-    _OUTPUTS = ("3.3.12", "Bundler version 4.0.16", None,
+    _OUTPUTS = ("3.3.12", "4.0.16", None,
                 "MRK_RUNTIME_3.3.12_FIDDLE_1.1.2", "MRK_RUNTIME_3.3.12_FIDDLE_1.1.2")
 
     def __init__(self, run):
@@ -314,7 +314,7 @@ class RuntimeAdmissionAttributionTests(unittest.TestCase):
     def test_trace_forwards_original_admission_without_extra_calls(self):
         tooling = Path("/fictional/pinned-contract")
         marker = "MRK_RUNTIME_3.3.12_FIDDLE_1.1.2"
-        outputs = ("\n3.3.12 \n", " Bundler version 4.0.16\n", "unconstrained bundle output", marker, marker)
+        outputs = ("\n3.3.12 \n", " 4.0.16\n", "unconstrained bundle output", marker, marker)
         replies = [subprocess.CompletedProcess([], 0, stdout=value, stderr="benign warning" if index < 3 else "")
                    for index, value in enumerate(outputs)]
         calls, incoming = [], []
@@ -378,7 +378,7 @@ class RuntimeAdmissionAttributionTests(unittest.TestCase):
     def test_required_failure_attribution_is_private_and_optional_mode_unchanged(self):
         private = "synthetic-private-runtime-data"
         marker = "MRK_RUNTIME_3.3.12_FIDDLE_1.1.2"
-        outputs = ("3.3.12", "Bundler version 4.0.16", "", marker, marker)
+        outputs = ("3.3.12", "4.0.16", "", marker, marker)
 
         def deny(*_args, **_kwargs):
             raise AssertionError("unexpected process or temporary export")

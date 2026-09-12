@@ -860,6 +860,24 @@ def minitest_records(stdout: str, expected: tuple[str, ...], *, deadline: float 
     boundary = footers[0].start() if footers else len(stdout)
     reasons, completed, seen, duplicates, unknown = set(), [], set(), set(), 0
     terminal_pattern = r"(?m)^([0-9]{1,9}\.[0-9]{2}) s = ([.FES])[ \t]*$"
+    terminal_names = {".": "success", "F": "failure", "E": "error", "S": "skip"}
+    start_records, adverse_records = [], []
+    known_starts = known_adverse = 0
+
+    def remember_record(ordinal: int, identifier: str, terminal: str) -> None:
+        # Bounded syntactic observations never authorize completion or reuse.
+        nonlocal known_starts, known_adverse
+        if identifier not in expected_set:
+            return
+        row = {"ordinal": ordinal, "id": identifier, "terminal": terminal}
+        known_starts += 1
+        if len(start_records) < 16:
+            start_records.append(row)
+        if terminal != "success":
+            known_adverse += 1
+            if len(adverse_records) < 16:
+                adverse_records.append(row)
+
     if len(footers) != 1:
         reasons.add("footer-count")
     if (re.search(terminal_pattern, stdout[:starts[0].start()] if starts else stdout)
@@ -879,10 +897,14 @@ def minitest_records(stdout: str, expected: tuple[str, ...], *, deadline: float 
         seen.add(identifier)
         if start.start() >= boundary:
             reasons.add("record-after-footer")
+            remember_record(index + 1, identifier, "after-footer")
             continue
         end = min(starts[index + 1].start() if index + 1 < len(starts) else len(stdout), boundary)
         body = stdout[start.end():end]
         terminals = re.findall(terminal_pattern, body)
+        terminal = (terminal_names[terminals[0][1]] if len(terminals) == 1
+                    else "ambiguous" if terminals else "missing")
+        remember_record(index + 1, identifier, terminal)
         if len(terminals) != 1:
             reasons.add("terminal-count")
         elif terminals[0][1] != ".":
@@ -899,7 +921,10 @@ def minitest_records(stdout: str, expected: tuple[str, ...], *, deadline: float 
     return completed, {"reasons": sorted(reasons), "expected_count": len(expected),
                        "started_count": len(starts), "completed_count": len(completed),
                        "missing_ids": sorted(missing)[:16], "duplicate_ids": sorted(duplicates)[:16],
-                       "unknown_count": unknown}
+                       "unknown_count": unknown,
+                       "start_records": start_records, "adverse_records": adverse_records,
+                       "start_records_omitted": known_starts - len(start_records),
+                       "adverse_records_omitted": known_adverse - len(adverse_records)}
 
 
 def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, deadline: float | None = None) -> CheckResult:
@@ -1323,9 +1348,20 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                            ("native_upload_validation.rb", "ios_upload_validation.rb",
                             "native_process_spawn.rb", "native_upload_process.rb",
                             "android_upload_validation.rb", "release_support.rb"))
-            locations = re.findall(r"((?:tests/workflow|fastlane)/[A-Za-z0-9_]+\.rb):([1-9][0-9]{0,5})", text)
-            value["ruby_locations"] = sorted({(name, int(line)) for name, line in locations
-                                                if name in allowed})[:32]
+            locations = set()
+            for stream in (text, result.stderr.decode("utf-8", "replace")):
+                if deadline is not None:
+                    check_clock(deadline)
+                for match in re.finditer(r"((?:tests/workflow|fastlane)/[A-Za-z0-9_]+\.rb):([1-9][0-9]{0,5})", stream):
+                    if deadline is not None:
+                        check_clock(deadline)
+                    if match[1] in allowed:
+                        locations.add((match[1], int(match[2])))
+                        if len(locations) > 32:
+                            locations.remove(max(locations))
+                if deadline is not None:
+                    check_clock(deadline)
+            value["ruby_locations"] = sorted(locations)
             footers = re.findall(MINITEST_FOOTER, text)
             value["minitest_observations"] = [list(map(int, row)) for row in footers[:2]]
         except (VerificationError, OSError, UnicodeError):
