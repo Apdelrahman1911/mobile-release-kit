@@ -6,6 +6,7 @@ import os
 import signal
 import unittest
 import weakref
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -588,6 +589,300 @@ class ProfileFixtureBookkeepingTests(unittest.TestCase):
                 self.assertEqual(len(sequence), 4)
                 self.assertEqual(sequence[3][0], "write")  # Actual original exit precedes this sole attempt.
                 self.assertEqual(fixture.json.loads(sequence[3][1][len(prefix):]), observed)
+
+        self._assert_pipe_observation_choreography()
+
+    def _assert_pipe_observation_choreography(self):
+        # Inert fixture choreography only. The owner's existing would-block
+        # regression proves channel offset accounting; native cases still prove
+        # the real READY/waits/EOF/joins and C-only writer on each platform.
+        @contextmanager
+        def modeled(role="keeper", mode="pipe-timeout"):
+            model = SimpleNamespace(now=1_000_000_000, run=3_000_000_000, parent=101,
+                                    files={}, trace=[], logs=[])
+            model.cutoff = model.run - 500_000_000
+            model.root = fixture.Path("/synthetic/pipe-observation")
+            # This is the actual admitted guard class, never a replacement
+            # cancellation authority. No handler is installed. Its deferred
+            # latch may precede context.cancelled/primary, just as in capture.
+            model.guard = owner.DefaultCancellation(ValidationError, "inert restoration")
+            context = model.context = SimpleNamespace(
+                role=role, run=model.run, hard=9_000_000_000, parent_pid=model.parent,
+                primary=None, cancelled=False, cleanup_unknown=False, launch_closed=False,
+                cancellation=model.guard, cleanup_limit=None, failure_limit=None)
+            context.control_cutoff = lambda original: owner._Context.control_cutoff(context, original)
+            acquisition = context.child_acquisition = SimpleNamespace(settled=True, cleanup_unknown=False, child=None)
+            task = model.task = SimpleNamespace(child_role="validator", acquisition=acquisition,
+                                               actual=object(), joined=True, body_done=True)
+            context.tasks = [task] if role == "keeper" else []
+            model.writer = SimpleNamespace(state="OPEN", fileno=lambda: 41)
+            model.reader = SimpleNamespace(state="OPEN", fileno=lambda: 42)
+            model.packet = memoryview(b"inert-original-status")
+            model.channel = SimpleNamespace(
+                context=context, writer=model.writer, writer_closed=False, eof=False,
+                outgoing="k_to_c" if role == "keeper" else "o_to_c", write_in_flight=True,
+                pending=[({"type": "STATUS", "validator_pid": 301}, model.packet)],
+                sent={"MOVED"}, write_limits={"STATUS": model.run})
+            model.frame = {"type": "READY", "validator_pid": 301, "group_id": 201, "keeper_pgid": 2010}
+            if role == "outer":
+                model.files = {model.root / name: value for name, value in {
+                    "pipe-status-held": str(model.cutoff), "child.pid": "401",
+                    "validator-reaped": fixture.json.dumps({"state": "reaped", "pid": 301,
+                                                           "status_kind": "exit", "status_code": 0}),
+                    "worker.json": fixture.json.dumps({"pid": 301, "group": 201, "parent": 201,
+                                                       "forbiddenEndpointsAbsent": True}),
+                    "child.json": fixture.json.dumps({"pid": 401, "group": 201, "parent": 301}),
+                }.items()}
+
+            def sleep(seconds):
+                self.assertGreater(seconds, 0)
+                self.assertLessEqual(seconds, .005)
+                model.now += round(seconds * owner.NANOSECOND)
+            def record(path, value):
+                self.assertEqual(path.parent, model.root)
+                self.assertFalse(model.binding.orphan_observed)
+                model.trace.append(("record", path.name))
+                model.files[path] = value
+            def observe(pid, *, group, deadline):
+                self.assertTrue(model.binding.orphan_attempted)
+                self.assertFalse(model.binding.orphan_observed)
+                self.assertEqual((pid, group), (401, 201))
+                self.assertGreater(deadline, model.now / owner.NANOSECOND)
+                self.assertLess(deadline, model.cutoff / owner.NANOSECOND)
+                self.assertLessEqual(deadline, model.now / owner.NANOSECOND + 1)
+                model.trace.append(("observe",))
+            def select(readers, writers, errors, timeout):
+                self.assertEqual((readers, writers, errors, timeout), ((42,), (), (), 0))
+                self.assertTrue(model.binding.orphan_attempted)
+                self.assertFalse(model.binding.orphan_observed)
+                model.trace.append(("select",))
+                return [], [], []
+            def log(event, **fields):
+                model.trace.append(("log", event))
+                model.logs.append((event, fields, model.now))
+            def write(descriptor, content):
+                model.trace.append(("write", descriptor, bytes(content), model.now))
+                return len(content)
+
+            traps = []
+            with fixture.ExitStack() as effects:
+                # Keep setUp's nine acquisition traps, and block every cached
+                # original alias as well: patching os later is not sufficient.
+                for name in ("open", "close", "pipe", "set_blocking", "read", "write", "fstat"):
+                    traps.append(effects.enter_context(patch.object(
+                        fixture.os, name, side_effect=AssertionError("inert pipe choreography used OS " + name))))
+                traps.append(effects.enter_context(patch.object(
+                    fixture, "process_state", side_effect=AssertionError("inert pipe choreography observed a process"))))
+                for name in ("install", "restore"):
+                    traps.append(effects.enter_context(patch.object(
+                        owner.DefaultCancellation, name, side_effect=AssertionError("inert guard changed handlers"))))
+                effects.enter_context(patch.object(fixture.time, "monotonic_ns", side_effect=lambda: model.now))
+                effects.enter_context(patch.object(fixture.time, "monotonic", side_effect=lambda: model.now / owner.NANOSECOND))
+                model.sleep = effects.enter_context(patch.object(fixture.time, "sleep", side_effect=sleep))
+                effects.enter_context(patch.object(fixture.os, "getppid", side_effect=lambda: model.parent))
+                effects.enter_context(patch.object(fixture.Path, "exists", lambda path: path in model.files))
+                effects.enter_context(patch.object(fixture.Path, "read_text", lambda path: model.files[path]))
+                model.ready = effects.enter_context(patch.object(fixture, "ready", return_value=True))
+                model.record = effects.enter_context(patch.object(fixture, "record", side_effect=record))
+                model.observe = effects.enter_context(patch.object(fixture, "assert_live", side_effect=observe))
+                model.select = effects.enter_context(patch.object(fixture.select, "select", side_effect=select))
+                binding = model.binding = fixture.ProfileBindings(model.root, mode, role)
+                for name in ("_real_read", "_real_fstat", "_real_killpg"):
+                    traps.append(effects.enter_context(patch.object(
+                        binding, name, side_effect=AssertionError("inert binding used cached " + name))))
+                model.write = effects.enter_context(patch.object(binding, "_real_write", side_effect=write))
+                model.log = effects.enter_context(patch.object(binding, "log", side_effect=log))
+                binding.run_deadline_ns = model.run
+                binding.channel_objects["c_to_k" if role == "keeper" else "c_to_o"] = model.channel
+                if role == "keeper":
+                    binding.tasks[id(task)] = task
+                    binding.join_witnesses[id(task.actual)] = id(task)
+                else:
+                    binding.children["custodian"] = SimpleNamespace(pid=2010)
+                    binding.payload_reader, binding.payload_fd = model.reader, 42
+                    binding.leases[id(model.reader)] = (model.reader, 42, (11, 12))
+                effects.enter_context(binding)
+                if role == "outer":
+                    binding.observe("outer", "ready", frame=model.frame)
+                    self.assertIs(binding.outer_ready, model.frame)
+                    model.trace.clear()
+                yield model
+            self.assertEqual(binding.patch_state, "CLOSED")
+            for trap in traps:
+                trap.assert_not_called()
+
+        def send(model):
+            return fixture.os.write(41, model.packet)
+        def adverse(model, fault):
+            if fault == "guard":
+                model.guard.interrupt(signal.SIGTERM, None)
+                self.assertIsNone(model.context.primary)
+                self.assertFalse(model.context.cancelled)
+            elif fault == "parent":
+                model.parent += 1
+            elif fault == "eof":
+                model.channel.eof = True
+            else:
+                setattr(model.context, fault, ValueError("inert primary") if fault == "primary" else True)
+
+        with modeled() as model:
+            pending = model.channel.pending[0]
+            limits = dict(model.channel.write_limits)
+            for acknowledged in (False, True):
+                if acknowledged:
+                    model.files[model.root / "pipe-observation-ack"] = str(model.cutoff)
+                with self.assertRaises(BlockingIOError):
+                    send(model)
+                self.assertIs(model.channel.pending[0], pending)
+                self.assertIs(model.channel.pending[0][1], model.packet)
+                self.assertEqual(model.channel.write_limits, limits)
+                model.write.assert_not_called()
+            self.assertEqual([row[0] for row in model.logs], ["pipe_status_held"])
+            self.assertEqual(model.sleep.call_count, 2)
+            model.now = model.cutoff
+            self.assertEqual(send(model), len(model.packet))
+            self.assertEqual(send(model), len(model.packet))  # No renewed gate/event on another original write turn.
+            self.assertEqual([row[0] for row in model.logs], ["pipe_status_held", "pipe_status_release_attempt"])
+            self.assertEqual(model.logs[-1][1], {"cutoff_ns": model.cutoff, "acknowledged": True})
+            self.assertEqual(model.sleep.call_count, 2)
+            self.assertEqual(model.write.call_count, 2)
+
+        # An absent ACK cannot extend B, including the sleep which reaches B.
+        with modeled() as model:
+            model.now = model.cutoff - 1_000_000
+            self.assertEqual(send(model), len(model.packet))
+            self.assertEqual(model.now, model.cutoff)
+            self.assertEqual(model.logs[-1][1], {"cutoff_ns": model.cutoff, "acknowledged": False})
+            model.write.assert_called_once_with(41, model.packet)
+
+        for bypass in ("mode", "role", "MOVED", "descriptor", "channel", "closed"):
+            with self.subTest(pipe_bypass=bypass), modeled() as model:
+                descriptor = 41
+                if bypass == "mode": model.binding.mode = "success"
+                elif bypass == "role": model.binding.role = "outer"
+                elif bypass == "MOVED": model.channel.pending[0][0]["type"] = "MOVED"
+                elif bypass == "descriptor": descriptor = 43
+                elif bypass == "channel": model.binding.channel_objects.clear()
+                else: model.channel.writer_closed = True
+                self.assertEqual(fixture.os.write(descriptor, model.packet), len(model.packet))
+                model.sleep.assert_not_called()
+                model.record.assert_not_called()
+
+        for fault in ("primary", "cancelled", "guard", "cleanup_unknown", "eof", "parent"):
+            for timing in ("before", "during"):
+                with self.subTest(pipe_adverse=fault, timing=timing), modeled() as model:
+                    if timing == "before": adverse(model, fault)
+                    else: model.sleep.side_effect = lambda duration: adverse(model, fault)
+                    self.assertEqual(send(model), len(model.packet))
+                    self.assertEqual(model.sleep.call_count, int(timing == "during"))
+                    model.write.assert_called_once_with(41, model.packet)
+
+        for missing in ("join", "settled", "witness", "cleanup", "acquisition-unknown", "packet"):
+            with self.subTest(pipe_custody=missing), modeled() as model:
+                if missing == "join": model.task.joined = False
+                elif missing == "settled": model.task.acquisition.settled = False
+                elif missing == "witness": model.binding.join_witnesses.clear()
+                elif missing == "cleanup": model.context.cleanup_limit = model.run
+                elif missing == "acquisition-unknown": model.task.acquisition.cleanup_unknown = True
+                else: model.packet = memoryview(bytearray(model.packet))
+                with self.assertRaises(AssertionError): send(model)
+                model.write.assert_not_called()
+                model.sleep.assert_not_called()
+
+        with modeled() as model:
+            model.sleep.side_effect = lambda duration: setattr(model, "now", model.run)
+            with self.assertRaises(BlockingIOError): send(model)
+            model.write.assert_not_called()  # Earlier channel preflight cannot authorize a late write.
+            self.assertEqual(model.channel.write_limits, {"STATUS": model.run})
+            self.assertIs(model.channel.pending[0][1], model.packet)
+
+        with modeled("outer") as model:
+            model.now = model.cutoff - 100_000_000
+            model.binding.tick()
+            self.assertTrue(model.binding.orphan_attempted and model.binding.orphan_observed)
+            self.assertEqual(model.files[model.root / "pipe-observation-ack"], str(model.cutoff))
+            self.assertEqual(model.trace, [("observe",), ("select",), ("record", "pipe-observation-ack"),
+                                           ("log", "exited_validator_live_descendant_without_payload_eof")])
+            self.assertEqual(model.logs[-1][1], {"descendant": 401, "cutoff_ns": model.cutoff, "observed_ns": model.now})
+            model.now = model.run
+            model.binding.tick()
+            model.observe.assert_called_once()
+            model.select.assert_called_once_with((42,), (), (), 0)
+            model.write.assert_not_called()
+
+        # Missing publications can become ready; no started observer is retried.
+        for missing in ("READY", "pipe-status-held", "validator-reaped", "child-readiness"):
+            with self.subTest(pipe_prerequisite=missing), modeled("outer") as model:
+                if missing == "READY": model.binding.outer_ready = None
+                elif missing == "child-readiness": model.ready.return_value = False
+                else: value = model.files.pop(model.root / missing)
+                model.binding.tick()
+                self.assertFalse(model.binding.orphan_attempted or model.binding.orphan_observed)
+                model.observe.assert_not_called()
+                if missing == "READY": model.binding.observe("outer", "ready", frame=model.frame)
+                elif missing == "child-readiness": model.ready.return_value = True
+                else: model.files[model.root / missing] = value
+                model.binding.tick()
+                self.assertTrue(model.binding.orphan_observed)
+                model.observe.assert_called_once()
+
+        for fault in ("primary", "cancelled", "guard", "cleanup_unknown", "launch_closed", "eof",
+                      "closed-reader", "unregistered-reader", "expired"):
+            with self.subTest(pipe_observer_veto=fault), modeled("outer") as model:
+                if fault == "closed-reader": model.reader.state = "CLOSED"
+                elif fault == "unregistered-reader": model.binding.leases.clear()
+                elif fault == "expired": model.now = model.cutoff
+                else: adverse(model, fault)
+                model.binding.tick(); model.binding.tick()
+                self.assertFalse(model.binding.orphan_attempted or model.binding.orphan_observed)
+                model.observe.assert_not_called()
+                model.select.assert_not_called()
+                model.record.assert_not_called()
+
+        for mismatch in ("validator_pid", "group_id", "keeper_pgid", "receipt", "descendant", "reader"):
+            with self.subTest(pipe_original_binding=mismatch), modeled("outer") as model:
+                if mismatch in model.frame: model.frame[mismatch] += 1
+                elif mismatch == "receipt":
+                    receipt = fixture.json.loads(model.files[model.root / "validator-reaped"])
+                    receipt["status_code"] = 1
+                    model.files[model.root / "validator-reaped"] = fixture.json.dumps(receipt)
+                elif mismatch == "descendant":
+                    child = fixture.json.loads(model.files[model.root / "child.json"])
+                    child["group"] += 1
+                    model.files[model.root / "child.json"] = fixture.json.dumps(child)
+                else: model.reader.fileno = lambda: 43
+                with self.assertRaises(AssertionError): model.binding.tick()
+                model.observe.assert_not_called()
+                model.record.assert_not_called()
+
+        for failure in ("observer-error", "observer-late", "observer-guard", "observer-closed",
+                        "select-error", "select-readable", "select-guard", "record-error", "record-late",
+                        "record-guard", "log-error", "log-guard"):
+            with self.subTest(pipe_one_attempt=failure), modeled("outer") as model:
+                stage, kind = failure.split("-", 1)
+                seam = {"observer": model.observe, "select": model.select,
+                        "record": model.record, "log": model.log}[stage]
+                original = seam.side_effect
+                def fail(*args, **kwargs):
+                    if kind == "error": raise OSError("inert proof publication loss")
+                    result = original(*args, **kwargs)
+                    if kind == "late": model.now = model.cutoff
+                    elif kind == "guard": adverse(model, "guard")
+                    elif kind == "closed": model.reader.state = "CLOSED"
+                    elif kind == "readable": return [42], [], []
+                    return result
+                seam.side_effect = fail
+                with self.assertRaises((AssertionError, OSError)):
+                    model.binding.tick()
+                self.assertTrue(model.binding.orphan_attempted)
+                self.assertFalse(model.binding.orphan_observed or model.binding._observing)
+                model.binding.tick()  # Even before outer error collection, the attempt is absorbing.
+                model.context.cleanup_unknown = True
+                model.binding.tick()  # Cleanup pumping cannot start a replacement observer either.
+                model.observe.assert_called_once()
+                self.assertLessEqual(model.select.call_count, 1)
+                self.assertLessEqual(model.record.call_count, 1)
+                model.write.assert_not_called()
 
     def test_partial_binding_entry_restores_prior_and_changed_targets_preserving_the_first_error(self):
         real_patch = patch.object

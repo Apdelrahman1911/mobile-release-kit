@@ -6,8 +6,10 @@ then prove cleanup before their independent fallback. No real profile/keychain.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
+import select
 import selectors
 import shutil
 import signal
@@ -39,9 +41,15 @@ PAYLOAD_MUTATION_MODES = {"overflow", "partial-marker", "extra-frame", "concaten
 UNKNOWN_PROFILE_MODES = {*BAD_FRAME_MODES, *PARENT_DEATH_MODES, "orphan",
                          "payload-writer-close-failure", "payload-reader-close-failure", "payload-reader-close-unresolved"}
 
-_DRIVER_FAILURE_MODES = frozenset({"failure", "read-failure", "partial-write-failure", "overflow",
-                                   "partial-marker", "extra-frame", "concatenated-frame",
-                                   "supervisor-timeout", "backpressure"})
+_DRIVER_FAILURE_MODES = frozenset({
+    "before-admit-cancel", "before-run-cancel", "success", "custom-handler", "pipe-timeout",
+    "spawn-return-cancel", "payload-register-cancel", "cancel", "completion-cancel", "completion-interrupt",
+    "committed-timeout", "failure", "read-failure", "partial-write-failure", "overflow", "partial-marker",
+    "extra-frame", "concatenated-frame", "full-zero", "full-failure", "marker-parent-death",
+    "committed-parent-death", "orphan", "supervisor-timeout", "backpressure", "commit-after-eof",
+    "withhold-commit", "short-write", "zombie", "payload-writer-close-failure",
+    "payload-reader-close-failure", "payload-reader-close-unresolved",
+})
 _DRIVER_FAILURE_FILES = (
     "tests/workflow/profile_process_fixture.py", "tests/workflow/process_fixture.py",
     "src/mobile_release/_profile_process.py", "src/mobile_release/_native_process.py",
@@ -473,6 +481,8 @@ class ProfileBindings:
         self.run_deadline_ns = None
         self.deadline = None
         self.orphan_observed = self.zombie_observed = False
+        self.orphan_attempted = False
+        self.outer_ready = None
         self.commit_withheld = False
         self._observing = False
         self._injected = set()
@@ -596,21 +606,113 @@ class ProfileBindings:
                     self.zombie_observed = True
                     self.log("actual_validator_zombie", validator_pid=publication["pid"])
                     record(self.root / "zombie-observed", "actual unreaped zombie")
-            if (self.mode == "pipe-timeout" and not self.orphan_observed and ready(self.root)
-                    and (self.root / "group-held").exists() and (self.root / "validator-reaped").exists()
-                    and self.payload_reader is not None and self.payload_reader.state == "OPEN"):
-                worker = json.loads((self.root / "worker.json").read_text())
-                descendant = int((self.root / "child.pid").read_text())
-                assert_live(descendant, group=worker["group"], deadline=time.monotonic() + 1)
-                import select
-                readable, _, _ = select.select((self.payload_reader.fileno(),), (), (), 0)
-                if not readable:
-                    # C, never V, owns this still-open payload writer. No read,
-                    # wait or signal is stolen from any production owner.
-                    self.orphan_observed = True
-                    self.log("exited_validator_live_descendant_without_payload_eof", descendant=descendant)
+            if self.mode == "pipe-timeout":
+                self._observe_pipe_orphan()
         finally:
             self._observing = False
+
+    def _observe_pipe_orphan(self):
+        channel = self.channel_objects.get("c_to_o")
+        if self.orphan_attempted or self.orphan_observed or channel is None:
+            return
+        context = channel.context
+        def healthy():
+            return (context.primary is None and not context.cancelled and not context.cleanup_unknown
+                    and (context.cancellation is None or not context.cancellation.cancelled)
+                    and not context.launch_closed and not channel.eof)
+        payload = self.payload_reader
+        registered = self.leases.get(id(payload))
+        if (not healthy() or self.outer_ready is None or self.run_deadline_ns is None
+                or payload is None or payload.state != "OPEN" or registered is None
+                or registered[0] is not payload or registered[1] != self.payload_fd):
+            return
+        cutoff = self.run_deadline_ns - 500_000_000
+        if time.monotonic_ns() >= cutoff or not ready(self.root):
+            return
+        held, reaped = self.root / "pipe-status-held", self.root / "validator-reaped"
+        if not held.exists() or not reaped.exists():
+            return
+        worker = json.loads((self.root / "worker.json").read_text())
+        descendant = json.loads((self.root / "child.json").read_text())
+        receipt = json.loads(reaped.read_text())
+        assert held.read_text() == str(cutoff), "STATUS hold did not preserve its original cutoff"
+        assert (self.outer_ready["validator_pid"] == worker["pid"] == receipt["pid"]
+                and self.outer_ready["group_id"] == worker["group"] == worker["parent"] == descendant["group"]
+                and self.outer_ready["keeper_pgid"] == self.child_for("custodian").pid
+                and descendant["parent"] == worker["pid"]
+                and descendant["pid"] == int((self.root / "child.pid").read_text())
+                and descendant["pid"] not in (worker["pid"], worker["group"])
+                and receipt == {"state": "reaped", "pid": worker["pid"], "status_kind": "exit", "status_code": 0}
+                and worker["forbiddenEndpointsAbsent"]), "orphan observation did not bind original READY/wait evidence"
+        assert payload.fileno() == self.payload_fd, "orphan observation changed its registered reader"
+        # Floor the observer's floating API bound; its one-second allowance must
+        # never outlive the original STATUS hold, even by upward rounding.
+        limit = min(time.monotonic() + 1, math.nextafter(cutoff / self.owner.NANOSECOND, -math.inf))
+        if not healthy() or time.monotonic_ns() >= cutoff:
+            return
+        self.orphan_attempted = True  # A failed started proof cannot retry during cleanup.
+        assert_live(descendant["pid"], group=worker["group"], deadline=limit)
+        assert healthy() and time.monotonic_ns() < cutoff, "orphan observation outlived its healthy window"
+        assert payload.state == "OPEN" and payload.fileno() == self.payload_fd
+        readable, _, _ = select.select((self.payload_fd,), (), (), 0)
+        assert not readable, "orphan observation substituted readable data or EOF for an open pipe"
+        assert healthy() and time.monotonic_ns() < cutoff, "orphan pipe observation was late"
+        # C, never V, owns the writer. This ACK neither waits/reaps/signals a
+        # producer nor releases K early; all original finality witnesses remain.
+        record(self.root / "pipe-observation-ack", str(cutoff))
+        observed = time.monotonic_ns()
+        assert healthy() and observed < cutoff, "orphan acknowledgement publication was late"
+        self.log("exited_validator_live_descendant_without_payload_eof", descendant=descendant["pid"],
+                 cutoff_ns=cutoff, observed_ns=observed)
+        assert healthy(), "orphan proof lost its healthy window"
+        self.orphan_observed = True
+
+    def _pace_pipe_status(self, descriptor, content):
+        if self.mode != "pipe-timeout" or self.role != "keeper":
+            return
+        channel = self.channel_objects.get("c_to_k")
+        if (channel is None or channel.writer_closed or channel.writer.state != "OPEN"
+                or channel.writer.fileno() != descriptor or not channel.pending
+                or channel.pending[0][0]["type"] != "STATUS"):
+            return
+        frame, pending = channel.pending[0]
+        assert channel.outgoing == "k_to_c" and channel.write_in_flight
+        assert content.obj is pending.obj and content == pending[:64 * 1024]
+        context = channel.context
+        assert self.run_deadline_ns == context.run
+        cutoff = context.run - 500_000_000
+        def healthy():
+            return (context.primary is None and not context.cancelled and not context.cleanup_unknown
+                    and (context.cancellation is None or not context.cancellation.cancelled)
+                    and not channel.eof and os.getppid() == context.parent_pid)
+        if healthy() and time.monotonic_ns() < cutoff:
+            if "pipe-status-held" not in self._injected:
+                assert "MOVED" in channel.sent and "STATUS" not in channel.sent
+                assert context.cleanup_limit is None and len(context.tasks) == 1
+                task = context.tasks[0]
+                assert (self.tasks.get(id(task)) is task and task.joined and task.body_done
+                        and task.acquisition is context.child_acquisition and task.acquisition.settled
+                        and not task.acquisition.cleanup_unknown
+                        and self.join_witnesses.get(id(task.actual)) == id(task))
+                self._injected.add("pipe-status-held")
+                self.log("pipe_status_held", cutoff_ns=cutoff, validator_pid=frame["validator_pid"])
+                record(self.root / "pipe-status-held", str(cutoff))
+            remaining = cutoff - time.monotonic_ns()
+            if healthy() and remaining > 0:
+                # One short turn, not an ACK wait: K still pumps C controls and
+                # checks direct-parent loss/fallback on every owner-loop turn.
+                time.sleep(min(.005, remaining / self.owner.NANOSECOND))
+            if healthy() and time.monotonic_ns() < cutoff:
+                raise BlockingIOError
+        if "pipe-status-held" in self._injected and "pipe-status-release" not in self._injected:
+            self._injected.add("pipe-status-release")
+            ack = self.root / "pipe-observation-ack"
+            self.log("pipe_status_release_attempt", cutoff_ns=cutoff,
+                     acknowledged=ack.exists() and ack.read_text() == str(cutoff))
+        # A paced callback can oversleep the earlier _Channel preflight. Do not
+        # write at a stale cutoff; its next original preflight/fallback will fail.
+        if time.monotonic_ns() >= context.control_cutoff(channel.write_limits["STATUS"]):
+            raise BlockingIOError
 
     def observe(self, role, event, **evidence):
         assert role == self.role
@@ -641,6 +743,8 @@ class ProfileBindings:
             self.payload_fd = self.remember(self.payload_reader)
             fields["descriptor"] = self.payload_fd
             fields["identity"] = self.descriptor_evidence(self.payload_fd)
+        elif event == "ready" and role == "outer":
+            self.outer_ready = evidence["frame"]
         elif event.startswith("task_"):
             task = evidence["task"]
             self.tasks[id(task)] = task
@@ -1008,6 +1112,7 @@ class ProfileBindings:
                 raise
 
         def write(descriptor, content):
+            self._pace_pipe_status(descriptor, content)
             if self.role == "custodian" and self.payload_writer is not None and descriptor == 6:
                 if self.mode == "short-write":
                     return self._real_write(descriptor, content[:7])
@@ -1146,9 +1251,8 @@ def validator(root, directory, mode, deadline_ns):
     assert (root / "child-ready").exists()
     if mode in {"orphan", "cancel", "supervisor-timeout"}:
         time.sleep(20)
-    if mode == "pipe-timeout":
-        while time.monotonic_ns() < deadline_ns - 500_000_000:
-            time.sleep(.005)
+    # pipe-timeout exits promptly: original K STATUS, not V's lifetime or K's
+    # control loop, is paced while O proves the real orphan/open-payload state.
     if mode == "failure":
         os.write(2, b"private-native-canary\n")  # Real native stderr is null.
         return 1
@@ -1517,7 +1621,22 @@ def driver(root, mode):
         assert not selected(items, "custodian", "commit_received")
         assert all(item["frame"]["outcome"] != "ok" for item in selected(items, "custodian", "frame_sent") if item["frame"]["type"] == "FINAL")
     if mode == "pipe-timeout":
-        assert binding.orphan_observed
+        assert binding.orphan_attempted and binding.orphan_observed
+        observed = selected(items, "outer", "exited_validator_live_descendant_without_payload_eof")
+        held = selected(items, "keeper", "pipe_status_held")
+        released = selected(items, "keeper", "pipe_status_release_attempt")
+        statuses = [item for item in selected(items, "keeper", "frame_sent") if item["frame"]["type"] == "STATUS"]
+        validator_waits = selected(items, "keeper", "validator_reaped")
+        assert len(observed) == len(held) == len(released) == len(statuses) == len(validator_waits) == 1
+        cutoff = binding.run_deadline_ns - 500_000_000
+        assert all(item["cutoff_ns"] == cutoff for item in (*observed, *held, *released))
+        assert observed[0]["observed_ns"] < cutoff and held[0]["time_ns"] < cutoff
+        assert released[0]["acknowledged"]
+        assert cutoff <= released[0]["time_ns"] <= statuses[0]["time_ns"] < binding.run_deadline_ns
+        assert (validator_waits[0]["sequence"] < held[0]["sequence"]
+                < released[0]["sequence"] < statuses[0]["sequence"])
+        requests = selected(items, "custodian", "group_request")
+        assert requests and requests[0]["time_ns"] >= cutoff
     if mode == "zombie":
         assert binding.zombie_observed
     if mode == "supervisor-timeout" and native_platform == "linux":

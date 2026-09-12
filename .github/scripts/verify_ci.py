@@ -43,14 +43,52 @@ PROFILE_FIXTURE_FAILURE_ID = (
     "test_failure_overflow_and_io_failure_reject_partial_content_without_leaking_workers"
 )
 PROFILE_FIXTURE_FAILURE_CALLBACK_MODES = {
+    ("workflow.test_profile_processes.ProfileProcessTests."
+     "test_group_ownership_is_established_before_spawn_and_never_kills_someone_elses_group"): (
+        "before-admit-cancel", "before-run-cancel",
+    ),
+    ("workflow.test_profile_processes.ProfileProcessTests."
+     "test_success_and_custom_handlers_still_reap_live_descendants_and_keep_capabilities_out"): (
+        "success", "custom-handler",
+    ),
+    ("workflow.test_profile_processes.ProfileProcessTests."
+     "test_timeout_observes_a_real_orphaned_pipe_before_cleanup"): ("pipe-timeout",),
+    ("workflow.test_profile_processes.ProfileProcessTests."
+     "test_cancellation_during_spawn_registration_and_active_native_work_is_contained"): (
+        "spawn-return-cancel", "payload-register-cancel", "cancel", "completion-cancel", "completion-interrupt",
+    ),
+    ("workflow.test_profile_processes.ProfileProcessTests."
+     "test_parent_capture_deadline_still_overrides_a_complete_success_frame"): ("committed-timeout",),
     PROFILE_FIXTURE_FAILURE_ID: (
         "failure", "read-failure", "partial-write-failure", "overflow", "partial-marker",
         "extra-frame", "concatenated-frame",
     ),
     ("workflow.test_profile_processes.ProfileProcessTests."
+     "test_unknown_malformed_c_full_zero_retains_scratch"): ("full-zero",),
+    ("workflow.test_profile_processes.ProfileProcessTests."
+     "test_unknown_malformed_c_full_failure_retains_scratch"): ("full-failure",),
+    ("workflow.test_profile_processes.ProfileProcessTests."
+     "test_unknown_marker_parent_death_requires_domain_disposal"): ("marker-parent-death",),
+    ("workflow.test_profile_processes.ProfileProcessTests."
+     "test_unknown_committed_parent_death_requires_domain_disposal"): ("committed-parent-death",),
+    ("workflow.test_profile_processes.ProfileProcessTests."
+     "test_killed_ancestor_cannot_strand_independent_native_worker_group"): ("orphan",),
+    ("workflow.test_profile_processes.ProfileProcessTests."
      "test_independent_supervisor_deadline_and_backpressure_kill_native_workers_without_inheriting_payload"): (
         "supervisor-timeout", "backpressure",
     ),
+    ("workflow.test_profile_processes.ProfileProcessTests."
+     "test_commit_follows_actual_payload_eof_and_withheld_commit_cannot_deadlock_writer_close"): (
+        "commit-after-eof", "withhold-commit", "short-write",
+    ),
+    ("workflow.test_profile_processes.ProfileGroupCleanupTests."
+     "test_actual_zombie_is_observed_before_its_owning_keeper_consumes_the_wait"): ("zombie",),
+    ("workflow.test_profile_processes.ProfileGroupCleanupTests."
+     "test_unknown_payload_writer_close_failure_retains_scratch"): ("payload-writer-close-failure",),
+    ("workflow.test_profile_processes.ProfileGroupCleanupTests."
+     "test_unknown_payload_reader_close_failure_retains_scratch"): ("payload-reader-close-failure",),
+    ("workflow.test_profile_processes.ProfileGroupCleanupTests."
+     "test_unknown_payload_reader_close_unresolved_retains_scratch"): ("payload-reader-close-unresolved",),
 }
 PROFILE_FIXTURE_FAILURE_MODES = frozenset(
     mode for modes in PROFILE_FIXTURE_FAILURE_CALLBACK_MODES.values() for mode in modes
@@ -83,6 +121,43 @@ ISOLATED_COLLECTOR_FAILURE_STAGES = (
 ISOLATED_COLLECTOR_FAILURE_CATEGORIES = (
     "assertion-error", "fixture-error", "native-lifecycle-error", "io-error", "os-error", "interrupt",
     "system-exit", "standard-error", "exception", "unknown",
+)
+NATIVE_PRIMARY_FAILURE_PREFIX = "MRK_NATIVE_PRIMARY_FAILURE="
+NATIVE_PRIMARY_FAILURE_CALLBACK_MODES = {
+    ("NativeUploadValidationTest#"
+     "test_unexpected_pre_entry_failures_preserve_original_through_real_cleanup"): tuple(
+        f"native-proof-{boundary}-{kind}-{secondary}"
+        for boundary in ("publication", "readiness", "watchdog")
+        for kind in ("standard", "io", "interrupt", "system-exit")
+        for secondary in ("none", "close")
+    ),
+    ("NativeUploadValidationTest#"
+     "test_unexpected_primary_outlives_late_teardown_and_lookalike_diagnostics"): (
+        "native-proof-late-cleanup", "native-proof-lookalike",
+    ),
+    ("NativeUploadValidationTest#"
+     "test_first_close_requires_the_actual_intentional_error_not_redacted_lookalike"): ("native-proof-entered-io",),
+    ("NativeUploadValidationTest#"
+     "test_nested_lifetime_preserves_pre_grant_ioerror_without_native_acquisition"): (
+        "native-proof-frame-io", "native-proof-frame-io-close",
+    ),
+}
+NATIVE_PRIMARY_FAILURE_MODES = frozenset(
+    mode for modes in NATIVE_PRIMARY_FAILURE_CALLBACK_MODES.values() for mode in modes
+)
+NATIVE_PRIMARY_IO_MODES = frozenset({
+    *(f"native-proof-{boundary}-io-{secondary}"
+      for boundary in ("publication", "readiness", "watchdog") for secondary in ("none", "close")),
+    "native-proof-entered-io", "native-proof-frame-io", "native-proof-frame-io-close",
+})
+NATIVE_PRIMARY_FAILURE_PREDICATES = ("case", "proof-failures", "proof-status", "result-kind", "driver-status")
+NATIVE_PRIMARY_PROOF_FAILURES = (
+    "actual failed native result", "one real injection/final boundary", "framePublishedBeforeFault",
+    "outerPrimarySameObject", "nestedPrimarySameObject", "taskPrimarySameObject", "originalMessagePreserved",
+    "originalStatusPreserved", "originalNotIntentional", "actualTaskJoins", "actualDescriptorsClosed",
+    "secondary identity", "ownedDescriptorsClosed", "watchdogJoined", "tasksJoined", "injectorsJoined",
+    "handlersRestored", "registryInactive", "no pending cancellation", "unchanged IOError redaction",
+    "actual non-IOError return", "native cleanup without fixture fallback", "actual capture finality", "first-close boundary",
 )
 PYTHON_POISON_PARTITIONS = (
     "poison-wait-loss",
@@ -1173,6 +1248,18 @@ def profile_fixture_failure(raw: bytes, *, deadline: float | None = None) -> dic
             "category": data["category"], "locations": locations}
 
 
+def _profile_failure_for_callbacks(raw: bytes, callbacks: list[dict], *, deadline: float | None = None) -> dict | None:
+    """Pair only already source-validated adverse callbacks with their modes."""
+    eligible = [row for row in callbacks
+                if row["id"] in PROFILE_FIXTURE_FAILURE_CALLBACK_MODES and row["outcome"] in {"error", "failure"}]
+    if eligible:
+        diagnostic = profile_fixture_failure(raw, deadline=deadline)
+        if diagnostic is not None and any(
+                diagnostic["mode"] in PROFILE_FIXTURE_FAILURE_CALLBACK_MODES[row["id"]] for row in eligible):
+            return diagnostic
+    return None
+
+
 def fixture_bootstrap_failure(raw: bytes, *, deadline: float | None = None) -> dict | None:
     data = _fixture_failure_record(raw, FIXTURE_BOOTSTRAP_FAILURE_PREFIX, 256, deadline=deadline)
     if (type(data) is not dict or set(data) != {"schema", "stage", "condition"}
@@ -1197,6 +1284,37 @@ def isolated_collector_failure(raw: bytes, *, deadline: float | None = None) -> 
     if deadline is not None:
         check_clock(deadline)
     return {"schema": 1, "stage": data["stage"], "category": data["category"]}
+
+
+def native_primary_failure(raw: bytes, *, deadline: float | None = None) -> dict | None:
+    """Finite primary-proof rejections, not the retained proof or its values."""
+    data = _fixture_failure_record(raw, NATIVE_PRIMARY_FAILURE_PREFIX, 2048, deadline=deadline,
+                                   canonical_fields=("schema", "mode", "failedPredicates", "proofFailures"))
+    if (type(data) is not dict or type(data["schema"]) is not int or data["schema"] != 1
+            or type(data["mode"]) is not str or data["mode"] not in NATIVE_PRIMARY_FAILURE_MODES
+            or type(data["failedPredicates"]) is not list or not 1 <= len(data["failedPredicates"]) <= 5
+            or type(data["proofFailures"]) is not list or len(data["proofFailures"]) > 23):
+        return None
+    predicates, failures = data["failedPredicates"], data["proofFailures"]
+    if (any(type(name) is not str for name in predicates + failures)
+            or predicates != [name for name in NATIVE_PRIMARY_FAILURE_PREDICATES if name in predicates]
+            or failures != [name for name in NATIVE_PRIMARY_PROOF_FAILURES if name in failures]
+            or ("proof-failures" in predicates) != bool(failures)
+            or ("actual non-IOError return" if data["mode"] in NATIVE_PRIMARY_IO_MODES
+                else "unchanged IOError redaction") in failures):
+        return None
+    if deadline is not None:
+        check_clock(deadline)
+    return {"schema": 1, "mode": data["mode"], "failedPredicates": predicates, "proofFailures": failures}
+
+
+def _minitest_failed_target(text: str, identifier: str, *, deadline: float | None = None) -> bool:
+    # Scan the SAME original bytes under the SAME cutoff. A target beyond the
+    # public first16 rows still counts, as does a late duplicate. No receipt.
+    _, target = minitest_records(text, (identifier,), deadline=deadline)
+    starts = target["start_records"]
+    return (len(starts) == 1 and target["start_records_omitted"] == 0 and not target["duplicate_ids"]
+            and starts[0]["id"] == identifier and starts[0]["terminal"] in {"failure", "error"})
 
 
 def native_failure_diagnostic(text: str, expected: tuple[str, ...], *, deadline: float | None = None) -> dict | None:
@@ -1451,14 +1569,9 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                     callbacks = python_failure_callbacks(detail["failure_callbacks"], expected)
                     if callbacks is not None:
                         value["failure_callbacks"] = callbacks
-                        profile_callbacks = [row for row in callbacks
-                            if row["id"] in PROFILE_FIXTURE_FAILURE_CALLBACK_MODES and row["outcome"] in {"error", "failure"}]
-                        if profile_callbacks:
-                            diagnostic = profile_fixture_failure(result.stderr, deadline=deadline)
-                            if diagnostic is not None and any(
-                                    diagnostic["mode"] in PROFILE_FIXTURE_FAILURE_CALLBACK_MODES[row["id"]]
-                                    for row in profile_callbacks):
-                                value["profile_fixture_failure"] = diagnostic
+                        diagnostic = _profile_failure_for_callbacks(result.stderr, callbacks, deadline=deadline)
+                        if diagnostic is not None:
+                            value["profile_fixture_failure"] = diagnostic
                 except Exception:
                     # Optional diagnostics must not replace the original failure.
                     # Do not absorb expiry of the original aggregate timer.
@@ -1518,16 +1631,16 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
             if (step.id == "ruby-native-capture" and step.native_partition == "healthy"
                     and ISOLATED_COLLECTOR_FAILURE_ID in expected):
                 diagnostic = isolated_collector_failure(result.stderr, deadline=deadline)
+                if diagnostic is not None and _minitest_failed_target(text, ISOLATED_COLLECTOR_FAILURE_ID, deadline=deadline):
+                    value["isolated_collector_failure"] = diagnostic
+            if step.id == "ruby-native-capture" and step.native_partition == "healthy":
+                diagnostic = native_primary_failure(result.stderr, deadline=deadline)
                 if diagnostic is not None:
-                    # Scan the SAME original bytes under the SAME cutoff. A
-                    # target beyond the public first16 rows still counts, as
-                    # does a late duplicate. This private view is not a receipt.
-                    _, target = minitest_records(text, (ISOLATED_COLLECTOR_FAILURE_ID,), deadline=deadline)
-                    starts = target["start_records"]
-                    if (len(starts) == 1 and target["start_records_omitted"] == 0 and not target["duplicate_ids"]
-                            and starts[0]["id"] == ISOLATED_COLLECTOR_FAILURE_ID
-                            and starts[0]["terminal"] in {"failure", "error"}):
-                        value["isolated_collector_failure"] = diagnostic
+                    targets = [identifier for identifier, modes in NATIVE_PRIMARY_FAILURE_CALLBACK_MODES.items()
+                               if diagnostic["mode"] in modes]
+                    if (len(targets) == 1 and targets[0] in expected
+                            and _minitest_failed_target(text, targets[0], deadline=deadline)):
+                        value["native_primary_failure"] = diagnostic
         except (VerificationError, OSError, UnicodeError):
             if deadline is not None:
                 check_clock(deadline)
@@ -1557,6 +1670,10 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                                                    expected, deadline=deadline)
             if diagnostic is not None:
                 value["native_diagnostic"] = diagnostic
+                if diagnostic["phase"] == "tests":
+                    profile = _profile_failure_for_callbacks(result.stderr, diagnostic["records"], deadline=deadline)
+                    if profile is not None:
+                        value["profile_fixture_failure"] = profile
         except Exception:
             if deadline is not None:
                 check_clock(deadline)

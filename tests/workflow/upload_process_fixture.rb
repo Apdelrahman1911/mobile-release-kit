@@ -746,7 +746,23 @@ module UploadProcessFixture
     end
   end
 
-  def run(platform:, root:, parameters:, mode:, observe_signals: false, deadline_ns: nil)
+  # Called only by the original compound primary-proof rejection below. Keep
+  # private, already-read values in the caller's fresh optional Hash; nothing
+  # is projected before the actual rejection survives the complete lifetime.
+  def reject_native_primary_proof!(mode:, proof:, result:, status:, deadline_ns:, state:)
+    original = Failure.new("fixture-result", "native primary proof rejected")
+    if state
+      state[:rejection] = original
+      state[:mode] = mode
+      state[:deadline_ns] = deadline_ns
+      state[:proof] = proof
+      state[:result] = result
+      state[:status] = status
+    end
+    raise original
+  end
+
+  def run(platform:, root:, parameters:, mode:, observe_signals: false, deadline_ns: nil, primary_failure_state: nil)
     assert_domain_reusable!
     validate_request!(platform, mode, parameters)
     validate_signal_observation!(platform, mode, observe_signals)
@@ -756,7 +772,7 @@ module UploadProcessFixture
     if observe_signals && !NativeSignalProbe.current
       return NativeSignalProbe.observe_parent(root, mode) do
         run(platform: platform, root: root, parameters: parameters, mode: mode,
-            observe_signals: true, deadline_ns: deadline_ns)
+            observe_signals: true, deadline_ns: deadline_ns, primary_failure_state: primary_failure_state)
       end
     end
     if observe_signals && !NativeSignalProbe.current.parent_for?(root, mode)
@@ -886,7 +902,8 @@ module UploadProcessFixture
               proof = read_json(File.join(directory, "primary-proof.json"))
               unless proof["case"] == mode && proof["failures"] == [] && proof["driverExitStatus"] == 1 &&
                      result["kind"] != "pass" && child.status.exitstatus == 0
-                raise Failure.new("fixture-result", "native primary proof rejected")
+                reject_native_primary_proof!(mode: mode, proof: proof, result: result, status: child.status,
+                  deadline_ns: run_ns, state: primary_failure_state)
               end
             elsif NATIVE_ORDER_MODES.include?(mode)
               order_proof = read_json(File.join(directory, "native-order-proof.json"))
@@ -1501,6 +1518,12 @@ module UploadProcessFixture
         @frame_published = !!(@observation.session && @observation.session.capture_slot)
         @fault_count += 1
         inject(@original)
+        # READY dispatch deliberately retains the production frame mask. The
+        # genuine injector is already joined; deliver its queued Interrupt at
+        # THIS proof's pre-entry boundary, not after the intentional first close.
+        # No synthetic raise repairs a missing injection. Common inject remains
+        # deferred for cleanup probes that intentionally rely on that policy.
+        Thread.handle_interrupt(Interrupt => :immediate) {}
       end
 
       def native_event(name, object)
@@ -2779,6 +2802,11 @@ module UploadProcessFixture
           driver.failure_recorded(object)
           value
         end
+        @hooks.wrap(session_class, :validate_final) do |original, object, arguments, keywords, block|
+          value = original.call(*arguments, **keywords, &block)
+          driver.after_validated_final(object, arguments.first)
+          value
+        end
         @hooks.wrap(session_class, :receive_frame) do |original, object, arguments, keywords, block|
           value = original.call(*arguments, **keywords, &block)
           driver.status_received(object, arguments.first) if arguments.first["type"] == "STATUS"
@@ -3107,6 +3135,37 @@ module UploadProcessFixture
       @observed["blockedDataWaits"] += 1
       @observed["firstBlockedDataNs"] ||= before
       @observed["lastBlockedDataNs"] = after
+    end
+
+    # Choose only this late timeout-fixture interleaving, AFTER the original
+    # validator accepted the frame. The original caller still finishes its own
+    # timed join and records its own first error; this hook creates neither.
+    def after_validated_final(session, frame)
+      return unless @base_mode == "real-deadline" && !@late_final_yielded &&
+        session.equal?(@observation.session) && frame["type"] == "FINAL" &&
+        frame["outcome"] == "failed" && frame["cleanup"] == "confirmed"
+      slot = session.capture_slot
+      caller = slot.caller
+      return unless Thread.current.equal?(slot.thread) && !caller.equal?(Thread.current) && caller.alive? &&
+        session.ready && session.reserved && @observed["ready"] == true && @observed["blockedDataWaits"].positive?
+      run_cutoff, hard_cutoff = slot.run_deadline_ns, slot.hard_cleanup_deadline_ns
+      return unless run_cutoff.instance_of?(Integer) && hard_cutoff.instance_of?(Integer) &&
+        run_cutoff == @observed["nativeRunDeadlineNs"]
+      # cancelled?/cleanup_deadline_ns call refresh_parent! and can cancel the
+      # task. Read the existing shared latch without causing the awaited event.
+      failure = slot.__send__(:failure_record)
+      now = UploadProcessFixture.clock_ns
+      return unless now >= run_cutoff && now < hard_cutoff
+      return if session.primary_error || failure.failed? || slot.launch_retired? ||
+        session.retained_unknown? || !session.cleanup_errors.empty?
+      @late_final_yielded = true
+      loop do
+        return if session.primary_error || failure.failed? || slot.launch_retired? ||
+          session.retained_unknown? || !session.cleanup_errors.empty? || !caller.alive?
+        remaining = hard_cutoff - UploadProcessFixture.clock_ns
+        return unless remaining.positive?
+        sleep [remaining, 10_000_000].min / 1_000_000_000.0
+      end
     end
 
     def timeout_constructed(session, error)

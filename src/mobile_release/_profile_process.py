@@ -1503,7 +1503,6 @@ class _Custodian:
 
     def retire_outer_control(self) -> bool:
         ctx, channel = self.context, self.outer
-        cutoff = ctx.run if ctx.primary is None else (ctx.failure_limit or ctx.hard)
         stopped = False
 
         def failed(error: BaseException) -> None:
@@ -1515,6 +1514,11 @@ class _Custodian:
         try:
             _require(not self.outer_retiring and not channel.reader_closed
                      and id(channel.reader) not in ctx.closed, CLEANUP_ERROR)
+            # A settled failed K can outlive run without a C-local failure.
+            # Observe ordinary stops before this one retirement bound is fixed;
+            # expiry after a healthy sample must never reopen the wait.
+            ctx.observe_helper_latches()
+            cutoff = ctx.run if ctx.primary is None else (ctx.failure_limit or ctx.hard)
             # Retire dispatch before notifying O or consuming another control.
             # This phase cannot reopen descendant cleanup or renew its own bound.
             self.outer_retiring = True

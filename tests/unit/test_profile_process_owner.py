@@ -2028,8 +2028,50 @@ class ProfileOwnerHelperTerminalTests(unittest.TestCase):
                 if fault in ("missing_eof", "unsent", "partial_write", "late_eof", "late_close"):
                     self.assertEqual(now[0], fixed)
 
+        for fault in ("after_healthy", "observe_error", "record_error"):
+            context = _context("custodian", parent_pid=429)
+            custodian = _custodian(context)
+            channel = custodian.outer = _wire_channel(context, "o_to_c", "c_to_o")
+            context.io.leases.extend((channel.reader, channel.writer))
+            now = [context.run if fault == "record_error" else context.run - 1]
+            later = OSError("PRIVATE_RETIREMENT_ADMISSION")
+            original_observe = context.observe_helper_latches
+
+            def observe():
+                if fault == "observe_error":
+                    raise later
+                original_observe()
+                if fault == "after_healthy":
+                    self.assertIsNone(context.primary)
+                    now[0] = context.run  # AFTER the original healthy sample, not before it.
+
+            with self.subTest(retirement_admission=fault), patch.object(owner.time, "monotonic_ns", side_effect=lambda: now[0]), patch.object(owner.os, "getppid", return_value=429), patch.object(context, "observe_helper_latches", side_effect=observe) as observed, patch.object(context, "record", wraps=context.record, side_effect=later if fault == "record_error" else None) as record, patch.object(owner.os, "read", side_effect=AssertionError("retirement must not read after rejected admission")) as read, patch.object(owner.os, "write", side_effect=AssertionError("retirement must not publish after rejected admission")) as write, patch.object(owner, "_pause", side_effect=AssertionError("rejected admission must not restart its wait")) as pause:
+                self.assertFalse(custodian.retire_outer_control())
+                observed.assert_called_once_with()
+                read.assert_not_called()
+                write.assert_not_called()
+                pause.assert_not_called()
+                self.assertEqual(record.call_count, 2 if fault == "record_error" else 1)
+            self.assertEqual(channel.reader.close_calls, 1)
+            self.assertTrue(channel.reader_closed)
+            self.assertIn(id(channel.reader), context.closed)
+            self.assertTrue(context.cleanup_unknown)
+            self.assertNotIn("QUIESCING", channel.encoder.seen)
+            self.assertEqual(channel.pending, [])
+            self.assertIsNone(context._helper_offer)
+            if fault == "after_healthy":
+                self.assertEqual(context.primary.args, (owner.TIMEOUT,))
+                self.assertEqual(context.failure_limit, context.hard)
+                self.assertIsNone(context.emergency_primary)
+            else:
+                self.assertIs(context.primary, later)
+                if fault == "record_error":
+                    self.assertIs(context.emergency_primary, later)
+
     def test_custodian_zero_only_carries_ok_or_rejected_and_keeper_two_forces_failed(self):
-        for keeper_code, validator_code, outcome, expected in ((0, 0, "ok", 0), (0, 7, "rejected", 0), (2, 0, "failed", 2)):
+        cases = ((0, 0, "ok", 0, False), (0, 7, "rejected", 0, False),
+                 (2, 0, "failed", 2, False), (2, 0, "failed", 2, True))
+        for keeper_code, validator_code, outcome, expected, crossed_run in cases:
             context = _context("custodian", parent_pid=429)
             custodian = _custodian(context)
             retirement = _model_custodian_input_retirement(custodian)
@@ -2044,19 +2086,31 @@ class ProfileOwnerHelperTerminalTests(unittest.TestCase):
             custodian.committed = outcome == "ok"
             custodian.keeper_channel = _Channel(context)
             context.io.leases.extend((custodian.keeper_channel.reader, custodian.keeper_channel.writer))
+            now = [context.run - 2 * owner.NANOSECOND if crossed_run else 1]
+            numeric_limits = []
 
             def cleanup():
+                self.assertIsNone(context.primary)
+                if crossed_run:
+                    numeric_limits.append(context.begin_cleanup())
                 context.retire_launch()
                 custodian.keeper_channel.close_reader()
                 custodian.keeper_channel.close_writer()
                 # Match the real descendant-cleanup tail: unused null/source
                 # copies must close BEFORE the payload success resource gate.
                 context.close_all(exclude=(custodian.outer.reader, custodian.outer.writer, custodian.payload))
+                if crossed_run:
+                    # Original K2/RELEASED/EOF/group evidence crosses run without
+                    # any prior C failure; its numeric cleanup window stays fixed.
+                    now[0] = context.run + owner.NANOSECOND // 2
+                    self.assertLess(now[0], numeric_limits[0])
+                    self.assertIsNone(context.primary)
+                    self.assertIsNone(context.failure_limit)
 
             custodian.work = Mock()
             custodian.cleanup_descendants = cleanup
             custodian.write_payload = Mock()  # Not payload/COMMIT or native evidence.
-            with self.subTest(keeper_code=keeper_code, validator_code=validator_code), patch.object(owner.time, "monotonic_ns", return_value=1), patch.object(owner.os, "getppid", return_value=429), patch.object(owner, "_pause"):
+            with self.subTest(keeper_code=keeper_code, validator_code=validator_code, crossed_run=crossed_run), patch.object(owner.time, "monotonic_ns", side_effect=lambda: now[0]), patch.object(owner.os, "getppid", return_value=429), patch.object(owner, "_pause"), patch.object(context, "record", wraps=context.record) as record:
                 result = custodian.run()
             offered = custodian.outer.offers[-1]
             owner.Protocol.encode(offered)
@@ -2068,6 +2122,20 @@ class ProfileOwnerHelperTerminalTests(unittest.TestCase):
             self.assertEqual(custodian.descriptors[7].close_calls, 1)
             self.assertEqual(custodian.committed, outcome == "ok")
             self.assertEqual(retirement, ["QUIESCING", "control_eof", "reader_closed", "FINAL"])
+            self.assertEqual(record.call_count, int(crossed_run))
+            if crossed_run:
+                self.assertEqual(context.primary.args, (owner.TIMEOUT,))
+                self.assertEqual(context.reason, "deadline")
+                self.assertEqual(context.failure_limit, min(context.hard, now[0] + owner.CLEANUP_SECONDS * owner.NANOSECOND))
+                self.assertEqual(context.failure_limit, context.hard)
+                self.assertEqual((numeric_limits, context.cleanup_limit), ([context.run + owner.NANOSECOND], context.run + owner.NANOSECOND))
+                self.assertEqual(context.secondary, [])
+                self.assertFalse(context.cleanup_unknown)
+                self.assertEqual(context._helper_offer[:3], (owner.HELPER_FAILED, (1, 0), context.hard))
+                self.assertEqual(custodian.outer.reader.close_calls, 1)
+                self.assertEqual(offered["keeper"], owner._receipt_record(custodian.keeper.receipt))
+                self.assertEqual(offered["validator"], custodian.released)
+                self.assertTrue(custodian.keeper_channel.eof and custodian.group.absent)
 
     def test_keeper_parent_cancel_never_erases_a_local_failure_before_or_after_it(self):
         for order in ("parent_only", "local_first", "local_later", "local_signal"):
@@ -2399,9 +2467,13 @@ class ProfileOwnerHelperHandoffTests(unittest.TestCase):
                 channel.eof = False
                 original_observe, original_resources = context.observe_helper_latches, context.resources_confirmed
                 stage = {"decision": False, "injected": False}
+                observations = []
 
                 def observe():
                     original_observe()
+                    observations.append(channel.reader_closed)
+                    if not channel.reader_closed:
+                        return  # New admission sampling must not move this late signal earlier.
                     if phase == "latch_tail":
                         context.helper_signal(signal.SIGTERM, None)
                         stage["injected"] = True
@@ -2423,6 +2495,7 @@ class ProfileOwnerHelperHandoffTests(unittest.TestCase):
                     self.assertEqual(context._helper_terminal_armed, phase == "latch_tail")
                     self.assertEqual(context._helper_offer[1][1], int(phase == "latch_tail"))
                     self.assertEqual(context.signal_epoch, 1)
+                    self.assertEqual(observations, [False, True] if role == "custodian" else [True])
                     terminate.assert_not_called()
                     if role == "custodian":
                         self.assertEqual(retirement, ["QUIESCING", "control_eof", "reader_closed", "FINAL"])
