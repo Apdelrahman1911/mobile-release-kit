@@ -189,8 +189,10 @@ class ProfileGroupCleanupTests(unittest.TestCase):
         # controls live with the actual owner unit tests, not retired Popen code.
         for outcomes in ((PermissionError(), ProcessLookupError()), (None, None, ProcessLookupError())):
             keeper = SimpleNamespace(pid=987654, numeric_retired=False)
-            group = owner._GroupReservation(SimpleNamespace(role="custodian"), keeper)
-            with self.subTest(outcomes=outcomes), patch.object(owner.os, "killpg", side_effect=outcomes) as kill:
+            context = SimpleNamespace(role="custodian", hard=10, cleanup_cutoff=lambda original: original)
+            group = owner._GroupReservation(context, keeper)
+            with self.subTest(outcomes=outcomes), patch.object(owner.time, "monotonic_ns", return_value=1), \
+                    patch.object(owner.os, "killpg", side_effect=outcomes) as kill:
                 for index in range(len(outcomes)):
                     present = group.request(int(signal.SIGKILL))
                     self.assertEqual(present, index < len(outcomes) - 1)
@@ -205,7 +207,8 @@ class ProfileGroupCleanupTests(unittest.TestCase):
     def test_retired_mismatched_and_observer_mutated_routes_are_vetoed_before_numeric_syscall(self):
         for mutation in ("group-retired", "child-retired", "identity", "observer"):
             keeper = SimpleNamespace(pid=987654, numeric_retired=False)
-            group = owner._GroupReservation(SimpleNamespace(role="custodian"), keeper)
+            context = SimpleNamespace(role="custodian", hard=10, cleanup_cutoff=lambda original: original)
+            group = owner._GroupReservation(context, keeper)
             if mutation == "group-retired":
                 group.retire(absent=False)
             elif mutation == "child-retired":
@@ -215,14 +218,17 @@ class ProfileGroupCleanupTests(unittest.TestCase):
             def observe(_role, event, **_evidence):
                 if mutation == "observer" and event == "group_request":
                     keeper.numeric_retired = True
-            with self.subTest(mutation=mutation), patch.object(owner, "_role_event", side_effect=observe), patch.object(owner.os, "killpg") as kill:
+            with self.subTest(mutation=mutation), patch.object(owner.time, "monotonic_ns", return_value=1), \
+                    patch.object(owner, "_role_event", side_effect=observe), patch.object(owner.os, "killpg") as kill:
                 with self.assertRaises(ValidationError):
                     group.request(0)
             kill.assert_not_called()
         for value in (-1, 1, True, "0"):
             keeper = SimpleNamespace(pid=987654, numeric_retired=False)
-            group = owner._GroupReservation(SimpleNamespace(role="custodian"), keeper)
-            with self.subTest(value=value), patch.object(owner.os, "killpg") as kill, self.assertRaises(ValidationError):
+            context = SimpleNamespace(role="custodian", hard=10, cleanup_cutoff=lambda original: original)
+            group = owner._GroupReservation(context, keeper)
+            with self.subTest(value=value), patch.object(owner.time, "monotonic_ns", return_value=1), \
+                    patch.object(owner.os, "killpg") as kill, self.assertRaises(ValidationError):
                 group.request(value)
             kill.assert_not_called()
         for field in ("id", "retired", "absent"):

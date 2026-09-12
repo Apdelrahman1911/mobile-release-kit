@@ -1814,7 +1814,7 @@ class NativeUploadTaskSlotTest < Minitest::Test
     value.start { :complete }
     assert value.admit!
     actual = value.thread
-    actual.define_singleton_method(:value) { raise "Thread#value must never be used" }
+    actual.define_singleton_method(:value) { Kernel.raise "Thread#value must never be used" }
     original_join = actual.method(:join)
     first = Interrupt.new("private-join-return-marker")
     injected = false
@@ -1822,12 +1822,16 @@ class NativeUploadTaskSlotTest < Minitest::Test
       result = original_join.call(timeout)
       if result && !injected
         injected = true
-        raise first
+        Kernel.raise first
       end
       result
     end
     observed = assert_raises(Interrupt) { value.join_until(deadline_ns: value.hard_cleanup_deadline_ns) }
     assert_same first, observed
+    assert injected
+    assert_same first, value.first_error
+    assert value.cancelled?
+    assert value.unresolved?
     refute value.joined?
     value.cancel!(error: observed, reason_code: "cancelled")
     assert value.join_until(deadline_ns: value.hard_cleanup_deadline_ns)
