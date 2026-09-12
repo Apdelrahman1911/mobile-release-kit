@@ -934,7 +934,15 @@ class NativeProcessSpawnTests < Minitest::Test
       child = Native.create(acq, spec)
       assert_same child, acq.child
       assert acq.launch_retired?
-      assert_raises(Native::Error) { Native.create(acq, spec) }
+      calls_before_refusal = Marshal.dump(backend.calls).freeze
+      # The original TaskSlot rejects before acquisition-local launch checks.
+      error = assert_raises(Helper::LifecycleError) { Native.create(acq, spec) }
+      assert_same error, acq.first_error
+      assert_same error, slot.first_error
+      assert_same child, acq.child
+      assert acq.launch_retired?
+      assert slot.launch_retired?
+      assert_equal calls_before_refusal, Marshal.dump(backend.calls)
       assert_equal 1, backend.calls.count { |name, _args, _fn| name == "posix_spawn" }
       refute acq.not_attempted?
     end
