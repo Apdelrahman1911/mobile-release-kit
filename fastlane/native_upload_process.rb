@@ -95,9 +95,9 @@ module MobileReleaseKit
         "FINAL" => %w[outcome cleanup keeper validator group],
       }.transform_values(&:freeze).freeze
 
-      # JSON invokes []= for every decoded member, including escaped spellings
-      # of the same key. Reject duplicates at every nesting level, not after a
-      # normal Hash has already discarded them.
+      # Default JSON 2.7.2 invokes []= for each decoded member, including escaped
+      # spellings. Bundled JSON 2.21.2 converts an already-parsed Hash instead,
+      # so Decoder also requires its explicit duplicate-key rejection option.
       class StrictObject < Hash
         def []=(key, value)
           raise ProtocolError if key?(key)
@@ -362,7 +362,8 @@ module MobileReleaseKit
             raise ProtocolError unless payload.valid_encoding?
 
             raw = JSON.parse(payload, object_class: StrictObject, array_class: Array,
-                             create_additions: false, max_nesting: 6, allow_nan: false)
+                             create_additions: false, max_nesting: 6, allow_nan: false,
+                             allow_duplicate_key: false)
             frame = Protocol.plain(raw, parsed: true)
             Protocol.validate(frame, direction: @direction, nsig: @nsig)
             raise ProtocolError if frame["type"] != "CONFIG" && @length > FRAME_LIMIT

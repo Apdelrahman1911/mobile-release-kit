@@ -102,6 +102,8 @@ class NativeUploadProtocolTest < Minitest::Test
     decoder = Protocol::Decoder.new(direction: direction, nsig: SIGNAL_LIMIT)
     error = assert_raises(Owner::ProtocolError) { decoder.feed([payload.bytesize].pack("N") + payload.b) }
     assert_equal "native capture protocol failure", error.message
+    assert_equal 0, decoder.frame_count
+    assert_raises(Owner::ProtocolError) { decoder.feed("".b) }
     assert_raises(Owner::ProtocolError) { decoder.eof }
   end
 
@@ -133,12 +135,22 @@ class NativeUploadProtocolTest < Minitest::Test
   end
 
   def test_duplicate_keys_are_rejected_at_every_nesting_level
-    raw_rejected('{"v":1,"\\u0076":1,"type":"ADMIT"}', :o_to_c)
-    config = JSON.generate(configuration).sub('"LANG":"C"', '"LANG":"C","LANG":"private-protocol-marker"')
-    raw_rejected(config, :o_to_c)
-    receipt = '{"v":1,"type":"RELEASED","validator":{"state":"unknown","state":"not_attempted"}}'
-    raw_rejected(receipt, :k_to_c)
-    raw_rejected('{"v":1,"type":"RELEASED","validator":{"state":"reaped","pid":1,"pid":2,"status_kind":"exit","status_code":0}}', :k_to_c)
+    config = JSON.generate(configuration)
+    last_environment = configuration
+    last_environment.fetch("validator_env")["LANG"] = "private-protocol-marker"
+    cases = [
+      [config.sub('"v":1') { '"v":1,"\\u0076":1' }, configuration, :o_to_c],
+      [config.sub('"LANG":"C"', '"LANG":"C","LANG":"private-protocol-marker"'), last_environment, :o_to_c],
+      ['{"v":1,"type":"RELEASED","validator":{"state":"unknown","state":"not_attempted"}}',
+       simple("RELEASED").merge("validator" => { "state" => "not_attempted" }), :k_to_c],
+      ['{"v":1,"type":"RELEASED","validator":{"state":"reaped","pid":1,"pid":2,"status_kind":"exit","status_code":0}}',
+       simple("RELEASED").merge("validator" => child(2)), :k_to_c],
+    ]
+    cases.each do |payload, last_wins, direction|
+      # A schema/order failure must not masquerade as duplicate rejection.
+      assert_equal [last_wins], decoded([last_wins], direction)
+      raw_rejected(payload, direction)
+    end
   end
 
   def test_closed_schema_rejects_missing_extra_and_old_flattened_fields
@@ -687,8 +699,45 @@ class NativeUploadRoleTest < Minitest::Test
   end
 
   def test_native_real_session_group_movement_and_three_genuine_receipts
-    harness = build(<<~'RUBY')
+    # Exercise the default codec inside the existing owned, gem-disabled V;
+    # this is not a claim that C rejected a malformed CONFIG.
+    harness = build("require #{HELPER_PATH.dump}\n" + <<~'RUBY')
       require "json"
+      raise "default JSON version differs" unless JSON::VERSION == "2.7.2"
+
+      protocol = MobileReleaseKit::NativeUploadProcess::Protocol
+      last_wins = { "v" => 1, "type" => "RELEASED", "validator" => { "state" => "not_attempted" } }
+      payloads = [
+        '{"v":1,"\\u0076":1,"type":"RELEASED","validator":{"state":"not_attempted"}}',
+        '{"v":1,"type":"RELEASED","validator":{"state":"unknown","state":"not_attempted"}}',
+      ]
+      reject = lambda do |operation|
+        begin
+          operation.call
+        rescue MobileReleaseKit::NativeUploadProcess::ProtocolError => error
+          unless error.message == "native capture protocol failure"
+            raise "default codec public error differs", cause: nil
+          end
+        rescue StandardError
+          raise "default codec error type differs", cause: nil
+        else
+          raise "default codec accepted invalid input"
+        end
+      end
+      payloads.each do |payload|
+        control = protocol::Decoder.new(direction: :k_to_c, nsig: 65)
+        accepted = control.feed(protocol.encode(last_wins, direction: :k_to_c, nsig: 65))
+        unless accepted == [last_wins] && control.frame_count == 1 && control.eof
+          raise "default codec positive control differs"
+        end
+
+        decoder = protocol::Decoder.new(direction: :k_to_c, nsig: 65)
+        reject.call(-> { decoder.feed([payload.bytesize].pack("N") + payload.b) })
+        raise "default codec admitted invalid frame" unless decoder.frame_count.zero?
+        reject.call(-> { decoder.feed("".b) })
+        reject.call(-> { decoder.eof })
+      end
+
       STDOUT.sync = true
       STDOUT.puts(JSON.generate("pid" => Process.pid, "ppid" => Process.ppid,
                                "sid" => Process.getsid(0), "pgid" => Process.getpgrp))
