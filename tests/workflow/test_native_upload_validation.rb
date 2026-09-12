@@ -1514,6 +1514,99 @@ class NativeUploadValidationTest < Minitest::Test
         assert driver.frame_published
       end
       assert_late_final_deadline_choreography
+
+      # Only the actual readiness algorithm runs here. Restoring file/clock/sleep
+      # seams supply no child, wait receipt, real IO or native readiness proof.
+      readiness_stat_class = Struct.new(:dev, :ino, :mode, :uid, :gid, :rdev, :ftype, :nlink, :size) do
+        def file?
+          ftype == "file"
+        end
+      end
+      ready_line = "collector ready\n"
+      driver_expiry = ["driver", "raw proof driver deadline expired"]
+      readiness_expiry = ["readiness", "literal collector readiness deadline expired"]
+      readiness = lambda do |samples, expected:, change: nil, read_error: nil, late_read: false|
+        now_ns, run_ns = 0, 40_000_000
+        baseline = readiness_stat_class.new(1, 2, 0o100600, 3, 4, 0, "file", 1, 0)
+        identity = UploadProcessFixture::OwnedChild.identity(baseline)
+        observed = {stream_identities: [identity]}
+        writer = Struct.new(:stat).new(baseline)
+        opens, limits, naps = [], [], []
+        opener = lambda do |path, flags, &body|
+          bytes, size = samples.fetch([opens.length, samples.length - 1].min)
+          opens << [path, flags, observed.key?(:literal_readiness)]
+          before, after, writer.stat = Array.new(3) { baseline.dup }
+          before.size = after.size = size
+          before.ftype = "directory" if change == :nonregular
+          before.ino += 1 if change == :before_identity
+          writer.stat.ino += 1 if change == :writer_identity
+          after.ino += 1 if change == :after_identity
+          stats = [before, after]
+          reader = Object.new
+          reader.define_singleton_method(:stat) { stats.shift || after }
+          reader.define_singleton_method(:read) do |limit|
+            limits << limit
+            now_ns = run_ns if late_read
+            raise read_error if read_error
+            bytes
+          end
+          body.call(reader)
+        end
+        sleeper = lambda do |seconds|
+          naps << [seconds, now_ns, observed.key?(:literal_readiness)]
+          raise "inert readiness exceeded fixed sleep bound" if naps.length > 5
+          now_ns += (seconds * 1_000_000_000).round
+        end
+        actual = File.stub(:open, opener) do
+          UploadProcessFixture.stub(:clock_ns, -> { now_ns }) do
+            stub(:sleep, sleeper) do
+              assert_raises(read_error ? read_error.class : UploadProcessFixture::Failure) do
+                await_literal_timeout("/inert-readiness", writer, observed, run_ns)
+              end
+            end
+          end
+        end
+        if read_error
+          assert_same read_error, actual
+        else
+          assert_equal expected, [actual.kind, actual.message]
+          assert_equal run_ns, now_ns if %w[driver readiness].include?(actual.kind)
+        end
+        refute_empty opens
+        opens.each do |path, flags, already_ready|
+          assert_equal "/inert-readiness/driver.stdout", path
+          assert_equal File::RDONLY | File::NOFOLLOW | File::NONBLOCK, flags
+          refute already_ready
+        end
+        assert_equal [UploadProcessFixture::OUTPUT_LIMIT + 1] * limits.length, limits
+        naps.each do |seconds, entered_ns, _ready|
+          assert_operator seconds, :>=, 0
+          assert_operator seconds, :<=, [10_000_000, run_ns - entered_ns].min.fdiv(1_000_000_000)
+        end
+        if expected == driver_expiry
+          assert_equal({"observed" => true, "identity" => identity}, observed.fetch(:literal_readiness))
+          assert_equal samples.length, opens.length
+          assert_equal [false] * (samples.length - 1) + [true], naps.map(&:last)
+        else
+          refute observed.key?(:literal_readiness)
+        end
+        assert_empty naps if late_read
+      end
+      readiness.call([[nil, 0], ["".b, 0], ["collector ", 10], [ready_line, ready_line.bytesize]], expected: driver_expiry)
+      readiness.call([[nil, 0]], expected: readiness_expiry)
+      readiness.call([[ready_line, ready_line.bytesize - 1]], expected: readiness_expiry)
+      readiness.call([[ready_line, ready_line.bytesize]], expected: readiness_expiry, late_read: true)
+      identity_message = "literal collector transcript identity changed"
+      bound_message = "literal collector transcript changed or exceeded its bound"
+      [[:nonregular, nil, 0, identity_message], [:before_identity, nil, 0, identity_message],
+       [:writer_identity, nil, 0, identity_message], [:after_identity, nil, 0, bound_message],
+       [nil, "x" * (UploadProcessFixture::OUTPUT_LIMIT + 1), 0, bound_message],
+       [nil, nil, UploadProcessFixture::OUTPUT_LIMIT + 1, bound_message],
+       [nil, "unexpected", 10, "literal collector readiness bytes were unexpected"],
+       [nil, false, 0, bound_message]].each do |change, bytes, size, message|
+        readiness.call([[bytes, size]], expected: ["diagnostic", message], change: change)
+      end
+      readiness.call([[nil, 0]], expected: nil, read_error: IOError.new("original readiness read failure"))
     end
   end
 
@@ -3037,6 +3130,8 @@ class NativeUploadValidationTest < Minitest::Test
           raise UploadProcessFixture::Failure.new("diagnostic", "literal collector transcript identity changed")
         end
         value = reader.read(UploadProcessFixture::OUTPUT_LIMIT + 1)
+        # Initial regular-file EOF can precede application output after GO.
+        value = "".b if value.nil?
         after = reader.stat
         unless UploadProcessFixture::OwnedChild.identity(after) == identity && value &&
                value.bytesize <= UploadProcessFixture::OUTPUT_LIMIT && after.size <= UploadProcessFixture::OUTPUT_LIMIT
@@ -3050,6 +3145,9 @@ class NativeUploadValidationTest < Minitest::Test
         raise UploadProcessFixture::Failure.new("diagnostic", "literal collector readiness bytes were unexpected")
       end
       if bytes == expected && size == expected.bytesize
+        unless UploadProcessFixture.clock_ns < run_ns
+          raise UploadProcessFixture::Failure.new("readiness", "literal collector readiness deadline expired")
+        end
         observed[:literal_readiness] = {"observed" => true, "identity" => identity}
         break
       end
@@ -3170,8 +3268,12 @@ class NativeUploadValidationTest < Minitest::Test
     record = UploadProcessFixture.read_json(File.join(directory, "collector.json"))
     failure_state[:stage] = "capture-record-status" if failure_state
     assert_equal finality == :finalized ? "reaped" : "unknown", record.fetch("phase")
-    assert_equal observed.fetch(:status).exitstatus, record.fetch("exitStatus")
-    assert_equal observed.fetch(:status).termsig, record.fetch("termSignal")
+    exit_status = observed.fetch(:status).exitstatus
+    recorded_exit_status = record.fetch("exitStatus")
+    exit_status.nil? ? assert_nil(recorded_exit_status) : assert_equal(exit_status, recorded_exit_status)
+    term_signal = observed.fetch(:status).termsig
+    recorded_term_signal = record.fetch("termSignal")
+    term_signal.nil? ? assert_nil(recorded_term_signal) : assert_equal(term_signal, recorded_term_signal)
     failure_state[:stage] = "capture-record-flags" if failure_state
     assert record.fetch("streamsClosed")
     assert_equal finality == :finalized, record.fetch("stopCompleted")
