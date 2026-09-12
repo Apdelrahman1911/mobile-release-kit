@@ -762,7 +762,22 @@ module UploadProcessFixture
     raise original
   end
 
-  def run(platform:, root:, parameters:, mode:, observe_signals: false, deadline_ns: nil, primary_failure_state: nil)
+  def reject_native_order_proof!(mode:, proof:, result:, status:, expected_sources:, deadline_ns:, state:)
+    original = Failure.new("fixture-result", "native order proof rejected")
+    if state
+      state[:rejection] = original
+      state[:mode] = mode
+      state[:deadline_ns] = deadline_ns
+      state[:proof] = proof
+      state[:result] = result
+      state[:status] = status
+      state[:expected_sources] = expected_sources
+    end
+    raise original
+  end
+
+  def run(platform:, root:, parameters:, mode:, observe_signals: false, deadline_ns: nil,
+          primary_failure_state: nil, order_failure_state: nil)
     assert_domain_reusable!
     validate_request!(platform, mode, parameters)
     validate_signal_observation!(platform, mode, observe_signals)
@@ -772,7 +787,8 @@ module UploadProcessFixture
     if observe_signals && !NativeSignalProbe.current
       return NativeSignalProbe.observe_parent(root, mode) do
         run(platform: platform, root: root, parameters: parameters, mode: mode,
-            observe_signals: true, deadline_ns: deadline_ns, primary_failure_state: primary_failure_state)
+            observe_signals: true, deadline_ns: deadline_ns, primary_failure_state: primary_failure_state,
+            order_failure_state: order_failure_state)
       end
     end
     if observe_signals && !NativeSignalProbe.current.parent_for?(root, mode)
@@ -913,7 +929,8 @@ module UploadProcessFixture
                      order_proof["failures"] == [] && order_proof["baseDriverReturn"] == 1 &&
                      order_proof["expectedUnknown"].equal?(unknown_order) && order_proof["originalAccepted"].equal?(false) &&
                      result["kind"] == (unknown_order ? "fixture-cleanup" : "unexpected") && child.status.exitstatus == 0
-                raise Failure.new("fixture-result", "native order proof rejected")
+                reject_native_order_proof!(mode: mode, proof: order_proof, result: result, status: child.status,
+                  expected_sources: record["orderSources"], deadline_ns: run_ns, state: order_failure_state)
               end
             else
               expected = {"unready" => "readiness", "leader-only" => "descendant-alive",
@@ -939,7 +956,7 @@ module UploadProcessFixture
                 raise Failure.new("fixture-result", "missing-cleanup control did not retain actual UNKNOWN")
               end
               result["missingCleanupProof"] = ContainmentEvidence.missing_cleanup!(directory, owner, result,
-                record.fetch("containmentSources"), deadline_ns: run_ns)
+                record.fetch("containmentSources"), deadline_ns: run_ns, driver_dispatch: dispatch)
             elsif !native_final
               raise Failure.new("fixture-result", "driver lacks physical native finality")
             end
@@ -1376,7 +1393,7 @@ module UploadProcessFixture
       if @mode == "native-setup-no-cleanup"
         # A genuine UNKNOWN remains UNKNOWN. Wait only for the already registered
         # independent fixture fallback; it cannot repair the native observation.
-        unless @watchdog.join_until(deadline_ns: @watchdog.hard_cleanup_deadline_ns)
+        unless @watchdog.join_until(deadline_ns: watchdog_join_deadline_ns)
           raise Failure.new("fixture-cleanup", "fixture fallback did not join")
         end
         raise Failure.new("setup-fallback", "native setup required independent fixture EOF")
@@ -1413,11 +1430,15 @@ module UploadProcessFixture
       @control.close
     end
 
+    def watchdog_join_deadline_ns
+      @watchdog.hard_cleanup_deadline_ns
+    end
+
     def finish_resources
       if @watchdog
         @watchdog_stop = true
         cleanup_step do
-          raise Failure.new("fixture-cleanup", "fixture watchdog did not join") unless @watchdog.join_until(deadline_ns: @watchdog.hard_cleanup_deadline_ns)
+          raise Failure.new("fixture-cleanup", "fixture watchdog did not join") unless @watchdog.join_until(deadline_ns: watchdog_join_deadline_ns)
           raise @watchdog.first_error if @watchdog.first_error
         end
       end
@@ -3335,7 +3356,8 @@ module UploadProcessFixture
 
     def initialize(directory, mode, manifest)
       @directory, @mode, @manifest = directory, mode, manifest
-      @helper, @spawn = MobileReleaseKit::NativeUploadProcess, MobileReleaseKit::NativeProcessSpawn
+      @helper = MobileReleaseKit::NativeUploadProcess
+      @spawn = @helper.native
       @role = @route = @wait = @released = @retirement = nil
       @kills, @absences, @omissions, @joins, @closes, @eofs = [], [], [], [], [], []
       @request_counts = {"0" => 0, "KILL" => 0}
@@ -3648,12 +3670,40 @@ module UploadProcessFixture
         "entryNs" => record.fetch("heldWriterCloseEntryNs"), "returnNs" => UploadProcessFixture.clock_ns}
     end
 
-    def self.missing_cleanup!(directory, owner, result, sources, deadline_ns:)
+    def self.missing_cleanup!(directory, owner, result, sources, deadline_ns:, driver_dispatch:)
       manifest = manifest!(directory, MISSING, sources)
       graph = graph!(owner, MISSING)
       records = wait_records(directory, %w[containment-custodian.json containment-keeper.json fallback-writer-close.json leader-eof.json], deadline_ns: deadline_ns)
       reports = bound_reports!(records, manifest, graph)
       close, eof = records.values_at("fallback-writer-close.json", "leader-eof.json")
+      custody = close["watchdogOwnership"]
+      times = %w[driverDeadlineNs preparedNs prearmDeadlineNs slotCeilingNs startReturnedNs admitReturnedNs
+                 captureEntryNs armNs fallbackNs effectiveHardDeadlineNs]
+      facts = %w[actualDriverCaller actualStartReturned actualAdmitReturned captureCallerIsDriver
+                 captureFinishedBeforeClose captureThreadExitedBeforeClose]
+      unless custody.instance_of?(Hash) && custody.keys.sort == (times + facts + %w[driverPid captureJoinedBeforeClose]).sort &&
+             times.all? { |key| custody[key].instance_of?(Integer) && custody[key].positive? } &&
+             facts.all? { |key| custody[key].equal?(true) } && result["watchdogPreadmitted"].equal?(true) &&
+             (custody["captureJoinedBeforeClose"].equal?(true) || custody["captureJoinedBeforeClose"].equal?(false)) &&
+             custody["driverPid"].instance_of?(Integer) && custody["driverPid"].positive? &&
+             custody["driverPid"] == driver_dispatch.fetch("pid") &&
+             custody["driverDeadlineNs"] == deadline_ns && custody["driverDeadlineNs"] == driver_dispatch.fetch("deadlineNs") &&
+             custody["prearmDeadlineNs"] == [custody["preparedNs"] + MissingCleanupDriver::PREARM_NS,
+               deadline_ns - MissingCleanupDriver::FALLBACK_DELAY_NS - MissingCleanupDriver::FALLBACK_FINISH_NS].min &&
+             custody["preparedNs"] < custody["prearmDeadlineNs"] &&
+             custody["slotCeilingNs"] == custody["prearmDeadlineNs"] + MissingCleanupDriver::FALLBACK_DELAY_NS + MissingCleanupDriver::FALLBACK_FINISH_NS &&
+             custody["slotCeilingNs"] <= deadline_ns &&
+             custody["preparedNs"] <= custody["startReturnedNs"] && custody["startReturnedNs"] <= custody["admitReturnedNs"] &&
+             custody["admitReturnedNs"] <= custody["captureEntryNs"] && custody["captureEntryNs"] <= custody["armNs"] &&
+             custody["armNs"] < custody["prearmDeadlineNs"] &&
+             custody["fallbackNs"] == custody["armNs"] + MissingCleanupDriver::FALLBACK_DELAY_NS &&
+             custody["effectiveHardDeadlineNs"] == custody["fallbackNs"] + MissingCleanupDriver::FALLBACK_FINISH_NS &&
+             custody["effectiveHardDeadlineNs"] <= custody["slotCeilingNs"] &&
+             close["watchdogRunDeadlineNs"] == custody["slotCeilingNs"] && close["watchdogHardDeadlineNs"] == custody["slotCeilingNs"] &&
+             close["closeEntryNs"].instance_of?(Integer) && close["closeReturnNs"].instance_of?(Integer) &&
+             custody["fallbackNs"] <= close["closeEntryNs"] && close["closeReturnNs"] < custody["effectiveHardDeadlineNs"]
+        raise Failure.new("fixture-result", "missing cleanup lacks the original driver-owned bounded fallback")
+      end
       unless close == result["fallbackWriterClose"] && close["version"] == 1 && close["identities"] == graph &&
              close["actualOriginalWriterClose"] && close["soleFixtureWriter"] && close["originalWatchdogThread"] &&
              close["watchdogAdmittedBeforeClose"] && result["watchdogJoined"] &&
@@ -3695,37 +3745,64 @@ module UploadProcessFixture
   end
 
   class MissingCleanupDriver < NativeSetupDriver
+    PREARM_NS = 5_000_000_000
+    FALLBACK_DELAY_NS = 5_300_000_000
+    FALLBACK_FINISH_NS = 1_000_000_000
+
     class FallbackControl < WorkerControl
       attr_accessor :driver
+      attr_reader :close_result, :close_error, :close_entry_ns, :close_return_ns
 
       def close_writer
         raise Failure.new("fixture-control", "repeated negative-control writer close") if @close_entered
         @close_entered = true
         slot = driver.instance_variable_get(:@watchdog)
         session = driver.observation&.session
+        arm = driver.watchdog_arm_record
         unless slot && slot.thread.equal?(Thread.current) && slot.publication_ready? && !slot.launch_retired? &&
                driver.observed["watchdogStarted"] && @anchor.state == :closed && @writer.state == :open &&
-               @writer.io.close_on_exec? && OwnedChild.identity(@writer.io.stat) == @identity && session&.ready && session.reserved
+               @writer.io.close_on_exec? && OwnedChild.identity(@writer.io.stat) == @identity && session&.ready && session.reserved &&
+               arm && arm.fetch(:session).equal?(session)
           raise Failure.new("fixture-control", "fallback is not the preadmitted original sole-writer watchdog")
         end
         graph = {"custodian" => session.custodian_child.pid, "keeper" => session.reserved.fetch("keeper_pid"),
           "validator" => session.ready.fetch("validator_pid"), "group" => session.ready.fetch("group_id"),
           "sid" => session.custodian_child.pid}
-        entry = UploadProcessFixture.clock_ns
-        value = super
+        custody = driver.watchdog_ownership(arm)
+        # Guard reads precede the short final claim. No lock spans the original
+        # close or publication; after a claim the SAME worker keeps custody until
+        # its actual join, even if stop is published while close is in flight.
+        claim = driver.claim_watchdog_action!(arm)
+        @close_entry_ns = claim.fetch(:entry_ns)
+        @close_result = super
+        @close_return_ns = UploadProcessFixture.clock_ns
+        unless @close_return_ns < arm.fetch(:hard_ns)
+          raise Failure.new("fixture-control", "original fallback close returned after its effective deadline")
+        end
         evidence = {"version" => 1, "identities" => graph, "fifoIdentity" => @identity,
-          "closeEntryNs" => entry, "closeReturnNs" => UploadProcessFixture.clock_ns,
-          "actualOriginalWriterClose" => value.equal?(true) && @writer.state == :closed && @writer.io.closed?,
+          "closeEntryNs" => @close_entry_ns, "closeReturnNs" => @close_return_ns,
+          "actualOriginalWriterClose" => @close_result.equal?(true) && @writer.state == :closed && @writer.io.closed?,
           "soleFixtureWriter" => true, "originalWatchdogThread" => true, "watchdogAdmittedBeforeClose" => true,
-          "watchdogRunDeadlineNs" => slot.run_deadline_ns, "watchdogHardDeadlineNs" => slot.hard_cleanup_deadline_ns}
+          "watchdogRunDeadlineNs" => slot.run_deadline_ns, "watchdogHardDeadlineNs" => slot.hard_cleanup_deadline_ns,
+          "watchdogOwnership" => custody}
         OwnedChild.write_record(File.join(@directory, "fallback-writer-close.json"), evidence)
         driver.observed["fallbackWriterClose"] = evidence
-        value
+        @close_result
+      rescue Exception => error
+        @close_error ||= error
+        raise
       end
     end
 
-    def initialize(directory, mode)
-      super
+    def initialize(directory, mode, deadline_ns:)
+      unless mode == ContainmentEvidence::MISSING && deadline_ns.instance_of?(Integer) && deadline_ns.positive?
+        raise Failure.new("fixture-input", "missing cleanup lacks its original driver cutoff")
+      end
+      super(directory, mode)
+      @driver_deadline_ns = deadline_ns
+      @watchdog_lock = Mutex.new
+      @watchdog_stopped = false
+      @watchdog_arm = @watchdog_action = nil
       @control = FallbackControl.new(directory)
       @control.driver = self
     end
@@ -3739,6 +3816,209 @@ module UploadProcessFixture
       @argv = [File.realpath(RbConfig.ruby), File.realpath(__FILE__), "worker", @directory, @mode]
       ContainmentEvidence.prepare(self)
       @observation = Observation.new(self, native: @native, root: @directory)
+      prepare_watchdog
+    end
+
+    def prepare_watchdog
+      @watchdog_lock.synchronize do
+        unless !@watchdog_stopped && @driver_thread.nil? && @watchdog.nil? && Thread.current.equal?(Thread.main)
+          raise Failure.new("fixture-control", "fallback must be started once by its original driver")
+        end
+        @driver_thread, @driver_pid = Thread.current, Process.pid
+      end
+      @watchdog_prepared_ns = UploadProcessFixture.clock_ns
+      @watchdog_prearm_ns = [@watchdog_prepared_ns + PREARM_NS,
+        @driver_deadline_ns - FALLBACK_DELAY_NS - FALLBACK_FINISH_NS].min
+      @watchdog_slot_ceiling_ns = @watchdog_prearm_ns + FALLBACK_DELAY_NS + FALLBACK_FINISH_NS
+      unless @watchdog_prepared_ns < @watchdog_prearm_ns && @watchdog_slot_ceiling_ns <= @driver_deadline_ns
+        raise Failure.new("fixture-control", "original fallback prearm window expired")
+      end
+      @watchdog = MobileReleaseKit::NativeUploadProcess::TaskSlot.new(caller: @driver_thread, parent_slot: nil,
+        run_deadline_ns: @watchdog_slot_ceiling_ns, hard_cleanup_deadline_ns: @watchdog_slot_ceiling_ns)
+      @watchdog_start_return = @watchdog.start { run_watchdog }
+      @watchdog_start_return_ns = UploadProcessFixture.clock_ns
+      raise Failure.new("fixture-control", "original fallback start was not returned") unless @watchdog_start_return.equal?(@watchdog)
+
+      loop do
+        now = UploadProcessFixture.clock_ns
+        unless now < @watchdog_prearm_ns && !@watchdog.cancelled? && !@watchdog.launch_retired?
+          raise Failure.new("fixture-control", "original fallback publication missed prearm admission")
+        end
+        break if @watchdog.publication_ready?
+        sleep [10_000_000, @watchdog_prearm_ns - now].min.fdiv(1_000_000_000)
+      end
+      # Both original thread references are already positively published, so
+      # original admit takes its immediate branch, never its S-bounded wait.
+      # Publication itself may have crossed P: the previous loop sample cannot
+      # authorize admission. State checks precede this fresh original-P check.
+      @watchdog_lock.synchronize do
+        unless !@watchdog_stopped && !@watchdog.cancelled? && !@watchdog.launch_retired? &&
+               UploadProcessFixture.clock_ns < @watchdog_prearm_ns
+          raise Failure.new("fixture-control", "original fallback publication missed prearm admission")
+        end
+      end
+      @watchdog_admit_return = @watchdog.admit!
+      @watchdog_admit_return_ns = UploadProcessFixture.clock_ns
+      unless @watchdog_admit_return.equal?(true) && @watchdog_admit_return_ns < @watchdog_prearm_ns &&
+             @watchdog.publication_ready? && !@watchdog.cancelled? && !@watchdog.launch_retired? &&
+             UploadProcessFixture.clock_ns < @watchdog_prearm_ns
+        raise Failure.new("fixture-control", "original fallback admission missed its prearm cutoff")
+      end
+      @observed["watchdogPreadmitted"] = true
+      true
+    end
+
+    def native_event(name, object)
+      if name == :execute_enter
+        @watchdog_lock.synchronize do
+          unless Thread.current.equal?(@driver_thread) && @driver_thread.equal?(Thread.main) && @capture_entry_ns.nil? &&
+                 !@watchdog_stopped && @watchdog_arm.nil? && @watchdog_action.nil? &&
+                 @watchdog_start_return.equal?(@watchdog) && @watchdog_admit_return.equal?(true) &&
+                 @watchdog.caller.equal?(@driver_thread) && @watchdog.publication_ready? &&
+                 !@watchdog.cancelled? && !@watchdog.launch_retired? && object.capture_slot.caller.equal?(@driver_thread)
+            raise Failure.new("fixture-control", "native entry lacks original live fallback preadmission")
+          end
+          now = UploadProcessFixture.clock_ns
+          raise Failure.new("fixture-control", "native entry missed its original prearm cutoff") unless now < @watchdog_prearm_ns
+          @capture_entry_ns = now
+        end
+      end
+      super
+    end
+
+    def start_watchdog
+      session = @observation.session
+      capture = session&.capture_slot
+      unless session && session.equal?(@native_frame) && capture && capture.thread.equal?(Thread.current) &&
+             capture.caller.equal?(@driver_thread) && !Thread.current.equal?(@driver_thread) &&
+             session.ready && session.reserved && @observed["ready"] && @control.anchor.state == :closed &&
+             @control.writer.state == :open && @control.writer.io.close_on_exec? &&
+             OwnedChild.identity(@control.writer.io.stat) == @control.identity
+        raise Failure.new("fixture-control", "fallback arm lacks the original capture and sole writer")
+      end
+      @watchdog_lock.synchronize do
+        unless !@watchdog_stopped && @watchdog_arm.nil? && @watchdog_action.nil? && @driver_thread.alive? &&
+               @driver_thread.equal?(Thread.main) && @watchdog.caller.equal?(@driver_thread) &&
+               @watchdog_start_return.equal?(@watchdog) && @watchdog_admit_return.equal?(true) &&
+               @watchdog.publication_ready? && !@watchdog.cancelled? && !@watchdog.launch_retired? &&
+               @capture_entry_ns && !capture.cancelled? && !capture.launch_retired? && session.primary_error.nil? &&
+               !session.retained_unknown? && session.cleanup_errors.empty?
+          raise Failure.new("fixture-control", "original fallback cannot be armed in this lifecycle")
+        end
+        capture_run, capture_hard = capture.run_deadline_ns, capture.hard_cleanup_deadline_ns
+        now = UploadProcessFixture.clock_ns
+        unless @capture_entry_ns <= now && now < @watchdog_prearm_ns && now < capture_run && now < capture_hard
+          raise Failure.new("fixture-control", "fallback arm missed its original lifecycle cutoff")
+        end
+        fallback = now + FALLBACK_DELAY_NS
+        hard = fallback + FALLBACK_FINISH_NS
+        raise Failure.new("fixture-control", "fallback arm exceeded its original ceiling") unless hard <= @watchdog_slot_ceiling_ns
+        @watchdog_arm = {session: session, capture: capture, thread: Thread.current,
+          at_ns: now, fallback_ns: fallback, hard_ns: hard}.freeze
+      end
+      @observed["watchdogStarted"] = true # Actual READY arm, distinct from preadmission.
+      true
+    end
+
+    def watchdog_arm_record
+      @watchdog_lock.synchronize { @watchdog_arm }
+    end
+
+    def watchdog_join_deadline_ns
+      @watchdog_lock.synchronize { @watchdog_arm ? @watchdog_arm.fetch(:hard_ns) : @watchdog_prearm_ns }
+    end
+
+    def run_watchdog
+      unless @watchdog.thread.equal?(Thread.current)
+        raise Failure.new("fixture-control", "fallback worker is not its original published task")
+      end
+      loop do
+        arm, stopped = @watchdog_lock.synchronize { [@watchdog_arm, @watchdog_stopped] }
+        return true if stopped
+        now = UploadProcessFixture.clock_ns
+        cutoff = arm ? arm.fetch(:hard_ns) : @watchdog_prearm_ns
+        unless now < cutoff && !@watchdog.cancelled? && !@watchdog.launch_retired?
+          raise Failure.new("fixture-control", "original fallback effective window expired")
+        end
+        if arm && now >= arm.fetch(:fallback_ns)
+          @observed["watchdogIntervened"] = @observed["fallbackUsed"] = true
+          @control.close_writer
+          return true
+        end
+        next_boundary = arm ? arm.fetch(:fallback_ns) : @watchdog_prearm_ns
+        sleep [10_000_000, next_boundary - now].min.fdiv(1_000_000_000)
+      end
+    end
+
+    def watchdog_ownership(arm)
+      capture = arm.fetch(:capture)
+      {"driverPid" => @driver_pid, "driverDeadlineNs" => @driver_deadline_ns,
+       "preparedNs" => @watchdog_prepared_ns, "prearmDeadlineNs" => @watchdog_prearm_ns,
+       "slotCeilingNs" => @watchdog_slot_ceiling_ns, "startReturnedNs" => @watchdog_start_return_ns,
+       "admitReturnedNs" => @watchdog_admit_return_ns, "captureEntryNs" => @capture_entry_ns,
+       "armNs" => arm.fetch(:at_ns), "fallbackNs" => arm.fetch(:fallback_ns), "effectiveHardDeadlineNs" => arm.fetch(:hard_ns),
+       "actualDriverCaller" => @watchdog.caller.equal?(@driver_thread) && @driver_thread.equal?(Thread.main),
+       "actualStartReturned" => @watchdog_start_return.equal?(@watchdog), "actualAdmitReturned" => @watchdog_admit_return.equal?(true),
+       "captureCallerIsDriver" => capture.caller.equal?(@driver_thread),
+       "captureFinishedBeforeClose" => capture.finished?, "captureJoinedBeforeClose" => capture.joined?,
+       "captureThreadExitedBeforeClose" => !arm.fetch(:thread).alive?}
+    end
+
+    def claim_watchdog_action!(arm)
+      @watchdog_lock.synchronize do
+        unless arm && arm.equal?(@watchdog_arm) && @watchdog_action.nil? && !@watchdog_stopped &&
+               @driver_thread.alive? && @driver_thread.equal?(Thread.main) && @watchdog.caller.equal?(@driver_thread) &&
+               @watchdog.thread.equal?(Thread.current) && @watchdog.publication_ready? &&
+               @watchdog_start_return.equal?(@watchdog) && @watchdog_admit_return.equal?(true) &&
+               !@watchdog.cancelled? && !@watchdog.launch_retired?
+          raise Failure.new("fixture-control", "original fallback action was not admitted")
+        end
+        now = UploadProcessFixture.clock_ns
+        unless arm.fetch(:fallback_ns) <= now && now < arm.fetch(:hard_ns)
+          raise Failure.new("fixture-control", "original fallback action missed its effective window")
+        end
+        @watchdog_action = {arm: arm, entry_ns: now}.freeze
+      end
+    end
+
+    def stop_watchdog!
+      @watchdog_lock.synchronize { @watchdog_stopped = true }
+      true
+    end
+
+    def finish_resources
+      cleanup_step { stop_watchdog! }
+      super
+    end
+
+    def close_control
+      if @watchdog
+        attempted = @watchdog.start_attempted?
+        if attempted.equal?(true)
+          unless @watchdog.joined?.equal?(true) && @watchdog.finished?.equal?(true) && @watchdog.unresolved?.equal?(false)
+            raise Failure.new("fixture-cleanup", "original fallback task still owns its control leases")
+          end
+        elsif attempted.equal?(false)
+          unless @watchdog_unstarted_retired
+            raise Failure.new("fixture-cleanup", "original fallback launch retirement is uncertain") if @watchdog_retirement_attempted
+            @watchdog_retirement_attempted = true
+            returned = @watchdog.close_launch!
+            unless returned.equal?(true) && @watchdog.launch_retired?.equal?(true)
+              raise Failure.new("fixture-cleanup", "original unstarted fallback was not retired")
+            end
+            @watchdog_unstarted_retired = true
+          end
+        else
+          raise Failure.new("fixture-cleanup", "original fallback start state is uncertain")
+        end
+      end
+      super
+    rescue Exception
+      # A join attempt or a stop flag is not transfer of writer custody. Root
+      # the real driver/control, not a Boolean, before propagating uncertainty.
+      UploadProcessFixture.retain_process_case!(self)
+      UploadProcessFixture.retain_unknown_domain!(@directory)
+      raise
     end
   end
 
@@ -3784,7 +4064,7 @@ module UploadProcessFixture
     return NativePrimaryProbe.new(directory, mode).execute if NATIVE_PRIMARY_PROOFS.key?(mode)
     return NativeOrderProbe.new(directory, mode).execute if NATIVE_ORDER_MODES.include?(mode)
     return HardLossNativeDriver.new(directory, mode).execute if mode == "kill-native-setup"
-    return MissingCleanupDriver.new(directory, mode).execute if mode == ContainmentEvidence::MISSING
+    return MissingCleanupDriver.new(directory, mode, deadline_ns: input.fetch("deadlineNs")).execute if mode == ContainmentEvidence::MISSING
     return NativeSetupDriver.new(directory, mode).execute if platform == "native"
     return HardLossAdapterDriver.new(directory, platform, mode, input.fetch("parameters")).execute if ContainmentEvidence::HARD_LOSS.include?(mode)
     AdapterDriver.new(directory, platform, mode, input.fetch("parameters")).execute
@@ -4797,7 +5077,7 @@ module UploadProcessFixture
         cutoff = now + DRIVER_LIMIT * 1_000_000_000
         base = {"platform" => "native", "parameters" => {}, "mode" => mode, "deadlineNs" => cutoff}
         input, temporary = base.dup, directory
-        reads, acquired, writes, metadata_reads = 0, [], [], []
+        reads, acquired, missing_acquired, writes, metadata_reads = 0, [], [], [], []
         native = Object.new
         native.define_singleton_method(:execute) { :synthetic_driver_only }
         metadata = Struct.new(:uid, :mode, :kind, :nlink) { def directory? = kind == :directory }.
@@ -4820,8 +5100,9 @@ module UploadProcessFixture
           [Process, :spawn, forbidden], [Process, :fork, forbidden], [Process, :kill, forbidden],
           [NativeSignalProbe, :execute_driver, forbidden], [NativePrimaryProbe, :new, forbidden],
           [NativeOrderProbe, :new, forbidden], [HardLossNativeDriver, :new, forbidden],
-          [MissingCleanupDriver, :new, forbidden], [HardLossAdapterDriver, :new, forbidden], [AdapterDriver, :new, forbidden],
-          [NativeSetupDriver, :new, ->(*arguments) { acquired << arguments; native }],
+          [HardLossAdapterDriver, :new, forbidden], [AdapterDriver, :new, forbidden],
+          [MissingCleanupDriver, :new, ->(*arguments, **keywords) { missing_acquired << [arguments, keywords]; native }],
+          [NativeSetupDriver, :new, ->(*arguments, **keywords) { assert_empty keywords; acquired << arguments; native }],
         ]
         with_contract_stubs(bindings) do
           invalid = [base.merge("mode" => "invalid-case"), base.merge("observeSignals" => true),
@@ -4836,6 +5117,7 @@ module UploadProcessFixture
           assert_equal 0, reads # Schema/mode/signal/original cutoff admission all precede temp lookup.
           assert_empty metadata_reads
           assert_empty acquired
+          assert_empty missing_acquired
           assert_empty writes
           input, temporary = base.dup, "/synthetic-wrong-root"
           error = assert_raises(Failure) { fixture.driver(directory) }
@@ -4858,6 +5140,14 @@ module UploadProcessFixture
           assert_equal [[File.join(directory, "driver-dispatch.json"), {"version" => 1, "pid" => 123,
             "argv" => [ruby, helper, "driver", directory], "environment" => environment, "cwd" => cwd,
             "fixtureSha256" => digest, "deadlineNs" => cutoff}]], writes
+          assert_empty missing_acquired
+          input = base.merge("mode" => ContainmentEvidence::MISSING)
+          assert_equal :synthetic_driver_only, fixture.driver(directory)
+          assert_equal [[[directory, ContainmentEvidence::MISSING], {deadline_ns: cutoff}]], missing_acquired
+          assert_equal [[directory, mode]], acquired # Ordinary constructor never receives the missing-only keyword.
+          assert_equal 5, reads
+          assert_equal [directory, directory, directory, directory], metadata_reads
+          assert_equal [writes.first, writes.first], writes # Dispatch and missing constructor share the exact original D.
         end
       end
     end

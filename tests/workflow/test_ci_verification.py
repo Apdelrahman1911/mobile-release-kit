@@ -1961,6 +1961,205 @@ class CIControllerContractTests(unittest.TestCase):
                                                    primary_step, paths, deadline=1000.0)
                     self.assertIs(raised.exception, interruption)
 
+            order_modes = {
+                primary_class + "test_native_task_error_precedes_later_caller_cancellation_at_the_original_latch": (
+                    "native-order-task-before-caller-interrupt", "native-order-task-before-caller-system-exit",
+                ),
+                primary_class + "test_native_caller_cancellation_precedes_later_task_ioerror_at_the_original_latch": (
+                    "native-order-caller-before-task-interrupt", "native-order-caller-before-task-system-exit",
+                ),
+                primary_class + "test_native_cleanup_error_precedes_later_caller_interrupt_and_retains_unknown": (
+                    "native-order-cleanup-before-caller-interrupt",
+                ),
+                primary_class + "test_native_cleanup_error_precedes_later_caller_system_exit_and_retains_unknown": (
+                    "native-order-cleanup-before-caller-system-exit",
+                ),
+            }
+            order_predicates = (
+                "proof-version", "proof-kind", "case", "source-binding", "proof-failures", "proof-status", "expected-unknown",
+                "original-accepted", "result-kind", "driver-status",
+            )
+            order_common = (
+                "original failed fixture result", "same first object through original boundaries", "unchanged original first message/status",
+                "unchanged original caller message/status", "no original upload acceptance", "original shared creator/capture latch",
+                "actual first and later latch returns", "actual latch released later fault", "actual caller delivery and rescue",
+                "actual original stdin close", "actual capture/creator joins", "actual original native closes", "actual original native EOFs",
+                "actual original C wait", "no fixture fallback or pending cancellation", "ownedDescriptorsClosed", "watchdogJoined",
+                "injectorsJoined", "handlersRestored", "registryInactive", "no fixture cleanup errors", "observation restored",
+                "unchanged original sources",
+            )
+            order_cleanup = ("actual clean body then original cleanup fault", "unknown original task/session retained",
+                             "real pre-tail native success not finality")
+            order_body = ("actual body error recorded", "actual settled native cancellation")
+            cleanup_modes = ("native-order-cleanup-before-caller-interrupt", "native-order-cleanup-before-caller-system-exit")
+            all_order_modes = [mode for modes in order_modes.values() for mode in modes]
+            self.assertEqual(controller.NATIVE_ORDER_FAILURE_PREFIX, "MRK_NATIVE_ORDER_FAILURE=")
+            self.assertEqual(controller.NATIVE_ORDER_FAILURE_CALLBACK_MODES, order_modes)
+            self.assertEqual((len(order_modes), len(all_order_modes), len(set(all_order_modes))), (4, 6, 6))
+            self.assertEqual(controller.NATIVE_ORDER_FAILURE_MODES, frozenset(all_order_modes))
+            self.assertEqual(controller.NATIVE_ORDER_CLEANUP_MODES, frozenset(cleanup_modes))
+            self.assertEqual(controller.NATIVE_ORDER_FAILURE_PREDICATES, order_predicates)
+            self.assertEqual(controller.NATIVE_ORDER_PROOF_FAILURES, order_common + order_cleanup + order_body)
+            self.assertEqual((len(order_predicates), len(order_common), len(order_cleanup), len(order_body)), (10, 23, 3, 2))
+
+            def order_bytes(record):
+                return (controller.NATIVE_ORDER_FAILURE_PREFIX
+                        + json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
+
+            def order_transcript(identifier, terminal="F"):
+                return (identifier + " = PRIVATE_MESSAGE\n0.01 s = " + terminal + "\n\n1 runs, 5 assertions, "
+                        + f"{int(terminal == 'F')} failures, {int(terminal == 'E')} errors, {int(terminal == 'S')} skips\n")
+
+            order_ids = tuple(sorted(order_modes))
+            order_inventories = {
+                "healthy": tuple(sorted(name for name, modes in order_modes.items() if modes[0] not in cleanup_modes)),
+                **{mode: (name,) for name, modes in order_modes.items() for mode in modes if mode in cleanup_modes},
+            }
+            def order_inventory(_source, _gate, partition, *, deadline):
+                return order_inventories.get(partition, ())
+
+            order_target = next(iter(order_modes))
+            order_record = {"schema": 1, "mode": "native-order-task-before-caller-interrupt",
+                            "failedPredicates": ["proof-failures"], "proofFailures": ["actual settled native cancellation"]}
+            order_marker = order_bytes(order_record)
+            order_step = controller.Step("ruby-native-capture", parser="minitest", expected_tests=1, native_partition="healthy")
+            order_stdout = order_transcript(order_target)
+            # Both source seams are inert, including deliberately wrong gates
+            # and partitions. No Ruby, fixture, catalog or native import occurs.
+            with patch.object(controller, "ruby_expected_ids", return_value=order_ids), \
+                    patch.object(controller, "ruby_capture_ids", side_effect=order_inventory) as inventory, \
+                    patch.object(controller.time, "monotonic", return_value=999.0):
+                for owner, modes in order_modes.items():
+                    for mode in modes:
+                        cleanup = mode in cleanup_modes
+                        partition = mode if cleanup else "healthy"
+                        selected_step = dataclasses.replace(order_step, native_partition=partition)
+                        labels = order_common + (order_cleanup if cleanup else order_body)
+                        record = {"schema": 1, "mode": mode, "failedPredicates": list(order_predicates), "proofFailures": list(labels)}
+                        raw = order_bytes(record)
+                        self.assertEqual(len(labels), 26 if cleanup else 25)
+                        self.assertLessEqual(len(raw), 2048)
+                        for terminal in ("F", "E"):
+                            transcript = order_transcript(owner, terminal)
+                            failed_capture = capture(transcript, stderr=raw, ok=False, returncode=1)
+                            with patch.object(controller, "minitest_records", wraps=controller.minitest_records) as scans:
+                                detail = controller.failure_details(failed_capture, selected_step, paths, deadline=1000.0)
+                            inventory.assert_called_with(ROOT, "ruby-native-capture", partition, deadline=1000.0)
+                            self.assertEqual([call.args for call in scans.call_args_list],
+                                             [(transcript, order_inventories[partition]), (transcript, (owner,))])
+                            self.assertEqual([call.kwargs for call in scans.call_args_list], [{"deadline": 1000.0}] * 2)
+                            self.assertEqual(detail["native_order_failure"], record)
+                            self.assertEqual(detail["returncode"], 1)
+                            self.assertNotIn("PRIVATE_MESSAGE", json.dumps(detail))
+                        with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                            controller.parse_capture(selected_step, failed_capture, paths, "macos", None)
+                        rc_zero = capture(transcript, stderr=raw)
+                        self.assertEqual(controller.failure_details(rc_zero, selected_step, paths, deadline=1000.0)["native_order_failure"], record)
+                        with self.assertRaisesRegex(controller.VerificationError, "MINITEST_RESULT_REJECTED"):
+                            controller.parse_capture(selected_step, rc_zero, paths, "macos", None, deadline=1000.0)
+                        opposite = order_body if cleanup else order_cleanup
+                        self.assertIsNone(controller.native_order_failure(order_bytes({**record, "proofFailures": list(opposite)})))
+                        # Make every ID source-known: these vetoes must arise
+                        # from the actual callback/partition pair, not discovery.
+                        with patch.object(controller, "ruby_capture_ids", return_value=order_ids):
+                            wrong_owner = next(name for name in order_modes if name != owner)
+                            self.assertNotIn("native_order_failure", controller.failure_details(
+                                capture(order_transcript(wrong_owner), stderr=raw, ok=False, returncode=1), selected_step, paths))
+                            for wrong_partition in ("healthy", *cleanup_modes, "all", "native-setup-no-cleanup"):
+                                if wrong_partition != partition:
+                                    self.assertNotIn("native_order_failure", controller.failure_details(
+                                        capture(transcript, stderr=raw, ok=False, returncode=1),
+                                        dataclasses.replace(selected_step, native_partition=wrong_partition), paths))
+
+                # Reuse the original canonical reader's existing malformed
+                # JSON/framing/duplicate/byte-limit matrix, binding its options.
+                with patch.object(controller, "_fixture_failure_record", wraps=controller._fixture_failure_record) as strict:
+                    self.assertEqual(controller.native_order_failure(order_marker, deadline=1000.0), order_record)
+                strict.assert_called_once_with(order_marker, "MRK_NATIVE_ORDER_FAILURE=", 2048, deadline=1000.0,
+                                               canonical_fields=("schema", "mode", "failedPredicates", "proofFailures"))
+                for predicate in order_predicates:
+                    if predicate != "proof-failures":
+                        record = {**order_record, "failedPredicates": [predicate], "proofFailures": []}
+                        self.assertEqual(controller.native_order_failure(order_bytes(record)), record)
+                invalid_order = [
+                    {key: value for key, value in order_record.items() if key != "proofFailures"},
+                    {**order_record, "category": "PRIVATE_CATEGORY"},
+                    *({**order_record, "schema": value} for value in (True, 1.0, 2, "1")),
+                    *({**order_record, "mode": value} for value in ([], False, "native-order-task-before-caller-other")),
+                    *({**order_record, "failedPredicates": value} for value in (
+                        [], None, [True], ["PRIVATE_PREDICATE"], ["proof-failures"] * 2,
+                        ["driver-status", "proof-failures"], list(order_predicates) + ["case"], ["proof-status"],
+                    )),
+                    *({**order_record, "proofFailures": value} for value in (
+                        None, [], [True], ["PRIVATE_FAILURE"], ["actual body error recorded"] * 2,
+                        ["actual settled native cancellation", "original failed fixture result"],
+                        list(order_common + order_cleanup + order_body),
+                    )),
+                ]
+                for record in invalid_order:
+                    detail = controller.failure_details(capture(order_stdout, stderr=order_bytes(record), ok=False, returncode=1),
+                                                        order_step, paths, deadline=1000.0)
+                    self.assertNotIn("native_order_failure", detail)
+                    self.assertEqual(detail["returncode"], 1)
+                    self.assertNotIn("PRIVATE_", json.dumps(detail))
+
+                for transcript in (
+                    "", order_target + ":\n", order_target + " = unfinished\n",
+                    order_transcript(order_target, "."), order_transcript(order_target, "S"),
+                    order_stdout.replace("0.01 s = F", "0.01 s = .\n0.01 s = F"),
+                    order_stdout + order_stdout, "0 runs, 5 assertions, 0 failures, 0 errors, 0 skips\n" + order_stdout,
+                ):
+                    self.assertNotIn("native_order_failure", controller.failure_details(
+                        capture(transcript, stderr=order_marker, ok=False, returncode=1), order_step, paths))
+                self.assertNotIn("native_order_failure", controller.failure_details(
+                    capture(order_stdout + order_marker.decode("ascii"), ok=False, returncode=1), order_step, paths))
+                with patch.object(controller, "ruby_capture_ids", return_value=expected):
+                    self.assertNotIn("native_order_failure", controller.failure_details(
+                        capture(order_stdout, stderr=order_marker, ok=False, returncode=1), order_step, paths))
+                for wrong_step in (
+                    dataclasses.replace(order_step, id="ruby-native-owner"),
+                    dataclasses.replace(order_step, id="ruby-play_store"),
+                    dataclasses.replace(order_step, parser="exit"),
+                ):
+                    self.assertNotIn("native_order_failure", controller.failure_details(
+                        capture(order_stdout, stderr=order_marker, ok=False, returncode=1), wrong_step, paths))
+                with patch.object(controller, "ruby_capture_ids", return_value=tuple(sorted((*many_ids, order_target)))):
+                    detail = controller.failure_details(capture(many_stdout + order_stdout, stderr=order_marker,
+                        ok=False, returncode=1), order_step, paths)
+                    self.assertGreater(detail["minitest_structure"]["start_records_omitted"], 0)
+                    self.assertEqual(detail["native_order_failure"], order_record)
+                    early_target = order_target + " = 0.01 s = F\n"
+                    self.assertNotIn("native_order_failure", controller.failure_details(
+                        capture(early_target + many_stdout + order_stdout, stderr=order_marker,
+                                ok=False, returncode=1), order_step, paths))
+
+                expired = [False]
+                def expired_order_parse(_text):
+                    expired[0] = True
+                    raise ValueError("PRIVATE_MESSAGE")
+                with patch.object(controller, "strict_json", side_effect=expired_order_parse), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(capture(order_stdout, stderr=order_marker, ok=False, returncode=1),
+                                               order_step, paths, deadline=1000.0)
+                expired[0] = False
+                original_scan = controller.minitest_records
+                def expire_order_scan(text, identifiers, *, deadline):
+                    if identifiers == (order_target,):
+                        expired[0] = True
+                    return original_scan(text, identifiers, deadline=deadline)
+                with patch.object(controller, "minitest_records", side_effect=expire_order_scan), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(capture(order_stdout, stderr=order_marker, ok=False, returncode=1),
+                                               order_step, paths, deadline=1000.0)
+                for interruption in (KeyboardInterrupt("PRIVATE_MESSAGE"), SystemExit(7)):
+                    with patch.object(controller, "strict_json", side_effect=interruption), \
+                            self.assertRaises(type(interruption)) as raised:
+                        controller.failure_details(capture(order_stdout, stderr=order_marker, ok=False, returncode=1),
+                                                   order_step, paths, deadline=1000.0)
+                    self.assertIs(raised.exception, interruption)
+
             for field, value in (("returncode", False), ("waited", False), ("stdout_eof", False),
                                  ("stderr_eof", False), ("domain_finality", False),
                                  ("primary_error", "fixture"), ("cleanup_errors", ("fixture",))):

@@ -169,6 +169,47 @@ NATIVE_PRIMARY_PROOF_FAILURES = (
     "handlersRestored", "registryInactive", "no pending cancellation", "unchanged IOError redaction",
     "actual non-IOError return", "native cleanup without fixture fallback", "actual capture finality", "first-close boundary",
 )
+NATIVE_ORDER_FAILURE_PREFIX = "MRK_NATIVE_ORDER_FAILURE="
+NATIVE_ORDER_FAILURE_CALLBACK_MODES = {
+    ("NativeUploadValidationTest#"
+     "test_native_task_error_precedes_later_caller_cancellation_at_the_original_latch"): (
+        "native-order-task-before-caller-interrupt", "native-order-task-before-caller-system-exit",
+    ),
+    ("NativeUploadValidationTest#"
+     "test_native_caller_cancellation_precedes_later_task_ioerror_at_the_original_latch"): (
+        "native-order-caller-before-task-interrupt", "native-order-caller-before-task-system-exit",
+    ),
+    ("NativeUploadValidationTest#"
+     "test_native_cleanup_error_precedes_later_caller_interrupt_and_retains_unknown"): (
+        "native-order-cleanup-before-caller-interrupt",
+    ),
+    ("NativeUploadValidationTest#"
+     "test_native_cleanup_error_precedes_later_caller_system_exit_and_retains_unknown"): (
+        "native-order-cleanup-before-caller-system-exit",
+    ),
+}
+NATIVE_ORDER_FAILURE_MODES = frozenset(
+    mode for modes in NATIVE_ORDER_FAILURE_CALLBACK_MODES.values() for mode in modes
+)
+NATIVE_ORDER_CLEANUP_MODES = frozenset({
+    "native-order-cleanup-before-caller-interrupt", "native-order-cleanup-before-caller-system-exit",
+})
+NATIVE_ORDER_FAILURE_PREDICATES = (
+    "proof-version", "proof-kind", "case", "source-binding", "proof-failures", "proof-status", "expected-unknown",
+    "original-accepted", "result-kind", "driver-status",
+)
+NATIVE_ORDER_PROOF_FAILURES = (
+    "original failed fixture result", "same first object through original boundaries", "unchanged original first message/status",
+    "unchanged original caller message/status", "no original upload acceptance", "original shared creator/capture latch",
+    "actual first and later latch returns", "actual latch released later fault", "actual caller delivery and rescue",
+    "actual original stdin close", "actual capture/creator joins", "actual original native closes", "actual original native EOFs",
+    "actual original C wait", "no fixture fallback or pending cancellation", "ownedDescriptorsClosed", "watchdogJoined",
+    "injectorsJoined", "handlersRestored", "registryInactive", "no fixture cleanup errors", "observation restored",
+    "unchanged original sources",
+    # The original proof appends only its own family's three or two labels.
+    "actual clean body then original cleanup fault", "unknown original task/session retained", "real pre-tail native success not finality",
+    "actual body error recorded", "actual settled native cancellation",
+)
 PYTHON_POISON_PARTITIONS = (
     "poison-wait-loss",
     "poison-startup-error",
@@ -1318,6 +1359,29 @@ def native_primary_failure(raw: bytes, *, deadline: float | None = None) -> dict
     return {"schema": 1, "mode": data["mode"], "failedPredicates": predicates, "proofFailures": failures}
 
 
+def native_order_failure(raw: bytes, *, deadline: float | None = None) -> dict | None:
+    """Project only finite, mode-applicable checks from a rejected order proof."""
+    data = _fixture_failure_record(raw, NATIVE_ORDER_FAILURE_PREFIX, 2048, deadline=deadline,
+                                   canonical_fields=("schema", "mode", "failedPredicates", "proofFailures"))
+    if (type(data) is not dict or type(data["schema"]) is not int or data["schema"] != 1
+            or type(data["mode"]) is not str or data["mode"] not in NATIVE_ORDER_FAILURE_MODES
+            or type(data["failedPredicates"]) is not list or not 1 <= len(data["failedPredicates"]) <= 10
+            or type(data["proofFailures"]) is not list):
+        return None
+    # Twenty-three common checks precede either the cleanup three or body two.
+    applicable = (NATIVE_ORDER_PROOF_FAILURES[:26] if data["mode"] in NATIVE_ORDER_CLEANUP_MODES
+                  else NATIVE_ORDER_PROOF_FAILURES[:23] + NATIVE_ORDER_PROOF_FAILURES[26:])
+    predicates, failures = data["failedPredicates"], data["proofFailures"]
+    if (len(failures) > len(applicable) or any(type(name) is not str for name in predicates + failures)
+            or predicates != [name for name in NATIVE_ORDER_FAILURE_PREDICATES if name in predicates]
+            or failures != [name for name in applicable if name in failures]
+            or ("proof-failures" in predicates) != bool(failures)):
+        return None
+    if deadline is not None:
+        check_clock(deadline)
+    return {"schema": 1, "mode": data["mode"], "failedPredicates": predicates, "proofFailures": failures}
+
+
 def _minitest_failed_target(text: str, identifier: str, *, deadline: float | None = None) -> bool:
     # Scan the SAME original bytes under the SAME cutoff. A target beyond the
     # public first16 rows still counts, as does a late duplicate. No receipt.
@@ -1651,6 +1715,16 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                     if (len(targets) == 1 and targets[0] in expected
                             and _minitest_failed_target(text, targets[0], deadline=deadline)):
                         value["native_primary_failure"] = diagnostic
+            if (step.id == "ruby-native-capture"
+                    and (step.native_partition == "healthy" or step.native_partition in NATIVE_ORDER_CLEANUP_MODES)):
+                diagnostic = native_order_failure(result.stderr, deadline=deadline)
+                if diagnostic is not None:
+                    partition = (diagnostic["mode"] if diagnostic["mode"] in NATIVE_ORDER_CLEANUP_MODES else "healthy")
+                    targets = [identifier for identifier, modes in NATIVE_ORDER_FAILURE_CALLBACK_MODES.items()
+                               if diagnostic["mode"] in modes]
+                    if (step.native_partition == partition and len(targets) == 1 and targets[0] in expected
+                            and _minitest_failed_target(text, targets[0], deadline=deadline)):
+                        value["native_order_failure"] = diagnostic
         except (VerificationError, OSError, UnicodeError):
             if deadline is not None:
                 check_clock(deadline)
