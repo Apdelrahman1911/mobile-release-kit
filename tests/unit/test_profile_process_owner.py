@@ -1125,6 +1125,77 @@ class ProfileOwnerWaitAndGroupTests(unittest.TestCase):
                     group.request(signum)
         syscall.assert_not_called()
 
+        # Parent acknowledgement is distinct from original physical retirement.
+        # Actual decoding must not let a duplicate, bad notice or late RELEASE
+        # repair lost local evidence, including an observer's exceptional tail.
+        for case in ("first_true", "first_false", "same_true", "wrong_id", "contradictory",
+                     "local_false", "local_unknown", "observer_error", "partial", "malformed"):
+            context = _context("keeper", parent_pid=430)
+            keeper = _keeper(context)
+            keeper.channel = _wire_channel(context, "c_to_k", "k_to_c")
+            context.io.leases.extend((keeper.channel.reader, keeper.channel.writer))
+            local = case not in ("first_true", "first_false", "observer_error")
+            keeper.group_retired, keeper.group_absent = local, local and case != "local_false"
+            notice = {"v": 1, "type": "GROUP_RETIRED", "group_id": 999 if case == "wrong_id" else 431,
+                      "absent": case not in ("first_false", "contradictory")}
+            content = owner.Protocol.encode(notice)
+            if case == "partial":
+                content = content[:-1]
+            elif case == "malformed":
+                content = _packet({**notice, "absent": "not-a-boolean"})
+            physical, prior, fault = [], ValidationError(owner.CLEANUP_ERROR), OSError("inert retirement observer")
+
+            def observe(role, event, **evidence):
+                if event == "group_retired":
+                    self.assertEqual(role, "keeper")
+                    self.assertIs(evidence["group"], keeper)
+                    self.assertTrue(keeper.parent_group_retired and keeper.group_retired)
+                    physical.append(evidence["absent"])
+                    if case == "observer_error":
+                        raise fault
+
+            with self.subTest(parent_notice=case), patch.object(owner.time, "monotonic_ns", return_value=1), patch.object(owner.os, "getppid", return_value=430), patch.object(owner.os, "getpid", return_value=431), patch.object(owner.os, "read", return_value=content) as read, patch.object(owner.os, "write", side_effect=AssertionError("notice-only model has no output")) as write, patch.object(owner.os, "killpg", side_effect=AssertionError("retired group must never be requested")) as request, patch.object(owner, "_pause", side_effect=AssertionError("retired group must never wait")) as pause, patch.object(owner, "_role_event", side_effect=observe):
+                try:
+                    if case in ("local_false", "local_unknown"):
+                        context.record(prior, cleanup=True)
+                    keeper.safe_pump()
+                    if case == "partial":
+                        self.assertFalse(keeper.parent_group_retired)
+                        read.return_value = b""
+                        keeper.safe_pump()  # Real decoder rejects truncated EOF.
+                    admitted = case in ("first_true", "first_false", "same_true", "observer_error")
+                    self.assertEqual(keeper.parent_group_retired, admitted)
+                    self.assertEqual((keeper.group_retired, keeper.group_absent),
+                                     (True, case not in ("first_false", "local_false")))
+                    self.assertEqual(physical, [] if local else [notice["absent"]])
+                    initial_error = context.primary
+                    if case in ("first_true", "same_true"):
+                        self.assertIsNone(initial_error)
+                        self.assertFalse(context.cleanup_unknown)
+                    else:
+                        self.assertTrue(context.cleanup_unknown)
+                    if case == "observer_error":
+                        self.assertIs(initial_error, fault)
+                    if case not in ("partial", "malformed"):
+                        # The grammar saw GR even if K rejected its identity.
+                        # RELEASE therefore also needs K's valid-notice latch.
+                        read.return_value = owner.Protocol.encode({"v": 1, "type": "RELEASE"})
+                        keeper.safe_pump()
+                        self.assertEqual(keeper.released, admitted)
+                    read.return_value = owner.Protocol.encode({"v": 1, "type": "GROUP_RETIRED", "group_id": 431, "absent": True})
+                    keeper.safe_pump()  # Duplicate/recovery input is absorbing.
+                    self.assertTrue(keeper.channel.decoder.failed and context.cleanup_unknown)
+                    self.assertEqual(keeper.parent_group_retired, admitted)
+                    self.assertEqual((keeper.group_retired, keeper.group_absent),
+                                     (True, case not in ("first_false", "local_false")))
+                    self.assertEqual(physical, [] if local else [notice["absent"]])
+                    if initial_error is not None:
+                        self.assertIs(context.primary, initial_error)
+                    keeper.fallback_group()
+                    request.assert_not_called(); pause.assert_not_called(); write.assert_not_called()
+                finally:
+                    context.close_all()
+
     def test_post_observer_identity_retirement_is_rechecked_before_group_syscall(self):
         context, keeper = _context("custodian"), _Child()
         group = owner._GroupReservation(context, keeper)
@@ -1366,6 +1437,232 @@ class ProfileOwnerWorkWaitTests(unittest.TestCase):
             self.assertTrue(keeper.channel.writer_closed)
             self.assertEqual([lease.close_calls for lease in keeper.descriptors.values()], [1] * 5)
 
+        # A healthy V/STATUS may precede R while C still owes its final controls.
+        # Both channels and decoders are real; only their transport is an inert
+        # pair of byte buffers. C's flush-before-read genuinely fails in this
+        # model if K closes the original reader before C's late write.
+        for stop in ("late_release", "late_cancel", "short_cleanup", "missing_release",
+                     "eof", "parent_lost", "read_error", "close_error"):
+            hard = 11 * owner.NANOSECOND if stop == "short_cleanup" else 13 * owner.NANOSECOND
+            context = _context("keeper", hard=hard, parent_pid=430)
+            parent_context = _context("custodian", hard=hard)
+            descriptors = {fd: _Lease(300 + fd) for fd in range(3, 8)}
+            context.io.leases.extend(descriptors.values())
+            with patch.object(owner.os, "set_blocking"), patch.object(owner.os, "getpid", return_value=431):
+                keeper = owner._Keeper(context, descriptors)
+            parent_channel = _wire_channel(parent_context, "k_to_c", "c_to_k")
+            parent_context.io.leases.extend((parent_channel.reader, parent_channel.writer))
+            receipt = _receipt(pid=432)
+            child = _Child((receipt,), pid=432)
+            context.child_acquisition.child, context.child_acquisition.attempted = child, True
+            keeper.validator, keeper.moved = child, True
+            now = [context.run - (5 * owner.NANOSECOND // 2 if stop == "short_cleanup" else owner.NANOSECOND)]
+            parent, returned, queued, injected = [430], [False], [False], [False]
+            to_keeper, to_parent = bytearray(), bytearray()
+            timeline, first, retired, requests = [], [], [], []
+            fault = OSError("inert original control failure")
+            if stop == "close_error":
+                keeper.channel.reader.error = fault
+            original_fallback, original_record, original_wait = keeper.fallback_group, context.record, owner._wait_child
+
+            def record(error, reason="lifecycle", *, cleanup=False):
+                initial = context.primary is None
+                original_record(error, reason, cleanup=cleanup)
+                if initial:
+                    first.append((error, context.failure_limit, context.cleanup_limit, now[0]))
+
+            def wait_original(*args, **options):
+                self.assertLess(now[0], context.run)  # Every post-R wait is vetoed.
+                self.assertIs(args[0], context)
+                self.assertIs(args[1], child)
+                self.assertEqual((args[2], args[4], options),
+                                 (context.run, "validator_reaped", {"phase": "WORK"}))
+                return original_wait(*args, **options)
+
+            def parent_turn():
+                if not queued[0]:
+                    self.assertTrue(returned[0])  # Not merely the fallback event.
+                    self.assertNotIn("RELEASED", parent_channel.decoder.direction.seen)
+                    queued[0] = True
+                    if stop in ("eof", "read_error"):
+                        parent_channel.close_writer()
+                    elif stop == "parent_lost":
+                        parent[0] = 999
+                    else:
+                        if stop == "late_cancel":
+                            parent_channel.send("CANCEL", reason_code="cancelled",
+                                                cleanup_deadline_ns=context.run + owner.NANOSECOND // 2)
+                        parent_channel.send("GROUP_RETIRED", group_id=431, absent=True)
+                        if stop != "missing_release":
+                            parent_channel.send("RELEASE")
+                parent_channel.pump()  # Original flush BEFORE original read.
+
+            def read(number, count):
+                if number == keeper.channel.reader.number:
+                    if returned[0]:
+                        parent_turn()
+                        if stop == "read_error" and not injected[0]:
+                            injected[0] = True
+                            raise fault
+                    buffer, writer = to_keeper, parent_channel.writer
+                elif number == parent_channel.reader.number:
+                    buffer, writer = to_parent, keeper.channel.writer
+                else:
+                    raise AssertionError("unexpected inert read descriptor")
+                if buffer:
+                    content = bytes(buffer[:count])
+                    del buffer[:count]
+                    return content
+                if writer.state == "CLOSED":
+                    return b""  # Original modeled writer close, not an EOF flag.
+                raise BlockingIOError
+
+            def write(number, content):
+                if number == parent_channel.writer.number:
+                    reader, buffer = keeper.channel.reader, to_keeper
+                    kind = parent_channel.pending[0][0]["type"]
+                    if kind not in ("CONFIG", "RUN"):
+                        self.assertTrue(returned[0])
+                        timeline.append(("parent_write", kind))
+                elif number == keeper.channel.writer.number:
+                    reader, buffer = parent_channel.reader, to_parent
+                else:
+                    raise AssertionError("unexpected inert write descriptor")
+                if reader.state != "OPEN":
+                    raise BrokenPipeError("inert peer retired its original reader")
+                if number == parent_channel.writer.number:
+                    self.assertIs(reader, descriptors[3])
+                    self.assertFalse(keeper.channel.reader_closed or id(reader) in context.closed)
+                buffer.extend(content)
+                return len(content)
+
+            def work():
+                # Explicit healthy-work precondition, not a synthetic finality:
+                # genuine modeled CONFIG/RUN and all three status frames finish
+                # before R. Actual K.run owns the subsequent timeout and cleanup.
+                keeper.channel.send_frame({**_hello(), "sid": 430})
+                keeper.channel.flush()
+                parent_channel.send_frame({**_configuration("keeper"), "hard_cleanup_deadline_ns": hard})
+                parent_channel.flush(); keeper.pump()
+                parent_channel.send("RUN")
+                parent_channel.flush(); keeper.pump()
+                for fd in (5, 6, 7):
+                    context.close(descriptors[fd])
+                keeper.channel.send("MOVED", validator_pid=432, group_id=431, keeper_pgid=430)
+                keeper.channel.flush()
+                keeper.receipt = owner._wait_child(context, child, context.run, keeper.pump,
+                                                   "validator_reaped", phase="WORK")
+                self.assertIs(keeper.receipt, receipt)
+                keeper.channel.send_frame(owner._status_frame(keeper.receipt))
+                keeper.channel.flush()
+                self.assertEqual(keeper.channel.sent, {"HELLO", "MOVED", "STATUS"})
+                self.assertEqual(keeper.channel.pending, [])
+                self.assertIsNone(context.primary)
+                parent_context.begin_cleanup()
+                if stop == "short_cleanup":
+                    context.begin_cleanup()
+                now[0] = context.run
+
+            def fallback():
+                original_fallback()  # Actual own-G retirement, with inert syscall below.
+                returned[0] = True
+                timeline.append(("fallback_return", now[0]))
+
+            def group_request(group_id, signum):
+                self.assertEqual((group_id, signum), (431, int(signal.SIGKILL)))
+                self.assertFalse(keeper.group_retired)
+                requests.append((group_id, signum))
+                raise ProcessLookupError  # Positive modeled absence of this original G.
+
+            def observe(role, event, **evidence):
+                if event == "group_retired":
+                    self.assertEqual(role, "keeper")
+                    self.assertIs(evidence["group"], keeper)
+                    retired.append(evidence["absent"])
+                    timeline.append(("group_retired", now[0]))
+                elif event == "validator_reaped":
+                    self.assertEqual(role, "keeper")
+                    self.assertIs(evidence["receipt"], receipt)
+                    self.assertIs(child.receipt, receipt)
+                    self.assertLess(now[0], context.run)
+                    timeline.append(("validator_reaped", receipt))
+                elif event == "frame_sent" and role == "keeper":
+                    kind = evidence["frame"]["type"]
+                    if kind == "STATUS":
+                        self.assertLess(now[0], context.run)
+                    elif kind == "RELEASED":
+                        self.assertTrue(keeper.channel.reader_closed)
+                    timeline.append(("keeper_sent", kind))
+
+            def pause(_cutoff, *_args):
+                now[0] += owner.NANOSECOND // 20
+                if now[0] > context.hard + owner.NANOSECOND:
+                    parent[0] = 999  # A broken inert control loop must still terminate.
+
+            with self.subTest(first_run_expiry=stop), patch.object(owner.time, "monotonic_ns", side_effect=lambda: now[0]), patch.object(owner.os, "getppid", side_effect=lambda: parent[0]), patch.object(owner.os, "getpid", return_value=431), patch.object(owner.os, "read", side_effect=read), patch.object(owner.os, "write", side_effect=write), patch.object(owner.os, "killpg", side_effect=group_request), patch.object(owner.os, "_exit") as terminate, patch.object(owner, "_pause", side_effect=pause), patch.object(owner, "_role_event", side_effect=observe), patch.object(owner, "_validate_configuration", return_value=Path("/private/profile")), patch.object(owner, "_spawn", side_effect=AssertionError("settled inert V must not be recreated")) as spawn, patch.object(owner, "_wait_child", side_effect=wait_original) as wait, patch.object(keeper, "move_out", side_effect=AssertionError("original K already moved")) as move, patch.object(keeper, "work", side_effect=work), patch.object(keeper, "fallback_group", side_effect=fallback), patch.object(context, "record", side_effect=record):
+                try:
+                    result = keeper.run()
+                    # Also schedule C after K returns: old unconditional break
+                    # reaches this with an unsent write and an already CLOSED
+                    # peer reader, before C can read buffered RELEASED.
+                    parent_turn()
+                    parent_channel.pump()
+                    terminate.assert_not_called(); spawn.assert_not_called()
+                    wait.assert_called_once(); move.assert_not_called()
+                finally:
+                    parent_channel.close_reader(); parent_channel.close_writer()
+                    context.close_all()
+            expected = owner.HELPER_UNKNOWN if stop in ("missing_release", "parent_lost", "read_error", "close_error") else owner.HELPER_FAILED
+            self.assertEqual(result, expected)
+            self.assertEqual(len(first), 1)
+            self.assertIs(context.primary, first[0][0])
+            self.assertEqual((context.primary.args, context.reason, first[0][3]), ((owner.TIMEOUT,), "deadline", context.run))
+            initial_cleanup = context.run + owner.NANOSECOND // 2 if stop == "short_cleanup" else hard
+            self.assertEqual(first[0][1:3], (hard, initial_cleanup))
+            final_failure = context.run + owner.NANOSECOND // 2 if stop == "late_cancel" else hard
+            self.assertEqual((context.failure_limit, context.cleanup_limit), (final_failure, min(initial_cleanup, final_failure)))
+            self.assertEqual(retired, [True])
+            self.assertEqual(requests, [(431, int(signal.SIGKILL))])
+            self.assertLess(timeline.index(("group_retired", context.run)),
+                            next(i for i, entry in enumerate(timeline) if entry[0] == "fallback_return"))
+            self.assertIs(keeper.validator, child)
+            self.assertIs(context.child_acquisition.child, child)
+            self.assertIs(keeper.receipt, receipt)
+            self.assertIs(child.receipt, receipt)
+            self.assertEqual((child.polls, child.wait_state, child.numeric_retired), (1, "REAPED", True))
+            self.assertEqual([item[1] for item in timeline if item[0] == "validator_reaped"], [receipt])
+            self.assertEqual([lease.close_calls for lease in descriptors.values()], [1] * 5)
+            self.assertTrue(keeper.channel.reader_closed and keeper.channel.writer_closed)
+            self.assertFalse(parent_channel.write_failed or parent_context.cleanup_unknown)
+            self.assertTrue(parent_channel.eof and parent_channel.decoder.ended)
+            self.assertTrue(keeper.group_retired and keeper.group_absent)
+            if stop in ("late_release", "late_cancel", "short_cleanup", "close_error"):
+                self.assertTrue(keeper.released and keeper.parent_group_retired)
+                self.assertIn("RELEASE", parent_channel.sent)
+                self.assertEqual(to_keeper, bytearray())
+                self.assertFalse(keeper.channel.eof or keeper.channel.decoder.ended)
+                self.assertLess(now[0], context.cleanup_limit)
+            else:
+                self.assertFalse(keeper.released)
+                self.assertEqual(keeper.parent_group_retired, stop == "missing_release")
+            if stop == "late_cancel":
+                self.assertIsNot(context.primary, keeper.parent_cancellation)
+                self.assertEqual(context.secondary, [keeper.parent_cancellation])
+                self.assertEqual(context.error_epoch, 2)
+            elif stop in ("late_release", "short_cleanup"):
+                self.assertEqual(context.secondary, [])
+                self.assertEqual(context.error_epoch, 1)
+            if stop in ("read_error", "close_error"):
+                self.assertIn(fault, context.secondary)
+                self.assertTrue(context.cleanup_unknown)
+            if stop in ("eof", "read_error"):
+                self.assertTrue(keeper.channel.eof and keeper.channel.decoder.ended and keeper.eof_seen)
+            if stop == "missing_release":
+                self.assertGreaterEqual(now[0], first[0][1])
+                self.assertNotIn("RELEASED", keeper.channel.sent)
+            else:
+                self.assertIn("RELEASED", keeper.channel.sent)
+
     def test_work_stops_before_first_poll_without_renewing_existing_cleanup_grace(self):
         for stop in ("parent_cancel", "timeout", "latched_signal"):
             context, receipt = _context("keeper", parent_pid=430), _receipt(pid=432)
@@ -1409,6 +1706,57 @@ class ProfileOwnerWorkWaitTests(unittest.TestCase):
             self.assertEqual(context.secondary, [])
             self.assertFalse(context.cleanup_unknown)
             pump.assert_not_called()
+
+        # Unlike the _wait_child cases above, drive the actual K.run transition:
+        # an expired WORK failure or earlier cleanup bound is not a fresh R stop.
+        for stop in ("prior_work_failure", "earlier_cleanup"):
+            context = _context("keeper", parent_pid=430)
+            keeper = _keeper(context)
+            child = _settled_child(context, pid=432)
+            keeper.validator, keeper.receipt, keeper.moved = child, child.receipt, True
+            keeper.channel.eof = False
+            now, fixed, physical = [owner.NANOSECOND], [], []
+            failure = ValidationError(owner.ERROR)
+
+            def work():
+                if stop == "prior_work_failure":
+                    context.record(failure, "lifecycle")
+                else:
+                    context.begin_cleanup()
+                fixed.append(context.cleanup_limit)
+                now[0] = fixed[0]  # Already expired, and strictly before R.
+
+            def observe(role, event, **evidence):
+                if event == "group_retired":
+                    self.assertEqual(role, "keeper")
+                    physical.append(evidence["absent"])
+
+            def pause(_cutoff, *_args):
+                # A bounded failure report may flush after numeric cleanup has
+                # retired. No extra parent-control turn is permitted meanwhile.
+                self.assertTrue(keeper.channel.reader_closed)
+                self.assertTrue(keeper.group_retired)
+
+            original_pump = keeper.pump
+            with self.subTest(expired_keeper_run=stop), patch.object(owner.time, "monotonic_ns", side_effect=lambda: now[0]), patch.object(owner.os, "getppid", return_value=430), patch.object(owner.os, "getpid", return_value=431), patch.object(owner.os, "killpg", side_effect=AssertionError("expired cleanup must not request G")) as request, patch.object(owner.os, "_exit") as terminate, patch.object(owner, "_pause", side_effect=pause), patch.object(owner, "_role_event", side_effect=observe), patch.object(owner, "_spawn", side_effect=AssertionError("expired work must not create V")) as spawn, patch.object(owner, "_wait_child", side_effect=AssertionError("original V is already reaped")) as wait, patch.object(keeper, "move_out", side_effect=AssertionError("original K already moved")) as move, patch.object(keeper, "pump", wraps=original_pump) as pump, patch.object(keeper, "work", side_effect=work):
+                result = keeper.run()
+                request.assert_not_called(); terminate.assert_not_called()
+                spawn.assert_not_called(); wait.assert_not_called(); move.assert_not_called()
+            self.assertEqual(result, owner.HELPER_UNKNOWN)
+            self.assertEqual(pump.call_count, 1)
+            self.assertEqual(physical, [False])
+            self.assertEqual(context.cleanup_limit, fixed[0])
+            expected_failure = fixed[0] if stop == "prior_work_failure" else fixed[0] + owner.CLEANUP_SECONDS * owner.NANOSECOND
+            self.assertEqual(context.failure_limit, expected_failure)
+            if stop == "prior_work_failure":
+                self.assertIs(context.primary, failure)
+            else:
+                self.assertEqual((context.primary.args, context.reason), ((owner.TIMEOUT,), "deadline"))
+            self.assertTrue(context.cleanup_unknown)
+            self.assertFalse(keeper.released or keeper.parent_group_retired or keeper.group_absent)
+            self.assertIs(keeper.receipt, child.receipt)
+            self.assertEqual((child.polls, child.wait_state), (0, "REAPED"))
+            self.assertEqual([lease.close_calls for lease in keeper.descriptors.values()], [1] * 5)
 
     def test_late_work_receipt_and_last_prestatus_cancel_never_emit_status(self):
         for stop in ("late_receipt", "prestatus_cancel"):

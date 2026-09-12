@@ -35,9 +35,18 @@ class NativeUploadValidationTest < Minitest::Test
   RAW_REPORTING_NS = 2_000_000_000
   ISOLATED_FAILURE_PREFIX = "MRK_ISOLATED_COLLECTOR_FAILURE="
   ISOLATED_FAILURE_STAGES = %w[cli-admission request-contract source-bindings deadline-bound collector-execution
-                              capture-contract cleanup-contract reporting-contract custody-contract final-recheck proof-publication].freeze
+                              capture-contract cleanup-contract reporting-contract custody-contract final-recheck proof-publication
+                              capture-primary capture-retained-files capture-retained-lifetime capture-retained-streams
+                              capture-record-read capture-record-status capture-record-flags capture-dispatch-contract
+                              capture-dispatch-environment capture-source-identities capture-stream-identities capture-child-receipt
+                              capture-creator capture-lifetime-endpoints capture-provenance capture-bootstrap-header
+                              capture-bootstrap-request capture-bootstrap-sources capture-bootstrap-directory capture-bootstrap-dispatch
+                              capture-bootstrap-descriptors capture-bootstrap-configuration capture-bootstrap-ready capture-bootstrap-grant
+                              capture-bootstrap-exec capture-bootstrap-directory-finality capture-error-contract capture-readiness
+                              capture-transcript capture-termination].freeze
   ISOLATED_FAILURE_CATEGORIES = %w[assertion-error fixture-error native-lifecycle-error io-error os-error interrupt
-                                  system-exit standard-error exception unknown].freeze
+                                  system-exit json-parser-error key-error no-method-error type-error argument-error runtime-error
+                                  standard-error exception unknown].freeze
   NATIVE_PRIMARY_FAILURE_PREFIX = "MRK_NATIVE_PRIMARY_FAILURE="
   NATIVE_PRIMARY_FAILURE_CALLBACK_MODES = {
     "NativeUploadValidationTest#test_unexpected_pre_entry_failures_preserve_original_through_real_cleanup" =>
@@ -446,6 +455,12 @@ class NativeUploadValidationTest < Minitest::Test
     when SystemCallError then "os-error"
     when Interrupt then "interrupt"
     when SystemExit then "system-exit"
+    when JSON::ParserError then "json-parser-error"
+    when KeyError then "key-error"
+    when NoMethodError then "no-method-error"
+    when TypeError then "type-error"
+    when ArgumentError then "argument-error"
+    when RuntimeError then "runtime-error"
     when StandardError then "standard-error"
     when Exception then "exception"
     else "unknown"
@@ -1064,13 +1079,20 @@ class NativeUploadValidationTest < Minitest::Test
       assert line.ascii_only?
       category_errors = [original, UploadProcessFixture::Failure.new("private-marker", "private-marker"),
         MobileReleaseKit::NativeUploadProcess::LifecycleError.new, IOError.new("private-marker"), Errno::EIO.new("private-marker"),
-        Interrupt.new("private-marker"), SystemExit.new(17, "private-marker"), RuntimeError.new("private-marker"),
+        Interrupt.new("private-marker"), SystemExit.new(17, "private-marker"), JSON::ParserError.new("private-marker"),
+        KeyError.new("private-marker"), NoMethodError.new("private-marker"), TypeError.new("private-marker"),
+        ArgumentError.new("private-marker"), RuntimeError.new("private-marker"), StandardError.new("private-marker"),
         Exception.new("private-marker"), Object.new]
-      category_errors.zip(ISOLATED_FAILURE_CATEGORIES).each do |failure, category|
+      assert_equal 16, category_errors.length
+      assert_equal 16, ISOLATED_FAILURE_CATEGORIES.uniq.length
+      category_packets = category_errors.zip(ISOLATED_FAILURE_CATEGORIES).map do |failure, category|
         packet = fixture_class.isolated_failure_line("capture-contract", failure)
         assert_equal category, JSON.parse(packet.delete_prefix(ISOLATED_FAILURE_PREFIX)).fetch("category")
         refute_includes packet, "private-marker"
+        packet
       end
+      nesting_packet = fixture_class.isolated_failure_line("capture-contract", JSON::NestingError.new("private-marker"))
+      assert_equal "json-parser-error", JSON.parse(nesting_packet.delete_prefix(ISOLATED_FAILURE_PREFIX)).fetch("category")
       assert_nil fixture_class.isolated_failure_line("private-marker", original)
       malformed = [line + line, line + "#{ISOLATED_FAILURE_PREFIX}not-json\n", line.delete_suffix("\n"),
         line.sub('"schema":1', '"schema":1,"schema":1'), line.sub('"schema":1', '"schema":true'),
@@ -1086,6 +1108,18 @@ class NativeUploadValidationTest < Minitest::Test
         clock_sequence ? clock_sequence.shift || now : now
       end
       UploadProcessFixture.stub(:clock_ns, inert_clock) do
+        assert_equal 41, ISOLATED_FAILURE_STAGES.uniq.length
+        ISOLATED_FAILURE_STAGES.each do |stage|
+          packet = fixture_class.isolated_failure_line(stage, original)
+          assert_equal({"schema" => 1, "stage" => stage, "category" => "assertion-error"},
+                       JSON.parse(packet.delete_prefix(ISOLATED_FAILURE_PREFIX)))
+          assert packet.ascii_only?
+          assert_operator packet.bytesize, :<=, 256
+          assert_equal packet, fixture_class.parse_isolated_failure(packet, deadline_ns: 10)
+        end
+        (category_packets + [nesting_packet]).each do |packet|
+          assert_equal packet, fixture_class.parse_isolated_failure(packet, deadline_ns: 10)
+        end
         assert_equal line, fixture_class.parse_isolated_failure("private unrelated transcript\n#{line}", deadline_ns: 10)
         malformed.each { |raw| assert_nil fixture_class.parse_isolated_failure(raw, deadline_ns: 10) }
         assert_nil fixture_class.parse_isolated_failure("x" * (UploadProcessFixture::OUTPUT_LIMIT + 1), deadline_ns: 10)
@@ -1171,6 +1205,90 @@ class NativeUploadValidationTest < Minitest::Test
           actual = assert_raises(Minitest::Assertion) { assert_isolated_collector_exit(malformed_capture) }
           assert_same actual, malformed_capture.fetch(:isolated_failure_report).fetch(:primary)
           assert_empty writes
+        end
+
+        # Exercise the actual nested helpers, stopping at deliberate original
+        # operands. These partial inputs never reach a Process::Status/receipt
+        # assertion or stand in for a successful capture or native provenance.
+        checkpoint = lambda do |stage, operand, failure, with_state: true, &body|
+          state = {stage: "capture-contract", deadline_ns: 10}
+          evaluations = []
+          fault = lambda do |seen|
+            evaluations << [seen, state.fetch(:stage)]
+            raise failure
+          end
+          keywords = with_state ? {failure_state: state} : {}
+          actual = assert_raises(failure.class) { body.call(keywords, fault) }
+          assert_same failure, actual
+          expected_stage = with_state ? stage : "capture-contract"
+          assert_equal [[operand, expected_stage]], evaluations # Checkpoint preceded the operand.
+          assert_equal({stage: expected_stage, deadline_ns: 10}, state) # No early primary/report latch.
+          if with_state
+            writes = []
+            STDERR.stub(:write, ->(packet) { writes << packet; packet.bytesize }) do
+              fixture_class.report_isolated_cli_failure(state, actual)
+              state[:stage] = "proof-publication"
+              fixture_class.report_isolated_cli_failure(state, IOError.new("later private-marker"))
+            end
+            assert_equal [fixture_class.isolated_failure_line(stage, failure)], writes
+            assert_same failure, state.fetch(:primary)
+            assert_equal stage, state.fetch(:failure_stage)
+          end
+        end
+        capture_directory = "/inert-mrk-capture"
+        capture_observed = {directory: capture_directory, streams_closed: true, stop_completed: false}
+        [true, false].each do |with_state|
+          checkpoint.call("capture-record-read", File.join(capture_directory, "collector.json"),
+                          JSON::ParserError.new("private-marker"), with_state: with_state) do |keywords, fault|
+            File.stub(:file?, true) do
+              UploadProcessFixture.stub(:read_json, fault) do
+                assert_retained_capture(capture_observed, finality: :unknown, **keywords)
+              end
+            end
+          end
+        end
+
+        # Only scalar comparisons precede the original :child fetch; no child,
+        # acquisition, creator, lifetime or authoritative wait receipt exists.
+        capture_status = Struct.new(:exitstatus, :termsig).new(nil, 9)
+        capture_fixture = {"path" => File.join(capture_directory, "fixture.rb")}
+        capture_environment = UploadProcessFixture::PROCESS_OBSERVER_SELECTION.nil? ? {} :
+          {UploadProcessFixture::PROCESS_OBSERVER_KEY => UploadProcessFixture::PROCESS_OBSERVER_SELECTION}
+        capture_environment.merge!("TMPDIR" => capture_directory, "TMP" => capture_directory, "TEMP" => capture_directory)
+        capture_dispatch = {"isolatedControl" => false, "minitest" => nil, "fixture" => capture_fixture,
+          "argv" => [RbConfig.ruby, capture_fixture.fetch("path"), "driver", capture_directory],
+          "environment" => capture_environment, "cwd" => Dir.pwd, "interpreter" => :inert_interpreter,
+          "options" => {"unsetenv_others" => true, "pgroup" => true, "stdin" => File::NULL,
+            "stdout" => File.join(capture_directory, "driver.stdout"), "stderr" => File.join(capture_directory, "driver.stderr")}}
+        capture_record = {"phase" => "unknown", "exitStatus" => nil, "termSignal" => 9, "streamsClosed" => true,
+          "stopCompleted" => false, "inputsRechecked" => true, "dispatch" => capture_dispatch, "streamIdentities" => :inert_streams}
+        capture_observed.merge!(status: capture_status, dispatch: capture_dispatch, stream_identities: :inert_streams)
+        identity_reads = []
+        identity_reader = lambda do |path, limit:|
+          identity_reads << [path, limit]
+          path == RbConfig.ruby ? :inert_interpreter : capture_fixture
+        end
+        original_fetch = capture_observed.method(:fetch)
+        checkpoint.call("capture-child-receipt", :child, KeyError.new("private-marker")) do |keywords, fault|
+          capture_observed.stub(:fetch, ->(key) { key == :child ? fault.call(key) : original_fetch.call(key) }) do
+            File.stub(:file?, true) do
+              UploadProcessFixture.stub(:read_json, capture_record) do
+                stub(:dispatch_file_identity, identity_reader) do
+                  assert_retained_capture(capture_observed, finality: :unknown, **keywords)
+                end
+              end
+            end
+          end
+        end
+        assert_equal [[RbConfig.ruby, 32 * 1024 * 1024], [capture_fixture.fetch("path"), 1_048_576]], identity_reads
+
+        [true, false].each do |with_state|
+          checkpoint.call("capture-bootstrap-header", "version", NoMethodError.new("private-marker"),
+                          with_state: with_state) do |keywords, fault|
+            provenance = Object.new
+            provenance.define_singleton_method(:fetch, fault)
+            assert_raw_bootstrap_provenance(provenance, nil, nil, stream_identities: nil, finality: :unknown, **keywords)
+          end
         end
       end
 
@@ -1854,14 +1972,18 @@ class NativeUploadValidationTest < Minitest::Test
         end
       end
     end
-    failure_state[:stage] = "capture-contract"
+    failure_state[:stage] = "capture-primary"
     assert_same error, observed.fetch(:primary)
-    record = assert_retained_capture(observed, finality: :unknown)
+    record = assert_retained_capture(observed, finality: :unknown, failure_state: failure_state)
+    failure_state[:stage] = "capture-error-contract"
     assert_equal bounded_error(error), record.fetch("primary")
     assert_equal "driver", error.kind
     assert_equal "raw proof driver deadline expired", error.message
+    failure_state[:stage] = "capture-readiness"
     assert_equal({"observed" => true, "identity" => observed.fetch(:stream_identities).first}, record.fetch("literalReadiness"))
+    failure_state[:stage] = "capture-transcript"
     assert_equal "collector ready\n", File.binread(File.join(observed.fetch(:directory), "driver.stdout"), UploadProcessFixture::OUTPUT_LIMIT + 1)
+    failure_state[:stage] = "capture-termination"
     assert_equal Signal.list.fetch("KILL"), observed.fetch(:status).termsig
     failure_state[:stage] = "cleanup-contract"
     assert_equal 2, observed.fetch(:cleanup_errors).length
@@ -3033,21 +3155,28 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal "Synthetic validator could not be executed safely; no upload is authorized", value.fetch("nativeErrorMessage")
   end
 
-  def assert_retained_capture(observed, finality: :finalized)
+  def assert_retained_capture(observed, finality: :finalized, failure_state: nil)
+    failure_state[:stage] = "capture-retained-files" if failure_state
     assert_includes %i[finalized unknown], finality
     directory = observed.fetch(:directory)
     %w[input.json driver.stdout driver.stderr collector.json].each { |name| assert File.file?(File.join(directory, name)), name }
+    failure_state[:stage] = "capture-retained-lifetime" if failure_state
     assert_nil UploadProcessFixture.instance_variable_get(:@cancellation_scope)
     refute Thread.current.pending_interrupt?
+    failure_state[:stage] = "capture-retained-streams" if failure_state
     assert observed.fetch(:streams_closed)
     assert_equal finality == :finalized, observed.fetch(:stop_completed)
+    failure_state[:stage] = "capture-record-read" if failure_state
     record = UploadProcessFixture.read_json(File.join(directory, "collector.json"))
+    failure_state[:stage] = "capture-record-status" if failure_state
     assert_equal finality == :finalized ? "reaped" : "unknown", record.fetch("phase")
     assert_equal observed.fetch(:status).exitstatus, record.fetch("exitStatus")
     assert_equal observed.fetch(:status).termsig, record.fetch("termSignal")
+    failure_state[:stage] = "capture-record-flags" if failure_state
     assert record.fetch("streamsClosed")
     assert_equal finality == :finalized, record.fetch("stopCompleted")
     assert record.fetch("inputsRechecked")
+    failure_state[:stage] = "capture-dispatch-contract" if failure_state
     assert_equal observed.fetch(:dispatch), record.fetch("dispatch")
     dispatch = record.fetch("dispatch")
     if dispatch.fetch("isolatedControl")
@@ -3058,6 +3187,7 @@ class NativeUploadValidationTest < Minitest::Test
       assert_nil dispatch.fetch("minitest")
       assert_equal [RbConfig.ruby, dispatch.fetch("fixture").fetch("path"), "driver", directory], dispatch.fetch("argv")
     end
+    failure_state[:stage] = "capture-dispatch-environment" if failure_state
     expected_environment = UploadProcessFixture::PROCESS_OBSERVER_SELECTION.nil? ? {} :
       {UploadProcessFixture::PROCESS_OBSERVER_KEY => UploadProcessFixture::PROCESS_OBSERVER_SELECTION}
     expected_environment.merge!("TMPDIR" => directory, "TMP" => directory, "TEMP" => directory)
@@ -3065,18 +3195,23 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal Dir.pwd, dispatch.fetch("cwd")
     assert_equal({"unsetenv_others" => true, "pgroup" => true, "stdin" => File::NULL,
                   "stdout" => File.join(directory, "driver.stdout"), "stderr" => File.join(directory, "driver.stderr")}, dispatch.fetch("options"))
+    failure_state[:stage] = "capture-source-identities" if failure_state
     assert_equal dispatch.fetch("interpreter"), dispatch_file_identity(RbConfig.ruby, limit: 32 * 1024 * 1024)
     assert_equal dispatch.fetch("fixture"), dispatch_file_identity(dispatch.fetch("fixture").fetch("path"), limit: 1_048_576)
+    failure_state[:stage] = "capture-stream-identities" if failure_state
     assert_equal observed.fetch(:stream_identities), record.fetch("streamIdentities")
+    failure_state[:stage] = "capture-child-receipt" if failure_state
     child = observed.fetch(:child)
     assert_same observed.fetch(:status), child.status
     assert_instance_of Process::Status, child.status
     assert_same child.child, child.acquisition.child
     assert_same child.status, child.child.receipt.raw_status
     assert_equal child.pid, child.status.pid
+    failure_state[:stage] = "capture-creator" if failure_state
     assert child.creator.joined?
     assert child.creator.finished?
     refute child.creator.unresolved?
+    failure_state[:stage] = "capture-lifetime-endpoints" if failure_state
     assert_equal observed.fetch(:run_deadline_ns), child.creator.run_deadline_ns
     assert_equal observed.fetch(:hard_deadline_ns), child.creator.hard_cleanup_deadline_ns
     assert_equal observed.fetch(:run_deadline_ns), record.fetch("runDeadlineNs")
@@ -3084,13 +3219,15 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal observed.fetch(:enclosing_deadline_ns), record.fetch("enclosingDeadlineNs")
     assert_equal observed.fetch(:hard_deadline_ns), observed.fetch(:collector_lifetime).instance_variable_get(:@drain_deadline_ns).call
     assert_equal observed.fetch(:enclosing_deadline_ns), observed.fetch(:reporting_lifetime).instance_variable_get(:@drain_deadline_ns).call
+    failure_state[:stage] = "capture-provenance" if failure_state
     assert_equal child.provenance, record.fetch("ownedChild")
     assert_raw_bootstrap_provenance(record.fetch("ownedChild"), dispatch, child.status,
-                                    stream_identities: record.fetch("streamIdentities"), finality: finality)
+                                    stream_identities: record.fetch("streamIdentities"), finality: finality, failure_state: failure_state)
     record
   end
 
-  def assert_raw_bootstrap_provenance(provenance, dispatch, status, stream_identities:, finality:)
+  def assert_raw_bootstrap_provenance(provenance, dispatch, status, stream_identities:, finality:, failure_state: nil)
+    failure_state[:stage] = "capture-bootstrap-header" if failure_state
     assert_equal 1, provenance.fetch("version")
     assert_equal status.pid, provenance.fetch("pid")
     assert_equal finality == :finalized ? "reaped" : "unknown", provenance.fetch("phase")
@@ -3099,8 +3236,10 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal finality == :finalized, provenance.fetch("resourcesClosed")
     assert_equal({"pid" => status.pid, "status_kind" => status.exited? ? "exit" : "signal",
                   "status_code" => status.exited? ? status.exitstatus : status.termsig}, provenance.fetch("wait"))
+    failure_state[:stage] = "capture-bootstrap-request" if failure_state
     assert_equal({"executable" => dispatch.fetch("argv").first, "argv" => dispatch.fetch("argv"),
                   "environment" => dispatch.fetch("environment"), "cwd" => dispatch.fetch("cwd")}, provenance.fetch("requested"))
+    failure_state[:stage] = "capture-bootstrap-sources" if failure_state
     bootstrap = provenance.fetch("nativeBootstrap")
     assert_equal %w[argv creatorCwd environment executable fdSources fixtureSha256], bootstrap.keys.sort
     sources = dispatch.fetch("bootstrapSources")
@@ -3109,6 +3248,7 @@ class NativeUploadValidationTest < Minitest::Test
       assert_equal source, dispatch_file_identity(source.fetch("path"), limit: 1_048_576)
     end
     fixture = sources.fetch("tests/workflow/upload_process_fixture.rb")
+    failure_state[:stage] = "capture-bootstrap-directory" if failure_state
     launch = provenance.fetch("launchDirectory")
     assert_equal %w[dev gid ino mode rdev type uid], launch.fetch("identity").keys.sort
     assert_equal File.dirname(dispatch.fetch("options").fetch("stdout")), File.dirname(launch.fetch("path"))
@@ -3116,17 +3256,20 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal "directory", launch.fetch("identity").fetch("type")
     assert_equal Process.uid, launch.fetch("identity").fetch("uid")
     assert_equal 0o700, launch.fetch("identity").fetch("mode") & 0o7777
+    failure_state[:stage] = "capture-bootstrap-dispatch" if failure_state
     assert_equal File.realpath(RbConfig.ruby), bootstrap.fetch("executable")
     assert_equal [File.realpath(RbConfig.ruby), *MobileReleaseKit::NativeUploadProcess::HELPER_FLAGS, "--",
                   fixture.fetch("realpath"), "owned-child", launch.fetch("path")], bootstrap.fetch("argv")
     assert_equal MobileReleaseKit::NativeUploadProcess.helper_environment, bootstrap.fetch("environment")
     assert_equal dispatch.fetch("cwd"), bootstrap.fetch("creatorCwd")
     assert_equal fixture.fetch("sha256"), bootstrap.fetch("fixtureSha256")
+    failure_state[:stage] = "capture-bootstrap-descriptors" if failure_state
     descriptors = bootstrap.fetch("fdSources")
     assert_equal %w[in out err], descriptors.map { |entry| entry.fetch("role") }
     assert_equal UploadProcessFixture::OwnedChild.identity(File.stat(File::NULL)), descriptors.first.fetch("identity")
     assert_equal stream_identities, descriptors.drop(1).map { |entry| entry.fetch("identity") }
 
+    failure_state[:stage] = "capture-bootstrap-configuration" if failure_state
     config = provenance.fetch("configuration")
     assert_equal %w[bytes identity path sha256], config.keys.sort
     assert_equal File.join(launch.fetch("path"), "configuration.json"), config.fetch("path")
@@ -3135,12 +3278,16 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal 0o600, config.fetch("identity").fetch("mode") & 0o7777
     assert_includes 1..UploadProcessFixture::OUTPUT_LIMIT, config.fetch("bytes")
     assert_match(/\A[0-9a-f]{64}\z/, config.fetch("sha256"))
+    failure_state[:stage] = "capture-bootstrap-ready" if failure_state
     assert_equal({"version" => 1, "pid" => status.pid, "pgid" => status.pid, "sid" => status.pid,
                   "configurationSha256" => config.fetch("sha256"), "cwd" => dispatch.fetch("cwd")}, provenance.fetch("ready"))
+    failure_state[:stage] = "capture-bootstrap-grant" if failure_state
     assert_equal({"state" => "granted", "bytesWritten" => 3}, provenance.fetch("grant"))
+    failure_state[:stage] = "capture-bootstrap-exec" if failure_state
     assert_equal({"version" => 1, "pid" => status.pid, "configurationSha256" => config.fetch("sha256"),
                   "argvSha256" => Digest::SHA256.hexdigest(JSON.generate(dispatch.fetch("argv"))),
                   "cwd" => dispatch.fetch("cwd")}, provenance.fetch("execAttempt"))
+    failure_state[:stage] = "capture-bootstrap-directory-finality" if failure_state
     if finality == :finalized
       refute File.exist?(launch.fetch("path"))
     else

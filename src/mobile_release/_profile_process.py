@@ -1652,6 +1652,7 @@ class _Keeper:
         self.directory: Path | None = None
         self.run_granted = self.moved = self.released = False
         self.group_retired = self.group_absent = False
+        self.parent_group_retired = False
         self.eof_seen = False
         self.parent_cancellation: BaseException | None = None
         self.validator: Any = None
@@ -1676,13 +1677,19 @@ class _Keeper:
             elif kind == "CANCEL":
                 self.parent_cancellation = ctx.cancel_frame(frame)
             elif kind == "GROUP_RETIRED":
-                _require(frame["group_id"] == self.group_id and not self.group_retired)
-                self.group_retired, self.group_absent = True, frame["absent"]
-                _role_event(ctx.role, "group_retired", group=self, absent=self.group_absent)
-                if not self.group_absent:
-                    ctx.record(ValidationError(CLEANUP_ERROR), "lifecycle", cleanup=True)
+                _require(frame["group_id"] == self.group_id and not self.parent_group_retired)
+                if self.group_retired:
+                    _require(self.group_absent and frame["absent"] and not ctx.cleanup_unknown)
+                # The parent's one-shot notice is not another physical retirement.
+                # Claim it before an observation failure could permit replay.
+                self.parent_group_retired = True
+                if not self.group_retired:
+                    self.group_retired, self.group_absent = True, frame["absent"]
+                    _role_event(ctx.role, "group_retired", group=self, absent=self.group_absent)
+                    if not self.group_absent:
+                        ctx.record(ValidationError(CLEANUP_ERROR), "lifecycle", cleanup=True)
             else:
-                _require(kind == "RELEASE" and self.group_retired and not self.released)
+                _require(kind == "RELEASE" and self.parent_group_retired and self.group_retired and not self.released)
                 self.released = True
         if self.channel.eof and not self.eof_seen:
             self.eof_seen = True
@@ -1807,10 +1814,28 @@ class _Keeper:
             while not self.released:
                 self.safe_pump()
                 cutoff = ctx.cleanup_cutoff(ctx.failure_limit or ctx.run)
-                if self.eof_seen or os.getppid() != ctx.parent_pid or time.monotonic_ns() >= cutoff:
+                parent_lost = os.getppid() != ctx.parent_pid
+                now = time.monotonic_ns()
+                if self.eof_seen or parent_lost or now >= cutoff:
+                    first_run_expiry = (ctx.primary is None and not ctx.cleanup_unknown
+                                        and not self.eof_seen and not parent_lost
+                                        and cutoff == ctx.run and now >= ctx.run)
                     if ctx.primary is None:
                         ctx.record(ValidationError(TIMEOUT), "deadline")
-                    self.fallback_group()
+                    if not self.group_retired:
+                        self.fallback_group()
+                    # At the first ordinary run stop, retire G immediately but
+                    # keep C's original reader for its still-pending final writes.
+                    # This uses only the SAME first-failure/cleanup window; an
+                    # earlier failure or expired shorter cleanup gets no renewal.
+                    if (first_run_expiry and not self.released and self.group_retired and self.group_absent
+                            and not ctx.cleanup_unknown and not self.eof_seen and not self.channel.eof
+                            and not self.channel.decoder.failed and not self.channel.decoder.ended
+                            and not self.channel.reader_closed and id(self.channel.reader) not in ctx.closed
+                            and self.channel.reader.state == "OPEN" and not self.channel.reader.unknown
+                            and os.getppid() == ctx.parent_pid
+                            and time.monotonic_ns() < ctx.cleanup_cutoff(ctx.failure_limit or ctx.run)):
+                        continue
                     break
                 if (not self.released and self.validator is not None and self.validator.receipt is None
                         and self.validator.wait_state in ("OWNED", "POLLABLE")):

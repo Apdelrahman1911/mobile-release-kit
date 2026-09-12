@@ -1586,6 +1586,31 @@ class CIControllerContractTests(unittest.TestCase):
             isolated_step = controller.Step("ruby-native-capture", parser="minitest", expected_tests=3,
                                             native_partition="healthy")
             isolated_record = {"schema": 1, "stage": "capture-contract", "category": "assertion-error"}
+            isolated_checkpoints = (
+                "capture-primary", "capture-retained-files", "capture-retained-lifetime", "capture-retained-streams",
+                "capture-record-read", "capture-record-status", "capture-record-flags", "capture-dispatch-contract",
+                "capture-dispatch-environment", "capture-source-identities", "capture-stream-identities",
+                "capture-child-receipt", "capture-creator", "capture-lifetime-endpoints", "capture-provenance",
+                "capture-bootstrap-header", "capture-bootstrap-request", "capture-bootstrap-sources", "capture-bootstrap-directory",
+                "capture-bootstrap-dispatch", "capture-bootstrap-descriptors", "capture-bootstrap-configuration",
+                "capture-bootstrap-ready", "capture-bootstrap-grant", "capture-bootstrap-exec",
+                "capture-bootstrap-directory-finality", "capture-error-contract", "capture-readiness", "capture-transcript",
+                "capture-termination",
+            )
+            isolated_stages = (
+                "cli-admission", "request-contract", "source-bindings", "deadline-bound", "collector-execution",
+                "capture-contract", "cleanup-contract", "reporting-contract", "custody-contract", "final-recheck",
+                "proof-publication", *isolated_checkpoints,
+            )
+            isolated_categories = (
+                "assertion-error", "fixture-error", "native-lifecycle-error", "io-error", "os-error", "interrupt",
+                "system-exit", "json-parser-error", "key-error", "no-method-error", "type-error", "argument-error", "runtime-error",
+                "standard-error", "exception", "unknown",
+            )
+            self.assertEqual(controller.ISOLATED_COLLECTOR_FAILURE_STAGES, isolated_stages)
+            self.assertEqual(controller.ISOLATED_COLLECTOR_FAILURE_CATEGORIES, isolated_categories)
+            self.assertEqual((len(isolated_stages), len(set(isolated_stages)),
+                              len(isolated_categories), len(set(isolated_categories))), (41, 41, 16, 16))
             def isolated_bytes(record):
                 return (controller.ISOLATED_COLLECTOR_FAILURE_PREFIX
                         + json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
@@ -1614,6 +1639,21 @@ class CIControllerContractTests(unittest.TestCase):
                     self.assertNotIn("PRIVATE_MESSAGE", json.dumps(detail))
                     with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
                         controller.parse_capture(isolated_step, failed_capture, paths, "macos", None)
+
+                # Finite refinements keep the SAME schema/cap/adverse target.
+                # Class precedence belongs to the Ruby producer; these two
+                # independent enums need no redundant Cartesian matrix.
+                refinements = [{**isolated_record, "stage": stage, "category": "standard-error"}
+                               for stage in isolated_checkpoints]
+                refinements += [{**isolated_record, "stage": "capture-record-read", "category": category}
+                                for category in isolated_categories[7:13]]
+                for record in refinements:
+                    raw = isolated_bytes(record)
+                    self.assertLessEqual(len(raw), 256)
+                    detail = controller.failure_details(capture(isolated_stdout, stderr=raw, ok=False, returncode=1),
+                                                        isolated_step, paths, deadline=1000.0)
+                    self.assertEqual(detail["isolated_collector_failure"], record)
+                    self.assertEqual(detail["returncode"], 1)
 
                 # Actual F/E structure remains adverse even after a genuine rc0;
                 # a marker alone cannot relabel a clean successful callback.

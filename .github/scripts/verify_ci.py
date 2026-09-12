@@ -117,10 +117,20 @@ ISOLATED_COLLECTOR_FAILURE_STAGES = (
     "cli-admission", "request-contract", "source-bindings", "deadline-bound", "collector-execution",
     "capture-contract", "cleanup-contract", "reporting-contract", "custody-contract", "final-recheck",
     "proof-publication",
+    "capture-primary", "capture-retained-files", "capture-retained-lifetime", "capture-retained-streams",
+    "capture-record-read", "capture-record-status", "capture-record-flags", "capture-dispatch-contract",
+    "capture-dispatch-environment", "capture-source-identities", "capture-stream-identities",
+    "capture-child-receipt", "capture-creator", "capture-lifetime-endpoints", "capture-provenance",
+    "capture-bootstrap-header", "capture-bootstrap-request", "capture-bootstrap-sources", "capture-bootstrap-directory",
+    "capture-bootstrap-dispatch", "capture-bootstrap-descriptors", "capture-bootstrap-configuration",
+    "capture-bootstrap-ready", "capture-bootstrap-grant", "capture-bootstrap-exec",
+    "capture-bootstrap-directory-finality", "capture-error-contract", "capture-readiness", "capture-transcript",
+    "capture-termination",
 )
 ISOLATED_COLLECTOR_FAILURE_CATEGORIES = (
     "assertion-error", "fixture-error", "native-lifecycle-error", "io-error", "os-error", "interrupt",
-    "system-exit", "standard-error", "exception", "unknown",
+    "system-exit", "json-parser-error", "key-error", "no-method-error", "type-error", "argument-error", "runtime-error",
+    "standard-error", "exception", "unknown",
 )
 NATIVE_PRIMARY_FAILURE_PREFIX = "MRK_NATIVE_PRIMARY_FAILURE="
 NATIVE_PRIMARY_FAILURE_CALLBACK_MODES = {
