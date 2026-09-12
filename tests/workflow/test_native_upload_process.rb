@@ -14,6 +14,7 @@ require_relative "../../fastlane/native_upload_process"
 module NativeUploadFixtureGuard
   @reuse_forbidden = false
   @retained_cases = []
+  FAILURE_LOCATION = %r{\A(?:(?:/[^/:\x00-\x1f\x7f]+)*/)?(tests/workflow/test_native_upload_process\.rb|fastlane/native_upload_process\.rb|fastlane/native_process_spawn\.rb):([1-9][0-9]{0,5})(?::in [`'][^\x00-\x1f\x7f]*')?\z}n.freeze
 
   def self.before_case!
     raise "native owner fixture reuse forbidden after an adverse case" if @reuse_forbidden
@@ -28,11 +29,54 @@ module NativeUploadFixtureGuard
     !NativeUploadRoleTest::RETAINED.empty? || !NativeUploadTaskSlotTest::RETAINED.empty?
   end
 
+  def self.report_failure_locations(result)
+    return if result.instance_variable_get(:@mrk_failure_locations_attempted)
+
+    # Result-local, so inert controls cannot consume the actual capture's
+    # report. The unchanged first-adverse-case veto prevents another real one.
+    result.instance_variable_set(:@mrk_failure_locations_attempted, true)
+    failures = result.failures
+    return unless failures.instance_of?(Array)
+
+    locations = []
+    failures.first(4).each do |failure|
+      backtrace = failure.backtrace
+      next unless backtrace.instance_of?(Array)
+
+      backtrace.first(32).each do |row|
+        next unless row.instance_of?(String) && row.bytesize <= 1_024
+
+        match = FAILURE_LOCATION.match(row.b)
+        next unless match
+        next if row.split(":", 2).first.split("/").any? { |part| part == "." || part == ".." }
+
+        location = "#{match[1]}:#{match[2]}"
+        locations << location unless locations.include?(location)
+        break if locations.length == 4
+      end
+      break if locations.length == 4
+    end
+    return if locations.empty?
+
+    output = "\nMRK_NATIVE_OWNER_FAILURE_LOCATIONS=\n" + locations.join("\n") + "\n"
+    return unless output.ascii_only? && output.bytesize <= 1_024
+
+    # Ordinary captured output AFTER original teardown and the reuse veto.
+    # No flush, retry, descriptor change, native observation or finality claim.
+    STDERR.write(output)
+    nil
+  rescue Exception
+    nil # Optional diagnostics must not replace the original adverse result.
+  end
+
   def run
     NativeUploadFixtureGuard.before_case!
     begin
       result = super
-      NativeUploadFixtureGuard.forbid_reuse!(self) unless passed? && !NativeUploadFixtureGuard.custody_retained?
+      unless passed? && !NativeUploadFixtureGuard.custody_retained?
+        NativeUploadFixtureGuard.forbid_reuse!(self)
+        NativeUploadFixtureGuard.report_failure_locations(result)
+      end
       result
     rescue Exception
       NativeUploadFixtureGuard.forbid_reuse!(self)
@@ -851,15 +895,23 @@ class NativeUploadRoleTest < Minitest::Test
   end
 
   def test_native_parent_control_eof_starts_pre_run_cleanup_without_commit
+    # These controls stop at a Ruby decision seam, never a synthetic native
+    # receipt. All stubs are restored before the genuine owned fixture below.
+    with_inert_native_role_effects_rejected do
+      assert_forwarded_parent_loss_decision
+      assert_failure_location_reporting
+    end
     harness = build('raise "validator must never execute"')
     harness.wait_frame("HELLO")
     harness.send_command("ADMIT")
-    harness.wait_frame("RESERVED")
+    reserved = harness.wait_frame("RESERVED")
     harness.close_control
     harness.finish
     final = harness.frame("FINAL")
     assert_equal "failed", final.fetch("outcome")
     assert_equal "confirmed", final.fetch("cleanup")
+    assert_equal({ "state" => "reaped", "pid" => reserved.fetch("keeper_pid"),
+                   "status_kind" => "exit", "status_code" => 0 }, final.fetch("keeper"))
     assert_equal({ "state" => "not_attempted" }, final.fetch("validator"))
     assert final.fetch("group").fetch("absent")
     assert_equal 2, harness.receipt.status_code
@@ -1035,6 +1087,234 @@ class NativeUploadRoleTest < Minitest::Test
   end
 
   private
+
+  def with_inert_native_role_effects_rejected(&body)
+    effects = []
+    reject = lambda do |*arguments, **keywords|
+      effects << :unexpected_effect
+      raise "inert native-role control attempted an effect"
+    end
+    operations = [[Owner, :native], [NativeUploadRoleHarness, :new], [Thread, :new],
+                  [Owner::TaskSlot, :retain], [File, :open], [File, :read], [File, :binread],
+                  [File, :write], [IO, :pipe], [Process, :spawn], [Process, :fork],
+                  [Process, :kill], [Process, :waitpid], [Process, :waitpid2],
+                  [Process, :setsid], [Process, :setpgid], [Process, :clock_gettime],
+                  [STDERR, :flush], [STDERR, :write_nonblock]]
+    enter = lambda do |index|
+      if index == operations.length
+        body.call
+      else
+        object, name = operations.fetch(index)
+        object.stub(name, reject) { enter.call(index + 1) }
+      end
+    end
+    enter.call(0)
+    assert_empty effects, "a no-throw diagnostic swallowed an effect tripwire"
+  end
+
+  def assert_forwarded_parent_loss_decision
+    now = 1_000_000_000
+    hard = 10_000_000_000
+    boundary_error = Class.new(StandardError).new("inert terminal decision boundary")
+    entries = []
+    Owner.stub(:monotonic_ns, -> { now }) do
+      bootstrap = Owner::TaskSlot.new(run_deadline_ns: 5_000_000_000, hard_cleanup_deadline_ns: hard)
+      descendant = Owner::TaskSlot.new(parent_slot: bootstrap, run_deadline_ns: 5_000_000_000,
+                                       hard_cleanup_deadline_ns: hard)
+      keeper = Owner::Keeper.allocate
+      { bootstrap_slot: bootstrap, slots: [bootstrap, descendant], hard_cleanup_deadline_ns: hard,
+        failed: false, local_failure: false, parent_lost: false, terminal_started: false,
+        release_received: false, group_created: false, signal_generation: 0 }.each do |name, value|
+        keeper.instance_variable_set(:"@#{name}", value)
+      end
+      # No child, group, acquisition, wait, EOF or native cleanup fact exists
+      # in this model. Stop immediately on entry to the terminal decision tail.
+      record_placeholder = Object.new
+      keeper.define_singleton_method(:validator_record) { record_placeholder }
+      keeper.define_singleton_method(:receive_parent) do
+        entries << :terminal_decision
+        raise boundary_error
+      end
+      %i[tick! prepare_terminal_io start_terminal abandon_terminal own_resources_settled?
+         move_to_parent_group cleanup_group poll_validator].each do |name|
+        keeper.define_singleton_method(name) { |*args, **kwargs| raise "inert decision crossed its tripwire" }
+      end
+
+      keeper.send(:fail!, "parent_lost", cutoff: 3_000_000_000, from_parent: true)
+      assert keeper.instance_variable_get(:@failed)
+      refute keeper.instance_variable_get(:@local_failure)
+      refute keeper.instance_variable_get(:@parent_lost)
+      assert keeper.instance_variable_get(:@validator_launch_closed)
+      assert_equal "parent_lost", keeper.instance_variable_get(:@failure_reason)
+      assert_nil keeper.send(:finish_if_ready)
+      assert_empty entries, "an ancestor's loss must not authorize autonomous K release"
+      [bootstrap, descendant].each do |slot|
+        assert slot.cancelled?
+        assert slot.launch_retired?
+        refute slot.start_attempted?
+        assert_equal 3_000_000_000, slot.cleanup_deadline_ns
+      end
+
+      first = IOError.new("private inert original error")
+      now += 100_000_000
+      keeper.send(:fail!, "parent_lost", error: first, cutoff: hard, from_parent: true)
+      assert_same first, keeper.instance_variable_get(:@first_error)
+      assert_same first, bootstrap.first_error
+      assert_same first, descendant.first_error
+      assert_equal 3_000_000_000, keeper.instance_variable_get(:@cleanup_deadline_ns)
+      assert_nil keeper.send(:finish_if_ready)
+      assert_empty entries
+
+      keeper.send(:fail!, "parent_lost") # A subsequent LOCAL observation still counts.
+      assert keeper.instance_variable_get(:@parent_lost)
+      assert keeper.instance_variable_get(:@local_failure)
+      returned = assert_raises(boundary_error.class) { keeper.send(:finish_if_ready) }
+      assert_same boundary_error, returned
+      assert_equal [:terminal_decision], entries
+      now += 100_000_000
+      keeper.send(:fail!, "parent_lost", error: RuntimeError.new("later private error"),
+                  cutoff: 2_500_000_000, from_parent: true)
+      assert keeper.instance_variable_get(:@parent_lost), "forwarding must never clear local parent loss"
+      assert_same first, keeper.instance_variable_get(:@first_error)
+      assert_equal "parent_lost", keeper.instance_variable_get(:@failure_reason)
+      assert_equal 2_500_000_000, keeper.instance_variable_get(:@cleanup_deadline_ns)
+      [bootstrap, descendant].each do |slot|
+        assert_same first, slot.first_error
+        assert_equal 2_500_000_000, slot.cleanup_deadline_ns
+        refute slot.start_attempted?
+      end
+    end
+  end
+
+  def assert_failure_location_reporting
+    guard = NativeUploadFixtureGuard
+    original_guard = [guard.instance_variable_get(:@reuse_forbidden), guard.instance_variable_get(:@retained_cases).dup]
+    failure_type = Struct.new(:backtrace)
+    result_type = Struct.new(:failures)
+    private_marker = "private-native-diagnostic-marker"
+    first_location = "tests/workflow/test_native_upload_process.rb:862"
+    bounded_row = "/" + "x" * (1_024 - first_location.bytesize - 2) + "/" + first_location
+    valid_rows = [bounded_row,
+                  "/private/#{private_marker}/fastlane/native_upload_process.rb:1173:in `#{private_marker}'",
+                  "fastlane/native_process_spawn.rb:1", "fastlane/native_process_spawn.rb:1",
+                  "fastlane/native_upload_process.rb:999999",
+                  "fastlane/native_upload_process.rb:2"]
+    make_result = ->(rows) { result_type.new([failure_type.new(rows)]) }
+    expected = "\nMRK_NATIVE_OWNER_FAILURE_LOCATIONS=\n" +
+               [first_location, "fastlane/native_upload_process.rb:1173", "fastlane/native_process_spawn.rb:1",
+                "fastlane/native_upload_process.rb:999999"].join("\n") + "\n"
+    single_expected = "\nMRK_NATIVE_OWNER_FAILURE_LOCATIONS=\n#{first_location}\n"
+    result = make_result.call(valid_rows)
+    original_failure = result.failures.first
+    writes, attempts = [], []
+    STDERR.stub(:write, lambda { |bytes|
+      writes << bytes
+      attempts << result.instance_variable_get(:@mrk_failure_locations_attempted)
+      bytes.bytesize
+    }) do
+      2.times { assert_nil guard.report_failure_locations(result) }
+    end
+    assert_equal [expected], writes
+    assert_equal [true], attempts
+    assert_same original_failure, result.failures.first
+    assert writes.first.ascii_only?
+    assert_operator writes.first.bytesize, :<=, 1_024
+    refute_includes writes.first, private_marker
+    refute_includes writes.first, "/private/"
+
+    overlong = "/" + "x" * (1_025 - first_location.bytesize - 2) + "/" + first_location
+    invalid_rows = [nil, Class.new(String).new(first_location), overlong,
+                    "fastlane/native_upload_process.rb:0", "fastlane/native_upload_process.rb:01",
+                    "fastlane/native_upload_process.rb:1000000", "fastlane/native_upload_process.rb.bak:1",
+                    "notfastlane/native_upload_process.rb:1", "/private/../fastlane/native_upload_process.rb:1",
+                    "#{first_location}\n#{private_marker}", "fastlane/native_upload_process.rb:1:unframed"]
+    bounded_reads = []
+    beyond_four = Object.new
+    beyond_four.define_singleton_method(:backtrace) { bounded_reads << :fifth_failure; [first_location] }
+    bounded_failures = Array.new(4) { failure_type.new(Array.new(32, "ignored") + [first_location]) } + [beyond_four]
+    malformed = [make_result.call(invalid_rows), result_type.new(nil),
+                 result_type.new(Class.new(Array).new([original_failure])), make_result.call(first_location),
+                 make_result.call(Class.new(Array).new([first_location])), result_type.new(bounded_failures)]
+    writes = []
+    STDERR.stub(:write, ->(bytes) { writes << bytes; bytes.bytesize }) do
+      malformed.each { |value| assert_nil guard.report_failure_locations(value) }
+    end
+    assert_empty writes
+    assert_empty bounded_reads
+
+    # Failure/backtrace inspection and output errors remain optional; an
+    # already-attempted result is never retried, including a short write.
+    [:short, :raise, :backtrace_error].each do |fault|
+      value = make_result.call([first_location])
+      failure = value.failures.first
+      inspections = []
+      if fault == :backtrace_error
+        failure.define_singleton_method(:backtrace) do
+          inspections << :read
+          raise IOError, private_marker
+        end
+      end
+      writes = []
+      STDERR.stub(:write, lambda { |bytes|
+        writes << bytes
+        raise IOError, private_marker if fault == :raise
+
+        0
+      }) do
+        2.times { assert_nil guard.report_failure_locations(value) }
+      end
+      assert_equal(fault == :backtrace_error ? [] : [single_expected], writes)
+      assert_equal(fault == :backtrace_error ? [:read] : [], inspections)
+      assert_same failure, value.failures.first
+      assert value.instance_variable_get(:@mrk_failure_locations_attempted)
+    end
+
+    # The superclass is inert, not Minitest::Test; these are never registered
+    # cases. Stub the three hooks, never mutate/reset the real capture's veto.
+    [:adverse, :body_error, :entry_error].each do |mode|
+      events, latched = [], []
+      value = make_result.call([first_location])
+      original_error = RuntimeError.new(private_marker)
+      parent = Class.new do
+        define_method(:run) do
+          events << :body
+          begin
+            raise original_error if mode == :body_error
+
+            value
+          ensure
+            events << :teardown
+          end
+        end
+        define_method(:passed?) { false }
+      end
+      runner = Class.new(parent) { prepend NativeUploadFixtureGuard }.new
+      entry = lambda do
+        events << :entry
+        raise original_error if mode == :entry_error
+      end
+      latch = ->(test) { events << :veto; latched << test }
+      STDERR.stub(:write, ->(bytes) { events << :write; bytes.bytesize }) do
+        guard.stub(:before_case!, entry) do
+          guard.stub(:forbid_reuse!, latch) do
+            guard.stub(:custody_retained?, -> { events << :custody; false }) do
+              if mode == :adverse
+                assert_same value, runner.run
+              else
+                assert_same original_error, assert_raises(RuntimeError) { runner.run }
+              end
+            end
+          end
+        end
+      end
+      expected_events = mode == :entry_error ? [:entry] : [:entry, :body, :teardown, :veto]
+      expected_events << :write if mode == :adverse
+      assert_equal expected_events, events
+      assert_equal(mode == :entry_error ? [] : [runner], latched)
+    end
+    assert_equal original_guard, [guard.instance_variable_get(:@reuse_forbidden),
+                                  guard.instance_variable_get(:@retained_cases)]
+  end
 
   def new_directory
     directory = File.realpath(Dir.mktmpdir("mrk-native-role-"))

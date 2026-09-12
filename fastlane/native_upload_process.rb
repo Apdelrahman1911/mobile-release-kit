@@ -1170,7 +1170,7 @@ module MobileReleaseKit
         @failure_reason ||= @first_error ? NativeUploadProcess.reason_for(@first_error) : reason
         @failed = true
         @local_failure = true unless from_parent
-        @parent_lost = true if reason == "parent_lost"
+        @parent_lost = true if reason == "parent_lost" && !from_parent
         if @terminal_started
           @terminal_poisoned = true
           @intended_exit = 1

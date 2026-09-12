@@ -892,6 +892,42 @@ class CIControllerContractTests(unittest.TestCase):
         wheel = controller.Step("python-wheel", parser="check")
         self.assertEqual(controller.failure_details(capture([callback], check="python-wheel", stderr=marker),
             wheel, paths, checks=checks, deadline=1000.0)["profile_fixture_failure"], diagnostic)
+
+        # Exercise the actual verbosity-2 transport boundary: startTest leaves
+        # its progress line open while the real fixture publishes its record.
+        # An empty emitter sink and a separately fabricated parser input cannot
+        # detect a marker accidentally appended to that unfinished progress line.
+        from . import profile_process_fixture as fixture
+        stream = io.StringIO()
+        inner_error = AssertionError(private)
+        inner_stderr = ("Traceback (most recent call last):\n"
+                        f'  File "/{private}/tests/workflow/profile_process_fixture.py", line 1199, in driver\n'
+                        f"AssertionError: {private}\n").encode("ascii")
+
+        def emit_then_fail():
+            fixture._report_driver_failure("partial-write-failure", 1, inner_stderr)
+            raise inner_error
+
+        with patch.object(fixture.sys, "stderr", stream):
+            inner_result = unittest.TextTestRunner(stream=stream, verbosity=2, failfast=True).run(
+                unittest.FunctionTestCase(emit_then_fail))
+        self.assertEqual((inner_result.testsRun, len(inner_result.failures), len(inner_result.errors)), (1, 1, 0))
+        self.assertFalse(inner_result.wasSuccessful())
+        transported = stream.getvalue().encode("ascii")
+        self.assertIn(b" ... \n" + controller.PROFILE_FIXTURE_FAILURE_PREFIX.encode("ascii"), transported)
+        transported_capture = capture([callback], stderr=transported)
+        value = controller.failure_details(transported_capture, step, paths, checks=checks, deadline=1000.0)
+        self.assertEqual(value["profile_fixture_failure"], diagnostic)
+        self.assertEqual(value["returncode"], 1)
+        self.assertNotIn(private, json.dumps(value))
+        with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+            controller.parse_capture(step, transported_capture, paths, "linux", checks)
+        # Removing the one delimiter recreates the real former transport defect;
+        # the strict parser must not start accepting arbitrary mid-line markers.
+        misframed = transported.replace(b"\n" + controller.PROFILE_FIXTURE_FAILURE_PREFIX.encode("ascii"),
+                                        controller.PROFILE_FIXTURE_FAILURE_PREFIX.encode("ascii"), 1)
+        self.assertNotIn("profile_fixture_failure", controller.failure_details(
+            capture([callback], stderr=misframed), step, paths, checks=checks, deadline=1000.0))
         for callbacks, changes in (([], {}), ([callback], {"ok": True}),
                                    ([callback], {"check": "python-wheel"}),
                                    ([{**callback, "outcome": "expected-failure"}], {})):

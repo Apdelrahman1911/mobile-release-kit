@@ -454,7 +454,7 @@ class ProfileFixtureBookkeepingTests(unittest.TestCase):
         header = b"Traceback (most recent call last):\n"
         raw = (header + b'  File "/' + private + b'/tests/workflow/profile_process_fixture.py", line 1199, in driver\n'
                b'    raise AssertionError("' + private + b'")\nAssertionError: ' + private + b"\n")
-        prefix = "MRK_PROFILE_FIXTURE_FAILURE="
+        prefix = "\nMRK_PROFILE_FIXTURE_FAILURE="
 
         def diagnostic(stderr=raw, *, mode="failure", code=1, write_error=None, short_write=False):
             writes = []

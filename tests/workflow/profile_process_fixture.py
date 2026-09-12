@@ -145,7 +145,9 @@ def _report_driver_failure(mode, returncode, stderr):
                     break
         record = {"schema": 1, "mode": mode, "returncode": returncode,
                   "category": category, "locations": locations}
-        line = "MRK_PROFILE_FIXTURE_FAILURE=" + json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n"
+        # Verbosity-two unittest leaves its progress line open during the body.
+        # Delimit the marker in the SAME write; the bound includes both newlines.
+        line = "\nMRK_PROFILE_FIXTURE_FAILURE=" + json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n"
         if len(line) <= 2048:  # The rebuilt line is ASCII, so chars == bytes.
             # Ordinary existing captured stderr, not a new nonblocking transport.
             # Driver close accounting already ran; the original Session owns its
