@@ -187,6 +187,46 @@ def _failed():
             "group": {"state": "not_created"}}
 
 
+def _quiescing():
+    return {"v": 1, "type": "QUIESCING"}
+
+
+def _model_custodian_input_retirement(custodian):
+    """Scoped inert full-write -> clean input EOF -> close -> FINAL model.
+
+    Do not stub retirement itself or globally default input EOF to success. The
+    real retirement method must drive this sequence in each full C-run table.
+    """
+    channel, context = custodian.outer, custodian.context
+    channel.eof = False
+    channel.decoder = owner.Decoder("o_to_c")
+    events = []
+    original_close = channel.close_reader
+
+    def flush(frame):
+        if frame["type"] == "QUIESCING":
+            if not custodian.outer_retiring or channel.reader_closed or "QUIESCING" not in channel.sent:
+                raise AssertionError("modeled notification did not retain its original reader")
+            events.append("QUIESCING")
+            channel.decoder.eof()  # Explicit clean framing completion, not eof alone.
+            channel.eof = True
+            events.append("control_eof")
+        elif frame["type"] == "FINAL":
+            if events != ["QUIESCING", "control_eof", "reader_closed"] or id(channel.reader) not in context.closed:
+                raise AssertionError("modeled FINAL preceded accounted input retirement")
+            events.append("FINAL")
+
+    def close_reader():
+        if not channel.reader_closed:
+            if events != ["QUIESCING", "control_eof"] or not channel.decoder.ended or channel.decoder.failed:
+                raise AssertionError("modeled input close lacked clean notification/EOF")
+            original_close()
+            events.append("reader_closed")
+
+    channel.on_flush, channel.close_reader = flush, close_reader
+    return events
+
+
 def _packet(value):
     raw = json.dumps(value, separators=(",", ":")).encode()
     return len(raw).to_bytes(4, "big") + raw
@@ -223,11 +263,16 @@ def _settled_child(context, *, pid=431, kind="exit", code=0):
 class ProfileOwnerProtocolTests(unittest.TestCase):
     def test_incremental_framing_requires_real_complete_records_and_clean_eof(self):
         decoder = owner.Decoder("c_to_o")
-        wire = owner.Protocol.encode(_hello()) + owner.Protocol.encode(_failed())
+        prefix = owner.Protocol.encode(_hello()) + owner.Protocol.encode(_quiescing())
+        wire = prefix + owner.Protocol.encode(_failed())
         frames = []
-        for byte in wire:
+        for index, byte in enumerate(wire):
             frames.extend(decoder.feed(bytes((byte,))))
-        self.assertEqual(frames, [_hello(), _failed()])
+            if index + 1 == len(prefix):
+                self.assertEqual(frames, [_hello(), _quiescing()])
+                self.assertFalse(decoder.direction.terminal)
+                self.assertFalse(decoder.ended)
+        self.assertEqual(frames, [_hello(), _quiescing(), _failed()])
         decoder.eof()
         with self.assertRaises(ValidationError):
             decoder.feed(b"")
@@ -235,6 +280,12 @@ class ProfileOwnerProtocolTests(unittest.TestCase):
         truncated.feed(wire[:7])
         with self.assertRaises(ValidationError):
             truncated.eof()
+        controls = owner.Decoder("o_to_c")
+        controls.feed(owner.Protocol.encode(_configuration()) + b"\0\0")
+        with self.assertRaises(ValidationError):
+            controls.eof()
+        self.assertTrue(controls.failed)
+        self.assertFalse(controls.ended)
 
     def test_duplicate_json_keys_unknown_fields_and_boolean_integers_are_rejected(self):
         raw = b'{"v":1,"v":1,"type":"ADMIT"}'
@@ -304,6 +355,30 @@ class ProfileOwnerProtocolTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             keeper.accept({"v": 1, "type": "RUN"})
 
+        # Local retirement does not reject already in-flight legal controls,
+        # install their configuration, or grant any work. Only CANCEL still acts.
+        context = _context("custodian", parent_pid=429)
+        custodian = _custodian(context)
+        custodian.outer = _wire_channel(context, "o_to_c", "c_to_o")
+        custodian.outer_retiring = True
+        cancel = {"v": 1, "type": "CANCEL", "reason_code": "cancelled", "cleanup_deadline_ns": 2_000_000_000}
+        content = b"".join(owner.Protocol.encode(frame) for frame in
+                           (_configuration(), {"v": 1, "type": "ADMIT"}, {"v": 1, "type": "RUN"},
+                            {"v": 1, "type": "COMMIT"}, cancel))
+        with patch.object(owner.time, "monotonic_ns", return_value=1), patch.object(owner.os, "getppid", return_value=429), patch.object(owner.os, "read", return_value=content), patch.object(owner, "_validate_configuration") as configure, patch.object(context, "check") as check:
+            custodian.pump_outer()
+        configure.assert_not_called()
+        check.assert_not_called()
+        self.assertIsNone(custodian.config)
+        self.assertIsNone(custodian.directory)
+        self.assertFalse(custodian.admitted or custodian.run_granted or custodian.committed)
+        self.assertEqual(custodian.outer.decoder.direction.seen, {"CONFIG", "ADMIT", "RUN", "COMMIT", "CANCEL"})
+        self.assertEqual((context.reason, context.failure_limit), ("cancelled", cancel["cleanup_deadline_ns"]))
+        with patch.object(owner.time, "monotonic_ns", return_value=1), patch.object(owner.os, "getppid", return_value=429), patch.object(owner.os, "read", return_value=owner.Protocol.encode({"v": 1, "type": "RUN"})):
+            with self.assertRaises(ValidationError):
+                custodian.pump_outer()
+        self.assertTrue(custodian.outer.decoder.failed)
+
     def test_terminal_variants_are_closed_and_unknown_cannot_confirm_cleanup(self):
         owner.Protocol.encode(_failed())
         real_keeper = {"state": "reaped", "pid": 431, "status_kind": "exit", "status_code": 0}
@@ -344,10 +419,38 @@ class ProfileOwnerProtocolTests(unittest.TestCase):
         status = {"v": 1, "type": "STATUS", "validator_pid": 433, "status_kind": "exit", "status_code": 0}
         with self.assertRaises(ValidationError):
             owner.Decoder("k_to_c").feed(_packet(status))
-        decoder = owner.Decoder("c_to_o")
-        decoder.feed(owner.Protocol.encode(_failed()))
+        reserved = {"v": 1, "type": "RESERVED", "keeper_pid": 432, "group_id": 432, "session_id": 431}
+        ready = {"v": 1, "type": "READY", "validator_pid": 433, "group_id": 432, "keeper_pgid": 431}
+        prefixes = ((), (_hello(),), (_hello(), reserved), (_hello(), reserved, ready),
+                    (_hello(), reserved, ready, status))
+        for prefix in prefixes:
+            decoder = owner.Decoder("c_to_o")
+            decoder.feed(b"".join(owner.Protocol.encode(frame) for frame in (*prefix, _quiescing())))
+            self.assertFalse(decoder.direction.terminal)
+            self.assertEqual(decoder.feed(owner.Protocol.encode(_failed())), [_failed()])
+            with self.assertRaises(ValidationError):
+                decoder.feed(owner.Protocol.encode(_failed()))
+        for edge in ("o_to_c", "c_to_k", "k_to_c"):
+            with self.subTest(edge=edge), self.assertRaises(ValidationError):
+                owner.Decoder(edge).feed(owner.Protocol.encode(_quiescing()))
+        for frame in (_quiescing(), _hello(), reserved, ready, status):
+            decoder = owner.Decoder("c_to_o")
+            decoder.feed(owner.Protocol.encode(_hello()) + owner.Protocol.encode(_quiescing()))
+            with self.subTest(after_quiescing=frame["type"]), self.assertRaises(ValidationError):
+                decoder.feed(owner.Protocol.encode(frame))
         with self.assertRaises(ValidationError):
-            decoder.feed(owner.Protocol.encode(_failed()))
+            owner.Protocol.encode({**_quiescing(), "cleanup": "confirmed"})
+        with self.assertRaises(ValidationError):
+            owner.Decoder("c_to_o").feed(owner.Protocol.encode(_failed()))
+        for outcome, code in (("ok", 0), ("rejected", 7)):
+            terminal = {**_failed(), "outcome": outcome,
+                        "keeper": {"state": "reaped", "pid": 432, "status_kind": "exit", "status_code": 0},
+                        "validator": {"state": "reaped", "pid": 433, "status_kind": "exit", "status_code": code},
+                        "group": {"state": "retired", "id": 432, "absent": True}}
+            decoder = owner.Decoder("c_to_o")
+            decoder.feed(b"".join(owner.Protocol.encode(frame) for frame in (_hello(), reserved, ready, _quiescing())))
+            with self.subTest(outcome=outcome, missing="STATUS"), self.assertRaises(ValidationError):
+                decoder.feed(owner.Protocol.encode(terminal))
         for field, value in (("role", []), ("capture_kind", {}), ("run_deadline_ns", True)):
             with self.subTest(field=field), self.assertRaises(ValidationError):
                 owner.Protocol.encode({**_configuration(), field: value})
@@ -389,7 +492,7 @@ class ProfileOwnerChannelTests(unittest.TestCase):
                  ("o_to_c", "c_to_o", [_hello()], reserved),
                  ("o_to_c", "c_to_o", [_hello(), reserved], ready),
                  ("c_to_k", "k_to_c", [_hello()], moved),
-                 ("o_to_c", "c_to_o", [_hello(), reserved, ready, status], final))
+                 ("o_to_c", "c_to_o", [_hello(), reserved, ready, status, _quiescing()], final))
         for incoming, outgoing, prefix, grant in cases:
             for partial in (False, True):
                 with self.subTest(kind=grant["type"], partial=partial):
@@ -417,30 +520,37 @@ class ProfileOwnerChannelTests(unittest.TestCase):
     def test_cancel_deadline_and_retired_launch_veto_the_live_prewrite_boundary(self):
         for grant, prefix in (("ADMIT", ()), ("RUN", ("ADMIT",)), ("COMMIT", ("ADMIT", "RUN"))):
             for veto in ("cancelled", "deadline", "launch_retired"):
-                context = _context()
-                channel = _wire_channel(context, "c_to_o", "o_to_c")
-                with patch.object(owner.time, "monotonic_ns", return_value=1), patch.object(owner.os, "write", side_effect=lambda _fd, content: len(content)):
-                    channel.send_frame(_configuration())
-                    channel.flush()
-                    for kind in prefix:
-                        channel.send(kind)
+                for partial in (False, True):
+                    context = _context()
+                    channel = _wire_channel(context, "c_to_o", "o_to_c")
+                    with patch.object(owner.time, "monotonic_ns", return_value=1), patch.object(owner.os, "write", side_effect=lambda _fd, content: len(content)):
+                        channel.send_frame(_configuration())
                         channel.flush()
-                    channel.send(grant)
-                now = 1
-                if veto == "cancelled":
-                    context.cancelled = True
-                elif veto == "deadline":
-                    now = context.run
-                else:
-                    context.retire_launch()
-                    self.assertIsNone(context.primary)
-                with self.subTest(grant=grant, veto=veto), patch.object(owner.time, "monotonic_ns", return_value=now), patch.object(owner.os, "write") as syscall:
-                    with self.assertRaises(ValidationError):
-                        channel.flush()
-                    syscall.assert_not_called()
-                self.assertNotIn(grant, channel.write_attempted)
-                self.assertNotIn(grant, channel.sent)
-                self.assertTrue(channel.writer_closed)
+                        for kind in prefix:
+                            channel.send(kind)
+                            channel.flush()
+                        channel.send(grant)
+                        if partial:
+                            with patch.object(owner.os, "write", return_value=2):
+                                channel.flush()
+                    now = 1
+                    if veto == "cancelled":
+                        context.cancelled = True
+                    elif veto == "deadline":
+                        now = context.run
+                    else:
+                        context.retire_launch()
+                        self.assertIsNone(context.primary)
+                    with self.subTest(grant=grant, veto=veto, partial=partial), patch.object(owner.time, "monotonic_ns", return_value=now), patch.object(owner.os, "write") as syscall:
+                        with self.assertRaises(ValidationError):
+                            channel.flush()
+                        channel.flush()  # A later cleanup turn cannot reopen it.
+                        syscall.assert_not_called()
+                    self.assertEqual(grant in channel.write_attempted, partial)
+                    self.assertNotIn(grant, channel.sent)
+                    self.assertTrue(channel.writer_closed)
+                    self.assertEqual(channel.writer.close_calls, 1)
+                    self.assertEqual(channel.pending, [])
 
     def test_fake_control_write_effect_then_exception_is_unknown_and_never_replayed(self):
         context = _context()
@@ -612,7 +722,7 @@ class ProfileOwnerDeadlineTests(unittest.TestCase):
         self.assertEqual(set(vars(limits).values()), {exact_floor})
 
     def test_first_failure_fixes_one_cleanup_grace_and_later_cancel_only_shortens(self):
-        context = _context()
+        context = _context("custodian", parent_pid=429)
         first = ValidationError(owner.ERROR)
         with patch.object(owner.time, "monotonic_ns", return_value=2_000_000_000):
             context.record(first)
@@ -622,6 +732,18 @@ class ProfileOwnerDeadlineTests(unittest.TestCase):
             context.cancel_frame({"reason_code": "deadline", "cleanup_deadline_ns": 4_500_000_000})
         self.assertEqual(context.begin_cleanup(), 4_500_000_000)
         self.assertIs(context.primary, first)
+        custodian = _custodian(context)
+        channel = custodian.outer = _wire_channel(context, "o_to_c", "c_to_o")
+        context.io.leases.extend((channel.reader, channel.writer))
+        cancel = {"v": 1, "type": "CANCEL", "reason_code": "cancelled", "cleanup_deadline_ns": 4_250_000_000}
+        with patch.object(owner.time, "monotonic_ns", return_value=4_000_000_000), patch.object(owner.os, "getppid", return_value=429), patch.object(owner.os, "read", side_effect=(owner.Protocol.encode(cancel), b"")), patch.object(owner.os, "write", side_effect=lambda _fd, content: len(content)), patch.object(owner, "_pause"):
+            self.assertTrue(custodian.retire_outer_control())
+        self.assertIs(context.primary, first)
+        self.assertEqual(context.failure_limit, 4_250_000_000)
+        self.assertEqual(context.cleanup_limit, 4_250_000_000)
+        self.assertEqual(channel.write_limits["QUIESCING"], 4_500_000_000)
+        self.assertTrue(channel.decoder.ended)
+        self.assertEqual(channel.reader.close_calls, 1)
 
     def test_cleanup_flush_rechecks_a_shortened_cutoff_after_its_pump(self):
         context = _context()
@@ -670,9 +792,10 @@ class ProfileOwnerDeadlineTests(unittest.TestCase):
             context.record(ValidationError(owner.TIMEOUT), "deadline")
             self.assertEqual(context.cleanup_cutoff(context.hard), original)
             self.assertEqual(context.control_cutoff(context.hard), 28_000_000_000)
+            channel.send_frame(_quiescing())
             channel.send_frame(_failed())
             owner._flush_until(channel, context.hard, lambda: None, cleanup_bound=False)
-        self.assertEqual(syscall.call_count, 1)
+        self.assertEqual(syscall.call_count, 2)
         self.assertIn("FINAL", channel.sent)
         self.assertEqual(context.cleanup_limit, original)
 
@@ -1307,7 +1430,7 @@ class ProfileOwnerHandshakeTests(unittest.TestCase):
         final = {"v": 1, "type": "FINAL", "outcome": "ok", "cleanup": "confirmed",
                  "keeper": {"state": "reaped", "pid": 431, "status_kind": "exit", "status_code": 0},
                  "validator": owner._status_record(status), "group": {"state": "retired", "id": 431, "absent": True}}
-        with patch.object(owner.os, "getpid", return_value=429):
+        with patch.object(owner.os, "getpid", return_value=429), patch.object(owner.time, "monotonic_ns", return_value=1):
             for grant, frame, attribute in (("ADMIT", reserved, "reserved"), ("RUN", ready, "ready")):
                 outer.channel.frames = [frame]
                 with self.assertRaises(ValidationError):
@@ -1320,16 +1443,167 @@ class ProfileOwnerHandshakeTests(unittest.TestCase):
             outer.channel.frames = [status]
             outer.process_frames()
             outer.content, outer.payload_eof, outer.commit_requested = b"modeled content", True, True
+            outer.channel.frames = [_quiescing()]
+            outer.process_frames()
+            self.assertTrue(outer.control_retiring)
             outer.channel.frames = [final]
             with self.assertRaises(ValidationError):
                 outer.process_frames()
             self.assertFalse(outer.committed)
             self.assertIsNone(outer.final)
-            outer.channel.sent.add("COMMIT")
-            outer.channel.frames = [final]
-            outer.process_frames()
-        self.assertTrue(outer.committed)
-        self.assertEqual(outer.final, final)
+            # A separate model has its full COMMIT before Q; never manufacture
+            # a late successful grant on the already-retired writer above.
+            accepted_context = _context()
+            accepted = owner._Outer(accepted_context, Path("/private/profile"), owner._Deadlines(10, 10, 10, 13, 13))
+            accepted.child, accepted.channel = _Child(pid=430), _Channel(accepted_context)
+            accepted.channel.eof = False
+            accepted.channel.sent.update(("ADMIT", "RUN", "COMMIT"))
+            accepted.channel.write_attempted.update(("ADMIT", "RUN", "COMMIT"))
+            accepted.hello, accepted.reserved, accepted.ready, accepted.status = outer.hello, reserved, ready, status
+            accepted.content, accepted.payload_eof, accepted.commit_requested = b"modeled content", True, True
+            accepted.channel.frames = [_quiescing(), final]
+            accepted.process_frames()
+        self.assertTrue(accepted.committed)
+        self.assertEqual(accepted.final, final)
+
+        # Retirement preserves an existing CANCEL's exact offset/deadline (and
+        # nonauthorizing CONFIG bytes), including genuine modeled would-block.
+        for pending in ("none", "new_cancel", "queued", "partial", "sent", "config_prefix"):
+            context = _context()
+            limits = owner._Deadlines(context.run, context.run, context.run, context.hard, context.hard)
+            outer = owner._Outer(context, Path("/private/profile"), limits)
+            outer.child, outer.channel = _Child(pid=430), _wire_channel(context, "c_to_o", "o_to_c")
+            channel = outer.channel
+            context.io.leases.extend((channel.reader, channel.writer))
+            first = None if pending == "none" else ValidationError(owner.ERROR)
+            with self.subTest(retiring_pending=pending), patch.object(owner.time, "monotonic_ns", return_value=owner.NANOSECOND):
+                if pending == "config_prefix":
+                    channel.send_frame(_configuration())
+                    with patch.object(owner.os, "write", return_value=2):
+                        channel.flush()
+                if first is not None:
+                    context.record(first, "io")
+                    if pending != "new_cancel":
+                        channel.send("CANCEL", reason_code=context.reason, cleanup_deadline_ns=context.failure_limit)
+                        if pending in ("partial", "sent"):
+                            with patch.object(owner.os, "write", side_effect=lambda _fd, content: 2 if pending == "partial" else len(content)):
+                                channel.flush()
+                before = [(frame, bytes(content)) for frame, content in channel.pending]
+                original_limits = dict(channel.write_limits)
+                channel.frames = channel.decoder.feed(owner.Protocol.encode(_quiescing()))
+                with patch.object(owner.os, "write", side_effect=BlockingIOError):
+                    outer.process_frames()
+                self.assertTrue(outer.control_retiring and context.launch_closed)
+                self.assertIs(context.primary, first)
+                self.assertIsNone(outer.final)
+                self.assertIsNone(outer.receipt)
+                self.assertFalse(outer.confirmed or outer.committed)
+                if before:
+                    self.assertEqual([(frame, bytes(content)) for frame, content in channel.pending], before)
+                    self.assertEqual(channel.write_limits, original_limits)
+                    self.assertFalse(channel.writer_closed)
+                elif pending == "new_cancel":
+                    self.assertEqual(channel.pending[0][0], {"v": 1, "type": "CANCEL", "reason_code": "io",
+                                                           "cleanup_deadline_ns": context.failure_limit})
+                    self.assertFalse(channel.writer_closed)
+                with patch.object(owner.os, "write", side_effect=lambda _fd, content: len(content)):
+                    for _ in range(3):
+                        outer.process_frames()  # Empty receive turn still progresses retirement.
+                self.assertFalse(channel.pending or channel.write_failed or channel.write_in_flight)
+                self.assertTrue(channel.writer_closed)
+                self.assertEqual(channel.writer.close_calls, 1)
+                self.assertIn(id(channel.writer), context.closed)
+                self.assertEqual("CANCEL" in channel.sent, first is not None)
+                self.assertFalse(context.cleanup_unknown)
+                context.record(ValidationError(owner.ERROR), "cancelled")
+                with patch.object(owner.os, "write") as syscall:
+                    outer.process_frames()
+                syscall.assert_not_called()  # Late failure cannot reopen a retired route.
+                self.assertEqual(channel.writer.close_calls, 1)
+                self.assertEqual("CANCEL" in channel.sent, first is not None)
+
+        for grant, prefix in (("ADMIT", ()), ("RUN", ("ADMIT",)), ("COMMIT", ("ADMIT", "RUN"))):
+            for partial in (False, True):
+                context = _context()
+                outer = owner._Outer(context, Path("/private/profile"), owner._Deadlines(context.run, context.run, context.run, context.hard, context.hard))
+                outer.child, outer.channel = _Child(pid=430), _wire_channel(context, "c_to_o", "o_to_c")
+                channel = outer.channel
+                frames = [_configuration(), *({"v": 1, "type": kind} for kind in prefix)]
+                with self.subTest(retiring_grant=grant, partial=partial), patch.object(owner.time, "monotonic_ns", return_value=1):
+                    with patch.object(owner.os, "write", side_effect=lambda _fd, content: len(content)):
+                        for frame in frames:
+                            channel.send_frame(frame)
+                            channel.flush()
+                    channel.send(grant)
+                    if partial:
+                        with patch.object(owner.os, "write", return_value=2):
+                            channel.flush()
+                    first = ValidationError(owner.ERROR)
+                    context.record(first, "io")
+                    channel.send("CANCEL", reason_code=context.reason, cleanup_deadline_ns=context.failure_limit)
+                    channel.frames = channel.decoder.feed(owner.Protocol.encode(_quiescing()))
+                    with patch.object(owner.os, "write") as syscall, self.assertRaises(ValidationError) as raised:
+                        outer.process_frames()
+                    self.assertIs(raised.exception, first)
+                    syscall.assert_not_called()
+                    self.assertTrue(outer.control_retiring)
+                    self.assertEqual(grant in channel.write_attempted, partial)
+                    self.assertNotIn(grant, channel.sent)
+                    self.assertNotIn("CANCEL", channel.write_attempted)
+                    self.assertNotIn("CANCEL", channel.sent)
+                    self.assertEqual(channel.pending, [])
+                    self.assertEqual(channel.writer.close_calls, 1)
+                    decoder = owner.Decoder("o_to_c")
+                    decoder.feed(b"".join(owner.Protocol.encode(frame) for frame in frames)
+                                 + (owner.Protocol.encode({"v": 1, "type": grant})[:2] if partial else b""))
+                    if partial:
+                        with self.assertRaises(ValidationError):
+                            decoder.eof()  # Discarded trailing CANCEL cannot repair a prefix.
+                        self.assertTrue(decoder.failed)
+                    else:
+                        decoder.eof()  # No invented consumed prefix for a wholly unsent grant.
+                        self.assertTrue(decoder.ended)
+
+        # Exercise every actual work enqueue site without filesystem/process IO.
+        # Q arrives one pump before FINAL, so simply failing at send()/missing
+        # finality cannot accidentally pass the "no later grant" control.
+        from mobile_release import ios_profiles
+
+        hello = {"v": 1, "type": "HELLO", "pid": 430, "ppid": 429, "sid": 430, "pgid": 430, "fd_map_version": 1}
+        for stage in ("ADMIT", "RUN", "COMMIT"):
+            context = _context()
+            outer = owner._Outer(context, Path("/private/profile"), owner._Deadlines(context.run, context.run, context.run, context.hard, context.hard))
+            channel = _wire_channel(context, "c_to_o", "o_to_c")
+            null_read, null_write, control_read, status_write, payload_read, payload_write = (_Lease(401 + index) for index in range(6))
+            context.io.leases.extend((null_read, null_write, control_read, channel.writer, channel.reader, status_write, payload_read, payload_write))
+            context.io.open_null = Mock(side_effect=(null_read, null_write))
+            context.io.pipe = Mock(side_effect=((control_read, channel.writer), (channel.reader, status_write), (payload_read, payload_write)))
+            terminal = _failed()
+            groups = [[hello]]
+            if stage != "ADMIT":
+                groups.append([reserved])
+                terminal = {**terminal, "keeper": {"state": "reaped", "pid": 431, "status_kind": "exit", "status_code": 2},
+                            "group": {"state": "retired", "id": 431, "absent": True}}
+            if stage == "COMMIT":
+                groups.append([ready, status])
+                terminal["validator"] = owner._status_record(status)
+            groups[-1].append(_quiescing())
+            groups.append([terminal])
+            chunks = [b"".join(owner.Protocol.encode(frame) for frame in group) for group in groups]
+            outer.read_payload = Mock(side_effect=lambda: setattr(outer, "payload_eof", True))
+            with self.subTest(before_grant=stage), patch.object(owner.time, "monotonic_ns", return_value=1), patch.object(owner.os, "getpid", return_value=429), patch.object(owner.os, "getsid", return_value=429), patch.object(owner.os, "set_blocking"), patch.object(Path, "lstat", return_value=types.SimpleNamespace(st_mode=0o40700)), patch.object(owner, "_Channel", return_value=channel), patch.object(owner, "_spawn", return_value=_Child(pid=430)), patch.object(owner, "helper_argv", return_value=("/fake/helper",)), patch.object(owner, "_configuration", return_value=_configuration()), patch.object(ios_profiles, "profile_environment", return_value={"LANG": "C"}), patch.object(ios_profiles, "completed_content", return_value=b"modeled content") as parse, patch.object(owner.os, "read", side_effect=chunks), patch.object(owner.os, "write", side_effect=lambda _fd, content: len(content)), patch.object(owner, "_pause"), patch.object(channel, "send", wraps=channel.send) as send:
+                with self.assertRaises(ValidationError) as raised:
+                    outer.work()
+                self.assertEqual(raised.exception.args, (ios_profiles.AUTHENTICATION_ERROR,))
+                self.assertEqual(outer.final, terminal)
+                self.assertTrue(outer.control_retiring and channel.writer_closed)
+                self.assertIsNone(context.primary)
+                sent_kinds = [call.args[0] for call in send.call_args_list]
+                self.assertEqual(sent_kinds, ["CONFIG"] + ([] if stage == "ADMIT" else ["ADMIT"] if stage == "RUN" else ["ADMIT", "RUN"]))
+                parse.assert_not_called()
+                self.assertFalse(outer.commit_requested)
+                self.assertEqual(channel.writer.close_calls, 1)
+                context.close_all()  # Only inert leases were ever acquired.
 
     def test_helpers_require_actual_hello_and_reserved_before_accepting_admission(self):
         context = _context("custodian", parent_pid=429)
@@ -1373,12 +1647,17 @@ class ProfileOwnerHandshakeTests(unittest.TestCase):
                  ({"ADMIT", "RUN"}, {**base, "validator": {**base["validator"], "pid": 429}}),
                  ({"ADMIT", "RUN"}, {**base, "validator": {**base["validator"], "pid": 430}}),
                  ({"ADMIT", "RUN"}, {**base, "validator": {**base["validator"], "pid": 431}}))
-        with patch.object(owner.os, "getpid", return_value=429):
+        with patch.object(owner.os, "getpid", return_value=429), patch.object(owner.time, "monotonic_ns", return_value=1):
             for attempted, frame in cases:
                 context = _context()
                 outer = owner._Outer(context, Path("/private/profile"), owner._Deadlines(10, 10, 10, 13, 13))
                 outer.child, outer.channel = _Child(pid=430), _Channel(context)
+                outer.channel.eof = False
                 outer.channel.write_attempted = attempted
+                outer.channel.frames = [_quiescing()]
+                outer.process_frames()
+                self.assertTrue(outer.control_retiring)
+                self.assertIsNone(context.primary)
                 outer.channel.frames = [frame]
                 with self.subTest(attempted=attempted, keeper=frame["keeper"], validator=frame["validator"]), self.assertRaises(ValidationError):
                     outer.process_frames()
@@ -1428,7 +1707,7 @@ class ProfileOwnerHelperTerminalTests(unittest.TestCase):
             with self.subTest(case=(kind, code, released, eof, absent, requested)):
                 context = _context("custodian", parent_pid=429)
                 custodian = _custodian(context)
-                custodian.outer.eof = False
+                retirement = _model_custodian_input_retirement(custodian)
                 custodian.keeper = _settled_child(context, kind=kind, code=code)
                 custodian.keeper_receipt = custodian.keeper.receipt
                 custodian.group = owner._GroupReservation(context, custodian.keeper)
@@ -1458,12 +1737,113 @@ class ProfileOwnerHelperTerminalTests(unittest.TestCase):
                 self.assertEqual(offered["keeper"], owner._receipt_record(custodian.keeper.receipt))
                 self.assertEqual(result, owner.HELPER_FAILED if expected else owner.HELPER_UNKNOWN)
                 custodian.write_payload.assert_not_called()
+                self.assertEqual(retirement, ["QUIESCING", "control_eof", "reader_closed", "FINAL"])
+
+        # Real protocol/channel code with inert syscall-return models. A sent
+        # set member or eof flag alone cannot prove retirement. All waits share
+        # the original failure endpoint; the missing-EOF clock advances.
+        faults = (None, "early_eof", "missing_eof", "eof_flag_only", "partial_frame", "read_error",
+                  "unsent", "partial_write", "write_tail", "reader_close", "late_eof", "late_close", "parent_lost")
+        for fault in faults:
+            context = _context("custodian", parent_pid=429)
+            custodian = _custodian(context)
+            channel = custodian.outer = _wire_channel(context, "o_to_c", "c_to_o")
+            context.io.leases.extend((channel.reader, channel.writer))
+            now = [owner.NANOSECOND]
+            first, later = ValidationError(owner.ERROR), OSError("PRIVATE_INPUT_RETIREMENT")
+            reads, writes, events = [], [], []
+            original_close = channel.reader.close
+
+            def write(_fd, content):
+                self.assertTrue(custodian.outer_retiring)
+                self.assertFalse(channel.reader_closed)
+                writes.append(bytes(content))
+                if fault == "unsent" or fault == "partial_write" and len(writes) > 1:
+                    raise BlockingIOError
+                if fault == "partial_write":
+                    return 2
+                if fault == "eof_flag_only":
+                    channel.eof = True  # Deliberately missing decoder completion.
+                return len(content)
+
+            def read(_fd, _limit):
+                reads.append(None)
+                if "QUIESCING" not in channel.sent or fault == "missing_eof":
+                    raise BlockingIOError
+                if fault == "read_error":
+                    raise later
+                if fault == "partial_frame" and len(reads) == 1:
+                    return b"\0\0"
+                if fault == "late_eof":
+                    now[0] = fixed
+                return b""
+
+            def observe(_role, event, **evidence):
+                events.append(event)
+                if fault == "write_tail" and event == "frame_sent" and evidence["frame"]["type"] == "QUIESCING":
+                    raise later  # Actual full return, lost observation tail.
+
+            def close():
+                original_close()
+                if fault == "late_close":
+                    now[0] = fixed
+
+            def pause(*_args):
+                now[0] = min(fixed, now[0] + owner.NANOSECOND)
+
+            with self.subTest(input_retirement=fault), patch.object(owner.time, "monotonic_ns", side_effect=lambda: now[0]), patch.object(owner.os, "getppid", return_value=999 if fault == "parent_lost" else 429), patch.object(owner.os, "write", side_effect=write), patch.object(owner.os, "read", side_effect=read), patch.object(owner, "_role_event", side_effect=observe), patch.object(owner, "_pause", side_effect=pause), patch.object(channel.reader, "close", side_effect=close):
+                if fault == "early_eof":
+                    cancel = {"v": 1, "type": "CANCEL", "reason_code": "cancelled", "cleanup_deadline_ns": 4 * owner.NANOSECOND}
+                    with patch.object(owner.os, "read", return_value=owner.Protocol.encode(cancel)):
+                        custodian.pump_outer()
+                    first = context.primary
+                    self.assertEqual(context.reason, "cancelled")
+                else:
+                    context.record(first, "io")
+                fixed = context.failure_limit
+                if fault == "early_eof":
+                    with patch.object(owner.os, "read", return_value=b""):
+                        custodian.pump_outer()
+                    self.assertTrue(channel.eof and channel.decoder.ended)
+                    self.assertTrue(custodian.outer_eof_seen)
+                    self.assertGreater(len(context.secondary), 0)
+                    self.assertIs(context.primary, first)
+                if fault == "reader_close":
+                    channel.reader.error = later
+                result = custodian.retire_outer_control()
+                expected = fault in (None, "early_eof")
+                self.assertEqual(result, expected)
+                self.assertIs(context.primary, first)
+                self.assertEqual((context.failure_limit, context.cleanup_limit), (fixed, fixed))
+                self.assertEqual(context.cleanup_unknown, not expected)
+                self.assertTrue(custodian.outer_retiring)
+                self.assertTrue(channel.reader_closed)
+                self.assertEqual(channel.reader.close_calls, 1)
+                self.assertLessEqual(len(reads), 4)
+                self.assertLessEqual(len(writes), 4)
+                self.assertIsNone(context._helper_offer)  # Input proof never offers FINAL.
+                if expected:
+                    self.assertTrue(channel.eof and channel.decoder.ended and not channel.decoder.failed)
+                    self.assertEqual(channel.sent, {"QUIESCING"})
+                    self.assertFalse(channel.pending or channel.write_failed or channel.write_in_flight)
+                    self.assertEqual(events, ["control_eof", "frame_sent", "descriptor_closed"] if fault == "early_eof"
+                                     else ["frame_sent", "control_eof", "descriptor_closed"])
+                elif fault in ("unsent", "partial_write", "parent_lost"):
+                    self.assertNotIn("QUIESCING", channel.sent)
+                elif fault == "write_tail":
+                    self.assertIn("QUIESCING", channel.sent)
+                    self.assertTrue(channel.write_failed and channel.write_in_flight)
+                elif fault == "partial_frame":
+                    self.assertTrue(channel.eof and channel.decoder.failed)
+                    self.assertFalse(channel.decoder.ended)
+                if fault in ("missing_eof", "unsent", "partial_write", "late_eof", "late_close"):
+                    self.assertEqual(now[0], fixed)
 
     def test_custodian_zero_only_carries_ok_or_rejected_and_keeper_two_forces_failed(self):
         for keeper_code, validator_code, outcome, expected in ((0, 0, "ok", 0), (0, 7, "rejected", 0), (2, 0, "failed", 2)):
             context = _context("custodian", parent_pid=429)
             custodian = _custodian(context)
-            custodian.outer.eof = False
+            retirement = _model_custodian_input_retirement(custodian)
             custodian.keeper = _settled_child(context, code=keeper_code)
             custodian.keeper_receipt = custodian.keeper.receipt
             custodian.group = owner._GroupReservation(context, custodian.keeper)
@@ -1471,7 +1851,8 @@ class ProfileOwnerHelperTerminalTests(unittest.TestCase):
             custodian.validator = {"state": "reaped", "pid": 432, "status_kind": "exit", "status_code": validator_code}
             custodian.released = custodian.validator
             custodian.released_after_request = True
-            custodian.ready = custodian.committed = True
+            custodian.ready = True
+            custodian.committed = outcome == "ok"
             custodian.keeper_channel = _Channel(context)
             context.io.leases.extend((custodian.keeper_channel.reader, custodian.keeper_channel.writer))
 
@@ -1496,6 +1877,8 @@ class ProfileOwnerHelperTerminalTests(unittest.TestCase):
             self.assertEqual(custodian.write_payload.call_count, int(outcome == "ok"))
             self.assertEqual(custodian.descriptors[5].close_calls, 1)
             self.assertEqual(custodian.descriptors[7].close_calls, 1)
+            self.assertEqual(custodian.committed, outcome == "ok")
+            self.assertEqual(retirement, ["QUIESCING", "control_eof", "reader_closed", "FINAL"])
 
     def test_keeper_parent_cancel_never_erases_a_local_failure_before_or_after_it(self):
         for order in ("parent_only", "local_first", "local_later", "local_signal"):
@@ -1539,6 +1922,7 @@ class ProfileOwnerHelperTerminalTests(unittest.TestCase):
             first = OSError("PRIVATE_STATUS_TAIL_CLOSE")
             if role == "custodian":
                 helper = _custodian(context)
+                retirement = _model_custodian_input_retirement(helper)
                 helper.work = Mock(side_effect=ValidationError(owner.ERROR))
                 helper.cleanup_descendants = Mock(side_effect=context.retire_launch)
                 channel = helper.outer
@@ -1560,6 +1944,7 @@ class ProfileOwnerHelperTerminalTests(unittest.TestCase):
             self.assertEqual(channel.writer.close_calls, 1)
             self.assertIn("FINAL" if role == "custodian" else "RELEASED", channel.sent)
             if role == "custodian":
+                self.assertEqual(retirement, ["QUIESCING", "control_eof", "reader_closed", "FINAL"])
                 self.assertEqual(channel.offers[-1]["cleanup"], "confirmed")
                 self.assertEqual(channel.offers[-1]["keeper"], {"state": "not_attempted"})
             else:
@@ -1797,6 +2182,7 @@ class ProfileOwnerHelperHandoffTests(unittest.TestCase):
                 context = _context(role, parent_pid=429 if role == "custodian" else 430)
                 if role == "custodian":
                     helper = _custodian(context)
+                    retirement = _model_custodian_input_retirement(helper)
                     helper.keeper = _settled_child(context)
                     helper.keeper_receipt = helper.keeper.receipt
                     helper.group = owner._GroupReservation(context, helper.keeper)
@@ -1849,6 +2235,8 @@ class ProfileOwnerHelperHandoffTests(unittest.TestCase):
                     self.assertEqual(context._helper_offer[1][1], int(phase == "latch_tail"))
                     self.assertEqual(context.signal_epoch, 1)
                     terminate.assert_not_called()
+                    if role == "custodian":
+                        self.assertEqual(retirement, ["QUIESCING", "control_eof", "reader_closed", "FINAL"])
 
 
 class ProfileOwnerFinalityTests(unittest.TestCase):
@@ -1909,8 +2297,13 @@ class ProfileOwnerFinalityTests(unittest.TestCase):
                  (2, "rejected", True, True, "confirmed", False), (1, "ok", True, True, "confirmed", False),
                  (0, "ok", False, True, "confirmed", False), (0, "ok", True, False, "confirmed", False),
                  (0, "ok", True, True, "unknown", False))
-        for exitcode, outcome, status_eof, payload_eof, cleanup, expected in cases:
-            with self.subTest(case=(exitcode, outcome, status_eof, payload_eof, cleanup)):
+        cases = tuple((*case, None) for case in cases) + (
+            (0, "ok", True, True, "confirmed", False, "no_notification"),
+            (0, "ok", True, True, "confirmed", False, "notification_only"),
+            (0, "ok", True, True, "confirmed", False, "writer_close_error"),
+            (0, "ok", True, True, "confirmed", False, "missing_writer_close"))
+        for exitcode, outcome, status_eof, payload_eof, cleanup, expected, fault in cases:
+            with self.subTest(case=(exitcode, outcome, status_eof, payload_eof, cleanup, fault)):
                 context = _context()
                 receipt = _receipt(code=exitcode)
                 child = _Child()
@@ -1919,15 +2312,38 @@ class ProfileOwnerFinalityTests(unittest.TestCase):
                 context.child_acquisition.attempted = True
                 outer = owner._Outer(context, Path("/private/profile"), owner._Deadlines(10, 10, 10, 13, 13))
                 outer.channel, outer.payload, outer.child = _Channel(context), _Lease(203), child
-                outer.channel.eof, outer.payload_eof = status_eof, payload_eof
-                outer.final = {"outcome": outcome, "cleanup": cleanup}
-                outer.safe_pump = Mock()
+                outer.channel.eof = False
                 context.io.leases.extend((outer.channel.reader, outer.channel.writer, outer.payload))
-                clock = iter((1, 20_000_000_000, 20_000_000_000, 20_000_000_000))
-                with patch.object(owner.time, "monotonic_ns", side_effect=lambda: next(clock, 20_000_000_000)), patch.object(owner, "_wait_child", return_value=receipt):
-                    outer.cleanup()
+                original_close = context.close
+
+                def close(lease):
+                    if fault == "missing_writer_close" and lease is outer.channel.writer:
+                        return  # Explicit lost dispatch: no lease close or context receipt.
+                    original_close(lease)
+
+                with patch.object(context, "close", side_effect=close):
+                    if fault == "writer_close_error":
+                        outer.channel.writer.error = OSError("PRIVATE_RETIRE_CLOSE")
+                    if fault != "no_notification":
+                        outer.channel.frames = [_quiescing()]
+                        with patch.object(owner.time, "monotonic_ns", return_value=1):
+                            outer.process_frames()
+                        self.assertTrue(outer.control_retiring)
+                        self.assertIsNone(outer.final)
+                    outer.channel.eof, outer.payload_eof = status_eof, payload_eof
+                    # Explicit parsed-terminal model, never a substitute for Q.
+                    if fault != "notification_only":
+                        outer.final = {"outcome": outcome, "cleanup": cleanup}
+                    outer.safe_pump = Mock()
+                    clock = iter((1, 20_000_000_000, 20_000_000_000, 20_000_000_000))
+                    with patch.object(owner.time, "monotonic_ns", side_effect=lambda: next(clock, 20_000_000_000)), patch.object(owner, "_wait_child", return_value=receipt):
+                        outer.cleanup()
                 self.assertEqual(outer.confirmed, expected)
-                self.assertEqual([lease.close_calls for lease in context.io.leases], [1, 1, 1])
+                self.assertEqual([lease.close_calls for lease in context.io.leases], [1, 0 if fault == "missing_writer_close" else 1, 1])
+                if fault == "missing_writer_close":
+                    self.assertNotIn(id(outer.channel.writer), context.closed)
+                if fault == "writer_close_error":
+                    self.assertTrue(context.cleanup_unknown)
 
     def test_capture_cleanup_is_shielded_unconditional_and_does_not_mask_body_primary(self):
         guard, finality = _Cancellation(), owner.CaptureFinality()
@@ -2102,8 +2518,14 @@ class ProfileOwnerFinalityTests(unittest.TestCase):
         outer = owner._Outer(context, Path("/private/profile"), owner._Deadlines(10, 10, 10, 13, 13))
         outer.child = _Child(pid=430)
         outer.channel = _Channel(context)
+        outer.channel.eof = False
         outer.channel.write_attempted.update(("ADMIT", "RUN"))
         outer.reserved = {"keeper_pid": 431, "group_id": 431, "session_id": 430}
+        outer.channel.frames = [_quiescing()]
+        with patch.object(owner.time, "monotonic_ns", return_value=1):
+            outer.process_frames()
+        self.assertTrue(outer.control_retiring)
+        self.assertIsNone(context.primary)
         outer.channel.take = Mock(return_value=[_failed()])
         with self.assertRaises(ValidationError):
             outer.process_frames()

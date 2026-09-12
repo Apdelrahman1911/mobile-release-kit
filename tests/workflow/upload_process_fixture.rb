@@ -174,7 +174,7 @@ module UploadProcessFixture
           record["directory"] = directory
           record["directoryState"] = :published
           directory = File.realpath(directory)
-          record["directoryIdentity"] = OwnedChild.identity(owned_fixture_directory(directory))
+          record["directoryIdentity"] = OwnedChild.directory_identity(directory)
           record["directoryState"] = :canonical
         end
         child = OwnedChild.new(root: directory, deadline_ns: run_ns, hard_deadline_ns: hard_ns, parent_slot: parent_slot)
@@ -242,7 +242,7 @@ module UploadProcessFixture
         scope.cleanup do
           begin
             if directory && cleanup_complete
-              unless OwnedChild.identity(owned_fixture_directory(directory)) == record.fetch("directoryIdentity")
+              unless OwnedChild.directory_identity(directory) == record.fetch("directoryIdentity")
                 raise Failure.new("fixture-cleanup", "observation directory identity changed")
               end
               FileUtils.remove_entry(directory)
@@ -365,8 +365,9 @@ module UploadProcessFixture
            directory == File.absolute_path(directory) && File.realpath(directory) == directory
       raise Failure.new("fixture-cleanup", "fixture directory is not canonical")
     end
-    value = File.lstat(directory) # A link is not an owned case directory.
-    unless value.directory? && value.uid == Process.uid && (value.mode & 0o7777) == 0o700
+    value = File.lstat(directory) # A symlink is not an owned case directory.
+    unless value.directory? && value.uid == Process.uid && (value.mode & 0o7777) == 0o700 &&
+           value.nlink.instance_of?(Integer) && value.nlink.positive?
       raise Failure.new("fixture-cleanup", "fixture directory is not private and owned")
     end
     value
@@ -779,7 +780,7 @@ module UploadProcessFixture
           directory = Dir.mktmpdir("native-process-", root)
           record["directory"], record["directoryState"] = directory, :published
           directory = File.realpath(directory)
-          record["directoryIdentity"] = OwnedChild.identity(owned_fixture_directory(directory))
+          record["directoryIdentity"] = OwnedChild.directory_identity(directory)
           record["directoryState"] = :canonical
         end
         input = {"platform" => platform, "parameters" => parameters, "mode" => mode, "deadlineNs" => run_ns}
@@ -993,7 +994,7 @@ module UploadProcessFixture
           if directory && record["directoryState"] == :canonical &&
              (transcripts + [held_writer].compact).all? { |lease| %i[unattempted closed].include?(lease.state) } &&
              (never_started || child.complete? && known_dead && native_final)
-            unless OwnedChild.identity(owned_fixture_directory(directory)) == record["directoryIdentity"]
+            unless OwnedChild.directory_identity(directory) == record["directoryIdentity"]
               raise Failure.new("fixture-cleanup", "driver directory identity changed")
             end
             remove_fixture_directory(directory, root: root, layout: :driver)
@@ -4488,6 +4489,7 @@ module UploadProcessFixture
               assert_equal File.join(directory, %w[driver.stdout driver.stderr].fetch(index)), path
               assert_equal File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW, flags
               assert_equal 0o600, mode
+              metadata.nlink += 1 # Model an entry-counting filesystem, not a native observation.
               ios.fetch(index)
             }],
             [File, :file?, ->(path) { %w[driver-dispatch.json owner.json result.json].map { |name| File.join(directory, name) }.include?(path) }],
@@ -4504,7 +4506,7 @@ module UploadProcessFixture
               sleeps += 1
               now = nil_polls && sleeps == 3 ? run_ns : now + 1_000_000
             }],
-            [fixture, :atomic_json, ->(path, value) { records << [path, value] }],
+            [fixture, :atomic_json, ->(path, value) { metadata.nlink += 1; records << [path, value] }],
             [fixture, :read_json, ->(path) { {File.join(directory, "owner.json") => owner, File.join(directory, "result.json") => result}.fetch(path) }],
             [fixture, :state, ->(*arguments, **options) { observer_calls << [arguments, options]; raise "run acquired a fresh process observer" }],
             [fixture, :observe_owner_death!, lambda { |value, deadline:, root:|
@@ -4524,6 +4526,7 @@ module UploadProcessFixture
           assert_equal [{root: directory, deadline_ns: run_ns, hard_deadline_ns: hard_ns}], constructions
           assert_equal [[environment, dispatch.fetch("argv"), {in: File::NULL, out: :pipe, err: :pipe, unsetenv_others: true, pgroup: true}]], starts
           assert_equal [[File.join(directory, "input.json"), {"platform" => "native", "parameters" => {}, "mode" => "native-setup-second-pipe", "deadlineNs" => run_ns}]], records
+          assert_equal 5, metadata.nlink # Original snapshot was 2; real run cleanup must not compare that old count.
           assert_empty pending_leases
           assert_equal %w[out err], ios.map(&:bytes)
           assert_equal [1, 1], ios.map(&:closes)
@@ -4606,10 +4609,10 @@ module UploadProcessFixture
     def assert_bounded_fixture_enumeration
       with_inert_contract_fixture do |fixture|
         path = "/synthetic-enumeration-root"
-        type = Struct.new(:dev, :ino, :mode, :uid, :gid, :nlink, :size, :mtime, :ctime) do
+        type = Struct.new(:dev, :ino, :mode, :uid, :gid, :nlink, :size, :mtime, :ctime, :rdev, :ftype) do
           def directory? = (mode & 0o170000) == 0o40000
         end
-        metadata = type.new(1, 2, 0o40700, Process.uid, Process.gid, 2, 64, 1, 1)
+        metadata = type.new(1, 2, 0o40700, Process.uid, Process.gid, 2, 64, 1, 1, 0, "directory")
         pin = Struct.new(:stat).new(metadata)
         borrowed = Struct.new(:stat).new(metadata)
         names, reads, closed = [], 0, []
@@ -4622,7 +4625,7 @@ module UploadProcessFixture
             reads += 1
             block.call(name)
           end
-          metadata.ctime += 1 if mutate
+          metadata[mutate] += 1 if mutate
         end
         file_open = lambda do |name, flags, &block|
           assert_equal path, name
@@ -4644,11 +4647,35 @@ module UploadProcessFixture
             raise IOError, "synthetic enumerator close failure" if close_error == :directory
           end
         end
-        File.stub(:realpath, path) do
+        resolved = path
+        File.stub(:realpath, ->(_path) { resolved }) do
           File.stub(:lstat, ->(*) { metadata }) do
             File.stub(:open, file_open) do
               Dir.stub(:open, dir_open) do
                 IO.stub(:for_fd, lambda { |fd, autoclose:| assert_equal 987_654, fd; assert_equal false, autoclose; borrowed }) do
+                  lifetime = {"dev" => 1, "ino" => 2, "mode" => 0o40700, "uid" => Process.uid,
+                              "gid" => Process.gid, "rdev" => 0, "type" => "directory"}
+                  [2, 4, 1, 2].each do |links|
+                    metadata.nlink = links # Authorized entry creation/removal may change this positive count.
+                    assert_equal lifetime, OwnedChild.directory_identity(path)
+                  end
+                  %i[dev ino gid rdev].each do |field|
+                    metadata[field] += 1
+                    refute_equal lifetime, OwnedChild.directory_identity(path)
+                    metadata[field] -= 1
+                  end
+                  [[:uid, Process.uid + 1], [:mode, 0o40777], [:mode, 0o120700],
+                   [:nlink, 0], [:nlink, -1], [:nlink, 1.0], [:nlink, "1"], [:nlink, nil], [:nlink, true]].each do |field, invalid|
+                    original = metadata[field]
+                    metadata[field] = invalid
+                    assert_raises(Failure) { OwnedChild.directory_identity(path) }
+                    metadata[field] = original
+                  end
+                  resolved = path + "-alias"
+                  assert_raises(Failure) { OwnedChild.directory_identity(path) }
+                  resolved = path
+                  assert_raises(Failure) { OwnedChild.directory_identity("relative-case") }
+                  assert_empty closed # Lifetime metadata validation acquires no new directory handles.
                   names = ["a" * 255]
                   assert_equal names, fixture.fixture_entry_names(path)
                   assert_equal [:directory, :pin], closed
@@ -4685,9 +4712,11 @@ module UploadProcessFixture
                   assert_equal 0, reads
                   assert_equal [:pin], closed
                   pin.stat = metadata
-                  mutate, closed = true, []
-                  assert_raises(Failure) { fixture.fixture_entry_names(path) }
-                  assert_equal [:directory, :pin], closed
+                  %i[ctime nlink].each do |field|
+                    mutate, closed = field, []
+                    assert_raises(Failure) { fixture.fixture_entry_names(path) }
+                    assert_equal [:directory, :pin], closed
+                  end
                   mutate = nil
                   [0o120700, 0o40777].each do |bad_mode|
                     metadata.mode, closed = bad_mode, []
@@ -4712,7 +4741,8 @@ module UploadProcessFixture
         reads, acquired, writes, metadata_reads = 0, [], [], []
         native = Object.new
         native.define_singleton_method(:execute) { :synthetic_driver_only }
-        metadata = Struct.new(:uid, :mode, :kind) { def directory? = kind == :directory }.new(Process.uid, 0o40700, :directory)
+        metadata = Struct.new(:uid, :mode, :kind, :nlink) { def directory? = kind == :directory }.
+          new(Process.uid, 0o40700, :directory, 1)
         source = UploadProcessFixture.method(:driver).source_location.fetch(0)
         ruby, helper, cwd, digest = "/synthetic-ruby", "/synthetic-fixture.rb", "/synthetic-cwd", "b" * 64
         environment = {"TMPDIR" => directory, "TMP" => directory, "TEMP" => directory}

@@ -119,6 +119,15 @@ observe real output EOF, validate the result and request COMMIT. COMMIT is not
 permission to begin cleanup. A failed, rejected or never-started transaction does
 not wait for success-only COMMIT and must not invent child statuses.
 
+To confirm control retirement, the custodian publishes `QUIESCING` while retaining
+its original control reader. The outer owner permanently retires further grants,
+finishes any valid pending cancellation within its original bound, and closes
+its control writer. It never completes a pending positive grant just to deliver
+a later cancellation. The custodian requires actual clean control EOF and an
+accounted reader close for a confirmed FINAL offer. This notification is neither
+a result nor proof of finality; incomplete framing, uncertain writes/closes and
+missing EOF remain adverse, and no deadline is renewed.
+
 The separate versioned control protocol has closed no-attempt, reaped and unknown
 terminal forms. Its FINAL is only an **offer**, not an accepted result or the
 custodian's own wait receipt. Acceptance additionally requires the genuine

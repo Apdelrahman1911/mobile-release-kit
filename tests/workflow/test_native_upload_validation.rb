@@ -751,8 +751,8 @@ class NativeUploadValidationTest < Minitest::Test
         end
         File.stub(:exist?, ->(path) { path == File.join(directory, "failure.json") }) do
           owner_class.stub(:bounded_file, reader) do
-            owner_class.stub(:identity, ->(_stat) { :inert_directory }) do
-              UploadProcessFixture.stub(:owned_fixture_directory, ->(_path) { :inert_stat }) do
+            owner_class.stub(:directory_identity, ->(path) { assert_equal directory, path; :inert_directory }) do
+              UploadProcessFixture.stub(:owned_fixture_directory, ->(*) { Kernel.raise "inert stop bypassed directory identity stub" }) do
                 FileUtils.stub(:remove_entry, ->(path) { removed << path; events << :remove_entry }) do
                   UploadProcessFixture.stub(:clock_ns, -> { now }) do
                     STDERR.stub(:write, sink) do
@@ -2308,6 +2308,7 @@ class NativeUploadValidationTest < Minitest::Test
     end
     fixture = sources.fetch("tests/workflow/upload_process_fixture.rb")
     launch = provenance.fetch("launchDirectory")
+    assert_equal %w[dev gid ino mode rdev type uid], launch.fetch("identity").keys.sort
     assert_equal File.dirname(dispatch.fetch("options").fetch("stdout")), File.dirname(launch.fetch("path"))
     assert_match(/\Amrk-owned-launch-/, File.basename(launch.fetch("path")))
     assert_equal "directory", launch.fetch("identity").fetch("type")
@@ -2341,7 +2342,7 @@ class NativeUploadValidationTest < Minitest::Test
     if finality == :finalized
       refute File.exist?(launch.fetch("path"))
     else
-      assert_equal launch.fetch("identity"), UploadProcessFixture::OwnedChild.identity(File.stat(launch.fetch("path")))
+      assert_equal launch.fetch("identity"), UploadProcessFixture::OwnedChild.directory_identity(launch.fetch("path"))
     end
   end
 end

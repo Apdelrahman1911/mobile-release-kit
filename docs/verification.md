@@ -651,6 +651,12 @@ for existing native, upload, entitlement, recovery or fixture tests:
   The closed v1 protocol permits a bounded 128 KiB configuration, at most 1 KiB
   per later frame and 16 frames per direction, with fixed fields/edges/phases.
   Validator stdout/stderr never supply control authority.
+  For Python control retirement, force partial payload rejection to send a real
+  late CANCEL while the custodian retains its original reader. Require
+  `QUIESCING`, irreversible grant retirement, actual clean control EOF and reader
+  closure before a confirmed FINAL; neither the notification nor an enqueued
+  cancellation proves completion. Preserve partial-write uncertainty and the
+  original cutoff.
 - Exercise success, rejection, timeout, independent stdout/stderr overflow,
   dead validator with live pipe holders, closed pipes with live work, setup
   failure, cancellation and parent loss. Keep Ruby's maximum 3600 seconds and

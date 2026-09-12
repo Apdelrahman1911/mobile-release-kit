@@ -63,7 +63,7 @@ ROLES = frozenset(("custodian", "keeper"))
 REASONS = frozenset(("cancelled", "deadline", "parent_lost", "protocol", "io", "creation", "lifecycle"))
 EDGES = {
     "o_to_c": frozenset(("CONFIG", "ADMIT", "RUN", "COMMIT", "CANCEL")),
-    "c_to_o": frozenset(("HELLO", "RESERVED", "READY", "STATUS", "FINAL")),
+    "c_to_o": frozenset(("HELLO", "RESERVED", "READY", "STATUS", "QUIESCING", "FINAL")),
     "c_to_k": frozenset(("CONFIG", "RUN", "CANCEL", "GROUP_RETIRED", "RELEASE")),
     "k_to_c": frozenset(("HELLO", "MOVED", "STATUS", "RELEASED")),
 }
@@ -71,7 +71,7 @@ FIELDS = {
     "CONFIG": {"role", "cwd", "validator_argv", "validator_env", "run_deadline_ns",
                "hard_cleanup_deadline_ns", "max_output_bytes", "capture_kind"},
     "HELLO": {"pid", "ppid", "sid", "pgid", "fd_map_version"},
-    "ADMIT": set(), "RUN": set(), "COMMIT": set(), "RELEASE": set(),
+    "ADMIT": set(), "RUN": set(), "COMMIT": set(), "RELEASE": set(), "QUIESCING": set(),
     "RESERVED": {"keeper_pid", "group_id", "session_id"},
     "MOVED": {"validator_pid", "group_id", "keeper_pgid"},
     "READY": {"validator_pid", "group_id", "keeper_pgid"},
@@ -209,6 +209,8 @@ class _Direction:
         _validate_frame(frame)
         kind = frame["type"]
         _require(not self.terminal and kind in EDGES[self.edge] and kind not in self.seen and len(self.seen) < FRAME_COUNT)
+        if self.edge == "c_to_o":
+            _require("QUIESCING" not in self.seen or kind == "FINAL")
         if kind == "CONFIG":
             _require(not self.seen and frame["role"] == ("custodian" if self.edge == "o_to_c" else "keeper"))
         elif kind in ("ADMIT", "RUN", "COMMIT"):
@@ -223,8 +225,10 @@ class _Direction:
             _require(not self.seen)
         elif kind == "RELEASE":
             _require("GROUP_RETIRED" in self.seen)
-        elif kind == "FINAL" and frame["outcome"] in ("ok", "rejected"):
-            _require("STATUS" in self.seen)
+        elif kind == "FINAL":
+            _require("QUIESCING" in self.seen)
+            if frame["outcome"] in ("ok", "rejected"):
+                _require("STATUS" in self.seen)
         if kind in ("FINAL", "RELEASED"):
             self.terminal = True
         self.seen.add(kind)
@@ -1225,6 +1229,7 @@ class _Custodian:
         self.ready = self.payload_closed = self.committed = False
         self.reserved = self.release_sent = self.routes_retired = False
         self.outer_eof_seen = self.keeper_eof_seen = False
+        self.outer_retiring = False
         self.keeper: Any = None
         self.group: _GroupReservation | None = None
         self.keeper_channel: _Channel | None = None
@@ -1245,7 +1250,14 @@ class _Custodian:
         self.outer.pump()
         for frame in self.outer.take():
             kind = frame["type"]
-            if kind == "CONFIG":
+            if kind == "CANCEL":
+                ctx.cancel_frame(frame)
+            elif self.outer_retiring:
+                # The decoder still enforces every frame and ordering rule.
+                # Retired routes consume late positive controls, never install
+                # their CONFIG or turn their bytes into a new work grant.
+                continue
+            elif kind == "CONFIG":
                 self.directory = _validate_configuration(frame, ctx)
                 self.config = frame
             elif kind == "ADMIT":
@@ -1261,11 +1273,15 @@ class _Custodian:
                          and self.group is not None and self.group.absent)
                 ctx.check(); self.committed = True
                 _role_event(ctx.role, "commit_received", frame=frame)
-            else:
-                ctx.cancel_frame(frame)
         if self.outer.eof and not self.outer_eof_seen:
             self.outer_eof_seen = True
-            ctx.record(ValidationError(ERROR), "parent_lost")
+            if not (self.outer_retiring and "QUIESCING" in self.outer.sent
+                    and not self.outer.pending and not self.outer.write_failed and not self.outer.write_in_flight
+                    and self.outer.decoder.ended and not self.outer.decoder.failed):
+                # An earlier clean EOF remains a lifecycle failure, including
+                # ordinary O cleanup after CANCEL. It can still prove stopped
+                # input later; it never becomes an assertion of parent liveness.
+                ctx.record(ValidationError(ERROR), "parent_lost")
 
     def pump_keeper(self) -> None:
         channel, ctx = self.keeper_channel, self.context
@@ -1478,6 +1494,63 @@ class _Custodian:
                 _role_event(ctx.role, "payload_marker_written", descriptor=self.payload.fileno())
         ctx.check()
 
+    def retire_outer_control(self) -> bool:
+        ctx, channel = self.context, self.outer
+        cutoff = ctx.run if ctx.primary is None else (ctx.failure_limit or ctx.hard)
+        stopped = False
+
+        def failed(error: BaseException) -> None:
+            try:
+                ctx.record(error, _failure_reason(error), cleanup=True)
+            except BaseException as recording_error:
+                ctx.contain_target_error(error, recording_error)
+
+        try:
+            _require(not self.outer_retiring and not channel.reader_closed
+                     and id(channel.reader) not in ctx.closed, CLEANUP_ERROR)
+            # Retire dispatch before notifying O or consuming another control.
+            # This phase cannot reopen descendant cleanup or renew its own bound.
+            self.outer_retiring = True
+            _require(time.monotonic_ns() < ctx.control_cutoff(cutoff), TIMEOUT)
+            channel.send("QUIESCING")
+            while True:
+                _require(time.monotonic_ns() < ctx.control_cutoff(cutoff), TIMEOUT)
+                _require(ctx.parent_pid is None or os.getppid() == ctx.parent_pid, CLEANUP_ERROR)
+                self.pump_outer()
+                _require(not channel.write_failed and not channel.write_in_flight
+                         and not channel.decoder.failed and not channel.reader_closed, CLEANUP_ERROR)
+                if channel.eof:
+                    # read() publishes eof before Decoder.eof() can reject a
+                    # trailing partial frame. Only completed framing is proof.
+                    _require(channel.decoder.ended, CLEANUP_ERROR)
+                    if "QUIESCING" in channel.sent and not channel.pending:
+                        stopped = True
+                        break
+                _require(not channel.writer_closed, CLEANUP_ERROR)
+                _pause(ctx.control_cutoff(cutoff), (channel,))
+        except BaseException as error:
+            failed(error)
+        # One actual close/accounting attempt follows both success and failure.
+        # A lost write/read/close never starts a second retirement wait.
+        try:
+            channel.close_reader()
+        except BaseException as error:
+            stopped = False
+            failed(error)
+        if stopped:
+            try:
+                _require(channel.eof and channel.decoder.ended and not channel.decoder.failed
+                         and "QUIESCING" in channel.sent and not channel.pending
+                         and not channel.write_failed and not channel.write_in_flight
+                         and channel.reader_closed and id(channel.reader) in ctx.closed
+                         and not channel.reader.unknown and not ctx.cleanup_unknown, CLEANUP_ERROR)
+                _require(time.monotonic_ns() < ctx.control_cutoff(cutoff), TIMEOUT)
+                _require(ctx.parent_pid is None or os.getppid() == ctx.parent_pid, CLEANUP_ERROR)
+            except BaseException as error:
+                stopped = False
+                failed(error)
+        return stopped
+
     def run(self) -> int:
         ctx = self.context
         try:
@@ -1530,11 +1603,11 @@ class _Custodian:
                 self.pump_outer(); ctx.check()
             except BaseException as error:
                 ctx.record(error, "lifecycle")
-        self.outer.close_reader()
+        input_retired = self.retire_outer_control()
         ctx.close_all(exclude=(self.outer.writer,))
         ctx.observe_helper_latches()
         epoch = ctx.error_epoch, ctx.signal_epoch
-        confirmed = (ctx.resources_confirmed(exclude=(self.outer.writer,))
+        confirmed = (input_retired and ctx.resources_confirmed(exclude=(self.outer.writer,))
                      and keeper_settled
                      and "unknown" not in (keeper["state"], validator["state"], group["state"])
                      and (group["state"] != "retired" or group["absent"]))
@@ -1854,6 +1927,7 @@ class _Outer:
         self.payload_eof = self.overflow = False
         self.committed = self.status_eof_seen = False
         self.commit_requested = False
+        self.control_retiring = False
         self.content: bytes | None = None
         self.receipt: Any = None
         self.confirmed = self.no_producers = False
@@ -1876,6 +1950,22 @@ class _Outer:
                 self.overflow = True
                 self.output.clear()
                 self.context.record(ValidationError("authenticated profile content exceeds its safety bound"), "io")
+
+    def retire_control_writer(self) -> None:
+        channel, ctx = self.channel, self.context
+        if not self.control_retiring or channel is None or channel.writer_closed:
+            return
+        if ctx.primary is not None and "CANCEL" not in channel.encoder.seen:
+            # record() already fixed the first failure bound. Do not replace an
+            # existing CANCEL packet, offset or deadline, or start another grace.
+            channel.send("CANCEL", reason_code=ctx.reason,
+                         cleanup_deadline_ns=min(ctx.cleanup_cutoff(ctx.hard), self.deadlines.hard))
+        # CONFIG and an existing CANCEL may drain. A queued/partial grant instead
+        # hits flush's live retirement veto; never finish it to reach a later
+        # CANCEL, or pretend that discarded trailing bytes were delivered.
+        channel.flush()
+        if not channel.pending and not channel.write_failed and not channel.write_in_flight:
+            channel.close_writer()
 
     def process_frames(self) -> None:
         channel, ctx = self.channel, self.context
@@ -1906,8 +1996,12 @@ class _Outer:
             elif kind == "STATUS":
                 _require(self.ready is not None and frame["validator_pid"] == self.ready["validator_pid"])
                 self.status = frame
+            elif kind == "QUIESCING":
+                _require(not self.control_retiring)
+                self.control_retiring = True
+                ctx.retire_launch()
             else:
-                _require(kind == "FINAL")
+                _require(kind == "FINAL" and self.control_retiring)
                 keeper, validator, group = (frame[name] for name in ("keeper", "validator", "group"))
                 if "ADMIT" not in channel.write_attempted:
                     _require(keeper["state"] == "not_attempted" and validator["state"] == "not_attempted"
@@ -1942,6 +2036,7 @@ class _Outer:
             self.status_eof_seen = True
             if self.final is None:
                 ctx.record(ValidationError(CLEANUP_ERROR), "protocol", cleanup=True)
+        self.retire_control_writer()
 
     def pump(self) -> None:
         if self.channel is not None:
@@ -1986,26 +2081,29 @@ class _Outer:
         for lease in (control_read, status_write, payload_write, null_read, null_write):
             ctx.close(lease)
         self.channel.send_frame(_configuration(self.directory, self.deadlines, "custodian"))
-        while self.hello is None and self.final is None:
+        while (self.hello is None or self.control_retiring) and self.final is None:
             self.pump(); ctx.check(); _pause(ctx.run, (self.channel,), (self.payload,))
         if self.final is not None:
             raise ValidationError(AUTHENTICATION_ERROR)
         ctx.check()
-        self.channel.send("ADMIT")
-        while self.reserved is None and self.final is None:
+        if not self.control_retiring:
+            self.channel.send("ADMIT")
+        while (self.reserved is None or self.control_retiring) and self.final is None:
             self.pump(); ctx.check(); _pause(ctx.run, (self.channel,), (self.payload,))
         if self.final is not None:
             raise ValidationError(AUTHENTICATION_ERROR)
         ctx.check()
-        self.channel.send("RUN")
+        if not self.control_retiring:
+            self.channel.send("RUN")
         while self.final is None:
             self.pump(); ctx.check()
-            if (not self.commit_requested and self.ready is not None and self.status is not None
+            if (not self.control_retiring and not self.commit_requested and self.ready is not None and self.status is not None
                     and _normal(_status_record(self.status)) and self.payload_eof):
                 self.content = completed_content(bytes(self.output))
                 ctx.check()
-                self.channel.send("COMMIT")
-                self.commit_requested = True
+                if not self.control_retiring:
+                    self.channel.send("COMMIT")
+                    self.commit_requested = True
             _pause(ctx.run, (self.channel,), () if self.payload_eof else (self.payload,))
         if self.final["outcome"] != "ok":
             raise ValidationError(AUTHENTICATION_ERROR)
@@ -2055,7 +2153,7 @@ class _Outer:
         self.confirmed = (ctx.resources_confirmed() and
                           (self.no_producers or
                            (self.receipt is not None and self.receipt.status_kind == "exit"
-                            and self.final is not None and self.final["cleanup"] == "confirmed"
+                            and self.control_retiring and self.final is not None and self.final["cleanup"] == "confirmed"
                             and self.receipt.status_code == (HELPER_FAILED if self.final["outcome"] == "failed" else HELPER_SETTLED)
                             and channel is not None and channel.eof and self.payload_eof)))
 

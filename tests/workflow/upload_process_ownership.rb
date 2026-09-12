@@ -627,12 +627,21 @@ module UploadProcessFixture
       [MobileReleaseKit::NativeProcessSpawn, MobileReleaseKit::NativeUploadProcess]
     end
 
-    # Identity excludes size/timestamps: stdout files and the private directory
-    # legitimately change after publication. Configuration bytes are additionally
-    # pinned by length and SHA256 before admission.
+    # File/FIFO identity excludes size/timestamps: stdout files legitimately
+    # change after publication. Configuration bytes are additionally pinned by
+    # length and SHA256 before admission. Link counts remain exact here.
     def self.identity(stat)
       {"dev" => stat.dev, "ino" => stat.ino, "mode" => stat.mode,
        "uid" => stat.uid, "gid" => stat.gid, "rdev" => stat.rdev, "type" => stat.ftype, "nlink" => stat.nlink}
+    end
+
+    # Directory entry changes can change nlink on supported filesystems. The
+    # original canonical/private path must still name a linked directory at
+    # every observation; the separate quiescent enumeration remains exact.
+    def self.directory_identity(path)
+      stat = UploadProcessFixture.owned_fixture_directory(path)
+      {"dev" => stat.dev, "ino" => stat.ino, "mode" => stat.mode,
+       "uid" => stat.uid, "gid" => stat.gid, "rdev" => stat.rdev, "type" => stat.ftype}
     end
 
     def self.bounded_file(path, expected: nil, limit: OUTPUT_LIMIT)
@@ -829,7 +838,7 @@ module UploadProcessFixture
         @launch_directory = File.realpath(Dir.mktmpdir("mrk-owned-launch-", @root))
         @launch_state = :open
       end
-      @directory_identity = self.class.identity(UploadProcessFixture.owned_fixture_directory(@launch_directory))
+      @directory_identity = self.class.directory_identity(@launch_directory)
       fifo = File.join(@launch_directory, "admission.fifo")
       File.mkfifo(fifo, 0o600)
       @fifo_identity = self.class.identity(File.lstat(fifo))
@@ -1187,7 +1196,7 @@ module UploadProcessFixture
         @provenance["grant"] = {"state" => @go_state, "bytesWritten" => @go_offset}
       end
       if @launch_directory
-        unless self.class.identity(UploadProcessFixture.owned_fixture_directory(@launch_directory)) == @directory_identity
+        unless self.class.directory_identity(@launch_directory) == @directory_identity
           raise Failure.new("process-ownership", "bootstrap directory identity changed")
         end
         FileUtils.remove_entry(@launch_directory)
@@ -1234,7 +1243,7 @@ module UploadProcessFixture
     def self.bootstrap(directory)
       stage = "configuration"
       condition = "directory_read"
-      expected_directory = identity(UploadProcessFixture.owned_fixture_directory(directory))
+      expected_directory = directory_identity(directory)
       condition = "record_read"
       raw = bounded_file(File.join(directory, "configuration.json"))
       condition = "record_parse"
@@ -2284,7 +2293,7 @@ module UploadProcessFixture
       @cleanup_depth = @raiser = nil
       @spawn_attempts, @signals, @leases, @closes = 0, [], [], []
       @case_root = File.realpath(Dir.mktmpdir("setup-#{helper}-", @directory))
-      identity = OwnedChild.identity(UploadProcessFixture.owned_fixture_directory(@case_root)).reject { |key, _| key == "nlink" }
+      identity = OwnedChild.directory_identity(@case_root)
       environment = %w[TMPDIR TMP TEMP].to_h { |key| [key, ENV[key]] }
       %w[TMPDIR TMP TEMP].each { |key| ENV[key] = @case_root }
       @first = error_class.new("original synchronous #{helper} setup failure")
@@ -2352,7 +2361,7 @@ module UploadProcessFixture
       # This is not UNKNOWN repair: the before-entry native veto, positive
       # no-stderr-acquisition seam and actual closes/joins prove zero producers.
       # Do not clear any original retained-state latch or reuse the case path.
-      unless OwnedChild.identity(UploadProcessFixture.owned_fixture_directory(@case_root)).reject { |key, _| key == "nlink" } == identity
+      unless OwnedChild.directory_identity(@case_root) == identity
         raise Failure.new("setup-probe", "original setup directory identity changed")
       end
       FileUtils.remove_entry(@case_root)
@@ -2696,7 +2705,7 @@ module UploadProcessFixture
           directory = Dir.mktmpdir("ownership-probe-", root)
           record["directory"], record["directoryState"] = directory, :published
           directory = File.realpath(directory)
-          record["directoryIdentity"] = OwnedChild.identity(owned_fixture_directory(directory))
+          record["directoryIdentity"] = OwnedChild.directory_identity(directory)
           record["directoryState"] = :canonical
         end
         atomic_json(File.join(directory, "input.json"),
@@ -2782,7 +2791,7 @@ module UploadProcessFixture
       ensure
         scope.cleanup do
           if directory && accepted_result && complete && !expected_unknown
-            unless OwnedChild.identity(owned_fixture_directory(directory)) == record["directoryIdentity"]
+            unless OwnedChild.directory_identity(directory) == record["directoryIdentity"]
               raise Failure.new("fixture-cleanup", "original probe directory identity changed")
             end
             remove_fixture_directory(directory, root: root, layout: :probe)

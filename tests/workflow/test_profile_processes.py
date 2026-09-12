@@ -107,6 +107,12 @@ class ProfileProcessTests(unittest.TestCase):
                 self.assertFalse(result["syntheticMalformedHelper"])
                 self.assertEqual(result["finality"], "FINALIZED")
                 self.assertTrue(result["scratchRemoved"] and result["noRetainedCustody"])
+                if mode == "partial-write-failure":
+                    # Real seven-byte payload/error → parser rejection → full
+                    # CANCEL while C still owns its original input → actual EOF,
+                    # reader close, failed helper2 and confirmed FINAL, no COMMIT.
+                    self.assertTrue(result["payloadParserRejected"] and result["controlRetirementInterleaving"])
+                    self.assertFalse(result["payloadOverflowVeto"])
                 if mode in PAYLOAD_MUTATION_MODES:
                     # These are actual C/K/V lifecycles, not missing-HELLO peers.
                     # The original O parser/overflow gate must reject the bytes.

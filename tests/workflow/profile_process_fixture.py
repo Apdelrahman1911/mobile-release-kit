@@ -737,6 +737,8 @@ class ProfileBindings:
             edge = evidence["edge"]
             assert edge in self.channels and id(self.channels[edge]) in self.raw_eofs
             fields["edge"] = edge
+            if self.mode == "partial-write-failure" and role == "custodian" and edge == "o_to_c":
+                fields["lease"] = id(self.channels[edge])
         elif event in {"payload_write", "payload_before_marker", "payload_marker_written"}:
             assert role == "custodian" and self.payload_writer is not None
             assert evidence["descriptor"] == self.remember(self.payload_writer) == 6
@@ -751,6 +753,16 @@ class ProfileBindings:
         self.log(event, **fields)
         if self.on_event is not None:
             self.on_event(role, event, evidence)
+        if (self.mode == "partial-write-failure" and role == "outer" and event == "frame_sent"
+                and evidence["edge"] == "o_to_c" and evidence["frame"]["type"] == "CANCEL"):
+            channel = self.channel_objects["c_to_o"]
+            assert channel.outgoing == "o_to_c" and "CANCEL" in channel.sent
+            assert "cancel-full-write" in self._injected and "cancel-outcome" not in self._injected
+            self._injected.add("cancel-outcome")
+            # Release C only after the original channel published the full frame,
+            # not after an attempted/partial syscall. This marker is NOT a receipt:
+            # any remaining observation-tail error still makes production UNKNOWN.
+            record(self.root / "retirement-cancel-sent", "full CANCEL publication observed")
         if role == "outer":
             if event == "child_published" and self.mode == "before-admit-cancel":
                 os.kill(os.getpid(), signal.SIGTERM)
@@ -832,6 +844,32 @@ class ProfileBindings:
             self.remember(writer)
 
         def send(channel, kind, **fields):
+            if (self.mode == "partial-write-failure" and self.role == "custodian"
+                    and channel.outgoing == "c_to_o" and kind in {"QUIESCING", "FINAL"}
+                    and "retirement-barrier" not in self._injected):
+                self._injected.add("retirement-barrier")
+                assert self.channel_objects["o_to_c"] is channel
+                assert "partial-write-failure" in self._injected and "STATUS" in channel.sent
+                assert not channel.pending and not channel.write_failed and not channel.write_in_flight
+                assert self.payload_writer.state == "CLOSED"
+                context = channel.context
+                cutoff = context.run if context.primary is None else (context.failure_limit or context.hard)
+                self.log("control_retirement_barrier_entered", kind=kind, reader=id(channel.reader),
+                         reader_state=channel.reader.state)
+                # The old FINAL path reaches this hook AFTER closing C's reader.
+                # The fixed QUIESCING path reaches it while that original reader
+                # is still live. O cannot see either frame while the gate is held.
+                record(self.root / "retirement-ready", "C reached its preterminal send boundary")
+                while True:
+                    remaining = context.control_cutoff(cutoff) - time.monotonic_ns()
+                    assert remaining > 0, "C retirement fixture exceeded its original control cutoff"
+                    sent = (self.root / "retirement-cancel-sent").exists()
+                    failed = (self.root / "retirement-cancel-failed").exists()
+                    if sent or failed:
+                        assert not (sent and failed), "ambiguous CANCEL fixture outcome"
+                        self.log("control_retirement_barrier_released", outcome="sent" if sent else "failed")
+                        break
+                    time.sleep(min(.005, remaining / owner.NANOSECOND))
             if self.role == "outer" and channel.outgoing == "o_to_c" and kind == "COMMIT":
                 assert self.payload_eof and id(self.payload_reader) in self.raw_eofs, "COMMIT preceded real payload EOF"
                 self.log("commit_requested_after_real_eof")
@@ -892,6 +930,14 @@ class ProfileBindings:
             is_payload = (self.role == "outer" and self.payload_reader is not None
                           and self.payload_reader.state == "OPEN" and descriptor == self.payload_reader.fileno())
             if is_payload:
+                if self.mode == "partial-write-failure" and "retirement-ready" not in self._injected:
+                    # Gate only payload reads: READY/STATUS must continue flowing.
+                    # Withhold the actual partial-payload EOF until the old/new
+                    # preterminal boundary, making late CANCEL deterministic.
+                    if not (self.root / "retirement-ready").exists():
+                        raise BlockingIOError
+                    self._injected.add("retirement-ready")
+                    self.log("payload_retirement_boundary_observed")
                 if self.mode == "read-failure" and ready(self.root) and "read-failure" not in self._injected:
                     self._injected.add("read-failure")
                     raise OSError("private-native-canary")
@@ -948,10 +994,12 @@ class ProfileBindings:
                 expected = {"partial-marker": canonical[:-1], "extra-frame": canonical + b"x",
                             "concatenated-frame": canonical * 2}[self.mode]
                 assert frame == expected, "C did not emit the intended malformed payload bytes"
+            elif self.mode == "partial-write-failure":
+                assert frame == original_frame(b"verified-content")[:7]
             try:
                 return original_parser(frame)
             except profiles.ValidationError as error:
-                if self.mode in PAYLOAD_MUTATION_MODES - {"overflow"}:
+                if self.mode in (PAYLOAD_MUTATION_MODES - {"overflow"}) | {"partial-write-failure"}:
                     assert not self.payload_parser_rejected
                     assert str(error) == profiles.AUTHENTICATION_ERROR + "; missing or malformed private completion frame"
                     self.payload_parser_rejected = True
@@ -963,10 +1011,43 @@ class ProfileBindings:
                 if self.mode == "short-write":
                     return self._real_write(descriptor, content[:7])
                 if self.mode == "partial-write-failure":
+                    assert self.payload_writer.state == "OPEN" and self.payload_writer.fileno() == descriptor
                     if "partial-write" in self._injected:
+                        self._injected.add("partial-write-failure")
+                        self.log("injected_payload_write_failure", lease=id(self.payload_writer), descriptor=descriptor)
                         raise OSError("private-native-canary")
+                    count = self._real_write(descriptor, content[:7])
+                    assert count == 7, "partial-payload fixture did not perform its original seven-byte write"
                     self._injected.add("partial-write")
-                    return self._real_write(descriptor, content[:7])
+                    self.log("original_partial_payload_write_return", lease=id(self.payload_writer),
+                             descriptor=descriptor, count=count)
+                    return count
+            if self.mode == "partial-write-failure" and self.role == "outer":
+                channel = self.channel_objects.get("c_to_o")
+                if (channel is not None and not channel.writer_closed and channel.writer.state == "OPEN"
+                        and channel.writer.fileno() == descriptor and channel.pending
+                        and channel.pending[0][0]["type"] == "CANCEL"):
+                    frame, pending = channel.pending[0]
+                    assert channel.outgoing == "o_to_c" and channel.write_in_flight
+                    assert content.obj is pending.obj and content == pending[:64 * 1024]
+                    assert self.payload_parser_rejected and "retirement-ready" in self._injected
+                    try:
+                        count = self._real_write(descriptor, content)
+                    except BlockingIOError:
+                        raise  # Original pending bytes/offset remain owned by _Channel.
+                    except BaseException:
+                        try:
+                            # Only release the old-path gate. Do not replace the
+                            # original syscall error if this optional write fails.
+                            record(self.root / "retirement-cancel-failed", "original CANCEL write failed")
+                        except BaseException:
+                            pass
+                        raise
+                    if type(count) is int and count == len(pending):
+                        self._injected.add("cancel-full-write")
+                        self.log("original_cancel_write_return", lease=id(channel.writer),
+                                 descriptor=descriptor, count=count, frame=frame)
+                    return count
             return self._real_write(descriptor, content)
 
         def killpg(group_id, signum):
@@ -1363,6 +1444,62 @@ def driver(root, mode):
         else:
             rejected = selected(items, "outer", "actual_payload_parser_rejected")
             assert len(rejected) == 1 and eof[0]["sequence"] < rejected[0]["sequence"]
+    control_retirement_proved = False
+    if mode == "partial-write-failure":
+        assert result == "rejected" and final_state == "FINALIZED"
+        assert binding.payload_parser_rejected and not binding.payload_overflow_veto
+        assert len(eof) == 1 and not commits
+        assert not selected(items, "outer", "commit_requested_after_real_eof")
+        assert not selected(items, "custodian", "commit_received")
+        partial = selected(items, "custodian", "original_partial_payload_write_return")
+        injected = selected(items, "custodian", "injected_payload_write_failure")
+        writes = selected(items, "custodian", "payload_write")
+        closed_payload = selected(items, "custodian", "payload_closed")
+        entered = selected(items, "custodian", "control_retirement_barrier_entered")
+        released = selected(items, "custodian", "control_retirement_barrier_released")
+        assert len(partial) == len(injected) == len(writes) == len(closed_payload) == len(entered) == len(released) == 1
+        assert partial[0]["count"] == writes[0]["count"] == 7
+        assert partial[0]["lease"] == injected[0]["lease"] == closed_payload[0]["lease"]
+        assert entered[0]["kind"] == "QUIESCING" and entered[0]["reader_state"] == "OPEN"
+        assert released[0]["outcome"] == "sent"
+        c_frames = selected(items, "custodian", "frame_sent")
+        status = [item for item in c_frames if item["frame"]["type"] == "STATUS"]
+        quiescing = [item for item in c_frames if item["frame"]["type"] == "QUIESCING"]
+        terminal = [item for item in c_frames if item["frame"]["type"] == "FINAL"]
+        control_eof = [item for item in selected(items, "custodian", "control_eof") if item["edge"] == "o_to_c"]
+        reader_closed = [item for item in selected(items, "custodian", "descriptor_closed")
+                         if item["lease"] == entered[0]["reader"]]
+        assert len(status) == len(quiescing) == len(terminal) == len(control_eof) == len(reader_closed) == 1
+        assert status[0]["frame"]["status_kind"] == "exit" and status[0]["frame"]["status_code"] == 0
+        assert control_eof[0]["lease"] == entered[0]["reader"]
+        assert terminal[0]["frame"]["outcome"] == "failed" and terminal[0]["frame"]["cleanup"] == "confirmed"
+        receipt = selected(items, "outer", "custodian_reaped")[0]["receipt"]
+        assert receipt["status_kind"] == "exit" and receipt["status_code"] == 2
+        assert (status[0]["sequence"] < partial[0]["sequence"] < writes[0]["sequence"]
+                < injected[0]["sequence"] < closed_payload[0]["sequence"] < entered[0]["sequence"]
+                < released[0]["sequence"] < quiescing[0]["sequence"] < control_eof[0]["sequence"]
+                < reader_closed[0]["sequence"] < terminal[0]["sequence"])
+        boundary = selected(items, "outer", "payload_retirement_boundary_observed")
+        rejected = selected(items, "outer", "actual_payload_parser_rejected")
+        original_cancel = selected(items, "outer", "original_cancel_write_return")
+        cancel = [item for item in selected(items, "outer", "frame_sent")
+                  if item["edge"] == "o_to_c" and item["frame"]["type"] == "CANCEL"]
+        assert len(boundary) == len(rejected) == len(original_cancel) == len(cancel) == 1
+        assert rejected[0]["count"] == binding.payload_bytes_read == 7
+        channel = binding.channel_objects["c_to_o"]
+        assert channel.writer_closed and channel.writer.state == "CLOSED"
+        assert not channel.pending and not channel.write_failed and not channel.write_in_flight
+        assert original_cancel[0]["lease"] == id(channel.writer) and original_cancel[0]["frame"] == cancel[0]["frame"]
+        writer_closed = [item for item in selected(items, "outer", "descriptor_closed")
+                         if item["lease"] == id(channel.writer)]
+        assert len(writer_closed) == 1
+        assert (boundary[0]["sequence"] < eof[0]["sequence"] < rejected[0]["sequence"]
+                < original_cancel[0]["sequence"] < cancel[0]["sequence"] < writer_closed[0]["sequence"])
+        assert not (root / "retirement-cancel-failed").exists()
+        # C→O and O→C order above is strictly same-role. Across roles, fixed
+        # ready/outcome markers only release the gates; the original operations,
+        # full frames, exact waits/EOFs/closes and finality separately prove them.
+        control_retirement_proved = True
     if result == "success":
         assert len(commits) == len(eof) == 1 and eof[0]["sequence"] < commits[0]["sequence"]
         payload_closes = selected(items, "custodian", "payload_closed")
@@ -1393,7 +1530,8 @@ def driver(root, mode):
                      "commitWithheld": binding.commit_withheld, "backpressureObserved": mode == "backpressure" and partial_bytes > 0,
                      "syntheticMalformedHelper": mode in BAD_FRAME_MODES,
                      "payloadParserRejected": binding.payload_parser_rejected,
-                     "payloadOverflowVeto": binding.payload_overflow_veto}
+                     "payloadOverflowVeto": binding.payload_overflow_veto,
+                     "controlRetirementInterleaving": control_retirement_proved}
     record(root / "result.json", json.dumps(result_record))
     return 0
 
