@@ -1226,12 +1226,12 @@ class CICoordinatorFilesystemTests(unittest.TestCase):
 
 
 class CICoordinatorResultTests(unittest.TestCase):
-    def _provider_alias_fixture(self, layout="current-version"):
+    def _provider_alias_fixture(self, layout="current-version", *, framework_name="Tk.framework"):
         """Finite metadata doubles, never a provider traversal or Session owner."""
         controller = controller_module()
         paths = dataclasses.replace(fixture_paths(controller), java_home=None)
         root = paths.compatibility_runtimes[1][1]
-        framework = root / "Frameworks/Tk.framework"
+        framework = root / "Frameworks" / framework_name
         versions, alias = framework / "Versions", framework / "PrivateHeaders"
         version = "8.6+private-provider-version"
         current, selected = versions / "Current", versions / version
@@ -1248,6 +1248,7 @@ class CICoordinatorResultTests(unittest.TestCase):
             absent={selected / "PrivateHeaders"},
             links={alias: raw, current: version}, platform="macos", roles=(("python313", root),),
             failed=alias, original=FileNotFoundError(2, "private-provider-error", "/private/provider-error"),
+            extra_aliases=[], extra_errors={},
             clock=10.0, padding=0, duplicate=False, probes=[], counts={}, changes={}, fail_at={}, expire_after=None,
             stat_count=0, continued=False, existing=None, tool_reads=[])
         ordinary = SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | 0o755)
@@ -1263,16 +1264,26 @@ class CICoordinatorResultTests(unittest.TestCase):
             for _ in range(rig.padding):
                 yield str(root), [], []
             yield str(root), [], []
-            yield str(rig.failed.parent), [], [rig.failed.name] * (2 if rig.duplicate else 1) + ["continued-runtime"]
+            aliases = (rig.failed, *rig.extra_aliases)
+            if rig.duplicate:
+                aliases += (rig.failed if rig.duplicate is True else rig.duplicate,)
+            for index, entry in enumerate(aliases):
+                yield str(entry.parent), [], [entry.name] + (["continued-runtime"] if index == len(aliases) - 1 else [])
 
         def stat_node(path, *args, **options):
             self.assertEqual((args, options), ((), {}))
-            self.assertIn(path, (root, rig.failed.parent, rig.failed, rig.failed.parent / "continued-runtime"))
             rig.stat_count += 1
+            if path == root:
+                return ordinary  # Constant-size padding does not construct extra path inventories.
+            aliases = (rig.failed, *rig.extra_aliases)
+            self.assertIn(path, (*aliases, *(entry.parent for entry in aliases),
+                                 *(entry.parent / "continued-runtime" for entry in aliases)))
             if path == rig.failed:
                 if rig.existing is None:
                     raise rig.original
                 return rig.existing
+            if path in rig.extra_errors:
+                raise rig.extra_errors[path]
             if path.name == "continued-runtime":
                 rig.continued = True
             return ordinary
@@ -1328,15 +1339,29 @@ class CICoordinatorResultTests(unittest.TestCase):
                                                               roles=rig.roles, platform=rig.platform)
         return rig
 
+    def _provider_alias_pair_fixture(self, layout="current-version"):
+        rig = self._provider_alias_fixture(layout)
+        other = self._provider_alias_fixture(layout, framework_name="Tcl.framework")
+        # Merge only inert namespace data. Both aliases use the FIRST caller's
+        # actual walk, counter, clock, metadata double and original Session double.
+        rig.states.update(other.states)
+        rig.links.update(other.links)
+        rig.absent.update(other.absent)
+        rig.extra_aliases.append(other.alias)
+        rig.extra_errors[other.alias] = other.original
+        return rig, other
+
     def test_optional_provider_header_alias_proof_records_both_layouts_and_continues_inventory(self):
-        for layout, inspections in (("direct-version", 16), ("current-version", 20)):
-            with self.subTest(layout=layout):
-                rig = self._provider_alias_fixture(layout)
+        for framework_name, layout, inspections in ((framework, layout, count)
+                for framework in ("Tk.framework", "Tcl.framework")
+                for layout, count in (("direct-version", 16), ("current-version", 20))):
+            with self.subTest(framework=framework_name, layout=layout):
+                rig = self._provider_alias_fixture(layout, framework_name=framework_name)
                 # Access time changes are not directory/link identity drift.
                 rig.changes["lstat", rig.alias, 2] = SimpleNamespace(**{**vars(rig.states[rig.alias]), "st_atime_ns": 999})
                 with rig.scope():
                     evidence = rig.controller.tool_evidence(rig.paths, rig.session, "macos", deadline=20.0)
-                expected = [{"runtime_role": "python313", "relative_components": ["Frameworks", "Tk.framework", "PrivateHeaders"],
+                expected = [{"runtime_role": "python313", "relative_components": ["Frameworks", framework_name, "PrivateHeaders"],
                              "layout": layout, "state": "protected-absent-optional-header"}]
                 self.assertEqual(evidence["protected_absent_optional_headers"], expected)
                 one_pass = [("lstat", path) for path in rig.directories[:4]] + [("lstat", rig.alias), ("readlink", rig.alias)]
@@ -1352,6 +1377,22 @@ class CICoordinatorResultTests(unittest.TestCase):
                 for hidden in (str(rig.root), rig.selected.name, "private-provider-error", "private-provider-host"):
                     self.assertNotIn(hidden, json.dumps(evidence))
 
+        rig, other = self._provider_alias_pair_fixture()
+        with rig.scope():
+            evidence = rig.controller.tool_evidence(rig.paths, rig.session, "macos", deadline=20.0)
+        self.assertEqual(evidence["protected_absent_optional_headers"], [
+            {"runtime_role": "python313", "relative_components": ["Frameworks", framework, "PrivateHeaders"],
+             "layout": "current-version", "state": "protected-absent-optional-header"}
+            for framework in ("Tk.framework", "Tcl.framework")])
+        self.assertEqual(len(rig.probes), 40)
+        for entry in (rig.alias, other.alias):
+            self.assertEqual(rig.counts["readlink", entry], 2)
+        self.assertEqual(rig.stat_count, 6)
+        self.assertTrue(rig.continued)
+        rig.session.run.assert_called_once()
+        for hidden in (str(rig.root), rig.selected.name, "private-provider-error", "private-provider-host"):
+            self.assertNotIn(hidden, json.dumps(evidence))
+
     def test_optional_provider_header_alias_entry_and_existing_targets_keep_original_rejections(self):
         cases = ("linux", "unknown-platform", "ruby", "jdk", "unbound", "ambiguous", "other-path", "other-errno", "missing-ordinary")
         for case in cases:
@@ -1362,7 +1403,7 @@ class CICoordinatorResultTests(unittest.TestCase):
                 elif case in {"ruby", "jdk", "unbound", "ambiguous"}:
                     rig.roles = () if case == "unbound" else ((case, rig.root),) if case != "ambiguous" else rig.roles * 2
                 elif case == "other-path":
-                    rig.failed = rig.root / "Frameworks/Tcl.framework/PrivateHeaders"
+                    rig.failed = rig.root / "Frameworks/Other.framework/PrivateHeaders"
                 elif case == "other-errno":
                     rig.original = PermissionError(13, "private provider stat denied")
                 else:
@@ -1390,13 +1431,31 @@ class CICoordinatorResultTests(unittest.TestCase):
                 self.assertEqual(rig.probes, [])
                 self.assertEqual(rig.continued, case == "protected")
 
+        for framework in ("Tk.framework", "Tcl.framework"):
+            with self.subTest(duplicate_after_coexistence=framework):
+                rig, other = self._provider_alias_pair_fixture()
+                rig.duplicate = rig.alias if framework == "Tk.framework" else other.alias
+                with rig.scope(), self.assertRaises(FileNotFoundError) as caught:
+                    rig.run()
+                self.assertIs(caught.exception, rig.original if framework == "Tk.framework" else other.original)
+                self.assertEqual(len(rig.probes), 40)  # Exactly one proof for each (role, alias).
+                self.assertEqual(rig.counts["readlink", rig.duplicate], 2)
+                self.assertFalse(rig.continued)
+
+        class NoPathDerivation:
+            def __truediv__(self, _part):
+                raise AssertionError("invalid framework choice must precede path derivation")
+
+        class NonPlainString(str):
+            pass
+
         rig = self._provider_alias_fixture()
-        rig.duplicate = True
-        with rig.scope(), self.assertRaises(FileNotFoundError) as caught:
-            rig.run()
-        self.assertIs(caught.exception, rig.original)
-        self.assertEqual(len(rig.probes), 20)  # One proof per role, never a second exception.
-        self.assertFalse(rig.continued)
+        for choice in ("Other.framework", "../Tk.framework", "Tk.framework/..", None, 1,
+                       b"Tk.framework", ["Tcl.framework"], NonPlainString("Tk.framework")):
+            with self.subTest(invalid_helper_choice=repr(choice)), rig.scope():
+                self.assertIsNone(rig.controller.protected_optional_header_alias(NoPathDerivation(), rig.session,
+                                  framework_name=choice, inspect=rig.forbidden))
+        self.assertEqual(rig.probes, [])
 
     def test_optional_provider_header_alias_requires_protected_directories_and_raw_internal_links(self):
         rig = self._provider_alias_fixture()
@@ -1484,6 +1543,23 @@ class CICoordinatorResultTests(unittest.TestCase):
                 self.assertEqual(len(rig.probes), probes)
                 self.assertEqual(rig.continued, completed)
                 self.assertEqual(rig.original._mrk_provider_stat[2], padding + 3)
+
+        for failure, attempts in (("budget", 31), ("first-second-proof-expiry", 17), ("final-second-proof-expiry", 32)):
+            with self.subTest(shared_second_proof_failure=failure):
+                rig, other = self._provider_alias_pair_fixture("direct-version")
+                if failure == "budget":
+                    rig.padding = 99964  # The second proof's final attempt would be entry100001.
+                else:
+                    rig.expire_after = attempts
+                with rig.scope(), self.assertRaises(rig.controller.VerificationError) as caught:
+                    rig.run()
+                self.assertEqual(caught.exception.code, "PROVIDER_RUNTIME_INVENTORY_BOUND" if failure == "budget"
+                                 else "AGGREGATE_DEADLINE")
+                self.assertEqual(len(rig.probes), attempts)
+                self.assertEqual(rig.counts["readlink", rig.alias], 2)  # The first proof genuinely completed.
+                self.assertEqual(rig.original._mrk_provider_stat[2], rig.padding + 3)
+                self.assertEqual(other.original._mrk_provider_stat[2], rig.padding + 21)
+                self.assertFalse(rig.continued)
 
         cases = ("initial-expiry", "first-expiry", "final-expiry", "first-io", "final-io", "io-and-expiry", "cancel", "unexpected")
         for case in cases:

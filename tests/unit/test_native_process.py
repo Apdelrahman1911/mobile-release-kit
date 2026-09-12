@@ -345,6 +345,69 @@ class NativeProcessTests(unittest.TestCase):
                 self.assertTrue(all(event[2] is None for event in world.events if event[0] == "sigaction"))
                 self.assertEqual((world.handler, world.signal_flags), (handler, flags))
 
+    def test_signal_signature_compares_only_actual_policy_membership(self):
+        # Actual ABI structs in memory only: no live native snapshot, setter,
+        # process, descriptor or thread is needed to test this equality oracle.
+        with patch.object(ctypes, "CDLL", side_effect=_World.denied), \
+                patch.object(m, "_Native", side_effect=_World.denied):
+            for family in ("linux-glibc", "darwin"):
+                world = _World(family)
+                native = types.SimpleNamespace(abi=world.abi, call=_World.denied)
+                before = world.abi.sigaction()
+                before.handler, before.flags = 1234, 0x100000
+                signals = (1, world.abi.constants["SIGCHLD"], world.abi.constants["NSIG"] - 1)
+                mask = sum(1 << (number - 1) for number in signals)
+                if family == "linux-glibc":
+                    before.mask[0], before.restorer = mask, 5678
+                else:
+                    before.mask = mask
+                original = bytes(before)
+                expected = (before.handler, before.flags,
+                            tuple(number in signals for number in range(1, world.abi.constants["NSIG"])))
+                if family == "linux-glibc":
+                    expected += (before.restorer,)
+                self.assertEqual(_signal_signature(native, before), expected)
+                self.assertEqual(bytes(before), original)
+
+                def compare(changed, *, equal):
+                    left, right = bytes(before), bytes(changed)
+                    actual = _signal_signature(native, before), _signal_signature(native, changed)
+                    if equal:
+                        self.assertEqual(*actual)
+                    else:
+                        self.assertNotEqual(*actual)
+                    self.assertEqual(bytes(before), left)
+                    self.assertEqual(bytes(changed), right)
+
+                unused = world.abi.sigaction.from_buffer_copy(original)
+                if family == "linux-glibc":
+                    for index in range(1, len(unused.mask)):
+                        unused.mask[index] = index * 0x10203
+                else:
+                    unused.mask ^= 1 << (world.abi.constants["NSIG"] - 1)
+                with self.subTest(family=family, field="unused-mask-storage"):
+                    self.assertNotEqual(bytes(unused), original)
+                    compare(unused, equal=True)
+                for number in signals:
+                    changed = world.abi.sigaction.from_buffer_copy(original)
+                    if family == "linux-glibc":
+                        changed.mask[0] ^= 1 << (number - 1)
+                    else:
+                        changed.mask ^= 1 << (number - 1)
+                    with self.subTest(family=family, signal=number):
+                        compare(changed, equal=False)
+                fields = (("handler", before.handler + 1), ("flags", before.flags ^ 1),
+                          ("flags", before.flags ^ (1 << 31)))
+                if family == "linux-glibc":
+                    fields += (("restorer", before.restorer + 1),)
+                for field, value in fields:
+                    changed = world.abi.sigaction.from_buffer_copy(original)
+                    setattr(changed, field, value)
+                    with self.subTest(family=family, field=field, value=value):
+                        compare(changed, equal=False)
+                self.assertEqual(world.events, [])
+                self.assertEqual(world.instances, [])
+
     def test_fd_factory_slots_are_prepublished_and_adoption_is_exact(self):
         world = _World()
         with world.installed():
@@ -1443,9 +1506,15 @@ def _native_sigaction(native, new=None):
 
 
 def _signal_signature(native, action):
+    # Public signal membership, not the unused part of libc's sigset storage.
+    # The admitted LP64 layouts have 64 meaningful Linux bits in the first
+    # unsigned-long word and 31 Darwin bits in its unsigned-int mask.
+    mask = action.mask[0] if native.abi.family == "linux-glibc" else action.mask
+    members = tuple(bool(mask & (1 << (number - 1))) for number in range(1, native.abi.constants["NSIG"]))
+    fields = action.handler, action.flags, members
     if native.abi.family == "linux-glibc":
-        return action.handler, action.flags, tuple(action.mask), action.restorer
-    return action.handler, action.flags, action.mask
+        return (*fields, action.restorer)
+    return fields
 
 
 class NativeProcessLifecycleTests(unittest.TestCase):
@@ -1642,7 +1711,12 @@ class NativeProcessLifecycleTests(unittest.TestCase):
                 self.assertEqual([task.result[1].status_code for task in tasks], [0, 7])
             self.assertIsNot(acquisitions[0]._native, acquisitions[1]._native)
             self.assertIsNot(acquisitions[0]._native.functions["fcntl"], acquisitions[1]._native.functions["fcntl"])
-            self.assertEqual(_signal_signature(native, _native_sigaction(native)), before)
+            after = _signal_signature(native, _native_sigaction(native))
+            self.assertEqual(after[0], before[0])  # Handler.
+            self.assertEqual(after[1], before[1])  # All flags.
+            self.assertEqual(after[2], before[2])  # Every valid signal bit.
+            if native.abi.family == "linux-glibc":
+                self.assertEqual(after[3], before[3])  # Exact restorer.
             self.assertIs(signal.getsignal(signal.SIGCHLD), handler)
             self.assertTrue(all(signum == signal.SIGCHLD for signum in seen))
         finally:

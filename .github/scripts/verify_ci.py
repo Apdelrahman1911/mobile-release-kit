@@ -1403,15 +1403,18 @@ def inspect_editable(paths: Paths, *, deadline: float) -> dict:
     return {"editable": True, "backend": "setuptools==80.9.0", "source_copy": "source-build/src"}
 
 
-def protected_optional_header_alias(root: Path, session, *, inspect: Callable) -> str | None:
-    """Prove only one absent Mac Tk development-header leaf, without changing it.
+def protected_optional_header_alias(root: Path, session, *, framework_name: str,
+                                    inspect: Callable) -> str | None:
+    """Prove one explicitly optional Mac Tk/Tcl header leaf, without changing it.
 
     The caller has already selected this exact optional path/role after ENOENT.
     This finite read-only proof assumes the admitted, trusted provider boundary;
     it is not an atomic pathname guarantee against a hostile host administrator.
     Every operation, including absent-leaf inspection, is charged by the caller.
     """
-    framework = root / "Frameworks/Tk.framework"
+    if type(framework_name) is not str or framework_name not in {"Tk.framework", "Tcl.framework"}:
+        return None
+    framework = root / "Frameworks" / framework_name
     versions = framework / "Versions"
     alias = framework / "PrivateHeaders"
     version_pattern = r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}"
@@ -1487,7 +1490,7 @@ def validate_tool_permissions(prefixes: tuple[Path, ...], session, *, deadline: 
 
     This is a bounded permissions check, not a homemade OS/package source map.
     System runtime symlinks are allowed; their actual destinations are checked.
-    Only a positively protected absent optional Mac Tk header alias is excepted.
+    Only positively protected absent optional Mac Tk/Tcl header aliases are excepted.
     """
     count = 0
     observations = []
@@ -1532,9 +1535,12 @@ def validate_tool_permissions(prefixes: tuple[Path, ...], session, *, deadline: 
                         role, components = "unbound", None
                     if (original.errno == 2 and platform == "macos"
                             and role in {"python", "python312", "python313", "python314"}
-                            and components == ("Frameworks", "Tk.framework", "PrivateHeaders")
-                            and role not in {item["runtime_role"] for item in observations}):
-                        layout = protected_optional_header_alias(root, session, inspect=inspect)
+                            and components in {("Frameworks", "Tk.framework", "PrivateHeaders"),
+                                               ("Frameworks", "Tcl.framework", "PrivateHeaders")}
+                            and (role, components) not in {(item["runtime_role"], tuple(item["relative_components"]))
+                                                           for item in observations}):
+                        layout = protected_optional_header_alias(root, session, framework_name=components[1],
+                                                                 inspect=inspect)
                         if layout is not None:
                             observations.append({"runtime_role": role, "relative_components": list(components),
                                                  "layout": layout, "state": "protected-absent-optional-header"})

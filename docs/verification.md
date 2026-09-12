@@ -120,13 +120,15 @@ the corresponding exact selected runtime prefixes, without a new ancestor-
 metadata, HOME, network or Mach exception. The legacy three-role shape remains
 only for bounded owner-contract controls, not a way to omit required CI versions.
 
-The macOS provider inventory may record one protected absent optional Tk
-`Frameworks/Tk.framework/PrivateHeaders` alias per selected Python role. Only
-that exact following-stat ENOENT can enter a finite, read-only two-pass proof of
+The macOS provider inventory may record protected absent optional
+`Frameworks/Tk.framework/PrivateHeaders` and `Frameworks/Tcl.framework/PrivateHeaders`
+aliases, at most once each per selected Python role (two per role, eight total).
+Only those exact following-stat ENOENTs can enter a finite, read-only two-pass proof of
 ordinary protected parents, an internal raw link layout, stable metadata and a
-genuinely absent final leaf. Every extra inspection consumes the original budget
-and deadline. Unproven layouts still fail; existing targets retain all permission
-checks. This does not repair a provider, claim Tk functionality, or replace native
+genuinely absent final leaf. Every extra inspection consumes the same original budget
+and deadline, without renewal between aliases. Unproven layouts still fail; existing
+targets retain all permission checks. This does not repair a provider, claim Tk/Tcl
+functionality, or replace native
 verification, and assumes the admitted trusted-provider/sandbox boundary.
 
 On the disposable macOS VM, the selected Ruby may be beneath runner HOME with
