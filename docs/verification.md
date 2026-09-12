@@ -120,6 +120,15 @@ the corresponding exact selected runtime prefixes, without a new ancestor-
 metadata, HOME, network or Mach exception. The legacy three-role shape remains
 only for bounded owner-contract controls, not a way to omit required CI versions.
 
+The macOS provider inventory may record one protected absent optional Tk
+`Frameworks/Tk.framework/PrivateHeaders` alias per selected Python role. Only
+that exact following-stat ENOENT can enter a finite, read-only two-pass proof of
+ordinary protected parents, an internal raw link layout, stable metadata and a
+genuinely absent final leaf. Every extra inspection consumes the original budget
+and deadline. Unproven layouts still fail; existing targets retain all permission
+checks. This does not repair a provider, claim Tk functionality, or replace native
+verification, and assumes the admitted trusted-provider/sandbox boundary.
+
 On the disposable macOS VM, the selected Ruby may be beneath runner HOME with
 mode `0750`. The owner pins that exact directory and may add only other-search
 (`0750` to `0751`), not read/list/write permission or group membership. The

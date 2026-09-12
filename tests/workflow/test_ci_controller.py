@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import base64
 import copy
-from contextlib import nullcontext, redirect_stdout
+from contextlib import contextmanager, nullcontext, redirect_stdout
 import csv
 import dataclasses
 import hashlib
@@ -1226,6 +1226,312 @@ class CICoordinatorFilesystemTests(unittest.TestCase):
 
 
 class CICoordinatorResultTests(unittest.TestCase):
+    def _provider_alias_fixture(self, layout="current-version"):
+        """Finite metadata doubles, never a provider traversal or Session owner."""
+        controller = controller_module()
+        paths = dataclasses.replace(fixture_paths(controller), java_home=None)
+        root = paths.compatibility_runtimes[1][1]
+        framework = root / "Frameworks/Tk.framework"
+        versions, alias = framework / "Versions", framework / "PrivateHeaders"
+        version = "8.6+private-provider-version"
+        current, selected = versions / "Current", versions / version
+        directories = (root, root / "Frameworks", framework, versions, selected)
+        raw = "Versions/" + ("Current" if layout == "current-version" else version) + "/PrivateHeaders"
+        nodes = (*directories, alias, current)
+        states = {path: SimpleNamespace(st_dev=7, st_ino=100 + index,
+            st_mode=(stat.S_IFLNK | 0o777) if path in (alias, current) else stat.S_IFDIR | 0o755,
+            st_uid=501, st_gid=20, st_size=len(raw if path == alias else version) if path in (alias, current) else 64,
+            st_mtime_ns=111, st_ctime_ns=222, st_atime_ns=333)
+            for index, path in enumerate(nodes)}
+        rig = SimpleNamespace(controller=controller, paths=paths, root=root, alias=alias, current=current,
+            selected=selected, leaf=selected / "PrivateHeaders", directories=directories, states=states,
+            absent={selected / "PrivateHeaders"},
+            links={alias: raw, current: version}, platform="macos", roles=(("python313", root),),
+            failed=alias, original=FileNotFoundError(2, "private-provider-error", "/private/provider-error"),
+            clock=10.0, padding=0, duplicate=False, probes=[], counts={}, changes={}, fail_at={}, expire_after=None,
+            stat_count=0, continued=False, existing=None, tool_reads=[])
+        ordinary = SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | 0o755)
+        forbidden = Mock(side_effect=AssertionError("no provider mutation, discovery, descriptor or native effect"))
+        rig.forbidden = forbidden
+        rig.session = SimpleNamespace(uid=60001, gid=60001, failure=None, tool_prefixes=(root,), run=Mock(return_value=
+            native_capture_fixture(stdout=b"ruby 3.3.12 (2026-09-08 fixture) [arm64-darwin]\n")))
+
+        def walk(prefix, **options):
+            self.assertEqual(prefix, root)
+            self.assertEqual(set(options), {"followlinks", "onerror"})
+            self.assertIs(options["followlinks"], False)
+            for _ in range(rig.padding):
+                yield str(root), [], []
+            yield str(root), [], []
+            yield str(rig.failed.parent), [], [rig.failed.name] * (2 if rig.duplicate else 1) + ["continued-runtime"]
+
+        def stat_node(path, *args, **options):
+            self.assertEqual((args, options), ((), {}))
+            self.assertIn(path, (root, rig.failed.parent, rig.failed, rig.failed.parent / "continued-runtime"))
+            rig.stat_count += 1
+            if path == rig.failed:
+                if rig.existing is None:
+                    raise rig.original
+                return rig.existing
+            if path.name == "continued-runtime":
+                rig.continued = True
+            return ordinary
+
+        def probe(kind, path):
+            self.assertIn(path, (*rig.states, *rig.absent))
+            rig.probes.append((kind, path))
+            number = len(rig.probes)
+            count = rig.counts[(kind, path)] = rig.counts.get((kind, path), 0) + 1
+            if rig.expire_after == number:
+                rig.clock = 20.0
+            if number in rig.fail_at:
+                raise rig.fail_at[number]
+            key = (kind, path, count)
+            if key in rig.changes:
+                value = rig.changes[key]
+            elif kind == "readlink":
+                self.assertIn(path, rig.links)
+                value = rig.links[path]
+            elif path in rig.absent:
+                value = FileNotFoundError(2, "private absent header leaf")
+            else:
+                value = rig.states[path]
+            if isinstance(value, BaseException):
+                raise value
+            return value
+
+        def tool_read(path, **options):
+            self.assertIn(path, (paths.python, paths.ruby))
+            rig.tool_reads.append(path)
+            return b"synthetic provider executable bytes; never executed"
+
+        @contextmanager
+        def scope():
+            fake_os = SimpleNamespace(walk=walk, readlink=lambda path: probe("readlink", path),
+                uname=lambda: ("Darwin", "private-provider-host", "26.6.2", "fixture", "arm64"),
+                **{name: forbidden for name in ("open", "close", "chmod", "chown", "fchmod", "fchown",
+                    "mkdir", "unlink", "remove", "rename", "replace", "symlink", "fork", "execve")})
+            with patch.object(controller, "os", fake_os), \
+                    patch.object(controller, "time", SimpleNamespace(monotonic=lambda: rig.clock)), \
+                    patch.object(controller, "read_regular", side_effect=tool_read), \
+                    patch.object(Path, "stat", stat_node), \
+                    patch.object(Path, "lstat", lambda path: probe("lstat", path)), \
+                    patch.object(Path, "readlink", forbidden), patch.object(Path, "resolve", forbidden), \
+                    patch.object(Path, "open", forbidden):
+                try:
+                    yield
+                finally:
+                    forbidden.assert_not_called()
+
+        rig.scope = scope
+        rig.run = lambda: controller.validate_tool_permissions((root,), rig.session, deadline=20.0,
+                                                              roles=rig.roles, platform=rig.platform)
+        return rig
+
+    def test_optional_provider_header_alias_proof_records_both_layouts_and_continues_inventory(self):
+        for layout, inspections in (("direct-version", 16), ("current-version", 20)):
+            with self.subTest(layout=layout):
+                rig = self._provider_alias_fixture(layout)
+                # Access time changes are not directory/link identity drift.
+                rig.changes["lstat", rig.alias, 2] = SimpleNamespace(**{**vars(rig.states[rig.alias]), "st_atime_ns": 999})
+                with rig.scope():
+                    evidence = rig.controller.tool_evidence(rig.paths, rig.session, "macos", deadline=20.0)
+                expected = [{"runtime_role": "python313", "relative_components": ["Frameworks", "Tk.framework", "PrivateHeaders"],
+                             "layout": layout, "state": "protected-absent-optional-header"}]
+                self.assertEqual(evidence["protected_absent_optional_headers"], expected)
+                one_pass = [("lstat", path) for path in rig.directories[:4]] + [("lstat", rig.alias), ("readlink", rig.alias)]
+                if layout == "current-version":
+                    one_pass += [("lstat", rig.current), ("readlink", rig.current)]
+                one_pass += [("lstat", rig.selected), ("lstat", rig.leaf)]
+                self.assertEqual(rig.probes, one_pass * 2)
+                self.assertEqual(len(rig.probes), inspections)
+                self.assertEqual(rig.stat_count, 4)
+                self.assertTrue(rig.continued)
+                self.assertEqual(rig.tool_reads, [rig.paths.python, rig.paths.ruby])
+                rig.session.run.assert_called_once()
+                for hidden in (str(rig.root), rig.selected.name, "private-provider-error", "private-provider-host"):
+                    self.assertNotIn(hidden, json.dumps(evidence))
+
+    def test_optional_provider_header_alias_entry_and_existing_targets_keep_original_rejections(self):
+        cases = ("linux", "unknown-platform", "ruby", "jdk", "unbound", "ambiguous", "other-path", "other-errno", "missing-ordinary")
+        for case in cases:
+            with self.subTest(entry=case):
+                rig = self._provider_alias_fixture()
+                if case in {"linux", "unknown-platform"}:
+                    rig.platform = "linux" if case == "linux" else ""
+                elif case in {"ruby", "jdk", "unbound", "ambiguous"}:
+                    rig.roles = () if case == "unbound" else ((case, rig.root),) if case != "ambiguous" else rig.roles * 2
+                elif case == "other-path":
+                    rig.failed = rig.root / "Frameworks/Tcl.framework/PrivateHeaders"
+                elif case == "other-errno":
+                    rig.original = PermissionError(13, "private provider stat denied")
+                else:
+                    rig.changes["lstat", rig.alias, 1] = FileNotFoundError(2, "private vanished ordinary entry")
+                with rig.scope(), self.assertRaises(OSError) as caught:
+                    rig.run()
+                self.assertIs(caught.exception, rig.original)
+                self.assertEqual(len(rig.probes), 5 if case == "missing-ordinary" else 0)
+                self.assertFalse(rig.continued)
+                self.assertEqual(rig.original._mrk_provider_stat[2], 3)
+
+        for case in ("protected", "subject-owner", "world-write", "subject-group-write"):
+            with self.subTest(existing_target=case):
+                rig = self._provider_alias_fixture()
+                rig.existing = SimpleNamespace(st_uid=rig.session.uid if case == "subject-owner" else 501,
+                    st_gid=rig.session.gid if case == "subject-group-write" else 20,
+                    st_mode=stat.S_IFREG | (0o666 if case == "world-write" else 0o660 if case == "subject-group-write" else 0o644))
+                with rig.scope():
+                    if case == "protected":
+                        self.assertEqual(rig.run(), [])
+                    else:
+                        with self.assertRaises(rig.controller.VerificationError) as caught:
+                            rig.run()
+                        self.assertEqual(caught.exception.code, "PROVIDER_RUNTIME_SUBJECT_WRITABLE")
+                self.assertEqual(rig.probes, [])
+                self.assertEqual(rig.continued, case == "protected")
+
+        rig = self._provider_alias_fixture()
+        rig.duplicate = True
+        with rig.scope(), self.assertRaises(FileNotFoundError) as caught:
+            rig.run()
+        self.assertIs(caught.exception, rig.original)
+        self.assertEqual(len(rig.probes), 20)  # One proof per role, never a second exception.
+        self.assertFalse(rig.continued)
+
+    def test_optional_provider_header_alias_requires_protected_directories_and_raw_internal_links(self):
+        rig = self._provider_alias_fixture()
+        mutations = [(path, {"st_mode": stat.S_IFDIR | 0o777}) for path in rig.directories]
+        mutations += [(rig.alias, {"st_uid": rig.session.uid}), (rig.current, {"st_uid": rig.session.uid}),
+            (rig.alias, {"st_mode": stat.S_IFREG | 0o644}), (rig.current, {"st_mode": stat.S_IFDIR | 0o755}),
+            (rig.selected, {"st_mode": stat.S_IFLNK | 0o777}),
+            (rig.selected, {"st_uid": rig.session.uid}),
+            (rig.selected, {"st_gid": rig.session.gid, "st_mode": stat.S_IFDIR | 0o770}),
+            (rig.alias, {"st_size": 129})]
+        for path, changes in mutations:
+            with self.subTest(node=path.relative_to(rig.root).as_posix(), changes=changes):
+                current = self._provider_alias_fixture()
+                current.states[path] = SimpleNamespace(**{**vars(current.states[path]), **changes})
+                with current.scope(), self.assertRaises(FileNotFoundError) as caught:
+                    current.run()
+                self.assertIs(caught.exception, current.original)
+                self.assertFalse(current.continued)
+
+        targets = ("/Versions/Current/PrivateHeaders", "Versions/../PrivateHeaders", "Versions/./PrivateHeaders",
+            "Versions//Current/PrivateHeaders", "Versions/Current/./PrivateHeaders", "Versions/Current/PrivateHeaders/",
+            "Versions/Current/PrivateHeaders\n", "Versions/" + "v" * 65 + "/PrivateHeaders", b"Versions/v/PrivateHeaders")
+        current_targets = ("../v", "/v", "./v", "v//tail", "v/alias", "Current", ".", "..", "v\n", "v" * 65)
+        for which, values in (("alias", targets), ("current", current_targets)):
+            for raw in values:
+                with self.subTest(link=which, raw=raw):
+                    current = self._provider_alias_fixture()
+                    current.links[getattr(current, which)] = raw
+                    with current.scope(), self.assertRaises(FileNotFoundError) as caught:
+                        current.run()
+                    self.assertIs(caught.exception, current.original)
+                    self.assertFalse(current.continued)
+
+    def test_optional_provider_header_alias_rechecks_identity_values_and_final_absence(self):
+        rig = self._provider_alias_fixture()
+        cases = [("lstat", path, 2, {"st_ino": rig.states[path].st_ino + 1})
+                 for path in (*rig.directories, rig.alias, rig.current)]
+        cases += [("lstat", rig.alias, 2, {field: getattr(rig.states[rig.alias], field) + delta})
+                  for field, delta in (("st_dev", 1), ("st_uid", 1), ("st_gid", 1), ("st_mode", -1),
+                                       ("st_size", 1), ("st_mtime_ns", 1), ("st_ctime_ns", 1))]
+        # Both spellings are individually valid, but changed values cannot be adopted.
+        cases += [("readlink", rig.alias, 2, "Versions/" + rig.selected.name + "/PrivateHeaders"),
+                  ("readlink", rig.current, 2, "different-version")]
+        for kind, path, occurrence, change in cases:
+            with self.subTest(observation=(kind, path.relative_to(rig.root).as_posix()), change=change):
+                current = self._provider_alias_fixture()
+                if kind == "readlink" and path == current.current:
+                    other = current.selected.parent / "different-version"
+                    # Both target observations remain otherwise identical and
+                    # protected; raw Current value drift alone must veto adoption.
+                    current.states[other] = SimpleNamespace(**vars(current.states[current.selected]))
+                    current.absent.add(other / "PrivateHeaders")
+                current.changes[kind, path, occurrence] = (SimpleNamespace(**{**vars(current.states[path]), **change})
+                                                          if type(change) is dict else change)
+                with current.scope(), self.assertRaises(FileNotFoundError) as caught:
+                    current.run()
+                self.assertIs(caught.exception, current.original)
+                self.assertEqual(current.original._mrk_provider_stat[2], 3)
+                self.assertFalse(current.continued)
+
+        for occurrence, kind in ((1, stat.S_IFLNK), (1, stat.S_IFREG), (2, stat.S_IFDIR)):
+            with self.subTest(absence_pass=occurrence, kind=kind):
+                current = self._provider_alias_fixture()
+                current.changes["lstat", current.leaf, occurrence] = SimpleNamespace(st_mode=kind | 0o755)
+                with current.scope(), self.assertRaises(FileNotFoundError) as caught:
+                    current.run()
+                self.assertIs(caught.exception, current.original)
+                self.assertFalse(current.continued)
+                self.assertEqual(len(current.probes), 10 * occurrence)
+
+    def test_optional_provider_header_alias_budget_deadline_and_errors_never_authorize_continuation(self):
+        # Exercise the actual global bound with constant-size inert state, not a
+        # smaller replacement limit or a mocked inspector that authorizes itself.
+        for padding, probes, completed in ((99980, 16, True), (99981, 16, False), (99982, 15, False)):
+            with self.subTest(inventory_padding=padding):
+                rig = self._provider_alias_fixture("direct-version")
+                rig.padding = padding
+                with rig.scope():
+                    if completed:
+                        self.assertEqual(len(rig.run()), 1)
+                    else:
+                        with self.assertRaises(rig.controller.VerificationError) as caught:
+                            rig.run()
+                        self.assertEqual(caught.exception.code, "PROVIDER_RUNTIME_INVENTORY_BOUND")
+                self.assertEqual(len(rig.probes), probes)
+                self.assertEqual(rig.continued, completed)
+                self.assertEqual(rig.original._mrk_provider_stat[2], padding + 3)
+
+        cases = ("initial-expiry", "first-expiry", "final-expiry", "first-io", "final-io", "io-and-expiry", "cancel", "unexpected")
+        for case in cases:
+            with self.subTest(failure=case):
+                rig = self._provider_alias_fixture()
+                error = (KeyboardInterrupt("synthetic cancellation") if case == "cancel" else
+                         RuntimeError("synthetic unexpected failure") if case == "unexpected" else OSError(5, "private proof I/O"))
+                if case == "initial-expiry":
+                    rig.clock = 20.0
+                if case in {"first-expiry", "final-expiry", "io-and-expiry"}:
+                    rig.expire_after = 1 if case == "first-expiry" else 20
+                if case in {"first-io", "final-io", "io-and-expiry", "cancel", "unexpected"}:
+                    rig.fail_at[1 if case == "first-io" else 20] = error
+                with rig.scope(), self.assertRaises(BaseException) as caught:
+                    rig.run()
+                if "expiry" in case:
+                    self.assertIsInstance(caught.exception, rig.controller.VerificationError)
+                    self.assertEqual(caught.exception.code, "AGGREGATE_DEADLINE")
+                else:
+                    self.assertIs(caught.exception, rig.original if case in {"first-io", "final-io"} else error)
+                self.assertEqual(len(rig.probes), 0 if case == "initial-expiry" else 1 if case in {"first-expiry", "first-io"} else 20)
+                self.assertFalse(rig.continued)
+
+        class SessionAlarm(RuntimeError):
+            """Inert shape of the owner's latched alarm, not its native module."""
+
+        for kind in (KeyboardInterrupt, SystemExit, RuntimeError, "deadline", "budget", SessionAlarm):
+            with self.subTest(diagnostic_assignment=kind):
+                rig = self._provider_alias_fixture()
+                error = (rig.controller.VerificationError("AGGREGATE_DEADLINE" if kind == "deadline"
+                                                         else "PROVIDER_RUNTIME_INVENTORY_BOUND") if kind in {"deadline", "budget"}
+                         else kind("synthetic diagnostic after-effect"))
+
+                class InterruptedDiagnostic(FileNotFoundError):
+                    def __setattr__(self, name, value):
+                        super().__setattr__(name, value)
+                        if name == "_mrk_provider_stat":
+                            if kind is SessionAlarm:
+                                rig.session.failure = "original aggregate deadline expired"
+                            raise error
+
+                rig.original = InterruptedDiagnostic(2, "private initiating stat")
+                with rig.scope(), self.assertRaises(BaseException) as caught:
+                    rig.run()
+                self.assertIs(caught.exception, rig.original if kind is RuntimeError else error)
+                self.assertEqual(rig.probes, [])
+                self.assertFalse(rig.continued)
+
     def test_provider_stat_failure_keeps_exact_error_single_operation_and_scoped_diagnostics(self):
         controller = controller_module()
         private = "private-diagnostic-fixture-not-for-publication"

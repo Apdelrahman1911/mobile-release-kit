@@ -42,6 +42,9 @@ UNKNOWN_RESOURCE_MODES = frozenset({
     "read-restored-term-fatal",
     "source-restored-term-fatal",
     "capture-restored-term-fatal",
+    "read-restore-int",
+    "source-restore-int",
+    "capture-restore-int",
     "capture-control-close-failure",
     "capture-status-close-failure",
     "capture-payload-close-failure",
@@ -488,6 +491,26 @@ def driver(root: Path, mode: str, signum: int) -> dict:
                     or any(state not in {"NO_PRODUCERS", "FINALIZED"}
                            for state in result["producerFinalities"]))
         retained_paths = [lease.path for lease in scratches if lease.path is not None and lease.path.exists()]
+        if phase == "restore-int":
+            # The actual saved INT handler ran before its setter returned to
+            # production. Observed restored handlers/closed FDs do not replace
+            # that lost restoration completion or retire the retained owner.
+            assert mode in UNKNOWN_RESOURCE_MODES and retained
+            assert result["handlersRestored"] and result["rawDescriptorsClosed"] and result["leasesClosed"]
+            assert result["noProducerAttempt"] == (area == "read")
+            assert result["nativeWaitsConfirmed"] == (area != "read")
+            if area == "read":
+                assert len(scopes) == 1 and scopes[0].retained
+                assert not outers and not scratches and result["producerFinalities"] == []
+                assert result["producerCleanupAllowed"] and result["scratchRemoved"] and not result["scratchRetained"]
+            elif area == "source":
+                assert len(scopes) == 1 and scopes[0].retained
+                assert result["producerFinalities"] == ["FINALIZED"]
+                assert result["producerCleanupAllowed"] and result["scratchRemoved"] and not result["scratchRetained"]
+            else:
+                assert not scopes and len(scratches) == 1 and scratches[0].retained
+                assert result["producerFinalities"] == ["UNKNOWN"]
+                assert not result["producerCleanupAllowed"] and not result["scratchRemoved"] and result["scratchRetained"]
         if mode in UNKNOWN_RESOURCE_MODES:
             assert retained, "intentional real-resource uncertainty lost its product custody"
             scope_ids = {id(item) for item in profiles._PROFILE_RESOURCE_SCOPES if item.retained}
@@ -527,7 +550,7 @@ def driver(root: Path, mode: str, signum: int) -> dict:
                     assert (cancellation_probe.call_count, scratch_probe.call_count, child_probe.call_count) == (0, 0, 0)
             result.update(retainedAfterGC=True, reuseRefused=True)
         else:
-            # These 81 ordinary rows may not pass through the poison branch.
+            # These 78 ordinary rows may not pass through the poison branch.
             # Their genuine native receipts (or positive no-attempt inventory)
             # must agree with actual product finality and empty real registries.
             assert not retained and not retained_paths, "healthy resource case retained actual custody"

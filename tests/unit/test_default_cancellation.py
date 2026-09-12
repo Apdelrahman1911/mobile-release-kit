@@ -19,7 +19,7 @@ from mobile_release.cancellation import CleanupScope, DefaultCancellation
 from mobile_release.errors import CredentialError, ValidationError
 from mobile_release.inspection import InspectionDeadline
 
-from workflow.profile_resource_fixture import run_case
+from workflow.profile_resource_fixture import UNKNOWN_RESOURCE_MODES, run_case
 from workflow.profile_process_fixture import (
     FixtureWorkspace, assert_fixture_idle, retain_fixture_custody,
 )
@@ -175,6 +175,54 @@ class DefaultCancellationTests(unittest.TestCase):
             self.assertNotIn("private-native-canary", str(raised.exception))
             self.assertEqual(calls, [signal.SIGTERM, signal.SIGINT])
 
+    def test_restoration_return_loss_not_deferred_cancellation_requires_unknown_scope(self):
+        self.assertEqual({mode for mode in UNKNOWN_RESOURCE_MODES if mode.endswith("-restore-int")},
+                         {"read-restore-int", "source-restore-int", "capture-restore-int"})
+        for selected in (signal.SIGTERM, signal.SIGINT):
+            guard = self.guard()
+            guard.previous = {signal.SIGINT: signal.default_int_handler, signal.SIGTERM: signal.SIG_DFL}
+            guard.depth = 0
+            handlers = {signum: guard.interrupt for signum in guard.previous}
+            calls, cleaned, registry = [], [], []
+            original = KeyboardInterrupt("modeled final restoration return loss")
+
+            def restore(signum, handler):
+                previous = handlers[signum]
+                handlers[signum] = handler
+                calls.append(signum)
+                if signum == selected:
+                    if selected == signal.SIGINT:
+                        raise original  # The final setter has not returned.
+                    guard.interrupt(signal.SIGINT, None)  # Still the deferred guard.
+                return previous
+
+            # Entirely inert scope: no handler is installed, and no descriptor,
+            # scratch, child or task exists. Replacing this model-only registry
+            # does not release any real resource or previous retained owner.
+            with self.subTest(restored=selected), patch.object(profiles, "_PROFILE_RESOURCE_SCOPES", registry), patch("mobile_release.cancellation.signal.signal", side_effect=restore):
+                scope = profiles._ProfileCleanupScope(
+                    guard, lambda: cleaned.append(True), owns_cancellation=True, descriptors=(),
+                )
+                with self.assertRaises(KeyboardInterrupt) as raised:
+                    try:
+                        with scope:
+                            pass
+                    finally:
+                        scope.__exit__(*exc_info())
+                unknown = selected == signal.SIGINT
+                self.assertEqual(calls, [signal.SIGTERM, signal.SIGINT])
+                self.assertEqual(cleaned, [True])
+                self.assertEqual(handlers, guard.previous)
+                self.assertTrue(scope.claimed and scope._settled)
+                self.assertEqual(scope.retained, unknown)
+                self.assertEqual(registry, [scope] if unknown else [])
+                self.assertEqual(len(scope._cleanup_errors), int(unknown))
+                self.assertIs(scope._primary_error, raised.exception)
+                if unknown:
+                    self.assertIs(raised.exception, original)
+                else:
+                    self.assertTrue(guard.cancelled)
+
 
 @unittest.skipUnless(os.name == "posix", "profile resource ownership needs POSIX")
 class ProfileResourceSignalTests(unittest.TestCase):
@@ -214,13 +262,38 @@ class ProfileResourceSignalTests(unittest.TestCase):
                             self.assertTrue(result["noProducerAttempt"])
 
     def test_restored_int_or_term_cannot_turn_completed_resource_cleanup_into_success(self):
+        # TERM is restored first while INT still reaches the deferred guard.
+        # Losing the final INT setter's return is isolated in the three tests
+        # below; a restored-handler observation cannot clear that uncertainty.
         for area in ("read", "source", "capture"):
-            for phase in ("restore-term", "restore-int"):
-                assert_fixture_idle()
-                with self.subTest(area=area, phase=phase), resource_case():
-                    result = self.boundary(f"{area}-{phase}")
-                    self.assertTrue(result["rawDescriptorsClosed"] and result["leasesClosed"])
-                    self.assertTrue(result["handlersRestored"])
+            assert_fixture_idle()
+            with self.subTest(area=area), resource_case():
+                result = self.boundary(f"{area}-restore-term")
+                self.assertTrue(result["rawDescriptorsClosed"] and result["leasesClosed"])
+                self.assertTrue(result["handlersRestored"])
+
+    def _unknown_restored_int(self, mode):
+        self.assertIn(mode, ("read-restore-int", "source-restore-int", "capture-restore-int"))
+        result = self.boundary(mode)
+        area = mode.split("-", 1)[0]
+        self.assertTrue(result["rawDescriptorsClosed"] and result["leasesClosed"] and result["handlersRestored"])
+        self.assertTrue(result["retainedCustody"] and result["retainedAfterGC"] and result["reuseRefused"])
+        self.assertFalse(result["noRetainedState"])
+        self.assertEqual(result["noProducerAttempt"], area == "read")
+        self.assertEqual(result["nativeWaitsConfirmed"], area != "read")
+        self.assertEqual(result["producerFinalities"], {"read": [], "source": ["FINALIZED"], "capture": ["UNKNOWN"]}[area])
+        self.assertEqual(result["producerCleanupAllowed"], area != "capture")
+        self.assertEqual(result["scratchRemoved"], area != "capture")
+        self.assertEqual(result["scratchRetained"], area == "capture")
+
+    def test_unknown_read_restored_int(self):
+        self._unknown_restored_int("read-restore-int")
+
+    def test_unknown_source_restored_int(self):
+        self._unknown_restored_int("source-restore-int")
+
+    def test_unknown_capture_restored_int(self):
+        self._unknown_restored_int("capture-restore-int")
 
     def _unknown_restored_term(self, mode):
         result = self.boundary(mode)

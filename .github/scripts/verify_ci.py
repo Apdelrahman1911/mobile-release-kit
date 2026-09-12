@@ -48,6 +48,9 @@ PYTHON_POISON_PARTITIONS = (
     "poison-payload-writer-close-failure",
     "poison-payload-reader-close-failure",
     "poison-payload-reader-close-unresolved",
+    "poison-read-restored-int",
+    "poison-source-restored-int",
+    "poison-capture-restored-int",
     "poison-read-restored-term-fatal",
     "poison-source-restored-term-fatal",
     "poison-capture-restored-term-fatal",
@@ -1400,14 +1403,106 @@ def inspect_editable(paths: Paths, *, deadline: float) -> dict:
     return {"editable": True, "backend": "setuptools==80.9.0", "source_copy": "source-build/src"}
 
 
+def protected_optional_header_alias(root: Path, session, *, inspect: Callable) -> str | None:
+    """Prove only one absent Mac Tk development-header leaf, without changing it.
+
+    The caller has already selected this exact optional path/role after ENOENT.
+    This finite read-only proof assumes the admitted, trusted provider boundary;
+    it is not an atomic pathname guarantee against a hostile host administrator.
+    Every operation, including absent-leaf inspection, is charged by the caller.
+    """
+    framework = root / "Frameworks/Tk.framework"
+    versions = framework / "Versions"
+    alias = framework / "PrivateHeaders"
+    version_pattern = r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}"
+    identity = lambda value: (value.st_dev, value.st_ino, value.st_mode, value.st_uid,
+                              value.st_gid, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+    def directory(path):
+        state = inspect(path.lstat)
+        if (not stat.S_ISDIR(state.st_mode) or state.st_uid == session.uid
+                or state.st_mode & 0o002 or state.st_gid == session.gid and state.st_mode & 0o020):
+            return None
+        return identity(state)
+
+    def link(path):
+        state = inspect(path.lstat)
+        # Symlink write bits (normally0777 on Darwin) are not content-write
+        # permission. The ordinary protected parent controls replacement.
+        if not stat.S_ISLNK(state.st_mode) or state.st_uid == session.uid or not 1 <= state.st_size <= 128:
+            return None
+        raw = inspect(lambda: os.readlink(path))
+        if type(raw) is not str or not 1 <= len(raw) <= 128:
+            return None
+        return identity(state), raw
+
+    def observe():
+        records = []
+        for path in (root, root / "Frameworks", framework, versions):
+            state = directory(path)
+            if state is None:
+                return None
+            records.append(state)
+        outer = link(alias)
+        if outer is None:
+            return None
+        records.append(outer)
+        match = re.fullmatch(r"Versions/(" + version_pattern + r")/PrivateHeaders", outer[1])
+        if match is None:
+            return None
+        version = match[1]
+        layout = "direct-version"
+        if version == "Current":
+            current = link(versions / "Current")
+            if current is None or re.fullmatch(version_pattern, current[1]) is None or current[1] == "Current":
+                return None
+            records.append(current)
+            version, layout = current[1], "current-version"
+        state = directory(versions / version)
+        if state is None:
+            return None
+        records.append(state)
+        try:
+            inspect((versions / version / "PrivateHeaders").lstat)
+        except FileNotFoundError as missing:
+            if missing.errno != 2:
+                return None
+        else:
+            return None  # Another dangling leaf is not positive absence.
+        return layout, tuple(records)
+
+    try:
+        before = observe()
+        if before is None:
+            return None
+        after = observe()
+        return before[0] if after == before else None
+    except OSError:
+        return None  # Preserve the original following-stat failure at the caller.
+
+
 def validate_tool_permissions(prefixes: tuple[Path, ...], session, *, deadline: float,
-                              roles: tuple[tuple[str, Path], ...] = ()) -> None:
+                              roles: tuple[tuple[str, Path], ...] = (), platform: str = "") -> list[dict]:
     """Provider runtimes are trusted, but the numerical subject cannot edit them.
 
     This is a bounded permissions check, not a homemade OS/package source map.
     System runtime symlinks are allowed; their actual destinations are checked.
+    Only a positively protected absent optional Mac Tk header alias is excepted.
     """
     count = 0
+    observations = []
+
+    def inspect(operation):
+        nonlocal count
+        check_clock(deadline)
+        count += 1
+        if count > 100000:
+            raise VerificationError("PROVIDER_RUNTIME_INVENTORY_BOUND")
+        try:
+            return operation()
+        finally:
+            check_clock(deadline)
+
     for prefix_index, root in enumerate(prefixes):
         for directory, dirs, files in os.walk(root, followlinks=False, onerror=walk_error):
             check_clock(deadline)
@@ -1418,18 +1513,37 @@ def validate_tool_permissions(prefixes: tuple[Path, ...], session, *, deadline: 
                 try:
                     info = path.stat()  # Provider-controlled links, not mutable outputs.
                 except OSError as original:
-                    # Diagnostic data only: retain this exact failed operation,
-                    # never retry or infer this node's kind from an earlier stat.
+                    # Preserve the original failed operation/index. Optional
+                    # proof inspections cannot rewrite its diagnostic location.
+                    role, components = "unbound", None
                     try:
                         selected = tuple(role for role, prefix in roles if prefix == root)
                         role = selected[0] if len(selected) == 1 else "unbound"
-                        original._mrk_provider_stat = (role, prefix_index, count, path.relative_to(root).parts)
-                    except BaseException:
-                        pass  # Optional diagnostics must not replace the original failure.
+                        components = path.relative_to(root).parts
+                        original._mrk_provider_stat = (role, prefix_index, count, components)
+                    except VerificationError:
+                        raise  # Deadline/budget failure cannot become optional success.
+                    except Exception:
+                        if getattr(session, "failure", None) is not None:
+                            raise  # Includes the owner's latched alarm exception.
+                        # A failed diagnostic cannot supply partial eligibility.
+                        # Cancellation is intentionally not caught now that a
+                        # positive proof could continue beyond the original error.
+                        role, components = "unbound", None
+                    if (original.errno == 2 and platform == "macos"
+                            and role in {"python", "python312", "python313", "python314"}
+                            and components == ("Frameworks", "Tk.framework", "PrivateHeaders")
+                            and role not in {item["runtime_role"] for item in observations}):
+                        layout = protected_optional_header_alias(root, session, inspect=inspect)
+                        if layout is not None:
+                            observations.append({"runtime_role": role, "relative_components": list(components),
+                                                 "layout": layout, "state": "protected-absent-optional-header"})
+                            continue
                     raise
                 if (info.st_uid == session.uid or info.st_mode & 0o002
                         or info.st_gid == session.gid and info.st_mode & 0o020):
                     raise VerificationError("PROVIDER_RUNTIME_SUBJECT_WRITABLE")
+    return observations
 
 
 def tool_evidence(paths: Paths, session, platform: str, *, deadline: float) -> dict:
@@ -1438,7 +1552,8 @@ def tool_evidence(paths: Paths, session, platform: str, *, deadline: float) -> d
         roles += (("jdk", paths.java_home),)
     roles += tuple((role, pair[1]) for role, pair in zip(
         ("python312", "python313", "python314"), paths.compatibility_runtimes))
-    validate_tool_permissions(session.tool_prefixes, session, deadline=deadline, roles=roles)
+    optional_headers = validate_tool_permissions(session.tool_prefixes, session, deadline=deadline,
+                                                 roles=roles, platform=platform)
     data = {"python": {"version": sys.version.split()[0], "sha256": hashlib.sha256(
                 read_regular(paths.python, deadline=deadline, maximum=64 * 1024**2)).hexdigest()},
             "ruby": {"sha256": hashlib.sha256(read_regular(paths.ruby, deadline=deadline,
@@ -1449,6 +1564,7 @@ def tool_evidence(paths: Paths, session, platform: str, *, deadline: float) -> d
     if not ruby.ok or ruby.stderr or not re.fullmatch(r"ruby 3\.3\.12 \([^\r\n]{1,150}\) \[[A-Za-z0-9_.-]+\]", version):
         raise VerificationError("RUBY_VERSION_OR_FINALITY")
     data["ruby"]["version"] = version
+    data["protected_absent_optional_headers"] = optional_headers
     data["platform"] = dict(zip(("system", "node", "release", "version", "machine"), os.uname()))
     data["platform"].pop("node")  # A host name is not useful public evidence.
     return data
