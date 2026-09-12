@@ -32,6 +32,12 @@ class NativeUploadValidationTest < Minitest::Test
   ISOLATED_COLLECTOR_FLAG = "--mrk-isolated-collector-close"
   ISOLATED_COLLECTOR_MODE = "collector-isolated-close"
   ISOLATED_COLLECTOR_LIMIT = 2 * UploadProcessFixture::DRIVER_LIMIT + 2 * UploadProcessFixture::CLEANUP_LIMIT
+  RAW_REPORTING_NS = 2_000_000_000
+  ISOLATED_FAILURE_PREFIX = "MRK_ISOLATED_COLLECTOR_FAILURE="
+  ISOLATED_FAILURE_STAGES = %w[cli-admission request-contract source-bindings deadline-bound collector-execution
+                              capture-contract cleanup-contract reporting-contract custody-contract final-recheck proof-publication].freeze
+  ISOLATED_FAILURE_CATEGORIES = %w[assertion-error fixture-error native-lifecycle-error io-error os-error interrupt
+                                  system-exit standard-error exception unknown].freeze
   ORDER_CASES = {
     "native-order-task-before-caller-interrupt" => %w[task-before-caller interrupt],
     "native-order-task-before-caller-system-exit" => %w[task-before-caller system-exit],
@@ -285,12 +291,12 @@ class NativeUploadValidationTest < Minitest::Test
     assert_retained_capture(isolated)
     assert_instance_of Process::Status, isolated.fetch(:status)
     assert isolated.fetch(:status).exited?
-    assert_equal 0, isolated.fetch(:status).exitstatus
+    assert_isolated_collector_exit(isolated)
     assert_equal "", isolated.fetch(:stdout)
     assert_equal "", isolated.fetch(:stderr)
     assert_empty isolated.fetch(:cleanup_errors)
     proof = read_isolated_json(File.join(isolated_directory, "isolated-control.json"))
-    assert_equal %w[argv case childCollector cwd innerState interpreter minitest pid sourceSha256 testSource version], proof.keys.sort
+    assert_equal %w[argv case childCollector cwd deadlineNs innerState interpreter minitest pid sourceSha256 testSource version], proof.keys.sort
     assert_equal 1, proof.fetch("version")
     assert_equal ISOLATED_COLLECTOR_MODE, proof.fetch("case")
     assert_equal isolated.fetch(:child).pid, proof.fetch("pid")
@@ -300,6 +306,9 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal isolated.fetch(:dispatch).fetch("fixture"), proof.fetch("testSource")
     assert_equal isolated.fetch(:dispatch).fetch("minitest"), proof.fetch("minitest")
     assert_equal isolated.fetch(:isolation_source_hashes), proof.fetch("sourceSha256")
+    assert_equal isolated.fetch(:run_deadline_ns), proof.fetch("deadlineNs")
+    assert_equal isolated.fetch(:child).creator.run_deadline_ns, proof.fetch("deadlineNs")
+    assert_equal isolated.fetch(:isolated_request).fetch("deadlineNs"), proof.fetch("deadlineNs")
     assert_equal({"phase" => "unknown", "stopCompleted" => false, "creatorJoined" => true,
                   "originalWaitBound" => true, "unknownLease" => "out", "retained" => true}, proof.fetch("innerState"))
     inner_record = proof.fetch("childCollector")
@@ -309,10 +318,15 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal "driver", inner_record.fetch("primary").fetch("kind")
     assert_equal "raw proof driver deadline expired", inner_record.fetch("primary").fetch("message")
     assert_equal({"observed" => true, "identity" => inner_record.fetch("streamIdentities").first}, inner_record.fetch("literalReadiness"))
+    assert_equal proof.fetch("deadlineNs"), inner_record.fetch("enclosingDeadlineNs")
+    assert_equal inner_record.fetch("runDeadlineNs") + UploadProcessFixture::CLEANUP_LIMIT * 1_000_000_000,
+                 inner_record.fetch("hardDeadlineNs")
+    assert_operator inner_record.fetch("hardDeadlineNs"), :<=, proof.fetch("deadlineNs") - RAW_REPORTING_NS
+    assert_operator inner_record.fetch("reportingInjectorDeadlineNs"), :<=, proof.fetch("deadlineNs")
     assert_equal isolated.fetch(:isolation_source_hashes), proof_source_snapshot.transform_values { |item| item.fetch("sha256") }
   end
 
-  def self.run_isolated_collector_cli(arguments)
+  def self.run_isolated_collector_cli(arguments, failure_state:)
     UploadProcessFixture.assert_domain_reusable!
     unless arguments.length == 2 && arguments.first == ISOLATED_COLLECTOR_FLAG
       raise UploadProcessFixture::Failure.new("fixture-input", "invalid isolated collector command")
@@ -321,8 +335,106 @@ class NativeUploadValidationTest < Minitest::Test
     UploadProcessFixture.owned_fixture_directory(directory)
     control = new("isolated_collector_close")
     control.instance_variable_set(:@root, directory)
-    control.__send__(:execute_isolated_collector_close, arguments)
+    control.__send__(:execute_isolated_collector_close, arguments, failure_state: failure_state)
     0
+  end
+
+  def assert_isolated_collector_exit(isolated)
+    assert_equal 0, isolated.fetch(:status).exitstatus
+  rescue Minitest::Assertion => original
+    # There is now an ACTUAL parent failure. Optional diagnostics must not
+    # swallow cancellation while merely anticipating a future assertion.
+    self.class.report_isolated_capture_failure(isolated, original)
+    raise
+  end
+
+  def self.isolated_failure_line(stage, error)
+    return unless ISOLATED_FAILURE_STAGES.include?(stage)
+
+    category = case error
+    when Minitest::Assertion then "assertion-error"
+    when UploadProcessFixture::Failure then "fixture-error"
+    when MobileReleaseKit::NativeUploadProcess::LifecycleError then "native-lifecycle-error"
+    when IOError then "io-error"
+    when SystemCallError then "os-error"
+    when Interrupt then "interrupt"
+    when SystemExit then "system-exit"
+    when StandardError then "standard-error"
+    when Exception then "exception"
+    else "unknown"
+    end
+    "#{ISOLATED_FAILURE_PREFIX}#{JSON.generate({"schema" => 1, "stage" => stage, "category" => category})}\n".freeze
+  end
+
+  def self.parse_isolated_failure(raw, deadline_ns:)
+    return unless raw.instance_of?(String) && raw.bytesize <= UploadProcessFixture::OUTPUT_LIMIT &&
+                  deadline_ns.instance_of?(Integer) && UploadProcessFixture.clock_ns < deadline_ns
+
+    found, accepted = false, nil
+    raw.b.each_line do |line|
+      return unless UploadProcessFixture.clock_ns < deadline_ns
+      next unless line.start_with?(ISOLATED_FAILURE_PREFIX)
+      return if found
+
+      found = true
+      return unless line.ascii_only? && line.bytesize <= 256 && line.end_with?("\n")
+
+      payload = line.byteslice(ISOLATED_FAILURE_PREFIX.bytesize, line.bytesize - ISOLATED_FAILURE_PREFIX.bytesize - 1)
+      record = JSON.parse(payload, create_additions: false, max_nesting: 4)
+      return unless record.instance_of?(Hash) && record.keys == %w[schema stage category] &&
+                    record["schema"].instance_of?(Integer) && record["schema"] == 1 &&
+                    record["stage"].instance_of?(String) && ISOLATED_FAILURE_STAGES.include?(record["stage"]) &&
+                    record["category"].instance_of?(String) && ISOLATED_FAILURE_CATEGORIES.include?(record["category"]) &&
+                    JSON.generate(record) == payload
+
+      accepted = "#{ISOLATED_FAILURE_PREFIX}#{JSON.generate(record)}\n".freeze
+    end
+    return unless UploadProcessFixture.clock_ns < deadline_ns
+
+    accepted
+  rescue JSON::ParserError, JSON::NestingError, EncodingError, ArgumentError
+    nil
+  end
+
+  def self.write_isolated_failure_line(line, state)
+    return if state[:write_attempted] || !line
+    return unless line.ascii_only? && line.bytesize <= 256 && line.end_with?("\n")
+    return if state[:deadline_ns] && UploadProcessFixture.clock_ns >= state.fetch(:deadline_ns)
+
+    state[:write_attempted] = true # BEFORE the one ordinary captured write.
+    state[:write_complete] = STDERR.write(line) == line.bytesize
+    nil
+  end
+
+  def self.report_isolated_cli_failure(state, error)
+    state[:primary] ||= error
+    state[:failure_stage] ||= state.fetch(:stage)
+    return if state[:report_attempted]
+
+    state[:report_attempted] = true
+    return if state[:deadline_ns] && UploadProcessFixture.clock_ns >= state.fetch(:deadline_ns)
+
+    # Before request-bound admission, this one finite write still belongs to
+    # the original external OwnedChild budget. No new local allowance exists.
+    line = isolated_failure_line(state.fetch(:failure_stage), state.fetch(:primary))
+    write_isolated_failure_line(line, state)
+    nil
+  rescue Exception => diagnostic_error
+    state[:diagnostic_error] ||= diagnostic_error
+    nil # The already latched CLI exception and exit 1 remain authoritative.
+  end
+
+  def self.report_isolated_capture_failure(observed, original)
+    state = observed[:isolated_failure_report] ||= {primary: original, deadline_ns: observed.fetch(:run_deadline_ns)}
+    return if state[:report_attempted]
+
+    state[:report_attempted] = true
+    line = parse_isolated_failure(observed.fetch(:stderr), deadline_ns: state.fetch(:deadline_ns))
+    write_isolated_failure_line(line, state)
+    nil
+  rescue Exception => diagnostic_error
+    observed[:isolated_failure_report_error] ||= diagnostic_error
+    nil # Called ONLY after the actual parent's Minitest::Assertion exists.
   end
 
   def assert_native_cleanup(value)
@@ -828,6 +940,152 @@ class NativeUploadValidationTest < Minitest::Test
       exercise.call(good, write_result: :short)
       exercise.call(good, write_result: IOError.new("private-marker"))
       exercise.call(good, cleanup_error: IOError.new("original cleanup error"), write_result: IOError.new("private-marker"))
+
+      # Exact original endpoints and all reporting seams below are inert. No
+      # process/wait receipt is fabricated; the acquisition veto remains live.
+      cap = 1_000_000_000_000_000_001 # 1e9 seconds + 1ns loses the 1ns in Float.
+      cleanup_ns = UploadProcessFixture::CLEANUP_LIMIT * 1_000_000_000
+      candidate_ns = cap + 20_000_000_000
+      candidate = Rational(candidate_ns, 1_000_000_000)
+      UploadProcessFixture.stub(:clock_ns, cap - 60_000_000_000) do
+        refute_equal cap, (cap.fdiv(1_000_000_000).to_r * 1_000_000_000).floor
+        assert_equal [cap - cleanup_ns - RAW_REPORTING_NS, cap - RAW_REPORTING_NS, cap],
+                     raw_collector_cutoffs(candidate, enclosing_deadline_ns: cap)
+        assert_equal [candidate_ns, candidate_ns + cleanup_ns, candidate_ns + cleanup_ns], raw_collector_cutoffs(candidate)
+        [false, cap.to_f, "private-marker", 0, MobileReleaseKit::NativeUploadProcess::MAX_TIME + 1].each do |invalid_cap|
+          failure = assert_raises(UploadProcessFixture::Failure) { raw_collector_cutoffs(candidate, enclosing_deadline_ns: invalid_cap) }
+          assert_equal "fixture-input", failure.kind
+        end
+        failure = assert_raises(UploadProcessFixture::Failure) do
+          raw_collector_cutoffs(candidate, enclosing_deadline_ns: cap - 60_000_000_000 + cleanup_ns + RAW_REPORTING_NS)
+        end
+        assert_equal "driver", failure.kind
+      end
+      caps, reporting = [], {}
+      frame = Object.new
+      UploadProcessFixture.stub(:lifetime, ->(deadline_ns:, &body) { caps << deadline_ns; body.call(frame) }) do
+        assert_equal :offered, with_capture_reporting(reporting, nil, enclosing_deadline_ns: cap) { :offered }
+      end
+      assert_equal [cap], caps
+      assert_same frame, reporting.fetch(:reporting_lifetime)
+
+      fixture_class = self.class
+      original = Minitest::Assertion.new("private-marker")
+      line = fixture_class.isolated_failure_line("capture-contract", original)
+      assert_equal "#{ISOLATED_FAILURE_PREFIX}{\"schema\":1,\"stage\":\"capture-contract\",\"category\":\"assertion-error\"}\n", line
+      assert_operator line.bytesize, :<=, 256
+      assert line.ascii_only?
+      category_errors = [original, UploadProcessFixture::Failure.new("private-marker", "private-marker"),
+        MobileReleaseKit::NativeUploadProcess::LifecycleError.new, IOError.new("private-marker"), Errno::EIO.new("private-marker"),
+        Interrupt.new("private-marker"), SystemExit.new(17, "private-marker"), RuntimeError.new("private-marker"),
+        Exception.new("private-marker"), Object.new]
+      category_errors.zip(ISOLATED_FAILURE_CATEGORIES).each do |failure, category|
+        packet = fixture_class.isolated_failure_line("capture-contract", failure)
+        assert_equal category, JSON.parse(packet.delete_prefix(ISOLATED_FAILURE_PREFIX)).fetch("category")
+        refute_includes packet, "private-marker"
+      end
+      assert_nil fixture_class.isolated_failure_line("private-marker", original)
+      malformed = [line + line, line + "#{ISOLATED_FAILURE_PREFIX}not-json\n", line.delete_suffix("\n"),
+        line.sub('"schema":1', '"schema":1,"schema":1'), line.sub('"schema":1', '"schema":true'),
+        line.sub('"schema":1', '"schema":1.0'), line.sub('"schema":1', '"schema":2'),
+        line.sub('"schema":1', '"schema":1,"pid":701'), line.sub('"schema":1', '"schema":1,"private":"private-marker"'),
+        line.sub("capture-contract", "private-marker"), line.sub("assertion-error", "private-marker"),
+        line.sub('"stage":"capture-contract"', '"stage":false'), line.sub('"category":"assertion-error"', '"category":[]'),
+        line.sub('{"schema":1,', '{ "schema":1,'), line.sub('"schema":1,"stage":"capture-contract"', '"stage":"capture-contract","schema":1'),
+        "#{ISOLATED_FAILURE_PREFIX}[]\n", "#{ISOLATED_FAILURE_PREFIX}#{'x' * 256}\n", "#{ISOLATED_FAILURE_PREFIX}\xff\n".b]
+      now, clock_sequence, clock_forbidden = 1, nil, false
+      inert_clock = lambda do
+        raise "early diagnostic manufactured a timer" if clock_forbidden
+        clock_sequence ? clock_sequence.shift || now : now
+      end
+      UploadProcessFixture.stub(:clock_ns, inert_clock) do
+        assert_equal line, fixture_class.parse_isolated_failure("private unrelated transcript\n#{line}", deadline_ns: 10)
+        malformed.each { |raw| assert_nil fixture_class.parse_isolated_failure(raw, deadline_ns: 10) }
+        assert_nil fixture_class.parse_isolated_failure("x" * (UploadProcessFixture::OUTPUT_LIMIT + 1), deadline_ns: 10)
+        now = 10
+        assert_nil fixture_class.parse_isolated_failure(line, deadline_ns: 10)
+        now = 1
+        clock_sequence = [1, 1, 10]
+        assert_nil fixture_class.parse_isolated_failure(line, deadline_ns: 10)
+        clock_sequence = nil
+
+        [:full, :short, IOError.new("private-marker"), Interrupt.new("private-marker"), SystemExit.new(19, "private-marker")].each do |write_result|
+          state = {stage: "capture-contract", deadline_ns: 10}
+          writes, latched = [], []
+          sink = lambda do |packet|
+            writes << packet
+            latched << [state[:primary], state[:failure_stage], state[:report_attempted], state[:write_attempted]]
+            raise write_result if write_result.is_a?(Exception)
+            write_result == :short ? 1 : packet.bytesize
+          end
+          STDERR.stub(:write, sink) do
+            fixture_class.report_isolated_cli_failure(state, original)
+            state[:stage] = "proof-publication"
+            fixture_class.report_isolated_cli_failure(state, IOError.new("later private-marker"))
+          end
+          assert_equal [line], writes
+          assert_equal [[original, "capture-contract", true, true]], latched
+          assert_same original, state.fetch(:primary)
+          assert_equal "capture-contract", state.fetch(:failure_stage)
+          if write_result.is_a?(Exception)
+            assert_same write_result, state.fetch(:diagnostic_error)
+          else
+            assert_equal write_result == :full, state.fetch(:write_complete)
+          end
+
+          # Exercise the SAME status-assertion wrapper as the native test, not
+          # a copied rescue. This inert status supplies no process authority.
+          observed = {status: Struct.new(:exitstatus).new(1), stderr: line, run_deadline_ns: 10}
+          parent_writes, parent_latches = [], []
+          parent_sink = lambda do |packet|
+            parent_writes << packet
+            parent_latches << observed.fetch(:isolated_failure_report).fetch(:primary)
+            raise write_result if write_result.is_a?(Exception)
+            write_result == :short ? 1 : packet.bytesize
+          end
+          actual = STDERR.stub(:write, parent_sink) do
+            assert_raises(Minitest::Assertion) { assert_isolated_collector_exit(observed) }
+          end
+          assert_equal [line], parent_writes
+          assert_equal [actual], parent_latches
+          assert_same actual, observed.fetch(:isolated_failure_report).fetch(:primary)
+          assert_same write_result, observed.fetch(:isolated_failure_report_error) if write_result.is_a?(Exception)
+        end
+
+        writes = []
+        STDERR.stub(:write, ->(packet) { writes << packet; packet.bytesize }) do
+          state = {stage: "capture-contract", deadline_ns: 10}
+          now = 10
+          fixture_class.report_isolated_cli_failure(state, original)
+          now = 1
+          fixture_class.report_isolated_cli_failure(state, original)
+          assert_empty writes # Expiry cannot be retried with a renewed clock.
+          assert_same original, state.fetch(:primary)
+
+          early = {stage: "cli-admission", deadline_ns: nil}
+          clock_forbidden = true
+          fixture_class.report_isolated_cli_failure(early, original)
+          clock_forbidden = false
+          assert_equal [fixture_class.isolated_failure_line("cli-admission", original)], writes
+          assert_nil early.fetch(:deadline_ns)
+          writes.clear
+
+          successful = {status: Struct.new(:exitstatus).new(0), stderr: line, run_deadline_ns: 10}
+          assert_isolated_collector_exit(successful)
+          refute successful.key?(:isolated_failure_report)
+          [Interrupt.new("before original assertion"), SystemExit.new(21, "before original assertion")].each do |cancellation|
+            status = Object.new
+            status.define_singleton_method(:exitstatus) { raise cancellation }
+            before_assertion = {status: status, stderr: line, run_deadline_ns: 10}
+            assert_same cancellation, assert_raises(cancellation.class) { assert_isolated_collector_exit(before_assertion) }
+            refute before_assertion.key?(:isolated_failure_report)
+          end
+          malformed_capture = {status: Struct.new(:exitstatus).new(1), stderr: line + line, run_deadline_ns: 10}
+          actual = assert_raises(Minitest::Assertion) { assert_isolated_collector_exit(malformed_capture) }
+          assert_same actual, malformed_capture.fetch(:isolated_failure_report).fetch(:primary)
+          assert_empty writes
+        end
+      end
     end
   end
 
@@ -1247,39 +1505,46 @@ class NativeUploadValidationTest < Minitest::Test
     value
   end
 
-  def execute_isolated_collector_close(arguments)
+  def execute_isolated_collector_close(arguments, failure_state:)
     UploadProcessFixture.assert_domain_reusable!
+    failure_state[:stage] = "request-contract"
     request = read_isolated_json(File.join(@root, "isolated-request.json"))
     assert_equal %w[argv cwd deadlineNs minitest sourceSha256 testSource version], request.keys.sort
     assert_equal 1, request.fetch("version")
+    assert_equal({"platform" => "native", "parameters" => {}, "mode" => ISOLATED_COLLECTOR_MODE},
+                 read_isolated_json(File.join(@root, "input.json")))
+    failure_state[:stage] = "source-bindings"
     minitest = minitest_library_snapshot
     assert_equal minitest, request.fetch("minitest")
     assert_equal isolated_collector_argv(@root, minitest), request.fetch("argv")
     assert_equal Dir.pwd, request.fetch("cwd")
-    assert_equal({"platform" => "native", "parameters" => {}, "mode" => ISOLATED_COLLECTOR_MODE},
-                 read_isolated_json(File.join(@root, "input.json")))
     source_hashes = proof_source_snapshot.transform_values { |item| item.fetch("sha256") }
     assert_equal source_hashes, request.fetch("sourceSha256")
     test_source = dispatch_file_identity(File.realpath(__FILE__), limit: 1_048_576)
     assert_equal test_source, request.fetch("testSource")
+    failure_state[:stage] = "deadline-bound"
     deadline_ns = request.fetch("deadlineNs")
     assert_instance_of Integer, deadline_ns
     now_ns = MobileReleaseKit::NativeUploadProcess.monotonic_ns
     assert_operator deadline_ns, :>, now_ns
     assert_operator deadline_ns, :<=, now_ns + ISOLATED_COLLECTOR_LIMIT * 1_000_000_000
+    failure_state[:deadline_ns] = deadline_ns
 
+    failure_state[:stage] = "collector-execution"
     observed = {}
     close_fault = IOError.new("synthetic collector close after effect")
     repeat = Interrupt.new("repeat at collector reporting tail")
     error = assert_raises(UploadProcessFixture::Failure) do
-      UploadProcessFixture.lifetime do |scope|
+      UploadProcessFixture.lifetime(deadline_ns: deadline_ns) do |scope|
+        observed[:isolated_lifetime] = scope
         directory = new_raw_case("collector-timeout", "collector-timeout")
         scope.active do
           collect_raw_driver(nil, directory, observed, literal: "timeout", close_fault: close_fault,
-                             reporting_repeat: repeat, enclosing_deadline: deadline_ns.fdiv(1_000_000_000))
+                             reporting_repeat: repeat, enclosing_deadline_ns: deadline_ns)
         end
       end
     end
+    failure_state[:stage] = "capture-contract"
     assert_same error, observed.fetch(:primary)
     record = assert_retained_capture(observed, finality: :unknown)
     assert_equal bounded_error(error), record.fetch("primary")
@@ -1288,6 +1553,7 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal({"observed" => true, "identity" => observed.fetch(:stream_identities).first}, record.fetch("literalReadiness"))
     assert_equal "collector ready\n", File.binread(File.join(observed.fetch(:directory), "driver.stdout"), UploadProcessFixture::OUTPUT_LIMIT + 1)
     assert_equal Signal.list.fetch("KILL"), observed.fetch(:status).termsig
+    failure_state[:stage] = "cleanup-contract"
     assert_equal 2, observed.fetch(:cleanup_errors).length
     assert_same close_fault, observed.fetch(:cleanup_errors).first
     scratch_error = observed.fetch(:cleanup_errors).last
@@ -1296,6 +1562,7 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal "unresolved observer scratch prevents fixture removal", scratch_error.message
     assert_equal ["IOError", "UploadProcessFixture::Failure"], record.fetch("cleanupErrors").map { |entry| entry.fetch("class") }
     assert_equal 1, observed.fetch(:close_fault_calls)
+    failure_state[:stage] = "reporting-contract"
     assert observed.fetch(:reporting_repeat_queued)
     assert observed.fetch(:reporting_injector_joined)
     assert observed.fetch(:reporting_injector_admitted)
@@ -1318,6 +1585,7 @@ class NativeUploadValidationTest < Minitest::Test
     refute observed.fetch(:reporting_injector).abort_on_exception
     assert_equal observed.fetch(:reporting_thread_defaults), [Thread.report_on_exception, Thread.abort_on_exception]
 
+    failure_state[:stage] = "custody-contract"
     child = observed.fetch(:child)
     assert_equal :unknown, child.phase
     refute child.complete?
@@ -1338,10 +1606,18 @@ class NativeUploadValidationTest < Minitest::Test
     assert_same child, retained.fetch(child.object_id)
     assert UploadProcessFixture.cleanup_unresolved?(observed.fetch(:directory))
     assert File.directory?(child.launch_directory)
+    failure_state[:stage] = "final-recheck"
+    assert_equal deadline_ns, observed.fetch(:enclosing_deadline_ns)
+    assert_equal deadline_ns, observed.fetch(:isolated_lifetime).instance_variable_get(:@drain_deadline_ns).call
+    assert_operator child.creator.hard_cleanup_deadline_ns, :<=, deadline_ns - RAW_REPORTING_NS
+    assert_operator slot.hard_cleanup_deadline_ns, :<=, deadline_ns
+    assert_equal slot.run_deadline_ns, record.fetch("reportingInjectorDeadlineNs")
+    assert_equal slot.run_deadline_ns, slot.hard_cleanup_deadline_ns
     assert_equal source_hashes, proof_source_snapshot.transform_values { |item| item.fetch("sha256") }
     assert_equal test_source, dispatch_file_identity(File.realpath(__FILE__), limit: 1_048_576)
     assert_equal minitest, minitest_library_snapshot
-    proof = {"version" => 1, "case" => ISOLATED_COLLECTOR_MODE, "pid" => Process.pid,
+    failure_state[:stage] = "proof-publication"
+    proof = {"version" => 1, "case" => ISOLATED_COLLECTOR_MODE, "pid" => Process.pid, "deadlineNs" => deadline_ns,
              "argv" => isolated_collector_argv(@root, minitest), "cwd" => Dir.pwd,
              "interpreter" => dispatch_file_identity(RbConfig.ruby, limit: 32 * 1024 * 1024),
              "testSource" => test_source, "sourceSha256" => source_hashes, "childCollector" => record, "minitest" => minitest,
@@ -1783,6 +2059,18 @@ class NativeUploadValidationTest < Minitest::Test
         end
       end
     end
+    if dispatch.fetch("isolatedControl")
+      request = observed.fetch(:isolated_request)
+      binding = dispatch.fetch("isolatedRequest")
+      path = File.join(observed.fetch(:directory), "isolated-request.json")
+      unless read_isolated_json(path) == request &&
+             dispatch_file_identity(path, limit: UploadProcessFixture::OUTPUT_LIMIT) == binding.fetch("identity") &&
+             request.fetch("deadlineNs") == binding.fetch("deadlineNs") &&
+             request.fetch("deadlineNs") == observed.fetch(:run_deadline_ns) &&
+             request.fetch("deadlineNs") == observed.fetch(:child).creator&.run_deadline_ns
+        raise UploadProcessFixture::Failure.new("fixture-source", "isolated raw proof original input/cutoff changed")
+      end
+    end
     observed[:inputs_rechecked] = true
   end
 
@@ -1795,9 +2083,12 @@ class NativeUploadValidationTest < Minitest::Test
               "streamsClosed" => observed.fetch(:streams_closed), "nativeObservation" => observed.fetch(:native_observation),
               "ownedChild" => child.provenance, "streamIdentities" => observed[:stream_identities],
               "dispatch" => observed[:dispatch], "inputsRechecked" => observed.fetch(:inputs_rechecked),
+              "runDeadlineNs" => observed.fetch(:run_deadline_ns), "hardDeadlineNs" => observed.fetch(:hard_deadline_ns),
+              "enclosingDeadlineNs" => observed.fetch(:enclosing_deadline_ns),
               "reportingRepeatQueued" => observed.fetch(:reporting_repeat_queued),
               "reportingInjectorJoined" => observed.fetch(:reporting_injector_joined),
               "reportingInjectorAdmitted" => observed.fetch(:reporting_injector_admitted),
+              "reportingInjectorDeadlineNs" => observed[:reporting_injector_deadline_ns],
               "reportingInjectorFinished" => observed[:reporting_injector_slot]&.finished?,
               "literalReadiness" => observed[:literal_readiness],
               "primary" => bounded_error(observed[:primary]), "cleanupErrors" => observed.fetch(:cleanup_errors).map { |error| bounded_error(error) }}
@@ -1889,8 +2180,9 @@ class NativeUploadValidationTest < Minitest::Test
     end
   end
 
-  def with_capture_reporting(observed, repeat, enclosing_deadline: nil)
-    UploadProcessFixture.lifetime do |report_scope|
+  def with_capture_reporting(observed, repeat, enclosing_deadline_ns:)
+    UploadProcessFixture.lifetime(deadline_ns: enclosing_deadline_ns) do |report_scope|
+      observed[:reporting_lifetime] = report_scope
       begin
         yield
       rescue Exception => error
@@ -1900,7 +2192,7 @@ class NativeUploadValidationTest < Minitest::Test
           if repeat
             target = Thread.current
             now_ns = MobileReleaseKit::NativeUploadProcess.monotonic_ns
-            deadline_ns = [now_ns + 2_000_000_000, enclosing_deadline && (enclosing_deadline.to_r * 1_000_000_000).floor].compact.min
+            deadline_ns = [now_ns + RAW_REPORTING_NS, enclosing_deadline_ns].min
             unless deadline_ns > now_ns
               raise UploadProcessFixture::Failure.new("fixture-cleanup", "collector reporting deadline expired")
             end
@@ -1959,28 +2251,44 @@ class NativeUploadValidationTest < Minitest::Test
     end
   end
 
+  def raw_collector_cutoffs(deadline, enclosing_deadline_ns: nil)
+    run_ns = (deadline.to_r * 1_000_000_000).floor # Original conversion, never another clock sample.
+    cleanup_ns = UploadProcessFixture::CLEANUP_LIMIT * 1_000_000_000
+    maximum = MobileReleaseKit::NativeUploadProcess::MAX_TIME
+    unless run_ns.between?(1, maximum - cleanup_ns) &&
+           (enclosing_deadline_ns.nil? || enclosing_deadline_ns.instance_of?(Integer) && enclosing_deadline_ns.between?(1, maximum))
+      raise UploadProcessFixture::Failure.new("fixture-input", "invalid raw collector deadline")
+    end
+    if enclosing_deadline_ns
+      # Inner run, original cleanup and reporting all fit INSIDE the original
+      # enclosing endpoint, without converting its absolute value to Float.
+      run_ns = [run_ns, enclosing_deadline_ns - cleanup_ns - RAW_REPORTING_NS].min
+    end
+    unless run_ns > UploadProcessFixture.clock_ns
+      raise UploadProcessFixture::Failure.new("driver", "raw proof driver deadline expired")
+    end
+    hard_ns = run_ns + cleanup_ns
+    [run_ns, hard_ns, enclosing_deadline_ns || hard_ns]
+  end
+
   def collect_raw_driver(copy, directory, observed, literal: nil, close_fault: nil, reporting_repeat: nil,
-                         isolate_close: false, enclosing_deadline: nil)
+                         isolate_close: false, enclosing_deadline_ns: nil)
     UploadProcessFixture.assert_domain_reusable!
     @retain_raw_evidence = true
     raise "invalid fixed collector isolation" unless [true, false].include?(isolate_close) && (!isolate_close || (!copy && !literal && !close_fault && !reporting_repeat))
     deadline = UploadProcessFixture.clock + (isolate_close ? ISOLATED_COLLECTOR_LIMIT : UploadProcessFixture::DRIVER_LIMIT)
-    if enclosing_deadline
-      # Leave the original parent budget for inner cleanup AND the fixed
-      # reporting task. Never renew the parent's single cutoff in its child.
-      deadline = [deadline, enclosing_deadline - UploadProcessFixture::CLEANUP_LIMIT - 2].min
-    end
-    run_ns = (deadline.to_r * 1_000_000_000).floor # EXACT original OwnedChild conversion, not a new clock sample.
-    child = UploadProcessFixture::OwnedChild.new(root: directory, deadline: deadline,
-                                               hard_deadline: deadline + UploadProcessFixture::CLEANUP_LIMIT)
+    run_ns, hard_ns, enclosing_ns = raw_collector_cutoffs(deadline, enclosing_deadline_ns: enclosing_deadline_ns)
+    child = UploadProcessFixture::OwnedChild.new(root: directory, deadline_ns: run_ns, hard_deadline_ns: hard_ns)
     output = errors = nil
     observed.merge!(directory: directory, child: child, status: nil, primary: nil, cleanup_errors: [],
+                    run_deadline_ns: run_ns, hard_deadline_ns: hard_ns, enclosing_deadline_ns: enclosing_ns,
                     stop_attempted: false, stop_completed: false, streams_closed: false,
                     native_observation: literal || isolate_close ? "literal-has-no-native-capture" : "pending", close_fault_calls: 0,
                     inputs_rechecked: false, reporting_repeat_queued: false, reporting_injector_joined: nil,
                     reporting_injector_admitted: false, reporting_injector_slot: nil)
-    with_capture_reporting(observed, reporting_repeat, enclosing_deadline: enclosing_deadline) do
-      UploadProcessFixture.lifetime do |scope|
+    with_capture_reporting(observed, reporting_repeat, enclosing_deadline_ns: enclosing_ns) do
+      UploadProcessFixture.lifetime(deadline_ns: hard_ns) do |scope|
+        observed[:collector_lifetime] = scope
         begin
           write_capture_record(observed) # Truthful pending state before acquisition.
           fixture = if isolate_close
@@ -2014,13 +2322,18 @@ class NativeUploadValidationTest < Minitest::Test
           end
           if isolate_close
             observed[:isolation_source_hashes] = proof_source_snapshot.transform_values { |item| item.fetch("sha256") }
-            UploadProcessFixture.atomic_json(File.join(directory, "isolated-request.json"),
-                                             {"version" => 1, "argv" => observed.fetch(:dispatch).fetch("argv"),
-                                              "cwd" => observed.fetch(:dispatch).fetch("cwd"),
-                                              "deadlineNs" => (deadline * 1_000_000_000).floor,
-                                              "minitest" => observed.fetch(:dispatch).fetch("minitest"),
-                                              "sourceSha256" => observed.fetch(:isolation_source_hashes),
-                                              "testSource" => observed.fetch(:dispatch).fetch("fixture")})
+            request = {"version" => 1, "argv" => observed.fetch(:dispatch).fetch("argv"),
+                       "cwd" => observed.fetch(:dispatch).fetch("cwd"), "deadlineNs" => run_ns,
+                       "minitest" => observed.fetch(:dispatch).fetch("minitest"),
+                       "sourceSha256" => observed.fetch(:isolation_source_hashes),
+                       "testSource" => observed.fetch(:dispatch).fetch("fixture")}
+            # Keep the full envelope privately in memory; dispatch already has
+            # Minitest's complete inventory and must not serialize it twice.
+            observed[:isolated_request] = request
+            request_path = File.join(directory, "isolated-request.json")
+            UploadProcessFixture.atomic_json(request_path, request)
+            observed.fetch(:dispatch)["isolatedRequest"] = {
+              "deadlineNs" => run_ns, "identity" => dispatch_file_identity(request_path, limit: UploadProcessFixture::OUTPUT_LIMIT)}
           end
           write_capture_record(observed)
           output = File.open(File.join(directory, "driver.stdout"), File::WRONLY | File::CREAT | File::EXCL, 0o600)
@@ -2044,22 +2357,26 @@ class NativeUploadValidationTest < Minitest::Test
               # cutoff. Its real ready bytes let us stop acquiring read-only ps
               # children, whose own startup deadline must not replace this
               # intended error. It retains the genuine pre-wait signal route.
-              await_literal_timeout(directory, output, observed, deadline)
+              await_literal_timeout(directory, output, observed, run_ns)
             end
             loop do
               if [output, errors].any? { |file| file.stat.size > UploadProcessFixture::OUTPUT_LIMIT }
                 raise UploadProcessFixture::Failure.new("diagnostic", "oversized raw proof diagnostic")
               end
-              remaining = deadline - UploadProcessFixture.clock
+              remaining = run_ns - UploadProcessFixture.clock_ns
               raise UploadProcessFixture::Failure.new("driver", "raw proof driver deadline expired") unless remaining.positive?
 
               if child.phase == :reserved
                 # This is a non-consuming observation of the actual reserved
                 # driver, not a wait receipt or authority from owner.json.
                 # Keep the pre-wait stop route until completion is observed.
-                stopped = UploadProcessFixture.state(child.pid, child.pid, seconds: [remaining, 2].min, deadline: deadline) == :stopped
+                stopped = UploadProcessFixture.state(child.pid, child.pid,
+                  seconds: [remaining, 2_000_000_000].min.fdiv(1_000_000_000),
+                  deadline: Rational(run_ns, 1_000_000_000)) == :stopped
                 child.retire_numeric! if stopped
               end
+              remaining = run_ns - UploadProcessFixture.clock_ns
+              raise UploadProcessFixture::Failure.new("driver", "raw proof driver deadline expired") unless remaining.positive?
               # Retirement is permanent even if a genuine first WNOHANG wait
               # returns nil. No later observation or timeout reopens a numeric
               # signal route; stop may only finish this wait or retain UNKNOWN.
@@ -2067,13 +2384,13 @@ class NativeUploadValidationTest < Minitest::Test
               unless %i[reserved waiting reaped].include?(child.phase)
                 raise UploadProcessFixture::Failure.new("process-ownership", "raw proof driver wait authority is unknown")
               end
-              remaining = deadline - UploadProcessFixture.clock
+              remaining = run_ns - UploadProcessFixture.clock_ns
               raise UploadProcessFixture::Failure.new("driver", "raw proof driver deadline expired") unless remaining.positive?
               break if child.status
-              sleep [remaining, 0.01].min
+              sleep [remaining, 10_000_000].min.fdiv(1_000_000_000)
             end
             stdout, stderr = [[output, "driver.stdout"], [errors, "driver.stderr"]].map do |writer, name|
-              read_raw_transcript(File.join(directory, name), writer)
+              read_raw_transcript(File.join(directory, name), writer, deadline_ns: run_ns)
             end
             if [stdout, stderr].any? { |value| value.bytesize > UploadProcessFixture::OUTPUT_LIMIT }
               raise UploadProcessFixture::Failure.new("diagnostic", "oversized raw proof diagnostic")
@@ -2114,11 +2431,11 @@ class NativeUploadValidationTest < Minitest::Test
     observed
   end
 
-  def await_literal_timeout(directory, writer, observed, deadline)
+  def await_literal_timeout(directory, writer, observed, run_ns)
     expected = "collector ready\n"
     identity = observed.fetch(:stream_identities).first
     loop do
-      remaining = deadline - UploadProcessFixture.clock
+      remaining = run_ns - UploadProcessFixture.clock_ns
       unless remaining.positive?
         raise UploadProcessFixture::Failure.new("readiness", "literal collector readiness deadline expired")
       end
@@ -2145,10 +2462,10 @@ class NativeUploadValidationTest < Minitest::Test
         observed[:literal_readiness] = {"observed" => true, "identity" => identity}
         break
       end
-      sleep [0.01, [deadline - UploadProcessFixture.clock, 0].max].min
+      sleep [10_000_000, [run_ns - UploadProcessFixture.clock_ns, 0].max].min.fdiv(1_000_000_000)
     end
-    while (remaining = deadline - UploadProcessFixture.clock).positive?
-      sleep [remaining, 0.01].min
+    while (remaining = run_ns - UploadProcessFixture.clock_ns).positive?
+      sleep [remaining, 10_000_000].min.fdiv(1_000_000_000)
     end
     raise UploadProcessFixture::Failure.new("driver", "raw proof driver deadline expired")
   end
@@ -2172,19 +2489,28 @@ class NativeUploadValidationTest < Minitest::Test
     file.close unless file.closed?
   end
 
-  def read_raw_transcript(path, writer)
+  def read_raw_transcript(path, writer, deadline_ns:)
     # Native maps grant stdout/stderr WRITE only. Read the real saved transcript
     # through a separate no-follow reader after the genuine driver wait, while
     # the original write-only object still binds the exact task-owned inode.
+    unless UploadProcessFixture.clock_ns < deadline_ns
+      raise UploadProcessFixture::Failure.new("driver", "raw proof driver deadline expired")
+    end
     File.open(path, File::RDONLY | File::NOFOLLOW | File::NONBLOCK) do |reader|
       before, owned = reader.stat, writer.stat
       unless before.file? && before.dev == owned.dev && before.ino == owned.ino
         raise UploadProcessFixture::Failure.new("diagnostic", "raw proof transcript identity changed")
       end
+      unless UploadProcessFixture.clock_ns < deadline_ns
+        raise UploadProcessFixture::Failure.new("driver", "raw proof driver deadline expired")
+      end
       bytes = reader.read(UploadProcessFixture::OUTPUT_LIMIT + 1) || ""
       identity = ->(value) { [value.dev, value.ino, value.mode, value.size, value.mtime, value.ctime] }
       unless identity.call(before) == identity.call(reader.stat)
         raise UploadProcessFixture::Failure.new("diagnostic", "raw proof transcript changed while read")
+      end
+      unless UploadProcessFixture.clock_ns < deadline_ns
+        raise UploadProcessFixture::Failure.new("driver", "raw proof driver deadline expired")
       end
       bytes
     end
@@ -2282,6 +2608,13 @@ class NativeUploadValidationTest < Minitest::Test
     assert child.creator.joined?
     assert child.creator.finished?
     refute child.creator.unresolved?
+    assert_equal observed.fetch(:run_deadline_ns), child.creator.run_deadline_ns
+    assert_equal observed.fetch(:hard_deadline_ns), child.creator.hard_cleanup_deadline_ns
+    assert_equal observed.fetch(:run_deadline_ns), record.fetch("runDeadlineNs")
+    assert_equal observed.fetch(:hard_deadline_ns), record.fetch("hardDeadlineNs")
+    assert_equal observed.fetch(:enclosing_deadline_ns), record.fetch("enclosingDeadlineNs")
+    assert_equal observed.fetch(:hard_deadline_ns), observed.fetch(:collector_lifetime).instance_variable_get(:@drain_deadline_ns).call
+    assert_equal observed.fetch(:enclosing_deadline_ns), observed.fetch(:reporting_lifetime).instance_variable_get(:@drain_deadline_ns).call
     assert_equal child.provenance, record.fetch("ownedChild")
     assert_raw_bootstrap_provenance(record.fetch("ownedChild"), dispatch, child.status,
                                     stream_identities: record.fetch("streamIdentities"), finality: finality)
@@ -2348,11 +2681,12 @@ class NativeUploadValidationTest < Minitest::Test
 end
 
 if $PROGRAM_NAME == __FILE__ && ARGV.first.to_s.start_with?("--mrk-isolated-")
+  isolated_failure = {stage: "cli-admission", deadline_ns: nil}
   begin
     File.umask(0o077)
-    Process.exit!(NativeUploadValidationTest.run_isolated_collector_cli(ARGV))
+    Process.exit!(NativeUploadValidationTest.run_isolated_collector_cli(ARGV, failure_state: isolated_failure))
   rescue Exception => error
-    warn "#{error.class}: isolated raw collector control failed"
+    NativeUploadValidationTest.report_isolated_cli_failure(isolated_failure, error)
     Process.exit!(1)
   end
 end

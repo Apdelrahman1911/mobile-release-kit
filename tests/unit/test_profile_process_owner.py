@@ -1032,14 +1032,46 @@ class ProfileOwnerWaitAndGroupTests(unittest.TestCase):
         self.assertTrue(child.numeric_retired)
         self.assertIs(event.call_args.kwargs["receipt"], receipt)
 
+        context, receipt = _context("keeper"), _receipt(pid=432)
+        child = _Child((None, receipt), pid=432)
+        context.child_acquisition.child = child
+        context.child_acquisition.attempted = True
+        pump = Mock(side_effect=AssertionError("single cleanup turn must yield to its caller"))
+        with patch.object(owner.time, "monotonic_ns", return_value=1), patch.object(owner, "_pause") as pause, patch.object(owner, "_role_event") as event:
+            self.assertIsNone(owner._wait_child(context, child, context.run, pump, "validator_reaped", phase="CLEANUP", single_turn=True))
+            self.assertEqual((child.polls, child.wait_state, child.numeric_retired), (1, "POLLABLE", True))
+            self.assertIsNone(child.receipt)
+            self.assertEqual(child.results, [receipt])
+            self.assertIsNone(context.primary)
+            self.assertIsNone(context.cleanup_limit)
+            self.assertIsNone(context.failure_limit)
+            event.assert_not_called()
+            pause.assert_not_called()
+            pump.assert_not_called()
+            self.assertIs(owner._wait_child(context, child, context.run, pump, "validator_reaped", phase="CLEANUP", single_turn=True), receipt)
+            self.assertEqual((child.polls, child.wait_state), (2, "REAPED"))
+            self.assertIs(child.receipt, receipt)
+            event.assert_called_once_with("keeper", "validator_reaped", receipt=receipt)
+            pause.assert_not_called()
+            pump.assert_not_called()
+            self.assertFalse(context.cleanup_unknown)
+
     def test_unknown_wait_is_absorbing_and_never_numeric_retried(self):
-        context, child = _context(), _Child((ChildProcessError("missing private wait"),))
-        with patch.object(owner.time, "monotonic_ns", return_value=1), patch.object(owner, "_pause"):
-            self.assertIsNone(owner._wait_child(context, child, 1_000_000_000, lambda: None, "custodian_reaped", phase="CLEANUP"))
-            self.assertIsNone(owner._wait_child(context, child, 1_000_000_000, lambda: None, "custodian_reaped", phase="CLEANUP"))
-        self.assertEqual(child.polls, 1)
-        self.assertEqual(child.wait_state, "UNKNOWN")
-        self.assertTrue(context.cleanup_unknown)
+        for role, single_turn in (("outer", False), ("keeper", True)):
+            context, child = _context(role), _Child((ChildProcessError("missing private wait"),))
+            pump = Mock(side_effect=AssertionError("unknown wait must not pump"))
+            with self.subTest(role=role, single_turn=single_turn), patch.object(owner.time, "monotonic_ns", return_value=1), patch.object(owner, "_pause") as pause, patch.object(owner, "_role_event") as event:
+                self.assertIsNone(owner._wait_child(context, child, 1_000_000_000, pump, "validator_reaped", phase="CLEANUP", single_turn=single_turn))
+                first, fixed = context.primary, context.failure_limit
+                self.assertIsNone(owner._wait_child(context, child, 1_000_000_000, pump, "validator_reaped", phase="CLEANUP", single_turn=single_turn))
+                self.assertIs(context.primary, first)
+                self.assertEqual(context.failure_limit, fixed)
+                pump.assert_not_called()
+                pause.assert_not_called()
+                event.assert_not_called()
+            self.assertEqual(child.polls, 1)
+            self.assertEqual(child.wait_state, "UNKNOWN")
+            self.assertTrue(context.cleanup_unknown)
 
     def test_wait_poll_and_group_syscall_use_the_shortened_live_cleanup_cutoff(self):
         now = 1_000_000_000
@@ -1062,6 +1094,23 @@ class ProfileOwnerWaitAndGroupTests(unittest.TestCase):
                 with self.assertRaises(ValidationError):
                     group.request(0)
         syscall.assert_not_called()
+
+        context, receipt = _context("keeper"), _receipt(pid=432)
+        child = _Child((None, receipt), pid=432)
+        pump = Mock(side_effect=AssertionError("single turn cannot consume another control turn"))
+        with patch.object(owner.time, "monotonic_ns", return_value=now), patch.object(owner, "_pause") as pause:
+            original = context.begin_cleanup()
+            self.assertIsNone(owner._wait_child(context, child, original, pump, "validator_reaped", phase="CLEANUP", single_turn=True))
+            first = context.cancel_frame({"reason_code": "deadline", "cleanup_deadline_ns": now})
+            self.assertIsNone(owner._wait_child(context, child, original, pump, "validator_reaped", phase="CLEANUP", single_turn=True))
+            self.assertIs(context.primary, first)
+            self.assertEqual((context.failure_limit, context.cleanup_limit), (now, now))
+            self.assertEqual(child.polls, 1)
+            self.assertEqual(child.results, [receipt])
+            self.assertIsNone(child.receipt)
+            self.assertTrue(context.cleanup_unknown)
+            pump.assert_not_called()
+            pause.assert_not_called()
 
     def test_readonly_group_retirement_vetoes_every_request_including_signal_zero(self):
         context, keeper = _context("custodian"), _Child()
@@ -1185,6 +1234,126 @@ class ProfileOwnerWorkWaitTests(unittest.TestCase):
             self.assertEqual(len(failure), 1)
             self.assertIs(failure[0][0], context.primary)
             self.assertEqual((failure[0][1], context.failure_limit, context.cleanup_limit), (fixed, fixed, fixed))
+            if stop == "parent_cancel":
+                self.assertIs(context.primary, keeper.parent_cancellation)
+            else:
+                self.assertEqual(context.primary.args, (owner.TIMEOUT,))
+                self.assertEqual(context.reason, "deadline")
+            self.assertNotIn("STATUS", {frame["type"] for frame in keeper.channel.offers})
+            self.assertNotIn("STATUS", keeper.channel.sent)
+            self.assertIn("RELEASED", keeper.channel.sent)
+            self.assertEqual(keeper.channel.offers[-1]["validator"], owner._receipt_record(receipt))
+            self.assertTrue(keeper.channel.writer_closed)
+            self.assertEqual([lease.close_calls for lease in keeper.descriptors.values()], [1] * 5)
+
+        # Model the real dependency: C withholds group retirement/RELEASE until
+        # original K consumes V's receipt. No control frame supplies that receipt.
+        # A missing interleaved reap advances the same clock to bounded failure.
+        for stop in ("timeout", "parent_cancel", "eof", "parent_lost"):
+            context = _context("keeper", parent_pid=430)
+            keeper, receipt = _keeper(context), _receipt(pid=432)
+            child = _Child((None, None, receipt), pid=432)
+            context.child_acquisition.child = child
+            context.child_acquisition.attempted = True
+            keeper.config, keeper.run_granted = _configuration("keeper"), True
+            keeper.channel.eof = False
+            now, parent, failure, timeline, receipts, fallback_calls = [owner.NANOSECOND], [430], [], [], [], []
+            original_pump, original_wait, original_poll = keeper.pump, owner._wait_child, child.poll_wait
+
+            def poll():
+                self.assertFalse(keeper.released)
+                actual = original_poll()  # Also requires numeric retirement before first poll.
+                timeline.append(("poll", child.polls))
+                return actual
+
+            def pump():
+                if context.primary is None:
+                    timeline.append(("work_control", child.polls))
+                    if stop == "parent_cancel":
+                        keeper.channel.frames = [{"v": 1, "type": "CANCEL", "reason_code": "cancelled",
+                                                  "cleanup_deadline_ns": context.hard}]
+                    original_pump()
+                    if stop != "parent_cancel":
+                        now[0] = context.run
+                    return
+                timeline.append(("cleanup_control", child.polls))
+                if not failure:
+                    failure.append((context.primary, context.failure_limit, context.cleanup_limit))
+                if child.receipt is receipt:
+                    self.assertIs(keeper.receipt, receipt)
+                    keeper.channel.frames = [{"v": 1, "type": "GROUP_RETIRED", "group_id": 431, "absent": True},
+                                              {"v": 1, "type": "RELEASE"}]
+                elif child.polls == 2 and stop in ("eof", "parent_lost"):
+                    timeline.append(("parent_input_lost", child.polls))
+                    if stop == "eof":
+                        keeper.channel.eof = True  # Explicit inert original-channel EOF model.
+                    else:
+                        parent[0] = 999
+                original_pump()
+
+            def observe(role, event, **evidence):
+                if event == "validator_reaped":
+                    self.assertEqual(role, "keeper")
+                    self.assertFalse(keeper.released)
+                    self.assertIs(evidence["receipt"], child.receipt)
+                    receipts.append(evidence["receipt"])
+                    timeline.append(("receipt", child.polls))
+                elif event == "group_retired":
+                    self.assertIs(child.receipt, receipt)
+                    timeline.append(("group_retired", child.polls))
+
+            def pause(cutoff, *_args):
+                timeline.append(("pause", child.polls))
+                now[0] = min(context.cleanup_cutoff(cutoff), now[0] + owner.NANOSECOND // 4)
+
+            def fallback():
+                fallback_calls.append((child.polls, now[0]))
+                timeline.append(("fallback", child.polls))
+                self.assertIn(stop, ("eof", "parent_lost"))
+                self.assertEqual(child.polls, 2)  # No extra poll after the control loss.
+                self.assertIsNone(child.receipt)
+                self.assertLess(now[0], failure[0][1])
+                self.assertTrue(keeper.eof_seen if stop == "eof" else parent[0] != context.parent_pid)
+                keeper.group_retired = keeper.group_absent = True  # No real group operation.
+
+            with self.subTest(causal_cleanup=stop), patch.object(owner.time, "monotonic_ns", side_effect=lambda: now[0]), patch.object(owner.os, "getppid", side_effect=lambda: parent[0]), patch.object(owner.os, "_exit") as terminate, patch.object(owner, "_pause", side_effect=pause), patch.object(owner, "_hello", return_value={**_hello(), "sid": 430}), patch.object(owner, "_spawn", return_value=child) as spawn, patch.object(keeper, "move_out", side_effect=lambda **_options: setattr(keeper, "moved", True)) as move, patch.object(keeper, "fallback_group", side_effect=fallback), patch.object(keeper, "pump", side_effect=pump), patch.object(child, "poll_wait", side_effect=poll), patch.object(owner, "_role_event", side_effect=observe), patch.object(owner, "_wait_child", wraps=original_wait) as waits:
+                result = keeper.run()
+                self.assertTrue(context.resources_confirmed())
+                terminate.assert_not_called()
+            expected = owner.HELPER_UNKNOWN if stop == "parent_lost" else owner.HELPER_SETTLED if stop == "parent_cancel" else owner.HELPER_FAILED
+            self.assertEqual(result, expected)
+            self.assertEqual([call.kwargs["phase"] for call in waits.call_args_list], ["WORK", "CLEANUP", "CLEANUP"])
+            self.assertEqual([call.kwargs.get("single_turn", False) for call in waits.call_args_list],
+                             [False, True, stop in ("timeout", "parent_cancel")])
+            self.assertTrue(all(call.args[0] is context and call.args[1] is child for call in waits.call_args_list))
+            self.assertEqual(spawn.call_count, 1)
+            move.assert_called_once_with(positive=True)
+            self.assertIs(keeper.validator, child)
+            self.assertIs(context.child_acquisition.child, child)
+            self.assertIs(keeper.receipt, receipt)
+            self.assertEqual(receipts, [receipt])
+            self.assertEqual((child.polls, child.wait_state, child.numeric_retired), (3, "REAPED", True))
+            self.assertLess(timeline.index(("cleanup_control", 1)), timeline.index(("poll", 2)))
+            self.assertLess(timeline.index(("poll", 2)), timeline.index(("cleanup_control", 2)))
+            self.assertLess(timeline.index(("cleanup_control", 2)), timeline.index(("poll", 3)))
+            self.assertEqual(len(failure), 1)
+            self.assertIs(context.primary, failure[0][0])
+            self.assertEqual((context.failure_limit, context.cleanup_limit), failure[0][1:])
+            self.assertLess(now[0], context.failure_limit)
+            self.assertFalse(context.cleanup_unknown)
+            if stop in ("timeout", "parent_cancel"):
+                self.assertEqual(fallback_calls, [])
+                self.assertTrue(keeper.released)
+                self.assertLess(timeline.index(("receipt", 3)), timeline.index(("group_retired", 3)))
+                self.assertEqual(context.secondary, [])
+            else:
+                self.assertEqual(len(fallback_calls), 1)
+                self.assertFalse(keeper.released)
+                self.assertLess(timeline.index(("parent_input_lost", 2)), timeline.index(("fallback", 2)))
+                self.assertLess(timeline.index(("fallback", 2)), timeline.index(("poll", 3)))
+                if stop == "eof":
+                    self.assertTrue(keeper.eof_seen)
+                    self.assertEqual(len(context.secondary), 1)
             if stop == "parent_cancel":
                 self.assertIs(context.primary, keeper.parent_cancellation)
             else:
@@ -1367,7 +1536,7 @@ class ProfileOwnerWorkWaitTests(unittest.TestCase):
     def test_unknown_custody_and_cleanup_cutoffs_veto_work_and_cleanup_polls(self):
         faults = ("UNKNOWN", "WAIT_IN_FLIGHT", "CONSUMED", "REAPED", "acquisition_unknown",
                   "acquisition_unsettled", "hard_cutoff", "cancel_cutoff", "failure_grace")
-        for phase in ("WORK", "CLEANUP"):
+        for phase, single_turn in (("WORK", False), ("CLEANUP", False), ("CLEANUP", True)):
             for fault in faults + (("explicit_cutoff",) if phase == "CLEANUP" else ()):
                 context, receipt = _context("keeper"), _receipt(pid=432)
                 child = _Child((receipt,), pid=432)
@@ -1375,7 +1544,7 @@ class ProfileOwnerWorkWaitTests(unittest.TestCase):
                 context.child_acquisition.attempted = True
                 now = [owner.NANOSECOND]
                 pump = Mock(side_effect=AssertionError("unknown custody must not pump"))
-                with self.subTest(phase=phase, fault=fault), patch.object(owner.time, "monotonic_ns", side_effect=lambda: now[0]), patch.object(owner, "_pause") as pause, patch.object(owner, "_role_event") as event:
+                with self.subTest(phase=phase, single_turn=single_turn, fault=fault), patch.object(owner.time, "monotonic_ns", side_effect=lambda: now[0]), patch.object(owner, "_pause") as pause, patch.object(owner, "_role_event") as event:
                     if fault in ("UNKNOWN", "WAIT_IN_FLIGHT", "CONSUMED", "REAPED"):
                         child.wait_state = fault  # REAPED without its receipt is ambiguous too.
                     elif fault == "acquisition_unknown":
@@ -1394,13 +1563,13 @@ class ProfileOwnerWorkWaitTests(unittest.TestCase):
                         now[0] = context.failure_limit
                     first = context.primary
                     cutoff = context.run if phase == "WORK" or fault == "explicit_cutoff" else context.hard
-                    self.assertIsNone(owner._wait_child(context, child, cutoff, pump, "validator_reaped", phase=phase))
+                    self.assertIsNone(owner._wait_child(context, child, cutoff, pump, "validator_reaped", phase=phase, single_turn=single_turn))
                     if first is not None:
                         self.assertIs(context.primary, first)
                     first, fixed = context.primary, context.failure_limit
                     self.assertTrue(context.cleanup_unknown)
                     now[0] += owner.NANOSECOND
-                    self.assertIsNone(owner._wait_child(context, child, cutoff, pump, "validator_reaped", phase=phase))
+                    self.assertIsNone(owner._wait_child(context, child, cutoff, pump, "validator_reaped", phase=phase, single_turn=single_turn))
                     self.assertIs(context.primary, first)
                     self.assertEqual(context.failure_limit, fixed)
                     pause.assert_not_called()
@@ -1412,6 +1581,26 @@ class ProfileOwnerWorkWaitTests(unittest.TestCase):
                 self.assertIsNone(child.receipt)
                 self.assertEqual(child.results, [receipt])
                 pump.assert_not_called()
+
+        # The new scheduling mode is private keeper cleanup, not an alternate
+        # WORK wait or a truthy input which can silently change caller behavior.
+        invalid = (("outer", "CLEANUP", True), ("custodian", "CLEANUP", True),
+                   ("keeper", "WORK", True), ("keeper", "invalid", True),
+                   *(("keeper", "CLEANUP", value) for value in (0, 1, None, "true", {})))
+        for role, phase, single_turn in invalid:
+            context, receipt = _context(role), _receipt(pid=432)
+            child = _Child((receipt,), pid=432)
+            pump = Mock(side_effect=AssertionError("invalid wait mode must not pump"))
+            with self.subTest(role=role, phase=phase, single_turn=single_turn), patch.object(owner.time, "monotonic_ns", return_value=1), patch.object(owner, "_pause") as pause, patch.object(owner, "_role_event") as event:
+                self.assertIsNone(owner._wait_child(context, child, context.hard, pump, "validator_reaped", phase=phase, single_turn=single_turn))
+                self.assertEqual(child.polls, 0)
+                self.assertFalse(child.numeric_retired)
+                self.assertEqual(child.results, [receipt])
+                self.assertTrue(context.cleanup_unknown)
+                self.assertEqual(context.primary.args, (owner.CLEANUP_ERROR,))
+                pump.assert_not_called()
+                pause.assert_not_called()
+                event.assert_not_called()
 
 
 class ProfileOwnerHandshakeTests(unittest.TestCase):

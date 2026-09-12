@@ -40,7 +40,8 @@ UNKNOWN_PROFILE_MODES = {*BAD_FRAME_MODES, *PARENT_DEATH_MODES, "orphan",
                          "payload-writer-close-failure", "payload-reader-close-failure", "payload-reader-close-unresolved"}
 
 _DRIVER_FAILURE_MODES = frozenset({"failure", "read-failure", "partial-write-failure", "overflow",
-                                   "partial-marker", "extra-frame", "concatenated-frame"})
+                                   "partial-marker", "extra-frame", "concatenated-frame",
+                                   "supervisor-timeout", "backpressure"})
 _DRIVER_FAILURE_FILES = (
     "tests/workflow/profile_process_fixture.py", "tests/workflow/process_fixture.py",
     "src/mobile_release/_profile_process.py", "src/mobile_release/_native_process.py",
@@ -1309,6 +1310,7 @@ def _assert_native_finality(root, *, allow_no_validator=False):
 
 
 def driver(root, mode):
+    native_platform = sys.platform  # Capture the host, not the profile module's Darwin shim below.
     assert_fixture_idle()
     import gc
     from mobile_release import ios_profiles as profiles
@@ -1518,6 +1520,15 @@ def driver(root, mode):
         assert binding.orphan_observed
     if mode == "zombie":
         assert binding.zombie_observed
+    if mode == "supervisor-timeout" and native_platform == "linux":
+        validator_waits = selected(items, "keeper", "validator_reaped")
+        group_retirements = selected(items, "keeper", "group_retired")
+        assert len(validator_waits) == len(group_retirements) == 1
+        # A Linux zombie still belongs to G until its original keeper reaps it.
+        # Compare K-local events, not cross-process log timing. Other platforms
+        # still require all genuine waits/finality above, not this Linux order.
+        assert group_retirements[0]["absent"]
+        assert validator_waits[0]["sequence"] < group_retirements[0]["sequence"]
     partial_bytes = sum(item["count"] for item in selected(items, "custodian", "payload_write"))
     if mode == "backpressure":
         assert 0 < partial_bytes < 4 * 1024 * 1024

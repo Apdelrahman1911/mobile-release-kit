@@ -1067,7 +1067,7 @@ def _task_child_record(context: _Context) -> dict[str, Any]:
 
 
 def _wait_child(context: _Context, child: Any, deadline_ns: int, pump: Callable[[], None], event: str,
-                *, phase: str) -> Any | None:
+                *, phase: str, single_turn: bool = False) -> Any | None:
     # No direct numeric request exists after this boundary, even if the first
     # WNOHANG call consumes status and its publication is subsequently lost.
     def stopped() -> bool:
@@ -1096,6 +1096,8 @@ def _wait_child(context: _Context, child: Any, deadline_ns: int, pump: Callable[
 
     try:
         _require(phase in ("WORK", "CLEANUP") and (phase != "WORK" or context.role == "keeper"), CLEANUP_ERROR)
+        _require(type(single_turn) is bool
+                 and (not single_turn or phase == "CLEANUP" and context.role == "keeper"), CLEANUP_ERROR)
         child.retire_numeric()
         while not stopped():
             receipt = child.poll_wait()
@@ -1106,6 +1108,11 @@ def _wait_child(context: _Context, child: Any, deadline_ns: int, pump: Callable[
                     return None  # Actual late receipt remains cleanup accounting.
                 return receipt
             _require(child.wait_state == "POLLABLE", CLEANUP_ERROR)
+            if single_turn:
+                # K must keep servicing parent controls/fallback while V is
+                # pending. This actual pid0 return grants only a later poll of
+                # the same child, never settlement or a renewed wait budget.
+                return None
             if phase == "WORK" and stopped():
                 return None
             pump()
@@ -1795,13 +1802,22 @@ class _Keeper:
         try:
             while not self.released:
                 self.safe_pump()
-                cutoff = ctx.failure_limit or ctx.run
+                cutoff = ctx.cleanup_cutoff(ctx.failure_limit or ctx.run)
                 if self.eof_seen or os.getppid() != ctx.parent_pid or time.monotonic_ns() >= cutoff:
                     if ctx.primary is None:
                         ctx.record(ValidationError(TIMEOUT), "deadline")
                     self.fallback_group()
                     break
-                _pause(cutoff, (self.channel,))
+                if (not self.released and self.validator is not None and self.validator.receipt is None
+                        and self.validator.wait_state in ("OWNED", "POLLABLE")):
+                    # C cannot retire G while a killed V remains an unreaped
+                    # group member. Reap V concurrently with waiting RELEASE,
+                    # but never block parent-loss fallback behind a live V.
+                    receipt = _wait_child(ctx, self.validator, cutoff, self.safe_pump,
+                                          "validator_reaped", phase="CLEANUP", single_turn=True)
+                    if receipt is not None:
+                        self.receipt = receipt
+                _pause(ctx.cleanup_cutoff(cutoff), (self.channel,))
             if self.validator is not None and self.validator.receipt is None and self.validator.wait_state != "UNKNOWN":
                 self.receipt = _wait_child(ctx, self.validator, ctx.failure_limit or ctx.hard,
                                            self.safe_pump, "validator_reaped", phase="CLEANUP")

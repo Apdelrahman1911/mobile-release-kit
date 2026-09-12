@@ -42,9 +42,18 @@ PROFILE_FIXTURE_FAILURE_ID = (
     "workflow.test_profile_processes.ProfileProcessTests."
     "test_failure_overflow_and_io_failure_reject_partial_content_without_leaking_workers"
 )
-PROFILE_FIXTURE_FAILURE_MODES = (
-    "failure", "read-failure", "partial-write-failure", "overflow", "partial-marker",
-    "extra-frame", "concatenated-frame",
+PROFILE_FIXTURE_FAILURE_CALLBACK_MODES = {
+    PROFILE_FIXTURE_FAILURE_ID: (
+        "failure", "read-failure", "partial-write-failure", "overflow", "partial-marker",
+        "extra-frame", "concatenated-frame",
+    ),
+    ("workflow.test_profile_processes.ProfileProcessTests."
+     "test_independent_supervisor_deadline_and_backpressure_kill_native_workers_without_inheriting_payload"): (
+        "supervisor-timeout", "backpressure",
+    ),
+}
+PROFILE_FIXTURE_FAILURE_MODES = frozenset(
+    mode for modes in PROFILE_FIXTURE_FAILURE_CALLBACK_MODES.values() for mode in modes
 )
 PROFILE_FIXTURE_FAILURE_FILES = (
     "tests/workflow/profile_process_fixture.py", "tests/workflow/process_fixture.py",
@@ -62,6 +71,19 @@ FIXTURE_BOOTSTRAP_FAILURE_CONDITIONS = {
     "admission_close": ("close",),
     "exec_attempt": ("attempt_record", "deadline", "exec"),
 }
+ISOLATED_COLLECTOR_FAILURE_PREFIX = "MRK_ISOLATED_COLLECTOR_FAILURE="
+ISOLATED_COLLECTOR_FAILURE_ID = (
+    "NativeUploadValidationTest#test_raw_collector_keeps_actual_failed_transcripts_status_and_first_error"
+)
+ISOLATED_COLLECTOR_FAILURE_STAGES = (
+    "cli-admission", "request-contract", "source-bindings", "deadline-bound", "collector-execution",
+    "capture-contract", "cleanup-contract", "reporting-contract", "custody-contract", "final-recheck",
+    "proof-publication",
+)
+ISOLATED_COLLECTOR_FAILURE_CATEGORIES = (
+    "assertion-error", "fixture-error", "native-lifecycle-error", "io-error", "os-error", "interrupt",
+    "system-exit", "standard-error", "exception", "unknown",
+)
 PYTHON_POISON_PARTITIONS = (
     "poison-wait-loss",
     "poison-startup-error",
@@ -1090,7 +1112,8 @@ def python_storage_profile(data: object) -> dict | None:
 
 
 def _fixture_failure_record(raw: bytes, prefix: str, maximum: int,
-                            *, deadline: float | None = None) -> dict | None:
+                            *, deadline: float | None = None,
+                            canonical_fields: tuple[str, ...] | None = None) -> dict | None:
     """One bounded record from the original capture, never a success receipt."""
     if deadline is not None:
         check_clock(deadline)
@@ -1098,16 +1121,25 @@ def _fixture_failure_record(raw: bytes, prefix: str, maximum: int,
         if type(raw) is not bytes:
             return None
         marker, found, record = prefix.encode("ascii"), False, None
-        for line in raw.split(b"\n"):
+        lines = raw.split(b"\n")
+        for index, line in enumerate(lines):
             if deadline is not None:
                 check_clock(deadline)
             if not line.startswith(marker):
                 continue
-            if found or len(line) + 1 > maximum:
+            if (found or len(line) + 1 > maximum
+                    or canonical_fields is not None and index == len(lines) - 1):
                 return None
             found = True
             try:
-                record = strict_json(line[len(marker):].decode("ascii"))
+                payload = line[len(marker):]
+                record = strict_json(payload.decode("ascii"))
+                if canonical_fields is not None:
+                    if type(record) is not dict or set(record) != set(canonical_fields):
+                        return None
+                    record = {key: record[key] for key in canonical_fields}
+                    if json.dumps(record, ensure_ascii=True, separators=(",", ":")).encode("ascii") != payload:
+                        return None
             except (UnicodeError, ValueError, VerificationError, RecursionError):
                 return None
         return record if type(record) is dict else None
@@ -1152,6 +1184,19 @@ def fixture_bootstrap_failure(raw: bytes, *, deadline: float | None = None) -> d
     if deadline is not None:
         check_clock(deadline)
     return {"schema": 1, "stage": data["stage"], "condition": data["condition"]}
+
+
+def isolated_collector_failure(raw: bytes, *, deadline: float | None = None) -> dict | None:
+    data = _fixture_failure_record(raw, ISOLATED_COLLECTOR_FAILURE_PREFIX, 256, deadline=deadline,
+                                   canonical_fields=("schema", "stage", "category"))
+    if (type(data) is not dict or set(data) != {"schema", "stage", "category"}
+            or type(data["schema"]) is not int or data["schema"] != 1
+            or type(data["stage"]) is not str or data["stage"] not in ISOLATED_COLLECTOR_FAILURE_STAGES
+            or type(data["category"]) is not str or data["category"] not in ISOLATED_COLLECTOR_FAILURE_CATEGORIES):
+        return None
+    if deadline is not None:
+        check_clock(deadline)
+    return {"schema": 1, "stage": data["stage"], "category": data["category"]}
 
 
 def native_failure_diagnostic(text: str, expected: tuple[str, ...], *, deadline: float | None = None) -> dict | None:
@@ -1406,10 +1451,13 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                     callbacks = python_failure_callbacks(detail["failure_callbacks"], expected)
                     if callbacks is not None:
                         value["failure_callbacks"] = callbacks
-                        if any(row["id"] == PROFILE_FIXTURE_FAILURE_ID and row["outcome"] in {"error", "failure"}
-                               for row in callbacks):
+                        profile_callbacks = [row for row in callbacks
+                            if row["id"] in PROFILE_FIXTURE_FAILURE_CALLBACK_MODES and row["outcome"] in {"error", "failure"}]
+                        if profile_callbacks:
                             diagnostic = profile_fixture_failure(result.stderr, deadline=deadline)
-                            if diagnostic is not None:
+                            if diagnostic is not None and any(
+                                    diagnostic["mode"] in PROFILE_FIXTURE_FAILURE_CALLBACK_MODES[row["id"]]
+                                    for row in profile_callbacks):
                                 value["profile_fixture_failure"] = diagnostic
                 except Exception:
                     # Optional diagnostics must not replace the original failure.
@@ -1467,6 +1515,19 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                 diagnostic = fixture_bootstrap_failure(result.stderr, deadline=deadline)
                 if diagnostic is not None:
                     value["fixture_bootstrap_failure"] = diagnostic
+            if (step.id == "ruby-native-capture" and step.native_partition == "healthy"
+                    and ISOLATED_COLLECTOR_FAILURE_ID in expected):
+                diagnostic = isolated_collector_failure(result.stderr, deadline=deadline)
+                if diagnostic is not None:
+                    # Scan the SAME original bytes under the SAME cutoff. A
+                    # target beyond the public first16 rows still counts, as
+                    # does a late duplicate. This private view is not a receipt.
+                    _, target = minitest_records(text, (ISOLATED_COLLECTOR_FAILURE_ID,), deadline=deadline)
+                    starts = target["start_records"]
+                    if (len(starts) == 1 and target["start_records_omitted"] == 0 and not target["duplicate_ids"]
+                            and starts[0]["id"] == ISOLATED_COLLECTOR_FAILURE_ID
+                            and starts[0]["terminal"] in {"failure", "error"}):
+                        value["isolated_collector_failure"] = diagnostic
         except (VerificationError, OSError, UnicodeError):
             if deadline is not None:
                 check_clock(deadline)

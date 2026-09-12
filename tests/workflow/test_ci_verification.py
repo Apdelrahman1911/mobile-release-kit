@@ -886,6 +886,7 @@ class CIControllerContractTests(unittest.TestCase):
         value = controller.failure_details(capture([callback], stderr=marker), step, paths,
                                            checks=checks, deadline=1000.0)
         self.assertEqual(value["profile_fixture_failure"], diagnostic)
+        self.assertEqual(controller.profile_fixture_failure(marker[:-1]), diagnostic)
         self.assertEqual(value["returncode"], 1)
         with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
             controller.parse_capture(step, capture([callback], stderr=marker), paths, "linux", checks)
@@ -893,46 +894,92 @@ class CIControllerContractTests(unittest.TestCase):
         self.assertEqual(controller.failure_details(capture([callback], check="python-wheel", stderr=marker),
             wheel, paths, checks=checks, deadline=1000.0)["profile_fixture_failure"], diagnostic)
 
+        callback_modes = {
+            ("workflow.test_profile_processes.ProfileProcessTests."
+             "test_failure_overflow_and_io_failure_reject_partial_content_without_leaking_workers"): (
+                "failure", "read-failure", "partial-write-failure", "overflow", "partial-marker",
+                "extra-frame", "concatenated-frame",
+            ),
+            ("workflow.test_profile_processes.ProfileProcessTests."
+             "test_independent_supervisor_deadline_and_backpressure_kill_native_workers_without_inheriting_payload"): (
+                "supervisor-timeout", "backpressure",
+            ),
+        }
+        self.assertEqual(controller.PROFILE_FIXTURE_FAILURE_CALLBACK_MODES, callback_modes)
+        supervisor_id = next(name for name in callback_modes if name != identifier)
+        # Both callbacks are source-known here: wrong-pair rejection must come
+        # from their mode binding, not from an unrelated unknown-ID veto.
+        with patch.object(checks, "python_capture_ids", return_value=tuple(callback_modes)):
+            for owner, modes in callback_modes.items():
+                for mode in modes:
+                    record = {**diagnostic, "mode": mode}
+                    for claimed in callback_modes:
+                        row = {**callback, "id": claimed}
+                        value = controller.failure_details(capture([row], stderr=encode(record)), step, paths,
+                                                           checks=checks, deadline=1000.0)
+                        if claimed == owner:
+                            self.assertEqual(value["profile_fixture_failure"], record)
+                        else:
+                            self.assertNotIn("profile_fixture_failure", value)
+                        self.assertEqual(value["returncode"], 1)
+            # Repeated failing subtests legitimately retain the same parent ID.
+            self.assertEqual(controller.failure_details(capture([callback, callback], stderr=marker),
+                step, paths, checks=checks, deadline=1000.0)["profile_fixture_failure"], diagnostic)
+
         # Exercise the actual verbosity-2 transport boundary: startTest leaves
         # its progress line open while the real fixture publishes its record.
         # An empty emitter sink and a separately fabricated parser input cannot
         # detect a marker accidentally appended to that unfinished progress line.
         from . import profile_process_fixture as fixture
-        stream = io.StringIO()
         inner_error = AssertionError(private)
         inner_stderr = ("Traceback (most recent call last):\n"
                         f'  File "/{private}/tests/workflow/profile_process_fixture.py", line 1199, in driver\n'
                         f"AssertionError: {private}\n").encode("ascii")
 
-        def emit_then_fail():
-            fixture._report_driver_failure("partial-write-failure", 1, inner_stderr)
-            raise inner_error
+        for identifier, mode in ((controller.PROFILE_FIXTURE_FAILURE_ID, "partial-write-failure"),
+                                 (supervisor_id, "supervisor-timeout"), (supervisor_id, "backpressure")):
+            with self.subTest(real_emitter_mode=mode):
+                stream = io.StringIO()
+                callback = {**callback, "id": identifier}
+                record = {**diagnostic, "mode": mode}
 
-        with patch.object(fixture.sys, "stderr", stream):
-            inner_result = unittest.TextTestRunner(stream=stream, verbosity=2, failfast=True).run(
-                unittest.FunctionTestCase(emit_then_fail))
-        self.assertEqual((inner_result.testsRun, len(inner_result.failures), len(inner_result.errors)), (1, 1, 0))
-        self.assertFalse(inner_result.wasSuccessful())
-        transported = stream.getvalue().encode("ascii")
-        self.assertIn(b" ... \n" + controller.PROFILE_FIXTURE_FAILURE_PREFIX.encode("ascii"), transported)
-        transported_capture = capture([callback], stderr=transported)
-        value = controller.failure_details(transported_capture, step, paths, checks=checks, deadline=1000.0)
-        self.assertEqual(value["profile_fixture_failure"], diagnostic)
-        self.assertEqual(value["returncode"], 1)
-        self.assertNotIn(private, json.dumps(value))
-        with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
-            controller.parse_capture(step, transported_capture, paths, "linux", checks)
-        # Removing the one delimiter recreates the real former transport defect;
-        # the strict parser must not start accepting arbitrary mid-line markers.
-        misframed = transported.replace(b"\n" + controller.PROFILE_FIXTURE_FAILURE_PREFIX.encode("ascii"),
-                                        controller.PROFILE_FIXTURE_FAILURE_PREFIX.encode("ascii"), 1)
-        self.assertNotIn("profile_fixture_failure", controller.failure_details(
-            capture([callback], stderr=misframed), step, paths, checks=checks, deadline=1000.0))
+                def emit_then_fail():
+                    fixture._report_driver_failure(mode, 1, inner_stderr)
+                    raise inner_error
+
+                with patch.object(fixture.sys, "stderr", stream):
+                    inner_result = unittest.TextTestRunner(stream=stream, verbosity=2, failfast=True).run(
+                        unittest.FunctionTestCase(emit_then_fail))
+                self.assertEqual((inner_result.testsRun, len(inner_result.failures), len(inner_result.errors)), (1, 1, 0))
+                self.assertFalse(inner_result.wasSuccessful())
+                transported = stream.getvalue().encode("ascii")
+                self.assertIn(b" ... \n" + controller.PROFILE_FIXTURE_FAILURE_PREFIX.encode("ascii"), transported)
+                transported_capture = capture([callback], stderr=transported)
+                value = controller.failure_details(transported_capture, step, paths, checks=checks, deadline=1000.0)
+                self.assertEqual(value["profile_fixture_failure"], record)
+                self.assertEqual(value["returncode"], 1)
+                self.assertNotIn(private, json.dumps(value))
+                self.assertEqual(controller.failure_details(capture([callback], check="python-wheel", stderr=transported),
+                    wheel, paths, checks=checks, deadline=1000.0)["profile_fixture_failure"], record)
+                with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                    controller.parse_capture(step, transported_capture, paths, "linux", checks)
+                # Removing the delimiter recreates the former progress-line bug.
+                misframed = transported.replace(b"\n" + controller.PROFILE_FIXTURE_FAILURE_PREFIX.encode("ascii"),
+                                                controller.PROFILE_FIXTURE_FAILURE_PREFIX.encode("ascii"), 1)
+                self.assertNotIn("profile_fixture_failure", controller.failure_details(
+                    capture([callback], stderr=misframed), step, paths, checks=checks, deadline=1000.0))
+        identifier = controller.PROFILE_FIXTURE_FAILURE_ID
+        callback = {**callback, "id": identifier}
         for callbacks, changes in (([], {}), ([callback], {"ok": True}),
                                    ([callback], {"check": "python-wheel"}),
-                                   ([{**callback, "outcome": "expected-failure"}], {})):
+                                   ([{**callback, "outcome": "expected-failure"}], {}),
+                                   *(([{**callback, "outcome": outcome, "category": "none"}], {})
+                                     for outcome in ("skip", "unexpected-success"))):
             self.assertNotIn("profile_fixture_failure", controller.failure_details(
                 capture(callbacks, stderr=marker, **changes), step, paths, checks=checks, deadline=1000.0))
+        for wrong_step in (controller.Step("python-full", parser="exit"), controller.Step("other", parser="check")):
+            self.assertNotIn("profile_fixture_failure", controller.failure_details(
+                capture([callback], stderr=marker), wrong_step, paths, checks=checks, deadline=1000.0))
         invalid_records = [
             {**diagnostic, "private": private}, {**diagnostic, "schema": True},
             {**diagnostic, "mode": private}, {**diagnostic, "category": private},
@@ -942,7 +989,9 @@ class CIControllerContractTests(unittest.TestCase):
             *({**diagnostic, "locations": [{"file": diagnostic["locations"][0]["file"], "line": line}]}
               for line in (True, 0, 1000000)),
         ]
+        malformed_marker = controller.PROFILE_FIXTURE_FAILURE_PREFIX.encode() + b"not-json\n"
         malformed = [*(encode(record) for record in invalid_records), marker + marker,
+                     marker + malformed_marker, malformed_marker + marker,
                      marker.replace(b'"schema": 1', b'"schema": 1,"schema": 1'),
                      controller.PROFILE_FIXTURE_FAILURE_PREFIX.encode() + b"x" * 2048 + b"\n",
                      controller.PROFILE_FIXTURE_FAILURE_PREFIX.encode() + b"\xff\n"]
@@ -1357,6 +1406,7 @@ class CIControllerContractTests(unittest.TestCase):
             def bootstrap_bytes(record):
                 return (controller.FIXTURE_BOOTSTRAP_FAILURE_PREFIX + json.dumps(record) + "\n").encode()
             marker = bootstrap_bytes(bootstrap)
+            self.assertEqual(controller.fixture_bootstrap_failure(marker[:-1]), bootstrap)
             with patch.object(controller, "ruby_capture_ids", return_value=expected):
                 for gate in ("ruby-native-capture", "ruby-ios_upload_validation", "ruby-android_upload_validation"):
                     native_step = controller.Step(gate, parser="minitest", expected_tests=2)
@@ -1394,6 +1444,145 @@ class CIControllerContractTests(unittest.TestCase):
                 with patch.object(controller.time, "monotonic", return_value=100.0), \
                         self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
                     controller.failure_details(failed_capture, native_step, paths, deadline=100.0)
+
+            target = "NativeUploadValidationTest#test_raw_collector_keeps_actual_failed_transcripts_status_and_first_error"
+            ruby_ids = tuple(sorted((*expected, target)))
+            isolated_step = controller.Step("ruby-native-capture", parser="minitest", expected_tests=3,
+                                            native_partition="healthy")
+            isolated_record = {"schema": 1, "stage": "capture-contract", "category": "assertion-error"}
+            def isolated_bytes(record):
+                return (controller.ISOLATED_COLLECTOR_FAILURE_PREFIX
+                        + json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
+            isolated_marker = isolated_bytes(isolated_record)
+            target_failure = target + " = PRIVATE_MESSAGE\n0.01 s = F\n"
+            failed_footer = "\n3 runs, 5 assertions, 1 failures, 0 errors, 0 skips\n"
+            isolated_stdout = clean + target_failure + failed_footer
+            # Both inventory seams remain inert, including wrong-gate checks.
+            # No Ruby source read, fixture entry or native operation occurs here.
+            with patch.object(controller, "ruby_expected_ids", return_value=ruby_ids), \
+                    patch.object(controller, "ruby_capture_ids", return_value=ruby_ids), \
+                    patch.object(controller.time, "monotonic", return_value=999.0):
+                for terminal in ("F", "E"):
+                    transcript = isolated_stdout if terminal == "F" else isolated_stdout.replace(
+                        "0.01 s = F", "0.01 s = E").replace("1 failures, 0 errors", "0 failures, 1 errors")
+                    failed_capture = capture(transcript, stderr=isolated_marker, ok=False, returncode=1)
+                    with patch.object(controller, "minitest_records", wraps=controller.minitest_records) as scans:
+                        detail = controller.failure_details(failed_capture, isolated_step, paths, deadline=1000.0)
+                    self.assertEqual([call.args for call in scans.call_args_list],
+                                     [(transcript, ruby_ids), (transcript, (target,))])
+                    self.assertEqual([call.kwargs for call in scans.call_args_list], [{"deadline": 1000.0}] * 2)
+                    self.assertEqual(detail["isolated_collector_failure"], isolated_record)
+                    self.assertEqual(detail["returncode"], 1)
+                    self.assertEqual(detail["minitest_structure"]["expected_count"], len(ruby_ids))
+                    self.assertEqual(detail["minitest_structure"]["unknown_count"], 0)
+                    self.assertNotIn("PRIVATE_MESSAGE", json.dumps(detail))
+                    with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                        controller.parse_capture(isolated_step, failed_capture, paths, "macos", None)
+
+                # Actual F/E structure remains adverse even after a genuine rc0;
+                # a marker alone cannot relabel a clean successful callback.
+                self.assertEqual(controller.failure_details(capture(isolated_stdout, stderr=isolated_marker),
+                    isolated_step, paths)["isolated_collector_failure"], isolated_record)
+                success_stdout = isolated_stdout.replace("0.01 s = F", "0.01 s = .").replace("1 failures", "0 failures")
+                self.assertNotIn("isolated_collector_failure", controller.failure_details(
+                    capture(success_stdout, stderr=isolated_marker), isolated_step, paths))
+                self.assertTrue(controller.parse_capture(isolated_step, capture(success_stdout, stderr=isolated_marker),
+                                                         paths, "macos", None).ok)
+                self.assertNotIn("isolated_collector_failure", controller.failure_details(
+                    capture(isolated_stdout + isolated_marker.decode("ascii"), ok=False, returncode=1),
+                    isolated_step, paths))
+                for transcript in (
+                    clean + failed_footer,
+                    clean + target + ":\n" + failed_footer,
+                    clean + target + " = unfinished\n" + failed_footer,
+                    isolated_stdout.replace("0.01 s = F", "0.01 s = S"),
+                    isolated_stdout.replace("0.01 s = F", "0.01 s = .\n0.01 s = F"),
+                    clean + target_failure * 2 + failed_footer,
+                    clean + failed_footer + target_failure,
+                    success_stdout.replace(first, first.replace("0.01 s = .", "0.01 s = F")),
+                ):
+                    self.assertNotIn("isolated_collector_failure", controller.failure_details(
+                        capture(transcript, stderr=isolated_marker, ok=False, returncode=1), isolated_step, paths))
+                with patch.object(controller, "ruby_capture_ids", return_value=expected):
+                    self.assertNotIn("isolated_collector_failure", controller.failure_details(
+                        capture(isolated_stdout, stderr=isolated_marker, ok=False, returncode=1), isolated_step, paths))
+                for wrong_step in (
+                    dataclasses.replace(isolated_step, id="ruby-native-owner"),
+                    dataclasses.replace(isolated_step, id="ruby-play_store"),
+                    dataclasses.replace(isolated_step, native_partition="all"),
+                    dataclasses.replace(isolated_step, native_partition="native-setup-no-cleanup"),
+                    dataclasses.replace(isolated_step, parser="exit"),
+                ):
+                    self.assertNotIn("isolated_collector_failure", controller.failure_details(
+                        capture(isolated_stdout, stderr=isolated_marker, ok=False, returncode=1), wrong_step, paths))
+
+                # Global first16 projections are not the target's complete
+                # history. Reuse the full original scan, not truncated lists.
+                many_ids = tuple(f"SyntheticTests#test_{index:02d}" for index in range(17))
+                many_stdout = "".join(name + " = 0.01 s = .\n" for name in many_ids)
+                with patch.object(controller, "ruby_capture_ids", return_value=tuple(sorted((*many_ids, target)))):
+                    detail = controller.failure_details(capture(many_stdout + target_failure,
+                        stderr=isolated_marker, ok=False, returncode=1), isolated_step, paths)
+                    self.assertGreater(detail["minitest_structure"]["start_records_omitted"], 0)
+                    self.assertEqual(detail["isolated_collector_failure"], isolated_record)
+                    self.assertNotIn("isolated_collector_failure", controller.failure_details(
+                        capture(target_failure + many_stdout + target_failure, stderr=isolated_marker,
+                                ok=False, returncode=1), isolated_step, paths))
+
+                invalid_isolated = [
+                    {key: value for key, value in isolated_record.items() if key != "category"},
+                    {**isolated_record, "private": "PRIVATE_ROOT"}, {**isolated_record, "pid": 123},
+                    *({**isolated_record, "schema": value} for value in (True, 1.0, 2, "1")),
+                    *({**isolated_record, "stage": value} for value in ([], "PRIVATE_ROOT", "configuration")),
+                    *({**isolated_record, "category": value} for value in (False, "PRIVATE_MESSAGE", "none")),
+                    {key: isolated_record[key] for key in ("category", "schema", "stage")},
+                ]
+                prefix = controller.ISOLATED_COLLECTOR_FAILURE_PREFIX.encode("ascii")
+                malformed_marker = prefix + b"not-json\n"
+                invalid_markers = [*(isolated_bytes(record) for record in invalid_isolated),
+                    isolated_marker * 2, isolated_marker + malformed_marker, malformed_marker + isolated_marker,
+                    isolated_marker.replace(b'"schema":1', b'"schema":1,"schema":1'),
+                    isolated_marker.replace(b'"schema":1', b'"schema": 1'),
+                    isolated_marker.replace(b"capture-contract", br"capture\u002dcontract"),
+                    prefix + b"x" * 256 + b"\n", prefix + b"\xff\n", isolated_marker[:-1],
+                    isolated_marker[:-1] + b"\r\n", b"progress " + isolated_marker,
+                ]
+                for raw in invalid_markers:
+                    detail = controller.failure_details(capture(isolated_stdout, stderr=raw, ok=False, returncode=1),
+                                                        isolated_step, paths, deadline=1000.0)
+                    self.assertNotIn("isolated_collector_failure", detail)
+                    self.assertEqual(detail["returncode"], 1)
+                    for private in ("PRIVATE_ROOT", "PRIVATE_MESSAGE"):
+                        self.assertNotIn(private, json.dumps(detail))
+
+                # Optional malformed parsing, target scanning and cancellation
+                # cannot absorb or renew the original aggregate cutoff.
+                expired = [False]
+                def expired_isolated_parse(_text):
+                    expired[0] = True
+                    raise ValueError("PRIVATE_MESSAGE")
+                with patch.object(controller, "strict_json", side_effect=expired_isolated_parse), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(capture(isolated_stdout, stderr=isolated_marker, ok=False, returncode=1),
+                                               isolated_step, paths, deadline=1000.0)
+                expired[0] = False
+                original_scan = controller.minitest_records
+                def expire_target_scan(text, identifiers, *, deadline):
+                    if identifiers == (target,):
+                        expired[0] = True
+                    return original_scan(text, identifiers, deadline=deadline)
+                with patch.object(controller, "minitest_records", side_effect=expire_target_scan), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(capture(isolated_stdout, stderr=isolated_marker, ok=False, returncode=1),
+                                               isolated_step, paths, deadline=1000.0)
+                for interruption in (KeyboardInterrupt("PRIVATE_MESSAGE"), SystemExit(7)):
+                    with patch.object(controller, "strict_json", side_effect=interruption), \
+                            self.assertRaises(type(interruption)) as raised:
+                        controller.failure_details(capture(isolated_stdout, stderr=isolated_marker, ok=False, returncode=1),
+                                                   isolated_step, paths, deadline=1000.0)
+                    self.assertIs(raised.exception, interruption)
 
             for field, value in (("returncode", False), ("waited", False), ("stdout_eof", False),
                                  ("stderr_eof", False), ("domain_finality", False),
