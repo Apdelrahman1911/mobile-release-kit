@@ -63,7 +63,7 @@ class _ProviderTree:
     fchmod changes ctime as well as permission bits, just as a real change can.
     """
 
-    def __init__(self):
+    def __init__(self, *, compatibility=False):
         self.uid = self.gid = 60001
         self.controller_uid = self.controller_euid = 0
         self.platform = "linux"
@@ -73,14 +73,18 @@ class _ProviderTree:
         self.next_fd, self.peak_fds = 100, 0
         self.after = lambda *_: None
         self.acls, self.resolutions = {}, {}
-        self.prefixes = tuple((role, Path("/synthetic/providers") / role)
-                              for role in ("python", "ruby", "jdk"))
+        roles = ("python", "ruby", "jdk")
+        if compatibility:
+            roles += ("python312", "python313", "python314")
+        self.prefixes = tuple((role, Path("/synthetic/providers") / role) for role in roles)
+        executables = {"python": "python", "ruby": "ruby", "jdk": "java",
+                       "python312": "python3.12", "python313": "python3.13", "python314": "python3.14"}
         for path in ("/", "/synthetic", "/synthetic/providers"):
             self.add(path, kind=stat.S_IFDIR)
         for role, prefix in self.prefixes:
             self.add(prefix, kind=stat.S_IFDIR)
             self.add(prefix / "bin", kind=stat.S_IFDIR)
-            self.add(prefix / "bin" / {"python": "python", "ruby": "ruby", "jdk": "java"}[role])
+            self.add(prefix / "bin" / executables[role])
 
     def add(self, path, *, kind=stat.S_IFREG, mode=0o755, uid=1001, gid=1001,
             nlink=None, target=None):
@@ -304,6 +308,102 @@ class ProviderRuntimeContractTests(unittest.TestCase):
         self.assertNotIn(str(tree.uid), repr(tree.report))
         for value in original_acls.values():
             self.assertNotIn(repr(value), repr(tree.report))
+        self.assert_closed_once(tree)
+
+    def test_all_six_runtime_inventories_precede_the_first_permission_effect(self):
+        tree = _ProviderTree(compatibility=True)
+        roles = ("python", "ruby", "jdk", "python312", "python313", "python314")
+        self.assertEqual(tuple(role for role, _prefix in tree.prefixes), roles)
+        python = "/synthetic/providers/python/bin/python"
+        java = "/synthetic/providers/jdk/bin/java"
+        python312 = "/synthetic/providers/python312"
+        python313_bin = "/synthetic/providers/python313/bin"
+        python314_lib = "/synthetic/providers/python314/lib"
+        tree.nodes[python].st_mode = tree.nodes[java].st_mode = stat.S_IFREG | 0o777
+        tree.nodes[python312].st_mode = stat.S_IFDIR | 0o777
+        tree.add(python312 + "/data", mode=0o666)
+        tree.nodes[python313_bin].st_mode = stat.S_IFDIR | 0o2777
+        tree.nodes[python313_bin].st_gid = tree.gid
+        tree.add(python314_lib, kind=stat.S_IFDIR)
+        tree.add(python314_lib + "/retained.py", mode=0o644)
+        tree.acls[python314_lib, "system.posix_acl_default"] = _default_acl()
+        unselected = "/synthetic/providers/python315"
+        tree.add(unselected, kind=stat.S_IFDIR, mode=0o777)
+        tree.add(unselected + "/untouched", mode=0o777)
+        original = {path: vars(node).copy() for path, node in tree.nodes.items()}
+        original_acls = tree.acls.copy()
+
+        tree.protect(self.module)
+
+        self.assertTrue(tree.report["ok"])
+        self.assertEqual(tree.report["phase"], "complete")
+        expected_modes = {python: 0o775, java: 0o775, python312: 0o775,
+                          python312 + "/data": 0o664, python313_bin: 0o2755}
+        self.assertCountEqual(
+            [(path, detail[1]) for operation, path, detail in tree.events if operation == "fchmod"],
+            expected_modes.items(),
+        )
+        first_change = next(index for index, event in enumerate(tree.events) if event[0] == "fchmod")
+        earlier = tree.events[:first_change]
+        for _role, prefix in tree.prefixes:
+            for path, before in original.items():
+                if path != str(prefix) and not path.startswith(str(prefix) + "/"):
+                    continue
+                self.assertTrue(any(event[:2] == ("fstat", path) for event in earlier), path)
+                for attribute in ("system.posix_acl_access", "system.posix_acl_default"):
+                    self.assertIn(("acl", path, attribute), earlier)
+                if stat.S_ISDIR(before["st_mode"]):
+                    self.assertTrue(any(event[:2] == ("listdir", path) for event in earlier), path)
+        self.assertFalse(any(path == unselected or path.startswith(unselected + "/")
+                             for _operation, path, _detail in tree.events))
+        for path, node in tree.nodes.items():
+            before = original[path].copy()
+            if path in expected_modes:
+                before["st_mode"] = stat.S_IFMT(before["st_mode"]) | expected_modes[path]
+                before["st_ctime_ns"] += 1
+            self.assertEqual(vars(node), before, path)
+        expected_counts = {"python": (3, 1), "ruby": (3, 0), "jdk": (3, 1),
+                           "python312": (4, 2), "python313": (3, 1), "python314": (5, 0)}
+        self.assertEqual(tuple(tree.report["roles"]), roles)
+        self.assertEqual(tree.report["roles"], {
+            role: {"inventoried": inventoried, "planned": changed, "attempted": changed, "confirmed": changed}
+            for role, (inventoried, changed) in expected_counts.items()
+        })
+        self.assertEqual(tuple(tree.report[field] for field in ("inventoried", "planned", "attempted", "confirmed", "errors")),
+                         (21, 5, 5, 5, 0))
+        self.assertEqual(tree.acls, original_acls)
+        self.assertEqual((tree.report["default_acl_nodes"], tree.report["default_acl_bytes"]),
+                         (1, len(_default_acl())))
+        self.assertEqual((self.module.MAX_NODES, self.module.MAX_DEPTH, self.module.MAX_OPEN), (100_000, 64, 72))
+        self.assertEqual((self.module.MAX_ACL_BYTES, self.module.MAX_DEFAULT_ACL_BYTES), (4096, 8 * 1024**2))
+        self.assertEqual(tree.deadline, 10.0)
+        self.assert_closed_once(tree)
+
+    def test_sixth_runtime_rejection_preserves_every_previously_planned_change(self):
+        tree = _ProviderTree(compatibility=True)
+        for _role, prefix in tree.prefixes[:-1]:
+            tree.add(prefix / "planned-write", mode=0o777)
+        late = "/synthetic/providers/python314/zz-late-node"
+        tree.add(late, uid=tree.uid)
+        original = {path: vars(node).copy() for path, node in tree.nodes.items()}
+
+        with self.assertRaises(self.module.ProviderRuntimeError):
+            tree.protect(self.module)
+
+        self.assertFalse(tree.report["ok"])
+        self.assertEqual((tree.report["condition"], tree.report["role"], tree.report["phase"]),
+                         ("subject-owned", "python314", "preinventory"))
+        self.assertIn(("stat", late, None), tree.events)
+        self.assertFalse(any(event[0] == "fchmod" for event in tree.events))
+        self.assertEqual({path: vars(node) for path, node in tree.nodes.items()}, original)
+        self.assertEqual(tree.report["roles"], {
+            role: {"inventoried": 3 if role == "python314" else 4,
+                   "planned": int(role != "python314"), "attempted": 0, "confirmed": 0}
+            for role, _prefix in tree.prefixes
+        })
+        self.assertEqual(tuple(tree.report[field] for field in ("inventoried", "planned", "attempted", "confirmed", "errors")),
+                         (23, 5, 0, 0, 1))
+        self.assertEqual(tree.deadline, 10.0)
         self.assert_closed_once(tree)
 
     def test_late_invalid_node_prevents_every_previously_planned_change(self):
@@ -781,6 +881,50 @@ class ProviderRuntimeContractTests(unittest.TestCase):
                 self.assertEqual(tree.report["condition"], condition)
                 self.assertFalse(tree.report["ok"])
                 self.assertEqual(tree.events, [])
+                self.assert_closed_once(tree)
+
+    def test_six_runtime_roles_and_nonoverlapping_roots_are_closed_before_metadata(self):
+        for case, condition in (("missing-compatibility", "prefix-roles"), ("missing-primary", "prefix-roles"),
+                                ("swapped-roles", "prefix-roles"), ("extra-role", "prefix-roles"),
+                                ("unselected-role", "prefix-roles"), ("duplicate-role", "prefix-roles"),
+                                ("duplicate-prefix", "prefix-overlap"), ("nested-prefix", "prefix-overlap"),
+                                ("ancestor-prefix", "prefix-overlap")):
+            with self.subTest(case=case):
+                tree = _ProviderTree(compatibility=True)
+                prefixes = list(tree.prefixes)
+                if case == "missing-compatibility":
+                    prefixes.pop()
+                elif case == "missing-primary":
+                    prefixes.pop(2)
+                elif case == "swapped-roles":
+                    prefixes[3], prefixes[5] = prefixes[5], prefixes[3]
+                elif case == "extra-role":
+                    prefixes.append(("python315", Path("/synthetic/providers/python315")))
+                elif case in {"unselected-role", "duplicate-role"}:
+                    prefixes[-1] = ("python315" if case == "unselected-role" else "python313", prefixes[-1][1])
+                elif case == "duplicate-prefix":
+                    prefixes[-1] = ("python314", prefixes[0][1])
+                elif case == "nested-prefix":
+                    prefixes[-1] = ("python314", prefixes[3][1] / "nested")
+                else:
+                    prefixes[3] = ("python312", prefixes[-1][1] / "nested")
+                original = {path: vars(node).copy() for path, node in tree.nodes.items()}
+
+                with self.assertRaises(self.module.ProviderRuntimeError):
+                    tree.protect(self.module, prefixes=prefixes)
+
+                self.assertFalse(tree.report["ok"])
+                self.assertEqual((tree.report["condition"], tree.report["phase"], tree.report["errors"]),
+                                 (condition, "arguments", 1))
+                self.assertEqual(tree.events, [])
+                self.assertEqual({path: vars(node) for path, node in tree.nodes.items()}, original)
+                admitted_roles = tree.prefixes[:3] if condition == "prefix-roles" else tree.prefixes
+                self.assertEqual(tree.report["roles"], {
+                    role: {field: 0 for field in ("inventoried", "planned", "attempted", "confirmed")}
+                    for role, _prefix in admitted_roles
+                })
+                for field in ("inventoried", "planned", "attempted", "confirmed"):
+                    self.assertEqual(tree.report[field], 0)
                 self.assert_closed_once(tree)
 
     def test_inventory_depth_and_descriptor_bounds_fail_before_permission_changes(self):

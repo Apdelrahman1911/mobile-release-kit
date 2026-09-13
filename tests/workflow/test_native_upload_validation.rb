@@ -3,13 +3,19 @@
 require "minitest/autorun"
 require "minitest/mock"
 require_relative "upload_process_fixture"
+require_relative "../../fastlane/native_process_spawn"
+require_relative "../../fastlane/native_upload_process"
+require_relative "../../fastlane/native_upload_validation"
 
 class NativeUploadValidationTest < Minitest::Test
   include UploadProcessFixture::RawCaptureCleanup
+  prepend UploadProcessFixture::CaseGuard
   PROOF_FILES = %w[
     tests/workflow/upload_process_fixture.rb
     tests/workflow/upload_process_ownership.rb
     fastlane/native_upload_validation.rb
+    fastlane/native_process_spawn.rb
+    fastlane/native_upload_process.rb
     fastlane/release_support.rb
   ].freeze
   IDENTITY_PREDICATE = 'primary.equal?(@injected_error) && '
@@ -23,25 +29,145 @@ class NativeUploadValidationTest < Minitest::Test
     "timeout" => "STDOUT.sync = true\nSTDOUT.puts('collector ready')\nsleep 30\n",
     "oversized" => "STDOUT.sync = true\nSTDERR.sync = true\nSTDOUT.write('x' * 32_769)\nSTDERR.puts('collector size control')\n"
   }.freeze
+  ISOLATED_COLLECTOR_FLAG = "--mrk-isolated-collector-close"
+  ISOLATED_COLLECTOR_MODE = "collector-isolated-close"
+  ISOLATED_COLLECTOR_LIMIT = 2 * UploadProcessFixture::DRIVER_LIMIT + 2 * UploadProcessFixture::CLEANUP_LIMIT
+  RAW_REPORTING_NS = 2_000_000_000
+  ISOLATED_FAILURE_PREFIX = "MRK_ISOLATED_COLLECTOR_FAILURE="
+  ISOLATED_FAILURE_STAGES = %w[cli-admission request-contract source-bindings deadline-bound collector-execution
+                              capture-contract cleanup-contract reporting-contract custody-contract final-recheck proof-publication
+                              capture-primary capture-retained-files capture-retained-lifetime capture-retained-streams
+                              capture-record-read capture-record-status capture-record-flags capture-dispatch-contract
+                              capture-dispatch-environment capture-source-identities capture-stream-identities capture-child-receipt
+                              capture-creator capture-lifetime-endpoints capture-provenance capture-bootstrap-header
+                              capture-bootstrap-request capture-bootstrap-sources capture-bootstrap-directory capture-bootstrap-dispatch
+                              capture-bootstrap-descriptors capture-bootstrap-configuration capture-bootstrap-ready capture-bootstrap-grant
+                              capture-bootstrap-exec capture-bootstrap-directory-finality capture-error-contract capture-readiness
+                              capture-transcript capture-termination].freeze
+  ISOLATED_FAILURE_CATEGORIES = %w[assertion-error fixture-error native-lifecycle-error io-error os-error interrupt
+                                  system-exit json-parser-error key-error no-method-error type-error argument-error runtime-error
+                                  standard-error exception unknown].freeze
+  NATIVE_PRIMARY_FAILURE_PREFIX = "MRK_NATIVE_PRIMARY_FAILURE="
+  NATIVE_PRIMARY_FAILURE_CALLBACK_MODES = {
+    "NativeUploadValidationTest#test_unexpected_pre_entry_failures_preserve_original_through_real_cleanup" =>
+      %w[publication readiness watchdog].product(%w[standard io interrupt system-exit], %w[none close]).map { |parts| "native-proof-#{parts.join('-')}".freeze }.freeze,
+    "NativeUploadValidationTest#test_unexpected_primary_outlives_late_teardown_and_lookalike_diagnostics" =>
+      %w[native-proof-late-cleanup native-proof-lookalike].freeze,
+    "NativeUploadValidationTest#test_first_close_requires_the_actual_intentional_error_not_redacted_lookalike" =>
+      %w[native-proof-entered-io].freeze,
+    "NativeUploadValidationTest#test_nested_lifetime_preserves_pre_grant_ioerror_without_native_acquisition" =>
+      %w[native-proof-frame-io native-proof-frame-io-close].freeze,
+  }.freeze
+  NATIVE_PRIMARY_FAILURE_PREDICATES = %w[case proof-failures proof-status result-kind driver-status].freeze
+  NATIVE_PRIMARY_PROOF_FAILURES = [
+    "actual failed native result", "one real injection/final boundary", "framePublishedBeforeFault",
+    "outerPrimarySameObject", "nestedPrimarySameObject", "taskPrimarySameObject", "originalMessagePreserved",
+    "originalStatusPreserved", "originalNotIntentional", "actualTaskJoins", "actualDescriptorsClosed",
+    "secondary identity", "ownedDescriptorsClosed", "watchdogJoined", "tasksJoined", "injectorsJoined",
+    "handlersRestored", "registryInactive", "no pending cancellation", "unchanged IOError redaction",
+    "actual non-IOError return", "native cleanup without fixture fallback", "actual capture finality", "first-close boundary",
+  ].freeze
+  ORDER_CASES = {
+    "native-order-task-before-caller-interrupt" => %w[task-before-caller interrupt],
+    "native-order-task-before-caller-system-exit" => %w[task-before-caller system-exit],
+    "native-order-caller-before-task-interrupt" => %w[caller-before-task interrupt],
+    "native-order-caller-before-task-system-exit" => %w[caller-before-task system-exit],
+    "native-order-cleanup-before-caller-interrupt" => %w[cleanup-before-caller interrupt],
+    "native-order-cleanup-before-caller-system-exit" => %w[cleanup-before-caller system-exit],
+  }.transform_values(&:freeze).freeze
+  NATIVE_ORDER_FAILURE_PREFIX = "MRK_NATIVE_ORDER_FAILURE="
+  NATIVE_ORDER_FAILURE_CALLBACK_MODES = {
+    "NativeUploadValidationTest#test_native_task_error_precedes_later_caller_cancellation_at_the_original_latch" =>
+      %w[native-order-task-before-caller-interrupt native-order-task-before-caller-system-exit].freeze,
+    "NativeUploadValidationTest#test_native_caller_cancellation_precedes_later_task_ioerror_at_the_original_latch" =>
+      %w[native-order-caller-before-task-interrupt native-order-caller-before-task-system-exit].freeze,
+    "NativeUploadValidationTest#test_native_cleanup_error_precedes_later_caller_interrupt_and_retains_unknown" =>
+      %w[native-order-cleanup-before-caller-interrupt].freeze,
+    "NativeUploadValidationTest#test_native_cleanup_error_precedes_later_caller_system_exit_and_retains_unknown" =>
+      %w[native-order-cleanup-before-caller-system-exit].freeze,
+  }.freeze
+  NATIVE_ORDER_FAILURE_PREDICATES = %w[proof-version proof-kind case source-binding proof-failures proof-status
+                                     expected-unknown original-accepted result-kind driver-status].freeze
+  NATIVE_ORDER_PROOF_FAILURES = [
+    "original failed fixture result", "same first object through original boundaries",
+    "unchanged original first message/status", "unchanged original caller message/status",
+    "no original upload acceptance", "original shared creator/capture latch", "actual first and later latch returns",
+    "actual latch released later fault", "actual caller delivery and rescue", "actual original stdin close",
+    "actual capture/creator joins", "actual original native closes", "actual original native EOFs", "actual original C wait",
+    "no fixture fallback or pending cancellation", "ownedDescriptorsClosed", "watchdogJoined", "injectorsJoined",
+    "handlersRestored", "registryInactive", "no fixture cleanup errors", "observation restored", "unchanged original sources",
+    "actual clean body then original cleanup fault", "unknown original task/session retained", "real pre-tail native success not finality",
+    "actual body error recorded", "actual settled native cancellation",
+  ].freeze
+
+  NATIVE_SETUP_FAILURE_PREFIX = "MRK_NATIVE_SETUP_FAILURE="
+  NATIVE_SETUP_FAILURE_CALLBACK = "NativeUploadValidationTest#test_cancellation_or_io_error_at_first_setup_step_cleans_up_the_real_child"
+  NATIVE_SETUP_FAILURE_KINDS = %w[pass fixture-cleanup readiness setup-fixture-fault process-observation
+                                process-ownership fixture-result unexpected].freeze
+  NATIVE_SETUP_FAILURE_CATEGORIES = {
+    "UploadProcessFixture::Failure" => "fixture-error", "MobileReleaseKit::ContractError" => "contract-error",
+    "MobileReleaseKit::NativeUploadProcess::LifecycleError" => "native-lifecycle-error",
+    "IOError" => "io-error", "Interrupt" => "interrupt", "SystemExit" => "system-exit",
+  }.freeze
+  NATIVE_SETUP_RESULT_CHECKS = %w[ready firstCloseEntered originalCloseCompleted nativeOriginalErrorPreserved watchdogStarted
+    watchdogIntervened fallbackUsed deadBeforeFallback ownedDescriptorsClosed watchdogJoined tasksJoined injectorsJoined
+    handlersRestored registryInactive pendingInterrupt cleanupErrorsEmpty].freeze
+  NATIVE_SETUP_NATIVE_CHECKS = %w[finalized noProducers settled unknown hooksRestored].freeze
 
   def setup
+    UploadProcessFixture.assert_domain_reusable!
     @root = File.realpath(Dir.mktmpdir("mrk-native-setup-"))
   end
 
   def teardown
-    if @retain_raw_evidence || UploadProcessFixture.cleanup_unresolved?(@root)
+    return unless @root # Refused entry acquired no new case directory.
+
+    if UploadProcessFixture.cleanup_unresolved?(@root)
       warn "Preserve unresolved native fixture evidence: #{@root}"
+      unless UploadProcessFixture.expected_unknown_retention?(@root)
+        flunk "native fixture retained unexpected process custody"
+      end
+    elsif @retain_raw_evidence
+      warn "Preserve native raw fixture evidence: #{@root}"
     else
       FileUtils.remove_entry(@root)
     end
   end
 
-  def process_case(mode, cleanup_errors: [])
-    value = UploadProcessFixture.run(platform: "native", root: @root, parameters: {}, mode: mode)
+  def process_case(mode, cleanup_errors: [], order_failure_state: nil)
+    UploadProcessFixture.assert_domain_reusable!
+    primary_failure_state = {} # Never shared with another mode, raw copy or call.
+    optional = order_failure_state.nil? ? {} : {order_failure_state: order_failure_state}
+    if mode.instance_of?(String) && UploadProcessFixture::NATIVE_SETUP_FAILURE_MODES.include?(mode)
+      setup_failure_state = {} # One ordinary setup case, never another proof's state.
+      optional[:setup_failure_state] = setup_failure_state
+    end
+    value = begin
+      UploadProcessFixture.run(platform: "native", root: @root, parameters: {}, mode: mode,
+        primary_failure_state: primary_failure_state, **optional)
+    rescue Exception => original
+      # run has completed its original lifetime, cleanup and policy restoration.
+      # A different failure or partial handoff cannot claim a proof rejection.
+      begin
+        self.class.report_native_primary_failure(primary_failure_state, original,
+          callback: "#{self.class.name}##{name}", mode: mode)
+      rescue Exception
+        nil # Even optional callback lookup must not replace the actual error.
+      end
+      if setup_failure_state
+        begin
+          self.class.report_native_setup_failure(setup_failure_state, original,
+            callback: "#{self.class.name}##{name}", mode: mode)
+        rescue Exception
+          nil # This independent optional projection cannot replace the rejection.
+        end
+      end
+      raise
+    end
     assert value.fetch("driverJoined"), value.inspect
     assert value.fetch("knownProcessesDead"), value.inspect
     unless mode.start_with?("kill-")
-      %w[watchdogJoined waiterJoined injectorsJoined ownedDescriptorsClosed handlersRestored registryInactive].each do |name|
+      %w[watchdogJoined tasksJoined injectorsJoined ownedDescriptorsClosed handlersRestored registryInactive].each do |name|
         assert value.fetch(name), value.inspect
       end
       refute value.fetch("pendingInterrupt"), value.inspect
@@ -52,6 +178,203 @@ class NativeUploadValidationTest < Minitest::Test
       end
     end
     value
+  end
+
+  def self.native_primary_failure_line(mode:, proof:, result:, status:)
+    return unless mode.instance_of?(String) && UploadProcessFixture::NATIVE_PRIMARY_PROOFS.key?(mode) &&
+                  proof.instance_of?(Hash) && %w[case failures driverExitStatus].all? { |key| proof.key?(key) } &&
+                  result.instance_of?(Hash) && result.key?("kind")
+
+    failures = proof.fetch("failures")
+    inapplicable = UploadProcessFixture::NATIVE_PRIMARY_PROOFS.fetch(mode)[1] == "io" ?
+      "actual non-IOError return" : "unchanged IOError redaction"
+    allowed = NATIVE_PRIMARY_PROOF_FAILURES.reject { |label| label == inapplicable }
+    return unless failures.instance_of?(Array) && failures.length <= 23 &&
+                  failures.all? { |label| label.instance_of?(String) && allowed.include?(label) } &&
+                  failures == allowed.select { |label| failures.include?(label) }
+
+    # These are observations of the retained original values, not a claim that
+    # every comparison ran before the original short-circuit guard rejected.
+    passed = [proof["case"] == mode, proof["failures"] == [], proof["driverExitStatus"] == 1,
+              result["kind"] != "pass", status.exitstatus == 0]
+    rejected = NATIVE_PRIMARY_FAILURE_PREDICATES.each_with_index.filter_map { |label, index| label unless passed[index] }
+    return if rejected.empty?
+
+    line = "#{NATIVE_PRIMARY_FAILURE_PREFIX}#{JSON.generate({"schema" => 1, "mode" => mode,
+      "failedPredicates" => rejected, "proofFailures" => failures})}\n"
+    line.freeze if line.ascii_only? && line.bytesize <= 2048
+  end
+
+  def self.report_native_primary_failure(state, original, callback:, mode:)
+    return unless state.instance_of?(Hash) && original.instance_of?(UploadProcessFixture::Failure) &&
+                  state[:rejection].equal?(original)
+    return if state[:report_attempted]
+
+    state[:report_attempted] = true
+    return unless callback.instance_of?(String) && mode.instance_of?(String) && state[:mode] == mode &&
+                  NATIVE_PRIMARY_FAILURE_CALLBACK_MODES.fetch(callback, []).include?(mode)
+
+    deadline_ns = state.fetch(:deadline_ns)
+    return unless deadline_ns.instance_of?(Integer) && deadline_ns.positive? && UploadProcessFixture.clock_ns < deadline_ns
+
+    line = native_primary_failure_line(mode: mode, proof: state.fetch(:proof),
+      result: state.fetch(:result), status: state.fetch(:status))
+    return unless line && UploadProcessFixture.clock_ns < deadline_ns
+
+    state[:write_attempted] = true # One ordinary captured write, never a retry.
+    state[:write_complete] = STDERR.write(line) == line.bytesize
+    nil
+  rescue Exception => diagnostic_error
+    begin
+      state[:diagnostic_error] ||= diagnostic_error if state.instance_of?(Hash)
+    rescue Exception
+      nil # A malformed/frozen optional handoff cannot replace the rejection.
+    end
+    nil
+  end
+
+  def self.native_order_failure_line(mode:, proof:, result:, status:, expected_sources:)
+    return unless mode.instance_of?(String) && ORDER_CASES.key?(mode) && proof.instance_of?(Hash) &&
+                  %w[version kind case sourceSha256 failures baseDriverReturn expectedUnknown originalAccepted].all? { |key| proof.key?(key) } &&
+                  result.instance_of?(Hash) && result.key?("kind") && expected_sources.instance_of?(Hash)
+
+    unknown = ORDER_CASES.fetch(mode).first == "cleanup-before-caller"
+    allowed = NATIVE_ORDER_PROOF_FAILURES.first(23) +
+      (unknown ? NATIVE_ORDER_PROOF_FAILURES[23, 3] : NATIVE_ORDER_PROOF_FAILURES.last(2))
+    failures = proof.fetch("failures")
+    return unless failures.instance_of?(Array) && failures.length <= allowed.length &&
+                  failures.all? { |label| label.instance_of?(String) && allowed.include?(label) } &&
+                  failures == allowed.select { |label| failures.include?(label) }
+
+    # Recheck retained original operands, not an assertion that every term ran
+    # before the actual short-circuit rejection. No operand value is published.
+    passed = [proof["version"] == 1, proof["kind"] == "native-order-observation", proof["case"] == mode,
+      proof["sourceSha256"] == expected_sources, proof["failures"] == [], proof["baseDriverReturn"] == 1,
+      proof["expectedUnknown"].equal?(unknown), proof["originalAccepted"].equal?(false),
+      result["kind"] == (unknown ? "fixture-cleanup" : "unexpected"), status.exitstatus == 0]
+    rejected = NATIVE_ORDER_FAILURE_PREDICATES.each_with_index.filter_map { |label, index| label unless passed[index] }
+    return if rejected.empty?
+
+    line = "#{NATIVE_ORDER_FAILURE_PREFIX}#{JSON.generate({"schema" => 1, "mode" => mode,
+      "failedPredicates" => rejected, "proofFailures" => failures})}\n"
+    line.freeze if line.ascii_only? && line.bytesize <= 2048
+  end
+
+  def self.report_native_order_failure(state, original, callback:, mode:)
+    return unless state.instance_of?(Hash) && original.instance_of?(UploadProcessFixture::Failure) &&
+                  state[:rejection].equal?(original)
+    return if state[:report_attempted]
+
+    state[:report_attempted] = true
+    return unless callback.instance_of?(String) && mode.instance_of?(String) && state[:mode] == mode &&
+                  NATIVE_ORDER_FAILURE_CALLBACK_MODES.fetch(callback, []).include?(mode)
+
+    deadline_ns = state.fetch(:deadline_ns)
+    return unless deadline_ns.instance_of?(Integer) && deadline_ns.positive? && UploadProcessFixture.clock_ns < deadline_ns
+
+    line = native_order_failure_line(mode: mode, proof: state.fetch(:proof), result: state.fetch(:result),
+      status: state.fetch(:status), expected_sources: state.fetch(:expected_sources))
+    return unless line && UploadProcessFixture.clock_ns < deadline_ns
+
+    state[:write_attempted] = true
+    state[:write_complete] = STDERR.write(line) == line.bytesize
+    nil
+  rescue Exception => diagnostic_error
+    begin
+      state[:diagnostic_error] ||= diagnostic_error if state.instance_of?(Hash)
+    rescue Exception
+      nil # Optional partial/frozen custody must not replace the actual rejection.
+    end
+    nil
+  end
+
+  def self.native_setup_failure_line(mode:, result:, status:)
+    return unless mode.instance_of?(String) && UploadProcessFixture::NATIVE_SETUP_FAILURE_MODES.include?(mode) &&
+                  result.instance_of?(Hash)
+
+    code = status.exitstatus
+    return unless code.instance_of?(Integer) && code.between?(0, 255)
+
+    # These operands were already read at the original combined rejection.
+    # This does not assert that both short-circuit comparisons were evaluated.
+    failed = []
+    failed << "result-kind" unless result["kind"] == "pass"
+    failed << "driver-status" unless code == 0
+    return if failed.empty?
+
+    kind = if !result.key?("kind")
+      "missing"
+    elsif !result["kind"].instance_of?(String)
+      "invalid"
+    elsif NATIVE_SETUP_FAILURE_KINDS.include?(result["kind"])
+      result["kind"]
+    else
+      "other"
+    end
+    category = lambda do |key|
+      next "missing" unless result.key?(key)
+      value = result.fetch(key)
+      next "none" if value.nil?
+      next "invalid" unless value.instance_of?(String)
+      NATIVE_SETUP_FAILURE_CATEGORIES.fetch(value, "other")
+    end
+    check = lambda do |record, key, absent: false|
+      next "missing" if absent
+      next "invalid" unless record.instance_of?(Hash)
+      next "missing" unless record.key?(key)
+      value = record.fetch(key)
+      value.equal?(true) || value.equal?(false) ? value : "invalid"
+    end
+    result_checks = NATIVE_SETUP_RESULT_CHECKS.to_h do |key|
+      value = if key == "cleanupErrorsEmpty"
+        if !result.key?("cleanupErrors")
+          "missing"
+        elsif result["cleanupErrors"].instance_of?(Array)
+          result["cleanupErrors"].empty?
+        else
+          "invalid"
+        end
+      else
+        check.call(result, key)
+      end
+      [key, value]
+    end
+    native_checks = NATIVE_SETUP_NATIVE_CHECKS.to_h do |key|
+      [key, check.call(result["nativeObservation"], key, absent: !result.key?("nativeObservation"))]
+    end
+    line = "#{NATIVE_SETUP_FAILURE_PREFIX}#{JSON.generate({"schema" => 1, "mode" => mode,
+      "failedPredicates" => failed, "resultKind" => kind, "driverExitStatus" => code,
+      "errorCategory" => category.call("errorClass"), "nativeErrorCategory" => category.call("nativeErrorClass"),
+      "resultChecks" => result_checks, "nativeChecks" => native_checks})}\n"
+    line.freeze if line.ascii_only? && line.bytesize <= 2048
+  end
+
+  def self.report_native_setup_failure(state, original, callback:, mode:)
+    return unless state.instance_of?(Hash) && original.instance_of?(UploadProcessFixture::Failure) &&
+                  state[:rejection].equal?(original)
+    return if state[:report_attempted]
+
+    state[:report_attempted] = true
+    return unless callback.instance_of?(String) && callback == NATIVE_SETUP_FAILURE_CALLBACK &&
+                  mode.instance_of?(String) && state[:mode].instance_of?(String) && state[:mode] == mode &&
+                  UploadProcessFixture::NATIVE_SETUP_FAILURE_MODES.include?(mode)
+
+    deadline_ns = state.fetch(:deadline_ns)
+    return unless deadline_ns.instance_of?(Integer) && deadline_ns.positive? && UploadProcessFixture.clock_ns < deadline_ns
+
+    line = native_setup_failure_line(mode: mode, result: state.fetch(:result), status: state.fetch(:status))
+    return unless line && UploadProcessFixture.clock_ns < deadline_ns
+
+    state[:write_attempted] = true
+    state[:write_complete] = STDERR.write(line) == line.bytesize
+    nil
+  rescue Exception => diagnostic_error
+    begin
+      state[:diagnostic_error] ||= diagnostic_error if state.instance_of?(Hash)
+    rescue Exception
+      nil # Optional partial/frozen custody cannot replace the escaping original.
+    end
+    nil
   end
 
   def primary_case(mode)
@@ -67,7 +390,7 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal 1, proof.fetch("resultObservations")
     assert value.fetch("harnessPrimaryRetained"), value.inspect
     %w[outerPrimarySameObject nestedPrimarySameObject originalMessagePreserved originalStatusPreserved
-       originalNotIntentional framePublishedBeforeFault actualWaiterMatchesDriver actualDescriptorsClosed].each do |name|
+       originalNotIntentional framePublishedBeforeFault actualTaskJoins actualDescriptorsClosed].each do |name|
       assert proof.fetch(name), proof.inspect
     end
     assert_equal secondary == "none" ? "unexpected" : "fixture-cleanup", value.fetch("kind")
@@ -79,45 +402,25 @@ class NativeUploadValidationTest < Minitest::Test
       assert_equal "IOError", value.fetch("errorClass")
     end
     assert_equal 41, value.fetch("nativeExitStatus") if kind == "system-exit"
-    if boundary == "frame"
-      assert_equal 0, proof.fetch("backendEntries")
-      assert_equal 0, proof.fetch("callbackEntries")
-      assert_equal 0, value.fetch("nativeSpawnAttempts")
-      assert_equal 4, value.fetch("ownedDescriptorCount")
-      assert proof.fetch("callbackAbsent"), proof.inspect
-      refute proof.fetch("actualWaiterReaped"), proof.inspect
-      refute value.fetch("fallbackUsed"), value.inspect
-      refute value.key?("workerControlEOF"), value.inspect
+    observation = value.fetch("nativeObservation")
+    assert_native_observation(observation, finality: boundary == "frame" ? :no_producers : :finalized)
+    assert_equal boundary != "frame", proof.fetch("actualCustodianReceiptBound")
+    assert_equal %w[readiness watchdog entered].include?(boundary), value.fetch("ready")
+    assert_equal boundary == "entered", value.fetch("firstCloseEntered")
+    assert_equal boundary == "entered", proof.fetch("firstCloseReturned")
+    if boundary == "entered"
+      %w[firstCloseFromNative originalCloseCompleted].each { |name| assert value.fetch(name), value.inspect }
+      assert observation.fetch("stdinCloseReturned"), observation.inspect
+      assert_equal 1, value.fetch("injectionCount")
+      assert_validator_killed(observation)
+      assert proof.fetch("enteredDeathBeforeControlClose"), proof.inspect
     else
-      assert_equal 1, proof.fetch("backendEntries")
-      assert_equal 1, proof.fetch("callbackEntries")
-      assert_equal 7, value.fetch("ownedDescriptorCount")
-      assert proof.fetch("callbackPrimarySameObject"), proof.inspect
-      assert proof.fetch("actualWaiterReaped"), proof.inspect
-      refute proof.fetch("callbackAbsent"), proof.inspect
-      if boundary == "entered"
-        %w[captureEntered firstCloseFromNative originalCloseCompleted].each { |name| assert value.fetch(name), value.inspect }
-        assert_equal 1, value.fetch("injectionCount")
-        assert_equal Signal.list.fetch("KILL"), proof.fetch("actualWorkerTermSignal")
-        assert_nil proof.fetch("actualWorkerExitStatus")
-        assert proof.fetch("enteredDeathBeforeControlClose"), proof.inspect
-        refute value.fetch("fallbackUsed"), value.inspect
-        refute value.key?("workerControlEOF"), value.inspect
-        assert_equal 1, proof.fetch("signalRequests").length
-        assert proof.fetch("signalRequests").first.fetch("forwarded"), proof.inspect
-      else
-        assert value.fetch("fallbackUsed"), value.inspect
-        assert value.fetch("workerControlEOF"), value.inspect
-        assert_equal 0, proof.fetch("actualWorkerExitStatus")
-        assert_nil proof.fetch("actualWorkerTermSignal")
-      end
-    end
-    unless boundary == "entered"
-      refute value.fetch("captureEntered"), value.inspect
-      refute value.key?("firstCloseFromNative"), value.inspect
       assert_equal 0, value.fetch("injectionCount")
-      assert_empty proof.fetch("signalRequests"), proof.inspect
+      refute proof.fetch("enteredDeathBeforeControlClose"), proof.inspect
     end
+    # C cleanup is no longer an Open3 callback fallback. Even publication and
+    # pre-close faults must settle their actual C/K/V obligations themselves.
+    refute value.fetch("fallbackUsed"), value.inspect
     refute value.fetch("watchdogIntervened"), value.inspect
     assert_equal boundary == "watchdog" || boundary == "entered", value.fetch("watchdogStarted")
     value
@@ -125,7 +428,8 @@ class NativeUploadValidationTest < Minitest::Test
 
   def test_unexpected_pre_entry_failures_preserve_original_through_real_cleanup
     cases = UploadProcessFixture::NATIVE_PRIMARY_PROOFS.keys.grep(/native-proof-(publication|readiness|watchdog)-/)
-    assert_equal 24, cases.length
+    assert_equal %w[publication readiness watchdog].product(%w[standard io interrupt system-exit], %w[none close]).map { |parts| "native-proof-#{parts.join('-')}" }.sort,
+                 cases.sort
     cases.each { |mode| primary_case(mode) }
   end
 
@@ -137,7 +441,7 @@ class NativeUploadValidationTest < Minitest::Test
     primary_case("native-proof-entered-io")
   end
 
-  def test_nested_lifetime_preserves_pre_callback_ioerror_without_acquiring_native_child
+  def test_nested_lifetime_preserves_pre_grant_ioerror_without_native_acquisition
     %w[native-proof-frame-io native-proof-frame-io-close].each { |mode| primary_case(mode) }
   end
 
@@ -145,22 +449,18 @@ class NativeUploadValidationTest < Minitest::Test
     with_proof_copies("identity", IDENTITY_PREDICATE) do |copies|
       copies.each do |label, copy|
         mutant = label == "mutant"
-        value, proof, owner = copied_primary_case(copy, "native-proof-entered-io", mutant: mutant)
+        value, proof, = copied_primary_case(copy, "native-proof-entered-io", mutant: mutant)
         assert_common_raw_proof(value, proof, secondary: false)
         assert_equal "native-setup-io-error", value.fetch("mode")
-        %w[ready captureEntered firstCloseFromNative originalCloseCompleted watchdogStarted].each do |name|
+        %w[ready firstCloseEntered firstCloseFromNative originalCloseCompleted watchdogStarted].each do |name|
           assert value.fetch(name), name
         end
         assert_equal 1, value.fetch("injectionCount")
         refute value.fetch("fallbackUsed")
-        refute value.key?("workerControlEOF")
-        assert_nil value.fetch("workerExitStatus")
-        assert_equal Signal.list.fetch("KILL"), value.fetch("workerTermSignal")
-        assert_nil proof.fetch("actualWorkerExitStatus")
-        assert_equal Signal.list.fetch("KILL"), proof.fetch("actualWorkerTermSignal")
+        assert_validator_killed(value.fetch("nativeObservation"))
+        assert value.fetch("nativeObservation").fetch("stdinCloseReturned")
+        assert proof.fetch("firstCloseReturned")
         assert proof.fetch("enteredDeathBeforeControlClose")
-        assert_equal [{"signal" => "KILL", "target" => -owner.fetch("leader"), "forwarded" => true, "result" => 1}],
-                     proof.fetch("signalRequests")
         assert_native_io_redaction(value, proof)
         refute value.fetch("nativeOriginalErrorPreserved")
         assert_equal mutant ? 0 : 1, proof.fetch("driverExitStatus") # Method return, not another OS exit.
@@ -172,12 +472,12 @@ class NativeUploadValidationTest < Minitest::Test
           assert_nil value.fetch("error")
           assert_nil value.fetch("harnessPrimaryRetained")
           assert value.fetch("deadBeforeFallback")
-          assert_equal ["actual failed native result", "outerPrimarySameObject", "originalMessagePreserved"], proof.fetch("failures")
+          %w[outerPrimarySameObject originalMessagePreserved].each { |name| assert_includes proof.fetch("failures"), name }
+          assert_includes proof.fetch("failures"), "actual failed native result"
         else
           assert_equal "IOError", value.fetch("errorClass")
           assert_equal "synthetic private diagnostic", value.fetch("error")
           assert value.fetch("harnessPrimaryRetained")
-          refute value.key?("deadBeforeFallback")
           assert_empty proof.fetch("failures")
         end
       end
@@ -196,20 +496,14 @@ class NativeUploadValidationTest < Minitest::Test
           value, proof, = copied_primary_case(copy, mode, mutant: mutant)
           assert_common_raw_proof(value, proof, secondary: has_secondary)
           assert_equal "native-setup-interrupt", value.fetch("mode")
-          assert_equal 1, proof.fetch("driverExitStatus")
+          assert_includes [0, 1], proof.fetch("driverExitStatus")
           assert_equal 0, value.fetch("injectionCount")
-          refute value.fetch("captureEntered")
-          refute value.key?("firstCloseFromNative")
+          refute value.fetch("firstCloseEntered")
+          refute proof.fetch("firstCloseReturned")
           refute value.fetch("watchdogStarted")
-          assert value.fetch("fallbackUsed")
-          assert value.fetch("workerControlEOF")
-          assert_equal 0, value.fetch("workerExitStatus")
-          assert_nil value.fetch("workerTermSignal")
-          assert_equal 0, proof.fetch("actualWorkerExitStatus")
-          assert_nil proof.fetch("actualWorkerTermSignal")
+          refute value.fetch("ready")
+          refute value.fetch("fallbackUsed")
           refute proof.fetch("enteredDeathBeforeControlClose")
-          assert_empty proof.fetch("signalRequests")
-          assert_equal has_secondary ? "fixture-cleanup" : "unexpected", value.fetch("kind")
           assert_native_io_redaction(value, proof) if kind == "io"
           if kind == "standard"
             assert_equal "UploadProcessFixture::NativePrimaryProbe::UnexpectedFailure", value.fetch("nativeErrorClass")
@@ -218,10 +512,12 @@ class NativeUploadValidationTest < Minitest::Test
           assert_equal !mutant, proof.fetch("outerPrimarySameObject")
           assert_equal !mutant, proof.fetch("originalMessagePreserved")
           if mutant
-            assert_equal ["outerPrimarySameObject", "originalMessagePreserved"], proof.fetch("failures")
-            assert_equal has_secondary ? "UploadProcessFixture::NativePrimaryProbe::CleanupFailure" : "RuntimeError", value.fetch("errorClass")
-            assert_equal has_secondary ? "secondary synthetic native cleanup failure" : "native cleanup did not SIGKILL the actual worker", value.fetch("error")
+            %w[outerPrimarySameObject originalMessagePreserved].each { |name| assert_includes proof.fetch("failures"), name }
+            refute value.fetch("harnessPrimaryRetained")
+            refute_equal "unexpected synthetic native setup failure", value.fetch("error")
           else
+            assert_equal 1, proof.fetch("driverExitStatus")
+            assert_equal has_secondary ? "fixture-cleanup" : "unexpected", value.fetch("kind")
             assert_empty proof.fetch("failures")
             assert value.fetch("harnessPrimaryRetained")
             assert_equal kind == "io" ? "IOError" : "UploadProcessFixture::NativePrimaryProbe::UnexpectedFailure", value.fetch("errorClass")
@@ -256,62 +552,199 @@ class NativeUploadValidationTest < Minitest::Test
       end
     end
     assert_retained_capture(invalid)
-    COLLECTOR_SCRIPTS.each_key do |fault|
-      observed = {}
-      close_fault = fault == "timeout" ? IOError.new("synthetic collector close after effect") : nil
-      repeat = fault == "timeout" ? Interrupt.new("repeat at collector reporting tail") : nil
-      error = assert_raises(UploadProcessFixture::Failure) do
-        UploadProcessFixture.lifetime do |scope|
-          directory = new_raw_case("collector-#{fault}", "collector-#{fault}")
-          scope.active { collect_raw_driver(nil, directory, observed, literal: fault, close_fault: close_fault, reporting_repeat: repeat) }
-        end
-      end
-      assert_same error, observed.fetch(:primary)
-      record = assert_retained_capture(observed)
-      assert_equal error.class.name, record.fetch("primary").fetch("class")
-      assert_equal error.kind, record.fetch("primary").fetch("kind")
-      assert_equal error.message, record.fetch("primary").fetch("message")
-      if fault == "timeout"
-        assert_equal "driver", error.kind
-        assert_equal "raw proof driver deadline expired", error.message
-        assert_equal "collector ready\n", File.binread(File.join(observed.fetch(:directory), "driver.stdout"), UploadProcessFixture::OUTPUT_LIMIT + 1)
-        assert_equal Signal.list.fetch("KILL"), observed.fetch(:status).termsig
-        assert_equal [close_fault], observed.fetch(:cleanup_errors)
-        assert_equal ["IOError"], record.fetch("cleanupErrors").map { |entry| entry.fetch("class") }
-        assert_equal 1, observed.fetch(:close_fault_calls)
-        assert observed.fetch(:reporting_repeat_queued)
-        assert observed.fetch(:reporting_injector_joined)
-        assert record.fetch("reportingRepeatQueued")
-        assert record.fetch("reportingInjectorJoined")
-        refute_same Thread.current, observed.fetch(:reporting_injector)
-        refute observed.fetch(:reporting_injector).alive?
-      else
-        assert_equal "diagnostic", error.kind
-        assert_equal "oversized raw proof diagnostic", error.message
-        assert_operator File.size(File.join(observed.fetch(:directory), "driver.stdout")), :>, UploadProcessFixture::OUTPUT_LIMIT
-        status = observed.fetch(:status)
-        assert (status.exited? && status.exitstatus == 0) || (status.signaled? && status.termsig == Signal.list.fetch("KILL"))
-        # A size-triggered KILL can precede the finite script's stderr write.
-        if status.exited?
-          assert_equal "collector size control\n", File.binread(File.join(observed.fetch(:directory), "driver.stderr"), UploadProcessFixture::OUTPUT_LIMIT + 1)
-        end
-        assert_empty observed.fetch(:cleanup_errors)
+    observed = {}
+    error = assert_raises(UploadProcessFixture::Failure) do
+      UploadProcessFixture.lifetime do |scope|
+        directory = new_raw_case("collector-oversized", "collector-oversized")
+        scope.active { collect_raw_driver(nil, directory, observed, literal: "oversized") }
       end
     end
+    assert_same error, observed.fetch(:primary)
+    record = assert_retained_capture(observed)
+    assert_equal bounded_error(error), record.fetch("primary")
+    assert_equal "diagnostic", error.kind
+    assert_equal "oversized raw proof diagnostic", error.message
+    assert_operator File.size(File.join(observed.fetch(:directory), "driver.stdout")), :>, UploadProcessFixture::OUTPUT_LIMIT
+    status = observed.fetch(:status)
+    assert (status.exited? && status.exitstatus == 0) || (status.signaled? && status.termsig == Signal.list.fetch("KILL"))
+    # A size-triggered KILL can precede the finite script's stderr write.
+    if status.exited?
+      assert_equal "collector size control\n", File.binread(File.join(observed.fetch(:directory), "driver.stderr"), UploadProcessFixture::OUTPUT_LIMIT + 1)
+    end
+    assert_empty observed.fetch(:cleanup_errors)
+
+    # The ambiguous close deliberately poisons its interpreter. It must not
+    # share this suite process with another native creation, even after reaping.
+    # Parent assertions concern this genuine outer CLI and detached proof only;
+    # Exception-object identity is asserted inside that CLI before it exits.
+    isolated_directory = new_raw_case("collector-isolated-close", ISOLATED_COLLECTOR_MODE)
+    isolated = collect_raw_driver(nil, isolated_directory, {}, isolate_close: true)
+    assert_retained_capture(isolated)
+    assert_instance_of Process::Status, isolated.fetch(:status)
+    assert isolated.fetch(:status).exited?
+    assert_isolated_collector_exit(isolated)
+    assert_equal "", isolated.fetch(:stdout)
+    assert_equal "", isolated.fetch(:stderr)
+    assert_empty isolated.fetch(:cleanup_errors)
+    proof = read_isolated_json(File.join(isolated_directory, "isolated-control.json"))
+    assert_equal %w[argv case childCollector cwd deadlineNs innerState interpreter minitest pid sourceSha256 testSource version], proof.keys.sort
+    assert_equal 1, proof.fetch("version")
+    assert_equal ISOLATED_COLLECTOR_MODE, proof.fetch("case")
+    assert_equal isolated.fetch(:child).pid, proof.fetch("pid")
+    assert_equal isolated.fetch(:dispatch).fetch("argv"), proof.fetch("argv")
+    assert_equal isolated.fetch(:dispatch).fetch("cwd"), proof.fetch("cwd")
+    assert_equal isolated.fetch(:dispatch).fetch("interpreter"), proof.fetch("interpreter")
+    assert_equal isolated.fetch(:dispatch).fetch("fixture"), proof.fetch("testSource")
+    assert_equal isolated.fetch(:dispatch).fetch("minitest"), proof.fetch("minitest")
+    assert_equal isolated.fetch(:isolation_source_hashes), proof.fetch("sourceSha256")
+    assert_equal isolated.fetch(:run_deadline_ns), proof.fetch("deadlineNs")
+    assert_equal isolated.fetch(:child).creator.run_deadline_ns, proof.fetch("deadlineNs")
+    assert_equal isolated.fetch(:isolated_request).fetch("deadlineNs"), proof.fetch("deadlineNs")
+    assert_equal({"phase" => "unknown", "stopCompleted" => false, "creatorJoined" => true,
+                  "originalWaitBound" => true, "unknownLease" => "out", "retained" => true}, proof.fetch("innerState"))
+    inner_record = proof.fetch("childCollector")
+    assert_equal "unknown", inner_record.fetch("phase")
+    refute inner_record.fetch("stopCompleted")
+    assert_equal Signal.list.fetch("KILL"), inner_record.fetch("termSignal")
+    assert_equal "driver", inner_record.fetch("primary").fetch("kind")
+    assert_equal "raw proof driver deadline expired", inner_record.fetch("primary").fetch("message")
+    assert_equal({"observed" => true, "identity" => inner_record.fetch("streamIdentities").first}, inner_record.fetch("literalReadiness"))
+    assert_equal proof.fetch("deadlineNs"), inner_record.fetch("enclosingDeadlineNs")
+    assert_equal inner_record.fetch("runDeadlineNs") + UploadProcessFixture::CLEANUP_LIMIT * 1_000_000_000,
+                 inner_record.fetch("hardDeadlineNs")
+    assert_operator inner_record.fetch("hardDeadlineNs"), :<=, proof.fetch("deadlineNs") - RAW_REPORTING_NS
+    assert_operator inner_record.fetch("reportingInjectorDeadlineNs"), :<=, proof.fetch("deadlineNs")
+    assert_equal isolated.fetch(:isolation_source_hashes), proof_source_snapshot.transform_values { |item| item.fetch("sha256") }
+  end
+
+  def self.run_isolated_collector_cli(arguments, failure_state:)
+    UploadProcessFixture.assert_domain_reusable!
+    unless arguments.length == 2 && arguments.first == ISOLATED_COLLECTOR_FLAG
+      raise UploadProcessFixture::Failure.new("fixture-input", "invalid isolated collector command")
+    end
+    directory = arguments.last
+    UploadProcessFixture.owned_fixture_directory(directory)
+    control = new("isolated_collector_close")
+    control.instance_variable_set(:@root, directory)
+    control.__send__(:execute_isolated_collector_close, arguments, failure_state: failure_state)
+    0
+  end
+
+  def assert_isolated_collector_exit(isolated)
+    assert_equal 0, isolated.fetch(:status).exitstatus
+  rescue Minitest::Assertion => original
+    # There is now an ACTUAL parent failure. Optional diagnostics must not
+    # swallow cancellation while merely anticipating a future assertion.
+    self.class.report_isolated_capture_failure(isolated, original)
+    raise
+  end
+
+  def self.isolated_failure_line(stage, error)
+    return unless ISOLATED_FAILURE_STAGES.include?(stage)
+
+    category = case error
+    when Minitest::Assertion then "assertion-error"
+    when UploadProcessFixture::Failure then "fixture-error"
+    when MobileReleaseKit::NativeUploadProcess::LifecycleError then "native-lifecycle-error"
+    when IOError then "io-error"
+    when SystemCallError then "os-error"
+    when Interrupt then "interrupt"
+    when SystemExit then "system-exit"
+    when JSON::ParserError then "json-parser-error"
+    when KeyError then "key-error"
+    when NoMethodError then "no-method-error"
+    when TypeError then "type-error"
+    when ArgumentError then "argument-error"
+    when RuntimeError then "runtime-error"
+    when StandardError then "standard-error"
+    when Exception then "exception"
+    else "unknown"
+    end
+    "#{ISOLATED_FAILURE_PREFIX}#{JSON.generate({"schema" => 1, "stage" => stage, "category" => category})}\n".freeze
+  end
+
+  def self.parse_isolated_failure(raw, deadline_ns:)
+    return unless raw.instance_of?(String) && raw.bytesize <= UploadProcessFixture::OUTPUT_LIMIT &&
+                  deadline_ns.instance_of?(Integer) && UploadProcessFixture.clock_ns < deadline_ns
+
+    found, accepted = false, nil
+    raw.b.each_line do |line|
+      return unless UploadProcessFixture.clock_ns < deadline_ns
+      next unless line.start_with?(ISOLATED_FAILURE_PREFIX)
+      return if found
+
+      found = true
+      return unless line.ascii_only? && line.bytesize <= 256 && line.end_with?("\n")
+
+      payload = line.byteslice(ISOLATED_FAILURE_PREFIX.bytesize, line.bytesize - ISOLATED_FAILURE_PREFIX.bytesize - 1)
+      record = JSON.parse(payload, create_additions: false, max_nesting: 4)
+      return unless record.instance_of?(Hash) && record.keys == %w[schema stage category] &&
+                    record["schema"].instance_of?(Integer) && record["schema"] == 1 &&
+                    record["stage"].instance_of?(String) && ISOLATED_FAILURE_STAGES.include?(record["stage"]) &&
+                    record["category"].instance_of?(String) && ISOLATED_FAILURE_CATEGORIES.include?(record["category"]) &&
+                    JSON.generate(record) == payload
+
+      accepted = "#{ISOLATED_FAILURE_PREFIX}#{JSON.generate(record)}\n".freeze
+    end
+    return unless UploadProcessFixture.clock_ns < deadline_ns
+
+    accepted
+  rescue JSON::ParserError, JSON::NestingError, EncodingError, ArgumentError
+    nil
+  end
+
+  def self.write_isolated_failure_line(line, state)
+    return if state[:write_attempted] || !line
+    return unless line.ascii_only? && line.bytesize <= 256 && line.end_with?("\n")
+    return if state[:deadline_ns] && UploadProcessFixture.clock_ns >= state.fetch(:deadline_ns)
+
+    state[:write_attempted] = true # BEFORE the one ordinary captured write.
+    state[:write_complete] = STDERR.write(line) == line.bytesize
+    nil
+  end
+
+  def self.report_isolated_cli_failure(state, error)
+    state[:primary] ||= error
+    state[:failure_stage] ||= state.fetch(:stage)
+    return if state[:report_attempted]
+
+    state[:report_attempted] = true
+    return if state[:deadline_ns] && UploadProcessFixture.clock_ns >= state.fetch(:deadline_ns)
+
+    # Before request-bound admission, this one finite write still belongs to
+    # the original external OwnedChild budget. No new local allowance exists.
+    line = isolated_failure_line(state.fetch(:failure_stage), state.fetch(:primary))
+    write_isolated_failure_line(line, state)
+    nil
+  rescue Exception => diagnostic_error
+    state[:diagnostic_error] ||= diagnostic_error
+    nil # The already latched CLI exception and exit 1 remain authoritative.
+  end
+
+  def self.report_isolated_capture_failure(observed, original)
+    state = observed[:isolated_failure_report] ||= {primary: original, deadline_ns: observed.fetch(:run_deadline_ns)}
+    return if state[:report_attempted]
+
+    state[:report_attempted] = true
+    line = parse_isolated_failure(observed.fetch(:stderr), deadline_ns: state.fetch(:deadline_ns))
+    write_isolated_failure_line(line, state)
+    nil
+  rescue Exception => diagnostic_error
+    observed[:isolated_failure_report_error] ||= diagnostic_error
+    nil # Called ONLY after the actual parent's Minitest::Assertion exists.
   end
 
   def assert_native_cleanup(value)
-    assert_equal 1, value.fetch("nativeSpawnAttempts")
     assert_equal 1, value.fetch("injectionCount")
-    %w[ready captureEntered firstCloseFromNative originalCloseCompleted watchdogStarted deadBeforeFallback].each do |name|
+    %w[ready firstCloseEntered firstCloseFromNative originalCloseCompleted watchdogStarted deadBeforeFallback].each do |name|
       assert value.fetch(name), value.inspect
     end
     refute value.fetch("watchdogIntervened"), value.inspect
     refute value.fetch("fallbackUsed"), value.inspect
-    refute value.key?("workerControlEOF"), value.inspect
-    assert_nil value.fetch("workerExitStatus")
-    assert_equal Signal.list.fetch("KILL"), value.fetch("workerTermSignal")
-    assert_equal 7, value.fetch("ownedDescriptorCount")
+    observation = value.fetch("nativeObservation")
+    assert_native_observation(observation, finality: :finalized)
+    assert observation.fetch("stdinCloseReturned"), observation.inspect
+    assert_validator_killed(observation)
   end
 
   def test_cancellation_or_io_error_at_first_setup_step_cleans_up_the_real_child
@@ -331,44 +764,201 @@ class NativeUploadValidationTest < Minitest::Test
   end
 
   def test_missing_native_cleanup_requires_eof_and_cannot_pass_the_production_oracle
-    value = process_case("native-setup-no-cleanup")
-    assert_equal "setup-fallback", value.fetch("kind")
+    # This deliberate missing-cleanup copy is a negative, isolated driver.
+    # Actual native tasks/leases may remain UNKNOWN at the original cutoff;
+    # the outer driver's own wait cannot turn those facts into finality.
+    UploadProcessFixture.assert_domain_reusable!
+    sources = proof_source_snapshot
+    value = UploadProcessFixture.run(platform: "native", root: @root, parameters: {}, mode: "native-setup-no-cleanup")
+    assert value.fetch("driverJoined")
+    refute value.key?("knownProcessesDead")
+    assert_includes %w[setup-fallback fixture-cleanup], value.fetch("kind")
     assert_equal 1, value.fetch("injectionCount")
+    %w[ready firstCloseEntered firstCloseFromNative originalCloseCompleted watchdogStarted watchdogPreadmitted
+       watchdogJoined injectorsJoined handlersRestored registryInactive].each { |name| assert value.fetch(name), name }
+    refute value.fetch("pendingInterrupt")
     assert value.fetch("nativeOriginalErrorPreserved"), value.inspect
     assert value.fetch("watchdogIntervened"), value.inspect
     assert value.fetch("fallbackUsed"), value.inspect
-    assert value.fetch("workerControlEOF"), value.inspect
-    assert_equal 0, value.fetch("workerExitStatus")
-    assert_nil value.fetch("workerTermSignal")
+    observation = value.fetch("nativeObservation")
+    assert_native_observation(observation, finality: :unknown)
+    assert_equal "unknown", value.fetch("nativeFinality")
+    assert value.fetch("retainedFixture")
+    assert value.fetch("domainDisposalRequired")
+    assert UploadProcessFixture.expected_unknown_retention?(@root)
+    assert UploadProcessFixture.domain_disposal_required?
+    if value.fetch("tasksJoined")
+      assert observation.fetch("tasks").all? { |task| task["finished"] && task["joined"] && task["actualJoinObserved"] }, observation.inspect
+    end
+    if value.fetch("ownedDescriptorsClosed")
+      assert observation.fetch("leases").all? { |lease| lease["state"] == "closed" && lease["closed"] && lease["actualCloseObserved"] }, observation.inspect
+    end
     refute value.key?("deadBeforeFallback"), value.inspect
-    assert_match(/\A[0-9a-f]{64}\z/, value.fetch("mutationSourceSha256"))
-    assert_match(/\A[0-9a-f]{64}\z/, value.fetch("mutationSha256"))
-    refute_equal value.fetch("mutationSourceSha256"), value.fetch("mutationSha256")
+    proof = value.fetch("missingCleanupProof")
+    assert_equal %w[actualValidatorReadNil custodianKillOmitted fifoIdentity helperCopy identities keeperKillOmitted kind mode
+                    nativeFinality originalWatchdogWriterClosed reportSha256 sourceSha256 validatorReadNilNs
+                    validatorSurvivedUntilFallback version writerCloseEntryNs], proof.keys.sort
+    assert_equal [1, "validator-survived-until-fixture-eof", "native-setup-no-cleanup", "unknown"],
+                 proof.values_at("version", "kind", "mode", "nativeFinality")
+    %w[custodianKillOmitted keeperKillOmitted originalWatchdogWriterClosed actualValidatorReadNil
+       validatorSurvivedUntilFallback].each { |name| assert_equal true, proof.fetch(name), name }
+    assert_equal sources.transform_values { |item| item.fetch("sha256") }, proof.fetch("sourceSha256")
+    dispatch = value.fetch("driverDispatch")
+    directory = dispatch.fetch("argv").last
+    assert_equal @root, File.dirname(directory)
+    assert_equal directory, File.realpath(directory)
+    copy = proof.fetch("helperCopy")
+    assert_equal %w[label originalPath originalSha256 path sha256], copy.keys.sort
+    assert_equal "containment-events", copy.fetch("label")
+    assert_equal File.realpath(File.expand_path("../../fastlane/native_upload_process.rb", __dir__)), copy.fetch("originalPath")
+    assert_equal sources.fetch("fastlane/native_upload_process.rb").fetch("sha256"), copy.fetch("originalSha256")
+    assert_equal File.join(directory, "containment-events-helper.rb"), copy.fetch("path")
+    assert_equal Digest::SHA256.hexdigest(UploadProcessFixture::OwnedChild.bounded_file(copy.fetch("path"), limit: 1_048_576)), copy.fetch("sha256")
+    refute_equal copy.fetch("originalSha256"), copy.fetch("sha256")
+    assert_equal copy, value.fetch("helperCopy")
+    assert_equal({"version" => 1, "mode" => "native-setup-no-cleanup", "helperCopy" => copy,
+                  "sourceSha256" => proof.fetch("sourceSha256")}, value.fetch("containmentSource"))
+    graph = proof.fetch("identities")
+    assert_equal %w[custodian group keeper sid validator], graph.keys.sort
+    graph.each_value { |pid| assert_instance_of Integer, pid; assert_operator pid, :>, 1 }
+    assert_equal 3, graph.values_at("custodian", "keeper", "validator").uniq.length
+    assert_equal graph.fetch("custodian"), graph.fetch("sid")
+    assert_equal graph.fetch("keeper"), graph.fetch("group")
+    owner = UploadProcessFixture.read_json(File.join(directory, "owner.json"))
+    assert_equal "unknown", owner.fetch("finality")
+    assert_equal [{"role" => "custodian", "pid" => graph.fetch("custodian"), "group" => graph.fetch("custodian")},
+                  {"role" => "keeper", "pid" => graph.fetch("keeper"), "group" => graph.fetch("custodian")},
+                  {"role" => "validator", "pid" => graph.fetch("validator"), "group" => graph.fetch("group")}],
+                 owner.fetch("processes").sort_by { |item| item.fetch("role") }
+    fifo = proof.fetch("fifoIdentity")
+    assert_equal %w[dev gid ino mode nlink rdev type uid], fifo.keys.sort
+    assert_equal "fifo", fifo.fetch("type")
+    assert_equal Process.uid, fifo.fetch("uid")
+    assert_equal 1, fifo.fetch("nlink")
+    assert_equal 0o600, fifo.fetch("mode") & 0o7777
+    assert_equal UploadProcessFixture::OwnedChild.identity(File.lstat(File.join(directory, "worker-control.fifo"))), fifo
+    # Read retained evidence only. No new process observer, task or custody
+    # follows UNKNOWN, and a validator read(nil) is not all-role finality.
+    hashes = proof.fetch("reportSha256")
+    assert_equal %w[containment-custodian-omission.json containment-keeper-omission.json fallback-writer-close.json leader-eof.json], hashes.keys.sort
+    entry_bindings = {}
+    reports = hashes.to_h do |name, digest|
+      path = File.join(directory, name)
+      if name.end_with?("-omission.json")
+        identity = UploadProcessFixture::OwnedChild.identity(File.lstat(path))
+        bytes = UploadProcessFixture::OwnedChild.bounded_file(path, expected: identity, limit: 8192)
+        assert_equal identity, UploadProcessFixture::OwnedChild.identity(File.lstat(path))
+        entry_bindings[name] = {"identity" => identity, "sha256" => Digest::SHA256.hexdigest(bytes)}
+      else
+        bytes = UploadProcessFixture::OwnedChild.bounded_file(path)
+      end
+      assert_equal Digest::SHA256.hexdigest(bytes), digest
+      [name, JSON.parse(bytes)]
+    end
+    close, eof = reports.values_at("fallback-writer-close.json", "leader-eof.json")
+    assert_equal close, value.fetch("fallbackWriterClose")
+    assert_equal %w[actualOriginalWriterClose closeEntryNs closeReturnNs fifoIdentity identities omissionRecords originalWatchdogThread
+                    soleFixtureWriter version watchdogAdmittedBeforeClose watchdogHardDeadlineNs watchdogOwnership
+                    watchdogRunDeadlineNs], close.keys.sort
+    assert_equal [1, graph, fifo], close.values_at("version", "identities", "fifoIdentity")
+    assert_equal entry_bindings, close.fetch("omissionRecords")
+    %w[actualOriginalWriterClose soleFixtureWriter originalWatchdogThread watchdogAdmittedBeforeClose].each do |name|
+      assert_equal true, close.fetch(name), name
+    end
+    assert_equal close.fetch("closeEntryNs"), proof.fetch("writerCloseEntryNs")
+    assert_equal eof.fetch("readNilNs"), proof.fetch("validatorReadNilNs")
+    %w[closeEntryNs closeReturnNs watchdogRunDeadlineNs watchdogHardDeadlineNs].each do |name|
+      assert_instance_of Integer, close.fetch(name)
+    end
+    assert_operator close.fetch("closeEntryNs"), :<=, close.fetch("closeReturnNs")
+    custody = close.fetch("watchdogOwnership")
+    times = %w[driverDeadlineNs preparedNs prearmDeadlineNs slotCeilingNs startReturnedNs admitReturnedNs
+               captureEntryNs armNs fallbackNs effectiveHardDeadlineNs]
+    facts = %w[actualDriverCaller actualStartReturned actualAdmitReturned captureCallerIsDriver
+               captureFinishedBeforeClose captureJoinedBeforeClose captureThreadExitedBeforeClose]
+    assert_equal (times + facts + ["driverPid"]).sort, custody.keys.sort
+    times.each { |name| assert_instance_of Integer, custody.fetch(name); assert_operator custody.fetch(name), :>, 0 }
+    assert_equal dispatch.fetch("pid"), custody.fetch("driverPid")
+    assert_equal dispatch.fetch("deadlineNs"), custody.fetch("driverDeadlineNs")
+    (facts - ["captureJoinedBeforeClose"]).each { |name| assert_equal true, custody.fetch(name), name }
+    joined = custody.fetch("captureJoinedBeforeClose")
+    assert joined.equal?(true) || joined.equal?(false)
+    # Native UNKNOWN can lack its original capture join. A completed/exited
+    # capture is not a repaired join receipt or native finality.
+    if joined
+      capture_task = observation.fetch("tasks").find { |task| task.fetch("role") == "capture" }
+      assert capture_task.fetch("joined")
+      assert capture_task.fetch("actualJoinObserved")
+    end
+    assert_equal [custody.fetch("preparedNs") + 5_000_000_000, dispatch.fetch("deadlineNs") - 6_300_000_000].min,
+                 custody.fetch("prearmDeadlineNs")
+    assert_equal custody.fetch("prearmDeadlineNs") + 6_300_000_000, custody.fetch("slotCeilingNs")
+    assert_operator custody.fetch("slotCeilingNs"), :<=, dispatch.fetch("deadlineNs")
+    %w[preparedNs startReturnedNs admitReturnedNs captureEntryNs armNs].each_cons(2) do |earlier, later|
+      assert_operator custody.fetch(earlier), :<=, custody.fetch(later)
+    end
+    assert_operator custody.fetch("armNs"), :<, custody.fetch("prearmDeadlineNs")
+    assert_equal custody.fetch("armNs") + 5_300_000_000, custody.fetch("fallbackNs")
+    assert_equal custody.fetch("fallbackNs") + 1_000_000_000, custody.fetch("effectiveHardDeadlineNs")
+    assert_operator custody.fetch("effectiveHardDeadlineNs"), :<=, custody.fetch("slotCeilingNs")
+    assert_equal [custody.fetch("slotCeilingNs")] * 2, close.values_at("watchdogRunDeadlineNs", "watchdogHardDeadlineNs")
+    assert_operator close.fetch("closeEntryNs"), :>=, custody.fetch("fallbackNs")
+    assert_operator close.fetch("closeReturnNs"), :<, custody.fetch("effectiveHardDeadlineNs")
+    assert_instance_of Integer, eof.fetch("readNilNs")
+    # Kernel EOF may reach V before Ruby close returns; the sole SAME writer,
+    # actual close and SAME FIFO read(nil), not return-time ordering, bind this.
+    assert_operator close.fetch("closeEntryNs"), :<=, eof.fetch("readNilNs")
+    assert_equal({"version" => 1, "eof" => true, "controlReadNil" => true, "readNilNs" => eof.fetch("readNilNs"),
+                  "pid" => graph.fetch("validator"), "group" => graph.fetch("group"), "sid" => graph.fetch("sid"),
+                  "fifoIdentity" => fifo}, eof)
+    %w[custodian keeper].each do |role|
+      report = reports.fetch("containment-#{role}-omission.json")
+      assert_equal %w[entry helperCopy identities kind mode parentPid pid role sourceSha256 version], report.keys.sort
+      assert_equal [1, "original-helper-cleanup-omission-entry", "native-setup-no-cleanup", role, graph.fetch(role), graph],
+                   report.values_at("version", "kind", "mode", "role", "pid", "identities")
+      assert_equal role == "custodian" ? dispatch.fetch("pid") : graph.fetch("custodian"), report.fetch("parentPid")
+      assert_equal proof.fetch("sourceSha256"), report.fetch("sourceSha256")
+      assert_equal copy, report.fetch("helperCopy")
+      omission = report.fetch("entry")
+      assert_equal %w[actualOmissionEntry atNs effectiveDeadlineNs group nativeCallOmitted origin originalReservedAuthority route signal], omission.keys.sort
+      assert_equal [role == "custodian" ? "custodian-group" : "keeper-group", graph.fetch("group"), "KILL"],
+                   omission.values_at("route", "group", "signal")
+      %w[actualOmissionEntry nativeCallOmitted originalReservedAuthority].each { |name| assert_equal true, omission.fetch(name), name }
+      assert_equal %w[line path], omission.fetch("origin").keys.sort
+      assert_equal copy.fetch("path"), omission.fetch("origin").fetch("path")
+      origin = role == "custodian" ? MobileReleaseKit::NativeUploadProcess::GroupLease.instance_method(:request) :
+                                   MobileReleaseKit::NativeUploadProcess::Keeper.instance_method(:request_group)
+      assert_equal origin.source_location.last, omission.fetch("origin").fetch("line")
+      %w[atNs effectiveDeadlineNs].each { |key| assert_instance_of Integer, omission.fetch(key) }
+      assert_operator custody.fetch("armNs"), :<=, omission.fetch("atNs")
+      assert_operator omission.fetch("atNs"), :<, omission.fetch("effectiveDeadlineNs")
+      assert_operator omission.fetch("effectiveDeadlineNs"), :<=, dispatch.fetch("deadlineNs")
+      assert_operator omission.fetch("atNs"), :<, close.fetch("closeEntryNs")
+    end
+    driver = value.fetch("driverProvenance")
+    assert_equal "reaped", driver.fetch("phase")
+    assert driver.fetch("creatorJoined")
+    assert driver.fetch("resourcesClosed")
+    assert_equal({"pid" => driver.fetch("pid"), "status_kind" => "exit", "status_code" => 1}, driver.fetch("wait"))
+    assert_equal({"out" => true, "err" => true}, driver.fetch("ownedStreamEOFs"))
+    assert_equal sources, proof_source_snapshot
   end
 
-  def test_partial_pipe_and_pre_entry_faults_close_actual_resources_before_implicit_join
+  def test_partial_pipe_and_pre_entry_faults_close_owned_leases_and_join_actual_tasks
     %w[second-pipe owner-failure readiness-failure watchdog-unavailable watchdog-failure].each do |fault|
       value = process_case("native-setup-#{fault}")
       assert_equal fault == "readiness-failure" ? "readiness" : "setup-fixture-fault", value.fetch("kind")
       assert value.fetch("harnessPrimaryRetained"), value.inspect
       assert_equal 0, value.fetch("injectionCount")
-      refute value.fetch("captureEntered"), value.inspect
-      refute value.key?("firstCloseFromNative"), value.inspect
-      refute value.key?("deadBeforeFallback"), value.inspect
+      refute value.fetch("firstCloseEntered"), value.inspect
       refute value.fetch("watchdogIntervened"), value.inspect
       assert_equal fault == "watchdog-failure", value.fetch("watchdogStarted")
       if fault == "second-pipe"
-        assert_equal 0, value.fetch("nativeSpawnAttempts")
-        assert_equal 2, value.fetch("ownedDescriptorCount")
+        assert_native_observation(value.fetch("nativeObservation"), finality: :no_producers)
         refute value.fetch("fallbackUsed"), value.inspect
-        refute value.key?("workerExitStatus"), value.inspect
       else
-        assert_equal 1, value.fetch("nativeSpawnAttempts")
-        assert_equal 7, value.fetch("ownedDescriptorCount")
-        assert value.fetch("fallbackUsed"), value.inspect
-        assert value.fetch("workerControlEOF"), value.inspect
-        assert_equal 0, value.fetch("workerExitStatus")
-        assert_nil value.fetch("workerTermSignal")
+        assert_native_observation(value.fetch("nativeObservation"), finality: :finalized)
+        refute value.fetch("fallbackUsed"), value.inspect
         assert value.fetch("ready"), value.inspect if fault.start_with?("watchdog-")
       end
     end
@@ -385,11 +975,156 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal Signal.list.fetch("INT"), value.fetch("selfSignalQueued")
   end
 
-  def test_hard_driver_loss_stops_native_leader_via_the_sole_control_writer
-    value = process_case("kill-native-setup")
+  def test_hard_driver_loss_stops_all_previously_bound_native_roles
+    UploadProcessFixture.assert_domain_reusable!
+    sources = proof_source_snapshot
+    value = UploadProcessFixture.run(platform: "native", root: @root, parameters: {}, mode: "kill-native-setup")
+    assert value.fetch("driverJoined")
     assert_equal "driver-terminated", value.fetch("kind")
     assert_equal "kill-native-setup", value.fetch("phase")
-    assert value.fetch("eofAfterDriverDeath"), value.inspect
+    refute value.key?("knownProcessesDead")
+    # An independently held ORIGINAL FIFO writer excludes fixture EOF while
+    # actual C/K waits, group KILL and absence prove runtime containment. Those
+    # events still do not provide the lost driver's original C wait/finality.
+    assert_equal Signal.list.fetch("KILL"), value.fetch("driverTermSignal")
+    assert_equal "unknown", value.fetch("nativeFinality")
+    assert value.fetch("retainedFixture")
+    assert value.fetch("domainDisposalRequired")
+    assert UploadProcessFixture.expected_unknown_retention?(@root)
+    assert UploadProcessFixture.domain_disposal_required?
+    proof = value.fetch("containmentProof")
+    assert_equal %w[driverKillEntryNs fifoIdentity heldWriterAcquiredNs heldWriterClose heldWriterOpenThroughProof helperCopy
+                    helperReportSha256 identities keeperExitStatus kind mode nativeFinality originalCustodianWaitMissing
+                    originalKeeperWaitObserved originalValidatorWaitObserved proofCompletedNs releasedAndControlEOFObserved
+                    reservedGroupAbsentBeforeFixtureEOF runtimeGroupKillObserved sourceSha256 validatorReceipt version], proof.keys.sort
+    assert_equal [1, "runtime-containment-before-fixture-eof", "kill-native-setup", "unknown"],
+                 proof.values_at("version", "kind", "mode", "nativeFinality")
+    %w[heldWriterOpenThroughProof originalCustodianWaitMissing reservedGroupAbsentBeforeFixtureEOF runtimeGroupKillObserved
+       originalKeeperWaitObserved originalValidatorWaitObserved releasedAndControlEOFObserved].each { |name| assert_equal true, proof.fetch(name), name }
+    assert_includes [0, 2], proof.fetch("keeperExitStatus")
+    assert_equal sources.transform_values { |item| item.fetch("sha256") }, proof.fetch("sourceSha256")
+    directory = value.fetch("driverDispatch").fetch("argv").last
+    assert_equal @root, File.dirname(directory)
+    assert_equal directory, File.realpath(directory)
+    copy = proof.fetch("helperCopy")
+    assert_equal %w[label originalPath originalSha256 path sha256], copy.keys.sort
+    assert_equal "containment-events", copy.fetch("label")
+    assert_equal File.realpath(File.expand_path("../../fastlane/native_upload_process.rb", __dir__)), copy.fetch("originalPath")
+    assert_equal sources.fetch("fastlane/native_upload_process.rb").fetch("sha256"), copy.fetch("originalSha256")
+    assert_equal File.join(directory, "containment-events-helper.rb"), copy.fetch("path")
+    assert_equal Digest::SHA256.hexdigest(UploadProcessFixture::OwnedChild.bounded_file(copy.fetch("path"), limit: 1_048_576)), copy.fetch("sha256")
+    refute_equal copy.fetch("originalSha256"), copy.fetch("sha256")
+    graph = proof.fetch("identities")
+    assert_equal %w[custodian group keeper sid validator], graph.keys.sort
+    graph.each_value { |pid| assert_instance_of Integer, pid; assert_operator pid, :>, 1 }
+    assert_equal 3, graph.values_at("custodian", "keeper", "validator").uniq.length
+    assert_equal graph.fetch("custodian"), graph.fetch("sid")
+    assert_equal graph.fetch("keeper"), graph.fetch("group")
+    owner = UploadProcessFixture.read_json(File.join(directory, "owner.json"))
+    assert_equal ["kill-native-setup", "active"], owner.values_at("phase", "finality")
+    assert_equal [{"role" => "custodian", "pid" => graph.fetch("custodian"), "group" => graph.fetch("custodian")},
+                  {"role" => "keeper", "pid" => graph.fetch("keeper"), "group" => graph.fetch("custodian")},
+                  {"role" => "validator", "pid" => graph.fetch("validator"), "group" => graph.fetch("group")}],
+                 owner.fetch("processes").sort_by { |item| item.fetch("role") }
+    assert_equal({"state" => "reaped", "pid" => graph.fetch("validator"), "status_kind" => "signal",
+                  "status_code" => Signal.list.fetch("KILL")}, proof.fetch("validatorReceipt"))
+    fifo = proof.fetch("fifoIdentity")
+    assert_equal %w[dev gid ino mode nlink rdev type uid], fifo.keys.sort
+    assert_equal "fifo", fifo.fetch("type")
+    assert_equal Process.uid, fifo.fetch("uid")
+    assert_equal 1, fifo.fetch("nlink")
+    assert_equal 0o600, fifo.fetch("mode") & 0o7777
+    assert_equal UploadProcessFixture::OwnedChild.identity(File.lstat(File.join(directory, "worker-control.fifo"))), fifo
+    close = proof.fetch("heldWriterClose")
+    assert_equal %w[actualCloseReturned closed entryNs returnNs], close.keys.sort
+    assert_equal true, close.fetch("actualCloseReturned")
+    assert_equal true, close.fetch("closed")
+    times = [proof.fetch("heldWriterAcquiredNs"), proof.fetch("driverKillEntryNs"), proof.fetch("proofCompletedNs"),
+             close.fetch("entryNs"), close.fetch("returnNs")]
+    times.each { |time| assert_instance_of Integer, time; assert_operator time, :>, 0 }
+    times.each_cons(2) { |before, after| assert_operator before, :<=, after }
+    # These are bounded reads of already retained reports, not new observers.
+    # Time fields constrain the proof; actual original call/IO receipts bind it.
+    hashes = proof.fetch("helperReportSha256")
+    assert_equal %w[containment-custodian.json containment-keeper.json], hashes.keys.sort
+    reports = hashes.to_h do |name, digest|
+      bytes = UploadProcessFixture::OwnedChild.bounded_file(File.join(directory, name))
+      assert_equal Digest::SHA256.hexdigest(bytes), digest
+      [name.delete_prefix("containment-").delete_suffix(".json"), JSON.parse(bytes)]
+    end
+    reports.each do |role, report|
+      assert_equal [1, "original-helper-containment-events", "kill-native-setup", role, graph.fetch(role), graph],
+                   report.values_at("version", "kind", "mode", "role", "pid", "identities")
+      assert_equal proof.fetch("sourceSha256"), report.fetch("sourceSha256")
+      assert_equal copy, report.fetch("helperCopy")
+      refute report.fetch("terminalAlreadyArmed")
+      assert_empty report.fetch("hookRestorationErrors")
+      assert_empty report.fetch("omissions")
+      child = report.fetch("originalChild")
+      assert_equal true, child.fetch("actualOriginalWaitObserved")
+      assert_equal true, child.fetch("actualCreatorJoinObserved")
+      assert_operator child.fetch("waitNs"), :<=, report.fetch("preArmNs")
+      assert_operator proof.fetch("driverKillEntryNs"), :<=, report.fetch("preArmNs")
+      assert_operator report.fetch("preArmNs"), :<=, proof.fetch("proofCompletedNs")
+    end
+    c, k = reports.values_at("custodian", "keeper")
+    assert_equal value.fetch("driverProvenance").fetch("pid"), c.fetch("parentPid")
+    assert_equal graph.fetch("custodian"), k.fetch("parentPid")
+    assert_equal proof.fetch("keeperExitStatus"), k.fetch("originalRunReturn")
+    assert_equal({"state" => "reaped", "pid" => graph.fetch("keeper"), "status_kind" => "exit",
+                  "status_code" => proof.fetch("keeperExitStatus")}, c.fetch("originalChild").fetch("record"))
+    assert_equal proof.fetch("validatorReceipt"), k.fetch("originalChild").fetch("record")
+    assert_equal({"v" => 1, "type" => "RELEASED", "validator" => proof.fetch("validatorReceipt")}, k.fetch("releasedFrame"))
+    assert_equal true, k.fetch("releasedWritten")
+    assert_equal true, k.fetch("actualStatusCloseObserved")
+    assert_equal true, c.fetch("acceptedReleased").fetch("actualOriginalAcceptReturned")
+    assert_equal k.fetch("releasedFrame"), c.fetch("acceptedReleased").fetch("frame")
+    assert_equal true, c.fetch("keeperChannelEOF")
+    assert c.fetch("actualEOFs").any? { |event| event.fetch("channel") == "keeper" && event.fetch("actualReadNil").equal?(true) }
+    retirement = c.fetch("groupRetirement")
+    assert_equal graph.fetch("group"), retirement.fetch("group")
+    assert_equal true, retirement.fetch("actualOriginalRetireReturned")
+    assert_equal true, retirement.fetch("originalESRCHObserved")
+    assert c.fetch("actualAbsences").any? { |event| event.fetch("group") == graph.fetch("group") && event.fetch("actualESRCH").equal?(true) }
+    kills = reports.values.flat_map { |report| report.fetch("actualKills") }
+    assert_operator kills.length, :>=, 1 # C OR K in this ORIGINAL case, not a forced-C schedule.
+    kills.each do |event|
+      assert_includes %w[custodian-group keeper-group], event.fetch("route")
+      assert_equal [graph.fetch("group"), "KILL", 1, true, true],
+                   event.values_at("group", "signal", "returned", "actualSyscallReturned", "originalReservedAuthority")
+      assert_equal copy.fetch("path"), event.fetch("origin").fetch("path")
+      assert_operator event.fetch("origin").fetch("line"), :>, 0
+      assert_operator proof.fetch("driverKillEntryNs"), :<=, event.fetch("atNs")
+      assert_operator event.fetch("atNs"), :<=, event.fetch("returnNs")
+      assert_operator event.fetch("returnNs"), :<=, proof.fetch("proofCompletedNs")
+    end
+    driver = value.fetch("driverProvenance")
+    assert_equal "reaped", driver.fetch("phase")
+    assert driver.fetch("creatorJoined")
+    assert driver.fetch("resourcesClosed")
+    assert_equal({"pid" => driver.fetch("pid"), "status_kind" => "signal", "status_code" => Signal.list.fetch("KILL")}, driver.fetch("wait"))
+    assert_equal({"out" => true, "err" => true}, driver.fetch("ownedStreamEOFs"))
+    assert_equal sources, proof_source_snapshot
+  end
+
+  def test_native_task_error_precedes_later_caller_cancellation_at_the_original_latch
+    %w[interrupt system-exit].each do |caller_kind|
+      native_order_case("task-before-caller", caller_kind)
+    end
+  end
+
+  def test_native_caller_cancellation_precedes_later_task_ioerror_at_the_original_latch
+    %w[interrupt system-exit].each do |caller_kind|
+      native_order_case("caller-before-task", caller_kind)
+    end
+  end
+
+  def test_native_cleanup_error_precedes_later_caller_interrupt_and_retains_unknown
+    native_order_case("cleanup-before-caller", "interrupt")
+  end
+
+  def test_native_cleanup_error_precedes_later_caller_system_exit_and_retains_unknown
+    native_order_case("cleanup-before-caller", "system-exit")
   end
 
   def test_native_platform_modes_and_empty_parameters_are_validated_before_acquisition
@@ -397,23 +1132,3656 @@ class NativeUploadValidationTest < Minitest::Test
     cases.concat((UploadProcessFixture::MODES - UploadProcessFixture::NATIVE_MODES).map { |mode| ["native", mode, {}] })
     cases.concat([["native", "missing", {}], ["missing", "native-setup-interrupt", {}],
                   ["native", "native-setup-interrupt", {"python" => "untrusted"}]])
-    starts = 0
-    Process.stub(:spawn, lambda { |*| starts += 1; raise "invalid fixture spawned a child" }) do
+    input_deadline_ns = UploadProcessFixture.clock_ns + UploadProcessFixture::DRIVER_LIMIT * 1_000_000_000
+    with_acquisition_veto do
       cases.each do |platform, mode, parameters|
         error = assert_raises(UploadProcessFixture::Failure) do
           UploadProcessFixture.run(platform: platform, root: @root, mode: mode, parameters: parameters)
         end
         assert_equal "fixture-input", error.kind
-        UploadProcessFixture.atomic_json(File.join(@root, "input.json"), {"platform" => platform, "mode" => mode, "parameters" => parameters})
-        error = assert_raises(UploadProcessFixture::Failure) { UploadProcessFixture.driver(@root) }
+        assert_equal "unknown or mismatched fixture mode/platform/parameters", error.message
+        assert_operator UploadProcessFixture.clock_ns, :<, input_deadline_ns
+        UploadProcessFixture.atomic_json(File.join(@root, "input.json"),
+          {"platform" => platform, "mode" => mode, "parameters" => parameters, "deadlineNs" => input_deadline_ns})
+        error = assert_raises(UploadProcessFixture::Failure) do
+          Dir.stub(:tmpdir, @root) { UploadProcessFixture.driver(@root) }
+        end
         assert_equal "fixture-input", error.kind
+        assert_equal "unknown or mismatched fixture mode/platform/parameters", error.message
         assert_equal ["input.json"], Dir.children(@root)
       end
+
+      # Inert bootstrap diagnostics: no original child, native receipt, actual
+      # process operation or new IO is supplied by these doubles. The real stop
+      # body sees only an empty acquisition and never an unretired numeric route.
+      owner_class = UploadProcessFixture::OwnedChild
+      record = {"version" => 1, "stage" => "configuration", "condition" => "directory_identity", "pid" => 701}
+      good = JSON.generate(record)
+      exercise = lambda do |raw, diagnostic: true, read_error: nil, write_result: :full, cleanup_error: nil, expiry: nil|
+        now, reads, first = 1, 0, nil
+        events, writes, read_observations, report_attempts, removed = Array.new(5) { [] }
+        directory = "/inert-mrk-bootstrap"
+        owner = owner_class.new(root: @root, deadline_ns: 20, hard_deadline_ns: 30)
+        creator, acquisition = Object.new, Object.new
+        creator.define_singleton_method(:first_error) { first }
+        creator.define_singleton_method(:cancelled?) { !first.nil? }
+        creator.define_singleton_method(:cancel!) do |error:, reason_code:|
+          first ||= error
+          events << :latch
+          true
+        end
+        creator.define_singleton_method(:record_cleanup_error) do |error|
+          first ||= error
+          events << :cleanup_latch
+          nil
+        end
+        creator.define_singleton_method(:cleanup_deadline_ns) { now = 10 if expiry == :before_read; 10 }
+        creator.define_singleton_method(:close_launch!) do
+          events << :creator_close
+          Kernel.raise cleanup_error if cleanup_error
+          nil
+        end
+        acquisition.define_singleton_method(:close_launch!) { events << :acquisition_close; nil }
+        acquisition.define_singleton_method(:resources) { {} }
+        acquisition.define_singleton_method(:not_attempted?) { false }
+        {creator: creator, acquisition: acquisition, pid: 701, phase: :reaped, creation_finished: true,
+         launch_directory: directory, directory_identity: :inert_directory}.each do |name, value|
+          owner.instance_variable_set(:"@#{name}", value)
+        end
+        owner.define_singleton_method(:signal) { |*| Kernel.raise "inert diagnostic attempted numeric signaling" }
+        owner.define_singleton_method(:poll_wait) { Kernel.raise "inert diagnostic attempted a process wait" }
+        owner.define_singleton_method(:fail_unknown!) do |_error|
+          @phase = :unknown
+          events << :unknown # No real acquisition exists to poison the case domain.
+        end
+        original_close = owner.method(:close_resources)
+        owner.define_singleton_method(:close_resources) { events << :close_resources; original_close.call }
+        reader = lambda do |path, limit:|
+          reads += 1
+          events << :read
+          read_observations << [path, limit, first, owner.instance_variable_get(:@primary), events.dup]
+          raise read_error if read_error
+          now = 10 if expiry == :after_read
+          raw
+        end
+        sink = lambda do |line|
+          events << :write
+          writes << line
+          report_attempts << owner.instance_variable_get(:@bootstrap_failure_report_attempted)
+          raise write_result if write_result.is_a?(Exception)
+          write_result == :short ? 1 : line.bytesize
+        end
+        File.stub(:exist?, ->(path) { path == File.join(directory, "failure.json") }) do
+          owner_class.stub(:bounded_file, reader) do
+            owner_class.stub(:directory_identity, ->(path) { assert_equal directory, path; :inert_directory }) do
+              UploadProcessFixture.stub(:owned_fixture_directory, ->(*) { Kernel.raise "inert stop bypassed directory identity stub" }) do
+                FileUtils.stub(:remove_entry, ->(path) { removed << path; events << :remove_entry }) do
+                  UploadProcessFixture.stub(:clock_ns, -> { now }) do
+                    STDERR.stub(:write, sink) do
+                      original = assert_raises(UploadProcessFixture::Failure) { owner.wait_ready }
+                      assert_same first, original
+                      assert_equal ["process-ownership", "bootstrap refused admission"], [original.kind, original.message]
+                      assert_equal "not_attempted", owner.instance_variable_get(:@go_state)
+                      assert_empty writes # wait_ready only snapshots; it never publishes.
+                      owner.snapshot_bootstrap_failure
+                      assert_equal expiry == :before_read ? 0 : 1, reads
+                      # Assert OUTSIDE the no-throw diagnostic callbacks: their
+                      # rescue must never swallow this test's own assertions.
+                      read_observations.each do |path, limit, latched, primary, sequence|
+                        assert_equal File.join(directory, "failure.json"), path
+                        assert_equal 1024, limit
+                        assert_same original, latched
+                        assert_same original, primary
+                        assert_equal %i[latch read], sequence
+                      end
+                      snapshot = diagnostic && !read_error && !%i[before_read after_read].include?(expiry)
+                      expected = {"stage" => "configuration", "condition" => "directory_identity"}
+                      if snapshot
+                        assert_equal expected, owner.instance_variable_get(:@bootstrap_failure_snapshot)
+                      else
+                        assert_nil owner.instance_variable_get(:@bootstrap_failure_snapshot)
+                      end
+                      now = 10 if expiry == :before_emit
+                      if cleanup_error
+                        assert_same cleanup_error, assert_raises(IOError) { owner.stop }
+                        assert_raises(UploadProcessFixture::Failure) { owner.stop }
+                      else
+                        assert_equal true, owner.stop
+                        assert_equal true, owner.stop
+                      end
+                      assert_same original, first
+                      assert_same original, owner.instance_variable_get(:@primary)
+                      assert_equal 10, owner.instance_variable_get(:@bootstrap_failure_cutoff_ns)
+                      assert_equal snapshot && expiry != :before_emit ? 1 : 0, writes.length
+                      assert_equal [true] * writes.length, report_attempts
+                      assert_equal cleanup_error ? [] : [directory], removed
+                      assert_includes events, :close_resources
+                      unless writes.empty?
+                        assert_operator events.index(:close_resources), :<, events.index(:write)
+                        assert_operator events.index(:remove_entry), :<, events.index(:write) unless cleanup_error
+                      end
+                      writes.each do |line|
+                        assert_equal "MRK_FIXTURE_BOOTSTRAP_FAILURE=#{JSON.generate({"schema" => 1}.merge(expected))}\n", line
+                        assert line.ascii_only?
+                        assert_operator line.bytesize, :<=, 256
+                        refute_includes line, "pid"
+                        refute_includes line, "701"
+                        refute_includes line, "private-marker"
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+      exercise.call(good)
+      invalid = ["not-json", "[]", "x" * 1025, " #{good}",
+        good.sub('"pid":701', '"pid":701,"pid":701'),
+        JSON.generate(record.reject { |key, _| key == "condition" }),
+        JSON.generate(record.merge("private-marker" => "must not escape")),
+        JSON.generate(record.merge("version" => 1.0)), JSON.generate(record.merge("pid" => 702)),
+        JSON.generate(record.merge("pid" => 701.0)), JSON.generate(record.merge("stage" => "private-marker")),
+        JSON.generate(record.merge("condition" => "setsid"))]
+      invalid.each { |bytes| exercise.call(bytes, diagnostic: false) }
+      exercise.call(good, read_error: IOError.new("private-marker"))
+      %i[before_read after_read before_emit].each { |expiry| exercise.call(good, expiry: expiry) }
+      exercise.call(good, write_result: :short)
+      exercise.call(good, write_result: IOError.new("private-marker"))
+      exercise.call(good, cleanup_error: IOError.new("original cleanup error"), write_result: IOError.new("private-marker"))
+
+      # Exact original endpoints and all reporting seams below are inert. No
+      # process/wait receipt is fabricated; the acquisition veto remains live.
+      cap = 1_000_000_000_000_000_001 # 1e9 seconds + 1ns loses the 1ns in Float.
+      cleanup_ns = UploadProcessFixture::CLEANUP_LIMIT * 1_000_000_000
+      candidate_ns = cap + 20_000_000_000
+      candidate = Rational(candidate_ns, 1_000_000_000)
+      UploadProcessFixture.stub(:clock_ns, cap - 60_000_000_000) do
+        refute_equal cap, (cap.fdiv(1_000_000_000).to_r * 1_000_000_000).floor
+        assert_equal [cap - cleanup_ns - RAW_REPORTING_NS, cap - RAW_REPORTING_NS, cap],
+                     raw_collector_cutoffs(candidate, enclosing_deadline_ns: cap)
+        assert_equal [candidate_ns, candidate_ns + cleanup_ns, candidate_ns + cleanup_ns], raw_collector_cutoffs(candidate)
+        [false, cap.to_f, "private-marker", 0, MobileReleaseKit::NativeUploadProcess::MAX_TIME + 1].each do |invalid_cap|
+          failure = assert_raises(UploadProcessFixture::Failure) { raw_collector_cutoffs(candidate, enclosing_deadline_ns: invalid_cap) }
+          assert_equal "fixture-input", failure.kind
+        end
+        failure = assert_raises(UploadProcessFixture::Failure) do
+          raw_collector_cutoffs(candidate, enclosing_deadline_ns: cap - 60_000_000_000 + cleanup_ns + RAW_REPORTING_NS)
+        end
+        assert_equal "driver", failure.kind
+      end
+      caps, reporting = [], {}
+      frame = Object.new
+      UploadProcessFixture.stub(:lifetime, ->(deadline_ns:, &body) { caps << deadline_ns; body.call(frame) }) do
+        assert_equal :offered, with_capture_reporting(reporting, nil, enclosing_deadline_ns: cap) { :offered }
+      end
+      assert_equal [cap], caps
+      assert_same frame, reporting.fetch(:reporting_lifetime)
+
+      fixture_class = self.class
+      original = Minitest::Assertion.new("private-marker")
+      line = fixture_class.isolated_failure_line("capture-contract", original)
+      assert_equal "#{ISOLATED_FAILURE_PREFIX}{\"schema\":1,\"stage\":\"capture-contract\",\"category\":\"assertion-error\"}\n", line
+      assert_operator line.bytesize, :<=, 256
+      assert line.ascii_only?
+      category_errors = [original, UploadProcessFixture::Failure.new("private-marker", "private-marker"),
+        MobileReleaseKit::NativeUploadProcess::LifecycleError.new, IOError.new("private-marker"), Errno::EIO.new("private-marker"),
+        Interrupt.new("private-marker"), SystemExit.new(17, "private-marker"), JSON::ParserError.new("private-marker"),
+        KeyError.new("private-marker"), NoMethodError.new("private-marker"), TypeError.new("private-marker"),
+        ArgumentError.new("private-marker"), RuntimeError.new("private-marker"), StandardError.new("private-marker"),
+        Exception.new("private-marker"), Object.new]
+      assert_equal 16, category_errors.length
+      assert_equal 16, ISOLATED_FAILURE_CATEGORIES.uniq.length
+      category_packets = category_errors.zip(ISOLATED_FAILURE_CATEGORIES).map do |failure, category|
+        packet = fixture_class.isolated_failure_line("capture-contract", failure)
+        assert_equal category, JSON.parse(packet.delete_prefix(ISOLATED_FAILURE_PREFIX)).fetch("category")
+        refute_includes packet, "private-marker"
+        packet
+      end
+      nesting_packet = fixture_class.isolated_failure_line("capture-contract", JSON::NestingError.new("private-marker"))
+      assert_equal "json-parser-error", JSON.parse(nesting_packet.delete_prefix(ISOLATED_FAILURE_PREFIX)).fetch("category")
+      assert_nil fixture_class.isolated_failure_line("private-marker", original)
+      malformed = [line + line, line + "#{ISOLATED_FAILURE_PREFIX}not-json\n", line.delete_suffix("\n"),
+        line.sub('"schema":1', '"schema":1,"schema":1'), line.sub('"schema":1', '"schema":true'),
+        line.sub('"schema":1', '"schema":1.0'), line.sub('"schema":1', '"schema":2'),
+        line.sub('"schema":1', '"schema":1,"pid":701'), line.sub('"schema":1', '"schema":1,"private":"private-marker"'),
+        line.sub("capture-contract", "private-marker"), line.sub("assertion-error", "private-marker"),
+        line.sub('"stage":"capture-contract"', '"stage":false'), line.sub('"category":"assertion-error"', '"category":[]'),
+        line.sub('{"schema":1,', '{ "schema":1,'), line.sub('"schema":1,"stage":"capture-contract"', '"stage":"capture-contract","schema":1'),
+        "#{ISOLATED_FAILURE_PREFIX}[]\n", "#{ISOLATED_FAILURE_PREFIX}#{'x' * 256}\n", "#{ISOLATED_FAILURE_PREFIX}\xff\n".b]
+      now, clock_sequence, clock_forbidden = 1, nil, false
+      inert_clock = lambda do
+        raise "early diagnostic manufactured a timer" if clock_forbidden
+        clock_sequence ? clock_sequence.shift || now : now
+      end
+      UploadProcessFixture.stub(:clock_ns, inert_clock) do
+        assert_equal 41, ISOLATED_FAILURE_STAGES.uniq.length
+        ISOLATED_FAILURE_STAGES.each do |stage|
+          packet = fixture_class.isolated_failure_line(stage, original)
+          assert_equal({"schema" => 1, "stage" => stage, "category" => "assertion-error"},
+                       JSON.parse(packet.delete_prefix(ISOLATED_FAILURE_PREFIX)))
+          assert packet.ascii_only?
+          assert_operator packet.bytesize, :<=, 256
+          assert_equal packet, fixture_class.parse_isolated_failure(packet, deadline_ns: 10)
+        end
+        (category_packets + [nesting_packet]).each do |packet|
+          assert_equal packet, fixture_class.parse_isolated_failure(packet, deadline_ns: 10)
+        end
+        assert_equal line, fixture_class.parse_isolated_failure("private unrelated transcript\n#{line}", deadline_ns: 10)
+        malformed.each { |raw| assert_nil fixture_class.parse_isolated_failure(raw, deadline_ns: 10) }
+        assert_nil fixture_class.parse_isolated_failure("x" * (UploadProcessFixture::OUTPUT_LIMIT + 1), deadline_ns: 10)
+        now = 10
+        assert_nil fixture_class.parse_isolated_failure(line, deadline_ns: 10)
+        now = 1
+        clock_sequence = [1, 1, 10]
+        assert_nil fixture_class.parse_isolated_failure(line, deadline_ns: 10)
+        clock_sequence = nil
+
+        [:full, :short, IOError.new("private-marker"), Interrupt.new("private-marker"), SystemExit.new(19, "private-marker")].each do |write_result|
+          state = {stage: "capture-contract", deadline_ns: 10}
+          writes, latched = [], []
+          sink = lambda do |packet|
+            writes << packet
+            latched << [state[:primary], state[:failure_stage], state[:report_attempted], state[:write_attempted]]
+            raise write_result if write_result.is_a?(Exception)
+            write_result == :short ? 1 : packet.bytesize
+          end
+          STDERR.stub(:write, sink) do
+            fixture_class.report_isolated_cli_failure(state, original)
+            state[:stage] = "proof-publication"
+            fixture_class.report_isolated_cli_failure(state, IOError.new("later private-marker"))
+          end
+          assert_equal [line], writes
+          assert_equal [[original, "capture-contract", true, true]], latched
+          assert_same original, state.fetch(:primary)
+          assert_equal "capture-contract", state.fetch(:failure_stage)
+          if write_result.is_a?(Exception)
+            assert_same write_result, state.fetch(:diagnostic_error)
+          else
+            assert_equal write_result == :full, state.fetch(:write_complete)
+          end
+
+          # Exercise the SAME status-assertion wrapper as the native test, not
+          # a copied rescue. This inert status supplies no process authority.
+          observed = {status: Struct.new(:exitstatus).new(1), stderr: line, run_deadline_ns: 10}
+          parent_writes, parent_latches = [], []
+          parent_sink = lambda do |packet|
+            parent_writes << packet
+            parent_latches << observed.fetch(:isolated_failure_report).fetch(:primary)
+            raise write_result if write_result.is_a?(Exception)
+            write_result == :short ? 1 : packet.bytesize
+          end
+          actual = STDERR.stub(:write, parent_sink) do
+            assert_raises(Minitest::Assertion) { assert_isolated_collector_exit(observed) }
+          end
+          assert_equal [line], parent_writes
+          assert_equal [actual], parent_latches
+          assert_same actual, observed.fetch(:isolated_failure_report).fetch(:primary)
+          assert_same write_result, observed.fetch(:isolated_failure_report_error) if write_result.is_a?(Exception)
+        end
+
+        writes = []
+        STDERR.stub(:write, ->(packet) { writes << packet; packet.bytesize }) do
+          state = {stage: "capture-contract", deadline_ns: 10}
+          now = 10
+          fixture_class.report_isolated_cli_failure(state, original)
+          now = 1
+          fixture_class.report_isolated_cli_failure(state, original)
+          assert_empty writes # Expiry cannot be retried with a renewed clock.
+          assert_same original, state.fetch(:primary)
+
+          early = {stage: "cli-admission", deadline_ns: nil}
+          clock_forbidden = true
+          fixture_class.report_isolated_cli_failure(early, original)
+          clock_forbidden = false
+          assert_equal [fixture_class.isolated_failure_line("cli-admission", original)], writes
+          assert_nil early.fetch(:deadline_ns)
+          writes.clear
+
+          successful = {status: Struct.new(:exitstatus).new(0), stderr: line, run_deadline_ns: 10}
+          assert_isolated_collector_exit(successful)
+          refute successful.key?(:isolated_failure_report)
+          [Interrupt.new("before original assertion"), SystemExit.new(21, "before original assertion")].each do |cancellation|
+            status = Object.new
+            status.define_singleton_method(:exitstatus) { raise cancellation }
+            before_assertion = {status: status, stderr: line, run_deadline_ns: 10}
+            assert_same cancellation, assert_raises(cancellation.class) { assert_isolated_collector_exit(before_assertion) }
+            refute before_assertion.key?(:isolated_failure_report)
+          end
+          malformed_capture = {status: Struct.new(:exitstatus).new(1), stderr: line + line, run_deadline_ns: 10}
+          actual = assert_raises(Minitest::Assertion) { assert_isolated_collector_exit(malformed_capture) }
+          assert_same actual, malformed_capture.fetch(:isolated_failure_report).fetch(:primary)
+          assert_empty writes
+        end
+
+        # Exercise the actual nested helpers, stopping at deliberate original
+        # operands. These partial inputs never reach a Process::Status/receipt
+        # assertion or stand in for a successful capture or native provenance.
+        checkpoint = lambda do |stage, operand, failure, with_state: true, &body|
+          state = {stage: "capture-contract", deadline_ns: 10}
+          evaluations = []
+          fault = lambda do |seen|
+            evaluations << [seen, state.fetch(:stage)]
+            raise failure
+          end
+          keywords = with_state ? {failure_state: state} : {}
+          actual = assert_raises(failure.class) { body.call(keywords, fault) }
+          assert_same failure, actual
+          expected_stage = with_state ? stage : "capture-contract"
+          assert_equal [[operand, expected_stage]], evaluations # Checkpoint preceded the operand.
+          assert_equal({stage: expected_stage, deadline_ns: 10}, state) # No early primary/report latch.
+          if with_state
+            writes = []
+            STDERR.stub(:write, ->(packet) { writes << packet; packet.bytesize }) do
+              fixture_class.report_isolated_cli_failure(state, actual)
+              state[:stage] = "proof-publication"
+              fixture_class.report_isolated_cli_failure(state, IOError.new("later private-marker"))
+            end
+            assert_equal [fixture_class.isolated_failure_line(stage, failure)], writes
+            assert_same failure, state.fetch(:primary)
+            assert_equal stage, state.fetch(:failure_stage)
+          end
+        end
+        capture_directory = "/inert-mrk-capture"
+        capture_observed = {directory: capture_directory, streams_closed: true, stop_completed: false}
+        [true, false].each do |with_state|
+          checkpoint.call("capture-record-read", File.join(capture_directory, "collector.json"),
+                          JSON::ParserError.new("private-marker"), with_state: with_state) do |keywords, fault|
+            File.stub(:file?, true) do
+              UploadProcessFixture.stub(:read_json, fault) do
+                assert_retained_capture(capture_observed, finality: :unknown, **keywords)
+              end
+            end
+          end
+        end
+
+        # Only scalar comparisons precede the original :child fetch; no child,
+        # acquisition, creator, lifetime or authoritative wait receipt exists.
+        capture_status = Struct.new(:exitstatus, :termsig).new(nil, 9)
+        capture_fixture = {"path" => File.join(capture_directory, "fixture.rb")}
+        capture_environment = UploadProcessFixture::PROCESS_OBSERVER_SELECTION.nil? ? {} :
+          {UploadProcessFixture::PROCESS_OBSERVER_KEY => UploadProcessFixture::PROCESS_OBSERVER_SELECTION}
+        capture_environment.merge!("TMPDIR" => capture_directory, "TMP" => capture_directory, "TEMP" => capture_directory)
+        capture_dispatch = {"isolatedControl" => false, "minitest" => nil, "fixture" => capture_fixture,
+          "argv" => [RbConfig.ruby, capture_fixture.fetch("path"), "driver", capture_directory],
+          "environment" => capture_environment, "cwd" => Dir.pwd, "interpreter" => :inert_interpreter,
+          "options" => {"unsetenv_others" => true, "pgroup" => true, "stdin" => File::NULL,
+            "stdout" => File.join(capture_directory, "driver.stdout"), "stderr" => File.join(capture_directory, "driver.stderr")}}
+        capture_record = {"phase" => "unknown", "exitStatus" => nil, "termSignal" => 9, "streamsClosed" => true,
+          "stopCompleted" => false, "inputsRechecked" => true, "dispatch" => capture_dispatch, "streamIdentities" => :inert_streams}
+        capture_observed.merge!(status: capture_status, dispatch: capture_dispatch, stream_identities: :inert_streams)
+        identity_reads = []
+        identity_reader = lambda do |path, limit:|
+          identity_reads << [path, limit]
+          path == RbConfig.ruby ? :inert_interpreter : capture_fixture
+        end
+        original_fetch = capture_observed.method(:fetch)
+        checkpoint.call("capture-child-receipt", :child, KeyError.new("private-marker")) do |keywords, fault|
+          capture_observed.stub(:fetch, ->(key) { key == :child ? fault.call(key) : original_fetch.call(key) }) do
+            File.stub(:file?, true) do
+              UploadProcessFixture.stub(:read_json, capture_record) do
+                stub(:dispatch_file_identity, identity_reader) do
+                  assert_retained_capture(capture_observed, finality: :unknown, **keywords)
+                end
+              end
+            end
+          end
+        end
+        assert_equal [[RbConfig.ruby, 32 * 1024 * 1024], [capture_fixture.fetch("path"), 1_048_576]], identity_reads
+
+        [true, false].each do |with_state|
+          checkpoint.call("capture-bootstrap-header", "version", NoMethodError.new("private-marker"),
+                          with_state: with_state) do |keywords, fault|
+            provenance = Object.new
+            provenance.define_singleton_method(:fetch, fault)
+            assert_raw_bootstrap_provenance(provenance, nil, nil, stream_identities: nil, finality: :unknown, **keywords)
+          end
+        end
+      end
+
+      # Primary-proof diagnostics keep the actual rejection through the real
+      # Lifetime implementation. Only the cancellation-policy object and run's
+      # native body are inert: no signal policy, child, task or receipt is made.
+      primary_mode = "native-proof-readiness-interrupt-none"
+      primary_callback = NATIVE_PRIMARY_FAILURE_CALLBACK_MODES.keys.first
+      primary_method = primary_callback.split("#", 2).last
+      status_class = Struct.new(:exitstatus) # Comparison input, not Process::Status authority.
+      primary_status = status_class.new(1)
+      primary_proof = {"case" => primary_mode, "failures" => ["first-close boundary"],
+        "driverExitStatus" => 1, "nativeErrorMessage" => "private-marker"}
+      primary_result = {"kind" => "unexpected", "private" => "private-marker"}
+      expected_primary = {"schema" => 1, "mode" => primary_mode,
+        "failedPredicates" => %w[proof-failures driver-status], "proofFailures" => ["first-close boundary"]}
+      expected_primary_line = "#{NATIVE_PRIMARY_FAILURE_PREFIX}#{JSON.generate(expected_primary)}\n"
+      assert_equal [24, 2, 1, 2], NATIVE_PRIMARY_FAILURE_CALLBACK_MODES.values.map(&:length)
+      mapped_modes = NATIVE_PRIMARY_FAILURE_CALLBACK_MODES.values.flatten
+      assert_equal 29, mapped_modes.uniq.length
+      assert_equal UploadProcessFixture::NATIVE_PRIMARY_PROOFS.keys.sort, mapped_modes.sort
+      assert_equal 24, NATIVE_PRIMARY_PROOF_FAILURES.uniq.length
+      assert_equal expected_primary_line, fixture_class.native_primary_failure_line(mode: primary_mode,
+        proof: primary_proof, result: primary_result, status: primary_status)
+      empty_proof = primary_proof.merge("case" => "private-marker", "failures" => [], "driverExitStatus" => 0)
+      empty_line = fixture_class.native_primary_failure_line(mode: primary_mode, proof: empty_proof,
+        result: {"kind" => "pass"}, status: status_class.new(0))
+      assert_equal({"schema" => 1, "mode" => primary_mode, "failedPredicates" => %w[case proof-status result-kind],
+        "proofFailures" => []}, JSON.parse(empty_line.delete_prefix(NATIVE_PRIMARY_FAILURE_PREFIX)))
+      refute_includes empty_line, "private-marker"
+      assert_nil fixture_class.native_primary_failure_line(mode: primary_mode,
+        proof: primary_proof.merge("failures" => []), result: primary_result, status: status_class.new(0))
+      invalid_failures = [nil, "private-marker", ["private-marker"], [:first_close],
+        ["first-close boundary", "first-close boundary"], ["first-close boundary", "actual capture finality"],
+        ["unchanged IOError redaction"], NATIVE_PRIMARY_PROOF_FAILURES]
+      invalid_failures.each do |failures|
+        assert_nil fixture_class.native_primary_failure_line(mode: primary_mode,
+          proof: primary_proof.merge("failures" => failures), result: primary_result, status: primary_status)
+      end
+      [primary_mode, "native-proof-entered-io"].each do |mode|
+        inapplicable = UploadProcessFixture::NATIVE_PRIMARY_PROOFS.fetch(mode)[1] == "io" ?
+          "actual non-IOError return" : "unchanged IOError redaction"
+        allowed = NATIVE_PRIMARY_PROOF_FAILURES.reject { |label| label == inapplicable }
+        maximum = fixture_class.native_primary_failure_line(mode: mode,
+          proof: primary_proof.merge("case" => mode, "failures" => allowed), result: primary_result, status: primary_status)
+        assert_equal 23, allowed.length
+        assert_equal allowed, JSON.parse(maximum.delete_prefix(NATIVE_PRIMARY_FAILURE_PREFIX)).fetch("proofFailures")
+        assert maximum.ascii_only?
+        assert maximum.end_with?("\n")
+        assert_operator maximum.bytesize, :<=, 2048
+        assert_nil fixture_class.native_primary_failure_line(mode: mode,
+          proof: primary_proof.merge("case" => mode, "failures" => [inapplicable]), result: primary_result, status: primary_status)
+      end
+
+      primary_exercise = lambda do |mutate: nil, write_result: :full, expiry: nil, interrupted: nil, method_name: primary_method|
+        now, sequence, depth = 1, nil, 0
+        state = run_error = dispatch = nil
+        events, writes, observations = [], [], []
+        policy = Object.new
+        policy.define_singleton_method(:install) { events << :install }
+        policy.define_singleton_method(:cleanup_depth) { depth }
+        policy.define_singleton_method(:cleanup) do |&body|
+          depth += 1
+          begin
+            body.call
+          ensure
+            depth -= 1
+          end
+        end
+        policy.define_singleton_method(:restore) { |&body| body.call; events << :restored }
+        policy.define_singleton_method(:errors) { [] }
+        policy.define_singleton_method(:replay_custom_pending) { events << :replay }
+        run = lambda do |**arguments|
+          dispatch = arguments
+          state = arguments.fetch(:primary_failure_state)
+          events << :run_enter
+          begin
+            UploadProcessFixture.lifetime(deadline_ns: 10) do |frame|
+              begin
+                frame.active do
+                  reject = lambda do
+                    UploadProcessFixture.reject_native_primary_proof!(mode: arguments.fetch(:mode), proof: primary_proof,
+                      result: primary_result, status: primary_status, deadline_ns: 10, state: state)
+                  end
+                  if interrupted
+                    original_writer = state.method(:[]=)
+                    state.stub(:[]=, ->(key, value) { raise interrupted if key == :mode; original_writer.call(key, value) }) { reject.call }
+                  else
+                    reject.call
+                  end
+                end
+              ensure
+                frame.cleanup { events << :cleanup }
+              end
+            end
+          rescue Exception => error
+            run_error = error
+            raise
+          ensure
+            mutate.call(state) if mutate
+            events << :run_unwound
+            now = 10 if expiry == :before_report
+            sequence = [1, 10] if expiry == :before_write
+          end
+        end
+        sink = lambda do |packet|
+          observations << [state[:rejection], state[:report_attempted], state[:write_attempted], events.dup,
+            UploadProcessFixture.instance_variable_get(:@cancellation_scope)]
+          events << :write
+          writes << packet
+          raise write_result if write_result.is_a?(Exception)
+          write_result == :short ? 1 : packet.bytesize
+        end
+        assert_nil UploadProcessFixture.instance_variable_get(:@cancellation_scope)
+        actual = nil
+        UploadProcessFixture::CancellationScope.stub(:new, policy) do
+          Thread.current.stub(:pending_interrupt?, false) do
+            UploadProcessFixture.stub(:clock_ns, -> { sequence ? sequence.shift || now : now }) do
+              UploadProcessFixture.stub(:run, run) do
+                stub(:name, method_name) do
+                  STDERR.stub(:write, sink) do
+                    actual = assert_raises(interrupted ? interrupted.class : UploadProcessFixture::Failure) { process_case(primary_mode) }
+                    now, sequence = 1, nil
+                    fixture_class.report_native_primary_failure(state, actual,
+                      callback: "#{self.class.name}##{method_name}", mode: primary_mode)
+                  end
+                end
+              end
+            end
+          end
+        end
+        assert_same run_error, actual
+        assert_equal({platform: "native", root: @root, parameters: {}, mode: primary_mode},
+          dispatch.reject { |key, _| key == :primary_failure_state })
+        assert_nil UploadProcessFixture.instance_variable_get(:@cancellation_scope)
+        expected_events = %i[run_enter install cleanup restored replay run_unwound]
+        assert_equal expected_events, events.take(expected_events.length)
+        assert_operator writes.length, :<=, 1
+        observations.each do |latched, report_attempted, write_attempted, seen, registry|
+          assert_same actual, latched
+          assert_equal true, report_attempted
+          assert_equal true, write_attempted
+          assert_equal expected_events, seen
+          assert_nil registry
+        end
+        writes.each do |packet|
+          assert_equal expected_primary_line, packet
+          assert packet.ascii_only?
+          assert_operator packet.bytesize, :<=, 2048
+          refute_includes packet, "private-marker"
+        end
+        {state: state, original: actual, writes: writes}
+      end
+      [:full, :short, IOError.new("private-marker"), Interrupt.new("private-marker"), SystemExit.new(19, "private-marker")].each do |write_result|
+        observed = primary_exercise.call(write_result: write_result)
+        assert_equal [expected_primary_line], observed.fetch(:writes)
+        state = observed.fetch(:state)
+        assert_same observed.fetch(:original), state.fetch(:rejection)
+        assert_same primary_proof, state.fetch(:proof)
+        assert_same primary_result, state.fetch(:result)
+        assert_same primary_status, state.fetch(:status)
+        assert_equal 10, state.fetch(:deadline_ns)
+        if write_result.is_a?(Exception)
+          assert_same write_result, state.fetch(:diagnostic_error)
+        else
+          assert_equal write_result == :full, state.fetch(:write_complete)
+        end
+      end
+      mutations = [->(state) { state.delete(:status) }, ->(state) { state.delete(:rejection) },
+        ->(state) { state[:rejection] = UploadProcessFixture::Failure.new("fixture-result", "private-marker") },
+        ->(state) { state[:mode] = "native-proof-frame-io" }, ->(state) { state[:proof] = nil },
+        ->(state) { state[:result] = {} }, ->(state) { state[:deadline_ns] = 10.0 },
+        ->(state) { state[:proof] = primary_proof.merge("failures" => ["first-close boundary"] * 2) },
+        ->(state) { state.freeze }]
+      mutations.each { |mutate| assert_empty primary_exercise.call(mutate: mutate).fetch(:writes) }
+      %i[before_report before_write].each { |expiry| assert_empty primary_exercise.call(expiry: expiry).fetch(:writes) }
+      wrong_method = "test_first_close_requires_the_actual_intentional_error_not_redacted_lookalike"
+      assert_empty primary_exercise.call(method_name: wrong_method).fetch(:writes)
+      [Interrupt.new("before actual rejection"), SystemExit.new(21, "before actual rejection")].each do |interrupted|
+        observed = primary_exercise.call(interrupted: interrupted)
+        assert_same interrupted, observed.fetch(:original)
+        refute_same interrupted, observed.fetch(:state).fetch(:rejection)
+        refute observed.fetch(:state).key?(:proof)
+        assert_empty observed.fetch(:writes)
+      end
+
+      # The real process_case wrapper must not diagnose a successful run or a
+      # later common assertion. These values are inert inputs, not native proof.
+      successful = {"driverJoined" => true, "knownProcessesDead" => true, "pendingInterrupt" => false, "cleanupErrors" => []}
+      %w[watchdogJoined tasksJoined injectorsJoined ownedDescriptorsClosed handlersRestored registryInactive].each { |key| successful[key] = true }
+      writes, handoffs = [], []
+      UploadProcessFixture.stub(:run, ->(**arguments) { handoffs << arguments.fetch(:primary_failure_state); successful }) do
+        STDERR.stub(:write, ->(packet) { writes << packet; packet.bytesize }) do
+          assert_same successful, process_case(primary_mode)
+          successful["driverJoined"] = false
+          assert_raises(Minitest::Assertion) { process_case(primary_mode) }
+        end
+      end
+      assert_empty writes
+      assert handoffs.all?(&:empty?)
+      refute_same(*handoffs)
+
+      assert_native_order_failure_projection
+      assert_native_setup_failure_projection
+      assert_adapter_failure_projection
+      assert_missing_cleanup_omission_evidence
+      assert_missing_cleanup_watchdog_lifecycle
+
+      # A modeled delivery seam protects the intended callback ordering only;
+      # the existing24-mode native test still proves real asynchronous delivery.
+      %w[readiness watchdog].each do |boundary|
+        driver = UploadProcessFixture::NativePrimaryProbe::Driver.new(@root, [boundary, "interrupt", "none"])
+        driver.instance_variable_set(:@observation, Struct.new(:session).new(Struct.new(:capture_slot).new(Object.new)))
+        events, masks = [], []
+        delivery = lambda do |mask, &body|
+          masks << mask
+          events << :delivery
+          raise driver.original
+        end
+        actual = driver.stub(:inject, ->(error) { events << [:injected, error] }) do
+          Thread.stub(:handle_interrupt, delivery) do
+            assert_raises(Interrupt) { driver.fault(boundary); events << :continued }
+          end
+        end
+        assert_same driver.original, actual
+        assert_equal [[:injected, actual], :delivery], events
+        assert_equal [{Interrupt => :immediate}], masks
+        assert_equal 1, driver.fault_count
+        assert driver.frame_published
+      end
+      assert_late_final_deadline_choreography
+      assert_slow_cleanup_choreography
+
+      # Only the actual readiness algorithm runs here. Restoring file/clock/sleep
+      # seams supply no child, wait receipt, real IO or native readiness proof.
+      readiness_stat_class = Struct.new(:dev, :ino, :mode, :uid, :gid, :rdev, :ftype, :nlink, :size) do
+        def file?
+          ftype == "file"
+        end
+      end
+      ready_line = "collector ready\n"
+      driver_expiry = ["driver", "raw proof driver deadline expired"]
+      readiness_expiry = ["readiness", "literal collector readiness deadline expired"]
+      readiness = lambda do |samples, expected:, change: nil, read_error: nil, late_read: false|
+        now_ns, run_ns = 0, 40_000_000
+        baseline = readiness_stat_class.new(1, 2, 0o100600, 3, 4, 0, "file", 1, 0)
+        identity = UploadProcessFixture::OwnedChild.identity(baseline)
+        observed = {stream_identities: [identity]}
+        writer = Struct.new(:stat).new(baseline)
+        opens, limits, naps = [], [], []
+        opener = lambda do |path, flags, &body|
+          bytes, size = samples.fetch([opens.length, samples.length - 1].min)
+          opens << [path, flags, observed.key?(:literal_readiness)]
+          before, after, writer.stat = Array.new(3) { baseline.dup }
+          before.size = after.size = size
+          before.ftype = "directory" if change == :nonregular
+          before.ino += 1 if change == :before_identity
+          writer.stat.ino += 1 if change == :writer_identity
+          after.ino += 1 if change == :after_identity
+          stats = [before, after]
+          reader = Object.new
+          reader.define_singleton_method(:stat) { stats.shift || after }
+          reader.define_singleton_method(:read) do |limit|
+            limits << limit
+            now_ns = run_ns if late_read
+            raise read_error if read_error
+            bytes
+          end
+          body.call(reader)
+        end
+        sleeper = lambda do |seconds|
+          naps << [seconds, now_ns, observed.key?(:literal_readiness)]
+          raise "inert readiness exceeded fixed sleep bound" if naps.length > 5
+          now_ns += (seconds * 1_000_000_000).round
+        end
+        actual = File.stub(:open, opener) do
+          UploadProcessFixture.stub(:clock_ns, -> { now_ns }) do
+            stub(:sleep, sleeper) do
+              assert_raises(read_error ? read_error.class : UploadProcessFixture::Failure) do
+                await_literal_timeout("/inert-readiness", writer, observed, run_ns)
+              end
+            end
+          end
+        end
+        if read_error
+          assert_same read_error, actual
+        else
+          assert_equal expected, [actual.kind, actual.message]
+          assert_equal run_ns, now_ns if %w[driver readiness].include?(actual.kind)
+        end
+        refute_empty opens
+        opens.each do |path, flags, already_ready|
+          assert_equal "/inert-readiness/driver.stdout", path
+          assert_equal File::RDONLY | File::NOFOLLOW | File::NONBLOCK, flags
+          refute already_ready
+        end
+        assert_equal [UploadProcessFixture::OUTPUT_LIMIT + 1] * limits.length, limits
+        naps.each do |seconds, entered_ns, _ready|
+          assert_operator seconds, :>=, 0
+          assert_operator seconds, :<=, [10_000_000, run_ns - entered_ns].min.fdiv(1_000_000_000)
+        end
+        if expected == driver_expiry
+          assert_equal({"observed" => true, "identity" => identity}, observed.fetch(:literal_readiness))
+          assert_equal samples.length, opens.length
+          assert_equal [false] * (samples.length - 1) + [true], naps.map(&:last)
+        else
+          refute observed.key?(:literal_readiness)
+        end
+        assert_empty naps if late_read
+      end
+      readiness.call([[nil, 0], ["".b, 0], ["collector ", 10], [ready_line, ready_line.bytesize]], expected: driver_expiry)
+      readiness.call([[nil, 0]], expected: readiness_expiry)
+      readiness.call([[ready_line, ready_line.bytesize - 1]], expected: readiness_expiry)
+      readiness.call([[ready_line, ready_line.bytesize]], expected: readiness_expiry, late_read: true)
+      identity_message = "literal collector transcript identity changed"
+      bound_message = "literal collector transcript changed or exceeded its bound"
+      [[:nonregular, nil, 0, identity_message], [:before_identity, nil, 0, identity_message],
+       [:writer_identity, nil, 0, identity_message], [:after_identity, nil, 0, bound_message],
+       [nil, "x" * (UploadProcessFixture::OUTPUT_LIMIT + 1), 0, bound_message],
+       [nil, nil, UploadProcessFixture::OUTPUT_LIMIT + 1, bound_message],
+       [nil, "unexpected", 10, "literal collector readiness bytes were unexpected"],
+       [nil, false, 0, bound_message]].each do |change, bytes, size, message|
+        readiness.call([[bytes, size]], expected: ["diagnostic", message], change: change)
+      end
+      readiness.call([[nil, 0]], expected: nil, read_error: IOError.new("original readiness read failure"))
     end
-    assert_equal 0, starts
+  end
+
+  def test_observer_terminal_grammar_rejects_contradictory_no_producer_context
+    # Inert grammar inputs are never wait receipts, process observations, or
+    # permission to signal. All process/task acquisition remains vetoed.
+    observer = UploadProcessFixture::CaptureObservation.new(native: MobileReleaseKit::NativeUploadValidation, root: @root)
+    observer.instance_variable_set(:@spawn, MobileReleaseKit::NativeProcessSpawn) # Pure declared ABI lookup, no native call.
+    context = Struct.new(:reserved, :ready, :custodian_child).new(nil, nil, Struct.new(:pid).new(101))
+    observer.instance_variable_set(:@session, context)
+    no_keeper = inert_terminal_frame
+    reserved = {"v" => 1, "type" => "RESERVED", "keeper_pid" => 102, "group_id" => 102, "session_id" => 101}
+    ready = {"v" => 1, "type" => "READY", "validator_pid" => 103, "group_id" => 102, "keeper_pgid" => 101}
+    no_validator = no_keeper.merge("keeper" => {"state" => "reaped", "pid" => 102, "status_kind" => "exit", "status_code" => 0},
+                                  "group" => {"state" => "retired", "id" => 102, "absent" => true})
+    with_acquisition_veto do
+      assert observer.terminal_cleanup_confirmed?(no_keeper)
+      context.reserved = reserved
+      refute observer.terminal_cleanup_confirmed?(no_keeper), "no-K cannot contradict RESERVED"
+      context.ready = ready
+      refute observer.terminal_cleanup_confirmed?(no_keeper), "no-K cannot contradict READY"
+      context.reserved = nil
+      refute observer.terminal_cleanup_confirmed?(no_keeper), "READY alone cannot authorize no-K"
+      context.reserved, context.ready = reserved, nil
+      assert observer.terminal_cleanup_confirmed?(no_validator)
+      assert observer.terminal_cleanup_confirmed?(no_validator.merge(
+        "keeper" => no_validator.fetch("keeper").merge("status_code" => 2),
+      )), "settled K failure is physical finality, not validation success"
+      [1, 7].each do |code|
+        refute observer.terminal_cleanup_confirmed?(no_validator.merge(
+          "keeper" => no_validator.fetch("keeper").merge("status_code" => code),
+        )), "default or unassigned K exit cannot confirm cleanup"
+      end
+      refute observer.terminal_cleanup_confirmed?(no_validator.merge(
+        "keeper" => no_validator.fetch("keeper").merge("status_kind" => "signal", "status_code" => Signal.list.fetch("KILL")),
+      )), "a K signal receipt cannot confirm its local cleanup"
+      context.ready = ready
+      refute observer.terminal_cleanup_confirmed?(no_validator), "no-V cannot contradict READY"
+
+      success = no_validator.merge("outcome" => "ok",
+                                   "validator" => {"state" => "reaped", "pid" => 103, "status_kind" => "exit", "status_code" => 0})
+      assert observer.terminal_cleanup_confirmed?(success)
+      invalid = [success.merge("v" => 1.0), success.merge("extra" => true),
+                 success.merge("outcome" => "rejected"),
+                 success.merge("keeper" => success.fetch("keeper").merge("status_code" => 2)),
+                 success.merge("cleanup" => "unknown"),
+                 success.merge("group" => success.fetch("group").merge("absent" => false)),
+                 success.merge("keeper" => success.fetch("keeper").merge("pid" => 104))]
+      invalid << success.merge("outcome" => "failed", "validator" => success.fetch("validator").merge(
+        "status_kind" => "signal", "status_code" => MobileReleaseKit::NativeProcessSpawn.nsig,
+      ))
+      invalid << success.merge("outcome" => "rejected", "validator" => success.fetch("validator").merge(
+        "status_kind" => "signal", "status_code" => Signal.list.fetch("KILL"),
+      ))
+      invalid.each { |frame| refute observer.terminal_cleanup_confirmed?(frame), frame.inspect }
+    end
+  end
+
+  def test_protocol_rejects_every_unused_late_frame_after_final
+    protocol = MobileReleaseKit::NativeUploadProcess::Protocol
+    nsig = MobileReleaseKit::NativeProcessSpawn.nsig
+    terminal = inert_terminal_frame
+    with_acquisition_veto do
+      inert_late_frames.each do |late|
+        decoder = protocol::Decoder.new(direction: :c_to_o, nsig: nsig)
+        bytes = protocol.encode(terminal, direction: :c_to_o, nsig: nsig)
+        assert_equal [terminal], decoder.feed(bytes)
+        assert_raises(MobileReleaseKit::NativeUploadProcess::ProtocolError) do
+          decoder.feed(protocol.encode(late, direction: :c_to_o, nsig: nsig))
+        end
+        # A failed post-terminal feed is absorbing, not an ignored duplicate.
+        assert_raises(MobileReleaseKit::NativeUploadProcess::ProtocolError) { decoder.feed("") }
+        assert_raises(MobileReleaseKit::NativeUploadProcess::ProtocolError) { decoder.eof }
+      end
+    end
+  end
+
+  def test_observer_hooks_preserve_original_failures_and_foreign_replacements
+    # Only an unreachable toy class is modified. No production method, live
+    # task, descriptor, or native acquisition is supplied by these controls.
+    # Each model gets an inert diagnostic key, never the real filesystem root.
+    # The actual observe arbitration and its UNKNOWN entries remain untouched.
+    real_root = @root
+    real_root_entries = Dir.children(real_root).sort
+    real_root_unresolved = UploadProcessFixture.cleanup_unresolved?(real_root)
+    refute real_root_unresolved
+    domain_latches = %i[@process_domain_failed @domain_disposal_required].to_h do |name|
+      [name, UploadProcessFixture.instance_variable_get(name)]
+    end
+    prior_unknowns = (UploadProcessFixture.instance_variable_get(:@unresolved_roots) || {}).dup
+    @inert_hook_observations = []
+    UploadProcessFixture.retain_process_case!(self) # Keep models through Minitest result copying/GC, without latching failure.
+    %w[install-before-effect return-publication restore-before-effect foreign-replacement].each do |fault|
+      UploadProcessFixture.assert_domain_reusable!
+      model_root = Object.new
+      target = Class.new do
+        def observed = :original
+      end
+      original = target.instance_method(:observed)
+      primary = IOError.new("first toy observation failure: #{fault}")
+      secondary = RuntimeError.new("toy restore failed")
+      real_define = Module.instance_method(:define_method).bind(target)
+      real_lookup = Module.instance_method(:instance_method).bind(target)
+      define_calls = lookup_calls = 0
+      target.define_singleton_method(:define_method) do |*arguments, &body|
+        define_calls += 1
+        raise primary if fault == "install-before-effect" && define_calls == 1
+        raise secondary if fault == "restore-before-effect" && define_calls == 2
+        real_define.call(*arguments, &body)
+      end
+      target.define_singleton_method(:instance_method) do |name|
+        lookup_calls += 1
+        raise primary if fault == "return-publication" && lookup_calls == 2
+        real_lookup.call(name)
+      end
+      observer_class = Class.new(UploadProcessFixture::CaptureObservation) do
+        define_method(:install) do
+          UploadProcessFixture::CaptureObservation.current = self
+          @hooks = UploadProcessFixture::CaptureObservation::Hooks.new
+          @hooks.wrap(target, :observed) do |saved, _object, arguments, keywords, block|
+            [:wrapped, saved.call(*arguments, **keywords, &block)]
+          end
+        end
+      end
+      observer = observer_class.new(native: MobileReleaseKit::NativeUploadValidation, root: model_root)
+      retained = {fault: fault, root: model_root, observer: observer, target: target,
+                  original: original, primary: primary, secondary: secondary}
+      @inert_hook_observations << retained
+      begin
+        with_acquisition_veto do
+          error = assert_raises(IOError) do
+            observer.observe do
+              target.send(:define_method, :observed) { :foreign } if fault == "foreign-replacement"
+              raise primary
+            end
+          end
+          assert_same primary, error
+          assert_equal "first toy observation failure: #{fault}", error.message
+          snapshot = observer.snapshot
+          assert_nil observer.session
+          assert_nil observer.source_origins
+          assert_nil observer.custodian_spec
+          assert_empty observer.events
+          %i[@slots @attempts @constructed_slots @closed_launches @finished_creations
+             @actual_joins @actual_closes @actual_eofs @actual_waits].each do |name|
+            assert_empty observer.instance_variable_get(name), name
+          end
+          refute observer.instance_variable_get(:@creator_gate_entered)
+          assert_nil snapshot.fetch("sourceOrigins")
+          assert_empty snapshot.fetch("tasks")
+          assert_empty snapshot.fetch("leases")
+          assert_empty snapshot.fetch("streams")
+          if fault == "install-before-effect"
+            assert snapshot.fetch("hooksRestored")
+            assert_empty snapshot.fetch("observerErrors")
+            assert snapshot.fetch("noProducers")
+            refute snapshot.fetch("unknown")
+            assert_equal :original, target.new.observed
+            assert_equal original, real_lookup.call(:observed)
+          else
+            refute snapshot.fetch("hooksRestored"), fault
+            assert snapshot.fetch("unknown"), fault
+            refute snapshot.fetch("noProducers"), fault
+            refute snapshot.fetch("finalized"), fault
+            expected = fault == "restore-before-effect" ? "RuntimeError" : "changed_observation_hook"
+            assert_includes snapshot.fetch("observerErrors"), expected
+            assert_equal fault == "foreign-replacement" ? :foreign : [:wrapped, :original], target.new.observed
+          end
+          assert_nil UploadProcessFixture::CaptureObservation.current
+          assert_equal fault != "install-before-effect", UploadProcessFixture.cleanup_unresolved?(model_root)
+          assert_same real_root, @root
+          assert_equal real_root_entries, Dir.children(real_root).sort
+          assert_equal real_root_unresolved, UploadProcessFixture.cleanup_unresolved?(real_root)
+          domain_latches.each do |name, value|
+            assert_same value, UploadProcessFixture.instance_variable_get(name), name
+          end
+          UploadProcessFixture.assert_domain_reusable!
+        end
+      ensure
+        retained[:hooks] = observer.instance_variable_get(:@hooks)
+        retained[:snapshot] = observer.instance_variable_get(:@snapshot) # Original snapshot, not reconstructed evidence.
+        # This only discards an inert toy hook. It does not revise the failed
+        # observer snapshot or clear any retained model/real UNKNOWN registry.
+        real_define.call(:observed, original)
+      end
+    end
+    unknowns = UploadProcessFixture.instance_variable_get(:@unresolved_roots)
+    prior_unknowns.each { |key, value| assert_same value, unknowns.fetch(key) }
+    assert_equal 4, @inert_hook_observations.map { |entry| entry.fetch(:root) }.uniq.length
+    @inert_hook_observations.each do |entry|
+      assert_same entry.fetch(:snapshot), entry.fetch(:observer).instance_variable_get(:@snapshot)
+      assert_same entry.fetch(:hooks), entry.fetch(:observer).instance_variable_get(:@hooks)
+      expected_unknown = entry.fetch(:fault) != "install-before-effect"
+      assert_equal expected_unknown, entry.fetch(:snapshot).fetch("unknown")
+      assert_equal expected_unknown, unknowns.key?(entry.fetch(:root))
+      assert_same true, unknowns.fetch(entry.fetch(:root)) if expected_unknown
+    end
+  end
+
+  def test_real_observer_finality_requires_exact_wait_join_close_and_eof_witnesses
+    # This method CONTAINS a real native capture and is never a fake-only local
+    # selector. The following negative variants become inert only after its
+    # actual C/K/V/IO/tasks are genuinely finalized.
+    @retain_raw_evidence = true
+    native = MobileReleaseKit::NativeUploadValidation
+    UploadProcessFixture.assert_domain_reusable!
+    observer = UploadProcessFixture::CaptureObservation.new(native: native, root: @root)
+    output = observer.observe do
+      native.capture(
+        {"LANG" => "C", "LC_ALL" => "C"},
+        [File.realpath(RbConfig.ruby), "--disable=rubyopt,gems", "-e", "STDOUT.write('observed capture')"],
+        File.expand_path("../..", __dir__), max_seconds: UploadProcessFixture::READINESS_LIMIT,
+        max_output_bytes: 1_024, label: "Synthetic observation", failure_message: "synthetic observation rejected",
+      )
+    end
+    assert_equal "observed capture", output
+    baseline = observer.snapshot
+    assert_native_observation(baseline, finality: :finalized)
+    UploadProcessFixture.atomic_json(File.join(@root, "observation-baseline.json"), baseline)
+    session = observer.session
+    original_receipt, original_frame = session.custodian_receipt, session.final
+    original_frame_bytes = JSON.generate(original_frame)
+    assert_instance_of Process::Status, original_receipt.raw_status
+    assert_equal original_receipt.pid, original_receipt.raw_status.pid
+
+    witnesses = [["custodian-wait", :@actual_waits, ->(pair) { pair.first.equal?(session.custodian_child) }]]
+    [session.capture_slot, session.creator_slot].each_with_index do |slot, index|
+      witnesses << ["task-#{index}-join", :@actual_joins, ->(thread) { thread.equal?(slot.thread) }]
+    end
+    session.leases.each do |role, lease|
+      next unless lease.state == :closed
+      witnesses << ["#{role}-close", :@actual_closes, ->(actual) { actual.equal?(lease) }]
+    end
+    %i[stdout_read stderr_read status_read].each do |role|
+      io = session.leases.fetch(role).io
+      witnesses << ["#{role}-eof", :@actual_eofs, ->(actual) { actual.equal?(io) }]
+    end
+    with_acquisition_veto do
+      # Keep the claimed booleans true: only the independent, actual witness
+      # changes. Otherwise a failure could be a vacuous false-flag assertion.
+      session.stub(:settled?, true) do
+        session.stub(:finality_confirmed?, true) do
+          witnesses.each do |label, field, missing|
+            original = observer.instance_variable_get(field)
+            assert original.any?(&missing), label
+            begin
+              observer.instance_variable_set(field, original.reject(&missing))
+              assert_inert_observer_rejection(observer, label)
+            ensure
+              observer.instance_variable_set(field, original)
+            end
+          end
+          {custodian_receipt: nil, custodian_child: nil, stdout_eof: false,
+           stderr_eof: false, status_eof: false, final: nil, retained_unknown?: true}.each do |method, value|
+            session.stub(method, value) { assert_inert_observer_rejection(observer, "fact-#{method.to_s.delete('?')}") }
+          end
+          [session.capture_slot, session.creator_slot].each_with_index do |slot, index|
+            %i[joined? finished? launch_retired?].each do |method|
+              slot.stub(method, false) { assert_inert_observer_rejection(observer, "task-#{index}-#{method.to_s.delete('?')}") }
+            end
+          end
+        end
+      end
+    end
+    # Decoder already rejects post-FINAL transport. This separately exercises
+    # the owner's absorbing boundary against directly supplied late frames.
+    context = [session.hello, session.reserved, session.ready, session.validator_status, session.phase]
+    with_acquisition_veto do
+      inert_late_frames.each do |late|
+        assert_raises(MobileReleaseKit::NativeUploadProcess::ProtocolError) { session.__send__(:receive_frame, late) }
+        assert_equal context, [session.hello, session.reserved, session.ready, session.validator_status, session.phase]
+        assert_same original_frame, session.final
+      end
+    end
+    assert_same original_receipt, session.custodian_receipt
+    assert_same original_frame, session.final
+    assert_equal original_frame_bytes, JSON.generate(session.final)
+    assert_equal baseline, observer.snapshot
+    assert_native_observation(observer.build_snapshot, finality: :finalized)
+    assert_nil UploadProcessFixture::CaptureObservation.current
+    refute session.retained_unknown?
+    @retain_raw_evidence = false
   end
 
   private
+
+  def assert_native_order_failure_projection
+    # Pure projections and original Lifetime unwinds with inert operations. No
+    # marker in these controls is a native proof or a process/wait receipt.
+    fixture_class = self.class
+    predicates = %w[proof-version proof-kind case source-binding proof-failures proof-status
+                    expected-unknown original-accepted result-kind driver-status]
+    labels = [
+      "original failed fixture result", "same first object through original boundaries",
+      "unchanged original first message/status", "unchanged original caller message/status",
+      "no original upload acceptance", "original shared creator/capture latch", "actual first and later latch returns",
+      "actual latch released later fault", "actual caller delivery and rescue", "actual original stdin close",
+      "actual capture/creator joins", "actual original native closes", "actual original native EOFs", "actual original C wait",
+      "no fixture fallback or pending cancellation", "ownedDescriptorsClosed", "watchdogJoined", "injectorsJoined",
+      "handlersRestored", "registryInactive", "no fixture cleanup errors", "observation restored", "unchanged original sources",
+      "actual clean body then original cleanup fault", "unknown original task/session retained", "real pre-tail native success not finality",
+      "actual body error recorded", "actual settled native cancellation",
+    ]
+    callbacks = {
+      "test_native_task_error_precedes_later_caller_cancellation_at_the_original_latch" =>
+        %w[native-order-task-before-caller-interrupt native-order-task-before-caller-system-exit],
+      "test_native_caller_cancellation_precedes_later_task_ioerror_at_the_original_latch" =>
+        %w[native-order-caller-before-task-interrupt native-order-caller-before-task-system-exit],
+      "test_native_cleanup_error_precedes_later_caller_interrupt_and_retains_unknown" => %w[native-order-cleanup-before-caller-interrupt],
+      "test_native_cleanup_error_precedes_later_caller_system_exit_and_retains_unknown" => %w[native-order-cleanup-before-caller-system-exit],
+    }
+    assert_equal predicates, NATIVE_ORDER_FAILURE_PREDICATES
+    assert_equal labels, NATIVE_ORDER_PROOF_FAILURES
+    assert_equal callbacks.transform_keys { |method| "NativeUploadValidationTest##{method}" }, NATIVE_ORDER_FAILURE_CALLBACK_MODES
+    assert_equal ORDER_CASES.keys, callbacks.values.flatten
+    sources = {"original-source" => "private-marker"}
+    status_class = Struct.new(:exitstatus)
+    formatter = fixture_class.method(:native_order_failure_line)
+    inputs = lambda do |mode|
+      unknown = ORDER_CASES.fetch(mode).first == "cleanup-before-caller"
+      {mode: mode, expected_sources: sources, status: status_class.new(0),
+       proof: {"version" => 1, "kind" => "native-order-observation", "case" => mode, "sourceSha256" => sources,
+               "failures" => [], "baseDriverReturn" => 1, "expectedUnknown" => unknown, "originalAccepted" => false},
+       result: {"kind" => unknown ? "fixture-cleanup" : "unexpected"}}
+    end
+    ORDER_CASES.each do |mode, (family, _kind)|
+      value = inputs.call(mode)
+      assert_nil formatter.call(**value)
+      applicable = labels.first(23) + (family == "cleanup-before-caller" ? labels[23, 3] : labels.last(2))
+      value[:proof].merge!("version" => 0, "kind" => "private-marker", "case" => "private-marker", "sourceSha256" => {},
+        "failures" => applicable, "baseDriverReturn" => 0, "expectedUnknown" => nil, "originalAccepted" => nil)
+      value[:result]["kind"] = "private-marker"
+      value[:status].exitstatus = nil
+      packet = formatter.call(**value)
+      assert_equal "#{NATIVE_ORDER_FAILURE_PREFIX}#{JSON.generate({"schema" => 1, "mode" => mode,
+        "failedPredicates" => predicates, "proofFailures" => applicable})}\n", packet
+      assert packet.ascii_only?
+      assert packet.frozen?
+      assert_operator packet.bytesize, :<=, 2048
+      refute_includes packet, "private-marker"
+      rejected = [labels - applicable, [applicable.last, applicable.first], [applicable.first] * 2,
+                  ["private-marker"], [true], nil]
+      rejected.each do |failures|
+        assert_nil formatter.call(**value.merge(proof: value[:proof].merge("failures" => failures)))
+      end
+    end
+    mode = ORDER_CASES.keys.first
+    mutations = [->(v) { v[:proof]["version"] = 2 }, ->(v) { v[:proof]["kind"] = "private-marker" },
+      ->(v) { v[:proof]["case"] = "private-marker" }, ->(v) { v[:proof]["sourceSha256"] = {} },
+      ->(v) { v[:proof]["failures"] = ["actual body error recorded"] }, ->(v) { v[:proof]["baseDriverReturn"] = 0 },
+      ->(v) { v[:proof]["expectedUnknown"] = nil }, ->(v) { v[:proof]["originalAccepted"] = nil },
+      ->(v) { v[:result]["kind"] = "pass" }, ->(v) { v[:status].exitstatus = nil }]
+    mutations.zip(predicates).each do |mutate, predicate|
+      value = inputs.call(mode)
+      mutate.call(value)
+      record = JSON.parse(formatter.call(**value).delete_prefix(NATIVE_ORDER_FAILURE_PREFIX))
+      assert_equal [predicate], record.fetch("failedPredicates")
+      assert_equal value[:proof].fetch("failures"), record.fetch("proofFailures")
+    end
+    invalid_inputs = [->(v) { v[:proof].delete("version") }, ->(v) { v[:proof] = nil },
+      ->(v) { v[:result] = {} }, ->(v) { v[:expected_sources] = nil }, ->(v) { v[:mode] = "private-marker" }]
+    invalid_inputs.each do |mutate|
+      value = inputs.call(mode)
+      mutate.call(value)
+      assert_nil formatter.call(**value)
+    end
+
+    exercise = lambda do |selected: mode, write_result: :full, expiry: nil, mutate: nil,
+                            publication_error: nil, projection_error: nil, callback: nil|
+      value = inputs.call(selected)
+      value[:proof]["failures"] = ["same first object through original boundaries"]
+      expected_packet = formatter.call(**value)
+      method_name = callback || callbacks.find { |_method, modes| modes.include?(selected) }.first
+      now, sequence, depth = 1, nil, 0
+      state = escaped = dispatch = nil
+      events, writes, observations = [], [], []
+      policy = Object.new
+      policy.define_singleton_method(:install) { events << :install }
+      policy.define_singleton_method(:cleanup_depth) { depth }
+      policy.define_singleton_method(:cleanup) do |&body|
+        depth += 1
+        begin
+          body.call
+        ensure
+          depth -= 1
+        end
+      end
+      policy.define_singleton_method(:restore) { |&body| body.call; events << :restored }
+      policy.define_singleton_method(:errors) { [] }
+      policy.define_singleton_method(:replay_custom_pending) { events << :replay }
+      run = lambda do |**arguments|
+        dispatch, state = arguments, arguments.fetch(:order_failure_state)
+        events << :run
+        begin
+          UploadProcessFixture.lifetime(deadline_ns: 10) do |frame|
+            begin
+              frame.active do
+                reject = -> { UploadProcessFixture.reject_native_order_proof!(**value, deadline_ns: 10, state: state) }
+                if publication_error
+                  original_writer = state.method(:[]=)
+                  state.stub(:[]=, ->(key, item) { raise publication_error if key == :mode; original_writer.call(key, item) }) { reject.call }
+                else
+                  reject.call
+                end
+              end
+            ensure
+              frame.cleanup { events << :cleanup }
+            end
+          end
+        rescue Exception => error
+          escaped = error
+          raise
+        ensure
+          mutate.call(state) if mutate
+          events << :unwound
+          now = 10 if expiry == :before_report
+          sequence = [1, 10] if expiry == :before_write
+        end
+      end
+      sink = lambda do |packet|
+        observations << [state[:rejection], state[:report_attempted], state[:write_attempted], events.dup,
+          UploadProcessFixture.instance_variable_get(:@cancellation_scope)]
+        writes << packet
+        raise write_result if write_result.is_a?(Exception)
+        write_result == :short ? 1 : packet.bytesize
+      end
+      project = projection_error ? ->(**) { raise projection_error } : formatter
+      actual = nil
+      UploadProcessFixture::CancellationScope.stub(:new, policy) do
+        Thread.current.stub(:pending_interrupt?, false) do
+          UploadProcessFixture.stub(:clock_ns, -> { sequence ? sequence.shift || now : now }) do
+            UploadProcessFixture.stub(:run, run) do
+              stub(:proof_source_snapshot, sources) do
+                stub(:name, method_name) do
+                  fixture_class.stub(:native_order_failure_line, project) do
+                    STDERR.stub(:write, sink) do
+                      actual = assert_raises(publication_error ? publication_error.class : UploadProcessFixture::Failure) do
+                        native_order_case(*ORDER_CASES.fetch(selected))
+                      end
+                      now, sequence = 1, nil
+                      fixture_class.report_native_order_failure(state, actual,
+                        callback: "#{self.class.name}##{method_name}", mode: selected)
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+      assert_same escaped, actual
+      assert_equal %i[run install cleanup restored replay unwound], events
+      assert_nil UploadProcessFixture.instance_variable_get(:@cancellation_scope)
+      assert_equal({platform: "native", root: @root, parameters: {}, mode: selected},
+        dispatch.reject { |key, _| %i[order_failure_state primary_failure_state].include?(key) })
+      assert_equal ORDER_CASES.fetch(selected).first != "cleanup-before-caller", dispatch.key?(:primary_failure_state)
+      assert_empty dispatch[:primary_failure_state] if dispatch.key?(:primary_failure_state)
+      assert_operator writes.length, :<=, 1
+      observations.each do |original, attempted, writing, prior, scope|
+        assert_same actual, original
+        assert_equal [true, true, events, nil], [attempted, writing, prior, scope]
+      end
+      writes.each { |packet| assert_equal expected_packet, packet }
+      {state: state, original: actual, writes: writes, inputs: value}
+    end
+    states = [mode, "native-order-cleanup-before-caller-interrupt"].map do |selected|
+      outcome = exercise.call(selected: selected)
+      state, value = outcome.values_at(:state, :inputs)
+      assert_equal 1, outcome.fetch(:writes).length
+      %i[proof result status expected_sources].each { |key| assert_same value.fetch(key), state.fetch(key), key }
+      assert_same outcome.fetch(:original), state.fetch(:rejection)
+      assert_equal ["fixture-result", "native order proof rejected"], [outcome[:original].kind, outcome[:original].message]
+      state
+    end
+    refute_same(*states)
+    [:short, IOError.new("private-marker"), Interrupt.new("private-marker"), SystemExit.new(19, "private-marker")].each do |write_result|
+      outcome = exercise.call(write_result: write_result)
+      assert_equal 1, outcome.fetch(:writes).length
+      if write_result.is_a?(Exception)
+        assert_same write_result, outcome.fetch(:state).fetch(:diagnostic_error)
+      else
+        assert_equal false, outcome.fetch(:state).fetch(:write_complete)
+      end
+    end
+    %i[before_report before_write].each { |expiry| assert_empty exercise.call(expiry: expiry).fetch(:writes) }
+    [->(s) { s.delete(:expected_sources) }, ->(s) { s.delete(:rejection) },
+     ->(s) { s[:rejection] = UploadProcessFixture::Failure.new("fixture-result", "private-marker") },
+     ->(s) { s[:mode] = ORDER_CASES.keys.last }, ->(s) { s[:proof] = nil }, ->(s) { s.freeze }].each do |mutate|
+      assert_empty exercise.call(mutate: mutate).fetch(:writes)
+    end
+    assert_empty exercise.call(callback: callbacks.keys.last).fetch(:writes)
+    interruption = Interrupt.new("private-marker")
+    assert_empty exercise.call(projection_error: interruption).fetch(:writes)
+    [interruption, SystemExit.new(21, "private-marker")].each do |publication_error|
+      outcome = exercise.call(publication_error: publication_error)
+      assert_same publication_error, outcome.fetch(:original)
+      refute_same publication_error, outcome.fetch(:state).fetch(:rejection)
+      assert_empty outcome.fetch(:writes)
+    end
+    successful = %w[driverJoined knownProcessesDead watchdogJoined tasksJoined injectorsJoined ownedDescriptorsClosed
+                     handlersRestored registryInactive].to_h { |key| [key, true] }.merge("pendingInterrupt" => false, "cleanupErrors" => [])
+    writes, handoffs = [], []
+    UploadProcessFixture.stub(:run, ->(**arguments) { handoffs << arguments.fetch(:order_failure_state); successful }) do
+      stub(:proof_source_snapshot, sources) do
+        STDERR.stub(:write, ->(packet) { writes << packet; packet.bytesize }) do
+          state = {}
+          assert_same successful, process_case(mode, order_failure_state: state)
+          assert_empty state
+          successful["driverJoined"] = false
+          [mode, ORDER_CASES.keys.last].each do |selected|
+            assert_raises(Minitest::Assertion) { native_order_case(*ORDER_CASES.fetch(selected)) }
+          end
+        end
+      end
+    end
+    assert_empty writes
+    assert handoffs.all?(&:empty?)
+    assert_equal 3, handoffs.map(&:object_id).uniq.length
+  end
+
+  def assert_native_setup_failure_projection
+    # Only pure data and the original Lifetime/reporting control flow execute.
+    # No double here is native custody, a wait receipt, or cleanup authority.
+    fixture_class = self.class
+    modes = %w[native-setup-interrupt native-setup-system-exit native-setup-io-error]
+    callback = "NativeUploadValidationTest#test_cancellation_or_io_error_at_first_setup_step_cleans_up_the_real_child"
+    result_keys = %w[ready firstCloseEntered originalCloseCompleted nativeOriginalErrorPreserved watchdogStarted
+      watchdogIntervened fallbackUsed deadBeforeFallback ownedDescriptorsClosed watchdogJoined tasksJoined injectorsJoined
+      handlersRestored registryInactive pendingInterrupt cleanupErrorsEmpty]
+    native_keys = %w[finalized noProducers settled unknown hooksRestored]
+    assert_equal modes, UploadProcessFixture::NATIVE_SETUP_FAILURE_MODES
+    assert_equal callback, NATIVE_SETUP_FAILURE_CALLBACK
+    assert_equal result_keys, NATIVE_SETUP_RESULT_CHECKS
+    assert_equal native_keys, NATIVE_SETUP_NATIVE_CHECKS
+    status_class = Struct.new(:exitstatus) # Comparison data only.
+    status = status_class.new(1)
+    raw = result_keys.reject { |key| key == "cleanupErrorsEmpty" }.to_h { |key| [key, true] }
+    raw.merge!("kind" => "fixture-cleanup", "errorClass" => "UploadProcessFixture::Failure", "nativeErrorClass" => "Interrupt",
+      "cleanupErrors" => ["private-marker"], "error" => "private-marker", "private" => "private-marker",
+      "nativeObservation" => native_keys.to_h { |key| [key, false] }.merge("private" => "private-marker"))
+    formatter = fixture_class.method(:native_setup_failure_line)
+    expected = {"schema" => 1, "mode" => modes.first, "failedPredicates" => %w[result-kind driver-status],
+      "resultKind" => "fixture-cleanup", "driverExitStatus" => 1, "errorCategory" => "fixture-error", "nativeErrorCategory" => "interrupt",
+      "resultChecks" => result_keys.to_h { |key| [key, key != "cleanupErrorsEmpty"] },
+      "nativeChecks" => native_keys.to_h { |key| [key, false] }}
+    modes.each do |mode|
+      packet = formatter.call(mode: mode, result: raw, status: status)
+      assert_equal "#{NATIVE_SETUP_FAILURE_PREFIX}#{JSON.generate(expected.merge("mode" => mode))}\n", packet
+      assert packet.ascii_only?
+      assert packet.frozen?
+      assert_operator packet.bytesize, :<=, 2048
+      refute_includes packet, "private-marker"
+    end
+    project = lambda do |value, code = 1|
+      packet = formatter.call(mode: modes.first, result: value, status: status_class.new(code))
+      JSON.parse(packet.delete_prefix(NATIVE_SETUP_FAILURE_PREFIX)) if packet
+    end
+    assert_nil project.call(raw.merge("kind" => "pass"), 0)
+    assert_equal ["result-kind"], project.call(raw, 0).fetch("failedPredicates")
+    assert_equal ["driver-status"], project.call(raw.merge("kind" => "pass"), 255).fetch("failedPredicates")
+    [nil, true, -1, 256, 1.0].each { |code| assert_nil formatter.call(mode: modes.first, result: raw, status: status_class.new(code)) }
+    ["native-setup-no-cleanup", "native-proof-entered-io", nil, :native_setup_interrupt].each do |mode|
+      assert_nil formatter.call(mode: mode, result: raw, status: status)
+    end
+    assert_nil formatter.call(mode: modes.first, result: nil, status: status)
+    kinds = %w[pass fixture-cleanup readiness setup-fixture-fault process-observation process-ownership fixture-result unexpected]
+    assert_equal kinds, NATIVE_SETUP_FAILURE_KINDS
+    (kinds.map { |value| [value, value] } + [["private-marker", "other"], [nil, "invalid"], [true, "invalid"]]).each do |value, label|
+      assert_equal label, project.call(raw.merge("kind" => value)).fetch("resultKind")
+    end
+    categories = {"UploadProcessFixture::Failure" => "fixture-error", "MobileReleaseKit::ContractError" => "contract-error",
+      "MobileReleaseKit::NativeUploadProcess::LifecycleError" => "native-lifecycle-error", "IOError" => "io-error",
+      "Interrupt" => "interrupt", "SystemExit" => "system-exit"}
+    assert_equal categories, NATIVE_SETUP_FAILURE_CATEGORIES
+    (categories.to_a + [[nil, "none"], ["private-marker", "other"], [false, "invalid"]]).each do |value, label|
+      row = project.call(raw.merge("errorClass" => value, "nativeErrorClass" => value))
+      assert_equal [label, label], row.values_at("errorCategory", "nativeErrorCategory")
+      refute_includes JSON.generate(row), "private-marker"
+    end
+    missing = project.call({})
+    assert_equal ["missing"] * 3, missing.values_at("resultKind", "errorCategory", "nativeErrorCategory")
+    assert_equal({"resultChecks" => result_keys.to_h { |key| [key, "missing"] },
+      "nativeChecks" => native_keys.to_h { |key| [key, "missing"] }}, missing.slice("resultChecks", "nativeChecks"))
+    malformed = result_keys.to_h { |key| [key, "private-marker"] }.merge("cleanupErrors" => nil, "nativeObservation" => nil)
+    invalid = project.call(malformed)
+    assert_equal ["invalid"], invalid.fetch("resultChecks").values.uniq
+    assert_equal ["invalid"], invalid.fetch("nativeChecks").values.uniq
+    assert_equal ["missing"], project.call(raw.merge("nativeObservation" => {})).fetch("nativeChecks").values.uniq
+    explicit_false = raw.merge(result_keys.to_h { |key| [key, false] }).merge("cleanupErrors" => [])
+    assert_equal result_keys.to_h { |key| [key, key == "cleanupErrorsEmpty"] }, project.call(explicit_false).fetch("resultChecks")
+    assert_equal native_keys.to_h { |key| [key, "invalid"] }, project.call(raw.merge(
+      "nativeObservation" => native_keys.to_h { |key| [key, 0] })).fetch("nativeChecks")
+
+    exercise = lambda do |selected: modes.first, write_result: :full, expiry: nil, mutate: nil,
+                            publication_error: nil, projection_error: nil, callback_name: callback.split("#", 2).last,
+                            restoration_error: nil, result: raw|
+      now, sequence, depth = 1, nil, 0
+      state = escaped = dispatch = nil
+      events, writes, projections, observations = [], [], [], []
+      policy = Object.new
+      policy.define_singleton_method(:install) { events << :install }
+      policy.define_singleton_method(:cleanup_depth) { depth }
+      policy.define_singleton_method(:cleanup) do |&body|
+        depth += 1
+        begin
+          body.call
+        ensure
+          depth -= 1
+        end
+      end
+      policy.define_singleton_method(:restore) { |&body| body.call; events << :restored }
+      policy.define_singleton_method(:errors) { restoration_error ? [restoration_error] : [] }
+      policy.define_singleton_method(:replay_custom_pending) { events << :replay }
+      run = lambda do |**arguments|
+        dispatch, state = arguments, arguments.fetch(:setup_failure_state)
+        events << :run
+        begin
+          UploadProcessFixture.lifetime(deadline_ns: 10) do |frame|
+            begin
+              frame.active do
+                reject = -> { UploadProcessFixture.reject_native_setup_result!(mode: selected, result: result,
+                  status: status, deadline_ns: 10, state: state) }
+                if publication_error
+                  original_writer = state.method(:[]=)
+                  state.stub(:[]=, ->(key, value) { raise publication_error if key == :mode; original_writer.call(key, value) }) { reject.call }
+                else
+                  reject.call
+                end
+              end
+            ensure
+              frame.cleanup { events << :cleanup }
+            end
+          end
+        rescue Exception => error
+          escaped = error
+          raise
+        ensure
+          mutate.call(state) if mutate
+          events << :unwound
+          now = 10 if expiry == :before_report
+          sequence = [1, 10] if expiry == :before_write
+        end
+      end
+      sink = lambda do |packet|
+        observations << [state[:rejection], state[:report_attempted], state[:write_attempted], events.dup,
+          UploadProcessFixture.instance_variable_get(:@cancellation_scope)]
+        writes << packet
+        raise write_result if write_result.is_a?(Exception)
+        write_result == :short ? 1 : packet.bytesize
+      end
+      projection = lambda do |**arguments|
+        projections << arguments
+        raise projection_error if projection_error
+        formatter.call(**arguments)
+      end
+      actual = nil
+      UploadProcessFixture::CancellationScope.stub(:new, policy) do
+        Thread.current.stub(:pending_interrupt?, false) do
+          UploadProcessFixture.stub(:clock_ns, -> { sequence ? sequence.shift || now : now }) do
+            UploadProcessFixture.stub(:run, run) do
+              stub(:name, callback_name) do
+                fixture_class.stub(:native_setup_failure_line, projection) do
+                  STDERR.stub(:write, sink) do
+                    actual = assert_raises(publication_error ? publication_error.class : UploadProcessFixture::Failure) { process_case(selected) }
+                    now, sequence = 1, nil
+                    fixture_class.report_native_setup_failure(state, actual,
+                      callback: "#{self.class.name}##{callback_name}", mode: selected)
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+      assert_same escaped, actual
+      assert_equal %i[run install cleanup restored replay unwound], events
+      assert_nil UploadProcessFixture.instance_variable_get(:@cancellation_scope)
+      assert_equal({platform: "native", root: @root, parameters: {}, mode: selected},
+        dispatch.reject { |key, _| %i[primary_failure_state setup_failure_state].include?(key) })
+      assert_empty dispatch.fetch(:primary_failure_state)
+      refute_same state, dispatch.fetch(:primary_failure_state)
+      assert_operator writes.length, :<=, 1
+      assert_operator projections.length, :<=, 1
+      observations.each do |original, attempted, writing, prior, scope|
+        assert_same actual, original
+        assert_equal [true, true, events, nil], [attempted, writing, prior, scope]
+      end
+      writes.each { |packet| assert_equal formatter.call(mode: selected, result: result, status: status), packet }
+      {state: state, original: actual, writes: writes, projections: projections}
+    end
+    states = modes.map do |mode|
+      outcome = exercise.call(selected: mode)
+      state = outcome.fetch(:state)
+      assert_equal 1, outcome.fetch(:writes).length
+      assert_same raw, state.fetch(:result)
+      assert_same status, state.fetch(:status)
+      assert_same outcome.fetch(:original), state.fetch(:rejection)
+      assert_equal [mode, 10, true], state.values_at(:mode, :deadline_ns, :write_complete)
+      assert_equal ["fixture-result", "unexpected fixture result kind/status"], [outcome[:original].kind, outcome[:original].message]
+      state
+    end
+    assert_equal 3, states.map(&:object_id).uniq.length
+    [:short, IOError.new("private-marker"), Interrupt.new("private-marker"), SystemExit.new(19, "private-marker")].each do |write_result|
+      outcome = exercise.call(write_result: write_result)
+      assert_equal 1, outcome.fetch(:writes).length
+      if write_result.is_a?(Exception)
+        assert_same write_result, outcome.fetch(:state).fetch(:diagnostic_error)
+      else
+        assert_equal false, outcome.fetch(:state).fetch(:write_complete)
+      end
+    end
+    %i[before_report before_write].each do |expiry|
+      outcome = exercise.call(expiry: expiry)
+      assert_empty outcome.fetch(:writes)
+      assert_equal expiry == :before_report ? 0 : 1, outcome.fetch(:projections).length
+    end
+    [->(s) { s.delete(:status) }, ->(s) { s.delete(:result) }, ->(s) { s.delete(:rejection) },
+     ->(s) { s[:rejection] = UploadProcessFixture::Failure.new("fixture-result", "private-marker") },
+     ->(s) { s[:mode] = modes.last }, ->(s) { s[:result] = nil }, ->(s) { s[:deadline_ns] = 10.0 },
+     ->(s) { s[:result] = raw.merge("kind" => "pass"); s[:status] = status_class.new(0) },
+     ->(s) { s.freeze }].each do |mutate|
+      assert_empty exercise.call(mutate: mutate).fetch(:writes)
+    end
+    assert_empty exercise.call(callback_name: "test_first_close_requires_the_actual_intentional_error_not_redacted_lookalike").fetch(:writes)
+    interruption = Interrupt.new("private-marker")
+    outcome = exercise.call(projection_error: interruption)
+    assert_empty outcome.fetch(:writes)
+    assert_same interruption, outcome.fetch(:state).fetch(:diagnostic_error)
+    assert_equal 1, exercise.call(restoration_error: IOError.new("later private restoration error")).fetch(:writes).length
+    [interruption, SystemExit.new(21, "private-marker")].each do |publication_error|
+      outcome = exercise.call(publication_error: publication_error)
+      assert_same publication_error, outcome.fetch(:original)
+      refute_same publication_error, outcome.fetch(:state).fetch(:rejection)
+      refute outcome.fetch(:state).key?(:result)
+      assert_empty outcome.fetch(:writes)
+    end
+
+    # Success and post-run assertions are outside the rejection reporter. Other
+    # modes retain their original primary/order keyword shapes with no new state.
+    successful = %w[driverJoined knownProcessesDead watchdogJoined tasksJoined injectorsJoined ownedDescriptorsClosed
+      handlersRestored registryInactive].to_h { |key| [key, true] }.merge("pendingInterrupt" => false, "cleanupErrors" => [])
+    writes, dispatches = [], []
+    UploadProcessFixture.stub(:run, ->(**arguments) { dispatches << arguments; successful }) do
+      STDERR.stub(:write, ->(packet) { writes << packet; packet.bytesize }) do
+        modes.each { |mode| assert_same successful, process_case(mode) }
+        order_state = {}
+        assert_same successful, process_case("native-order-task-before-caller-interrupt", order_failure_state: order_state)
+        assert_same order_state, dispatches.last.fetch(:order_failure_state)
+        assert_same successful, process_case("native-proof-readiness-standard-none")
+        successful["driverJoined"] = false
+        assert_raises(Minitest::Assertion) { process_case(modes.first) }
+      end
+    end
+    assert_empty writes
+    setup_states = dispatches.filter_map { |arguments| arguments[:setup_failure_state] }
+    assert_equal 4, setup_states.map(&:object_id).uniq.length
+    assert setup_states.all?(&:empty?)
+    dispatches.each do |arguments|
+      assert_equal modes.include?(arguments.fetch(:mode)), arguments.key?(:setup_failure_state)
+      assert_empty arguments.fetch(:primary_failure_state)
+    end
+  end
+
+  def assert_adapter_failure_projection
+    # Pure operands and the real shared wrapper/Lifetime only. These anonymous
+    # receivers model callback names; no adapter test class or native owner runs.
+    callback_modes = {
+      "test_deadline_terminates_validator_without_authorizing_upload" => %w[real-deadline],
+      "test_deadline_terminates_inherited_pipe_children_after_validator_parent_exits" => %w[inherited],
+      "test_descendant_boundary_survives_delayed_start_and_late_parent_record" => %w[delayed-start late-record],
+      "test_unready_fixture_fails_distinctly_and_stops_before_any_late_pid_record" => %w[unready],
+      "test_fixture_detects_leader_only_cleanup_and_missing_deadline" => %w[leader-only no-deadline],
+      "test_fixture_rejects_an_immediate_timeout_even_when_the_leader_is_killed" => %w[immediate-deadline],
+      "test_slow_cleanup_cannot_supply_a_positive_deadline_wait" => %w[real-deadline-slow-cleanup immediate-deadline-slow-cleanup],
+    }
+    classes = {"ios" => "IosUploadValidationTest", "android" => "AndroidUploadValidationTest"}
+    expected_kinds = {"real-deadline" => "pass", "inherited" => "pass", "delayed-start" => "pass", "late-record" => "pass",
+      "unready" => "readiness", "leader-only" => "descendant-alive", "no-deadline" => "capture-watchdog",
+      "immediate-deadline" => "elapsed-bound", "real-deadline-slow-cleanup" => "pass", "immediate-deadline-slow-cleanup" => "elapsed-bound"}
+    fields = %w[schema platform mode expectedKind failedPredicates resultKind driverExitStatus retainedDriverErrorCategory
+      retainedDriverErrorCode adapterErrorCategory resultChecks nativeChecks timingChecks nativeOutcomes slowChecks]
+    result_keys = %w[ready stdinClosedAfterReady deadlinePrimarySameObject deadlineResultSameObject watchdogStarted watchdogIntervened
+      fallbackUsed deadBeforeFallback nativeFinalityBeforeFallback adapterRejected adapterCallObserved captureEntered descendantLiveBeforeRelease
+      inheritedPipeBlockObserved validatorReapedAfterRelease commitAfterDataEOF ownedDescriptorsClosed watchdogJoined tasksJoined injectorsJoined
+      handlersRestored registryInactive pendingInterrupt cleanupErrorsEmpty]
+    native_keys = %w[finalized noProducers settled unknown hooksRestored observerErrorsEmpty productionFinality retainedUnknown
+      statusValid statusDecodedEOF cleanupErrorsEmpty originalWaitObserved tasksJoined leasesClosed allActualEOFObserved
+      captureSettled captureFinished captureJoined captureActualJoinObserved creatorSettled creatorFinished creatorJoined
+      creatorActualJoinObserved stdoutEOF stdoutActualEOFObserved stderrEOF stderrActualEOFObserved statusEOF statusActualEOFObserved groupAbsent]
+    timing_keys = %w[runSpanMatchesMode firstTimeoutCutoff selectedTimeoutCutoff blockedDataWaitsPositive firstBlockedDataWithinRun
+      captureWithinLimit slowCleanupAtLeastFour captureCoversSlowCleanup slowCleanupWithinOriginalCutoff]
+    outcome_keys = %w[custodian keeper validator finalOutcome finalCleanup groupState captureState creatorState]
+    slow_keys = %w[handoffPerformed delayEntered delayGuardPassed delayFailed delayFinished originalCleanupCalled originalCleanupFinished]
+    assert_equal expected_kinds, UploadProcessFixture::ADAPTER_FAILURE_EXPECTED_KINDS
+    assert_equal classes.values.flat_map { |class_name| callback_modes.map { |suffix, modes| ["#{class_name}##{suffix}", modes] } }.to_h,
+      UploadProcessFixture::ADAPTER_FAILURE_CALLBACK_MODES
+    assert_equal fields, UploadProcessFixture::ADAPTER_FAILURE_FIELDS
+    assert_equal result_keys, UploadProcessFixture::ADAPTER_FAILURE_RESULT_CHECKS
+    assert_equal native_keys, UploadProcessFixture::ADAPTER_FAILURE_NATIVE_CHECKS
+    assert_equal timing_keys, UploadProcessFixture::ADAPTER_FAILURE_TIMING_CHECKS
+    assert_equal outcome_keys, UploadProcessFixture::ADAPTER_FAILURE_NATIVE_OUTCOMES.keys
+    assert_equal slow_keys, UploadProcessFixture::ADAPTER_FAILURE_SLOW_CHECKS
+    assert_equal "MRK_ADAPTER_FAILURE=", UploadProcessFixture::ADAPTER_FAILURE_PREFIX
+    status_class = Struct.new(:exitstatus) # Already-read comparison data, not a Process::Status receipt.
+    status = status_class.new(1)
+    start, cutoff = 100, 2_000_000_100
+    raw = result_keys.reject { |key| key == "cleanupErrorsEmpty" }.to_h { |key| [key, true] }
+    raw.merge!("kind" => "fixture-cleanup", "errorClass" => "UploadProcessFixture::Failure",
+      "error" => "actual ready timeout cause was not observed", "adapterErrorClass" => "MobileReleaseKit::ContractError",
+      "cleanupErrors" => ["private-marker"], "private" => "private-marker", "pid" => 999_887_766,
+      "nativeObservation" => native_keys.reject { |key| key == "observerErrorsEmpty" }.to_h { |key| [key, false] }.merge(
+        "observerErrors" => [], "private" => "private-marker",
+        "custodian" => {"state" => "reaped", "status_kind" => "exit", "status_code" => 2},
+        "final" => {"outcome" => "failed", "cleanup" => "confirmed", "group" => {"state" => "retired", "absent" => true},
+          "keeper" => {"state" => "reaped", "status_kind" => "exit", "status_code" => 2},
+          "validator" => {"state" => "reaped", "status_kind" => "signal", "status_code" => 9}},
+        "tasks" => [{"role" => "capture", "state" => "attempted"}, {"role" => "creator", "state" => "not_started"}],
+        "slowCleanup" => slow_keys.to_h { |key| [key, key != "delayFailed"] }.merge("slowCleanupSeconds" => 4.0,
+          "originalCleanupFinishedNs" => 6_000_000_000, "originalCleanupCutoffNs" => 7_000_000_000)),
+      "nativeStartedNs" => start, "nativeRunDeadlineNs" => cutoff, "firstTimeoutDecisionNs" => cutoff - 1,
+      "selectedTimeoutNs" => cutoff, "blockedDataWaits" => 2, "firstBlockedDataNs" => start + 1,
+      "captureSeconds" => 6.0, "slowCleanupSeconds" => 999.0) # Mutable driver data is NOT the slow snapshot authority.
+    formatter = UploadProcessFixture.method(:adapter_failure_line)
+    expected = {"schema" => 2, "platform" => "ios", "mode" => "real-deadline", "expectedKind" => "pass",
+      "failedPredicates" => %w[result-kind driver-status], "resultKind" => "fixture-cleanup", "driverExitStatus" => 1,
+      "retainedDriverErrorCategory" => "fixture-error", "retainedDriverErrorCode" => "ready-timeout-unobserved",
+      "adapterErrorCategory" => "contract-error", "resultChecks" => result_keys.to_h { |key| [key, key != "cleanupErrorsEmpty"] },
+      "nativeChecks" => native_keys.to_h { |key| [key, key == "observerErrorsEmpty"] },
+      "timingChecks" => {"runSpanMatchesMode" => true, "firstTimeoutCutoff" => "before-cutoff", "selectedTimeoutCutoff" => "at-or-after-cutoff",
+        "blockedDataWaitsPositive" => true, "firstBlockedDataWithinRun" => true, "captureWithinLimit" => true,
+        "slowCleanupAtLeastFour" => true, "captureCoversSlowCleanup" => true, "slowCleanupWithinOriginalCutoff" => true},
+      "nativeOutcomes" => {"custodian" => "exit2", "keeper" => "exit2", "validator" => "signal", "finalOutcome" => "failed",
+        "finalCleanup" => "confirmed", "groupState" => "retired", "captureState" => "attempted", "creatorState" => "not-started"},
+      "slowChecks" => slow_keys.to_h { |key| [key, key != "delayFailed"] }}
+    classes.each_key do |platform|
+      packet = formatter.call(platform: platform, mode: "real-deadline", result: raw, status: status)
+      assert_equal "MRK_ADAPTER_FAILURE=#{JSON.generate(expected.merge("platform" => platform))}\n", packet
+      assert packet.ascii_only?
+      assert packet.frozen?
+      assert_operator packet.bytesize, :<=, 4096
+      %w[private-marker 999887766 2000000100].each { |private_value| refute_includes packet, private_value }
+      refute_includes packet, raw.fetch("error")
+    end
+    project = lambda do |value, mode: "real-deadline", code: 1|
+      packet = formatter.call(platform: "ios", mode: mode, result: value, status: status_class.new(code))
+      JSON.parse(packet.delete_prefix("MRK_ADAPTER_FAILURE=")) if packet
+    end
+    expected_kinds.each do |mode, kind|
+      accepted_status = kind == "pass" ? 0 : 1
+      assert_nil project.call(raw.merge("kind" => kind), mode: mode, code: accepted_status)
+      row = project.call(raw.merge("kind" => kind), mode: mode, code: 255)
+      assert_equal [kind, ["driver-status"]], row.values_at("expectedKind", "failedPredicates")
+    end
+    assert_equal ["result-kind"], project.call(raw, code: 0).fetch("failedPredicates")
+    assert_equal "other", project.call(raw.merge("kind" => "private-marker")).fetch("resultKind")
+    assert_equal "invalid", project.call(raw.merge("kind" => nil)).fetch("resultKind")
+    [nil, true, -1, 256, 1.0].each { |code| assert_nil formatter.call(platform: "ios", mode: "real-deadline", result: raw, status: status_class.new(code)) }
+    assert_nil formatter.call(platform: "ios", mode: "real-deadline", result: Class.new(Hash).new.merge!(raw), status: status)
+    [["native", "real-deadline"], ["ios", "native-setup-interrupt"], ["android", "ownership-async"], ["ios", "kill-startup"]].each do |platform, mode|
+      assert_nil formatter.call(platform: platform, mode: mode, result: raw, status: status)
+    end
+
+    # The retained driver pair is independent of a cleanup-overridden kind. Only
+    # exact persisted literals select codes; private lookalikes remain unquoted.
+    [
+      ["MobileReleaseKit::NativeUploadProcess::LifecycleError", "native capture deadline failure", "native-lifecycle-error", "native-deadline"],
+      ["MobileReleaseKit::NativeUploadProcess::ProtocolError", "native capture protocol failure", "native-protocol-error", "native-protocol"],
+      ["MobileReleaseKit::NativeUploadProcess::ProtocolError", "native capture deadline failure", "native-protocol-error", "other"],
+      ["MobileReleaseKit::NativeProcessSpawn::Error", "native process close failure", "native-spawn-error", "spawn-close"],
+      ["UploadProcessFixture::Failure", "private-marker actual ready timeout cause was not observed", "fixture-error", "other"],
+      ["private-marker", "private-marker", "other", "other"],
+      [nil, nil, "none", "none"], [nil, "private-marker", "none", "invalid"],
+      ["UploadProcessFixture::Failure", nil, "fixture-error", "invalid"], [false, "private-marker", "invalid", "invalid"],
+    ].each do |class_name, message, category, code|
+      row = project.call(raw.merge("errorClass" => class_name, "error" => message))
+      assert_equal [category, code], row.values_at("retainedDriverErrorCategory", "retainedDriverErrorCode")
+      refute_includes JSON.generate(row), "private-marker"
+    end
+    missing = project.call({})
+    assert_equal ["missing"] * 4, missing.values_at("resultKind", "retainedDriverErrorCategory", "retainedDriverErrorCode", "adapterErrorCategory")
+    %w[resultChecks nativeChecks timingChecks nativeOutcomes slowChecks].each { |key| assert_equal ["missing"], missing.fetch(key).values.uniq }
+    assert_equal "missing", project.call(raw.reject { |key, _| key == "errorClass" }).fetch("retainedDriverErrorCode")
+    malformed = raw.merge(result_keys.to_h { |key| [key, "private-marker"] }).merge("cleanupErrors" => nil, "nativeObservation" => nil)
+    invalid = project.call(malformed)
+    assert_equal ["invalid"], invalid.fetch("resultChecks").values.uniq
+    assert_equal ["invalid"], invalid.fetch("nativeChecks").values.uniq
+    assert_equal ["invalid"], invalid.fetch("nativeOutcomes").values.uniq
+    assert_equal ["invalid"], invalid.fetch("slowChecks").values.uniq
+    false_checks = raw.merge(result_keys.to_h { |key| [key, false] }).merge("cleanupErrors" => [])
+    assert_equal result_keys.to_h { |key| [key, key == "cleanupErrorsEmpty"] }, project.call(false_checks).fetch("resultChecks")
+
+    # Original first construction and selected primary are separate observations.
+    # These are scalar vectors; no clock or runtime deadline is changed by them.
+    [[start - 1, "before-start"], [start, "before-cutoff"], [cutoff, "at-or-after-cutoff"]].each do |time, relation|
+      row = project.call(raw.merge("firstTimeoutDecisionNs" => time)).fetch("timingChecks")
+      assert_equal [relation, "at-or-after-cutoff"], row.values_at("firstTimeoutCutoff", "selectedTimeoutCutoff")
+    end
+    [0, true, start.to_f, 2**63].each do |time|
+      assert_equal "invalid", project.call(raw.merge("selectedTimeoutNs" => time)).fetch("timingChecks").fetch("selectedTimeoutCutoff")
+    end
+    row = project.call(raw.reject { |key, _| key == "firstTimeoutDecisionNs" }.merge("nativeStartedNs" => 0)).fetch("timingChecks")
+    assert_equal ["missing", "invalid"], row.values_at("firstTimeoutCutoff", "selectedTimeoutCutoff")
+    assert_equal "invalid", project.call(raw.merge("nativeRunDeadlineNs" => start)).fetch("timingChecks").fetch("runSpanMatchesMode")
+    assert_equal false, project.call(raw, mode: "no-deadline").fetch("timingChecks").fetch("runSpanMatchesMode")
+    assert_equal true, project.call(raw.merge("nativeRunDeadlineNs" => start + 10_000_000_000), mode: "no-deadline").fetch("timingChecks").fetch("runSpanMatchesMode")
+    [[0, false], [-1, "invalid"], [1.0, "invalid"]].each do |count, expected_value|
+      assert_equal expected_value, project.call(raw.merge("blockedDataWaits" => count)).fetch("timingChecks").fetch("blockedDataWaitsPositive")
+    end
+    [[start, true], [cutoff, false], [nil, "invalid"]].each do |time, expected_value|
+      assert_equal expected_value, project.call(raw.merge("firstBlockedDataNs" => time)).fetch("timingChecks").fetch("firstBlockedDataWithinRun")
+    end
+    [[8, false], [Float::INFINITY, "invalid"], [Float::NAN, "invalid"], [-1, "invalid"], [nil, "invalid"]].each do |seconds, expected_value|
+      assert_equal expected_value, project.call(raw.merge("captureSeconds" => seconds)).fetch("timingChecks").fetch("captureWithinLimit")
+    end
+    with_slow = lambda do |value|
+      raw.merge("nativeObservation" => raw.fetch("nativeObservation").merge("slowCleanup" => value))
+    end
+    slow_snapshot = raw.fetch("nativeObservation").fetch("slowCleanup")
+    row = project.call(with_slow.call(slow_snapshot.merge("slowCleanupSeconds" => 3.5)).merge("captureSeconds" => 3)).fetch("timingChecks")
+    assert_equal [false, false], row.values_at("slowCleanupAtLeastFour", "captureCoversSlowCleanup")
+    row = project.call(with_slow.call(slow_snapshot.reject { |key, _| key == "slowCleanupSeconds" }).merge("captureSeconds" => nil)).fetch("timingChecks")
+    assert_equal ["missing", "missing"], row.values_at("slowCleanupAtLeastFour", "captureCoversSlowCleanup")
+    assert_equal expected.fetch("timingChecks"), project.call(raw.merge("slowCleanupSeconds" => -1)).fetch("timingChecks")
+    [Float::INFINITY, Float::NAN, nil, -1, true].each do |duration|
+      row = project.call(with_slow.call(slow_snapshot.merge("slowCleanupSeconds" => duration))).fetch("timingChecks")
+      assert_equal ["invalid", "invalid"], row.values_at("slowCleanupAtLeastFour", "captureCoversSlowCleanup")
+    end
+    [[6_999_999_999, true], [7_000_000_000, false], [7_000_000_001, false], [nil, "invalid"], [1.0, "invalid"]].each do |finish, relation|
+      row = project.call(with_slow.call(slow_snapshot.merge("originalCleanupFinishedNs" => finish))).fetch("timingChecks")
+      assert_equal relation, row.fetch("slowCleanupWithinOriginalCutoff")
+    end
+    slow_keys.each do |key|
+      assert_equal false, project.call(with_slow.call(slow_snapshot.merge(key => false))).fetch("slowChecks").fetch(key)
+      assert_equal "invalid", project.call(with_slow.call(slow_snapshot.merge(key => nil))).fetch("slowChecks").fetch(key)
+      assert_equal "missing", project.call(with_slow.call(slow_snapshot.reject { |name, _| name == key })).fetch("slowChecks").fetch(key)
+    end
+    child_vectors = [[{}, "missing"], [nil, "invalid"], [{"state" => "unknown"}, "unknown"],
+      [{"state" => "not_attempted"}, "not-attempted"], [{"state" => "private-marker"}, "invalid"],
+      [{"state" => :unknown}, "invalid"], [{"state" => "reaped", "status_kind" => :exit, "status_code" => 0}, "invalid"]]
+    [0, 1, 2, 3, 255, 256, true].each do |code|
+      category = code.instance_of?(Integer) && code.between?(0, 255) ? (code <= 2 ? "exit#{code}" : "other-exit") : "invalid"
+      child_vectors << [{"state" => "reaped", "status_kind" => "exit", "status_code" => code}, category]
+    end
+    child_vectors << [{"state" => "reaped", "status_kind" => "signal", "status_code" => 9}, "signal"]
+    %w[custodian keeper validator].each do |role|
+      child_vectors.each do |record, category|
+        native = raw.fetch("nativeObservation").dup
+        if role == "custodian"
+          native[role] = record
+        else
+          native["final"] = native.fetch("final").merge(role => record)
+        end
+        assert_equal category, project.call(raw.merge("nativeObservation" => native)).fetch("nativeOutcomes").fetch(role)
+      end
+    end
+    {"finalOutcome" => ["outcome", %w[ok rejected failed]], "finalCleanup" => ["cleanup", %w[confirmed unknown]]}.each do |key, (field, values)|
+      (values + ["private-marker", nil]).each do |value|
+        native = raw.fetch("nativeObservation").merge("final" => raw.fetch("nativeObservation").fetch("final").merge(field => value))
+        assert_equal values.include?(value) ? value : "invalid", project.call(raw.merge("nativeObservation" => native)).fetch("nativeOutcomes").fetch(key)
+      end
+    end
+    %w[not_created retired unknown].each do |state|
+      native = raw.fetch("nativeObservation").merge("final" => raw.fetch("nativeObservation").fetch("final").merge("group" => {"state" => state}))
+      assert_equal state.tr("_", "-"), project.call(raw.merge("nativeObservation" => native)).fetch("nativeOutcomes").fetch("groupState")
+    end
+    %w[capture creator].each do |role|
+      %w[unpublished not_constructed not_started attempted].each do |state|
+        native = raw.fetch("nativeObservation").merge("tasks" => [{"role" => role, "state" => state}])
+        assert_equal state.tr("_", "-"), project.call(raw.merge("nativeObservation" => native)).fetch("nativeOutcomes").fetch("#{role}State")
+      end
+      [nil, [false], [{"role" => role, "state" => "attempted"}] * 2].each do |records|
+        native = raw.fetch("nativeObservation").merge("tasks" => records)
+        assert_equal "invalid", project.call(raw.merge("nativeObservation" => native)).fetch("nativeOutcomes").fetch("#{role}State")
+      end
+    end
+    no_final = project.call(raw.merge("nativeObservation" => raw.fetch("nativeObservation").merge("final" => nil))).fetch("nativeOutcomes")
+    assert_equal ["missing"] * 5, no_final.values_at("keeper", "validator", "finalOutcome", "finalCleanup", "groupState")
+
+    exercise = lambda do |platform: "ios", selected: "real-deadline", class_name: nil, method_name: nil,
+                            write_result: :full, expiry: nil, mutate: nil, publication_error: nil, projection_error: nil,
+                            callback_error: nil, cleanup_error: nil, restoration_error: nil, prior_error: nil|
+      class_name ||= classes.fetch(platform)
+      method_name ||= callback_modes.find { |_suffix, modes| modes.include?(selected) }.first
+      callback = "#{class_name}##{method_name}"
+      now, sequence, depth = 1, nil, 0
+      state = escaped = dispatch = nil
+      events, writes, projections, observations, cleanup_messages = [], [], [], [], []
+      policy = Object.new
+      policy.define_singleton_method(:install) { events << :install }
+      policy.define_singleton_method(:cleanup_depth) { depth }
+      policy.define_singleton_method(:cleanup) do |&body|
+        depth += 1
+        begin
+          body.call
+        ensure
+          depth -= 1
+        end
+      end
+      policy.define_singleton_method(:restore) { |&body| body.call; events << :restored }
+      policy.define_singleton_method(:errors) { restoration_error ? [restoration_error] : [] }
+      policy.define_singleton_method(:replay_custom_pending) { events << :replay }
+      receiver = Object.new.extend(UploadProcessFixture::Contracts)
+      receiver.define_singleton_method(:name) { events << :callback; raise callback_error if callback_error; method_name }
+      run = lambda do |**optional|
+        dispatch, state = optional, optional.fetch(:adapter_failure_state)
+        events << :run
+        begin
+          UploadProcessFixture.lifetime(deadline_ns: 10) do |frame|
+            # Retain synthetic cleanup diagnostics privately, without an extra
+            # real STDERR channel competing with the reporter under test.
+            frame.define_singleton_method(:warn) { |message| cleanup_messages << message }
+            frame.remember(prior_error) if prior_error
+            begin
+              frame.active do
+                reject = -> { UploadProcessFixture.reject_adapter_result!(platform: platform, mode: selected, result: raw,
+                  status: status, deadline_ns: 10, state: state) }
+                if publication_error
+                  original_writer = state.method(:[]=)
+                  state.stub(:[]=, ->(key, value) { raise publication_error if key == :mode; original_writer.call(key, value) }) { reject.call }
+                else
+                  reject.call
+                end
+              end
+            ensure
+              frame.cleanup { events << :cleanup; raise cleanup_error if cleanup_error }
+            end
+          end
+        rescue Exception => error
+          escaped = error
+          raise
+        ensure
+          mutate.call(state) if mutate
+          events << :unwound
+          now = 10 if expiry == :before_report
+          sequence = [1, 10] if expiry == :before_write
+        end
+      end
+      sink = lambda do |packet|
+        observations << [state[:rejection], state[:report_attempted], state[:write_attempted], events.dup,
+          UploadProcessFixture.instance_variable_get(:@cancellation_scope)]
+        writes << packet
+        raise write_result if write_result.is_a?(Exception)
+        write_result == :short ? 1 : packet.bytesize
+      end
+      projection = lambda do |**arguments|
+        projections << arguments
+        raise projection_error if projection_error
+        formatter.call(**arguments)
+      end
+      actual = nil
+      expected_error = (prior_error || publication_error)&.class || UploadProcessFixture::Failure
+      UploadProcessFixture::CancellationScope.stub(:new, policy) do
+        Thread.current.stub(:pending_interrupt?, false) do
+          UploadProcessFixture.stub(:clock_ns, -> { sequence ? sequence.shift || now : now }) do
+            receiver.stub(:class, Struct.new(:name).new(class_name)) do
+              UploadProcessFixture.stub(:adapter_failure_line, projection) do
+                STDERR.stub(:write, sink) do
+                  actual = assert_raises(expected_error) do
+                    receiver.with_adapter_failure_diagnostic(platform: platform, mode: selected) { |optional| run.call(**optional) }
+                  end
+                  # A renewed test clock cannot reopen an already attempted
+                  # optional report, even when the first attempt produced nothing.
+                  now, sequence = 1, nil
+                  UploadProcessFixture.report_adapter_failure(state, actual, platform: platform, mode: selected, callback: callback)
+                end
+              end
+            end
+          end
+        end
+      end
+      assert_same escaped, actual
+      assert_equal [:adapter_failure_state], dispatch.keys
+      assert_equal %i[run install cleanup restored replay unwound], events.reject { |event| event == :callback }
+      assert events.each_index.select { |index| events[index] == :callback }.all? { |index| index > events.index(:unwound) }
+      assert_nil UploadProcessFixture.instance_variable_get(:@cancellation_scope)
+      assert_operator writes.length, :<=, 1
+      assert_operator projections.length, :<=, 1
+      assert_equal cleanup_error ? 1 : 0, cleanup_messages.length
+      observations.each do |original, attempted, writing, prior, scope|
+        assert_same actual, original
+        assert_equal [true, true, events, nil], [attempted, writing, prior, scope]
+      end
+      writes.each { |packet| assert_equal formatter.call(platform: platform, mode: selected, result: raw, status: status), packet }
+      {state: state, original: actual, writes: writes, projections: projections}
+    end
+    cases = [exercise.call, exercise.call(platform: "android", selected: "immediate-deadline-slow-cleanup")]
+    cases.each do |outcome|
+      state = outcome.fetch(:state)
+      assert_equal 1, outcome.fetch(:writes).length
+      assert_same raw, state.fetch(:result)
+      assert_same status, state.fetch(:status)
+      assert_same outcome.fetch(:original), state.fetch(:rejection)
+      assert_equal [10, true], state.values_at(:deadline_ns, :write_complete)
+      assert_equal ["fixture-result", "unexpected fixture result kind/status"], [outcome[:original].kind, outcome[:original].message]
+    end
+    refute_same(*cases.map { |outcome| outcome.fetch(:state) })
+    [:short, IOError.new("private-marker")].each do |write_result|
+      outcome = exercise.call(write_result: write_result)
+      assert_equal 1, outcome.fetch(:writes).length
+      if write_result.is_a?(Exception)
+        assert_same write_result, outcome.fetch(:state).fetch(:diagnostic_error)
+      else
+        assert_equal false, outcome.fetch(:state).fetch(:write_complete)
+      end
+    end
+    %i[before_report before_write].each do |expiry|
+      outcome = exercise.call(expiry: expiry)
+      assert_empty outcome.fetch(:writes)
+      assert_equal expiry == :before_report ? 0 : 1, outcome.fetch(:projections).length
+    end
+    [->(s) { s.delete(:status) }, ->(s) { s[:status] = nil }, ->(s) { s[:platform] = "android" }, ->(s) { s[:mode] = "inherited" },
+     ->(s) { s[:rejection] = UploadProcessFixture::Failure.new("fixture-result", "private-marker") },
+     ->(s) { s[:deadline_ns] = 10.0 }, ->(s) { s[:result] = raw.merge("kind" => "pass"); s[:status] = status_class.new(0) },
+     ->(s) { s.freeze }].each { |mutate| assert_empty exercise.call(mutate: mutate).fetch(:writes) }
+    assert_empty exercise.call(class_name: "NativeUploadValidationTest").fetch(:writes)
+    assert_empty exercise.call(method_name: callback_modes.keys.last).fetch(:writes)
+    [[:projection_error, Interrupt.new("private-marker")], [:callback_error, SystemExit.new(19, "private-marker")]].each do |key, error|
+      outcome = exercise.call(**{key => error})
+      assert_empty outcome.fetch(:writes)
+      assert_same error, outcome.fetch(:state).fetch(:diagnostic_error)
+      assert_equal true, outcome.fetch(:state).fetch(:report_attempted)
+    end
+    secondary = IOError.new("later private cleanup error")
+    assert_equal 1, exercise.call(cleanup_error: secondary, restoration_error: secondary).fetch(:writes).length
+    [:publication_error, :prior_error].each do |key|
+      original = Interrupt.new("private-marker")
+      outcome = exercise.call(**{key => original})
+      assert_same original, outcome.fetch(:original)
+      refute_same original, outcome.fetch(:state).fetch(:rejection)
+      assert_empty outcome.fetch(:writes)
+    end
+
+    # Unrelated modes receive no keyword; successful eligible calls use fresh
+    # empty states. A later assertion is outside the original guarded run.
+    receiver = Object.new.extend(UploadProcessFixture::Contracts)
+    receiver.define_singleton_method(:name) { raise "successful wrapper must not inspect a callback" }
+    successful, writes, handoffs = Object.new, [], []
+    STDERR.stub(:write, ->(packet) { writes << packet; packet.bytesize }) do
+      2.times do
+        assert_same successful, receiver.with_adapter_failure_diagnostic(platform: "ios", mode: "real-deadline") { |optional| handoffs << optional; successful }
+      end
+      [["native", "real-deadline"], ["ios", "native-setup-interrupt"], ["ios", "ownership-async"], ["android", "kill-descendant"]].each do |platform, mode|
+        assert_same successful, receiver.with_adapter_failure_diagnostic(platform: platform, mode: mode) { |optional| assert_empty optional; successful }
+      end
+      assert_raises(Minitest::Assertion) do
+        receiver.with_adapter_failure_diagnostic(platform: "android", mode: "real-deadline") { |optional| handoffs << optional; successful }
+        flunk "later synthetic assertion"
+      end
+    end
+    assert_empty writes
+    assert_equal 3, handoffs.map { |optional| optional.fetch(:adapter_failure_state).object_id }.uniq.length
+    assert handoffs.all? { |optional| optional.keys == [:adapter_failure_state] && optional[:adapter_failure_state].empty? }
+  end
+
+  def missing_cleanup_omission_sample
+    # In-memory inputs shared by entry, reader and watchdog controls. They are
+    # never written as native receipts or used to authorize a real operation.
+    directory = "/inert-missing-cleanup"
+    sources = UploadProcessFixture::ContainmentEvidence::SOURCES.to_h { |name| [name, "a" * 64] }
+    original_path = File.realpath(MobileReleaseKit::NativeUploadProcess::GroupLease.instance_method(:request).source_location.first)
+    copy = {"label" => "containment-events", "originalPath" => original_path,
+      "originalSha256" => "a" * 64, "path" => "#{directory}/containment-events-helper.rb", "sha256" => "b" * 64}
+    manifest = {"version" => 1, "mode" => "native-setup-no-cleanup", "helperCopy" => copy, "sourceSha256" => sources}
+    graph = {"custodian" => 701, "keeper" => 702, "validator" => 703, "group" => 702, "sid" => 701}
+    stat_class = Struct.new(:dev, :ino, :mode, :uid, :gid, :rdev, :ftype, :nlink)
+    records, bytes, stats = {}, {}, {}
+    %w[custodian keeper].each_with_index do |role, index|
+      name = "containment-#{role}-omission.json"
+      origin = role == "custodian" ? MobileReleaseKit::NativeUploadProcess::GroupLease.instance_method(:request) :
+                                   MobileReleaseKit::NativeUploadProcess::Keeper.instance_method(:request_group)
+      entry = {"route" => "#{role}-group", "group" => 702, "signal" => "KILL", "atNs" => 2_500_000_000,
+        "effectiveDeadlineNs" => 7_000_000_000, "originalReservedAuthority" => true,
+        "origin" => {"path" => copy.fetch("path"), "line" => origin.source_location.last},
+        "actualOmissionEntry" => true, "nativeCallOmitted" => true}
+      records[name] = {"version" => 1, "kind" => "original-helper-cleanup-omission-entry", "mode" => manifest.fetch("mode"),
+        "sourceSha256" => sources, "helperCopy" => copy, "role" => role, "pid" => graph.fetch(role),
+        "parentPid" => role == "custodian" ? 700 : 701, "identities" => graph, "entry" => entry}
+      bytes[name] = JSON.generate(records.fetch(name))
+      stats[name] = stat_class.new(1, 10 + index, 0o100600, 3, 4, 0, "file", 1)
+    end
+    {directory: directory, manifest: manifest, graph: graph, records: records, bytes: bytes, stats: stats}
+  end
+
+  def assert_missing_cleanup_omission_evidence
+    evidence = UploadProcessFixture::ContainmentEvidence
+    native = MobileReleaseKit::NativeUploadProcess
+    assert_equal 8192, evidence::OMISSION_LIMIT
+    assert_equal({"custodian" => "containment-custodian-omission.json", "keeper" => "containment-keeper-omission.json"}, evidence::OMISSION_FILES)
+    make = lambda do |role|
+      sample = missing_cleanup_omission_sample
+      child_class = Struct.new(:pid, :state, :receipt, :retired) { def numeric_retired? = retired }
+      keeper, validator = child_class.new(702, :running, nil, false), child_class.new(703, :pollable, nil, true)
+      object = (role == "custodian" ? native::Custodian : native::Keeper).allocate
+      {pid: sample[:graph].fetch(role), parent_pid: role == "custodian" ? 700 : 701, session_id: 701,
+       inherited_session_id: 701, run_deadline_ns: 7_000_000_000, hard_cleanup_deadline_ns: 7_000_000_000,
+       keeper: keeper, validator: validator, group_created: true, self_group_retired: false, self_group_absent: false,
+       creator_acquisition: Struct.new(:child).new(role == "custodian" ? keeper : validator),
+       moved: {"validator_pid" => 703, "group_id" => 702, "keeper_pgid" => 701},
+       moved_frame: {"validator_pid" => 703, "group_id" => 702, "keeper_pgid" => 701}}.each do |key, value|
+        object.instance_variable_set(:"@#{key}", value)
+      end
+      group = native::GroupLease.allocate
+      {keeper: keeper, id: 702, session_id: 701, retired: false, absent: false}.each do |key, value|
+        group.instance_variable_set(:"@#{key}", value)
+      end
+      object.instance_variable_set(:@group, group)
+      observer = evidence.new(sample[:directory], "native-setup-no-cleanup", sample[:manifest])
+      observer.instance_variable_set(:@role, object)
+      observer.instance_variable_set(:@origins, sample[:records].values.to_h { |record| [record["entry"]["route"], record["entry"]["origin"]] })
+      sample.merge(role: role, object: object, group: group, observer: observer, now: 2_500_000_000,
+        target: role == "custodian" ? group : object, route: "#{role}-group", opens: [], delegated: [], written: nil)
+    end
+    within = lambda do |rig, &body|
+      writer = Object.new
+      writer.define_singleton_method(:write) do |bytes|
+        raise rig[:failure] if rig[:publication] == :before
+        rig[:written] = rig[:publication] == :short ? bytes.byteslice(0, bytes.bytesize - 1) : bytes
+        raise rig[:failure] if rig[:publication] == :after
+        rig[:publication] == :short ? bytes.bytesize - 1 : bytes.bytesize
+      end
+      writer.define_singleton_method(:flush) { true }
+      open = lambda do |path, flags, mode, &block|
+        rig[:opens] << path
+        assert_equal "#{rig[:directory]}/containment-#{rig[:role]}-omission.json", path
+        assert_equal File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW, flags
+        assert_equal 0o600, mode
+        block.call(writer) # No descriptor or file is created, even on an error.
+      end
+      File.stub(:open, open) do
+        Process.stub(:pid, rig[:object].pid) do
+          clock = lambda do
+            rig[:clock_reads] = rig.fetch(:clock_reads, 0) + 1
+            rig[:late_entry] && rig[:clock_reads] > 1 ? 7_000_000_000 : rig[:now]
+          end
+          UploadProcessFixture.stub(:clock_ns, clock) { body.call }
+        end
+      end
+    end
+    invoke = lambda do |rig|
+      original = ->(*args, **kwargs) { rig[:delegated] << [args, kwargs]; raise "omission delegated native operation" }
+      rig[:observer].group_request(original, rig[:target], ["KILL"], {}, nil, rig[:route])
+    end
+    %w[custodian keeper].each do |role|
+      rig = make.call(role)
+      within.call(rig) do
+        assert_equal 0, invoke.call(rig) # Integer0 stays truthy; false would manufacture absence.
+        assert_equal rig[:records].fetch("containment-#{role}-omission.json"), JSON.parse(rig[:written])
+        assert_equal 1, rig[:observer].instance_variable_get(:@omissions).length
+        assert_raises(UploadProcessFixture::Failure) { invoke.call(rig) }
+        assert_equal 1, rig[:opens].length
+        assert_empty rig[:delegated]
+      end
+      # K's original V is already numerically retired. The valid case above
+      # observes only its original identity and never reopens that authority.
+      %i[retired wrong_route graph expired].each do |fault|
+        candidate = make.call(role)
+        case fault
+        when :retired
+          candidate[:group].instance_variable_set(:@retired, true)
+          candidate[:object].instance_variable_set(:@self_group_retired, true)
+        when :wrong_route
+          candidate[:route] = role == "custodian" ? "keeper-group" : "custodian-group"
+          candidate[:target] = role == "custodian" ? candidate[:object] : candidate[:group]
+        when :graph then candidate[:object].instance_variable_set(:@session_id, 799)
+        when :expired then candidate[:now] = 7_000_000_000
+        end
+        within.call(candidate) do
+          assert_raises(UploadProcessFixture::Failure) { invoke.call(candidate) }
+          assert_empty candidate[:opens]
+          assert_empty candidate[:delegated]
+        end
+      end
+      %i[before short after].each do |fault|
+        candidate = make.call(role)
+        candidate[:publication], candidate[:failure] = fault, IOError.new("original inert omission publication")
+        within.call(candidate) do
+          error = assert_raises(fault == :short ? UploadProcessFixture::Failure : IOError) { invoke.call(candidate) }
+          assert_same candidate[:failure], error unless fault == :short
+          assert_equal 1, candidate[:observer].instance_variable_get(:@omissions).length
+          assert_raises(UploadProcessFixture::Failure) { invoke.call(candidate) }
+          assert_equal 1, candidate[:opens].length
+          assert_empty candidate[:delegated]
+          assert_equal fault != :before, !candidate[:written].nil? # After-effect bytes are not a return receipt.
+        end
+      end
+    end
+    %i[oversized late_entry].each do |fault|
+      candidate = make.call("custodian")
+      if fault == :oversized
+        candidate[:manifest]["helperCopy"]["path"] = "x" * 8192
+      else
+        candidate[:late_entry] = true # Earlier reservation guard passed, actual entry sample did not.
+      end
+      within.call(candidate) do
+        assert_raises(UploadProcessFixture::Failure) { invoke.call(candidate) }
+        assert_empty candidate[:opens]
+        assert_empty candidate[:delegated]
+      end
+    end
+  end
+
+  def assert_missing_cleanup_watchdog_lifecycle
+    # Actual driver/control algorithms; ALL task, thread, lease, clock and output
+    # operations are inert. These are not native waits, EOFs or finality receipts.
+    klass = UploadProcessFixture::MissingCleanupDriver
+    thread_class = Struct.new(:live) do
+      def alive? = live
+      # The real JSON parser uses Thread.current thread-local storage. Keep
+      # those ordinary values isolated on each inert identity, not a real task.
+      def [](key) = (@thread_locals ||= {})[key.to_sym]
+      def []=(key, value)
+        (@thread_locals ||= {})[key.to_sym] = value
+      end
+    end
+    stat_class = Struct.new(:dev, :ino, :mode, :uid, :gid, :rdev, :ftype, :nlink)
+    retain_case = UploadProcessFixture.instance_method(:retain_process_case!)
+    retain_unknown = UploadProcessFixture.instance_method(:retain_unknown_domain!)
+    registry_names = %i[@retained_fixture_cases @unresolved_roots @expected_unknown_roots @domain_disposal_required @process_domain_failed]
+    original_registries = registry_names.to_h do |name|
+      value = UploadProcessFixture.instance_variable_get(name)
+      [name, [UploadProcessFixture.instance_variable_defined?(name), value, value.is_a?(Hash) ? value.dup : value]]
+    end
+    make = lambda do |deadline: 20_000_000_000|
+      driver = klass.new("/inert-missing-cleanup", "native-setup-no-cleanup", deadline_ns: deadline)
+      rig = {driver: driver, now: 1_000_000_000, events: [], writes: [], sleeps: [], factories: [],
+             driver_thread: thread_class.new(true), capture_thread: thread_class.new(true), worker_thread: thread_class.new(true),
+             flags: {attempted: false, published: true, cancelled: false, retired: false, joined: false, finished: false,
+                     unresolved: false, first_error: nil, start_return: :slot, admit_return: true, join_return: true},
+             query_hooks: {}, registry: Object.new.extend(UploadProcessFixture), writer_attempts: 0,
+             omissions: missing_cleanup_omission_sample, entry_reads: [], stat_reads: Hash.new(0)}
+      driver.observed["containmentSource"] = rig[:omissions][:manifest]
+      rig[:current] = rig[:driver_thread]
+      slot = rig[:slot] = Object.new
+      {start_attempted?: :attempted, publication_ready?: :published, cancelled?: :cancelled,
+       launch_retired?: :retired, joined?: :joined, finished?: :finished, unresolved?: :unresolved,
+       first_error: :first_error}.each do |method, key|
+        slot.define_singleton_method(method) do
+          rig[:query_hooks].delete(method)&.call(rig)
+          item = rig[:flags].fetch(key)
+          raise item if item.is_a?(Exception) && method != :first_error
+          item
+        end
+      end
+      slot.define_singleton_method(:caller) { rig.fetch(:slot_options).fetch(:caller) }
+      slot.define_singleton_method(:thread) { rig[:worker_thread] }
+      %i[run_deadline_ns hard_cleanup_deadline_ns].each do |key|
+        slot.define_singleton_method(key) { rig.fetch(:slot_options).fetch(key) }
+      end
+      slot.define_singleton_method(:start) do |&body|
+        rig[:flags][:attempted] = true
+        rig[:events] << [:start, rig[:current], driver.instance_variable_get(:@watchdog)]
+        rig[:worker] = body
+        raise rig[:start_error] if rig[:start_error]
+        rig[:flags][:start_return] == :slot ? slot : rig[:flags][:start_return]
+      end
+      slot.define_singleton_method(:admit!) do
+        rig[:events] << [:admit, rig[:current], rig[:flags][:published]]
+        rig[:now] = rig[:admit_ns] if rig[:admit_ns]
+        raise rig[:admit_error] if rig[:admit_error]
+        rig[:flags][:admit_return]
+      end
+      slot.define_singleton_method(:join_until) do |deadline_ns:|
+        rig[:events] << [:join, deadline_ns, driver.instance_variable_get(:@watchdog_stopped)]
+        raise rig[:join_error] if rig[:join_error]
+        if rig[:flags][:join_return].equal?(true)
+          rig[:flags][:joined] = rig[:flags][:finished] = true
+          rig[:flags][:retired] = true
+        end
+        rig[:flags][:join_return]
+      end
+      slot.define_singleton_method(:close_launch!) do
+        rig[:events] << [:retire]
+        rig[:flags][:retired] = true
+        raise rig[:retire_error] if rig[:retire_error]
+        rig.fetch(:retire_return, true)
+      end
+      capture_flags = rig[:capture_flags] = {cancelled: false, retired: false, finished: false, joined: false}
+      capture = rig[:capture] = Object.new
+      capture.define_singleton_method(:thread) { rig[:capture_thread] }
+      capture.define_singleton_method(:caller) { rig.fetch(:capture_caller, rig[:driver_thread]) }
+      capture.define_singleton_method(:run_deadline_ns) { 3_000_000_000 }
+      capture.define_singleton_method(:hard_cleanup_deadline_ns) { 7_000_000_000 }
+      {cancelled?: :cancelled, launch_retired?: :retired, finished?: :finished, joined?: :joined}.each do |method, key|
+        capture.define_singleton_method(method) { capture_flags.fetch(key) }
+      end
+      session = rig[:session] = Struct.new(:capture_slot, :ready, :reserved, :primary_error, :cleanup_errors, :custodian_child, :unknown) do
+        def retained_unknown? = unknown
+      end.new(capture, {"validator_pid" => 703, "group_id" => 702}, {"keeper_pid" => 702}, nil, [], Struct.new(:pid).new(701), false)
+      driver.instance_variable_set(:@observation, Struct.new(:session).new(session))
+      driver.observed["ready"] = true
+      control = rig[:control] = driver.instance_variable_get(:@control)
+      inode = stat_class.new(1, 2, 0o10600, 3, 4, 0, "fifo", 1)
+      identity = UploadProcessFixture::OwnedChild.identity(inode)
+      control.instance_variable_set(:@identity, identity)
+      %i[anchor writer].each do |role|
+        state = {value: role == :anchor ? :closed : :open}
+        io, lease = Object.new, Object.new
+        io.define_singleton_method(:stat) { inode }
+        io.define_singleton_method(:close_on_exec?) { true }
+        io.define_singleton_method(:closed?) { state[:value] == :closed }
+        lease.define_singleton_method(:state) { state[:value] }
+        lease.define_singleton_method(:io) { io }
+        lease.define_singleton_method(:close_once) do
+          raise "inert lease operation under watchdog state lock" if driver.instance_variable_get(:@watchdog_lock).owned?
+          rig[:events] << [:lease_close, role]
+          if role == :writer && state[:value] != :closed
+            rig[:writer_attempts] += 1
+            rig[:during_close]&.call(rig)
+            raise rig[:writer_error] if rig[:writer_error]
+            rig[:now] = rig[:close_return_ns] if rig[:close_return_ns]
+          end
+          state[:value] = :closed
+          true
+        end
+        control.instance_variable_set(:"@#{role}", lease)
+      end
+      driver.define_singleton_method(:publish_owner) { |phase| rig[:events] << [:owner, phase]; true }
+      rig
+    end
+    within = lambda do |rig, &body|
+      factory = lambda do |**options|
+        raise "inert fallback constructed more than once" unless rig[:factories].empty?
+        rig[:factories] << options
+        rig[:slot_options] = options
+        rig[:slot]
+      end
+      sleeper = lambda do |seconds|
+        rig[:sleeps] << seconds
+        raise "inert fallback exceeded finite loop allowance" if rig[:sleeps].length > 3
+        if rig[:sleep_hook]
+          rig[:sleep_hook].call(rig)
+        else
+          rig[:now] += (seconds * 1_000_000_000).round
+        end
+      end
+      sample = rig[:omissions]
+      file_stat = lambda do |path|
+        raise "inert omission read under watchdog state lock" if rig[:driver].instance_variable_get(:@watchdog_lock).owned?
+        assert_equal sample[:directory], File.dirname(path)
+        name = File.basename(path)
+        rig[:stat_reads][name] += 1
+        raise Errno::ENOENT, "inert missing omission record" unless sample[:stats].key?(name)
+        value = sample[:stats].fetch(name)
+        value = value.dup.tap { |stat| stat.ino += 1 } if rig[:changed_path] == name && rig[:stat_reads][name].even?
+        value
+      end
+      read = lambda do |path, expected: nil, limit: UploadProcessFixture::OUTPUT_LIMIT|
+        raise "inert omission read under watchdog state lock" if rig[:driver].instance_variable_get(:@watchdog_lock).owned?
+        assert_equal sample[:directory], File.dirname(path)
+        name = File.basename(path)
+        if name.end_with?("-omission.json")
+          rig[:entry_reads] << name
+          assert_equal 8192, limit
+          assert_equal UploadProcessFixture::OwnedChild.identity(sample[:stats].fetch(name)), expected
+        end
+        value = sample[:bytes].fetch(name)
+        rig[:after_read]&.call(rig, name)
+        value
+      end
+      manifest = lambda do |directory, mode, sources|
+        assert_equal [sample[:directory], "native-setup-no-cleanup", sample[:manifest].fetch("sourceSha256")], [directory, mode, sources]
+        rig.fetch(:manifest_read, sample[:manifest])
+      end
+      # Run the ORIGINAL registry algorithms on a private receiver. No real
+      # domain latch/registry is reset or exempted; this proves only their
+      # inert retention behavior plus the actual close_control call routing.
+      UploadProcessFixture.stub(:retain_process_case!, retain_case.bind(rig[:registry])) do
+        UploadProcessFixture.stub(:retain_unknown_domain!, retain_unknown.bind(rig[:registry])) do
+          MobileReleaseKit::NativeUploadProcess::TaskSlot.stub(:new, factory) do
+            Thread.stub(:main, rig[:driver_thread]) do
+              Thread.stub(:current, -> { rig[:current] }) do
+                Process.stub(:pid, 700) do
+                  UploadProcessFixture.stub(:clock_ns, -> { rig[:now] }) do
+                    UploadProcessFixture::OwnedChild.stub(:write_record, ->(path, record) { rig[:writes] << [path, record]; true }) do
+                      File.stub(:lstat, file_stat) do
+                        File.stub(:file?, ->(path) { sample[:bytes].key?(File.basename(path)) }) do
+                          UploadProcessFixture::OwnedChild.stub(:bounded_file, read) do
+                            UploadProcessFixture::ContainmentEvidence.stub(:manifest!, manifest) do
+                              rig[:driver].stub(:sleep, sleeper) { body.call }
+                            end
+                          end
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+    prepare = lambda do |rig|
+      assert_equal true, rig[:driver].prepare_watchdog
+      assert_same rig[:slot], rig[:driver].instance_variable_get(:@watchdog)
+      assert_equal [{caller: rig[:driver_thread], parent_slot: nil, run_deadline_ns: 12_300_000_000,
+                     hard_cleanup_deadline_ns: 12_300_000_000}], rig[:factories]
+      assert_equal [[:start, rig[:driver_thread], rig[:slot]], [:admit, rig[:driver_thread], true]], rig[:events]
+      assert_equal true, rig[:driver].observed.fetch("watchdogPreadmitted")
+      refute rig[:driver].observed.fetch("watchdogStarted")
+      assert_equal 6_000_000_000, rig[:driver].watchdog_join_deadline_ns
+      rig[:driver].native_event(:execute_enter, rig[:session])
+      assert_same rig[:session], rig[:driver].instance_variable_get(:@native_frame)
+    end
+    arm = lambda do |rig|
+      rig[:current], rig[:now] = rig[:capture_thread], 2_000_000_000
+      assert_equal true, rig[:driver].start_watchdog
+      record = rig[:driver].watchdog_arm_record
+      assert record.frozen?
+      assert_same rig[:session], record.fetch(:session)
+      assert_same rig[:capture], record.fetch(:capture)
+      assert_same rig[:capture_thread], record.fetch(:thread)
+      assert_equal [2_000_000_000, 7_300_000_000, 8_300_000_000], record.values_at(:at_ns, :fallback_ns, :hard_ns)
+      assert_equal 8_300_000_000, rig[:driver].watchdog_join_deadline_ns
+      assert_equal 1, rig[:factories].length
+      record
+    end
+    ended_capture = lambda do |rig|
+      rig[:capture_thread].live = false
+      rig[:capture_flags].merge!(finished: true, joined: false, cancelled: true, retired: true)
+      rig[:session].unknown = true
+      rig[:session].primary_error = Interrupt.new("inert original capture primary")
+      rig[:current], rig[:now] = rig[:worker_thread], 7_300_000_000
+    end
+    retained = lambda do |rig|
+      registry, driver = rig.values_at(:registry, :driver)
+      assert_same driver, registry.instance_variable_get(:@retained_fixture_cases).fetch(driver.object_id)
+      assert_same rig[:control], driver.instance_variable_get(:@control)
+      assert_equal({"/inert-missing-cleanup" => true}, registry.instance_variable_get(:@unresolved_roots))
+      assert_equal true, registry.instance_variable_get(:@domain_disposal_required)
+      assert_nil registry.instance_variable_get(:@expected_unknown_roots)
+    end
+    parent_proof = lambda do |rig|
+      sample = rig[:omissions]
+      close = rig[:writes].find { |path, _value| File.basename(path) == "fallback-writer-close.json" }.last
+      sample[:bytes]["fallback-writer-close.json"] = JSON.generate(close)
+      sample[:bytes]["leader-eof.json"] = JSON.generate({"version" => 1, "eof" => true, "controlReadNil" => true,
+        "readNilNs" => close.fetch("closeEntryNs"), "pid" => 703, "group" => 702, "sid" => 701,
+        "fifoIdentity" => close.fetch("fifoIdentity")})
+      owner = {"version" => 2, "phase" => "native-setup-no-cleanup", "finality" => "unknown",
+        "custodian" => {"state" => "unknown"}, "keeper" => {"state" => "unknown"},
+        "validator" => {"state" => "unknown"}, "group" => {"state" => "unknown"},
+        "processes" => [{"role" => "custodian", "pid" => 701, "group" => 701},
+                        {"role" => "keeper", "pid" => 702, "group" => 701},
+                        {"role" => "validator", "pid" => 703, "group" => 702}]}
+      result = {"containmentSource" => sample[:manifest], "fallbackWriterClose" => close,
+        "watchdogPreadmitted" => true, "watchdogJoined" => true}
+      UploadProcessFixture::ContainmentEvidence.missing_cleanup!(sample[:directory], owner, result,
+        sample[:manifest].fetch("sourceSha256"), deadline_ns: 20_000_000_000,
+        driver_dispatch: {"pid" => 700, "deadlineNs" => 20_000_000_000})
+    end
+
+    # Driver-side publication/admission, then a distinct capture-side arm.
+    rig = make.call
+    within.call(rig) do
+      prepare.call(rig)
+      record = arm.call(rig)
+      assert_raises(UploadProcessFixture::Failure) { rig[:driver].start_watchdog }
+      assert_same record, rig[:driver].watchdog_arm_record
+      ended_capture.call(rig)
+      assert_equal true, rig.fetch(:worker).call
+      assert_equal 1, rig[:writer_attempts]
+      assert_equal 1, rig[:writes].length
+      path, report = rig[:writes].first
+      assert_equal "/inert-missing-cleanup/fallback-writer-close.json", path
+      custody = report.fetch("watchdogOwnership")
+      assert_equal [700, 20_000_000_000, 6_000_000_000, 12_300_000_000, 7_300_000_000, 8_300_000_000],
+        custody.values_at("driverPid", "driverDeadlineNs", "prearmDeadlineNs", "slotCeilingNs", "fallbackNs", "effectiveHardDeadlineNs")
+      assert_equal [true, false, true], custody.values_at("captureFinishedBeforeClose", "captureJoinedBeforeClose", "captureThreadExitedBeforeClose")
+      assert_equal true, report.fetch("actualOriginalWriterClose")
+      assert_equal rig[:omissions][:records].keys, rig[:entry_reads]
+      assert_equal rig[:omissions][:records].keys.to_h { |name| [name,
+        {"identity" => UploadProcessFixture::OwnedChild.identity(rig[:omissions][:stats].fetch(name)),
+         "sha256" => Digest::SHA256.hexdigest(rig[:omissions][:bytes].fetch(name))}] }, report.fetch("omissionRecords")
+      assert_equal true, rig[:session].retained_unknown? # Never repaired by fallback.
+      # The real parent binder accepts early entries without either terminal
+      # report or callback. These are inert inputs, not native proof receipts.
+      proof = parent_proof.call(rig)
+      assert_equal "unknown", proof.fetch("nativeFinality")
+      assert_equal %w[containment-custodian-omission.json containment-keeper-omission.json fallback-writer-close.json leader-eof.json],
+        proof.fetch("reportSha256").keys.sort
+      assert_equal proof.fetch("reportSha256").keys.sort, rig[:omissions][:bytes].keys.sort
+      assert rig[:session].retained_unknown?
+      # Equal parsed JSON is insufficient: the parent's reread must match the
+      # exact bytes and original file identity admitted BEFORE the same close.
+      name = "containment-keeper-omission.json"
+      original_bytes = rig[:omissions][:bytes].fetch(name)
+      rig[:omissions][:bytes][name] = original_bytes + " "
+      assert_raises(UploadProcessFixture::Failure) { parent_proof.call(rig) }
+      rig[:omissions][:bytes][name] = original_bytes
+      rig[:omissions][:stats].fetch(name).ino += 1
+      assert_raises(UploadProcessFixture::Failure) { parent_proof.call(rig) }
+      rig[:omissions][:stats].fetch(name).ino -= 1
+      final_reads = 0
+      rig[:after_read] = lambda do |c, read_name|
+        next unless read_name == "leader-eof.json"
+        final_reads += 1
+        c[:now] = 20_000_000_000 if final_reads == 2 # Final report hash, after entry admission.
+      end
+      assert_raises(UploadProcessFixture::Failure) { parent_proof.call(rig) }
+      assert_equal 2, final_reads
+      assert_equal 20_000_000_000, rig[:now]
+      rig[:after_read] = nil
+      assert_equal 1, rig[:writer_attempts]
+      rig[:now] = 30_000_000_000
+      assert_equal 8_300_000_000, rig[:driver].watchdog_join_deadline_ns
+      rig[:driver].finish_resources
+      assert_includes rig[:events], [:join, 8_300_000_000, true]
+      assert_equal 1, rig[:writer_attempts]
+    end
+    # Only materially different entry/source/file/temporal boundaries. Shared
+    # bounded-file permission/size tests and prior watchdog matrices stay reused.
+    invalid_entries = {
+      "role" => ->(item) { item["role"] = "custodian" },
+      "source" => ->(item) { item["sourceSha256"].transform_values! { "c" * 64 } },
+      "copy" => ->(item) { item["helperCopy"]["sha256"] = "c" * 64 },
+      "graph" => ->(item) { item["identities"]["validator"] = 799 },
+      "parent" => ->(item) { item["parentPid"] = 700 },
+      "route" => ->(item) { item["entry"]["route"] = "custodian-group" },
+      "origin" => ->(item) { item["entry"]["origin"]["line"] += 1 },
+      "pre-arm" => ->(item) { item["entry"]["atNs"] = 1_999_999_999 },
+      "expired-entry" => ->(item) { item["entry"]["effectiveDeadlineNs"] = item["entry"]["atNs"] },
+      "terminal-substitute" => ->(item) { item["kind"] = "original-helper-containment-events" },
+    }
+    scenarios = invalid_entries.keys + %w[missing-custodian missing-keeper changed-path changed-manifest read-crosses-H]
+    scenarios.each do |fault|
+      candidate = make.call
+      within.call(candidate) do
+        prepare.call(candidate)
+        arm.call(candidate)
+        ended_capture.call(candidate)
+        name = "containment-keeper-omission.json"
+        if invalid_entries.key?(fault)
+          item = JSON.parse(candidate[:omissions][:bytes].fetch(name))
+          invalid_entries.fetch(fault).call(item)
+          candidate[:omissions][:bytes][name] = JSON.generate(item)
+        elsif fault.start_with?("missing-")
+          candidate[:omissions][:stats].delete("containment-#{fault.delete_prefix('missing-')}-omission.json")
+        elsif fault == "changed-path"
+          candidate[:changed_path] = name
+        elsif fault == "changed-manifest"
+          candidate[:manifest_read] = JSON.parse(JSON.generate(candidate[:omissions][:manifest]))
+          candidate[:manifest_read]["helperCopy"]["sha256"] = "c" * 64
+        else
+          candidate[:after_read] = ->(c, read_name) { c[:now] = 8_300_000_000 if read_name == name }
+        end
+        expected = fault.start_with?("missing-") ? Errno::ENOENT : UploadProcessFixture::Failure
+        error = assert_raises(expected, fault) { candidate[:control].close_writer }
+        assert_same error, candidate[:control].close_error
+        assert_nil candidate[:driver].instance_variable_get(:@watchdog_action)
+        assert_equal 0, candidate[:writer_attempts], fault
+        assert_empty candidate[:writes]
+        assert candidate[:session].retained_unknown?
+      end
+    end
+    # Hardloss keeps its stronger terminal requirement; early omissions must
+    # not silently replace the original C/K terminal receipt wait in that path.
+    candidate = make.call
+    within.call(candidate) do
+      original = IOError.new("inert hardloss terminal wait")
+      wait = lambda do |directory, names, deadline_ns:|
+        assert_equal candidate[:omissions][:directory], directory
+        assert_equal %w[containment-custodian.json containment-keeper.json], names
+        assert_equal 20_000_000_000, deadline_ns
+        raise original
+      end
+      UploadProcessFixture::ContainmentEvidence.stub(:wait_records, wait) do
+        caught = assert_raises(IOError) do
+          UploadProcessFixture::ContainmentEvidence.hardloss!(candidate[:omissions][:directory], "kill-native-setup",
+            {"fifoIdentity" => candidate[:control].instance_variable_get(:@identity)}, candidate[:control].writer,
+            deadline_ns: 20_000_000_000)
+        end
+        assert_same original, caught
+        assert_equal 0, candidate[:writer_attempts]
+      end
+    end
+    candidate = make.call
+    within.call(candidate) do
+      candidate[:now] = 20_000_000_000
+      sample = candidate[:omissions]
+      assert_raises(UploadProcessFixture::Failure) do
+        UploadProcessFixture::ContainmentEvidence.omission_records!(sample[:directory], sample[:manifest], sample[:graph],
+          driver_pid: 700, deadline_ns: 20_000_000_000, capture_entry_ns: 1_000_000_000,
+          arm_ns: 2_000_000_000, before_ns: 7_300_000_000)
+      end
+      assert_empty candidate[:entry_reads]
+      assert_empty candidate[:stat_reads]
+      assert_equal 0, candidate[:writer_attempts]
+    end
+    # Stop-before-prepare and exhausted original D cannot acquire a new slot.
+    [make.call, make.call(deadline: 7_300_000_000), make.call].each_with_index do |candidate, index|
+      within.call(candidate) do
+        candidate[:driver].stop_watchdog! if index.zero?
+        candidate[:current] = candidate[:worker_thread] if index == 2
+        assert_raises(UploadProcessFixture::Failure) { candidate[:driver].prepare_watchdog }
+        assert_empty candidate[:factories]
+      end
+    end
+    # Late returned publication must never enter even an immediate admit branch.
+    %i[publication_query publication_wait admit_return start_return denied_admit start_error admit_error].each do |fault|
+      candidate = make.call
+      original = IOError.new("inert #{fault}")
+      case fault
+      when :publication_query then candidate[:query_hooks][:publication_ready?] = ->(c) { c[:now] = 6_000_000_000 }
+      when :publication_wait
+        candidate[:flags][:published] = false
+        candidate[:sleep_hook] = ->(c) { c[:now] = 6_000_000_000; c[:flags][:published] = true }
+      when :admit_return then candidate[:admit_ns] = 6_000_000_000
+      when :start_return then candidate[:flags][:start_return] = nil
+      when :denied_admit then candidate[:flags][:admit_return] = false
+      when :start_error then candidate[:start_error] = original
+      when :admit_error then candidate[:admit_error] = original
+      end
+      within.call(candidate) do
+        error = assert_raises(%i[start_error admit_error].include?(fault) ? IOError : UploadProcessFixture::Failure) do
+          candidate[:driver].prepare_watchdog
+        end
+        assert_same original, error if %i[start_error admit_error].include?(fault)
+        assert_same candidate[:slot], candidate[:driver].instance_variable_get(:@watchdog)
+        assert candidate[:flags][:attempted]
+        refute candidate[:driver].observed.fetch("watchdogStarted")
+        refute candidate[:driver].observed.key?("watchdogPreadmitted")
+        assert_empty candidate[:events].select { |row| row.first == :admit } if %i[publication_query publication_wait start_return start_error].include?(fault)
+      end
+    end
+    candidate = make.call
+    within.call(candidate) do
+      assert_equal true, candidate[:driver].prepare_watchdog
+      candidate[:now] = 6_000_000_000
+      assert_raises(UploadProcessFixture::Failure) { candidate[:driver].native_event(:execute_enter, candidate[:session]) }
+      assert_nil candidate[:driver].instance_variable_get(:@native_frame)
+    end
+    candidate = make.call
+    within.call(candidate) do
+      prepare.call(candidate)
+      candidate[:current] = candidate[:worker_thread]
+      assert_raises(UploadProcessFixture::Failure) { candidate[:driver].claim_watchdog_action!(nil) }
+      candidate[:sleep_hook] = ->(c) { c[:now] = 6_000_000_000 }
+      assert_raises(UploadProcessFixture::Failure) { candidate.fetch(:worker).call }
+      assert_empty candidate[:writes]
+      assert_equal 0, candidate[:writer_attempts]
+      assert_equal 6_000_000_000, candidate[:driver].watchdog_join_deadline_ns
+    end
+    # Arm fails before any new authority; action independently rechecks F/H and
+    # original worker/caller state, even when native capture has ended UNKNOWN.
+    arm_refusals = [->(c) { c[:driver].stop_watchdog! }, ->(c) { c[:now] = 6_000_000_000 },
+      ->(c) { c[:current] = c[:driver_thread] }, ->(c) { c[:session].unknown = true },
+      ->(c) { c[:capture_flags][:cancelled] = true }]
+    arm_refusals.each do |mutate|
+      candidate = make.call
+      within.call(candidate) do
+        prepare.call(candidate)
+        candidate[:current], candidate[:now] = candidate[:capture_thread], 2_000_000_000
+        mutate.call(candidate)
+        assert_raises(UploadProcessFixture::Failure) { candidate[:driver].start_watchdog }
+        assert_nil candidate[:driver].watchdog_arm_record
+        refute candidate[:driver].observed.fetch("watchdogStarted")
+        assert_equal 1, candidate[:factories].length
+      end
+    end
+    action_refusals = [->(c) { c[:driver].stop_watchdog! }, ->(c) { c[:current] = c[:capture_thread] },
+      ->(c) { c[:driver_thread].live = false }, ->(c) { c[:flags][:cancelled] = true },
+      ->(c) { c[:flags][:retired] = true }, ->(c) { c[:now] = 7_300_000_000 - 1 }, ->(c) { c[:now] = 8_300_000_000 },
+      ->(c) { c[:query_hooks][:launch_retired?] = ->(r) { r[:now] = 8_300_000_000 } }]
+    action_refusals.each do |mutate|
+      candidate = make.call
+      within.call(candidate) do
+        prepare.call(candidate)
+        record = arm.call(candidate)
+        ended_capture.call(candidate)
+        mutate.call(candidate)
+        assert_raises(UploadProcessFixture::Failure) { candidate[:driver].claim_watchdog_action!(record) }
+        assert_nil candidate[:driver].instance_variable_get(:@watchdog_action)
+        assert_equal 0, candidate[:writer_attempts]
+      end
+    end
+    # A failed join forbids BOTH parent lease closes and roots the same driver.
+    # The second case stops while the original writer action is already in flight.
+    %i[unclaimed inflight join_error].each do |scenario|
+      candidate = make.call
+      within.call(candidate) do
+        prepare.call(candidate)
+        record = arm.call(candidate)
+        ended_capture.call(candidate)
+        candidate[:flags][:join_return] = false
+        candidate[:join_error] = IOError.new("original fallback join failure") if scenario == :join_error
+        primary = candidate[:session].primary_error
+        cleanup_error = nil
+        finish = lambda do |c|
+          # Model the parent turn without another real thread or scheduling.
+          caller = c[:current]
+          c[:current] = c[:driver_thread]
+          begin
+            before = c[:events].count { |row| row.first == :lease_close }
+            cleanup_error = assert_raises(c[:join_error] ? IOError : UploadProcessFixture::Failure) { c[:driver].finish_resources }
+            assert_same c[:join_error], cleanup_error if c[:join_error]
+            assert_equal before, c[:events].count { |row| row.first == :lease_close }
+            assert_same cleanup_error, c[:driver].instance_variable_get(:@cleanup_errors).first
+            assert_nil c[:slot].first_error # A native failure is not this independent task's failure.
+            assert_same primary, c[:session].primary_error
+            assert_includes c[:events], [:owner, "finished"]
+            retained.call(c)
+          ensure
+            c[:current] = caller
+          end
+        end
+        if scenario == :inflight
+          candidate[:during_close] = finish
+          assert_equal true, candidate.fetch(:worker).call
+          claim = candidate[:driver].instance_variable_get(:@watchdog_action)
+          assert claim.frozen?
+          assert_same record, claim.fetch(:arm)
+          assert_equal 7_300_000_000, claim.fetch(:entry_ns)
+          assert_equal 1, candidate[:writer_attempts]
+          assert_raises(UploadProcessFixture::Failure) { candidate[:driver].claim_watchdog_action!(record) }
+          assert_same claim, candidate[:driver].instance_variable_get(:@watchdog_action)
+        else
+          finish.call(candidate)
+          assert_raises(UploadProcessFixture::Failure) { candidate[:control].close_writer }
+          assert_nil candidate[:driver].instance_variable_get(:@watchdog_action)
+          assert_equal 0, candidate[:writer_attempts]
+        end
+      end
+    end
+    # Positive join plus original task failure still closes independent resources
+    # and preserves that first error; false/raising custody never closes them.
+    candidate = make.call
+    within.call(candidate) do
+      prepare.call(candidate)
+      original = candidate[:flags][:first_error] = IOError.new("original fallback task failure")
+      candidate[:flags][:cancelled] = true
+      actual = assert_raises(IOError) { candidate[:driver].finish_resources }
+      assert_same original, actual
+      assert_equal [original], candidate[:driver].instance_variable_get(:@cleanup_errors)
+      assert_equal [[:lease_close, :anchor], [:lease_close, :writer]], candidate[:events].select { |row| row.first == :lease_close }
+      assert_includes candidate[:events], [:owner, "finished"]
+    end
+    [{joined: nil}, {joined: true, finished: false}, {joined: true, finished: true, unresolved: true},
+     {joined: IOError.new("inert failed original join query")}].each do |flags|
+      candidate = make.call
+      within.call(candidate) do
+        prepare.call(candidate)
+        candidate[:flags].merge!(flags)
+        error = assert_raises(flags[:joined].is_a?(Exception) ? IOError : UploadProcessFixture::Failure) { candidate[:driver].close_control }
+        assert_same flags[:joined], error if flags[:joined].is_a?(Exception)
+        assert_empty candidate[:events].select { |row| row.first == :lease_close }
+        retained.call(candidate)
+      end
+    end
+    [true, false].each do |retire_return|
+      candidate = make.call
+      within.call(candidate) do
+        candidate[:driver].instance_variable_set(:@watchdog, candidate[:slot])
+        candidate[:retire_return] = retire_return
+        if retire_return
+          assert_equal true, candidate[:driver].close_control
+          assert candidate[:flags][:retired]
+        else
+          2.times { assert_raises(UploadProcessFixture::Failure) { candidate[:driver].close_control } }
+          assert_empty candidate[:events].select { |row| row.first == :lease_close }
+          retained.call(candidate)
+        end
+        assert_equal [[:retire]], candidate[:events].select { |row| row.first == :retire }
+      end
+    end
+    # A real close effect arriving at/after H is retained but never published as
+    # timely proof, and neither it nor a close exception authorizes a second call.
+    [8_300_000_000, 8_300_000_001, IOError.new("original inert writer close failure")].each do |outcome|
+      candidate = make.call
+      within.call(candidate) do
+        prepare.call(candidate)
+        arm.call(candidate)
+        ended_capture.call(candidate)
+        if outcome.is_a?(Exception)
+          candidate[:writer_error] = outcome
+        else
+          candidate[:close_return_ns] = outcome
+        end
+        original = assert_raises(outcome.is_a?(Exception) ? IOError : UploadProcessFixture::Failure) { candidate[:control].close_writer }
+        assert_same outcome, original if outcome.is_a?(Exception)
+        assert_same original, candidate[:control].close_error
+        assert_equal true, candidate[:control].close_result unless outcome.is_a?(Exception)
+        assert_raises(UploadProcessFixture::Failure) { candidate[:control].close_writer }
+        assert_same original, candidate[:control].close_error
+        assert_equal 1, candidate[:writer_attempts]
+        assert_empty candidate[:writes]
+      end
+    end
+    original_registries.each do |name, (defined, object, contents)|
+      assert_equal defined, UploadProcessFixture.instance_variable_defined?(name), name
+      assert_same object, UploadProcessFixture.instance_variable_get(name), name
+      assert_equal contents, object, name if object.is_a?(Hash)
+    end
+  end
+
+  def native_order_case(family, caller_kind)
+    UploadProcessFixture.assert_domain_reusable!
+    assert_equal ORDER_CASES, UploadProcessFixture::NativeOrderProbe::MODES
+    mode = "native-order-#{family}-#{caller_kind}"
+    assert_equal [family, caller_kind], ORDER_CASES.fetch(mode)
+    unknown = family == "cleanup-before-caller"
+    caller_first = family == "caller-before-task"
+    sources = proof_source_snapshot
+    order_failure_state = {} # Each internal mode retains only its own rejection.
+    value = begin
+      if unknown
+        # One original driver in this singleton. Its truthful UNKNOWN is not a
+        # successful capture, a ps-repaired receipt, or permission for a next case.
+        UploadProcessFixture.run(platform: "native", root: @root, parameters: {}, mode: mode,
+          order_failure_state: order_failure_state)
+      else
+        process_case(mode, order_failure_state: order_failure_state)
+      end
+    rescue Exception => original
+      begin
+        self.class.report_native_order_failure(order_failure_state, original,
+          callback: "#{self.class.name}##{name}", mode: mode)
+      rescue Exception
+        nil # Lookup/report failures cannot replace the original unwound error.
+      end
+      raise
+    end
+    assert value.fetch("driverJoined")
+    assert_equal unknown ? "fixture-cleanup" : "unexpected", value.fetch("kind")
+    proof = value.fetch("nativeOrderProof")
+    assert_equal %w[baseDriverReturn bodyError bodyFaults callerDeliveries callerDeliveryReturned callerError callerKind
+                    callerRescueObserved captureFinished captureFirstSameObject captureJoined case causalBarrierBound
+                    cleanupError cleanupFaults cleanupTailSource creatorFirstSameObject expectedUnknown failures family
+                    finiteValidator firstError firstLatch kind laterLatch nativeFirstSameObject ordinaryProductionPass
+                    originalAccepted outerFirstSameObject receiptEvents retainedOriginalSession sourceSha256 version], proof.keys.sort
+    assert_equal [1, "native-order-observation", mode, family, caller_kind], proof.values_at("version", "kind", "case", "family", "callerKind")
+    assert_equal sources.transform_values { |item| item.fetch("sha256") }, proof.fetch("sourceSha256")
+    assert_empty proof.fetch("failures"), proof.inspect
+    assert_equal 1, proof.fetch("baseDriverReturn") # Original Ruby method return, not the direct driver's OS exit.
+    refute proof.fetch("ordinaryProductionPass")
+    refute proof.fetch("originalAccepted")
+    assert_equal unknown, proof.fetch("expectedUnknown")
+    %w[causalBarrierBound callerDeliveryReturned callerRescueObserved outerFirstSameObject nativeFirstSameObject
+       captureFirstSameObject creatorFirstSameObject captureJoined].each { |name| assert_equal true, proof.fetch(name), name }
+    assert_equal 1, proof.fetch("callerDeliveries")
+    assert_equal unknown ? 0 : 1, proof.fetch("bodyFaults")
+    assert_equal unknown ? 1 : 0, proof.fetch("cleanupFaults")
+    assert_equal !unknown, proof.fetch("captureFinished")
+    assert_equal unknown, proof.fetch("retainedOriginalSession")
+    caller_error = {"class" => caller_kind == "interrupt" ? "Interrupt" : "SystemExit",
+                    "message" => "original native order caller cancellation", "exitStatus" => caller_kind == "interrupt" ? nil : 47}
+    body_error = {"class" => caller_first ? "IOError" : "UploadProcessFixture::NativeOrderProbe::BodyFailure",
+                  "message" => caller_first ? "later native order body IOError" : "original native order body failure", "exitStatus" => nil}
+    cleanup_error = {"class" => "UploadProcessFixture::NativeOrderProbe::CleanupFailure",
+                     "message" => "original native order task cleanup failure", "exitStatus" => nil}
+    assert_equal caller_error, proof.fetch("callerError")
+    assert_equal body_error, proof.fetch("bodyError")
+    assert_equal cleanup_error, proof.fetch("cleanupError")
+    first_error = unknown ? cleanup_error : caller_first ? caller_error : body_error
+    assert_equal first_error, proof.fetch("firstError")
+    assert_equal first_error.fetch("class"), value.fetch("nativeErrorClass")
+    assert_equal first_error.fetch("message"), value.fetch("nativeErrorMessage")
+    assert value.fetch("nativeOriginalErrorPreserved")
+    assert_equal 47, value.fetch("nativeExitStatus") if caller_first && caller_kind == "system-exit"
+    first, later = proof.values_at("firstLatch", "laterLatch")
+    [first, later].each do |receipt|
+      assert_equal %w[firstSameObject launchRetired operation originalCallReturned originalSharedRecord originalSlot priorWasFirst priorWasNil thread], receipt.keys.sort
+      %w[originalCallReturned originalSharedRecord originalSlot firstSameObject launchRetired].each { |name| assert_equal true, receipt.fetch(name), name }
+    end
+    assert_equal unknown ? "record_cleanup_error" : "cancel!", first.fetch("operation")
+    assert_equal "cancel!", later.fetch("operation")
+    assert_equal caller_first ? "caller" : "capture", first.fetch("thread")
+    assert_equal caller_first ? "capture" : "caller", later.fetch("thread")
+    assert first.fetch("priorWasNil")
+    refute first.fetch("priorWasFirst")
+    refute later.fetch("priorWasNil")
+    assert later.fetch("priorWasFirst")
+    # Ordinals are diagnostic only. The driver separately checked the retained
+    # original latch-return object which released each actual later exception.
+    events = proof.fetch("receiptEvents")
+    assert_operator events.length, :<=, 64
+    assert_equal (0...events.length).to_a, events.map { |event| event.fetch("ordinal") }
+    events.each { |event| assert_includes %w[caller capture], event.fetch("thread") }
+    native = value.fetch("nativeObservation")
+    assert_native_observation(native, finality: unknown ? :unknown : :finalized)
+    if unknown
+      assert_equal "unknown", value.fetch("nativeFinality")
+      assert value.fetch("retainedFixture")
+      assert value.fetch("domainDisposalRequired")
+      refute value.key?("knownProcessesDead") # UNKNOWN does not authorize a new process observer or a repaired custody claim.
+      assert UploadProcessFixture.expected_unknown_retention?(@root)
+      assert UploadProcessFixture.domain_disposal_required?
+      refute value.fetch("tasksJoined")
+      refute value.fetch("watchdogStarted")
+      refute value.key?("deadBeforeFallback")
+      assert_equal 0, value.fetch("injectionCount")
+      assert_equal %w[capture creator], native.fetch("tasks").map { |task| task.fetch("role") }.sort
+      native.fetch("tasks").each do |task|
+        %w[startAttempted joined actualJoinObserved actualConstructionObserved launchRetired actualLaunchClosureObserved].each { |name| assert task.fetch(name), task.inspect }
+        refute task.fetch("unresolved")
+        assert_equal task.fetch("role") == "creator", task.fetch("finished")
+      end
+      native.fetch("leases").each do |lease|
+        assert_equal "closed", lease.fetch("state")
+        assert lease.fetch("closed")
+        assert lease.fetch("actualCloseObserved")
+        assert_nil lease.fetch("closeError")
+      end
+      assert native.fetch("streams").values.all? { |flag| flag.equal?(true) }
+      assert_child_terminal(native.fetch("custodian"), allow_no_attempt: false)
+      assert_equal ["exit", 0], native.fetch("custodian").values_at("status_kind", "status_code")
+      assert_final_cleanup(native.fetch("final"))
+      assert_equal "ok", native.fetch("final").fetch("outcome") # Real pre-tail native success is NOT finality.
+      finite = proof.fetch("finiteValidator")
+      source = "STDOUT.write(\"native-order-complete\\n\")\n"
+      assert_equal({"argv" => [File.realpath(RbConfig.ruby), *MobileReleaseKit::NativeUploadProcess::HELPER_FLAGS, "-e", source],
+                    "sha256" => Digest::SHA256.hexdigest(source)}, finite)
+      tail = "          begin\n            close_launch!\n            @lock.synchronize { @finished = true }\n          rescue Exception => error\n            record_cleanup_error(error)\n"
+      lines = sources.fetch("fastlane/native_upload_process.rb").fetch("bytes").lines
+      starts = lines.each_index.select { |index| lines[index, tail.lines.length]&.join == tail }
+      assert_equal 1, starts.length
+      assert_equal({"path" => File.realpath(File.expand_path("../../fastlane/native_upload_process.rb", __dir__)),
+                    "line" => starts.first + 2}, proof.fetch("cleanupTailSource"))
+    else
+      assert_equal "finalized", value.fetch("nativeFinality")
+      refute value.fetch("retainedFixture")
+      assert_equal 1, value.fetch("injectionCount")
+      assert_validator_killed(native)
+      assert_nil proof.fetch("cleanupTailSource")
+      assert_nil proof.fetch("finiteValidator")
+    end
+    %w[ready firstCloseEntered firstCloseFromNative originalCloseCompleted ownedDescriptorsClosed watchdogJoined
+       injectorsJoined handlersRestored registryInactive].each { |name| assert value.fetch(name), name }
+    %w[fallbackUsed watchdogIntervened pendingInterrupt].each { |name| refute value.fetch(name), name }
+    assert_empty value.fetch("cleanupErrors")
+    driver = value.fetch("driverProvenance")
+    assert_equal "reaped", driver.fetch("phase")
+    assert driver.fetch("creatorJoined")
+    assert driver.fetch("resourcesClosed")
+    assert_equal({"pid" => driver.fetch("pid"), "status_kind" => "exit", "status_code" => 0}, driver.fetch("wait"))
+    assert_equal({"out" => true, "err" => true}, driver.fetch("ownedStreamEOFs"))
+    assert_equal sources, proof_source_snapshot
+    value
+  end
+
+  def execute_isolated_collector_close(arguments, failure_state:)
+    UploadProcessFixture.assert_domain_reusable!
+    failure_state[:stage] = "request-contract"
+    request = read_isolated_json(File.join(@root, "isolated-request.json"))
+    assert_equal %w[argv cwd deadlineNs minitest sourceSha256 testSource version], request.keys.sort
+    assert_equal 1, request.fetch("version")
+    assert_equal({"platform" => "native", "parameters" => {}, "mode" => ISOLATED_COLLECTOR_MODE},
+                 read_isolated_json(File.join(@root, "input.json")))
+    failure_state[:stage] = "source-bindings"
+    minitest = minitest_library_snapshot
+    assert_equal minitest, request.fetch("minitest")
+    assert_equal isolated_collector_argv(@root, minitest), request.fetch("argv")
+    assert_equal Dir.pwd, request.fetch("cwd")
+    source_hashes = proof_source_snapshot.transform_values { |item| item.fetch("sha256") }
+    assert_equal source_hashes, request.fetch("sourceSha256")
+    test_source = dispatch_file_identity(File.realpath(__FILE__), limit: 1_048_576)
+    assert_equal test_source, request.fetch("testSource")
+    failure_state[:stage] = "deadline-bound"
+    deadline_ns = request.fetch("deadlineNs")
+    assert_instance_of Integer, deadline_ns
+    now_ns = MobileReleaseKit::NativeUploadProcess.monotonic_ns
+    assert_operator deadline_ns, :>, now_ns
+    assert_operator deadline_ns, :<=, now_ns + ISOLATED_COLLECTOR_LIMIT * 1_000_000_000
+    failure_state[:deadline_ns] = deadline_ns
+
+    failure_state[:stage] = "collector-execution"
+    observed = {}
+    close_fault = IOError.new("synthetic collector close after effect")
+    repeat = Interrupt.new("repeat at collector reporting tail")
+    error = assert_raises(UploadProcessFixture::Failure) do
+      UploadProcessFixture.lifetime(deadline_ns: deadline_ns) do |scope|
+        observed[:isolated_lifetime] = scope
+        directory = new_raw_case("collector-timeout", "collector-timeout")
+        scope.active do
+          collect_raw_driver(nil, directory, observed, literal: "timeout", close_fault: close_fault,
+                             reporting_repeat: repeat, enclosing_deadline_ns: deadline_ns)
+        end
+      end
+    end
+    failure_state[:stage] = "capture-primary"
+    assert_same error, observed.fetch(:primary)
+    record = assert_retained_capture(observed, finality: :unknown, failure_state: failure_state)
+    failure_state[:stage] = "capture-error-contract"
+    assert_equal bounded_error(error), record.fetch("primary")
+    assert_equal "driver", error.kind
+    assert_equal "raw proof driver deadline expired", error.message
+    failure_state[:stage] = "capture-readiness"
+    assert_equal({"observed" => true, "identity" => observed.fetch(:stream_identities).first}, record.fetch("literalReadiness"))
+    failure_state[:stage] = "capture-transcript"
+    assert_equal "collector ready\n", File.binread(File.join(observed.fetch(:directory), "driver.stdout"), UploadProcessFixture::OUTPUT_LIMIT + 1)
+    failure_state[:stage] = "capture-termination"
+    assert_equal Signal.list.fetch("KILL"), observed.fetch(:status).termsig
+    failure_state[:stage] = "cleanup-contract"
+    assert_equal 2, observed.fetch(:cleanup_errors).length
+    assert_same close_fault, observed.fetch(:cleanup_errors).first
+    scratch_error = observed.fetch(:cleanup_errors).last
+    assert_instance_of UploadProcessFixture::Failure, scratch_error
+    assert_equal "fixture-cleanup", scratch_error.kind
+    assert_equal "unresolved observer scratch prevents fixture removal", scratch_error.message
+    assert_equal ["IOError", "UploadProcessFixture::Failure"], record.fetch("cleanupErrors").map { |entry| entry.fetch("class") }
+    assert_equal 1, observed.fetch(:close_fault_calls)
+    failure_state[:stage] = "reporting-contract"
+    assert observed.fetch(:reporting_repeat_queued)
+    assert observed.fetch(:reporting_injector_joined)
+    assert observed.fetch(:reporting_injector_admitted)
+    %w[reportingRepeatQueued reportingInjectorJoined reportingInjectorAdmitted reportingInjectorFinished].each do |name|
+      assert record.fetch(name), name
+    end
+    slot = observed.fetch(:reporting_injector_slot)
+    assert_instance_of MobileReleaseKit::NativeUploadProcess::TaskSlot, slot
+    assert_same slot.thread, observed.fetch(:reporting_injector)
+    assert slot.joined?
+    assert slot.finished?
+    assert slot.launch_retired?
+    refute slot.unresolved?
+    assert_equal true, slot.offer
+    assert_nil slot.first_error
+    assert_empty slot.cleanup_errors
+    refute_same Thread.current, observed.fetch(:reporting_injector)
+    refute observed.fetch(:reporting_injector).alive?
+    refute observed.fetch(:reporting_injector).report_on_exception
+    refute observed.fetch(:reporting_injector).abort_on_exception
+    assert_equal observed.fetch(:reporting_thread_defaults), [Thread.report_on_exception, Thread.abort_on_exception]
+
+    failure_state[:stage] = "custody-contract"
+    child = observed.fetch(:child)
+    assert_equal :unknown, child.phase
+    refute child.complete?
+    assert_equal :unknown, child.acquisition.state
+    assert_equal :reaped, child.child.state
+    assert_same child.child, child.acquisition.child
+    assert_same child.status, child.child.receipt.raw_status
+    assert child.child.numeric_retired?
+    assert child.creator.joined?
+    assert child.creator.finished?
+    refute child.creator.unresolved?
+    unknown = child.acquisition.resources.values.select { |lease| lease.state == :unknown }
+    assert_equal [:out], unknown.map(&:role)
+    assert_same close_fault, unknown.first.close_error
+    assert unknown.first.io.closed? # Physical effect is NOT repaired custody.
+    assert child.acquisition.resources.values.reject { |lease| lease.equal?(unknown.first) }.all? { |lease| %i[closed not_acquired].include?(lease.state) }
+    retained = UploadProcessFixture.instance_variable_get(:@unresolved_children)
+    assert_same child, retained.fetch(child.object_id)
+    assert UploadProcessFixture.cleanup_unresolved?(observed.fetch(:directory))
+    assert File.directory?(child.launch_directory)
+    failure_state[:stage] = "final-recheck"
+    assert_equal deadline_ns, observed.fetch(:enclosing_deadline_ns)
+    assert_equal deadline_ns, observed.fetch(:isolated_lifetime).instance_variable_get(:@drain_deadline_ns).call
+    assert_operator child.creator.hard_cleanup_deadline_ns, :<=, deadline_ns - RAW_REPORTING_NS
+    assert_operator slot.hard_cleanup_deadline_ns, :<=, deadline_ns
+    assert_equal slot.run_deadline_ns, record.fetch("reportingInjectorDeadlineNs")
+    assert_equal slot.run_deadline_ns, slot.hard_cleanup_deadline_ns
+    assert_equal source_hashes, proof_source_snapshot.transform_values { |item| item.fetch("sha256") }
+    assert_equal test_source, dispatch_file_identity(File.realpath(__FILE__), limit: 1_048_576)
+    assert_equal minitest, minitest_library_snapshot
+    failure_state[:stage] = "proof-publication"
+    proof = {"version" => 1, "case" => ISOLATED_COLLECTOR_MODE, "pid" => Process.pid, "deadlineNs" => deadline_ns,
+             "argv" => isolated_collector_argv(@root, minitest), "cwd" => Dir.pwd,
+             "interpreter" => dispatch_file_identity(RbConfig.ruby, limit: 32 * 1024 * 1024),
+             "testSource" => test_source, "sourceSha256" => source_hashes, "childCollector" => record, "minitest" => minitest,
+             "innerState" => {"phase" => "unknown", "stopCompleted" => false, "creatorJoined" => true,
+                               "originalWaitBound" => true, "unknownLease" => "out", "retained" => true}}
+    raise "oversized isolated collector proof" if JSON.generate(proof).bytesize > UploadProcessFixture::OUTPUT_LIMIT
+    UploadProcessFixture.atomic_json(File.join(@root, "isolated-control.json"), proof)
+    # The fixed CLI exits immediately. Do not run autorun, another capture,
+    # cleanup/reset hooks, or a scratch finalizer in this poisoned interpreter.
+  end
+
+  def read_isolated_json(path)
+    File.open(path, File::RDONLY | File::NOFOLLOW | File::NONBLOCK) do |file|
+      before = file.stat
+      unless before.file? && before.uid == Process.uid && before.nlink == 1 && (before.mode & 0o7777) == 0o600
+        raise UploadProcessFixture::Failure.new("fixture-result", "isolated collector proof identity is invalid")
+      end
+      bytes = file.read(UploadProcessFixture::OUTPUT_LIMIT + 1)
+      identity = ->(stat) { [stat.dev, stat.ino, stat.mode, stat.size, stat.mtime, stat.ctime] }
+      unless bytes && bytes.bytesize <= UploadProcessFixture::OUTPUT_LIMIT && bytes.bytesize == before.size &&
+             identity.call(before) == identity.call(file.stat)
+        raise UploadProcessFixture::Failure.new("fixture-result", "isolated collector proof changed or exceeded its bound")
+      end
+      value = JSON.parse(bytes)
+      raise UploadProcessFixture::Failure.new("fixture-result", "isolated collector proof is not an object") unless value.instance_of?(Hash)
+      value
+    end
+  end
+
+  def isolated_collector_argv(directory, minitest)
+    [RbConfig.ruby, *MobileReleaseKit::NativeUploadProcess::HELPER_FLAGS, "-I", minitest.fetch("root"),
+     "--", File.realpath(__FILE__), ISOLATED_COLLECTOR_FLAG, directory]
+  end
+
+  def minitest_library_snapshot
+    raise "isolated collector requires the locked Minitest version" unless Minitest::VERSION == "5.25.5"
+    methods = {"Test" => Minitest::Test.instance_method(:run), "Assertions" => Minitest::Assertions.instance_method(:assert),
+               "autorun" => Minitest.method(:autorun), "mock" => Object.instance_method(:stub)}
+    origins = methods.transform_values do |method|
+      path, line = method.source_location
+      raise "Minitest origin is not Ruby source" unless path && line
+      {"path" => File.realpath(path), "line" => line}
+    end
+    root = File.dirname(origins.fetch("autorun").fetch("path"))
+    expected = {"Test" => "minitest/test.rb", "Assertions" => "minitest/assertions.rb",
+                "autorun" => "minitest.rb", "mock" => "minitest/mock.rb"}
+    expected.each do |name, relative|
+      raise "Minitest origins do not share one exact library" unless origins.fetch(name).fetch("path") == File.join(root, relative)
+    end
+    # Locked 5.25.5 also ships this inert Hoe plugin source. Account for exactly
+    # that file without requiring Hoe or opening any additional loader namespace.
+    hoe_root = File.join(root, "hoe")
+    raise "unexpected Minitest shadow-loader entry" unless Dir.children(root).sort == %w[hoe minitest minitest.rb]
+    pending, files, directories, total = [root], {}, {}, 0
+    until pending.empty?
+      path = pending.pop
+      before = File.lstat(path)
+      unless before.directory? && File.realpath(path) == path && (before.mode & 0o022).zero? && directories.length < 16
+        raise "Minitest library directory is unsafe or exceeds its bound"
+      end
+      names = Dir.children(path).sort
+      raise "Minitest library directory exceeds its bound" if names.length > 64
+      directories[path.delete_prefix("#{root}/")] = [before.dev, before.ino, before.mode, before.uid, before.gid]
+      names.each do |name|
+        raise "invalid Minitest library name" unless /\A[A-Za-z0-9_.-]+\z/.match?(name) && !%w[. ..].include?(name)
+        child = File.join(path, name)
+        stat = File.lstat(child)
+        if stat.directory?
+          unless child == hoe_root || child.start_with?("#{root}/minitest") && child.count("/") - root.count("/") <= 4
+            raise "unexpected Minitest namespace"
+          end
+          pending << child
+        else
+          unless stat.file? && stat.nlink == 1 && (stat.mode & 0o022).zero? && name.end_with?(".rb") &&
+                 File.realpath(child) == child && files.length < 64 && (path != hoe_root || name == "minitest.rb")
+            raise "Minitest library contains an unsafe or unexpected loader"
+          end
+          item = dispatch_file_identity(child, limit: 1_048_576)
+          if path == hoe_root && (item.fetch("size") != 544 || item.fetch("sha256") != "66a98ba72d7c7d57c5ea948c9d7ce442567e6c68b22fd34bdd18e4814d1099ef")
+            raise "Minitest Hoe source differs from the locked artifact"
+          end
+          total += item.fetch("size")
+          raise "Minitest library byte bound exceeded" if total > 2_097_152
+          files[child.delete_prefix("#{root}/")] = item
+        end
+      end
+      identity = ->(stat) { [stat.dev, stat.ino, stat.mode, stat.size, stat.mtime, stat.ctime] }
+      raise "Minitest library changed during enumeration" unless identity.call(before) == identity.call(File.lstat(path))
+    end
+    %w[hoe/minitest.rb minitest.rb minitest/assertions.rb minitest/autorun.rb minitest/mock.rb minitest/test.rb].each do |name|
+      raise "Minitest library is incomplete" unless files.key?(name)
+    end
+    {"root" => root, "version" => Minitest::VERSION, "origins" => origins, "files" => files, "directories" => directories}
+  end
+
+  def inert_terminal_frame
+    {"v" => 1, "type" => "FINAL", "outcome" => "failed", "cleanup" => "confirmed",
+     "keeper" => {"state" => "not_attempted"}, "validator" => {"state" => "not_attempted"},
+     "group" => {"state" => "not_created"}}
+  end
+
+  def inert_late_frames
+    [{"v" => 1, "type" => "HELLO", "pid" => 101, "ppid" => 100, "sid" => 101, "pgid" => 101, "fd_map_version" => 1},
+     {"v" => 1, "type" => "RESERVED", "keeper_pid" => 102, "group_id" => 102, "session_id" => 101},
+     {"v" => 1, "type" => "READY", "validator_pid" => 103, "group_id" => 102, "keeper_pgid" => 101},
+     {"v" => 1, "type" => "STATUS", "validator_pid" => 103, "status_kind" => "exit", "status_code" => 0},
+     inert_terminal_frame]
+  end
+
+  def assert_inert_observer_rejection(observer, label)
+    snapshot = observer.build_snapshot
+    refute snapshot.fetch("finalized"), label
+    refute snapshot.fetch("noProducers"), label
+    assert snapshot.fetch("unknown"), label
+    UploadProcessFixture.atomic_json(File.join(@root, "#{label}.inert-observer.json"),
+                                     {"inertControl" => true, "case" => label, "snapshot" => snapshot})
+  end
+
+  def assert_child_terminal(record, allow_no_attempt: true)
+    assert_instance_of Hash, record
+    if record.fetch("state") == "not_attempted"
+      assert allow_no_attempt
+      assert_equal({"state" => "not_attempted"}, record)
+      return
+    end
+    assert_equal %w[pid state status_code status_kind], record.keys.sort
+    assert_equal "reaped", record.fetch("state")
+    assert_instance_of Integer, record.fetch("pid")
+    assert_operator record.fetch("pid"), :>, 1
+    assert_operator record.fetch("pid"), :<=, 2_147_483_647
+    assert_instance_of Integer, record.fetch("status_code")
+    case record.fetch("status_kind")
+    when "exit" then assert_includes 0..255, record.fetch("status_code")
+    when "signal" then assert_includes 1...MobileReleaseKit::NativeProcessSpawn.nsig, record.fetch("status_code")
+    else flunk "invalid genuine child terminal kind: #{record.inspect}"
+    end
+  end
+
+  def assert_final_cleanup(frame)
+    assert_instance_of Hash, frame
+    assert_equal %w[cleanup group keeper outcome type v validator], frame.keys.sort
+    assert_instance_of Integer, frame.fetch("v")
+    assert_equal 1, frame.fetch("v")
+    assert_equal "FINAL", frame.fetch("type")
+    assert_equal "confirmed", frame.fetch("cleanup")
+    assert_includes %w[ok rejected failed], frame.fetch("outcome")
+    keeper, validator, group = frame.values_at("keeper", "validator", "group")
+    [keeper, validator].each { |record| assert_child_terminal(record) }
+    if keeper.fetch("state") == "reaped"
+      assert_equal "exit", keeper.fetch("status_kind")
+      assert_includes frame.fetch("outcome") == "failed" ? [0, 2] : [0], keeper.fetch("status_code")
+    end
+    if group.fetch("state") == "not_created"
+      assert_equal({"state" => "not_created"}, group)
+      assert_equal({"state" => "not_attempted"}, validator)
+    else
+      assert_equal %w[absent id state], group.keys.sort
+      assert_equal "retired", group.fetch("state")
+      assert_equal true, group.fetch("absent")
+      assert_equal "reaped", keeper.fetch("state")
+      assert_equal keeper.fetch("pid"), group.fetch("id")
+    end
+    if keeper.fetch("state") == "not_attempted"
+      assert_equal({"state" => "not_attempted"}, validator)
+      assert_equal({"state" => "not_created"}, group)
+    end
+    if validator.fetch("state") == "not_attempted"
+      assert_equal "failed", frame.fetch("outcome")
+    elsif frame.fetch("outcome") != "failed"
+      assert_equal "retired", group.fetch("state")
+      assert_equal ["exit", 0], keeper.values_at("status_kind", "status_code")
+      assert_equal "exit", validator.fetch("status_kind")
+      if frame.fetch("outcome") == "ok"
+        assert_equal 0, validator.fetch("status_code")
+      else
+        assert_operator validator.fetch("status_code"), :>, 0
+      end
+    end
+  end
+
+  def assert_native_observation(observation, finality:)
+    assert_instance_of Hash, observation
+    assert_equal 1, observation.fetch("version")
+    assert observation.fetch("hooksRestored"), observation.inspect
+    assert_empty observation.fetch("observerErrors"), observation.inspect
+    assert_equal %w[capture helper spawn], observation.fetch("sourceOrigins").keys.sort
+    observation.fetch("sourceOrigins").each_value do |origin|
+      assert_equal %w[line path sha256], origin.keys.sort
+      assert_equal File.absolute_path(origin.fetch("path")), origin.fetch("path")
+      assert_operator origin.fetch("line"), :>, 0
+      assert_match(/\A[0-9a-f]{64}\z/, origin.fetch("sha256"))
+    end
+    assert_equal finality == :finalized, observation.fetch("finalized")
+    assert_equal finality == :no_producers, observation.fetch("noProducers")
+    assert_equal finality == :unknown, observation.fetch("unknown")
+    return if finality == :unknown
+
+    assert observation.fetch("settled"), observation.inspect
+    observation.fetch("tasks").each do |task|
+      refute task.fetch("unresolved"), task.inspect
+      if task.fetch("state") == "not_constructed"
+        assert_equal "creator", task.fetch("role")
+        refute task.fetch("startAttempted"), task.inspect
+        assert task.fetch("creationGateClosed"), task.inspect
+        assert task.fetch("actualScopeSettled"), task.inspect
+        next
+      end
+      %w[actualConstructionObserved launchRetired actualLaunchClosureObserved].each do |name|
+        assert task.fetch(name), task.inspect
+      end
+      if task.fetch("startAttempted")
+        assert_equal "attempted", task.fetch("state")
+        assert_instance_of Integer, task.fetch("thread")
+        %w[finished joined actualJoinObserved].each { |name| assert task.fetch(name), task.inspect }
+      else
+        assert_equal "not_started", task.fetch("state")
+        assert_nil task.fetch("thread")
+        refute task.fetch("joined"), task.inspect
+        refute task.fetch("actualJoinObserved"), task.inspect
+      end
+    end
+    observation.fetch("leases").each do |lease|
+      assert_nil lease.fetch("closeError"), lease.inspect
+      if lease.fetch("noIOAcquired").equal?(true)
+        assert_equal "not_acquired", lease.fetch("state")
+        refute lease.fetch("closed"), lease.inspect
+        refute lease.fetch("actualCloseObserved"), lease.inspect
+      else
+        assert_equal "closed", lease.fetch("state")
+        assert lease.fetch("closed"), lease.inspect
+        assert lease.fetch("actualCloseObserved"), lease.inspect
+      end
+    end
+    if finality == :no_producers
+      assert_equal({"state" => "not_attempted"}, observation.fetch("custodian"))
+      assert_nil observation.fetch("custodianSpawn")
+      assert_nil observation.fetch("final")
+    else
+      assert_equal %w[capture creator], observation.fetch("tasks").map { |task| task.fetch("role") }.sort
+      assert observation.fetch("tasks").all? { |task| task.fetch("startAttempted") }
+      %w[productionFinality statusValid statusDecodedEOF cleanupErrorsEmpty originalWaitObserved
+        tasksJoined leasesClosed allActualEOFObserved captureSettled captureFinished captureJoined captureActualJoinObserved
+        creatorSettled creatorFinished creatorJoined creatorActualJoinObserved stdoutEOF stdoutActualEOFObserved
+        stderrEOF stderrActualEOFObserved statusEOF statusActualEOFObserved].each do |key|
+        assert_equal true, observation.fetch(key), key
+      end
+      assert_equal false, observation.fetch("retainedUnknown")
+      if observation.fetch("final").fetch("group").fetch("state") == "retired"
+        assert_equal true, observation.fetch("groupAbsent")
+      else
+        refute observation.key?("groupAbsent"), "absence of a group is not a group-absence observation"
+      end
+      assert_child_terminal(observation.fetch("custodian"), allow_no_attempt: false)
+      expected_exit = observation.fetch("final").fetch("outcome") == "failed" ? 2 : 0
+      assert_equal ["exit", expected_exit], observation.fetch("custodian").values_at("status_kind", "status_code")
+      refute_nil observation.fetch("custodianSpawn")
+      %w[stdoutEOF stderrEOF statusEOF actualEOFObserved].each do |name|
+        assert_equal true, observation.fetch("streams").fetch(name)
+      end
+      assert_final_cleanup(observation.fetch("final"))
+    end
+  end
+
+  def assert_validator_killed(observation)
+    validator = observation.fetch("final").fetch("validator")
+    assert_child_terminal(validator, allow_no_attempt: false)
+    assert_equal ["signal", Signal.list.fetch("KILL")], validator.values_at("status_kind", "status_code")
+  end
+
+  def assert_late_final_deadline_choreography
+    # Capture the ACTUAL adapter hook registration, but never install a native
+    # observer. Only the parent install method has a restoring inert seam. The
+    # modeled slot/caller are not tasks, wait receipts or ownership evidence.
+    helper = MobileReleaseKit::NativeUploadProcess
+    native = MobileReleaseKit::NativeUploadValidation
+    parent = UploadProcessFixture::NativeSetupDriver::Observation
+    before_install = parent.instance_method(:install)
+    before_observer = UploadProcessFixture::CaptureObservation.current
+    install_seam = UploadProcessFixture::CaptureObservation::Hooks.new
+    begin
+      install_seam.wrap(parent, :install) { nil }
+      exercise = lambda do |mode: "real-deadline", mutate: nil, finish: :primary, error: IOError.new("genuine caller error"), invalid: false|
+        run_cutoff, hard_cutoff = 1_000_000_000, 1_025_000_000
+        state = {now: run_cutoff, alive: true, retired: false, unknown: false, cleanup: []}
+        record = helper::TaskSlot.const_get(:FailureRecord, false).new
+        publish = record.method(:record) # Used only by the modeled original caller, never by the hook.
+        record_error = ->(value) { publish.call(error: value, hard_cleanup_deadline_ns: hard_cutoff, cleanup_deadline_ns: nil) }
+        caller = Object.new
+        caller.define_singleton_method(:alive?) { state.fetch(:alive) }
+        slot = Struct.new(:thread, :caller, :run_deadline_ns, :hard_cleanup_deadline_ns).
+          new(Thread.current, caller, run_cutoff, hard_cutoff)
+        slot.define_singleton_method(:failure_record) { record }
+        slot.define_singleton_method(:launch_retired?) { state.fetch(:retired) }
+        session = Struct.new(:capture_slot, :ready, :reserved).new(slot, {}, {})
+        session.define_singleton_method(:primary_error) { record.first_error }
+        session.define_singleton_method(:retained_unknown?) { state.fetch(:unknown) }
+        session.define_singleton_method(:cleanup_errors) { state.fetch(:cleanup) }
+        deny = ->(*, **) { flunk "late FINAL helper attempted mutation, construction, joining or masking" }
+        %i[cancelled? cleanup_deadline_ns cancel! join_until start close_launch! record_cleanup_error].each do |name|
+          slot.define_singleton_method(name, &deny)
+        end
+        %i[timeout_error task_failure caller_failure receive_frame execute].each { |name| session.define_singleton_method(name, &deny) }
+        driver = UploadProcessFixture::AdapterDriver.new(@root, "ios", mode, {})
+        observer = UploadProcessFixture::AdapterDriver::Observation.new(driver, native: native, root: Object.new)
+        driver.instance_variable_set(:@observation, observer)
+        observer.instance_variable_set(:@session, session)
+        driver.observed.merge!("ready" => true, "blockedDataWaits" => 1, "nativeRunDeadlineNs" => run_cutoff)
+        registrations = {}
+        hooks = Object.new
+        hooks.define_singleton_method(:wrap) { |target, name, &body| registrations[[target, name]] = body }
+        observer.instance_variable_set(:@hooks, hooks)
+        observer.instance_variable_set(:@helper, helper)
+        observer.install
+        hook = registrations.fetch([native.const_get(:CaptureSession, false), :validate_final])
+        frame = {"type" => "FINAL", "outcome" => "failed", "cleanup" => "confirmed"}
+        context = {state: state, slot: slot, session: session, observer: observer, driver: driver,
+                   frame: frame, publish: record_error, error: error}
+        events, sleeps, validated = [], [], []
+        result, validation_error = Object.new, helper::ProtocolError.new
+        value = nil
+        UploadProcessFixture.stub(:clock_ns, -> { state.fetch(:now) }) do
+          helper.stub(:monotonic_ns, -> { state.fetch(:now) }) do
+            mutate.call(context) if mutate
+            original_endpoints = [slot.run_deadline_ns, slot.hard_cleanup_deadline_ns]
+            original_frame = frame.dup
+            original = lambda do |actual_frame|
+              validated << actual_frame
+              events << :validation
+              raise validation_error if invalid
+              result
+            end
+            actual_helper = driver.method(:after_validated_final)
+            after_validation = lambda do |actual_session, actual_frame|
+              assert_equal [:validation], events
+              assert_same session, actual_session
+              assert_same frame, actual_frame
+              events << :helper
+              actual_helper.call(actual_session, actual_frame)
+            end
+            pause = lambda do |seconds|
+              assert driver.instance_variable_get(:@late_final_yielded), "one-shot must precede yielding"
+              assert_operator seconds, :>, 0
+              assert_operator seconds, :<=, 0.01
+              assert_operator seconds, :<=, (hard_cutoff - state.fetch(:now)) / 1_000_000_000.0
+              sleeps << seconds
+              assert_operator sleeps.length, :<=, 3 # A renewed cutoff cannot hang this inert regression.
+              state[:now] += (seconds * 1_000_000_000).round
+              case finish
+              when :primary then record_error.call(error)
+              when :cancelled then record_error.call(nil)
+              when :unknown then state[:unknown] = true
+              when :retired then state[:retired] = true
+              when :cleanup then state[:cleanup] << error
+              when :dead_caller then state[:alive] = false
+              when :hard_expiry # Let the original bound expire without publishing an error.
+              else flunk "unknown late FINAL test finish"
+              end
+            end
+            record.stub(:record, deny) do
+              helper::TaskSlot.stub(:new, deny) do
+                helper::LifecycleError.stub(:new, deny) do
+                  MobileReleaseKit::ContractError.stub(:new, deny) do
+                    Thread.stub(:handle_interrupt, deny) do
+                      driver.stub(:sleep, pause) do
+                        driver.stub(:after_validated_final, after_validation) do
+                          if invalid
+                            actual = assert_raises(helper::ProtocolError) { hook.call(original, session, [frame], {}, nil) }
+                            assert_same validation_error, actual
+                          else
+                            value = hook.call(original, session, [frame], {}, nil)
+                            assert_same result, value
+                          end
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+            assert_equal original_endpoints, [slot.run_deadline_ns, slot.hard_cleanup_deadline_ns]
+            assert_equal original_frame, frame
+          end
+        end
+        assert_equal [frame], validated
+        assert_same frame, validated.first
+        assert_equal invalid ? [:validation] : %i[validation helper], events
+        {sleeps: sleeps, record: record, driver: driver, error: error}
+      end
+
+      %w[real-deadline real-deadline-slow-cleanup].each do |mode|
+        [IOError.new("first caller IO error"), Interrupt.new("first caller interruption"), SystemExit.new(23)].each do |error|
+          value = exercise.call(mode: mode, error: error)
+          assert_equal [0.01], value.fetch(:sleeps)
+          assert_same error, value.fetch(:record).first_error # No timeout-type or message matching.
+        end
+      end
+      %i[cancelled unknown retired cleanup dead_caller hard_expiry].each do |finish|
+        value = exercise.call(finish: finish)
+        assert_equal finish == :hard_expiry ? [0.01, 0.01, 0.005] : [0.01], value.fetch(:sleeps)
+        assert_nil value.fetch(:record).first_error
+        assert_equal finish == :cancelled, value.fetch(:record).failed?
+      end
+      assert_empty exercise.call(invalid: true).fetch(:sleeps)
+      %w[immediate-deadline immediate-deadline-slow-cleanup no-deadline inherited].each do |mode|
+        assert_empty exercise.call(mode: mode).fetch(:sleeps)
+      end
+      bypasses = [
+        ->(c) { c[:state][:now] -= 1 }, ->(c) { c[:state][:now] = c[:slot].hard_cleanup_deadline_ns },
+        ->(c) { c[:observer].instance_variable_set(:@session, Object.new) },
+        ->(c) { c[:slot].thread = Object.new }, ->(c) { c[:slot].caller = Thread.current },
+        ->(c) { c[:state][:alive] = false }, ->(c) { c[:session].ready = nil }, ->(c) { c[:session].reserved = nil },
+        ->(c) { c[:driver].observed["ready"] = false }, ->(c) { c[:driver].observed["blockedDataWaits"] = 0 },
+        ->(c) { c[:frame]["type"] = "STATUS" }, ->(c) { c[:frame]["outcome"] = "rejected" },
+        ->(c) { c[:frame]["cleanup"] = "unknown" }, ->(c) { c[:publish].call(c[:error]) },
+        ->(c) { c[:publish].call(nil) }, ->(c) { c[:state][:retired] = true }, ->(c) { c[:state][:unknown] = true },
+        ->(c) { c[:state][:cleanup] << c[:error] }, ->(c) { c[:slot].run_deadline_ns = c[:slot].run_deadline_ns.to_f },
+        ->(c) { c[:slot].hard_cleanup_deadline_ns = c[:slot].hard_cleanup_deadline_ns.to_f },
+        ->(c) { c[:driver].observed["nativeRunDeadlineNs"] -= 1 },
+        ->(c) { c[:driver].instance_variable_set(:@late_final_yielded, true) },
+      ]
+      bypasses.each { |mutate| assert_empty exercise.call(mutate: mutate).fetch(:sleeps) }
+    ensure
+      assert_empty install_seam.restore
+      assert_equal before_install, parent.instance_method(:install)
+      assert_same before_observer, UploadProcessFixture::CaptureObservation.current
+    end
+  end
+
+  def assert_slow_cleanup_choreography
+    # Real hook registrations and their ordinary Ruby bodies, but only inert
+    # session/task operands. No native observer, thread, IO, signal or wait is
+    # installed. The sole parent-install seam is reversed below.
+    helper = MobileReleaseKit::NativeUploadProcess
+    native = MobileReleaseKit::NativeUploadValidation
+    parent = UploadProcessFixture::NativeSetupDriver::Observation
+    before_install = parent.instance_method(:install)
+    before_observer = UploadProcessFixture::CaptureObservation.current
+    install_seam = UploadProcessFixture::CaptureObservation::Hooks.new
+    begin
+      install_seam.wrap(parent, :install) { nil }
+      model = lambda do |mode = "real-deadline-slow-cleanup"|
+        primary = MobileReleaseKit::ContractError.new("original modeled timeout")
+        state = {now: 2_000_000_000, cutoff: 7_000_000_000, primary: primary}
+        slot = Struct.new(:thread, :run_deadline_ns, :hard_cleanup_deadline_ns).
+          new(Thread.current, 2_000_000_000, 7_000_000_000)
+        session = Struct.new(:capture_slot, :ready, :reserved).new(slot, {}, {})
+        session.define_singleton_method(:primary_error) { state.fetch(:primary) }
+        session.define_singleton_method(:cleanup_deadline_ns) { state.fetch(:cutoff) }
+        driver = UploadProcessFixture::AdapterDriver.new(@root, "ios", mode, {})
+        observer = UploadProcessFixture::AdapterDriver::Observation.new(driver, native: native, root: Object.new)
+        driver.instance_variable_set(:@observation, observer)
+        observer.instance_variable_set(:@session, session)
+        driver.observed.merge!("ready" => true, "blockedDataWaits" => 1, "nativeRunDeadlineNs" => slot.run_deadline_ns)
+        selected = [primary, slot.run_deadline_ns]
+        driver.instance_variable_set(:@selected_timeout, selected)
+        driver.instance_variable_set(:@timeout_objects, [selected])
+        registrations = {}
+        hooks = Object.new
+        hooks.define_singleton_method(:wrap) { |target, name, &body| registrations[[target, name]] = body }
+        observer.instance_variable_set(:@hooks, hooks)
+        observer.instance_variable_set(:@helper, helper)
+        observer.install
+        target = native.const_get(:CaptureSession, false)
+        invoke = lambda do |name, &original|
+          registrations.fetch([target, name]).call(original, session, [], {}, nil)
+        end
+        {state: state, slot: slot, session: session, driver: driver, observer: observer, invoke: invoke,
+         primary: primary, selected: selected, registrations: registrations}
+      end
+      observe = ->(m) { m.fetch(:invoke).call(:observe_cancellation) { :observed } }
+      run = ->(m, &body) { m.fetch(:invoke).call(:run, &body) }
+
+      m = model.call
+      seen = []
+      original = -> { seen << :original; :observed }
+      run.call(m) do
+        hook = m.fetch(:registrations).fetch([native.const_get(:CaptureSession, false), :observe_cancellation])
+        actual = assert_raises(MobileReleaseKit::ContractError) { hook.call(original, m.fetch(:session), [], {}, nil) }
+        assert_same m.fetch(:primary), actual
+        assert_equal [:original], seen
+        assert m.fetch(:observer).snapshot_additions.fetch("slowCleanup").fetch("handoffPerformed")
+        assert_equal :observed, observe.call(m) # One-shot; no second delivery/construction.
+      end
+      assert_equal 0, m.fetch(:observer).instance_variable_get(:@slow_body_depth)
+
+      bypasses = [
+        ->(c) { c[:observer].instance_variable_set(:@session, Object.new) },
+        ->(c) { c[:slot].thread = Object.new }, ->(c) { c[:session].ready = nil }, ->(c) { c[:session].reserved = nil },
+        ->(c) { c[:driver].observed["ready"] = false }, ->(c) { c[:driver].observed["blockedDataWaits"] = 0 },
+        ->(c) { c[:driver].observed["blockedDataWaits"] = true }, ->(c) { c[:slot].run_deadline_ns = 2.0 },
+        ->(c) { c[:driver].observed["nativeRunDeadlineNs"] += 1 }, ->(c) { c[:selected][1] -= 1 },
+        ->(c) { c[:selected][1] = 2.0 }, ->(c) { c[:state][:primary] = IOError.new("earlier original error") },
+        ->(c) { c[:driver].instance_variable_set(:@selected_timeout, nil) },
+        ->(c) { c[:driver].instance_variable_set(:@timeout_objects, [c[:selected].dup]) },
+        ->(c) { c[:observer].instance_variable_set(:@slow_cleanup_entered, true) },
+      ]
+      bypasses.each do |mutate|
+        m = model.call
+        mutate.call(m)
+        run.call(m) { assert_equal :observed, observe.call(m) }
+        refute m.fetch(:observer).instance_variable_get(:@slow_handoff_performed)
+      end
+      %w[real-deadline immediate-deadline immediate-deadline-slow-cleanup no-deadline inherited].each do |mode|
+        m = model.call(mode)
+        run.call(m) { assert_equal :observed, observe.call(m) }
+        refute m.fetch(:observer).instance_variable_get(:@slow_handoff_performed)
+        assert_equal({}, m.fetch(:observer).snapshot_additions) unless mode.end_with?("-slow-cleanup")
+      end
+      m = model.call
+      assert_equal :observed, observe.call(m) # Not in the original run-body scope.
+      refute m.fetch(:observer).instance_variable_get(:@slow_handoff_performed)
+      run.call(m) do
+        run.call(m) { assert_equal :observed, observe.call(m) } # Nested run is not the original body.
+        assert_same m.fetch(:primary), assert_raises(MobileReleaseKit::ContractError) { observe.call(m) }
+      end
+
+      [nil, IOError.new("nested write failure")].each do |write_error|
+        m = model.call
+        run.call(m) do
+          nested = lambda do
+            m.fetch(:invoke).call(:write_control) do
+              m.fetch(:invoke).call(:write_control) do
+                assert_equal :observed, observe.call(m)
+                refute m.fetch(:observer).instance_variable_get(:@slow_handoff_performed)
+                raise write_error if write_error
+              end
+            end
+          end
+          if write_error
+            assert_same write_error, assert_raises(IOError) { nested.call }
+          else
+            nested.call
+          end
+          assert_equal 0, m.fetch(:observer).instance_variable_get(:@slow_write_depth)
+          assert_same m.fetch(:primary), assert_raises(MobileReleaseKit::ContractError) { observe.call(m) }
+        end
+      end
+      m = model.call
+      run.call(m) do
+        error = IOError.new("original observation failed before handoff")
+        actual = assert_raises(IOError) { m.fetch(:invoke).call(:observe_cancellation) { raise error } }
+        assert_same error, actual
+        refute m.fetch(:observer).instance_variable_get(:@slow_handoff_performed)
+        assert_same m.fetch(:primary), assert_raises(MobileReleaseKit::ContractError) { observe.call(m) }
+      end
+
+      # Both legitimate real-slow paths reach the ORIGINAL body ensure: the
+      # direct handoff above, or natural loop completion after its already
+      # recorded timeout, without another direct observation. These inert
+      # models retain that timeout; neither creates a replacement or a receipt.
+      [false, true].each do |handoff|
+        m = model.call
+        driver, observer, state = m.values_at(:driver, :observer, :state)
+        cutoff, primary, selected = state.values_at(:cutoff, :primary) + [m.fetch(:selected)]
+        cleanups, sleeps = [], []
+        sleeper = lambda do |seconds|
+          sleeps << seconds
+          assert_equal 4, seconds
+          state[:now] += 4_000_000_000
+        end
+        returned = nil
+        UploadProcessFixture.stub(:clock_ns, -> { state.fetch(:now) }) do
+          observer.stub(:sleep, sleeper) do
+            returned = run.call(m) do
+              begin
+                if handoff
+                  observe.call(m)
+                  flunk "eligible original handoff did not transfer its timeout"
+                end
+                :original_body_returned
+              rescue MobileReleaseKit::ContractError => error
+                assert handoff
+                assert_same primary, error
+                :original_timeout_handled
+              ensure
+                m.fetch(:invoke).call(:finish_task_ownership) do
+                  cleanups << :original
+                  assert_equal :observed, observe.call(m) # Entered cleanup cannot supply a missing handoff.
+                  state[:now] += 10_000_000
+                  :cleaned
+                end
+              end
+            end
+          end
+        end
+        assert_equal handoff ? :original_timeout_handled : :original_body_returned, returned
+        assert_equal [4], sleeps
+        assert_equal [:original], cleanups
+        assert_equal cutoff, state.fetch(:cutoff)
+        assert_same primary, state.fetch(:primary)
+        assert_same selected, driver.original_timeout_record(m.fetch(:session))
+        assert_equal [selected], driver.instance_variable_get(:@timeout_objects)
+        assert_equal 0, observer.instance_variable_get(:@slow_body_depth)
+        snapshot = observer.snapshot_additions
+        slow = snapshot.fetch("slowCleanup")
+        assert_equal handoff, slow.fetch("handoffPerformed")
+        assert_nil driver.validate_slow_cleanup_snapshot!(snapshot)
+        malformed = [slow.reject { |key, _| key == "handoffPerformed" }]
+        [nil, 0, "false"].each { |value| malformed << slow.merge("handoffPerformed" => value) }
+        {"delayFailed" => true, "delayFinished" => false, "originalCleanupCalled" => false,
+         "slowCleanupSeconds" => 3.99, "originalCleanupFinishedNs" => cutoff}.each do |key, value|
+          malformed << slow.merge(key => value)
+        end
+        malformed.each do |facts|
+          assert_raises(UploadProcessFixture::Failure) { driver.validate_slow_cleanup_snapshot!("slowCleanup" => facts) }
+        end
+        assert_equal handoff, slow.fetch("handoffPerformed") # No domain correction rewrites the original snapshot.
+      end
+
+      # Failure while inspecting the context, even a failing recorder, must
+      # still call the original cleanup once and preserve known call facts.
+      [false, true].each do |recording_fault|
+        m = model.call
+        driver, observer = m.values_at(:driver, :observer)
+        failure, recording_failure = IOError.new("context observation failure"), IOError.new("context recorder failure")
+        calls = []
+        invoke = lambda do
+          observer.stub(:slow_capture_task?, ->(_object) { raise failure }) do
+            actual = assert_raises(IOError) do
+              m.fetch(:invoke).call(:finish_task_ownership) { calls << :original; :cleaned }
+            end
+            assert_same recording_fault ? recording_failure : failure, actual
+          end
+        end
+        if recording_fault
+          observer.stub(:remember_slow_failure, ->(_error) { raise recording_failure }) { invoke.call }
+        else
+          invoke.call
+        end
+        assert_equal [:original], calls
+        slow = observer.snapshot_additions.fetch("slowCleanup")
+        assert slow.fetch("delayFailed") && slow.fetch("originalCleanupCalled") && slow.fetch("originalCleanupFinished")
+        refute slow.fetch("delayEntered")
+        refute slow.key?("slowCleanupSeconds")
+        assert_raises(UploadProcessFixture::Failure) { driver.validate_slow_cleanup_snapshot!(observer.snapshot_additions) }
+      end
+
+      # Each mode uses fresh inert state. Clock/sleep failures cannot suppress
+      # the original cleanup call, even when the failure recorder itself raises.
+      cases = %i[complete guard cleanup_cutoff first_clock sleep sleep_after_four delay_clock cleanup_clock recording failure_recording original_cleanup oversleep nested_entry]
+      cases.each do |fault|
+        m = model.call("immediate-deadline-slow-cleanup")
+        driver, observer, state = m.values_at(:driver, :observer, :state)
+        state[:cutoff] = state[:now] + 4_250_000_000 if fault == :guard
+        original_cutoff = state[:cutoff]
+        clock_calls, sleeps, cleanups = 0, [], []
+        failure, recording_failure, cleanup_failure = IOError.new("delay failure"), IOError.new("recording failure"), IOError.new("original cleanup failure")
+        m.fetch(:session).define_singleton_method(:cleanup_deadline_ns) { raise failure } if fault == :cleanup_cutoff
+        now = lambda do
+          clock_calls += 1
+          fail_at = {first_clock: 1, delay_clock: 2, cleanup_clock: 3}[fault]
+          raise failure if fail_at == clock_calls
+          state.fetch(:now)
+        end
+        sleeper = lambda do |seconds|
+          sleeps << seconds
+          assert_equal 4, seconds
+          raise failure if %i[sleep failure_recording].include?(fault)
+          if fault == :nested_entry
+            assert_raises(UploadProcessFixture::Failure) do
+              m.fetch(:invoke).call(:finish_task_ownership) { cleanups << :unexpected_nested_cleanup }
+            end
+          end
+          state[:now] += fault == :oversleep ? 5_000_000_000 : 4_000_000_000
+          raise failure if fault == :sleep_after_four
+        end
+        original = lambda do
+          cleanups << :original
+          assert observer.instance_variable_get(:@slow_cleanup_entered)
+          assert_equal :observed, observe.call(m) # Entered cleanup cannot consume the handoff.
+          state[:now] += 10_000_000
+          raise cleanup_failure if fault == :original_cleanup
+          :cleaned
+        end
+        action = -> { run.call(m) { m.fetch(:invoke).call(:finish_task_ownership, &original) } }
+        written = driver.observed.method(:[]=)
+        writer = lambda do |key, value|
+          raise recording_failure if fault == :recording && key == "cleanupSeconds"
+          written.call(key, value)
+        end
+        perform = lambda do
+          if fault == :failure_recording
+            observer.stub(:remember_slow_failure, ->(_error) { raise recording_failure }) do
+              assert_same recording_failure, assert_raises(IOError) { action.call }
+            end
+          elsif fault == :original_cleanup
+            assert_same cleanup_failure, assert_raises(IOError) { action.call }
+          else
+            assert_equal :cleaned, action.call
+          end
+        end
+        UploadProcessFixture.stub(:clock_ns, now) do
+          observer.stub(:sleep, sleeper) do
+            driver.observed.stub(:[]=, writer) { perform.call }
+          end
+        end
+        assert_equal [:original], cleanups
+        assert_equal original_cutoff, state.fetch(:cutoff)
+        assert_equal 0, observer.instance_variable_get(:@slow_body_depth)
+        assert_same m.fetch(:primary), state.fetch(:primary)
+        snapshot = observer.snapshot_additions
+        slow = snapshot.fetch("slowCleanup")
+        assert snapshot.frozen? && slow.frozen?
+        assert slow.fetch("delayEntered") && slow.fetch("originalCleanupCalled")
+        assert_equal fault != :original_cleanup, slow.fetch("originalCleanupFinished")
+        assert_equal !%i[complete original_cleanup oversleep].include?(fault), slow.fetch("delayFailed")
+        assert_equal [], sleeps if %i[guard cleanup_cutoff first_clock].include?(fault)
+        refute slow.key?("slowCleanupSeconds") if %i[cleanup_cutoff first_clock delay_clock].include?(fault)
+        assert_operator slow.fetch("slowCleanupSeconds"), :>=, 4 if fault == :sleep_after_four
+        if fault == :complete
+          assert_nil driver.validate_slow_cleanup_snapshot!(snapshot)
+          [true, nil, 0, "false"].each do |handoff|
+            changed = snapshot.merge("slowCleanup" => slow.merge("handoffPerformed" => handoff))
+            assert_raises(UploadProcessFixture::Failure) { driver.validate_slow_cleanup_snapshot!(changed) }
+          end
+          missing = snapshot.merge("slowCleanup" => slow.reject { |key, _| key == "handoffPerformed" })
+          assert_raises(UploadProcessFixture::Failure) { driver.validate_slow_cleanup_snapshot!(missing) }
+        else
+          assert_raises(UploadProcessFixture::Failure) { driver.validate_slow_cleanup_snapshot!(snapshot) }
+        end
+        # Later task progress cannot repair the original immutable failure facts.
+        old = slow.dup
+        observer.instance_variable_set(:@slow_delay_failed, false)
+        observer.instance_variable_set(:@slow_delay_finished, true)
+        observer.instance_variable_set(:@slow_original_cleanup_finished, true)
+        assert_equal old, slow
+        assert_raises(UploadProcessFixture::Failure) { driver.validate_slow_cleanup_snapshot!(snapshot) } unless fault == :complete
+        # A repeated wrapper call may fail, but cannot repeat the original
+        # cleanup or replace the already captured facts above.
+        assert_raises(UploadProcessFixture::Failure) do
+          m.fetch(:invoke).call(:finish_task_ownership) { cleanups << :unexpected_repeat_cleanup }
+        end
+        assert_equal [:original], cleanups
+        assert_equal old, slow
+      end
+    ensure
+      assert_empty install_seam.restore
+      assert_equal before_install, parent.instance_method(:install)
+      assert_same before_observer, UploadProcessFixture::CaptureObservation.current
+    end
+  end
+
+  def with_acquisition_veto
+    attempts = {spawn: 0, native_create: 0, task: 0, pipe: 0, directory: 0}
+    deny = lambda do |kind|
+      lambda do |*, **|
+        attempts[kind] += 1
+        raise "invalid native fixture attempted #{kind} acquisition"
+      end
+    end
+    # Process.spawn alone no longer intercepts the production creation path.
+    # Deny actual native creation and tasks/IO before they can acquire custody.
+    Process.stub(:spawn, deny.call(:spawn)) do
+      MobileReleaseKit::NativeProcessSpawn.stub(:create, deny.call(:native_create)) do
+        Thread.stub(:new, deny.call(:task)) do
+          IO.stub(:pipe, deny.call(:pipe)) do
+            Dir.stub(:mktmpdir, deny.call(:directory)) { yield }
+          end
+        end
+      end
+    end
+    assert_equal({spawn: 0, native_create: 0, task: 0, pipe: 0, directory: 0}, attempts)
+  end
 
   def proof_source_snapshot
     root = File.expand_path("../..", __dir__)
@@ -460,6 +4828,7 @@ class NativeUploadValidationTest < Minitest::Test
   end
 
   def make_proof_copy(label, snapshot)
+    UploadProcessFixture.assert_domain_reusable!
     root = Dir.mktmpdir("#{label}-", @root)
     snapshot.each do |name, item|
       path = File.join(root, name)
@@ -472,6 +4841,7 @@ class NativeUploadValidationTest < Minitest::Test
   end
 
   def with_proof_copies(label, anchor)
+    UploadProcessFixture.assert_domain_reusable!
     @retain_raw_evidence = true
     UploadProcessFixture.lifetime do |scope|
       original = proof_source_snapshot
@@ -500,6 +4870,7 @@ class NativeUploadValidationTest < Minitest::Test
   end
 
   def new_raw_case(label, mode)
+    UploadProcessFixture.assert_domain_reusable!
     directory = Dir.mktmpdir("#{label}-", @root)
     UploadProcessFixture.atomic_json(File.join(directory, "input.json"), {"platform" => "native", "parameters" => {}, "mode" => mode})
     directory
@@ -532,23 +4903,59 @@ class NativeUploadValidationTest < Minitest::Test
     end
   end
 
-  def raw_dispatch(copy, directory, fixture, literal)
-    {"argv" => [RbConfig.ruby, fixture, "driver", directory], "cwd" => Dir.pwd,
+  def raw_dispatch(copy, directory, fixture, literal, isolate_close: false)
+    bootstrap_files = %w[tests/workflow/upload_process_fixture.rb tests/workflow/upload_process_ownership.rb
+                         fastlane/native_process_spawn.rb fastlane/native_upload_process.rb]
+    source_root = File.expand_path("../..", __dir__)
+    minitest = isolate_close ? minitest_library_snapshot : nil
+    {"argv" => isolate_close ? isolated_collector_argv(directory, minitest) : [RbConfig.ruby, fixture, "driver", directory], "cwd" => Dir.pwd,
      "environment" => UploadProcessFixture.driver_environment(directory),
      "options" => {"unsetenv_others" => true, "pgroup" => true, "stdin" => File::NULL,
                    "stdout" => File.join(directory, "driver.stdout"), "stderr" => File.join(directory, "driver.stderr")},
-     "copyRoot" => copy, "literalCase" => literal,
+     "copyRoot" => copy, "literalCase" => literal, "isolatedControl" => isolate_close, "minitest" => minitest,
      "interpreter" => dispatch_file_identity(RbConfig.ruby, limit: 32 * 1024 * 1024),
-     "fixture" => dispatch_file_identity(fixture, limit: 1_048_576)}
+     "fixture" => dispatch_file_identity(fixture, limit: 1_048_576),
+     "bootstrapSources" => bootstrap_files.to_h { |name| [name, dispatch_file_identity(File.join(source_root, name), limit: 1_048_576)] }}
   end
 
   def recheck_raw_dispatch(observed)
     dispatch = observed[:dispatch]
     return unless dispatch
-    interpreter = dispatch_file_identity(dispatch.fetch("argv").first, limit: 32 * 1024 * 1024)
-    fixture = dispatch_file_identity(dispatch.fetch("argv")[1], limit: 1_048_576)
-    unless interpreter == dispatch.fetch("interpreter") && fixture == dispatch.fetch("fixture")
+    interpreter = dispatch_file_identity(dispatch.fetch("interpreter").fetch("path"), limit: 32 * 1024 * 1024)
+    fixture = dispatch_file_identity(dispatch.fetch("fixture").fetch("path"), limit: 1_048_576)
+    bootstrap_same = dispatch.fetch("bootstrapSources").values.all? do |source|
+      dispatch_file_identity(source.fetch("path"), limit: 1_048_576) == source
+    end
+    minitest_same = !dispatch.fetch("isolatedControl") || minitest_library_snapshot == dispatch.fetch("minitest")
+    unless interpreter == dispatch.fetch("interpreter") && fixture == dispatch.fetch("fixture") && bootstrap_same && minitest_same
       raise UploadProcessFixture::Failure.new("fixture-source", "raw proof dispatch input changed")
+    end
+    if dispatch.key?("driverInput") # Ordinary copied drivers only; literal/isolated schemas are unchanged.
+      input = dispatch.fetch("driverInput")
+      directory = observed.fetch(:directory)
+      unless UploadProcessFixture.read_json(File.join(directory, "input.json")) == input &&
+             observed.fetch(:child).creator&.run_deadline_ns == input.fetch("deadlineNs")
+        raise UploadProcessFixture::Failure.new("fixture-source", "raw proof original input/cutoff changed")
+      end
+      receipt_path = File.join(directory, "driver-dispatch.json")
+      if File.file?(receipt_path) # An intentionally invalid mode rejects before publishing this receipt.
+        receipt = UploadProcessFixture.read_json(receipt_path)
+        unless receipt.fetch("deadlineNs") == input.fetch("deadlineNs") && receipt.fetch("pid") == observed.fetch(:child).pid
+          raise UploadProcessFixture::Failure.new("fixture-source", "raw proof dispatch did not echo its original cutoff")
+        end
+      end
+    end
+    if dispatch.fetch("isolatedControl")
+      request = observed.fetch(:isolated_request)
+      binding = dispatch.fetch("isolatedRequest")
+      path = File.join(observed.fetch(:directory), "isolated-request.json")
+      unless read_isolated_json(path) == request &&
+             dispatch_file_identity(path, limit: UploadProcessFixture::OUTPUT_LIMIT) == binding.fetch("identity") &&
+             request.fetch("deadlineNs") == binding.fetch("deadlineNs") &&
+             request.fetch("deadlineNs") == observed.fetch(:run_deadline_ns) &&
+             request.fetch("deadlineNs") == observed.fetch(:child).creator&.run_deadline_ns
+        raise UploadProcessFixture::Failure.new("fixture-source", "isolated raw proof original input/cutoff changed")
+      end
     end
     observed[:inputs_rechecked] = true
   end
@@ -560,9 +4967,16 @@ class NativeUploadValidationTest < Minitest::Test
               "pid" => child.pid, "exitStatus" => status&.exitstatus, "termSignal" => status&.termsig,
               "stopAttempted" => observed.fetch(:stop_attempted), "stopCompleted" => observed.fetch(:stop_completed),
               "streamsClosed" => observed.fetch(:streams_closed), "nativeObservation" => observed.fetch(:native_observation),
+              "ownedChild" => child.provenance, "streamIdentities" => observed[:stream_identities],
               "dispatch" => observed[:dispatch], "inputsRechecked" => observed.fetch(:inputs_rechecked),
+              "runDeadlineNs" => observed.fetch(:run_deadline_ns), "hardDeadlineNs" => observed.fetch(:hard_deadline_ns),
+              "enclosingDeadlineNs" => observed.fetch(:enclosing_deadline_ns),
               "reportingRepeatQueued" => observed.fetch(:reporting_repeat_queued),
               "reportingInjectorJoined" => observed.fetch(:reporting_injector_joined),
+              "reportingInjectorAdmitted" => observed.fetch(:reporting_injector_admitted),
+              "reportingInjectorDeadlineNs" => observed[:reporting_injector_deadline_ns],
+              "reportingInjectorFinished" => observed[:reporting_injector_slot]&.finished?,
+              "literalReadiness" => observed[:literal_readiness],
               "primary" => bounded_error(observed[:primary]), "cleanupErrors" => observed.fetch(:cleanup_errors).map { |error| bounded_error(error) }}
     raise "oversized collector record" if JSON.generate(record).bytesize > UploadProcessFixture::OUTPUT_LIMIT
     UploadProcessFixture.atomic_json(File.join(observed.fetch(:directory), "collector.json"), record)
@@ -572,20 +4986,89 @@ class NativeUploadValidationTest < Minitest::Test
     path = File.join(directory, "owner.json")
     return unless File.file?(path)
     owner = UploadProcessFixture.read_json(path)
-    unless owner.is_a?(Hash) && owner.keys.sort == %w[group leader phase] && owner["leader"].is_a?(Integer) &&
-           owner["leader"] > 1 && owner["group"] == owner["leader"] && %w[launched finished].include?(owner["phase"])
+    unless owner.is_a?(Hash) && owner.keys.sort == %w[custodian finality group keeper phase processes validator version] &&
+           owner["version"].instance_of?(Integer) && owner["version"] == 2 && owner["phase"] == "finished" &&
+           %w[finalized no_producers].include?(owner["finality"]) && owner["processes"].is_a?(Array)
       raise UploadProcessFixture::Failure.new("fixture-result", "invalid native proof owner")
     end
+    result = UploadProcessFixture.read_json(File.join(directory, "result.json"))
+    observation = result.fetch("nativeObservation")
+    assert_native_observation(observation, finality: owner.fetch("finality").to_sym)
+    assert_owner_observation(owner, observation)
+    source_root = observed.fetch(:dispatch).fetch("copyRoot")
+    {"capture" => "native_upload_validation.rb", "spawn" => "native_process_spawn.rb",
+     "helper" => "native_upload_process.rb"}.each do |role, name|
+      origin = observation.fetch("sourceOrigins").fetch(role)
+      expected = File.realpath(File.join(source_root, "fastlane", name))
+      assert_equal expected, origin.fetch("path")
+      assert_equal dispatch_file_identity(expected, limit: 1_048_576).fetch("sha256"), origin.fetch("sha256")
+    end
     observed[:native_deadline] ||= UploadProcessFixture.clock + UploadProcessFixture::CLEANUP_LIMIT
-    UploadProcessFixture.dead!(owner.fetch("leader"), owner.fetch("group"), deadline: observed.fetch(:native_deadline))
+    owner.fetch("processes").each do |process|
+      # These exact role/group observations never grant a signal or wait route.
+      # In particular, K has moved away from its original reserved group G.
+      UploadProcessFixture.dead!(process.fetch("pid"), process.fetch("group"), deadline: observed.fetch(:native_deadline))
+    end
     observed[:native_observation] = "observed-stopped"
+  end
+
+  def assert_owner_observation(owner, observation)
+    assert_equal observation.fetch("custodian"), owner.fetch("custodian")
+    if owner.fetch("finality") == "no_producers"
+      %w[keeper validator].each { |role| assert_equal({"state" => "not_attempted"}, owner.fetch(role)) }
+      assert_equal({"state" => "not_created"}, owner.fetch("group"))
+      assert_empty owner.fetch("processes")
+      return
+    end
+    %w[keeper validator group].each do |role|
+      assert_equal observation.fetch("final").fetch(role), owner.fetch(role)
+    end
+    processes = owner.fetch("processes")
+    assert_equal processes.map { |process| process.fetch("role") }.uniq.length, processes.length
+    processes.each do |process|
+      assert_equal %w[group pid role], process.keys.sort
+      assert_includes %w[custodian keeper validator], process.fetch("role")
+      %w[pid group].each do |name|
+        assert_instance_of Integer, process.fetch(name)
+        assert_includes 2..2_147_483_647, process.fetch(name)
+      end
+      terminal = owner.fetch(process.fetch("role"))
+      assert_equal "reaped", terminal.fetch("state")
+      assert_equal terminal.fetch("pid"), process.fetch("pid")
+    end
+    # Only independently accepted role bindings can populate the read-only
+    # observation list. A terminal PID by itself is never an adopted target.
+    context = observation.fetch("protocolContext")
+    expected = []
+    if (hello = context.fetch("hello"))
+      expected << {"role" => "custodian", "pid" => hello.fetch("pid"), "group" => hello.fetch("pgid")}
+    end
+    if context.fetch("reserved") && (ready = context.fetch("ready"))
+      expected << {"role" => "keeper", "pid" => context.fetch("reserved").fetch("keeper_pid"), "group" => ready.fetch("keeper_pgid")}
+      expected << {"role" => "validator", "pid" => ready.fetch("validator_pid"), "group" => ready.fetch("group_id")}
+    end
+    assert_equal expected.sort_by { |entry| entry.fetch("role") }, processes.sort_by { |entry| entry.fetch("role") }
   end
 
   # The entire reporting tail stays inside this additional, deferred lifetime.
   # Its authoritative first error outlives publication failures AND a queued
   # repeat at the point which used to be outside the inner collection lifetime.
-  def with_capture_reporting(observed, repeat)
-    UploadProcessFixture.lifetime do |report_scope|
+  def remember_reporting_cleanup(observed, scope, error, slot: nil)
+    observed[:cleanup_errors] << error
+    scope.remember(error)
+    return unless slot
+
+    begin
+      slot.cancel!(error: error, reason_code: "cancelled")
+    rescue Exception => cancellation_error
+      observed[:cleanup_errors] << cancellation_error
+      scope.remember(cancellation_error)
+    end
+  end
+
+  def with_capture_reporting(observed, repeat, enclosing_deadline_ns:)
+    UploadProcessFixture.lifetime(deadline_ns: enclosing_deadline_ns) do |report_scope|
+      observed[:reporting_lifetime] = report_scope
       begin
         yield
       rescue Exception => error
@@ -594,26 +5077,51 @@ class NativeUploadValidationTest < Minitest::Test
         begin
           if repeat
             target = Thread.current
-            observed[:reporting_injector] = Thread.new { target.raise(repeat) }
-            unless observed.fetch(:reporting_injector).join(2)
+            now_ns = MobileReleaseKit::NativeUploadProcess.monotonic_ns
+            deadline_ns = [now_ns + RAW_REPORTING_NS, enclosing_deadline_ns].min
+            unless deadline_ns > now_ns
+              raise UploadProcessFixture::Failure.new("fixture-cleanup", "collector reporting deadline expired")
+            end
+            observed[:reporting_injector_deadline_ns] = deadline_ns
+            observed[:reporting_thread_defaults] = [Thread.report_on_exception, Thread.abort_on_exception]
+            injector = MobileReleaseKit::NativeUploadProcess::TaskSlot.new(
+              caller: target, run_deadline_ns: deadline_ns, hard_cleanup_deadline_ns: deadline_ns,
+            )
+            # Publish custody before Thread.new. The task cannot deliver a
+            # repeat until its actual self-published/returned identities agree.
+            observed[:reporting_injector_slot] = injector
+            injector.start do |_owned_slot|
+              target.raise(repeat)
+              true
+            end
+            unless injector.admit!
+              raise UploadProcessFixture::Failure.new("fixture-cleanup", "collector reporting injector was not admitted")
+            end
+            observed[:reporting_injector_admitted] = true
+            observed[:reporting_injector] = injector.thread
+            unless injector.join_until(deadline_ns: deadline_ns)
               raise UploadProcessFixture::Failure.new("fixture-cleanup", "collector reporting injector did not join")
+            end
+            raise injector.first_error if injector.first_error
+            unless injector.offer.equal?(true)
+              raise UploadProcessFixture::Failure.new("fixture-cleanup", "collector reporting injector did not deliver its repeat")
             end
             observed[:reporting_repeat_queued] = Thread.current.pending_interrupt?
           end
         rescue Exception => secondary
-          observed[:cleanup_errors] << secondary
-          report_scope.remember(secondary)
+          remember_reporting_cleanup(observed, report_scope, secondary, slot: observed[:reporting_injector_slot])
         ensure
           report_scope.cleanup do
-            if (injector = observed[:reporting_injector])
+            if (injector = observed[:reporting_injector_slot])
               begin
-                unless injector.join(2)
+                injector.close_launch!
+                unless injector.join_until(deadline_ns: observed.fetch(:reporting_injector_deadline_ns))
                   raise UploadProcessFixture::Failure.new("fixture-cleanup", "collector reporting injector did not finish")
                 end
-                observed[:reporting_injector_joined] = !injector.alive?
+                observed[:reporting_injector] = injector.thread
+                observed[:reporting_injector_joined] = injector.joined? && injector.finished? && !injector.unresolved?
               rescue Exception => secondary
-                observed[:cleanup_errors] << secondary
-                report_scope.remember(secondary)
+                remember_reporting_cleanup(observed, report_scope, secondary, slot: injector)
               end
             end
             begin
@@ -629,19 +5137,49 @@ class NativeUploadValidationTest < Minitest::Test
     end
   end
 
-  def collect_raw_driver(copy, directory, observed, literal: nil, close_fault: nil, reporting_repeat: nil)
+  def raw_collector_cutoffs(deadline, enclosing_deadline_ns: nil)
+    run_ns = (deadline.to_r * 1_000_000_000).floor # Original conversion, never another clock sample.
+    cleanup_ns = UploadProcessFixture::CLEANUP_LIMIT * 1_000_000_000
+    maximum = MobileReleaseKit::NativeUploadProcess::MAX_TIME
+    unless run_ns.between?(1, maximum - cleanup_ns) &&
+           (enclosing_deadline_ns.nil? || enclosing_deadline_ns.instance_of?(Integer) && enclosing_deadline_ns.between?(1, maximum))
+      raise UploadProcessFixture::Failure.new("fixture-input", "invalid raw collector deadline")
+    end
+    if enclosing_deadline_ns
+      # Inner run, original cleanup and reporting all fit INSIDE the original
+      # enclosing endpoint, without converting its absolute value to Float.
+      run_ns = [run_ns, enclosing_deadline_ns - cleanup_ns - RAW_REPORTING_NS].min
+    end
+    unless run_ns > UploadProcessFixture.clock_ns
+      raise UploadProcessFixture::Failure.new("driver", "raw proof driver deadline expired")
+    end
+    hard_ns = run_ns + cleanup_ns
+    [run_ns, hard_ns, enclosing_deadline_ns || hard_ns]
+  end
+
+  def collect_raw_driver(copy, directory, observed, literal: nil, close_fault: nil, reporting_repeat: nil,
+                         isolate_close: false, enclosing_deadline_ns: nil)
+    UploadProcessFixture.assert_domain_reusable!
     @retain_raw_evidence = true
-    child = UploadProcessFixture::OwnedChild.new
+    raise "invalid fixed collector isolation" unless [true, false].include?(isolate_close) && (!isolate_close || (!copy && !literal && !close_fault && !reporting_repeat))
+    deadline = UploadProcessFixture.clock + (isolate_close ? ISOLATED_COLLECTOR_LIMIT : UploadProcessFixture::DRIVER_LIMIT)
+    run_ns, hard_ns, enclosing_ns = raw_collector_cutoffs(deadline, enclosing_deadline_ns: enclosing_deadline_ns)
+    child = UploadProcessFixture::OwnedChild.new(root: directory, deadline_ns: run_ns, hard_deadline_ns: hard_ns)
     output = errors = nil
     observed.merge!(directory: directory, child: child, status: nil, primary: nil, cleanup_errors: [],
+                    run_deadline_ns: run_ns, hard_deadline_ns: hard_ns, enclosing_deadline_ns: enclosing_ns,
                     stop_attempted: false, stop_completed: false, streams_closed: false,
-                    native_observation: literal ? "literal-has-no-native-child" : "pending", close_fault_calls: 0,
-                    inputs_rechecked: false, reporting_repeat_queued: false, reporting_injector_joined: nil)
-    with_capture_reporting(observed, reporting_repeat) do
-      UploadProcessFixture.lifetime do |scope|
+                    native_observation: literal || isolate_close ? "literal-has-no-native-capture" : "pending", close_fault_calls: 0,
+                    inputs_rechecked: false, reporting_repeat_queued: false, reporting_injector_joined: nil,
+                    reporting_injector_admitted: false, reporting_injector_slot: nil)
+    with_capture_reporting(observed, reporting_repeat, enclosing_deadline_ns: enclosing_ns) do
+      UploadProcessFixture.lifetime(deadline_ns: hard_ns) do |scope|
+        observed[:collector_lifetime] = scope
         begin
           write_capture_record(observed) # Truthful pending state before acquisition.
-          fixture = if literal
+          fixture = if isolate_close
+            File.realpath(__FILE__)
+          elsif literal
             path = File.join(directory, "collector-control.rb")
             bytes = COLLECTOR_SCRIPTS.fetch(literal)
             File.open(path, File::WRONLY | File::CREAT | File::EXCL, 0o600) { |file| file.write(bytes) }
@@ -655,10 +5193,38 @@ class NativeUploadValidationTest < Minitest::Test
           else
             File.join(copy, PROOF_FILES.first)
           end
-          observed[:dispatch] = raw_dispatch(copy, directory, fixture, literal)
+          observed[:dispatch] = raw_dispatch(copy, directory, fixture, literal, isolate_close: isolate_close)
+          unless literal || isolate_close
+            input_path = File.join(directory, "input.json")
+            input = UploadProcessFixture.read_json(input_path)
+            unless input.instance_of?(Hash) && input.keys.sort == %w[mode parameters platform]
+              raise UploadProcessFixture::Failure.new("fixture-input", "unexpected raw copied-driver input envelope")
+            end
+            # Publish the original collector cutoff BEFORE child.start. This
+            # consumes the same run budget and never rewrites a live input.
+            input = input.merge("deadlineNs" => run_ns)
+            UploadProcessFixture.atomic_json(input_path, input)
+            observed[:dispatch]["driverInput"] = input
+          end
+          if isolate_close
+            observed[:isolation_source_hashes] = proof_source_snapshot.transform_values { |item| item.fetch("sha256") }
+            request = {"version" => 1, "argv" => observed.fetch(:dispatch).fetch("argv"),
+                       "cwd" => observed.fetch(:dispatch).fetch("cwd"), "deadlineNs" => run_ns,
+                       "minitest" => observed.fetch(:dispatch).fetch("minitest"),
+                       "sourceSha256" => observed.fetch(:isolation_source_hashes),
+                       "testSource" => observed.fetch(:dispatch).fetch("fixture")}
+            # Keep the full envelope privately in memory; dispatch already has
+            # Minitest's complete inventory and must not serialize it twice.
+            observed[:isolated_request] = request
+            request_path = File.join(directory, "isolated-request.json")
+            UploadProcessFixture.atomic_json(request_path, request)
+            observed.fetch(:dispatch)["isolatedRequest"] = {
+              "deadlineNs" => run_ns, "identity" => dispatch_file_identity(request_path, limit: UploadProcessFixture::OUTPUT_LIMIT)}
+          end
           write_capture_record(observed)
-          output = File.open(File.join(directory, "driver.stdout"), File::RDWR | File::CREAT | File::EXCL, 0o600)
-          errors = File.open(File.join(directory, "driver.stderr"), File::RDWR | File::CREAT | File::EXCL, 0o600)
+          output = File.open(File.join(directory, "driver.stdout"), File::WRONLY | File::CREAT | File::EXCL, 0o600)
+          errors = File.open(File.join(directory, "driver.stderr"), File::WRONLY | File::CREAT | File::EXCL, 0o600)
+          observed[:stream_identities] = [output, errors].map { |file| UploadProcessFixture::OwnedChild.identity(file.stat) }
           if close_fault
             original_close = output.method(:close)
             output.define_singleton_method(:close) do
@@ -668,24 +5234,49 @@ class NativeUploadValidationTest < Minitest::Test
             end
           end
           scope.active do
-            deadline = UploadProcessFixture.clock + UploadProcessFixture::DRIVER_LIMIT
             dispatch = observed.fetch(:dispatch)
             child.start(dispatch.fetch("environment"), *dispatch.fetch("argv"), chdir: dispatch.fetch("cwd"),
                         in: File::NULL, out: output, err: errors,
                         unsetenv_others: true, pgroup: true)
+            if literal == "timeout"
+              # This one fixed control intentionally outlives the original run
+              # cutoff. Its real ready bytes let us stop acquiring read-only ps
+              # children, whose own startup deadline must not replace this
+              # intended error. It retains the genuine pre-wait signal route.
+              await_literal_timeout(directory, output, observed, run_ns)
+            end
             loop do
-              child.poll
               if [output, errors].any? { |file| file.stat.size > UploadProcessFixture::OUTPUT_LIMIT }
                 raise UploadProcessFixture::Failure.new("diagnostic", "oversized raw proof diagnostic")
               end
-              remaining = deadline - UploadProcessFixture.clock
+              remaining = run_ns - UploadProcessFixture.clock_ns
+              raise UploadProcessFixture::Failure.new("driver", "raw proof driver deadline expired") unless remaining.positive?
+
+              if child.phase == :reserved
+                # This is a non-consuming observation of the actual reserved
+                # driver, not a wait receipt or authority from owner.json.
+                # Keep the pre-wait stop route until completion is observed.
+                stopped = UploadProcessFixture.state(child.pid, child.pid,
+                  seconds: [remaining, 2_000_000_000].min.fdiv(1_000_000_000),
+                  deadline: Rational(run_ns, 1_000_000_000)) == :stopped
+                child.retire_numeric! if stopped
+              end
+              remaining = run_ns - UploadProcessFixture.clock_ns
+              raise UploadProcessFixture::Failure.new("driver", "raw proof driver deadline expired") unless remaining.positive?
+              # Retirement is permanent even if a genuine first WNOHANG wait
+              # returns nil. No later observation or timeout reopens a numeric
+              # signal route; stop may only finish this wait or retain UNKNOWN.
+              child.poll_wait if child.phase == :waiting
+              unless %i[reserved waiting reaped].include?(child.phase)
+                raise UploadProcessFixture::Failure.new("process-ownership", "raw proof driver wait authority is unknown")
+              end
+              remaining = run_ns - UploadProcessFixture.clock_ns
               raise UploadProcessFixture::Failure.new("driver", "raw proof driver deadline expired") unless remaining.positive?
               break if child.status
-              sleep [remaining, 0.01].min
+              sleep [remaining, 10_000_000].min.fdiv(1_000_000_000)
             end
-            stdout, stderr = [output, errors].map do |file|
-              file.rewind
-              file.read(UploadProcessFixture::OUTPUT_LIMIT + 1) || ""
+            stdout, stderr = [[output, "driver.stdout"], [errors, "driver.stderr"]].map do |writer, name|
+              read_raw_transcript(File.join(directory, name), writer, deadline_ns: run_ns)
             end
             if [stdout, stderr].any? { |value| value.bytesize > UploadProcessFixture::OUTPUT_LIMIT }
               raise UploadProcessFixture::Failure.new("diagnostic", "oversized raw proof diagnostic")
@@ -707,13 +5298,15 @@ class NativeUploadValidationTest < Minitest::Test
             end
             attempt.call do
               observed[:stop_attempted] = true
-              child.stop # Only the still-owned direct reservation; never marker PIDs.
+              # KILL is permitted only before the first consuming wait. The
+              # owned API never revives a retired route, even on a nil wait.
+              child.stop
               observed[:stop_completed] = child.complete?
             end
             observed[:status] = child.status
-            [output, errors].compact.each { |file| attempt.call { file.close unless file.closed? } }
+            [output, errors].compact.each { |file| attempt.call { close_raw_writer(child, file) } }
             observed[:streams_closed] = output && errors && [output, errors].all?(&:closed?)
-            attempt.call { observe_raw_native(directory, observed) } unless literal
+            attempt.call { observe_raw_native(directory, observed) } unless literal || isolate_close
             attempt.call { check_raw_capture_scratch!(directory) }
             attempt.call { recheck_raw_dispatch(observed) }
             attempt.call { write_capture_record(observed) }
@@ -722,6 +5315,96 @@ class NativeUploadValidationTest < Minitest::Test
       end
     end
     observed
+  end
+
+  def await_literal_timeout(directory, writer, observed, run_ns)
+    expected = "collector ready\n"
+    identity = observed.fetch(:stream_identities).first
+    loop do
+      remaining = run_ns - UploadProcessFixture.clock_ns
+      unless remaining.positive?
+        raise UploadProcessFixture::Failure.new("readiness", "literal collector readiness deadline expired")
+      end
+      bytes, size = File.open(File.join(directory, "driver.stdout"), File::RDONLY | File::NOFOLLOW | File::NONBLOCK) do |reader|
+        before = reader.stat
+        unless before.file? && UploadProcessFixture::OwnedChild.identity(before) == identity &&
+               UploadProcessFixture::OwnedChild.identity(writer.stat) == identity
+          raise UploadProcessFixture::Failure.new("diagnostic", "literal collector transcript identity changed")
+        end
+        value = reader.read(UploadProcessFixture::OUTPUT_LIMIT + 1)
+        # Initial regular-file EOF can precede application output after GO.
+        value = "".b if value.nil?
+        after = reader.stat
+        unless UploadProcessFixture::OwnedChild.identity(after) == identity && value &&
+               value.bytesize <= UploadProcessFixture::OUTPUT_LIMIT && after.size <= UploadProcessFixture::OUTPUT_LIMIT
+          raise UploadProcessFixture::Failure.new("diagnostic", "literal collector transcript changed or exceeded its bound")
+        end
+        [value, after.size]
+      end
+      # The still-running literal can publish a prefix concurrently. Only its
+      # actual COMPLETE fixed bytes authorize readiness, never size/EOF alone.
+      unless expected.start_with?(bytes) && size <= expected.bytesize
+        raise UploadProcessFixture::Failure.new("diagnostic", "literal collector readiness bytes were unexpected")
+      end
+      if bytes == expected && size == expected.bytesize
+        unless UploadProcessFixture.clock_ns < run_ns
+          raise UploadProcessFixture::Failure.new("readiness", "literal collector readiness deadline expired")
+        end
+        observed[:literal_readiness] = {"observed" => true, "identity" => identity}
+        break
+      end
+      sleep [10_000_000, [run_ns - UploadProcessFixture.clock_ns, 0].max].min.fdiv(1_000_000_000)
+    end
+    while (remaining = run_ns - UploadProcessFixture.clock_ns).positive?
+      sleep [remaining, 10_000_000].min.fdiv(1_000_000_000)
+    end
+    raise UploadProcessFixture::Failure.new("driver", "raw proof driver deadline expired")
+  end
+
+  def close_raw_writer(child, file)
+    lease = child.acquisition&.resources&.values&.find { |candidate| candidate.io.equal?(file) }
+    if lease
+      # The actual native lease, not the retained File object, owns this close.
+      # In particular UNKNOWN never retries even when File#closed? is true.
+      if lease.state == :open
+        if child.creator&.start_attempted? && !child.creator.joined?
+          raise UploadProcessFixture::Failure.new("fixture-cleanup", "raw output creator is not joined")
+        end
+        lease.close_once
+      end
+      return
+    end
+    if child.acquisition&.state == :unknown || (child.creator&.start_attempted? && !child.creator.joined?)
+      raise UploadProcessFixture::Failure.new("fixture-cleanup", "raw output custody remains unpublished")
+    end
+    file.close unless file.closed?
+  end
+
+  def read_raw_transcript(path, writer, deadline_ns:)
+    # Native maps grant stdout/stderr WRITE only. Read the real saved transcript
+    # through a separate no-follow reader after the genuine driver wait, while
+    # the original write-only object still binds the exact task-owned inode.
+    unless UploadProcessFixture.clock_ns < deadline_ns
+      raise UploadProcessFixture::Failure.new("driver", "raw proof driver deadline expired")
+    end
+    File.open(path, File::RDONLY | File::NOFOLLOW | File::NONBLOCK) do |reader|
+      before, owned = reader.stat, writer.stat
+      unless before.file? && before.dev == owned.dev && before.ino == owned.ino
+        raise UploadProcessFixture::Failure.new("diagnostic", "raw proof transcript identity changed")
+      end
+      unless UploadProcessFixture.clock_ns < deadline_ns
+        raise UploadProcessFixture::Failure.new("driver", "raw proof driver deadline expired")
+      end
+      bytes = reader.read(UploadProcessFixture::OUTPUT_LIMIT + 1) || ""
+      identity = ->(value) { [value.dev, value.ino, value.mode, value.size, value.mtime, value.ctime] }
+      unless identity.call(before) == identity.call(reader.stat)
+        raise UploadProcessFixture::Failure.new("diagnostic", "raw proof transcript changed while read")
+      end
+      unless UploadProcessFixture.clock_ns < deadline_ns
+        raise UploadProcessFixture::Failure.new("driver", "raw proof driver deadline expired")
+      end
+      bytes
+    end
   end
 
   def read_raw_primary(directory, observed, mode, expected_exit:)
@@ -739,11 +5422,8 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal "", observed.fetch(:stdout)
     assert result.is_a?(Hash)
     assert proof.is_a?(Hash)
-    if mode == "native-proof-entered-io"
-      refute File.exist?(File.join(directory, "leader-eof.json"))
-    else
-      assert_equal({"eof" => true}, UploadProcessFixture.read_json(File.join(directory, "leader-eof.json")))
-    end
+    assert_equal "finalized", owner.fetch("finality")
+    assert_owner_observation(owner, result.fetch("nativeObservation"))
     [result, proof, owner]
   end
 
@@ -754,48 +5434,64 @@ class NativeUploadValidationTest < Minitest::Test
   end
 
   def assert_common_raw_proof(value, proof, secondary:)
-    assert_equal 1, value.fetch("nativeSpawnAttempts")
-    assert_equal 7, value.fetch("ownedDescriptorCount")
-    %w[ownedDescriptorsClosed watchdogJoined waiterJoined injectorsJoined handlersRestored registryInactive].each do |name|
+    assert_native_observation(value.fetch("nativeObservation"), finality: :finalized)
+    %w[ownedDescriptorsClosed watchdogJoined tasksJoined injectorsJoined handlersRestored registryInactive].each do |name|
       assert value.fetch(name), name
     end
     refute value.fetch("pendingInterrupt")
     refute value.fetch("watchdogIntervened")
     assert_equal secondary ? ["UploadProcessFixture::NativePrimaryProbe::CleanupFailure"] : [], value.fetch("cleanupErrors")
-    %w[faultCount resultObservations backendEntries callbackEntries].each { |name| assert_equal 1, proof.fetch(name), name }
-    %w[framePublishedBeforeFault nestedPrimarySameObject callbackPrimarySameObject originalNotIntentional
-       originalStatusPreserved actualWaiterMatchesDriver actualWaiterReaped actualDescriptorsClosed].each do |name|
+    %w[faultCount resultObservations].each { |name| assert_equal 1, proof.fetch(name), name }
+    %w[framePublishedBeforeFault nestedPrimarySameObject originalNotIntentional originalStatusPreserved
+       actualCustodianReceiptBound actualTaskJoins actualDescriptorsClosed].each do |name|
       assert proof.fetch(name), name
     end
-    refute proof.fetch("callbackAbsent")
     assert_equal secondary ? 1 : 0, proof.fetch("secondaryCount")
-    secondary ? assert(proof.fetch("secondaryObjectRecorded")) : assert_nil(proof.fetch("secondaryObjectRecorded"))
+    assert_equal secondary, proof.fetch("secondaryObjectRecorded")
   end
 
-  def assert_native_io_redaction(value, proof)
+  def assert_native_io_redaction(value, _proof)
     assert_equal "MobileReleaseKit::ContractError", value.fetch("nativeErrorClass")
     assert_equal "Synthetic validator could not be executed safely; no upload is authorized", value.fetch("nativeErrorMessage")
-    assert_equal value.fetch("nativeErrorClass"), proof.fetch("nativeErrorClass")
-    assert_equal value.fetch("nativeErrorMessage"), proof.fetch("nativeErrorMessage")
   end
 
-  def assert_retained_capture(observed)
+  def assert_retained_capture(observed, finality: :finalized, failure_state: nil)
+    failure_state[:stage] = "capture-retained-files" if failure_state
+    assert_includes %i[finalized unknown], finality
     directory = observed.fetch(:directory)
     %w[input.json driver.stdout driver.stderr collector.json].each { |name| assert File.file?(File.join(directory, name)), name }
+    failure_state[:stage] = "capture-retained-lifetime" if failure_state
     assert_nil UploadProcessFixture.instance_variable_get(:@cancellation_scope)
     refute Thread.current.pending_interrupt?
+    failure_state[:stage] = "capture-retained-streams" if failure_state
     assert observed.fetch(:streams_closed)
-    assert observed.fetch(:stop_completed)
+    assert_equal finality == :finalized, observed.fetch(:stop_completed)
+    failure_state[:stage] = "capture-record-read" if failure_state
     record = UploadProcessFixture.read_json(File.join(directory, "collector.json"))
-    assert_equal "reaped", record.fetch("phase")
-    assert_equal observed.fetch(:status).exitstatus, record.fetch("exitStatus")
-    assert_equal observed.fetch(:status).termsig, record.fetch("termSignal")
+    failure_state[:stage] = "capture-record-status" if failure_state
+    assert_equal finality == :finalized ? "reaped" : "unknown", record.fetch("phase")
+    exit_status = observed.fetch(:status).exitstatus
+    recorded_exit_status = record.fetch("exitStatus")
+    exit_status.nil? ? assert_nil(recorded_exit_status) : assert_equal(exit_status, recorded_exit_status)
+    term_signal = observed.fetch(:status).termsig
+    recorded_term_signal = record.fetch("termSignal")
+    term_signal.nil? ? assert_nil(recorded_term_signal) : assert_equal(term_signal, recorded_term_signal)
+    failure_state[:stage] = "capture-record-flags" if failure_state
     assert record.fetch("streamsClosed")
-    assert record.fetch("stopCompleted")
+    assert_equal finality == :finalized, record.fetch("stopCompleted")
     assert record.fetch("inputsRechecked")
+    failure_state[:stage] = "capture-dispatch-contract" if failure_state
     assert_equal observed.fetch(:dispatch), record.fetch("dispatch")
     dispatch = record.fetch("dispatch")
-    assert_equal [RbConfig.ruby, dispatch.fetch("fixture").fetch("path"), "driver", directory], dispatch.fetch("argv")
+    if dispatch.fetch("isolatedControl")
+      assert_equal minitest_library_snapshot, dispatch.fetch("minitest")
+      assert_equal isolated_collector_argv(directory, dispatch.fetch("minitest")), dispatch.fetch("argv")
+      assert_equal File.realpath(__FILE__), dispatch.fetch("fixture").fetch("path")
+    else
+      assert_nil dispatch.fetch("minitest")
+      assert_equal [RbConfig.ruby, dispatch.fetch("fixture").fetch("path"), "driver", directory], dispatch.fetch("argv")
+    end
+    failure_state[:stage] = "capture-dispatch-environment" if failure_state
     expected_environment = UploadProcessFixture::PROCESS_OBSERVER_SELECTION.nil? ? {} :
       {UploadProcessFixture::PROCESS_OBSERVER_KEY => UploadProcessFixture::PROCESS_OBSERVER_SELECTION}
     expected_environment.merge!("TMPDIR" => directory, "TMP" => directory, "TEMP" => directory)
@@ -803,8 +5499,114 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal Dir.pwd, dispatch.fetch("cwd")
     assert_equal({"unsetenv_others" => true, "pgroup" => true, "stdin" => File::NULL,
                   "stdout" => File.join(directory, "driver.stdout"), "stderr" => File.join(directory, "driver.stderr")}, dispatch.fetch("options"))
+    failure_state[:stage] = "capture-source-identities" if failure_state
     assert_equal dispatch.fetch("interpreter"), dispatch_file_identity(RbConfig.ruby, limit: 32 * 1024 * 1024)
-    assert_equal dispatch.fetch("fixture"), dispatch_file_identity(dispatch.fetch("argv")[1], limit: 1_048_576)
+    assert_equal dispatch.fetch("fixture"), dispatch_file_identity(dispatch.fetch("fixture").fetch("path"), limit: 1_048_576)
+    failure_state[:stage] = "capture-stream-identities" if failure_state
+    assert_equal observed.fetch(:stream_identities), record.fetch("streamIdentities")
+    failure_state[:stage] = "capture-child-receipt" if failure_state
+    child = observed.fetch(:child)
+    assert_same observed.fetch(:status), child.status
+    assert_instance_of Process::Status, child.status
+    assert_same child.child, child.acquisition.child
+    assert_same child.status, child.child.receipt.raw_status
+    assert_equal child.pid, child.status.pid
+    failure_state[:stage] = "capture-creator" if failure_state
+    assert child.creator.joined?
+    assert child.creator.finished?
+    refute child.creator.unresolved?
+    failure_state[:stage] = "capture-lifetime-endpoints" if failure_state
+    assert_equal observed.fetch(:run_deadline_ns), child.creator.run_deadline_ns
+    assert_equal observed.fetch(:hard_deadline_ns), child.creator.hard_cleanup_deadline_ns
+    assert_equal observed.fetch(:run_deadline_ns), record.fetch("runDeadlineNs")
+    assert_equal observed.fetch(:hard_deadline_ns), record.fetch("hardDeadlineNs")
+    assert_equal observed.fetch(:enclosing_deadline_ns), record.fetch("enclosingDeadlineNs")
+    assert_equal observed.fetch(:hard_deadline_ns), observed.fetch(:collector_lifetime).instance_variable_get(:@drain_deadline_ns).call
+    assert_equal observed.fetch(:enclosing_deadline_ns), observed.fetch(:reporting_lifetime).instance_variable_get(:@drain_deadline_ns).call
+    failure_state[:stage] = "capture-provenance" if failure_state
+    assert_equal child.provenance, record.fetch("ownedChild")
+    assert_raw_bootstrap_provenance(record.fetch("ownedChild"), dispatch, child.status,
+                                    stream_identities: record.fetch("streamIdentities"), finality: finality, failure_state: failure_state)
     record
+  end
+
+  def assert_raw_bootstrap_provenance(provenance, dispatch, status, stream_identities:, finality:, failure_state: nil)
+    failure_state[:stage] = "capture-bootstrap-header" if failure_state
+    assert_equal 1, provenance.fetch("version")
+    assert_equal status.pid, provenance.fetch("pid")
+    assert_equal finality == :finalized ? "reaped" : "unknown", provenance.fetch("phase")
+    assert provenance.fetch("numericRetired")
+    assert provenance.fetch("creatorJoined")
+    assert_equal finality == :finalized, provenance.fetch("resourcesClosed")
+    assert_equal({"pid" => status.pid, "status_kind" => status.exited? ? "exit" : "signal",
+                  "status_code" => status.exited? ? status.exitstatus : status.termsig}, provenance.fetch("wait"))
+    failure_state[:stage] = "capture-bootstrap-request" if failure_state
+    assert_equal({"executable" => dispatch.fetch("argv").first, "argv" => dispatch.fetch("argv"),
+                  "environment" => dispatch.fetch("environment"), "cwd" => dispatch.fetch("cwd")}, provenance.fetch("requested"))
+    failure_state[:stage] = "capture-bootstrap-sources" if failure_state
+    bootstrap = provenance.fetch("nativeBootstrap")
+    assert_equal %w[argv creatorCwd environment executable fdSources fixtureSha256], bootstrap.keys.sort
+    sources = dispatch.fetch("bootstrapSources")
+    assert_equal %w[fastlane/native_process_spawn.rb fastlane/native_upload_process.rb tests/workflow/upload_process_fixture.rb tests/workflow/upload_process_ownership.rb], sources.keys.sort
+    sources.each_value do |source|
+      assert_equal source, dispatch_file_identity(source.fetch("path"), limit: 1_048_576)
+    end
+    fixture = sources.fetch("tests/workflow/upload_process_fixture.rb")
+    failure_state[:stage] = "capture-bootstrap-directory" if failure_state
+    launch = provenance.fetch("launchDirectory")
+    assert_equal %w[dev gid ino mode rdev type uid], launch.fetch("identity").keys.sort
+    assert_equal File.dirname(dispatch.fetch("options").fetch("stdout")), File.dirname(launch.fetch("path"))
+    assert_match(/\Amrk-owned-launch-/, File.basename(launch.fetch("path")))
+    assert_equal "directory", launch.fetch("identity").fetch("type")
+    assert_equal Process.uid, launch.fetch("identity").fetch("uid")
+    assert_equal 0o700, launch.fetch("identity").fetch("mode") & 0o7777
+    failure_state[:stage] = "capture-bootstrap-dispatch" if failure_state
+    assert_equal File.realpath(RbConfig.ruby), bootstrap.fetch("executable")
+    assert_equal [File.realpath(RbConfig.ruby), *MobileReleaseKit::NativeUploadProcess::HELPER_FLAGS, "--",
+                  fixture.fetch("realpath"), "owned-child", launch.fetch("path")], bootstrap.fetch("argv")
+    assert_equal MobileReleaseKit::NativeUploadProcess.helper_environment, bootstrap.fetch("environment")
+    assert_equal dispatch.fetch("cwd"), bootstrap.fetch("creatorCwd")
+    assert_equal fixture.fetch("sha256"), bootstrap.fetch("fixtureSha256")
+    failure_state[:stage] = "capture-bootstrap-descriptors" if failure_state
+    descriptors = bootstrap.fetch("fdSources")
+    assert_equal %w[in out err], descriptors.map { |entry| entry.fetch("role") }
+    assert_equal UploadProcessFixture::OwnedChild.identity(File.stat(File::NULL)), descriptors.first.fetch("identity")
+    assert_equal stream_identities, descriptors.drop(1).map { |entry| entry.fetch("identity") }
+
+    failure_state[:stage] = "capture-bootstrap-configuration" if failure_state
+    config = provenance.fetch("configuration")
+    assert_equal %w[bytes identity path sha256], config.keys.sort
+    assert_equal File.join(launch.fetch("path"), "configuration.json"), config.fetch("path")
+    assert_equal "file", config.fetch("identity").fetch("type")
+    assert_equal Process.uid, config.fetch("identity").fetch("uid")
+    assert_equal 0o600, config.fetch("identity").fetch("mode") & 0o7777
+    assert_includes 1..UploadProcessFixture::OUTPUT_LIMIT, config.fetch("bytes")
+    assert_match(/\A[0-9a-f]{64}\z/, config.fetch("sha256"))
+    failure_state[:stage] = "capture-bootstrap-ready" if failure_state
+    assert_equal({"version" => 1, "pid" => status.pid, "pgid" => status.pid, "sid" => status.pid,
+                  "configurationSha256" => config.fetch("sha256"), "cwd" => dispatch.fetch("cwd")}, provenance.fetch("ready"))
+    failure_state[:stage] = "capture-bootstrap-grant" if failure_state
+    assert_equal({"state" => "granted", "bytesWritten" => 3}, provenance.fetch("grant"))
+    failure_state[:stage] = "capture-bootstrap-exec" if failure_state
+    assert_equal({"version" => 1, "pid" => status.pid, "configurationSha256" => config.fetch("sha256"),
+                  "argvSha256" => Digest::SHA256.hexdigest(JSON.generate(dispatch.fetch("argv"))),
+                  "cwd" => dispatch.fetch("cwd")}, provenance.fetch("execAttempt"))
+    failure_state[:stage] = "capture-bootstrap-directory-finality" if failure_state
+    if finality == :finalized
+      refute File.exist?(launch.fetch("path"))
+    else
+      assert_equal launch.fetch("identity"), UploadProcessFixture::OwnedChild.directory_identity(launch.fetch("path"))
+    end
+  end
+end
+
+if $PROGRAM_NAME == __FILE__ && ARGV.first.to_s.start_with?("--mrk-isolated-")
+  isolated_failure = {stage: "cli-admission", deadline_ns: nil}
+  begin
+    File.umask(0o077)
+    Process.exit!(NativeUploadValidationTest.run_isolated_collector_cli(ARGV, failure_state: isolated_failure))
+  rescue Exception => error
+    NativeUploadValidationTest.report_isolated_cli_failure(isolated_failure, error)
+    Process.exit!(1)
   end
 end

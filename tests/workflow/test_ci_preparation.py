@@ -181,11 +181,15 @@ class PreparationContractsTests(unittest.TestCase):
                 self.assertEqual(len(wheels), 9)
                 rpds = next(asset for asset in wheels if asset["name"] == "rpds-py")
                 self.assertEqual((rpds["filename"], rpds["sha256"]), ("rpds_py-0.27.1-" + tag, digest))
-                self.assertEqual(len(gems), 99)
-                self.assertEqual(len({asset["filename"] for asset in gems}), 99)
+                self.assertEqual((manifest["ruby"], manifest["fiddle"], manifest["locked_gem_count"]), ("3.3.12", "1.1.2", 99))
+                self.assertEqual(len(gems), 100)
+                self.assertEqual(len({asset["filename"] for asset in gems}), 100)
                 locked_lines = [line.strip() for line in self.original_lock.decode("ascii").splitlines() if " sha256=" in line]
-                self.assertEqual(len(locked_lines), 98)
+                self.assertEqual(len(locked_lines), 99)
                 self.assertEqual({f'{a["name"]} ({a["version"]}) sha256={a["sha256"]}' for a in gems if a["name"] != "bundler"}, set(locked_lines))
+                fiddle = next(asset for asset in gems if asset["name"] == "fiddle")
+                self.assertEqual((fiddle["version"], fiddle["filename"], fiddle["sha256"]),
+                                 ("1.1.2", "fiddle-1.1.2.gem", "59bd18c38e65cdc36863ab68e3ffd78658b8f025d1d080b218de94370420a074"))
                 self.assertEqual(gems[-1]["sha256"], "d6ca5dd440c24f9abce9844cf44cc8e18c6a553de65a47efb4544137af92c47d")
                 self.assertEqual(manifest["actionlint"]["sha256"], "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8")
                 self.assertEqual(lock_hash, hashlib.sha256(self.original_lock).hexdigest())
@@ -198,6 +202,11 @@ class PreparationContractsTests(unittest.TestCase):
             lambda value: value["wheels"].__setitem__(-1, copy.deepcopy(value["wheels"][0])),
             lambda value: next(a for a in value["wheels"] if a["name"] == "rpds-py").update(filename="rpds_py-0.27.1-cp312-cp312-macosx_11_0_arm64.whl"),
             lambda value: value["wheels"][0].update(bytes=True),
+            lambda value: value.update(ruby="3.3.11"),
+            lambda value: value.update(fiddle="1.1.3"),
+            lambda value: value.pop("fiddle"),
+            lambda value: value.update(locked_gem_count=98),
+            lambda value: value.update(locked_gem_count=True),
         )
         for index, change in enumerate(changes):
             with self.subTest(index=index):
@@ -214,6 +223,7 @@ class PreparationContractsTests(unittest.TestCase):
             ("missing", self.original_lock.replace(checksum.encode(), b"", 1)),
             ("duplicate", self.original_lock.replace(checksum.encode(), (checksum * 2).encode(), 1)),
             ("wrong-version", self.original_lock.replace(checksum.encode(), checksum.replace(" (", " (9", 1).encode(), 1)),
+            ("wrong-fiddle", self.original_lock.replace(b"fiddle (1.1.2)", b"fiddle (1.1.3)")),
         ):
             with self.subTest(lock=kind):
                 manifest = copy.deepcopy(self.original_manifest)
@@ -227,7 +237,7 @@ class PreparationContractsTests(unittest.TestCase):
     def test_complete_preparation_returns_every_byte_and_requirement_without_executing_assets(self):
         self.synthetic_source()
         before = {name: (self.source / name).read_bytes() for name in ("Gemfile.lock", ".github/verification-tools.json")}
-        for platform, file_count, request_count in (("linux", 114, 109), ("macos", 112, 108)):
+        for platform, file_count, request_count in (("linux", 115, 110), ("macos", 113, 109)):
             with self.subTest(platform=platform), patch.object(self.prep, "remaining", wraps=self.prep.remaining) as clock:
                 self.requests.clear()
                 self.replies.clear()

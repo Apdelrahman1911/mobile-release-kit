@@ -1,4 +1,4 @@
-"""Root-only preparation of three selected runtimes on a disposable Linux VM.
+"""Root-only preparation of fixed selected runtimes on a disposable Linux VM.
 
 Imported only by the original controller, never by the copied child entry.
 This changes permission bits, not runtime contents, owners, installation paths,
@@ -28,6 +28,7 @@ MAX_OPEN = 72
 MAX_ACL_BYTES = 4096
 MAX_DEFAULT_ACL_BYTES = 8 * 1024**2
 ROLES = ("python", "ruby", "jdk")
+COMPATIBILITY_ROLES = ("python312", "python313", "python314")
 ACL_NAMES = ("system.posix_acl_access", "system.posix_acl_default")
 _ACL_UNCHECKED = object()
 
@@ -438,7 +439,7 @@ class _Preparation:
 
 
 def protect_selected_runtimes(prefixes, *, uid, gid, deadline, report):
-    """Prepare only the caller's exact Python/Ruby/JDK prefixes before any U code.
+    """Prepare only the exact three or six selected prefixes before any U code.
 
     ``report`` is the original controller's already-published admission row.
     Attempt/confirmed counts remain truthful on every exception; no rollback or
@@ -457,10 +458,17 @@ def protect_selected_runtimes(prefixes, *, uid, gid, deadline, report):
                 or type(uid) is not int or type(gid) is not int or not 60000 <= uid < 65000 or gid != uid
                 or type(deadline) not in (int, float) or not math.isfinite(deadline)):
             preparation.refuse("root-linux-identity-or-deadline")
-        if (not isinstance(prefixes, (tuple, list)) or len(prefixes) != len(ROLES)
+        if (not isinstance(prefixes, (tuple, list)) or len(prefixes) not in (3, 6)
                 or any(not isinstance(row, (tuple, list)) or len(row) != 2 for row in prefixes)
-                or tuple(row[0] for row in prefixes) != ROLES):
+                or tuple(row[0] for row in prefixes) != (
+                    ROLES if len(prefixes) == 3 else ROLES + COMPATIBILITY_ROLES)):
             preparation.refuse("prefix-roles")
+        # Extend only the closed, complete role set. The original transaction
+        # inventories every selected prefix before its first permission effect;
+        # none of its bounds, ACL rules or failure/close accounting change.
+        if len(prefixes) == 6:
+            report["roles"].update({role: {k: 0 for k in ("inventoried", "planned", "attempted", "confirmed")}
+                                    for role in COMPATIBILITY_ROLES})
         paths = tuple(str(row[1]) for row in prefixes)
         for path in paths:
             parts = PurePosixPath(path).parts

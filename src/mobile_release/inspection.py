@@ -17,6 +17,11 @@ class InspectionDeadline:
     def __init__(self) -> None:
         self._expires_at = time.monotonic() + MAX_INSPECTION_SECONDS
 
+    @property
+    def expires_at(self) -> float:
+        """The original monotonic endpoint, never a renewed inspection budget."""
+        return self._expires_at
+
     def check(self) -> None:
         if time.monotonic() >= self._expires_at:
             raise ValidationError("iOS artifact inspection exceeded its shared time bound; no new authorization is permitted")

@@ -46,6 +46,7 @@ _PYTHON_FULL_WORK_TMPFS = (("tmp", 640 * MiB), *((name, 16 * MiB) for name in (
     "home", "config", "cache", "gem-cache", "bundle-config", "bundle-home", "checks")))
 _PYTHON_FULL_PRIVATE_TMPFS = (("/run", 16 * MiB), ("/tmp", 128 * MiB), ("/dev/shm", 16 * MiB))
 _USERNS_PATH = Path("/proc/sys/user/max_user_namespaces")
+_COMPATIBILITY_ROLES = ("python312", "python313", "python314")
 _NATIVE_PHASES = ("source", "wheel")
 _NATIVE_PROFILES = frozenset("native-authority-" + phase for phase in _NATIVE_PHASES)
 _NATIVE_LEAVES = ("home", "tmp", "config", "cache", "probes")
@@ -557,7 +558,7 @@ _DIAGNOSTIC_OPERATIONS = frozenset({"process-groups-linux", "kernel-groups-libra
                                     "mac-original-credentials", "cleanup-batch",
                                     "network-tcp4", "network-udp4", "network-tcp6", "network-udp6"})
 _TOOL_DIAGNOSTIC_ROLES = frozenset({"python", "ruby", "sudo", "true", "sandbox-exec", "ps",
-                                    "compiler", "linker", "signature-tool", "unspecified"})
+                                    "compiler", "linker", "signature-tool", "unspecified", *_COMPATIBILITY_ROLES})
 
 
 def _observer_error_fields(value: object) -> dict | None:
@@ -904,6 +905,49 @@ def _canonical(value: str | Path) -> Path:
     return p
 
 
+def _runtime_prefix_roles(platform: str, python: Path, python_prefix: Path, ruby: Path,
+                          tool_prefixes: tuple[Path, ...],
+                          compatibility_runtimes: tuple[tuple[Path, Path], ...]) -> tuple[tuple[str, Path], ...]:
+    """Pure closed-role reconciliation; canonical metadata belongs to admission.
+
+    Normal QA007 CI supplies all three additional minors. The empty shape keeps
+    the existing bounded owner controls usable; it cannot omit CLI/catalog gates.
+    Actual minor identities are checked by owned isolated interpreter captures,
+    never inferred from a pathname or an out-of-owner discovery subprocess.
+    """
+    if (platform not in {"linux", "darwin"} or type(tool_prefixes) is not tuple
+            or type(compatibility_runtimes) is not tuple or len(compatibility_runtimes) not in (0, 3)
+            or any(type(row) is not tuple or len(row) != 2 for row in compatibility_runtimes)):
+        raise SessionError("selected provider prefix roles are incomplete or ambiguous")
+    paths = (python, python_prefix, ruby, *tool_prefixes,
+             *(path for row in compatibility_runtimes for path in row))
+    if any(not isinstance(path, Path) or not path.is_absolute() or ".." in path.parts
+           or path == Path("/") or len(str(path)) > 4096
+           or any(not 32 <= ord(c) < 127 for c in str(path)) for path in paths):
+        raise SessionError("selected provider path shape is unsupported")
+    if (python.parent.name != "bin" or ruby.parent.name != "bin" or not _under(python, python_prefix)
+            or any(executable.parent.name != "bin" or executable.parent.parent != prefix
+                   for executable, prefix in compatibility_runtimes)):
+        raise SessionError("selected executable does not have its exact provider prefix")
+    ruby_prefix = ruby.parent.parent
+    extras = tuple((role, pair[1]) for role, pair in zip(_COMPATIBILITY_ROLES, compatibility_runtimes))
+    selected = (python_prefix, ruby_prefix, *(prefix for _, prefix in extras))
+    if len(set(tool_prefixes)) != len(tool_prefixes) or any(prefix not in tool_prefixes for prefix in selected):
+        raise SessionError("selected provider prefix roles are incomplete or ambiguous")
+    remaining = tuple(prefix for prefix in tool_prefixes if prefix not in selected)
+    if len(remaining) != (1 if platform == "linux" else 0):
+        raise SessionError("selected provider prefix roles are incomplete or ambiguous")
+    roles = (("python", python_prefix), ("ruby", ruby_prefix))
+    if platform == "linux":
+        roles += (("jdk", remaining[0]),)
+    roles += extras
+    roots = tuple(prefix for _, prefix in roles)
+    if (len(roots) != len(tool_prefixes) or any(_under(a, b) or _under(b, a)
+            for index, a in enumerate(roots) for b in roots[index + 1:])):
+        raise SessionError("selected provider prefix roles overlap")
+    return roles
+
+
 def _private_file(path: Path, data: bytes, mode: int = 0o600, *, root_owned: bool = False) -> None:
     if type(root_owned) is not bool:
         raise SessionError("invalid fixed controller-file ownership option")
@@ -1216,6 +1260,55 @@ def _admit_executable(path: Path, uid: int, gid: int, *, root_owned: bool = Fals
         failure._ci_observation = {"tool": note}
         raise failure
     return note
+
+
+def _linux_native_process_toolchain(uid: int, gid: int, *, deadline: float) -> dict:
+    """Read-only binding of the one distribution ABI-fixture compiler.
+
+    Compilation/version observation belongs to ordinary Session captures, with
+    fixed /usr/bin:/bin PATH. No package installation, command lookup, provider
+    permission mutation or execution occurs here.
+    """
+    _remaining(deadline)
+    if sys.platform != "linux" or os.geteuid() != 0 or os.uname().machine != "x86_64":
+        raise SessionError("ABI fixture compiler requires the supported hosted Linux owner")
+    compiler = Path("/usr/bin/x86_64-linux-gnu-gcc-13")
+    for parent in reversed(compiler.parents):
+        _remaining(deadline)
+        _canonical(parent)
+        info = parent.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise SessionError("fixed distribution compiler ancestry is writable or unowned")
+    _canonical(compiler)
+    before = compiler.lstat()
+    # Validate the SAME metadata used as the opened-file baseline. A discarded
+    # earlier stat admission cannot authorize adopting a different later node.
+    if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or not before.st_mode & 0o111
+            or before.st_mode & (0o022 | stat.S_ISUID | stat.S_ISGID)):
+        raise SessionError("fixed distribution compiler permission/identity contract failed")
+    identity = lambda value: (_home_node(value), value.st_mode, value.st_size,
+                              value.st_nlink, value.st_mtime_ns, value.st_ctime_ns)
+    if not 0 < before.st_size <= 16 * MiB:
+        raise SessionError("fixed distribution compiler size is unsupported")
+    total, digest = 0, hashlib.sha256()
+    with compiler.open("rb") as stream:
+        if identity(os.fstat(stream.fileno())) != identity(before):
+            raise SessionError("fixed distribution compiler opened a different node")
+        while chunk := stream.read(65536):
+            _remaining(deadline)
+            total += len(chunk)
+            if total > before.st_size:
+                raise SessionError("fixed distribution compiler changed during binding")
+            digest.update(chunk)
+        if identity(os.fstat(stream.fileno())) != identity(before):
+            raise SessionError("fixed distribution compiler changed during read")
+    _remaining(deadline)
+    if total != before.st_size or identity(compiler.lstat()) != identity(before):
+        raise SessionError("fixed distribution compiler lost its original binding")
+    _canonical(compiler)
+    _remaining(deadline)
+    return {"gcc": compiler, "evidence": {"gcc_sha256": digest.hexdigest(),
+            "provider": "ubuntu-24.04-distribution", "compiler_family": "gcc-13"}}
 
 
 def _small_command(argv: list[str], seconds: float = 10.0,
@@ -1799,7 +1892,8 @@ class Session:
 
     def __init__(self, platform: str, root: str | Path, *, python: str | Path,
                  ruby: str | Path, runner_home: str | Path, runner_temp: str | Path,
-                 tool_prefixes: tuple[str | Path, ...] | list[str | Path], deadline: float):
+                 tool_prefixes: tuple[str | Path, ...] | list[str | Path], deadline: float,
+                 compatibility_runtimes: tuple[tuple[str | Path, str | Path], ...] = ()):
         if platform not in {"linux", "darwin"} or sys.platform != platform or os.geteuid() != 0:
             raise SessionError("requires root controller on the selected disposable hosted VM")
         if not isinstance(deadline, (int, float)) or not 0 < deadline - time.monotonic() <= 3300:
@@ -1812,6 +1906,16 @@ class Session:
         self.python, self.ruby = _canonical(python), _canonical(ruby)
         self.runner_home, self.runner_temp = _canonical(runner_home), _canonical(runner_temp)
         self.tool_prefixes = tuple(_canonical(p) for p in tool_prefixes)
+        if (type(compatibility_runtimes) is not tuple or len(compatibility_runtimes) not in (0, 3)
+                or any(type(pair) is not tuple or len(pair) != 2 for pair in compatibility_runtimes)):
+            raise SessionError("three fixed compatibility runtime pairs are required")
+        self.compatibility_runtimes = tuple((_canonical(executable), _canonical(prefix))
+                                           for executable, prefix in compatibility_runtimes)
+        if self.compatibility_runtimes:
+            # Bind the complete expanded scope before reservations, HOME or any
+            # provider effects. The old empty shape has no compatibility gates.
+            _runtime_prefix_roles(platform, self.python, _canonical(sys.base_prefix), self.ruby,
+                                  self.tool_prefixes, self.compatibility_runtimes)
         self.source, self.inputs = self.root / "source", self.root / "inputs"
         self.work, self.control, self.bootstrap = (self.root / n for n in ("work", "control", "bootstrap"))
         self.uid = self.gid = 60000 + secrets.randbelow(5000)  # One selection; never retry/adopt.
@@ -1823,6 +1927,7 @@ class Session:
         self.persisted_bytes = self._run_number = 0
         self.admission_results: list[dict[str, object]] = []
         self.process_observer: Path | None = None
+        self._native_process_toolchain_binding: dict | None = None
         self._home_state: dict | None = None
         self._userns_state: dict | None = None
         self._native_authority: dict[str, dict] = {}
@@ -1898,6 +2003,16 @@ class Session:
     def fail(self, reason: str) -> None:
         """Latch a controller parser/provenance failure; there is no reset API."""
         self._fail(reason)
+
+    @property
+    def native_process_toolchain(self) -> dict:
+        """Successful original admission only; callers cannot mutate custody."""
+        self._guard()
+        if not self.admitted or self._native_process_toolchain_binding is None:
+            raise SessionError("native process toolchain has no successful admission")
+        self.ensure_idle()
+        tools = self._native_process_toolchain_binding
+        return {**tools, "evidence": dict(tools["evidence"])}
 
     def _interrupted(self, signum: int, _frame) -> None:
         if signum == signal.SIGALRM:
@@ -3966,6 +4081,7 @@ class Session:
             roles = [("python", self.python, {}),
                      ("sudo", Path("/usr/bin/sudo"), {"root_owned": True, "non_set_id": False}),
                      ("true", Path("/usr/bin/true"), {"root_owned": True})]
+            roles += [(role, pair[0], {}) for role, pair in zip(_COMPATIBILITY_ROLES, self.compatibility_runtimes)]
             if self.platform == "darwin":
                 # Only root's census executes this original system ps.  Record
                 # actual image metadata without presuming why sandboxed exec failed.
@@ -3983,6 +4099,11 @@ class Session:
                         tools[role] = observation["tool"]
                     raise
             tools_note["ok"] = True
+            if self.platform == "linux" and self.compatibility_runtimes:
+                self._native_process_toolchain_binding = _linux_native_process_toolchain(
+                    self.uid, self.gid, deadline=self.deadline)
+                self.admission_results.append({"name": "native-process-toolchain", "ok": True,
+                                               **self._native_process_toolchain_binding["evidence"]})
             os.chown(self.work, self.uid, self.gid)
             for name in ("home", "tmp", "config", "cache"):
                 p = self.work / name
@@ -4002,8 +4123,9 @@ class Session:
             # those subcontrol facts and revoke this attempt's aggregate claim.
             self.admitted = False
             self.process_observer = None
+            self._native_process_toolchain_binding = None
             for row in self.admission_results:
-                if row["name"] == "process-observer":
+                if row["name"] in {"process-observer", "native-process-toolchain"}:
                     row["ok"] = False
             self.admission_results.append({"name": "native-admission-failure", "ok": False,
                                            "exceptions": _exception_notes(exc)})
@@ -4159,13 +4281,8 @@ class Session:
             raise SessionError("provider preparation requires the native root owner")
         self.ensure_idle()
         _remaining(self.deadline)
-        python_prefix = _canonical(sys.base_prefix)
-        ruby_prefix = self.ruby.parent.parent
-        remaining = [p for p in self.tool_prefixes if p not in {python_prefix, ruby_prefix}]
-        if (python_prefix not in self.tool_prefixes or ruby_prefix not in self.tool_prefixes
-                or not _under(self.python, python_prefix) or len(remaining) != 1):
-            raise SessionError("selected provider prefix roles are incomplete or ambiguous")
-        prefixes = (("python", python_prefix), ("ruby", ruby_prefix), ("jdk", remaining[0]))
+        prefixes = _runtime_prefix_roles(self.platform, self.python, _canonical(sys.base_prefix), self.ruby,
+                                        self.tool_prefixes, self.compatibility_runtimes)
         # Only this root admission method loads the immutable provider-only
         # source. The one-file copied bootstrap and every child role stay intact.
         report = {"name": "provider-runtime-permissions", "ok": False}
@@ -4595,6 +4712,7 @@ class Session:
         self.ensure_idle()
         _remaining(self.deadline)
         self.process_observer = frozen  # No caller-selected or pre-admission path.
+        self._native_process_toolchain_binding = {**tools, "evidence": dict(tools["evidence"])}
         self.admission_results.append({"name": "process-observer", "ok": True,
                                        "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
                                        "binary_sha256": hashlib.sha256(binary).hexdigest(),

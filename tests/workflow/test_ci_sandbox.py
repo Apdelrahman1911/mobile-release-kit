@@ -56,6 +56,8 @@ def session_double(module, platform="linux"):
     session.python = Path("/fixture-tools/python/bin/python")
     session.ruby = Path("/fixture-tools/ruby/bin/ruby")
     session.tool_prefixes = (session.python.parent.parent, session.ruby.parent.parent)
+    session.compatibility_runtimes = ()
+    session._native_process_toolchain_binding = None
     session.runner_home = Path("/home/runner")
     session.runner_temp = Path("/home/runner/work/_temp")
     session.ruby_prefix = session.ruby.parent.parent
@@ -9856,16 +9858,219 @@ class CISandboxPureTests(unittest.TestCase):
                 if case == "all-close-errors":
                     self.assertTrue(all(error in captured_cleanup for error in close_errors.values()))
 
+    def test_closed_compatibility_prefix_roles_reject_ambiguity_before_effects(self):
+        python, ruby = Path("/providers/python/bin/python"), Path("/providers/ruby/bin/ruby")
+        jdk = Path("/providers/jdk")
+        pairs = tuple((Path(f"/providers/python{minor}/bin/python"), Path(f"/providers/python{minor}"))
+                      for minor in (312, 313, 314))
+        selected = (python.parent.parent, ruby.parent.parent, jdk, *(prefix for _, prefix in pairs))
+        expected = tuple(zip(("python", "ruby", "jdk", "python312", "python313", "python314"), selected))
+        forbidden = Mock(side_effect=AssertionError("role reconciliation must be pure"))
+        with patch.object(self.module, "os", SimpleNamespace()), \
+             patch.object(self.module, "_canonical", forbidden), \
+             patch.object(Path, "stat", forbidden), patch.object(Path, "resolve", forbidden), \
+             patch.object(Path, "open", forbidden):
+            self.assertEqual(self.module._runtime_prefix_roles(
+                "linux", python, selected[0], ruby, selected, pairs), expected)
+            mac = selected[:2] + selected[3:]
+            self.assertEqual(self.module._runtime_prefix_roles(
+                "darwin", python, selected[0], ruby, mac, pairs), expected[:2] + expected[3:])
+            for platform, roots in (("linux", selected[:3]), ("darwin", selected[:2])):
+                self.assertEqual(self.module._runtime_prefix_roles(
+                    platform, python, selected[0], ruby, roots, ()), expected[:len(roots)])
+            invalid = (
+                ("platform", "win32", selected, pairs),
+                ("prefix-list", "linux", list(selected), pairs),
+                ("pair-list", "linux", selected, list(pairs)),
+                ("missing-minor", "linux", selected, pairs[:2]),
+                ("duplicate-role-root", "linux", selected, (pairs[0], pairs[0], pairs[2])),
+                ("missing-provider", "linux", selected[:-1], pairs),
+                ("duplicate-prefix", "linux", selected + (selected[0],), pairs),
+                ("unselected-root", "linux", selected + (Path("/providers/unselected"),), pairs),
+                ("relative", "linux", selected, ((Path("relative/bin/python"), pairs[0][1]), *pairs[1:])),
+                ("wrong-bin", "linux", selected, ((pairs[0][1] / "sbin/python", pairs[0][1]), *pairs[1:])),
+                ("wrong-prefix", "linux", selected, ((pairs[0][0], pairs[1][1]), *pairs[1:])),
+                ("ancestor", "linux", (selected[0], selected[1], Path("/providers"), *selected[3:]), pairs),
+                ("mac-extra-jdk", "darwin", selected, pairs),
+            )
+            for label, platform, roots, runtimes in invalid:
+                with self.subTest(closed_roles=label), self.assertRaises(self.module.SessionError):
+                    self.module._runtime_prefix_roles(platform, python, selected[0], ruby, roots, runtimes)
+        forbidden.assert_not_called()
+
+    def test_native_toolchain_binding_requires_current_admission_and_real_idle(self):
+        cases = ("linux", "darwin", "not-admitted", "no-binding", "failed", "closed", "expired",
+                 "busy", "active", "pending", "live-domain", "unknown-domain", "headroom")
+        for case in cases:
+            with self.subTest(toolchain_custody=case):
+                session = session_double(self.module, "darwin" if case == "darwin" else "linux")
+                binding = {"gcc": Path("/usr/bin/x86_64-linux-gnu-gcc-13"), "evidence": {"gcc_sha256": "a" * 64}}
+                if case == "darwin":
+                    binding = {"clang": Path("/Applications/fixture/clang"), "linker": Path("/Applications/fixture/ld"),
+                               "sdk": Path("/Applications/fixture/sdk"), "toolchain": Path("/Applications/fixture/toolchain"),
+                               "evidence": {"clang_sha256": "b" * 64}}
+                session._native_process_toolchain_binding = None if case == "no-binding" else binding
+                session.admitted = case != "not-admitted"
+                session.closed, session._busy = case == "closed", case == "busy"
+                session._active = object() if case == "active" else None
+                session._direct_producer_pending = case == "pending"
+                if case == "failed":
+                    session.fail("earlier recorded failure")
+                original = OSError(errno.EIO, "synthetic idle-observation refusal")
+                domain = Mock(return_value={22} if case == "live-domain" else set(),
+                              side_effect=original if case == "unknown-domain" else None)
+                headroom = Mock(side_effect=original if case == "headroom" else None)
+                with patch.multiple(self.module, os=SimpleNamespace(), _domain=domain,
+                                    time=SimpleNamespace(monotonic=lambda: 100.0 if case == "expired" else 0.0)), \
+                     patch.object(session, "_headroom", headroom):
+                    if case in {"linux", "darwin"}:
+                        observed = session.native_process_toolchain
+                        self.assertEqual(observed, binding)
+                        self.assertIsNot(observed, binding)
+                        self.assertIsNot(observed["evidence"], binding["evidence"])
+                        observed["evidence"].clear()
+                        observed.clear()
+                        self.assertEqual(session.native_process_toolchain, binding)
+                        self.assertTrue(session.domain_finality)
+                    else:
+                        with self.assertRaises((self.module.SessionError, OSError)):
+                            session.native_process_toolchain
+                if case in {"not-admitted", "no-binding", "failed", "closed", "expired", "busy", "active", "pending"}:
+                    domain.assert_not_called()
+                else:
+                    self.assertTrue(domain.called)
+                    self.assertEqual(domain.call_args.args, (session.platform, session.uid))
+
+    def test_fixed_linux_compiler_binding_is_read_only_bounded_and_drift_sensitive(self):
+        compiler = Path("/usr/bin/x86_64-linux-gnu-gcc-13")
+        original_data = b"synthetic compiler image, never executable\n"
+        cases = ("valid", "platform", "not-root", "architecture", "parent-write", "parent-owner", "parent-type",
+                 "missing", "alias", "tool-write", "tool-setid", "named-owner", "named-no-execute", "named-type",
+                 "size", "opened-other", "short-read", "long-read",
+                 "read-error", "close-error", "read-drift", "name-drift", "late-close")
+        for case in cases:
+            with self.subTest(distribution_compiler_binding=case):
+                clock, events, streams = SimpleNamespace(now=0.0), [], []
+                original = OSError(errno.EIO, "synthetic compiler observation failure")
+                state = SimpleNamespace(st_dev=7, st_ino=99, st_mode=stat.S_IFREG | 0o555,
+                    st_uid=0, st_gid=0, st_nlink=1, st_size=len(original_data), st_mtime_ns=3, st_ctime_ns=4)
+                if case == "tool-write":
+                    state.st_mode |= 0o020
+                elif case == "tool-setid":
+                    state.st_mode |= stat.S_ISUID
+                elif case == "named-owner":
+                    state.st_uid = 60001
+                elif case == "named-no-execute":
+                    state.st_mode = stat.S_IFREG | 0o444
+                elif case == "named-type":
+                    state.st_mode = stat.S_IFIFO | 0o555
+                elif case == "size":
+                    state.st_size = 16 * self.module.MiB + 1
+                named, pinned = 0, 0
+
+                def metadata(path, *, for_lstat):
+                    nonlocal named
+                    self.assertIn(path, (compiler, *compiler.parents))
+                    events.append(("lstat" if for_lstat else "stat", path))
+                    if path == compiler:
+                        if case == "missing":
+                            raise FileNotFoundError(errno.ENOENT, "synthetic absent compiler")
+                        value = SimpleNamespace(**vars(state))
+                        if for_lstat:
+                            named += 1
+                            if case == "name-drift" and named > 1:
+                                value.st_ino += 1
+                        return value
+                    value = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
+                    if path == Path("/usr/bin"):
+                        if case == "parent-write":
+                            value.st_mode |= 0o020
+                        elif case == "parent-owner":
+                            value.st_uid = 1001
+                        elif case == "parent-type":
+                            value.st_mode = stat.S_IFLNK | 0o755
+                    return value
+
+                def canonical(path):
+                    self.assertIn(path, (compiler, *compiler.parents))
+                    if case == "alias" and path == compiler:
+                        raise self.module.SessionError("synthetic compiler alias")
+                    return path
+
+                def fstat(fd):
+                    nonlocal pinned
+                    self.assertEqual(fd, 611)
+                    pinned += 1
+                    value = SimpleNamespace(**vars(state))
+                    if case == "opened-other" or case == "read-drift" and pinned > 1:
+                        value.st_ino += 1
+                    return value
+
+                class MemoryCompiler(io.BytesIO):
+                    def fileno(self):
+                        return 611  # Fake API key, never a real descriptor.
+
+                    def read(self, size=-1):
+                        if size != 65536:
+                            raise AssertionError("compiler binding read bound changed")
+                        if case == "read-error":
+                            raise original
+                        return super().read(size)
+
+                    def close(self):
+                        events.append(("close", compiler))
+                        super().close()
+                        if case == "close-error":
+                            raise original
+                        if case == "late-close":
+                            clock.now = 10.0
+
+                def opened(path, mode):
+                    self.assertEqual((path, mode), (compiler, "rb"))
+                    data = original_data[:-1] if case == "short-read" else original_data + b"x" if case == "long-read" else original_data
+                    stream = MemoryCompiler(data)
+                    streams.append(stream)
+                    events.append(("open", compiler))
+                    return stream
+
+                with patch.multiple(self.module, os=SimpleNamespace(geteuid=lambda: 1001 if case == "not-root" else 0,
+                                        uname=lambda: SimpleNamespace(machine="arm64" if case == "architecture" else "x86_64"),
+                                        fstat=fstat), sys=SimpleNamespace(platform="darwin" if case == "platform" else "linux"),
+                                    subprocess=SimpleNamespace(), time=SimpleNamespace(monotonic=lambda: clock.now), _canonical=canonical), \
+                     patch.object(Path, "lstat", lambda path: metadata(path, for_lstat=True)), \
+                     patch.object(Path, "stat", side_effect=AssertionError("a separate stat must not authorize a later digest baseline")), \
+                     patch.object(Path, "resolve", side_effect=AssertionError("no real path resolution")), \
+                     patch.object(Path, "open", opened):
+                    if case == "valid":
+                        result = self.module._linux_native_process_toolchain(60001, 60001, deadline=10.0)
+                        self.assertEqual(result, {"gcc": compiler, "evidence": {
+                            "gcc_sha256": hashlib.sha256(original_data).hexdigest(),
+                            "provider": "ubuntu-24.04-distribution", "compiler_family": "gcc-13"}})
+                    else:
+                        with self.assertRaises((self.module.SessionError, OSError)) as caught:
+                            self.module._linux_native_process_toolchain(60001, 60001, deadline=10.0)
+                        if case in {"read-error", "close-error"}:
+                            self.assertIs(caught.exception, original)
+                self.assertTrue(all(stream.closed for stream in streams))
+                self.assertEqual(events.count(("close", compiler)), len(streams))
+                self.assertLessEqual(len(streams), 1)
+
     def test_linux_provider_wrapper_keeps_collision_writer_import_and_partial_preparation_gates(self):
         cases = ("valid", "nss-bad", "collision", "userns-preparation-error", "busy", "active", "prior-failure", "wrong-platform", "not-root",
                  "missing-prefix", "existing-module", "spec-missing", "loader-failure", "partial-preparation",
                  "incomplete-report", "late-preparation")
-        for case in cases:
-            with self.subTest(provider_owner_integration=case):
+        cases = tuple((case, False) for case in cases) + tuple((case, True) for case in (
+            "valid", "partial-preparation", "late-preparation", "compiler-refusal", "preflight-failure"))
+        for case, compatibility in cases:
+            with self.subTest(provider_owner_integration=case, compatibility=compatibility):
                 session = session_double(self.module)
                 session.admitted = False
                 python_prefix, ruby_prefix, jdk_prefix = session.python.parent.parent, session.ruby.parent.parent, Path("/synthetic/jdk")
                 session.tool_prefixes = (python_prefix, ruby_prefix, jdk_prefix)
+                if compatibility:
+                    session.compatibility_runtimes = tuple((Path(f"/fixture-tools/python{minor}/bin/python"),
+                        Path(f"/fixture-tools/python{minor}")) for minor in (312, 313, 314))
+                    session.tool_prefixes += tuple(prefix for _, prefix in session.compatibility_runtimes)
                 if case == "missing-prefix":
                     session.tool_prefixes = (python_prefix, ruby_prefix)
                 if case == "wrong-platform":
@@ -9882,7 +10087,10 @@ class CISandboxPureTests(unittest.TestCase):
                 original = OSError(errno.EIO, "synthetic immutable module/preparation failure")
 
                 def protect(prefixes, **kwargs):
-                    self.assertEqual(prefixes, (("python", python_prefix), ("ruby", ruby_prefix), ("jdk", jdk_prefix)))
+                    expected = (("python", python_prefix), ("ruby", ruby_prefix), ("jdk", jdk_prefix))
+                    expected += tuple((role, pair[1]) for role, pair in zip(
+                        ("python312", "python313", "python314"), session.compatibility_runtimes))
+                    self.assertEqual(prefixes, expected)
                     self.assertEqual({k: v for k, v in kwargs.items() if k != "report"},
                                      {"uid": session.uid, "gid": session.gid, "deadline": session.deadline})
                     report = kwargs["report"]
@@ -9927,7 +10135,8 @@ class CISandboxPureTests(unittest.TestCase):
 
                 def tool(path, uid, gid, **options):
                     self.assertEqual((uid, gid), (session.uid, session.gid))
-                    self.assertIn(path, (session.python, Path("/usr/bin/sudo"), Path("/usr/bin/true")))
+                    self.assertIn(path, (session.python, Path("/usr/bin/sudo"), Path("/usr/bin/true"),
+                        *(executable for executable, _ in session.compatibility_runtimes)))
                     self.assertIn(("protect",), events)
                     self.assertTrue(next(n for n in session.admission_results if n["name"] == "provider-runtime-permissions")["ok"])
                     events.append(("tool", options["role"]))
@@ -9941,6 +10150,17 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertIn(("tool", "python"), events)
                     self.assertTrue(next(n for n in session.admission_results if n["name"] == "provider-runtime-permissions")["ok"])
                     events.append(("preflight",))
+                    if case == "preflight-failure":
+                        raise original
+
+                def compiler_binding(uid, gid, *, deadline):
+                    self.assertTrue(compatibility)
+                    self.assertEqual((uid, gid, deadline), (session.uid, session.gid, session.deadline))
+                    self.assertIn(("tool", "python314"), events)
+                    events.append(("compiler-binding",))
+                    if case == "compiler-refusal":
+                        raise original
+                    return {"gcc": Path("/usr/bin/x86_64-linux-gnu-gcc-13"), "evidence": {"gcc_sha256": "d" * 64}}
 
                 def userns_preparation():
                     self.assertEqual(events, [("nss",), ("domain", True)])
@@ -9956,6 +10176,7 @@ class CISandboxPureTests(unittest.TestCase):
                                     sys=SimpleNamespace(platform="linux", base_prefix=str(python_prefix), modules=modules),
                                     subprocess=SimpleNamespace(), signal=SimpleNamespace(), _canonical=Path,
                                     _readonly_tree=Mock(), _small_command=nss, _domain=domain,
+                                    _linux_native_process_toolchain=compiler_binding,
                                     _admit_executable=tool, time=SimpleNamespace(monotonic=lambda: clock.now)), \
                      patch.object(importlib.util, "spec_from_file_location", side_effect=specification) as make_spec, \
                      patch.object(importlib.util, "module_from_spec", return_value=prepared_module) as make_module, \
@@ -9970,7 +10191,7 @@ class CISandboxPureTests(unittest.TestCase):
                     else:
                         with self.assertRaises((self.module.SessionError, OSError)) as caught:
                             session._prepare_provider_runtime() if direct else session.admit()
-                        if case in {"loader-failure", "partial-preparation", "userns-preparation-error"}:
+                        if case in {"loader-failure", "partial-preparation", "userns-preparation-error", "compiler-refusal", "preflight-failure"}:
                             self.assertIs(caught.exception, original)
                 self.assertIs(sys.modules.get(module_name), real_module_before)  # No real lazy import or ownership mutation.
                 self.assertEqual(session.admitted, case == "valid")
@@ -9982,9 +10203,18 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertLess(events.index(("protect",)), events.index(("tool", "python")))
                     self.assertLess(events.index(("tool", "true")), events.index(("preflight",)))
                     self.assertEqual(chown.call_count, 5)
+                    if compatibility:
+                        self.assertEqual(session._native_process_toolchain_binding["evidence"], {"gcc_sha256": "d" * 64})
+                        self.assertLess(events.index(("compiler-binding",)), events.index(("preflight",)))
                 else:
-                    self.assertFalse(any(e[0] in {"tool", "preflight"} for e in events))
-                    chown.assert_not_called()
+                    if case not in {"compiler-refusal", "preflight-failure"}:
+                        self.assertFalse(any(e[0] in {"tool", "preflight"} for e in events))
+                    if case != "preflight-failure":
+                        chown.assert_not_called()
+                    else:
+                        self.assertEqual(chown.call_count, 5)
+                        self.assertFalse(next(n for n in session.admission_results if n["name"] == "native-process-toolchain")["ok"])
+                    self.assertIsNone(session._native_process_toolchain_binding)
                     if not direct:
                         self.assertEqual(session.failure, "native isolation admission failed; no product command permitted")
                 self.assertEqual(userns.call_count, int(not direct and case not in {"nss-bad", "collision"}))
@@ -9997,7 +10227,7 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertIs(modules[module_name], foreign)
                 reports = [n for n in session.admission_results if n["name"] == "provider-runtime-permissions"]
                 if reports:
-                    self.assertEqual(reports[0]["ok"], case == "valid")
+                    self.assertEqual(reports[0]["ok"], case in {"valid", "compiler-refusal", "preflight-failure"})
                 if case in {"partial-preparation", "incomplete-report", "late-preparation"}:
                     self.assertEqual((reports[0]["attempted"], reports[0]["confirmed"]), (2, 1 if case == "partial-preparation" else 2))
 

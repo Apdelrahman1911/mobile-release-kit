@@ -7,9 +7,12 @@ Ruby completion text is synthetic parser input, never a native test receipt.
 """
 from __future__ import annotations
 
+import base64
 import copy
-from contextlib import redirect_stdout
+from contextlib import contextmanager, nullcontext, redirect_stdout
+import csv
 import dataclasses
+import hashlib
 import io
 import json
 import os
@@ -48,6 +51,1230 @@ def session_fixture(events, *, close_action=None, finish_action=None):
 
     session.close, session.finish = close, finish
     return session
+
+
+def native_capture_fixture(stdout=b"", stderr=b"", **changes):
+    """Data only: never a CapturedRun constructor, child, FD or live receipt."""
+    fields = dict(ok=True, returncode=0, waited=True, stdout_eof=True, stderr_eof=True,
+                  domain_finality=True, timed_out=False, cancelled=False, primary_error=None, cleanup_errors=(),
+                  stdout=stdout, stderr=stderr, persisted=(len(stdout), len(stderr)), duration=.01)
+    fields.update(changes)
+    return SimpleNamespace(**fields)
+
+
+def python_runtime_fixture(paths, *, minor=12, phase="source"):
+    executable, prefix = paths.compatibility_runtimes[minor - 12]
+    package = (paths.work / "source-build/src/mobile_release" if phase == "source"
+               else paths.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
+    return {"schema": "mrk-native-python-runtime-v1", "phase": phase, "implementation": "cpython",
+            "version": [3, minor, 1], "executable": str(executable), "base_prefix": str(prefix),
+            "base_exec_prefix": str(prefix), "prefix": str(prefix), "exec_prefix": str(prefix), "isolated": True,
+            "package_root": str(package), "origins": {
+                "mobile_release": str(package / "__init__.py"),
+                "mobile_release._native_process": str(package / "_native_process.py"),
+            }}
+
+
+def runtime_wire(controller, data):
+    return (controller.NATIVE_PYTHON_RUNTIME_PREFIX + json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+
+
+def minitest_fixture(identifiers):
+    """Synthetic completion text, never an invocation or a passing receipt."""
+    text = "".join(identifier + " = 0.00 s = .\n" for identifier in identifiers)
+    return (text + f"\n{len(identifiers)} runs, {3 * len(identifiers)} assertions, 0 failures, 0 errors, 0 skips\n").encode("ascii")
+
+
+_RUBY_PARTITION_FIXTURES = (
+    ("ruby-native-owner", "test_native_upload_process.rb", 52, 44, 120, None),
+    ("ruby-native-capture", "test_native_upload_validation.rb", 21, 17, 310, "NativeUploadValidationTest"),
+    ("ruby-ios_upload_validation", "test_ios_upload_validation.rb", 32, 23, 300, "IosUploadValidationTest"),
+    ("ruby-android_upload_validation", "test_android_upload_validation.rb", 32, 23, 300, "AndroidUploadValidationTest"),
+)
+
+
+class NativeProcessCIIntegrationTests(unittest.TestCase):
+    def _ruby_partition_fixture(self, platform="linux", *, gate="ruby-native-owner"):
+        """Synthetic inventories/original capture doubles; no Ruby DATA or execution."""
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        _gate, filename, total, healthy_count, seconds, owner = next(row for row in _RUBY_PARTITION_FIXTURES if row[0] == gate)
+        healthy = tuple(f"{owner or 'HealthyFixture'}#test_{number:02d}" for number in range(healthy_count))
+        poison = (controller.RUBY_OWNER_POISON_PARTITIONS if gate == "ruby-native-owner" else
+                  controller.RUBY_NATIVE_CAPTURE_POISON_PARTITIONS if gate == "ruby-native-capture" else
+                  tuple((mode, owner + "#" + method) for mode, method in controller.RUBY_PROBE_POISON_PARTITIONS))
+        partitions = {"healthy": healthy, **{name: (identifier,)
+                      for name, identifier in poison}}
+        complete = tuple(sorted(identifier for ids in partitions.values() for identifier in ids))
+        step = controller.Step(gate, argv=(*paths.bundle, "exec", str(paths.ruby),
+            str(paths.source / "tests/workflow" / filename), "--verbose"),
+            cwd=paths.work, env=controller.environment(paths, platform), seconds=seconds, parser="minitest", expected_tests=total)
+        state = controller.NativeABIState(phases={"source": tuple(native_capture_fixture() for _ in range(3))})
+        rig = SimpleNamespace(controller=controller, paths=paths, platform=platform, complete=complete,
+            partitions=partitions, step=step, state=state, clock=10.0, events=[], captures=[], parsed=[], changes={},
+            header_error=None, header_advance=0.0, run_error=None, run_advance=10.0, run_advances={},
+            idle_error_after=None, after_clock_sample=None,
+            gate=gate, seconds=seconds, total=total, healthy_count=healthy_count)
+
+        def run(argv, **options):
+            index = len(rig.captures)
+            partition = tuple(partitions)[index]
+            rig.events.append(("run", partition, tuple(argv), options))
+            if rig.run_error is not None:
+                raise rig.run_error
+            capture = native_capture_fixture(**{"stdout": minitest_fixture(partitions[partition]),
+                                                **rig.changes.get(partition, {})})
+            rig.captures.append(capture)
+            rig.clock += rig.run_advances.get(partition, rig.run_advance)
+            return capture
+
+        def idle(*, deadline):
+            rig.events.append(("idle", deadline))
+            if rig.idle_error_after is not None and len(rig.captures) >= rig.idle_error_after:
+                raise controller.VerificationError("RUBY_PARTITION_NOT_IDLE")
+
+        rig.session = SimpleNamespace(run=run, ensure_idle=idle)
+        return rig
+
+    def _perform_ruby_partition_fixture(self, rig, *, step=None, deadline=1000.0):
+        controller = rig.controller
+        original_parser = controller.parse_capture
+
+        def header(paths, session, platform, state, *, deadline):
+            self.assertEqual(paths, rig.paths)
+            self.assertIs(session, rig.session)
+            self.assertEqual(platform, rig.platform)
+            self.assertIs(state, rig.state)
+            rig.events.append(("header", deadline))
+            rig.clock += rig.header_advance
+            if rig.header_error is not None:
+                raise rig.header_error
+
+        def parse(part, capture, *args, **kwargs):
+            rig.parsed.append(capture)
+            return original_parser(part, capture, *args, **kwargs)
+
+        def clock():
+            sampled = rig.clock
+            if rig.after_clock_sample is not None:
+                rig.after_clock_sample()
+            return sampled
+
+        with patch.multiple(controller, time=SimpleNamespace(monotonic=clock), check_capacity=Mock(),
+                require_retained_header=header, ruby_expected_ids=Mock(return_value=rig.complete),
+                parse_capture=Mock(side_effect=parse)):
+            return controller.perform_step(step or rig.step, rig.paths, rig.session, SimpleNamespace(), {}, rig.platform,
+                                           deadline=deadline, native_abi=rig.state)
+
+    def test_ruby_owner_capture_partitions_are_source_bound_exact_and_cannot_pool(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        literals = (
+            ("custodian-preoffer-close", "NativeUploadRoleTest#test_native_custodian_preoffer_close_fault_cannot_claim_settled_failure"),
+            ("custodian-postoffer-tail", "NativeUploadRoleTest#test_native_custodian_postoffer_tail_fault_downgrades_intended_two_to_unknown_one"),
+            ("keeper-preoffer-close", "NativeUploadRoleTest#test_native_keeper_preoffer_close_fault_preserves_v_receipt_but_not_cleanup"),
+            ("keeper-postoffer-tail", "NativeUploadRoleTest#test_native_keeper_postoffer_tail_fault_cannot_launder_confirmed_cleanup"),
+            ("custodian-before-exit-arm", "NativeUploadRoleTest#test_native_custodian_before_exit_arm_callback_rejects_saved_settled_failure"),
+            ("custodian-after-exit-arm", "NativeUploadRoleTest#test_native_custodian_after_exit_arm_signal_cannot_accept_saved_settled_failure"),
+            ("keeper-before-exit-arm", "NativeUploadRoleTest#test_native_keeper_before_exit_arm_callback_invalidates_saved_release"),
+            ("keeper-after-exit-arm", "NativeUploadRoleTest#test_native_keeper_after_exit_arm_signal_cannot_accept_saved_release"),
+        )
+        self.assertEqual(controller.RUBY_OWNER_POISON_PARTITIONS, literals)
+        healthy = tuple(f"HealthyFixture#test_{number:02d}" for number in range(44))
+        complete = tuple(sorted(healthy + tuple(identifier for _, identifier in literals)))
+        with patch.object(controller, "ruby_expected_ids", return_value=complete) as source, \
+                patch.object(controller, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+            self.assertEqual(controller.ruby_capture_ids(ROOT, "ruby-native-owner", "all", deadline=130.0), complete)
+            selected = []
+            for partition, expected in (("healthy", healthy), *((name, (identifier,)) for name, identifier in literals)):
+                self.assertEqual(controller.ruby_capture_ids(ROOT, "ruby-native-owner", partition, deadline=130.0), expected)
+                argv = controller.ruby_capture_argv(paths, "ruby-native-owner", partition, deadline=130.0)
+                self.assertEqual(argv, (*paths.bundle, "exec", str(paths.ruby),
+                    str(paths.source / "tests/workflow/test_native_upload_process.rb"), "--verbose", "--name",
+                    "/\\A(?:" + "|".join(expected) + ")\\z/"))
+                selected.extend(expected)
+            self.assertEqual(tuple(sorted(selected)), complete)
+            self.assertEqual(len(set(selected)), 52)
+            self.assertTrue(all(call.args == (ROOT, "ruby-native-owner") and not call.kwargs
+                                for call in source.call_args_list))
+            for partition in ("all", "pooled", "/.*/", literals[0][1], None, True, [], {}):
+                with self.subTest(rejected=partition), self.assertRaises(controller.VerificationError):
+                    controller.ruby_capture_argv(paths, "ruby-native-owner", partition, deadline=130.0)
+        for mutated in (complete[:-1], tuple(sorted((*complete, complete[0]))), tuple(reversed(complete)), list(complete),
+                        tuple(sorted(healthy + tuple(identifier for _, identifier in literals[1:]) + ("Other#test_replacement",))),
+                        tuple(sorted(complete[1:] + ("Foreign#test_.*",)))):
+            with patch.object(controller, "ruby_expected_ids", return_value=mutated), \
+                    self.assertRaises(controller.VerificationError):
+                controller.ruby_capture_ids(ROOT, "ruby-native-owner", "healthy")
+
+    def test_ruby_owner_gate_retains_nine_originals_and_exact_filters_after_original_header(self):
+        for platform, deadline, cutoff in (("linux", 1000.0, 130.0), ("macos", 110.0, 110.0)):
+            with self.subTest(platform=platform):
+                rig = self._ruby_partition_fixture(platform)
+                result = self._perform_ruby_partition_fixture(rig, deadline=deadline)
+                self.assertTrue(result.ok, result)
+                rows = result.details["partitions"]
+                self.assertEqual([row["partition"] for row in rows], list(rig.partitions))
+                self.assertEqual([row["status"] for row in rows], ["PASS"] * 9)
+                self.assertEqual([row["tests"] for row in rows], [44, 1, 1, 1, 1, 1, 1, 1, 1])
+                self.assertEqual((result.details["tests"], result.details["completed"]), (52, list(rig.complete)))
+                self.assertNotIn("returncode", result.details)
+                self.assertNotIn("summary", result.details)
+                calls = [event for event in rig.events if event[0] == "run"]
+                self.assertEqual(len(calls), 9)
+                self.assertEqual([event for event in rig.events if event[0] == "header"], [("header", cutoff)])
+                self.assertLess(rig.events.index(("header", cutoff)), rig.events.index(calls[0]))
+                for index, (_, partition, argv, options) in enumerate(calls):
+                    self.assertEqual(argv, (*rig.step.argv, "--name", "/\\A(?:" + "|".join(rig.partitions[partition]) + ")\\z/"))
+                    self.assertEqual(options, {"cwd": rig.paths.work, "env": dict(rig.step.env), "seconds": 120,
+                        "output_limit": 8 * 1024**2, "cpu_seconds": 180, "profile": "ordinary", "absolute_deadline": cutoff})
+                    self.assertIs(rig.parsed[index], rig.captures[index])
+                    self.assertEqual(rows[index]["capture"], rig.controller.capture_observations(rig.captures[index]))
+                    position = rig.events.index(calls[index])
+                    self.assertEqual(rig.events[position - 1], ("idle", cutoff))
+                    self.assertEqual(rig.events[position + 1], ("idle", cutoff))
+
+    def test_ruby_owner_gate_rejects_contract_header_and_partition_drift_before_capture(self):
+        for fault in ("argv", "cwd", "environment", "kind", "parser", "seconds", "count", "partition",
+                      "state", "phase", "source-finality", "header", "inventory", "pooled", "missing", "overlap"):
+            with self.subTest(fault=fault):
+                rig = self._ruby_partition_fixture()
+                step = rig.step
+                changes = {"argv": {"argv": (*step.argv, "--name", "/.*/")}, "cwd": {"cwd": rig.paths.source},
+                    "environment": {"env": ()}, "kind": {"kind": "inspection"}, "parser": {"parser": "exit"},
+                    "seconds": {"seconds": 121}, "count": {"expected_tests": 51}, "partition": {"native_partition": "healthy"}}
+                if fault in changes:
+                    step = dataclasses.replace(step, **changes[fault])
+                elif fault == "state":
+                    rig.state = None
+                elif fault == "phase":
+                    rig.state.phases = {}
+                elif fault == "source-finality":
+                    rig.state.phases["source"][1].waited = False
+                elif fault == "header":
+                    rig.header_error = rig.controller.VerificationError("ORIGINAL_HEADER_REQUIRED")
+                elif fault == "inventory":
+                    rig.complete = rig.complete[:-1]
+                first, second = tuple(rig.partitions)[1:3]
+                inventories = {"all": rig.complete, **rig.partitions}
+                if fault == "pooled":
+                    inventories[first] += inventories[second]
+                elif fault == "missing":
+                    inventories[second] = ()
+                elif fault == "overlap":
+                    inventories["healthy"] = (*inventories["healthy"][:-1], inventories[first][0])
+                selected = (patch.object(rig.controller, "ruby_capture_ids", side_effect=
+                    lambda _source, _gate, partition, **_kwargs: inventories[partition]) if fault in {"pooled", "missing", "overlap"}
+                    else nullcontext())
+                with selected:
+                    result = self._perform_ruby_partition_fixture(rig, step=step)
+                self.assertFalse(result.ok)
+                self.assertEqual(rig.captures, [])
+                self.assertEqual([row["status"] for row in result.details["partitions"]], ["UNEXECUTED"] * 9)
+
+    def test_ruby_owner_gate_stops_after_each_failed_original_and_never_renews_its_cutoff(self):
+        for platform in ("linux", "macos"):
+            for failed in range(9):
+                for fault in ("exit", "wait", "stdout", "stderr", "domain", "timeout", "cancel", "primary", "cleanup",
+                              "skip", "count", "wrong-id", "idle", "deadline"):
+                    with self.subTest(platform=platform, failed=failed, fault=fault):
+                        rig = self._ruby_partition_fixture(platform)
+                        partition = tuple(rig.partitions)[failed]
+                        fields = {"exit": {"returncode": 1}, "wait": {"waited": False},
+                            "stdout": {"stdout_eof": False}, "stderr": {"stderr_eof": False}, "domain": {"domain_finality": False},
+                            "timeout": {"timed_out": True}, "cancel": {"cancelled": True}, "primary": {"primary_error": "ORIGINAL_ERROR"},
+                            "cleanup": {"cleanup_errors": ("ORIGINAL_CLOSE",)}}
+                        if fault in fields:
+                            rig.changes[partition] = fields[fault]
+                        elif fault in {"skip", "count", "wrong-id"}:
+                            output = minitest_fixture(rig.partitions[partition])
+                            if fault == "skip":
+                                output = output.replace(b"0 skips", b"1 skips")
+                            elif fault == "count":
+                                output = output.replace(f"{len(rig.partitions[partition])} runs".encode(), b"49 runs")
+                            else:
+                                output = output.replace(rig.partitions[partition][0].encode(), b"Foreign#test_not_the_required_case")
+                            rig.changes[partition] = {"stdout": output}
+                        elif fault == "idle":
+                            rig.idle_error_after = failed + 1
+                        else:
+                            rig.run_advance = 121.0 / (failed + 1)
+                        result = self._perform_ruby_partition_fixture(rig)
+                        self.assertFalse(result.ok)
+                        self.assertEqual(len(rig.captures), failed + 1)
+                        rows = result.details["partitions"]
+                        self.assertEqual([row["status"] for row in rows], ["PASS"] * failed + ["FAIL"] + ["UNEXECUTED"] * (8 - failed))
+                        for index, capture in enumerate(rig.captures):
+                            for name, value in rig.controller.capture_observations(capture).items():
+                                self.assertEqual(rows[index]["capture"][name], value)
+                        self.assertTrue(all(event[3]["absolute_deadline"] == 130.0 for event in rig.events if event[0] == "run"))
+                        if fault == "deadline":
+                            self.assertEqual(result.error, "AGGREGATE_DEADLINE")
+        for fault in ("header-expiry", "final-union", "launch"):
+            with self.subTest(fault=fault):
+                rig = self._ruby_partition_fixture()
+                reconciliations = []
+                if fault == "header-expiry":
+                    rig.header_advance = 120.0
+                elif fault == "launch":
+                    rig.run_error = OSError("PRIVATE_ORIGINAL_LAUNCH_ERROR")
+
+                def late_sorted(values, *args, **kwargs):
+                    result = sorted(values, *args, **kwargs)
+                    if type(values) is list and tuple(result) == rig.complete:
+                        reconciliations.append(True)
+                        if len(reconciliations) == 2:
+                            rig.clock = 130.0
+                    return result
+
+                with patch.object(rig.controller, "sorted", create=True, side_effect=late_sorted) if fault == "final-union" else nullcontext():
+                    result = self._perform_ruby_partition_fixture(rig)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error, "RUBY_PARTITION_GATE_FAILURE" if fault == "launch" else "AGGREGATE_DEADLINE")
+                self.assertEqual(len(rig.captures), 9 if fault == "final-union" else 0)
+                self.assertNotIn("PRIVATE_ORIGINAL_LAUNCH_ERROR", json.dumps(result.details))
+                self.assertEqual([row["status"] for row in result.details["partitions"]],
+                    ["PASS"] * 9 if fault == "final-union" else ["FAIL", *(["UNEXECUTED"] * 8)] if fault == "launch" else ["UNEXECUTED"] * 9)
+
+    def test_ruby_partition_contracts_and_non_owner_filters_are_closed_and_class_qualified(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        literals = (
+            ("ownership-unknown-capture-spawn", "test_process_ownership_unknown_creation_through_real_capture"),
+            ("ownership-unknown-capture-reap", "test_process_ownership_unknown_wait_through_real_capture"),
+            ("ownership-unknown-capture-echild", "test_process_ownership_echild_after_original_wait_through_real_capture"),
+            ("ownership-unknown-run-spawn", "test_process_ownership_unknown_creation_through_real_run"),
+            ("ownership-unknown-run-reap", "test_process_ownership_unknown_wait_through_real_run"),
+            ("ownership-unknown-run-echild", "test_process_ownership_echild_after_original_wait_through_real_run"),
+            ("kill-startup", "test_driver_loss_during_startup_retains_unknown_native_custody"),
+            ("kill-descendant", "test_driver_loss_with_inherited_pipes_retains_unknown_native_custody"),
+            ("ownership-observation", "test_indeterminate_observations_never_prove_readiness_or_renew_native_death_budget"),
+        )
+        native_literals = (
+            ("native-setup-no-cleanup", "NativeUploadValidationTest#test_missing_native_cleanup_requires_eof_and_cannot_pass_the_production_oracle"),
+            ("kill-native-setup", "NativeUploadValidationTest#test_hard_driver_loss_stops_all_previously_bound_native_roles"),
+            ("native-order-cleanup-before-caller-interrupt", "NativeUploadValidationTest#test_native_cleanup_error_precedes_later_caller_interrupt_and_retains_unknown"),
+            ("native-order-cleanup-before-caller-system-exit", "NativeUploadValidationTest#test_native_cleanup_error_precedes_later_caller_system_exit_and_retains_unknown"),
+        )
+        self.assertEqual(controller.RUBY_PARTITION_CONTRACTS, _RUBY_PARTITION_FIXTURES)
+        self.assertEqual(controller.PARTITIONED_RUBY_GATES, tuple(row[0] for row in _RUBY_PARTITION_FIXTURES))
+        self.assertEqual(controller.RUBY_PROBE_POISON_PARTITIONS, literals)
+        self.assertEqual(controller.RUBY_NATIVE_CAPTURE_POISON_PARTITIONS, native_literals)
+        self.assertEqual(controller.RUBY_NATIVE_CAPTURE_BUDGETS, (("healthy", 180), *((name, 30) for name, _ in native_literals)))
+        self.assertEqual(controller.RUBY_NATIVE_CAPTURE_SHARED_SECONDS, 10)
+        self.assertEqual(10 + sum(seconds for _, seconds in controller.RUBY_NATIVE_CAPTURE_BUDGETS), 310)
+        catalog_ids = {gate: tuple(f"CatalogFixture#test_{index:02d}" for index in range(total))
+                       for gate, _filename, total, _healthy, _seconds, _owner in _RUBY_PARTITION_FIXTURES}
+        # Budget agreement needs no real source-presence, Ruby inventory or
+        # workflow-directory observation, including the packaged argv cases.
+        with patch.object(controller, "ruby_expected_ids", side_effect=lambda source, gate:
+                          catalog_ids.get(gate, ("CatalogFixture#test_other",))) as source, \
+                patch.object(Path, "exists", return_value=False) as exists, \
+                patch.object(Path, "glob", return_value=()) as glob:
+            for platform in ("linux", "macos"):
+                steps = {step.id: step for step in controller.catalog(paths, platform, deadline=1000.0)}
+                for gate, _filename, total, _healthy, seconds, _owner in _RUBY_PARTITION_FIXTURES:
+                    self.assertEqual((steps[gate].seconds, steps[gate].expected_tests), (seconds, total))
+                for gate in ("ruby-native-spawn", "ruby-native-signal-observation"):
+                    self.assertEqual(steps[gate].seconds, 180)
+            self.assertEqual(exists.call_count, 2)
+            self.assertEqual(glob.call_count, 4)
+            self.assertTrue({"ruby-packaged-capture-source", "ruby-packaged-capture-wheel"}
+                            <= {call.args[1] for call in source.call_args_list})
+        budgets = controller.RUBY_NATIVE_CAPTURE_BUDGETS
+        for changed in (budgets[::-1], (("healthy", 181), *budgets[1:])):
+            with self.subTest(budgets=changed), patch.object(controller, "RUBY_NATIVE_CAPTURE_BUDGETS", changed):
+                rig = self._ruby_partition_fixture(gate="ruby-native-capture")
+                result = self._perform_ruby_partition_fixture(rig)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error, "RUBY_PARTITION_GATE_CONTRACT")
+                self.assertEqual(rig.events, [])
+        for gate, filename, total, healthy_count, _seconds, owner in _RUBY_PARTITION_FIXTURES[1:]:
+            with self.subTest(gate=gate):
+                healthy = tuple(f"{owner}#test_{number:02d}" for number in range(healthy_count))
+                poison = (native_literals if gate == "ruby-native-capture" else
+                          tuple((name, owner + "#" + method) for name, method in literals))
+                complete = tuple(sorted(healthy + tuple(identifier for _name, identifier in poison)))
+                with patch.object(controller, "ruby_expected_ids", return_value=complete) as source, \
+                        patch.object(controller, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+                    self.assertEqual(controller.ruby_capture_ids(ROOT, gate, deadline=310.0), complete)
+                    selected = []
+                    for partition, expected in (("healthy", healthy), *((name, (identifier,)) for name, identifier in poison)):
+                        self.assertEqual(controller.ruby_capture_ids(ROOT, gate, partition, deadline=310.0), expected)
+                        self.assertEqual(controller.ruby_capture_argv(paths, gate, partition, deadline=310.0),
+                            (*paths.bundle, "exec", str(paths.ruby), str(paths.source / "tests/workflow" / filename),
+                             "--verbose", "--name", "/\\A(?:" + "|".join(expected) + ")\\z/"))
+                        selected.extend(expected)
+                    self.assertEqual(tuple(sorted(selected)), complete)
+                    self.assertEqual(len(set(selected)), total)
+                    self.assertTrue(all(call.args == (ROOT, gate) and not call.kwargs for call in source.call_args_list))
+                    for rejected in ("all", "ownership-unknown", "custodian-preoffer-close", "/.*/", poison[0][1],
+                                     poison[0][1].partition("#")[2], None, True, [], {}):
+                        with self.subTest(rejected=rejected), self.assertRaises(controller.VerificationError):
+                            controller.ruby_capture_argv(paths, gate, rejected, deadline=310.0)
+                replaced = tuple(sorted(healthy + tuple(identifier for _name, identifier in poison[1:])
+                                        + ("ForeignSuite#" + poison[0][1].partition("#")[2],)))
+                with patch.object(controller, "ruby_expected_ids", return_value=replaced), \
+                        self.assertRaisesRegex(controller.VerificationError, "RUBY_PARTITION_STATIC_INVENTORY"):
+                    controller.ruby_capture_ids(ROOT, gate, "healthy")
+        with patch.object(controller, "ruby_expected_ids", side_effect=AssertionError("unadmitted source lookup")):
+            for gate in ("ruby-native-spawn", "ruby-packaged-capture-source", "ruby-custom", "test_ios_upload_validation.rb",
+                         "/private/test.rb", None, True, [], {}):
+                with self.subTest(gate=gate), self.assertRaisesRegex(controller.VerificationError, "RUBY_PARTITION_GATE_CONTRACT"):
+                    controller.ruby_capture_argv(paths, gate, "healthy", deadline=310.0)
+
+    def test_ruby_non_owner_gates_retain_originals_filters_and_their_unchanged_cutoffs(self):
+        for gate, _filename, total, healthy_count, seconds, _owner in _RUBY_PARTITION_FIXTURES[1:]:
+            for platform, deadline, cutoff in (("linux", 1000.0, 10.0 + seconds), ("macos", 180.0, 180.0)):
+                with self.subTest(gate=gate, platform=platform):
+                    rig = self._ruby_partition_fixture(platform, gate=gate)
+                    result = self._perform_ruby_partition_fixture(rig, deadline=deadline)
+                    self.assertTrue(result.ok, result)
+                    rows = result.details["partitions"]
+                    self.assertEqual([row["partition"] for row in rows], list(rig.partitions))
+                    self.assertEqual([row["status"] for row in rows], ["PASS"] * len(rig.partitions))
+                    self.assertEqual([row["tests"] for row in rows], [healthy_count] + [1] * (len(rig.partitions) - 1))
+                    self.assertEqual((result.details["tests"], result.details["completed"]), (total, list(rig.complete)))
+                    self.assertNotIn("returncode", result.details)
+                    self.assertNotIn("summary", result.details)
+                    calls = [event for event in rig.events if event[0] == "run"]
+                    self.assertEqual(len(calls), len(rig.partitions))
+                    native_capture = gate == "ruby-native-capture"
+                    header_cutoff = min(cutoff, 20.0) if native_capture else cutoff
+                    self.assertEqual([event for event in rig.events if event[0] == "header"], [("header", header_cutoff)])
+                    self.assertLess(rig.events.index(("header", header_cutoff)), rig.events.index(calls[0]))
+                    for index, (_, partition, argv, options) in enumerate(calls):
+                        part_seconds = (180 if index == 0 else 30) if native_capture else seconds
+                        part_cutoff = min(cutoff, 10.0 + index * 10.0 + part_seconds) if native_capture else cutoff
+                        self.assertEqual(argv, (*rig.step.argv, "--name", "/\\A(?:" + "|".join(rig.partitions[partition]) + ")\\z/"))
+                        self.assertEqual(options, {"cwd": rig.paths.work, "env": dict(rig.step.env), "seconds": part_seconds,
+                            "output_limit": 8 * 1024**2, "cpu_seconds": 180, "profile": "ordinary", "absolute_deadline": part_cutoff})
+                        self.assertIs(rig.parsed[index], rig.captures[index])
+                        self.assertEqual(rows[index]["capture"], rig.controller.capture_observations(rig.captures[index]))
+                        position = rig.events.index(calls[index])
+                        self.assertEqual(rig.events[position - 1], ("idle", part_cutoff))
+                        self.assertEqual(rig.events[position + 1], ("idle", part_cutoff))
+        # Synthetic time, not a native receipt: all five originals can finish
+        # beyond the old shared180, without granting any part another's slack.
+        for platform in ("linux", "macos"):
+            rig = self._ruby_partition_fixture(platform, gate="ruby-native-capture")
+            rig.header_advance = 3.0
+            rig.run_advances = {name: 179.0 if name == "healthy" else 29.0 for name in rig.partitions}
+            result = self._perform_ruby_partition_fixture(rig)
+            self.assertTrue(result.ok, result)
+            self.assertEqual([row["status"] for row in result.details["partitions"]], ["PASS"] * 5)
+            self.assertEqual(result.details["completed"], list(rig.complete))
+            self.assertEqual(rig.clock, 308.0)
+            calls = [event for event in rig.events if event[0] == "run"]
+            self.assertEqual([event[3]["absolute_deadline"] for event in calls], [193.0, 222.0, 251.0, 280.0, 309.0])
+            self.assertEqual([event[3]["seconds"] for event in calls], [180, 30, 30, 30, 30])
+
+    def test_ruby_non_owner_failures_stop_later_originals_and_diagnostics_never_name_another_partition(self):
+        for gate, _filename, _total, _healthy_count, seconds, _owner in _RUBY_PARTITION_FIXTURES[1:]:
+            template = self._ruby_partition_fixture(gate=gate)
+            native_capture = gate == "ruby-native-capture"
+            finality_faults = {"wait": {"waited": False}, "stdout": {"stdout_eof": False}, "stderr": {"stderr_eof": False},
+                "domain": {"domain_finality": False}, "timeout": {"timed_out": True}, "cancel": {"cancelled": True},
+                "primary": {"primary_error": "ORIGINAL_ERROR"}, "cleanup": {"cleanup_errors": ("ORIGINAL_CLOSE",)}}
+            for failed, partition in enumerate(template.partitions):
+                for fault in ("original-failure", "foreign-class", "deadline", *(finality_faults if native_capture else ())):
+                    with self.subTest(gate=gate, partition=partition, fault=fault):
+                        rig = self._ruby_partition_fixture(gate=gate)
+                        selected = rig.partitions[partition][0]
+                        other = next(identifier for name, identifiers in rig.partitions.items() if name != partition
+                                     for identifier in identifiers)
+                        if fault == "original-failure":
+                            output = minitest_fixture(rig.partitions[partition]).replace(b"s = .", b"s = F", 1)
+                            output = output.replace(b"0 failures", b"1 failures")
+                            output += (f"1) Failure:\n{selected}:\nPRIVATE_CASE_MESSAGE\n"
+                                       f"2) Failure:\n{other}:\nPRIVATE_OTHER_CASE\n").encode("ascii")
+                            rig.changes[partition] = {"returncode": 1, "stdout": output}
+                        elif fault == "foreign-class":
+                            output = minitest_fixture(rig.partitions[partition]).replace(selected.encode("ascii"),
+                                ("ForeignSuite#" + selected.partition("#")[2]).encode("ascii"), 1)
+                            rig.changes[partition] = {"stdout": output}
+                        elif fault in finality_faults:
+                            rig.changes[partition] = finality_faults[fault]
+                        elif native_capture:
+                            rig.run_advances[partition] = (180 if failed == 0 else 30) + 1.0
+                        else:
+                            rig.run_advance = (seconds + 1.0) / (failed + 1)
+                        result = self._perform_ruby_partition_fixture(rig)
+                        self.assertFalse(result.ok)
+                        self.assertEqual(len(rig.captures), failed + 1)
+                        rows = result.details["partitions"]
+                        self.assertEqual([row["status"] for row in rows], ["PASS"] * failed + ["FAIL"]
+                            + ["UNEXECUTED"] * (len(rig.partitions) - failed - 1))
+                        calls = [event for event in rig.events if event[0] == "run"]
+                        for index, event in enumerate(calls):
+                            part_seconds = (180 if index == 0 else 30) if native_capture else seconds
+                            cutoff = min(10.0 + seconds, 10.0 + index * 10.0 + part_seconds) if native_capture else 10.0 + seconds
+                            self.assertEqual((event[3]["absolute_deadline"], event[3]["seconds"]), (cutoff, part_seconds))
+                        details = rows[failed]["capture"]
+                        for index, capture in enumerate(rig.captures):
+                            for name, value in rig.controller.capture_observations(capture).items():
+                                self.assertEqual(rows[index]["capture"][name], value)
+                        if fault == "deadline":
+                            self.assertEqual(result.error, "AGGREGATE_DEADLINE")
+                        elif fault in {"original-failure", "foreign-class"}:
+                            self.assertEqual(details["minitest_structure"]["expected_count"], len(rig.partitions[partition]))
+                            self.assertEqual(details["minitest_structure"]["missing_ids"], [selected])
+                            self.assertEqual(details["minitest_structure"]["unknown_count"], int(fault == "foreign-class"))
+                            self.assertEqual(details["failed_tests"], [selected] if fault == "original-failure" else [])
+                            for private in (other, "PRIVATE_CASE_MESSAGE", "PRIVATE_OTHER_CASE", "ForeignSuite"):
+                                self.assertNotIn(private, json.dumps(details))
+            for changes in ({"seconds": 120}, {"expected_tests": 1}, {"native_partition": "healthy"},
+                            {"argv": (*template.step.argv[:-2], "test_native_upload_process.rb", "--verbose")},
+                            *(({"seconds": 180},) if native_capture else ())):
+                with self.subTest(gate=gate, changes=changes):
+                    rig = self._ruby_partition_fixture(gate=gate)
+                    result = self._perform_ruby_partition_fixture(rig, step=dataclasses.replace(rig.step, **changes))
+                    self.assertFalse(result.ok)
+                    self.assertEqual(result.error, "RUBY_PARTITION_GATE_CONTRACT")
+                    self.assertEqual(rig.captures, [])
+
+        rig = self._ruby_partition_fixture(gate="ruby-native-capture")
+        rig.header_advance = 10.0
+        result = self._perform_ruby_partition_fixture(rig)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error, "AGGREGATE_DEADLINE")
+        self.assertEqual(rig.captures, [])
+        self.assertEqual([row["status"] for row in result.details["partitions"]], ["UNEXECUTED"] * 5)
+        self.assertIn(("header", 20.0), rig.events)
+
+        # Six seconds of setup leaves FOUR, not a fresh ten, for final union.
+        # Advance during the final result's own sorted-list bookkeeping.
+        for union_seconds in (3.0, 4.0):
+            with self.subTest(union_seconds=union_seconds):
+                rig = self._ruby_partition_fixture(gate="ruby-native-capture")
+                rig.header_advance = 6.0
+                reconciliations = []
+
+                def late_sorted(values, *args, **kwargs):
+                    result = sorted(values, *args, **kwargs)
+                    if type(values) is list and tuple(result) == rig.complete:
+                        reconciliations.append(True)
+                        if len(reconciliations) == 2:
+                            rig.clock += union_seconds
+                    return result
+
+                with patch.object(rig.controller, "sorted", create=True, side_effect=late_sorted):
+                    result = self._perform_ruby_partition_fixture(rig)
+                self.assertEqual(result.ok, union_seconds == 3.0)
+                self.assertEqual(len(reconciliations), 2)
+                self.assertEqual(len(rig.captures), 5)
+                self.assertEqual([row["status"] for row in result.details["partitions"]], ["PASS"] * 5)
+                if not result.ok:
+                    self.assertEqual(result.error, "AGGREGATE_DEADLINE")
+
+        # An earlier original job endpoint still clips a fresh singleton; it
+        # cannot turn the fixed310 gate into another310 after healthy returns.
+        rig = self._ruby_partition_fixture(gate="ruby-native-capture")
+        target = tuple(rig.partitions)[1]
+        rig.header_advance = 3.0
+        rig.run_advances = {"healthy": 179.0, target: 18.0}
+        result = self._perform_ruby_partition_fixture(rig, deadline=210.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error, "AGGREGATE_DEADLINE")
+        self.assertEqual([row["status"] for row in result.details["partitions"]], ["PASS", "FAIL", *(["UNEXECUTED"] * 3)])
+        self.assertEqual([event[3]["absolute_deadline"] for event in rig.events if event[0] == "run"], [193.0, 210.0])
+
+        for expiry in ("pre-idle", "post-idle", "argv", "parser", "bookkeeping", "diagnostic", "phase-gap"):
+            with self.subTest(expiry=expiry):
+                rig = self._ruby_partition_fixture(gate="ruby-native-capture")
+                controller = rig.controller
+                target = tuple(rig.partitions)[1]
+                watched = "healthy" if expiry == "phase-gap" else target
+                seen = []
+                original_argv = controller.ruby_capture_argv
+                original_parser = controller.parse_capture
+                original_diagnostic = controller.failure_details
+                original_idle = rig.session.ensure_idle
+
+                def argv(paths, gate, partition, *, deadline):
+                    value = original_argv(paths, gate, partition, deadline=deadline)
+                    if partition == target:
+                        seen.append(("argv", deadline))
+                        if expiry == "argv":
+                            rig.clock = deadline
+                    return value
+
+                def idle(*, deadline):
+                    original_idle(deadline=deadline)
+                    if deadline == 50.0 and len(rig.captures) == (1 if expiry == "pre-idle" else 2):
+                        seen.append(("idle", deadline))
+                        if expiry in {"pre-idle", "post-idle"}:
+                            rig.clock = deadline
+
+                def parse(part, capture, *args, **kwargs):
+                    value = original_parser(part, capture, *args, **kwargs)
+                    if part.native_partition != watched:
+                        return value
+                    cutoff = kwargs["deadline"]
+                    seen.append(("parser", cutoff))
+                    self.assertEqual(part.seconds, 180 if watched == "healthy" else 30)
+                    if expiry == "parser":
+                        rig.clock = cutoff
+                    if expiry in {"bookkeeping", "phase-gap"}:
+                        class LateDetails(dict):
+                            def __getitem__(self, name):
+                                result = super().__getitem__(name)
+                                if name == "assertions":
+                                    if expiry == "bookkeeping":
+                                        rig.clock = cutoff
+                                    else:
+                                        def after_sample():
+                                            rig.after_clock_sample = None
+                                            rig.clock += 31.0
+                                        rig.after_clock_sample = after_sample
+                                return result
+                        value = dataclasses.replace(value, details=LateDetails(value.details))
+                    return value
+
+                def diagnose(capture, part, *args, **kwargs):
+                    value = original_diagnostic(capture, part, *args, **kwargs)
+                    seen.append(("diagnostic", kwargs["deadline"]))
+                    if expiry == "diagnostic":
+                        rig.clock = kwargs["deadline"]
+                        controller.check_clock(kwargs["deadline"])
+                    return value
+
+                if expiry == "diagnostic":
+                    rig.changes[target] = {"returncode": 1}
+                    rig.idle_error_after = 2
+                rig.session.ensure_idle = idle
+                with patch.object(controller, "ruby_capture_argv", side_effect=argv), \
+                        patch.object(controller, "parse_capture", side_effect=parse), \
+                        patch.object(controller, "failure_details", side_effect=diagnose):
+                    result = self._perform_ruby_partition_fixture(rig)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error, "COMMAND_EXIT_OR_FINALITY" if expiry == "diagnostic" else "AGGREGATE_DEADLINE")
+                launched = expiry not in {"pre-idle", "argv", "phase-gap"}
+                self.assertEqual(len(rig.captures), 2 if launched else 1)
+                rows = result.details["partitions"]
+                self.assertEqual([row["status"] for row in rows], ["PASS", "FAIL" if launched else "UNEXECUTED", *(["UNEXECUTED"] * 3)])
+                for index, capture in enumerate(rig.captures):
+                    for name, value in controller.capture_observations(capture).items():
+                        self.assertEqual(rows[index]["capture"][name], value)
+                if expiry == "phase-gap":
+                    self.assertEqual(seen, [("parser", 190.0)])
+                    self.assertEqual(rig.clock, 51.0)
+                else:
+                    self.assertTrue(seen)
+                    self.assertTrue(all(cutoff == 50.0 for _stage, cutoff in seen))
+                if expiry == "diagnostic":
+                    self.assertEqual(rows[1]["idle_error"]["error"], "RUBY_PARTITION_NOT_IDLE")
+                    self.assertEqual(rows[1]["diagnostic_error"]["error"], "AGGREGATE_DEADLINE")
+
+    def test_compatibility_provider_bindings_are_closed_narrow_and_disjoint(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        self.assertIs(controller.compatibility_paths(paths), paths.compatibility_runtimes)
+        pairs = paths.compatibility_runtimes
+        invalid = ((), pairs[:2], pairs + pairs[:1], list(pairs), (pairs[0], pairs[0], pairs[2]),
+                   ((pairs[0][0], Path("/fixture")), *pairs[1:]),
+                   ((Path("relative/bin/python"), Path("relative")), *pairs[1:]),
+                   ((Path("/fixture/alias/../python312/bin/python"), Path("/fixture/alias/../python312")), *pairs[1:]),
+                   ((Path("/fixture/python/bin/python"), Path("/fixture/python")), *pairs[1:]),
+                   ((Path("/fixture/python312/nested/bin/python"), Path("/fixture/python312/nested")), pairs[0], pairs[2]))
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaisesRegex(controller.VerificationError, "COMPATIBILITY_RUNTIME_BINDING"):
+                controller.compatibility_paths(dataclasses.replace(paths, compatibility_runtimes=value))
+        # Position alone is not runtime identity: swapped well-formed pairs
+        # are rejected by actual version/executable metadata before controls.
+        swapped = dataclasses.replace(paths, compatibility_runtimes=(pairs[1], pairs[0], pairs[2]))
+        self.assertEqual(controller.compatibility_paths(swapped), swapped.compatibility_runtimes)
+
+    def test_python_runtime_observation_rejects_foreign_lines_prefixes_and_product_origins(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        for phase in ("source", "wheel"):
+            for minor in (12, 13, 14):
+                data = python_runtime_fixture(paths, minor=minor, phase=phase)
+                executable, prefix = paths.compatibility_runtimes[minor - 12]
+
+                def check(value):
+                    return controller.native_python_observation(runtime_wire(controller, value), paths,
+                        minor=minor, phase=phase, executable=executable, prefix=prefix)
+
+                self.assertEqual(check(data)["version"], f"3.{minor}.1")
+                mutations = {"schema": 1, "phase": "wrong", "implementation": "pypy", "version": [3, minor + 1, 1],
+                             "executable": str(paths.source_python), "base_prefix": "/fixture", "base_exec_prefix": "/fixture",
+                             "prefix": str(paths.work / "wheel-venv"), "exec_prefix": "/foreign", "isolated": 1,
+                             "package_root": str(paths.source / "src/mobile_release"), "origins": {}, "extra": True}
+                for field, value in mutations.items():
+                    with self.subTest(phase=phase, minor=minor, field=field), self.assertRaises(controller.VerificationError):
+                        check({**data, field: value})
+                for version in ([True, minor, 1], [3, float(minor), 1], [3, minor, True], [3, minor], "3.12.1"):
+                    with self.assertRaises(controller.VerificationError):
+                        check({**data, "version": version})
+                for origins in ({"mobile_release": data["origins"]["mobile_release"]},
+                                {**data["origins"], "mobile_release._native_process": "/private/substitute.py"},
+                                {**data["origins"], "unrelated": "/private/unrelated.py"},
+                                {**data["origins"], "mobile_release.nested.module": "/private/nested.py"}):
+                    with self.assertRaises(controller.VerificationError):
+                        check({**data, "origins": origins})
+
+    def test_runtime_metadata_has_one_closed_ascii_record_and_no_duplicate_keys(self):
+        controller = controller_module()
+        raw = runtime_wire(controller, {"a": 1})
+        self.assertEqual(controller.native_runtime_record(raw, controller.NATIVE_PYTHON_RUNTIME_PREFIX), {"a": 1})
+        invalid = (raw[:-1], raw + b"\n", b"\n" + raw, b" " + raw, raw.replace(b"1", b"NaN"),
+                   raw.replace(b'{"a":1}', b'{"a":1,"a":1}'), raw.replace(b'{"a":1}', b'[]'),
+                   raw.replace(b"1", b"\xff"), raw.replace(b"1", b"\t1"), b"x" * 65537 + b"\n")
+        for value in invalid:
+            with self.subTest(value=value[:80]), self.assertRaises(controller.VerificationError):
+                controller.native_runtime_record(value, controller.NATIVE_PYTHON_RUNTIME_PREFIX)
+
+    def test_native_capture_keeps_original_facts_and_checks_idle_under_the_same_cutoff(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        facts = {"ok": False, "returncode": 1, "waited": False, "stdout_eof": False, "stderr_eof": False,
+                 "domain_finality": False, "timed_out": True, "cancelled": True,
+                 "primary_error": "PRIVATE_ERROR", "cleanup_errors": ("PRIVATE_CLEANUP",)}
+        for field, value in facts.items():
+            result = native_capture_fixture(b"PRIVATE_OUTPUT", **{field: value})
+            session = SimpleNamespace(run=Mock(return_value=result), ensure_idle=Mock())
+            rows = []
+            with patch.object(controller, "time", SimpleNamespace(monotonic=lambda: 1.0)), \
+                    self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                controller.original_native_capture(session, ("/fixed/ordinary",), paths, rows, "fixture",
+                    deadline=12.0, seconds=120, env={})
+            self.assertEqual(session.ensure_idle.call_count, 2)
+            self.assertTrue(all(call.kwargs == {"deadline": 12.0} for call in session.ensure_idle.call_args_list))
+            self.assertEqual(session.run.call_args.kwargs["absolute_deadline"], 12.0)
+            self.assertEqual(session.run.call_args.kwargs["profile"], "ordinary")
+            self.assertEqual(rows[0]["status"], "FAIL")
+            self.assertEqual(rows[0]["capture"]["stdout_bytes"], len(result.stdout))
+            self.assertNotIn("PRIVATE", json.dumps(rows))
+        first, second = native_capture_fixture(b"one"), native_capture_fixture(b"two")
+        session = SimpleNamespace(run=Mock(side_effect=[first, second]), ensure_idle=Mock())
+        rows = []
+        with patch.object(controller, "time", SimpleNamespace(monotonic=lambda: 1.0)):
+            originals = [controller.original_native_capture(session, ("/fixed/ordinary",), paths, rows, name,
+                         deadline=12.0, seconds=120, env={}) for name in ("one", "two")]
+        self.assertIs(originals[0], first)
+        self.assertIs(originals[1], second)
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["status"] == "FINALIZED" for row in rows))
+
+    def test_compatibility_requires_matching_original_declaration_before_any_control(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        ids = tuple(sorted("unit.test_native_process.NativeProcessCompatibilityTests." + name for name in (
+            "test_native_public_api_atomic_duplication", "test_native_helper_and_validator_fd_maps",
+            "test_native_exact_terminal_wait_receipts")))
+        text = "".join(f"{identifier.rsplit('.', 1)[1]} ({identifier}) ... ok\n" for identifier in ids)
+        text += "\nRan 3 tests in 0.001s\n\nOK\n"
+        for phase in ("source", "wheel"):
+            for fault in (None, "header", "declaration-finality", "origin", "abi", "skip", "control-finality", "expired"):
+                with self.subTest(phase=phase, fault=fault):
+                    clock, events = [10.0], []
+                    python, prefix = paths.compatibility_runtimes[0]
+                    data = python_runtime_fixture(paths, phase=phase)
+                    if fault == "origin":
+                        data["base_prefix"] = "/unselected/provider"
+                    declaration = native_capture_fixture(b"actual-python-declaration\n", runtime_wire(controller, data),
+                                                         waited=fault != "declaration-finality")
+                    controls = native_capture_fixture(runtime_wire(controller, python_runtime_fixture(paths, phase=phase)),
+                        text.replace("OK", "OK (skipped=1)").encode() if fault == "skip" else text.encode(),
+                        domain_finality=fault != "control-finality")
+                    originals = [declaration, controls]
+
+                    def run(argv, **kwargs):
+                        events.append(("capture", tuple(argv), kwargs))
+                        value = originals[len([item for item in events if item[0] == "capture"]) - 1]
+                        if fault == "expired":
+                            clock[0] = 131.0
+                        return value
+
+                    def compare(header, actual, ruby):
+                        events.append(("compare", header, actual, ruby))
+                        if fault == "abi":
+                            raise ValueError("PRIVATE_ABI_MISMATCH")
+
+                    checks = SimpleNamespace(compare_abi_records=Mock(side_effect=compare),
+                        native_compatibility_ids=Mock(return_value=ids))
+                    session = SimpleNamespace(run=run, ensure_idle=Mock())
+                    state = controller.NativeABIState(header_capture=native_capture_fixture(b"header\n"), phases={phase: (
+                        native_capture_fixture(b"original-python\n"), native_capture_fixture(b"bundle\n"),
+                        native_capture_fixture(b"default\n"))})
+                    env = controller.native_phase_environment(paths, "linux", phase)
+                    step = controller.Step(f"python-compat-312-{phase}", kind="python-compatibility", seconds=120,
+                        cwd=paths.work, env=tuple(sorted(env.items())), argv=(str(python), "-I", "-S", "-B",
+                        str(paths.source / "tests/workflow/run_native_profile_checks.py"), f"--compat-312-{phase}"))
+                    with patch.multiple(controller, time=SimpleNamespace(monotonic=lambda: clock[0]),
+                            check_capacity=Mock(), read_regular=Mock(return_value=b"immutable executable"),
+                            require_retained_header=Mock(side_effect=controller.VerificationError("MISSING_HEADER")
+                                                         if fault == "header" else None)):
+                        result = controller.perform_compatibility_gate(step, paths, session, checks, "linux", state, deadline=1000.0)
+                    self.assertEqual(result.ok, fault is None)
+                    captures = [item for item in events if item[0] == "capture"]
+                    expected_captures = 0 if fault == "header" else 1 if fault in {
+                        "declaration-finality", "origin", "abi", "expired"} else 2
+                    self.assertEqual(len(captures), expected_captures)
+                    if len(captures) == 2:
+                        self.assertEqual([item[0] for item in events], ["capture", "compare", "compare", "capture"])
+                        self.assertEqual(captures[0][1][-1], f"--abi-312-{phase}")
+                        self.assertEqual(captures[1][1][-1], f"--compat-312-{phase}")
+                    self.assertTrue(all(item[2]["absolute_deadline"] == 130.0 for item in captures))
+                    self.assertTrue(all(item[2]["profile"] == "ordinary" for item in captures))
+                    self.assertNotIn("PRIVATE", json.dumps(result.details))
+
+    def test_compiler_version_is_bound_to_actual_family_and_original_finality(self):
+        controller = controller_module()
+        gcc = native_capture_fixture(b"x86_64-linux-gnu-gcc-13 (Ubuntu 13.3.0-6ubuntu2) 13.3.0\nCopyright (C) 2023\n")
+        clang = native_capture_fixture(b"Apple clang version 17.0.0 (clang-1700.6.3.2)\nTarget: arm64-apple-darwin\n")
+        self.assertIn("13.3.0", controller.native_compiler_version(gcc, "linux"))
+        self.assertIn("Apple clang", controller.native_compiler_version(clang, "macos"))
+        for value, platform in ((gcc, "macos"), (clang, "linux"),
+                                (native_capture_fixture(gcc.stdout.replace(b" 13.3.0\n", b" 14.3.0\n")), "linux"),
+                                (native_capture_fixture(gcc.stdout, b"unexpected"), "linux"),
+                                (native_capture_fixture(gcc.stdout, waited=False), "linux")):
+            with self.assertRaises(controller.VerificationError):
+                controller.native_compiler_version(value, platform)
+
+    def test_abi_gate_compares_both_ruby_contexts_before_public_controls_and_retains_originals(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        public_ids = ("unit.test_native_process.NativeProcessCompatibilityTests.test_native_public_api_atomic_duplication",)
+        ruby_ids = tuple(sorted((
+            "NativeProcessSpawnTests#test_public_atomic_cloexec_duplication_uses_independent_creator_functions",
+            "NativeProcessSpawnTests#test_public_spawn_containers_and_read_only_sigchld_admission",
+        )))
+        # Read actual fixed Ruby method definitions before mocking captures;
+        # matching stale controller/test literals cannot authorize a renamed ID.
+        for gate in ("ruby-native-public-source", "ruby-native-public-wheel"):
+            self.assertEqual(controller.ruby_expected_ids(ROOT, gate), ruby_ids)
+        for phase in ("source", "wheel"):
+            for fault in (None, "phase-order", "header", "python-finality", "bundle-finality", "default-finality",
+                          "bundle-abi", "default-abi", "python-control", "ruby-control", "expired"):
+                with self.subTest(phase=phase, fault=fault):
+                    if phase == "source" and fault == "phase-order":
+                        continue
+                    events, clock = [], [10.0]
+                    python = paths.source_python if phase == "source" else paths.wheel_python
+                    metadata = python_runtime_fixture(paths, phase=phase)
+                    metadata.update(version=[3, 11, 1], executable=str(python),
+                                    base_prefix=str(ROOT), base_exec_prefix=str(ROOT), prefix=str(ROOT), exec_prefix=str(ROOT))
+                    declaration = native_capture_fixture(b"python ABI\n", runtime_wire(controller, metadata),
+                                                         waited=fault != "python-finality")
+                    bundle = native_capture_fixture(b"bundled Ruby ABI\n", b"bundle metadata\n",
+                                                    waited=fault != "bundle-finality")
+                    default = native_capture_fixture(b"default Ruby ABI\n", b"default metadata\n",
+                                                     stderr_eof=fault != "default-finality")
+                    public_text = (f"test_native_public_api_atomic_duplication ({public_ids[0]}) ... ok\n"
+                                   "\nRan 1 test in 0.001s\n\nOK\n").encode()
+                    public = native_capture_fixture(runtime_wire(controller, metadata), public_text,
+                                                     domain_finality=fault != "python-control")
+                    ruby_public = native_capture_fixture(minitest_fixture(ruby_ids),
+                                                          waited=fault != "ruby-control")
+                    originals = (declaration, bundle, default, public, ruby_public)
+                    header = native_capture_fixture(b"original C header\n")
+                    state = controller.NativeABIState(header_capture=header)
+                    source_originals = tuple(native_capture_fixture(value) for value in (b"source Python", b"source bundle", b"source default"))
+                    if phase == "wheel" and fault != "phase-order":
+                        state.phases["source"] = source_originals
+
+                    def run(argv, **kwargs):
+                        events.append(("capture", tuple(argv), kwargs))
+                        index = sum(item[0] == "capture" for item in events) - 1
+                        if fault == "expired":
+                            clock[0] = 311.0
+                        return originals[index]
+
+                    def compare(left, middle, right):
+                        events.append(("compare", left, middle, right))
+                        if (fault == "bundle-abi" and right == bundle.stdout
+                                or fault == "default-abi" and right == default.stdout):
+                            raise ValueError("PRIVATE_ABI_BODY")
+
+                    session = SimpleNamespace(run=run, ensure_idle=Mock())
+                    checks = SimpleNamespace(inspect_native_package=Mock(return_value={"bytes_bound": True}),
+                        compare_abi_records=Mock(side_effect=compare), native_compatibility_ids=Mock(return_value=public_ids))
+                    retain = Mock(return_value={"original": True})
+                    with patch.multiple(controller, time=SimpleNamespace(monotonic=lambda: clock[0]),
+                            sys=SimpleNamespace(base_prefix=str(ROOT)), check_capacity=Mock(),
+                            read_regular=Mock(return_value=b"fixed immutable bytes"), retain_native_header=retain,
+                            require_retained_header=Mock(side_effect=controller.VerificationError("HEADER_REQUIRED")
+                                                         if fault == "header" else None),
+                            native_ruby_observation=Mock(return_value={"actual_source_locations": True}),
+                            ruby_expected_ids=Mock(return_value=ruby_ids)):
+                        result = controller.perform_native_abi_gate(
+                            controller.Step("native-process-abi-" + phase, kind="native-abi", seconds=300),
+                            paths, session, checks, "linux", state, deadline=1000.0)
+                    self.assertEqual(result.ok, fault is None)
+                    captures = [item for item in events if item[0] == "capture"]
+                    expected = {"phase-order": 0, "header": 0, "python-finality": 1, "bundle-finality": 2,
+                                "default-finality": 3, "bundle-abi": 2, "default-abi": 3,
+                                "python-control": 4, "ruby-control": 5, "expired": 1, None: 5}[fault]
+                    self.assertEqual(len(captures), expected)
+                    self.assertEqual(retain.call_count, int(phase == "source"))
+                    self.assertTrue(all(item[2]["absolute_deadline"] == 310.0 and item[2]["profile"] == "ordinary"
+                                        for item in captures))
+                    if len(captures) >= 4:
+                        self.assertEqual([item[0] for item in events[:6]],
+                                         ["capture", "capture", "compare", "capture", "compare", "capture"])
+                        self.assertEqual(captures[3][1][-1], "--public-311-" + phase)
+                        self.assertEqual(events[2][1:], (header.stdout, declaration.stdout, bundle.stdout))
+                        self.assertEqual(events[4][1:], (header.stdout, declaration.stdout, default.stdout))
+                    if fault is None:
+                        self.assertIs(state.header_capture, header)
+                        self.assertIs(state.phases[phase][0], declaration)
+                        self.assertIs(state.phases[phase][1], bundle)
+                        self.assertIs(state.phases[phase][2], default)
+                    else:
+                        self.assertNotIn(phase, state.phases)
+                    if phase == "wheel" and fault != "phase-order":
+                        self.assertIs(state.phases["source"], source_originals)
+                    self.assertNotIn("PRIVATE", json.dumps(result.details))
+
+    def test_native_header_build_reads_and_freezes_only_after_original_compiler_finality(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        compiler = Path("/usr/bin/x86_64-linux-gnu-gcc-13")
+        binary = paths.work / "native-process-abi/header-record"
+        for fault in (None, "build-wait", "build-eof", "build-idle", "build-expiry", "header-finality"):
+            with self.subTest(fault=fault):
+                events, clock, stage = [], [1.0], [None]
+                version = native_capture_fixture(b"x86_64-linux-gnu-gcc-13 (Ubuntu 13.3.0) 13.3.0\n")
+                build = native_capture_fixture(waited=fault != "build-wait", stderr_eof=fault != "build-eof")
+                header = native_capture_fixture(b"C header\n", waited=fault != "header-finality")
+                results = iter((version, build, header))
+
+                def run(argv, **kwargs):
+                    value = next(results)
+                    stage[0] = "version" if value is version else "build" if value is build else "header"
+                    events.append(("capture", stage[0], tuple(argv), kwargs))
+                    if stage[0] == "build" and fault == "build-expiry":
+                        clock[0] = 21.0
+                    return value
+
+                def idle(**kwargs):
+                    events.append(("idle", stage[0], kwargs))
+                    if stage[0] == "build" and fault == "build-idle":
+                        raise controller.VerificationError("SYNTHETIC_NOT_IDLE")
+
+                def read(path, **_kwargs):
+                    events.append(("read", path))
+                    if path == binary:
+                        self.assertIn(("idle", "build", {"deadline": 20.0}), events)
+                        self.assertNotIn(fault, {"build-wait", "build-eof", "build-idle", "build-expiry"})
+                    return b"immutable bytes"
+
+                session = SimpleNamespace(run=run, ensure_idle=idle)
+                state, rows = controller.NativeABIState(), []
+                checks = SimpleNamespace(parse_abi_record=Mock(return_value={"family": "linux-glibc", "architecture": "x86_64"}))
+                with patch.multiple(controller, time=SimpleNamespace(monotonic=lambda: clock[0]),
+                        native_compiler_binding=Mock(return_value=(compiler, {"evidence": {}}, "a" * 64)),
+                        read_regular=Mock(side_effect=read), freeze_tree=Mock(side_effect=lambda *_args, **_kwargs: events.append(("freeze",))),
+                        os=SimpleNamespace(uname=lambda: SimpleNamespace(machine="x86_64"))), \
+                        patch.object(Path, "iterdir", side_effect=[iter(()), iter((binary,))]), \
+                        patch.object(Path, "stat", return_value=SimpleNamespace(st_mode=stat.S_IFREG | 0o555)):
+                    if fault is None:
+                        controller.retain_native_header(paths, session, checks, "linux", state, rows, deadline=20.0)
+                    else:
+                        with self.assertRaises(controller.VerificationError):
+                            controller.retain_native_header(paths, session, checks, "linux", state, rows, deadline=20.0)
+                captures = [item for item in events if item[0] == "capture"]
+                self.assertTrue(all(item[3]["absolute_deadline"] == 20.0 and item[3]["profile"] == "ordinary"
+                                    for item in captures))
+                self.assertEqual(captures[0][2], (str(compiler), "--version"))
+                self.assertEqual(captures[1][2], tuple(map(str, (compiler, "-D_GNU_SOURCE", "-std=c11", "-O2",
+                    "-Wall", "-Wextra", "-Werror", paths.source / "tests/workflow/native_process_abi.c", "-o", binary))))
+                self.assertEqual(captures[0][3]["env"], {"PATH": "/usr/bin:/bin"})
+                self.assertEqual(captures[1][3]["env"], {"PATH": "/usr/bin:/bin"})
+                if fault not in {None, "header-finality"}:
+                    self.assertNotIn(("read", binary), events)
+                    self.assertNotIn(("freeze",), events)
+                    self.assertEqual(len(captures), 2)
+                if fault is None:
+                    self.assertIs(state.compiler_capture, version)
+                    self.assertIs(state.build_capture, build)
+                    self.assertIs(state.header_capture, header)
+                else:
+                    self.assertIsNone(state.header_capture)
+
+    def test_packaged_ruby_cli_uses_exact_phase_roots_gemfile_and_class_selector(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        for phase in ("source", "wheel"):
+            prefix = paths.source if phase == "source" else paths.work / "wheel-venv"
+            tooling = paths.source / "fastlane" if phase == "source" else prefix / "share/mobile-release-kit/fastlane"
+            selector = (r"/\APackagedRubyCaptureTest#/" if phase == "source" else
+                        r"/\A(?:PackagedRubyCaptureTest|InstalledRubyCaptureMissingHelperTest)#/")
+            expected = tuple(map(str, (*paths.bundle, "exec", paths.ruby,
+                paths.source / "tests/workflow/test_installed_ruby_capture.rb", "--capture-phase", phase,
+                "--capture-tooling-root", tooling, "--capture-prefix", prefix, "--capture-source-root", paths.source,
+                "--capture-python", paths.source_python if phase == "source" else paths.wheel_python,
+                *(("--capture-wheel", paths.wheel, "--negative-prefix", paths.work / "ruby-negative") if phase == "wheel" else ()),
+                "--capture-deadline", "20.0", "--verbose", "--name", selector)))
+            self.assertEqual(controller.packaged_ruby_argv(paths, phase, deadline=20.0), expected)
+            env = controller.native_phase_environment(paths, "linux", phase, ruby=True)
+            self.assertEqual(env["BUNDLE_GEMFILE"], str(tooling.parent / "Gemfile"))
+            step = controller.Step("ruby-packaged-capture-" + phase, argv=expected, cwd=paths.work,
+                                   env=tuple(sorted(env.items())), seconds=300, parser="minitest", expected_tests=1)
+            changes = [("--negative-prefix", "/foreign"), ("--capture-prefix", "/foreign"),
+                       ("--capture-deadline", "21.0"), ("--capture-tooling-root", str(tooling.parent)),
+                       ("--name", "/.*/"), ("--capture-python", str(paths.python))]
+            for flag, value in changes:
+                argv = list(expected)
+                if flag in argv:
+                    argv[argv.index(flag) + 1] = value
+                else:
+                    argv.extend((flag, value))
+                session = SimpleNamespace(run=Mock(), ensure_idle=Mock())
+                with patch.multiple(controller, time=SimpleNamespace(monotonic=lambda: 1.0),
+                        check_capacity=Mock(), ruby_expected_ids=Mock(return_value=("Fixture#test_one",))):
+                    result = controller.perform_packaged_ruby_gate(dataclasses.replace(step, argv=tuple(argv)),
+                        paths, session, SimpleNamespace(), "linux", deadline=20.0)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error, "PACKAGED_RUBY_GATE_CONTRACT")
+                session.run.assert_not_called()
+                session.ensure_idle.assert_not_called()
+
+    def test_negative_installation_and_suite_have_separate_originals_and_one_unrenewed_cutoff(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        ids = ("Fixture#test_one",)
+        identity = (1, 2, 1234, 1234, stat.S_IFDIR | 0o700)
+        for phase in ("source", "wheel"):
+            faults = ((None, "suite-wait", "suite-eof", "suite-idle", "suite-skip") if phase == "source" else
+                      (None, "nonprivate", "pip-wait", "pip-eof", "pip-idle", "pip-expiry", "install-record",
+                       "suite-wait", "suite-eof", "suite-idle", "suite-skip", "not-restored", "dispose"))
+            for fault in faults:
+                with self.subTest(phase=phase, fault=fault):
+                    events, clock, stage = [], [10.0], [None]
+                    pip = native_capture_fixture(b"private installer output", waited=fault != "pip-wait",
+                                                  stdout_eof=fault != "pip-eof")
+                    suite = native_capture_fixture(minitest_fixture(ids), waited=fault != "suite-wait",
+                                                    stderr_eof=fault != "suite-eof")
+                    if fault == "suite-skip":
+                        suite.stdout = suite.stdout.replace(b"0 skips", b"1 skips")
+
+                    def run(argv, **kwargs):
+                        name = "pip" if "--prefix" in argv else "suite"
+                        stage[0] = name
+                        events.append(("capture", name, tuple(argv), kwargs))
+                        if name == "pip" and fault == "pip-expiry":
+                            clock[0] = 311.0
+                        return pip if name == "pip" else suite
+
+                    def idle(**kwargs):
+                        events.append(("idle", stage[0], kwargs))
+                        if fault == str(stage[0]) + "-idle":
+                            raise controller.VerificationError("NOT_IDLE")
+
+                    def custody(*_args, **_kwargs):
+                        events.append(("custody", stage[0]))
+                        if fault == "nonprivate":
+                            raise controller.VerificationError("NEGATIVE_PREFIX_CUSTODY")
+                        return identity
+
+                    def inspect(*_args, **_kwargs):
+                        events.append(("inspect", stage[0]))
+                        self.assertIn(("idle", stage[0], {"deadline": 310.0}), events)
+                        if stage[0] == "pip" and fault == "install-record":
+                            raise controller.VerificationError("NEGATIVE_PREFIX_RECORD_BYTES")
+                        return {"files": 1, "record_sha256": "changed" if stage[0] == "suite" and fault == "not-restored" else "a" * 64}
+
+                    def dispose(*_args, **_kwargs):
+                        events.append(("dispose",))
+                        self.assertEqual(_kwargs, {"deadline": 310.0})
+                        self.assertIn(("inspect", "suite"), events)
+                        if fault == "dispose":
+                            raise controller.VerificationError("NEGATIVE_PREFIX_NOT_REMOVED")
+
+                    session = SimpleNamespace(run=run, ensure_idle=idle, uid=1234, gid=1234)
+                    checks = SimpleNamespace(inspect_project_wheel=Mock(return_value={"sha256": "b" * 64}))
+                    step = controller.Step("ruby-packaged-capture-" + phase,
+                        argv=controller.packaged_ruby_argv(paths, phase, deadline=1000.0), cwd=paths.work,
+                        env=tuple(sorted(controller.native_phase_environment(paths, "linux", phase, ruby=True).items())),
+                        seconds=300, parser="minitest", expected_tests=1)
+                    with patch.multiple(controller, time=SimpleNamespace(monotonic=lambda: clock[0]),
+                            check_capacity=Mock(), ruby_expected_ids=Mock(return_value=ids),
+                            negative_prefix_custody=custody, inspect_negative_ruby_prefix=inspect,
+                            dispose_negative_ruby_prefix=dispose), \
+                            patch.object(controller.os, "scandir", return_value=nullcontext(iter(()))):
+                        result = controller.perform_packaged_ruby_gate(step, paths, session, checks, "linux", deadline=1000.0)
+                    self.assertEqual(result.ok, fault is None)
+                    captures = [item for item in events if item[0] == "capture"]
+                    self.assertTrue(all(item[3]["absolute_deadline"] == 310.0 and item[3]["profile"] == "ordinary"
+                                        for item in captures))
+                    self.assertTrue(all(item[2]["deadline"] == 310.0 for item in events if item[0] == "idle"))
+                    if phase == "source":
+                        self.assertEqual([item[1] for item in captures], ["suite"])
+                        self.assertFalse(any(item[0] in {"custody", "inspect", "dispose"} for item in events))
+                        checks.inspect_project_wheel.assert_not_called()
+                    else:
+                        names = [item[1] for item in captures]
+                        expected = [] if fault == "nonprivate" else ["pip"] if fault in {
+                            "pip-wait", "pip-eof", "pip-idle", "pip-expiry", "install-record"} else ["pip", "suite"]
+                        self.assertEqual(names, expected)
+                        if names:
+                            self.assertEqual(captures[0][2], tuple(map(str, (paths.wheel_python, "-I", "-B", "-m", "pip",
+                                "install", "--ignore-installed", "--no-index", "--no-deps", "--no-compile", "--no-cache-dir",
+                                "--prefix", paths.work / "ruby-negative", paths.wheel))))
+                        inspected = [item[1] for item in events if item[0] == "inspect"]
+                        if fault in {"nonprivate", "pip-wait", "pip-eof", "pip-idle", "pip-expiry"}:
+                            self.assertEqual(inspected, [])
+                        elif fault in {"install-record", "suite-wait", "suite-eof", "suite-idle", "suite-skip"}:
+                            self.assertEqual(inspected, ["pip"])
+                        else:
+                            self.assertEqual(inspected, ["pip", "suite"])
+                        self.assertEqual(("dispose",) in events, fault in {None, "dispose"})
+                        if result.ok:
+                            self.assertTrue(result.details["negative_prefix"]["removed_after_outer_finality"])
+                    if captures and captures[-1][1] == "suite":
+                        argv = captures[-1][2]
+                        self.assertEqual(argv[argv.index("--capture-deadline") + 1], "310.0")
+                    self.assertNotIn("private installer output", json.dumps(result.details))
+
+    def test_negative_prefix_custody_and_descriptor_disposal_fail_closed_without_real_removal(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        fields = dict(st_dev=1, st_ino=2, st_uid=1234, st_gid=1234, st_mode=stat.S_IFDIR | 0o700)
+        identity = tuple(fields[name] for name in ("st_dev", "st_ino", "st_uid", "st_gid", "st_mode"))
+        session = SimpleNamespace(uid=1234, gid=1234, ensure_idle=Mock())
+        with patch.object(controller, "time", SimpleNamespace(monotonic=lambda: 1.0)), \
+                patch.object(Path, "resolve", lambda self, **_kwargs: self):
+            with patch.object(Path, "lstat", return_value=SimpleNamespace(**fields)):
+                self.assertEqual(controller.negative_prefix_custody(paths, session, deadline=20.0), identity)
+            for field, value in (("st_uid", 0), ("st_gid", 0), ("st_mode", stat.S_IFDIR | 0o755),
+                                 ("st_mode", stat.S_IFREG | 0o700), ("st_mode", stat.S_IFLNK | 0o700)):
+                with patch.object(Path, "lstat", return_value=SimpleNamespace(**{**fields, field: value})), \
+                        self.assertRaisesRegex(controller.VerificationError, "NEGATIVE_PREFIX_CUSTODY"):
+                    controller.negative_prefix_custody(paths, session, deadline=20.0)
+        for fault in (None, "idle", "identity", "unsafe", "entry", "remove", "still-present", "close"):
+            events = []
+            remove = Mock(side_effect=OSError("PRIVATE_REMOVE") if fault == "remove" else lambda *args, **kwargs: events.append(("remove", args, kwargs)))
+            remove.avoids_symlink_attacks = fault != "unsafe"
+            entry = SimpleNamespace(**{**fields, **({"st_ino": 3} if fault == "entry" else {})})
+            stats = [entry, entry if fault == "still-present" else FileNotFoundError()]
+            fake_os = SimpleNamespace(O_RDONLY=os.O_RDONLY, O_DIRECTORY=os.O_DIRECTORY, O_NOFOLLOW=os.O_NOFOLLOW,
+                open=Mock(return_value=77), stat=Mock(side_effect=stats),
+                close=Mock(side_effect=OSError("PRIVATE_CLOSE") if fault == "close" else None))
+            session.ensure_idle = Mock(side_effect=controller.VerificationError("NOT_IDLE") if fault == "idle" else None)
+            with patch.multiple(controller, time=SimpleNamespace(monotonic=lambda: 1.0), os=fake_os,
+                    shutil=SimpleNamespace(rmtree=remove), negative_prefix_custody=Mock(return_value=(9,) if fault == "identity" else identity)):
+                if fault is None:
+                    controller.dispose_negative_ruby_prefix(paths, session, identity, deadline=20.0)
+                else:
+                    with self.assertRaises((controller.VerificationError, OSError)):
+                        controller.dispose_negative_ruby_prefix(paths, session, identity, deadline=20.0)
+            session.ensure_idle.assert_called_once_with(deadline=20.0)
+            if fault in {"idle", "identity", "unsafe"}:
+                fake_os.open.assert_not_called()
+                fake_os.close.assert_not_called()
+                remove.assert_not_called()
+            else:
+                fake_os.open.assert_called_once_with(paths.work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                fake_os.close.assert_called_once_with(77)
+                if fault == "entry":
+                    remove.assert_not_called()
+                else:
+                    remove.assert_called_once_with("ruby-negative", dir_fd=77)
+                self.assertTrue(all(call.args == ("ruby-negative",) and call.kwargs == {"dir_fd": 77, "follow_symlinks": False}
+                                    for call in fake_os.stat.call_args_list))
+
+    def test_negative_prefix_record_covers_exact_same_wheel_files_without_source_substitution(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        prefix, positive = paths.work / "ruby-negative", paths.work / "wheel-venv"
+        site = "lib/python3.11/site-packages/"
+        dist = site + "mobile_release_kit-0.3.0.dist-info/"
+        package = {"__init__.py": b"inert package data", "_native_process.py": b"inert primitive data"}
+        tooling = "fastlane/native_process_spawn.rb"
+        wheel_hash = "a" * 64
+        base = {site + "mobile_release/" + name: data for name, data in package.items()}
+        base["share/mobile-release-kit/" + tooling] = b"inert Ruby data"
+        base.update({dist + name: b"inert installed metadata" for name in (
+            "METADATA", "WHEEL", "entry_points.txt", "top_level.txt", "licenses/LICENSE", "INSTALLER", "REQUESTED")})
+        base[dist + "direct_url.json"] = json.dumps({"url": paths.wheel.as_uri(),
+            "archive_info": {"hashes": {"sha256": wheel_hash}}}).encode()
+        base["bin/mobile-release"] = b"inert console data"
+        base[dist + "RECORD"] = b""
+        parents = {parent.as_posix() for name in base for parent in Path(name).parents if parent != Path(".")}
+        table = []
+        for name, data in sorted(base.items()):
+            relative = os.path.relpath(prefix / name, prefix / site)
+            digest = "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+            table.append([relative, "" if name == dist + "RECORD" else digest,
+                          "" if name == dist + "RECORD" else str(len(data))])
+        for fault in (None, "missing", "extra-directory", "source-bytes", "positive-bytes", "owner", "hardlink",
+                      "wheel-origin", "record-missing", "record-duplicate", "record-outside", "record-digest",
+                      "record-size", "record-self"):
+            with self.subTest(fault=fault):
+                files, directories, rows = dict(base), set(parents), copy.deepcopy(table)
+                if fault == "missing":
+                    del files["share/mobile-release-kit/" + tooling]
+                elif fault == "extra-directory":
+                    directories.add("unrecorded-empty-directory")
+                elif fault == "source-bytes":
+                    files[site + "mobile_release/_native_process.py"] = b"foreign substitute"
+                elif fault == "wheel-origin":
+                    files[dist + "direct_url.json"] = files[dist + "direct_url.json"].replace(wheel_hash.encode(), b"b" * 64)
+                if fault == "record-missing":
+                    rows.pop()
+                elif fault == "record-duplicate":
+                    rows[-1] = rows[0]
+                elif fault == "record-outside":
+                    rows[0][0] = "../../../../outside"
+                elif fault == "record-digest":
+                    rows[0][1] = "sha512=" + "a" * 64
+                elif fault == "record-size":
+                    rows[0][2] = "00001"
+                elif fault == "record-self":
+                    next(row for row in rows if row[0].endswith(".dist-info/RECORD"))[1] = "sha256=" + "a" * 43
+                data = io.StringIO(newline="")
+                csv.writer(data, lineterminator="\n").writerows(rows)
+                files[dist + "RECORD"] = data.getvalue().encode()
+                positive_files = dict(files)
+                if fault == "positive-bytes":
+                    positive_files["bin/mobile-release"] = b"different positive file"
+
+                def read(path, **_kwargs):
+                    if path == paths.source / tooling:
+                        return base["share/mobile-release-kit/" + tooling]
+                    root = prefix if path.is_relative_to(prefix) else positive
+                    source = files if root == prefix else positive_files
+                    return source[path.relative_to(root).as_posix()]
+
+                checks = SimpleNamespace(_tree=Mock(return_value=(files, directories)),
+                    _source_package=Mock(return_value=package), TOOLING_FILES=(tooling,))
+                session = SimpleNamespace(uid=1234, gid=1234)
+                info = SimpleNamespace(st_uid=0 if fault == "owner" else 1234, st_gid=1234,
+                    st_mode=stat.S_IFREG | 0o600, st_nlink=2 if fault == "hardlink" else 1)
+                with patch.multiple(controller, time=SimpleNamespace(monotonic=lambda: 1.0),
+                        read_regular=Mock(side_effect=read), negative_prefix_custody=Mock(return_value=(1, 2, 1234, 1234, 0o40700))), \
+                        patch.object(Path, "lstat", return_value=info), \
+                        patch.object(Path, "resolve", lambda self, **_kwargs: Path(os.path.normpath(str(self)))):
+                    if fault is None:
+                        observed = controller.inspect_negative_ruby_prefix(paths, session, checks, wheel_hash, deadline=20.0)
+                        self.assertEqual(observed, {"files": len(files), "wheel_sha256": wheel_hash,
+                            "record_sha256": hashlib.sha256(files[dist + "RECORD"]).hexdigest(), "positive_prefix_untouched": True})
+                    else:
+                        with self.assertRaises(controller.VerificationError):
+                            controller.inspect_negative_ruby_prefix(paths, session, checks, wheel_hash, deadline=20.0)
+                checks._tree.assert_called_once_with(prefix, deadline=20.0)
+
+    def test_gate_order_requires_both_abi_phases_and_all_six_ordinary_compatibility_gates(self):
+        controller = controller_module()
+        for platform in ("linux", "macos"):
+            gates = controller.required_gate_ids(platform)
+            self.assertEqual(len(gates), len(set(gates)))
+            for phase in ("source", "wheel"):
+                abi = gates.index("native-process-abi-" + phase)
+                ordinary = "python-full" if phase == "source" else "python-wheel"
+                terminal = gates.index(ordinary if platform == "linux" else "native-profile-" + phase)
+                for line in ("312", "313", "314"):
+                    control = gates.index(f"python-compat-{line}-{phase}")
+                    self.assertLess(abi, control)
+                    self.assertLess(control, terminal)
+                self.assertLess(abi, gates.index("ruby-packaged-capture-" + phase))
+            self.assertLess(gates.index("wheel-freeze"), gates.index("native-process-abi-wheel"))
+            self.assertLess(gates.index("native-process-abi-wheel"), gates.index("wheel-smoke"))
+        self.assertEqual(controller.AGGREGATE_SECONDS, 3300)
 
 
 class CICoordinatorFilesystemTests(unittest.TestCase):
@@ -198,6 +1425,477 @@ class CICoordinatorFilesystemTests(unittest.TestCase):
 
 
 class CICoordinatorResultTests(unittest.TestCase):
+    def _provider_alias_fixture(self, layout="current-version", *, framework_name="Tk.framework"):
+        """Finite metadata doubles, never a provider traversal or Session owner."""
+        controller = controller_module()
+        paths = dataclasses.replace(fixture_paths(controller), java_home=None)
+        root = paths.compatibility_runtimes[1][1]
+        framework = root / "Frameworks" / framework_name
+        versions, alias = framework / "Versions", framework / "PrivateHeaders"
+        version = "8.6+private-provider-version"
+        current, selected = versions / "Current", versions / version
+        directories = (root, root / "Frameworks", framework, versions, selected)
+        raw = "Versions/" + ("Current" if layout == "current-version" else version) + "/PrivateHeaders"
+        nodes = (*directories, alias, current)
+        states = {path: SimpleNamespace(st_dev=7, st_ino=100 + index,
+            st_mode=(stat.S_IFLNK | 0o777) if path in (alias, current) else stat.S_IFDIR | 0o755,
+            st_uid=501, st_gid=20, st_size=len(raw if path == alias else version) if path in (alias, current) else 64,
+            st_mtime_ns=111, st_ctime_ns=222, st_atime_ns=333)
+            for index, path in enumerate(nodes)}
+        rig = SimpleNamespace(controller=controller, paths=paths, root=root, alias=alias, current=current,
+            selected=selected, leaf=selected / "PrivateHeaders", directories=directories, states=states,
+            absent={selected / "PrivateHeaders"},
+            links={alias: raw, current: version}, platform="macos", roles=(("python313", root),),
+            failed=alias, original=FileNotFoundError(2, "private-provider-error", "/private/provider-error"),
+            extra_aliases=[], extra_errors={},
+            clock=10.0, padding=0, duplicate=False, probes=[], counts={}, changes={}, fail_at={}, expire_after=None,
+            stat_count=0, continued=False, existing=None, tool_reads=[])
+        ordinary = SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | 0o755)
+        forbidden = Mock(side_effect=AssertionError("no provider mutation, discovery, descriptor or native effect"))
+        rig.forbidden = forbidden
+        rig.session = SimpleNamespace(uid=60001, gid=60001, failure=None, tool_prefixes=(root,), run=Mock(return_value=
+            native_capture_fixture(stdout=b"ruby 3.3.12 (2026-09-08 fixture) [arm64-darwin]\n")))
+
+        def walk(prefix, **options):
+            self.assertEqual(prefix, root)
+            self.assertEqual(set(options), {"followlinks", "onerror"})
+            self.assertIs(options["followlinks"], False)
+            for _ in range(rig.padding):
+                yield str(root), [], []
+            yield str(root), [], []
+            aliases = (rig.failed, *rig.extra_aliases)
+            if rig.duplicate:
+                aliases += (rig.failed if rig.duplicate is True else rig.duplicate,)
+            for index, entry in enumerate(aliases):
+                yield str(entry.parent), [], [entry.name] + (["continued-runtime"] if index == len(aliases) - 1 else [])
+
+        def stat_node(path, *args, **options):
+            self.assertEqual((args, options), ((), {}))
+            rig.stat_count += 1
+            if path == root:
+                return ordinary  # Constant-size padding does not construct extra path inventories.
+            aliases = (rig.failed, *rig.extra_aliases)
+            self.assertIn(path, (*aliases, *(entry.parent for entry in aliases),
+                                 *(entry.parent / "continued-runtime" for entry in aliases)))
+            if path == rig.failed:
+                if rig.existing is None:
+                    raise rig.original
+                return rig.existing
+            if path in rig.extra_errors:
+                raise rig.extra_errors[path]
+            if path.name == "continued-runtime":
+                rig.continued = True
+            return ordinary
+
+        def probe(kind, path):
+            self.assertIn(path, (*rig.states, *rig.absent))
+            rig.probes.append((kind, path))
+            number = len(rig.probes)
+            count = rig.counts[(kind, path)] = rig.counts.get((kind, path), 0) + 1
+            if rig.expire_after == number:
+                rig.clock = 20.0
+            if number in rig.fail_at:
+                raise rig.fail_at[number]
+            key = (kind, path, count)
+            if key in rig.changes:
+                value = rig.changes[key]
+            elif kind == "readlink":
+                self.assertIn(path, rig.links)
+                value = rig.links[path]
+            elif path in rig.absent:
+                value = FileNotFoundError(2, "private absent header leaf")
+            else:
+                value = rig.states[path]
+            if isinstance(value, BaseException):
+                raise value
+            return value
+
+        def tool_read(path, **options):
+            self.assertIn(path, (paths.python, paths.ruby))
+            rig.tool_reads.append(path)
+            return b"synthetic provider executable bytes; never executed"
+
+        @contextmanager
+        def scope():
+            fake_os = SimpleNamespace(walk=walk, readlink=lambda path: probe("readlink", path),
+                uname=lambda: ("Darwin", "private-provider-host", "26.6.2", "fixture", "arm64"),
+                **{name: forbidden for name in ("open", "close", "chmod", "chown", "fchmod", "fchown",
+                    "mkdir", "unlink", "remove", "rename", "replace", "symlink", "fork", "execve")})
+            with patch.object(controller, "os", fake_os), \
+                    patch.object(controller, "time", SimpleNamespace(monotonic=lambda: rig.clock)), \
+                    patch.object(controller, "read_regular", side_effect=tool_read), \
+                    patch.object(Path, "stat", stat_node), \
+                    patch.object(Path, "lstat", lambda path: probe("lstat", path)), \
+                    patch.object(Path, "readlink", forbidden), patch.object(Path, "resolve", forbidden), \
+                    patch.object(Path, "open", forbidden):
+                try:
+                    yield
+                finally:
+                    forbidden.assert_not_called()
+
+        rig.scope = scope
+        rig.run = lambda: controller.validate_tool_permissions((root,), rig.session, deadline=20.0,
+                                                              roles=rig.roles, platform=rig.platform)
+        return rig
+
+    def _provider_alias_pair_fixture(self, layout="current-version"):
+        rig = self._provider_alias_fixture(layout)
+        other = self._provider_alias_fixture(layout, framework_name="Tcl.framework")
+        # Merge only inert namespace data. Both aliases use the FIRST caller's
+        # actual walk, counter, clock, metadata double and original Session double.
+        rig.states.update(other.states)
+        rig.links.update(other.links)
+        rig.absent.update(other.absent)
+        rig.extra_aliases.append(other.alias)
+        rig.extra_errors[other.alias] = other.original
+        return rig, other
+
+    def test_optional_provider_header_alias_proof_records_both_layouts_and_continues_inventory(self):
+        for framework_name, layout, inspections in ((framework, layout, count)
+                for framework in ("Tk.framework", "Tcl.framework")
+                for layout, count in (("direct-version", 16), ("current-version", 20))):
+            with self.subTest(framework=framework_name, layout=layout):
+                rig = self._provider_alias_fixture(layout, framework_name=framework_name)
+                # Access time changes are not directory/link identity drift.
+                rig.changes["lstat", rig.alias, 2] = SimpleNamespace(**{**vars(rig.states[rig.alias]), "st_atime_ns": 999})
+                with rig.scope():
+                    evidence = rig.controller.tool_evidence(rig.paths, rig.session, "macos", deadline=20.0)
+                expected = [{"runtime_role": "python313", "relative_components": ["Frameworks", framework_name, "PrivateHeaders"],
+                             "layout": layout, "state": "protected-absent-optional-header"}]
+                self.assertEqual(evidence["protected_absent_optional_headers"], expected)
+                one_pass = [("lstat", path) for path in rig.directories[:4]] + [("lstat", rig.alias), ("readlink", rig.alias)]
+                if layout == "current-version":
+                    one_pass += [("lstat", rig.current), ("readlink", rig.current)]
+                one_pass += [("lstat", rig.selected), ("lstat", rig.leaf)]
+                self.assertEqual(rig.probes, one_pass * 2)
+                self.assertEqual(len(rig.probes), inspections)
+                self.assertEqual(rig.stat_count, 4)
+                self.assertTrue(rig.continued)
+                self.assertEqual(rig.tool_reads, [rig.paths.python, rig.paths.ruby])
+                rig.session.run.assert_called_once()
+                for hidden in (str(rig.root), rig.selected.name, "private-provider-error", "private-provider-host"):
+                    self.assertNotIn(hidden, json.dumps(evidence))
+
+        rig, other = self._provider_alias_pair_fixture()
+        with rig.scope():
+            evidence = rig.controller.tool_evidence(rig.paths, rig.session, "macos", deadline=20.0)
+        self.assertEqual(evidence["protected_absent_optional_headers"], [
+            {"runtime_role": "python313", "relative_components": ["Frameworks", framework, "PrivateHeaders"],
+             "layout": "current-version", "state": "protected-absent-optional-header"}
+            for framework in ("Tk.framework", "Tcl.framework")])
+        self.assertEqual(len(rig.probes), 40)
+        for entry in (rig.alias, other.alias):
+            self.assertEqual(rig.counts["readlink", entry], 2)
+        self.assertEqual(rig.stat_count, 6)
+        self.assertTrue(rig.continued)
+        rig.session.run.assert_called_once()
+        for hidden in (str(rig.root), rig.selected.name, "private-provider-error", "private-provider-host"):
+            self.assertNotIn(hidden, json.dumps(evidence))
+
+    def test_optional_provider_header_alias_entry_and_existing_targets_keep_original_rejections(self):
+        cases = ("linux", "unknown-platform", "ruby", "jdk", "unbound", "ambiguous", "other-path", "other-errno", "missing-ordinary")
+        for case in cases:
+            with self.subTest(entry=case):
+                rig = self._provider_alias_fixture()
+                if case in {"linux", "unknown-platform"}:
+                    rig.platform = "linux" if case == "linux" else ""
+                elif case in {"ruby", "jdk", "unbound", "ambiguous"}:
+                    rig.roles = () if case == "unbound" else ((case, rig.root),) if case != "ambiguous" else rig.roles * 2
+                elif case == "other-path":
+                    rig.failed = rig.root / "Frameworks/Other.framework/PrivateHeaders"
+                elif case == "other-errno":
+                    rig.original = PermissionError(13, "private provider stat denied")
+                else:
+                    rig.changes["lstat", rig.alias, 1] = FileNotFoundError(2, "private vanished ordinary entry")
+                with rig.scope(), self.assertRaises(OSError) as caught:
+                    rig.run()
+                self.assertIs(caught.exception, rig.original)
+                self.assertEqual(len(rig.probes), 5 if case == "missing-ordinary" else 0)
+                self.assertFalse(rig.continued)
+                self.assertEqual(rig.original._mrk_provider_stat[2], 3)
+
+        for case in ("protected", "subject-owner", "world-write", "subject-group-write"):
+            with self.subTest(existing_target=case):
+                rig = self._provider_alias_fixture()
+                rig.existing = SimpleNamespace(st_uid=rig.session.uid if case == "subject-owner" else 501,
+                    st_gid=rig.session.gid if case == "subject-group-write" else 20,
+                    st_mode=stat.S_IFREG | (0o666 if case == "world-write" else 0o660 if case == "subject-group-write" else 0o644))
+                with rig.scope():
+                    if case == "protected":
+                        self.assertEqual(rig.run(), [])
+                    else:
+                        with self.assertRaises(rig.controller.VerificationError) as caught:
+                            rig.run()
+                        self.assertEqual(caught.exception.code, "PROVIDER_RUNTIME_SUBJECT_WRITABLE")
+                self.assertEqual(rig.probes, [])
+                self.assertEqual(rig.continued, case == "protected")
+
+        for framework in ("Tk.framework", "Tcl.framework"):
+            with self.subTest(duplicate_after_coexistence=framework):
+                rig, other = self._provider_alias_pair_fixture()
+                rig.duplicate = rig.alias if framework == "Tk.framework" else other.alias
+                with rig.scope(), self.assertRaises(FileNotFoundError) as caught:
+                    rig.run()
+                self.assertIs(caught.exception, rig.original if framework == "Tk.framework" else other.original)
+                self.assertEqual(len(rig.probes), 40)  # Exactly one proof for each (role, alias).
+                self.assertEqual(rig.counts["readlink", rig.duplicate], 2)
+                self.assertFalse(rig.continued)
+
+        class NoPathDerivation:
+            def __truediv__(self, _part):
+                raise AssertionError("invalid framework choice must precede path derivation")
+
+        class NonPlainString(str):
+            pass
+
+        rig = self._provider_alias_fixture()
+        for choice in ("Other.framework", "../Tk.framework", "Tk.framework/..", None, 1,
+                       b"Tk.framework", ["Tcl.framework"], NonPlainString("Tk.framework")):
+            with self.subTest(invalid_helper_choice=repr(choice)), rig.scope():
+                self.assertIsNone(rig.controller.protected_optional_header_alias(NoPathDerivation(), rig.session,
+                                  framework_name=choice, inspect=rig.forbidden))
+        self.assertEqual(rig.probes, [])
+
+    def test_optional_provider_header_alias_requires_protected_directories_and_raw_internal_links(self):
+        rig = self._provider_alias_fixture()
+        mutations = [(path, {"st_mode": stat.S_IFDIR | 0o777}) for path in rig.directories]
+        mutations += [(rig.alias, {"st_uid": rig.session.uid}), (rig.current, {"st_uid": rig.session.uid}),
+            (rig.alias, {"st_mode": stat.S_IFREG | 0o644}), (rig.current, {"st_mode": stat.S_IFDIR | 0o755}),
+            (rig.selected, {"st_mode": stat.S_IFLNK | 0o777}),
+            (rig.selected, {"st_uid": rig.session.uid}),
+            (rig.selected, {"st_gid": rig.session.gid, "st_mode": stat.S_IFDIR | 0o770}),
+            (rig.alias, {"st_size": 129})]
+        for path, changes in mutations:
+            with self.subTest(node=path.relative_to(rig.root).as_posix(), changes=changes):
+                current = self._provider_alias_fixture()
+                current.states[path] = SimpleNamespace(**{**vars(current.states[path]), **changes})
+                with current.scope(), self.assertRaises(FileNotFoundError) as caught:
+                    current.run()
+                self.assertIs(caught.exception, current.original)
+                self.assertFalse(current.continued)
+
+        targets = ("/Versions/Current/PrivateHeaders", "Versions/../PrivateHeaders", "Versions/./PrivateHeaders",
+            "Versions//Current/PrivateHeaders", "Versions/Current/./PrivateHeaders", "Versions/Current/PrivateHeaders/",
+            "Versions/Current/PrivateHeaders\n", "Versions/" + "v" * 65 + "/PrivateHeaders", b"Versions/v/PrivateHeaders")
+        current_targets = ("../v", "/v", "./v", "v//tail", "v/alias", "Current", ".", "..", "v\n", "v" * 65)
+        for which, values in (("alias", targets), ("current", current_targets)):
+            for raw in values:
+                with self.subTest(link=which, raw=raw):
+                    current = self._provider_alias_fixture()
+                    current.links[getattr(current, which)] = raw
+                    with current.scope(), self.assertRaises(FileNotFoundError) as caught:
+                        current.run()
+                    self.assertIs(caught.exception, current.original)
+                    self.assertFalse(current.continued)
+
+    def test_optional_provider_header_alias_rechecks_identity_values_and_final_absence(self):
+        rig = self._provider_alias_fixture()
+        cases = [("lstat", path, 2, {"st_ino": rig.states[path].st_ino + 1})
+                 for path in (*rig.directories, rig.alias, rig.current)]
+        cases += [("lstat", rig.alias, 2, {field: getattr(rig.states[rig.alias], field) + delta})
+                  for field, delta in (("st_dev", 1), ("st_uid", 1), ("st_gid", 1), ("st_mode", -1),
+                                       ("st_size", 1), ("st_mtime_ns", 1), ("st_ctime_ns", 1))]
+        # Both spellings are individually valid, but changed values cannot be adopted.
+        cases += [("readlink", rig.alias, 2, "Versions/" + rig.selected.name + "/PrivateHeaders"),
+                  ("readlink", rig.current, 2, "different-version")]
+        for kind, path, occurrence, change in cases:
+            with self.subTest(observation=(kind, path.relative_to(rig.root).as_posix()), change=change):
+                current = self._provider_alias_fixture()
+                if kind == "readlink" and path == current.current:
+                    other = current.selected.parent / "different-version"
+                    # Both target observations remain otherwise identical and
+                    # protected; raw Current value drift alone must veto adoption.
+                    current.states[other] = SimpleNamespace(**vars(current.states[current.selected]))
+                    current.absent.add(other / "PrivateHeaders")
+                current.changes[kind, path, occurrence] = (SimpleNamespace(**{**vars(current.states[path]), **change})
+                                                          if type(change) is dict else change)
+                with current.scope(), self.assertRaises(FileNotFoundError) as caught:
+                    current.run()
+                self.assertIs(caught.exception, current.original)
+                self.assertEqual(current.original._mrk_provider_stat[2], 3)
+                self.assertFalse(current.continued)
+
+        for occurrence, kind in ((1, stat.S_IFLNK), (1, stat.S_IFREG), (2, stat.S_IFDIR)):
+            with self.subTest(absence_pass=occurrence, kind=kind):
+                current = self._provider_alias_fixture()
+                current.changes["lstat", current.leaf, occurrence] = SimpleNamespace(st_mode=kind | 0o755)
+                with current.scope(), self.assertRaises(FileNotFoundError) as caught:
+                    current.run()
+                self.assertIs(caught.exception, current.original)
+                self.assertFalse(current.continued)
+                self.assertEqual(len(current.probes), 10 * occurrence)
+
+    def test_optional_provider_header_alias_budget_deadline_and_errors_never_authorize_continuation(self):
+        # Exercise the actual global bound with constant-size inert state, not a
+        # smaller replacement limit or a mocked inspector that authorizes itself.
+        for padding, probes, completed in ((99980, 16, True), (99981, 16, False), (99982, 15, False)):
+            with self.subTest(inventory_padding=padding):
+                rig = self._provider_alias_fixture("direct-version")
+                rig.padding = padding
+                with rig.scope():
+                    if completed:
+                        self.assertEqual(len(rig.run()), 1)
+                    else:
+                        with self.assertRaises(rig.controller.VerificationError) as caught:
+                            rig.run()
+                        self.assertEqual(caught.exception.code, "PROVIDER_RUNTIME_INVENTORY_BOUND")
+                self.assertEqual(len(rig.probes), probes)
+                self.assertEqual(rig.continued, completed)
+                self.assertEqual(rig.original._mrk_provider_stat[2], padding + 3)
+
+        for failure, attempts in (("budget", 31), ("first-second-proof-expiry", 17), ("final-second-proof-expiry", 32)):
+            with self.subTest(shared_second_proof_failure=failure):
+                rig, other = self._provider_alias_pair_fixture("direct-version")
+                if failure == "budget":
+                    rig.padding = 99964  # The second proof's final attempt would be entry100001.
+                else:
+                    rig.expire_after = attempts
+                with rig.scope(), self.assertRaises(rig.controller.VerificationError) as caught:
+                    rig.run()
+                self.assertEqual(caught.exception.code, "PROVIDER_RUNTIME_INVENTORY_BOUND" if failure == "budget"
+                                 else "AGGREGATE_DEADLINE")
+                self.assertEqual(len(rig.probes), attempts)
+                self.assertEqual(rig.counts["readlink", rig.alias], 2)  # The first proof genuinely completed.
+                self.assertEqual(rig.original._mrk_provider_stat[2], rig.padding + 3)
+                self.assertEqual(other.original._mrk_provider_stat[2], rig.padding + 21)
+                self.assertFalse(rig.continued)
+
+        cases = ("initial-expiry", "first-expiry", "final-expiry", "first-io", "final-io", "io-and-expiry", "cancel", "unexpected")
+        for case in cases:
+            with self.subTest(failure=case):
+                rig = self._provider_alias_fixture()
+                error = (KeyboardInterrupt("synthetic cancellation") if case == "cancel" else
+                         RuntimeError("synthetic unexpected failure") if case == "unexpected" else OSError(5, "private proof I/O"))
+                if case == "initial-expiry":
+                    rig.clock = 20.0
+                if case in {"first-expiry", "final-expiry", "io-and-expiry"}:
+                    rig.expire_after = 1 if case == "first-expiry" else 20
+                if case in {"first-io", "final-io", "io-and-expiry", "cancel", "unexpected"}:
+                    rig.fail_at[1 if case == "first-io" else 20] = error
+                with rig.scope(), self.assertRaises(BaseException) as caught:
+                    rig.run()
+                if "expiry" in case:
+                    self.assertIsInstance(caught.exception, rig.controller.VerificationError)
+                    self.assertEqual(caught.exception.code, "AGGREGATE_DEADLINE")
+                else:
+                    self.assertIs(caught.exception, rig.original if case in {"first-io", "final-io"} else error)
+                self.assertEqual(len(rig.probes), 0 if case == "initial-expiry" else 1 if case in {"first-expiry", "first-io"} else 20)
+                self.assertFalse(rig.continued)
+
+        class SessionAlarm(RuntimeError):
+            """Inert shape of the owner's latched alarm, not its native module."""
+
+        for kind in (KeyboardInterrupt, SystemExit, RuntimeError, "deadline", "budget", SessionAlarm):
+            with self.subTest(diagnostic_assignment=kind):
+                rig = self._provider_alias_fixture()
+                error = (rig.controller.VerificationError("AGGREGATE_DEADLINE" if kind == "deadline"
+                                                         else "PROVIDER_RUNTIME_INVENTORY_BOUND") if kind in {"deadline", "budget"}
+                         else kind("synthetic diagnostic after-effect"))
+
+                class InterruptedDiagnostic(FileNotFoundError):
+                    def __setattr__(self, name, value):
+                        super().__setattr__(name, value)
+                        if name == "_mrk_provider_stat":
+                            if kind is SessionAlarm:
+                                rig.session.failure = "original aggregate deadline expired"
+                            raise error
+
+                rig.original = InterruptedDiagnostic(2, "private initiating stat")
+                with rig.scope(), self.assertRaises(BaseException) as caught:
+                    rig.run()
+                self.assertIs(caught.exception, rig.original if kind is RuntimeError else error)
+                self.assertEqual(rig.probes, [])
+                self.assertFalse(rig.continued)
+
+    def test_provider_stat_failure_keeps_exact_error_single_operation_and_scoped_diagnostics(self):
+        controller = controller_module()
+        private = "private-diagnostic-fixture-not-for-publication"
+        for platform, wanted_role in (("macos", "python313"), ("linux", "jdk")):
+            for diagnostic_fault in (False, True):
+                with self.subTest(platform=platform, diagnostic_fault=diagnostic_fault):
+                    paths = fixture_paths(controller)
+                    if platform == "macos":
+                        paths = dataclasses.replace(paths, java_home=None)
+                    roles = [("python", paths.python.parent.parent), ("ruby", paths.ruby.parent.parent)]
+                    if paths.java_home is not None:
+                        roles.append(("jdk", paths.java_home))
+                    roles += [(role, pair[1]) for role, pair in zip(
+                        ("python312", "python313", "python314"), paths.compatibility_runtimes)]
+                    prefixes = tuple(prefix for _, prefix in roles)
+                    index = next(i for i, (role, _) in enumerate(roles) if role == wanted_role)
+                    failed = prefixes[index] / "missing-target"
+                    original = FileNotFoundError(2, private, "/private/" + private)
+                    observed = []
+
+                    def walk(root, **kwargs):
+                        self.assertIs(kwargs["followlinks"], False)
+                        return iter([(str(root), [], ["missing-target"] if root == prefixes[index] else [])])
+
+                    def stat_node(path, *args, **kwargs):
+                        observed.append(path)
+                        if path == failed:
+                            raise original
+                        return SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | 0o755)
+
+                    session = SimpleNamespace(uid=60001, gid=60001, tool_prefixes=prefixes,
+                                              run=Mock(side_effect=AssertionError("no tool launch after failed inventory")))
+                    fault = (patch.object(Path, "relative_to", side_effect=RuntimeError("synthetic diagnostic failure"))
+                             if diagnostic_fault else nullcontext())
+                    with patch.object(controller.os, "walk", side_effect=walk), \
+                            patch.object(Path, "stat", stat_node), \
+                            patch.object(Path, "lstat", side_effect=AssertionError("no metadata retry")), \
+                            patch.object(Path, "readlink", side_effect=AssertionError("no link reread")), \
+                            patch.object(controller, "read_regular", side_effect=AssertionError("no later tool read")), \
+                            patch.object(controller, "time", SimpleNamespace(monotonic=lambda: 10.0)), fault:
+                        try:
+                            controller.tool_evidence(paths, session, platform, deadline=20.0)
+                        except FileNotFoundError as caught:
+                            self.assertIs(caught, original)
+                            details = controller.error_details(caught)
+                        else:
+                            self.fail("missing provider target must still reject")
+                    self.assertEqual(observed, [*prefixes[:index + 1], failed])
+                    session.run.assert_not_called()
+                    self.assertEqual(details["errno"], 2)
+                    self.assertEqual(details["exception"], "FileNotFoundError")
+                    self.assertEqual(details["controller_location"][0], "verify_ci.py")
+                    if diagnostic_fault:
+                        self.assertNotIn("provider_stat", details)
+                    else:
+                        self.assertEqual(details["provider_stat"], {
+                            "operation": "provider-stat", "runtime_role": wanted_role,
+                            "prefix_index": index, "node_index": index + 2,
+                            "relative_components": ["missing-target"],
+                        })
+                    for hidden in (private, "/private/", str(prefixes[index]), "synthetic diagnostic failure"):
+                        self.assertNotIn(hidden, json.dumps(details))
+
+    def test_provider_diagnostics_omit_unsafe_components_and_untrusted_traceback_paths(self):
+        controller = controller_module()
+        original = FileNotFoundError(2, "private-message", "/private/not-for-reporting")
+        frames = [SimpleNamespace(filename=controller.__file__, lineno=120),
+                  SimpleNamespace(filename="/private/foreign/verify_ci.py", lineno=900)]
+        unsafe = (("unsafe\ncomponent",), ("x" * 129,), tuple("part" for _ in range(33)),
+                  tuple("x" * 128 for _ in range(9)), ("..",), ("/absolute",))
+        for components in unsafe:
+            with self.subTest(components_shape=(len(components), len(components[0]))):
+                original._mrk_provider_stat = ("python314", 4, 27, components)
+                with patch.object(controller.traceback, "extract_tb", return_value=frames):
+                    details = controller.error_details(original)
+                self.assertEqual(details["provider_stat"], {
+                    "operation": "provider-stat", "runtime_role": "python314", "prefix_index": 4,
+                    "node_index": 27, "relative_components_omitted": True,
+                })
+                self.assertEqual(details["controller_location"], ["verify_ci.py", 120])
+                self.assertEqual(details["location"], ["verify_ci.py", 900])
+                self.assertNotIn("/private/", json.dumps(details))
+                self.assertNotIn("private-message", json.dumps(details))
+        original._mrk_provider_stat = ("private-invalid-role", True, 27, ("safe",))
+        with patch.object(controller.traceback, "extract_tb", return_value=frames[1:]):
+            details = controller.error_details(original)
+        self.assertNotIn("controller_location", details)
+        self.assertNotIn("provider_stat", details)
+
     def test_failed_ruby_diagnostics_keep_only_source_known_ids_and_locations(self):
         controller = controller_module()
         paths = fixture_paths(controller)
@@ -240,7 +1938,10 @@ class CICoordinatorResultTests(unittest.TestCase):
         paths = fixture_paths(controller)
         suites = {
             "ruby-support": ("test_fastlane_support.rb", {"FastlaneReleaseSupportTest"}, 12),
-            "ruby-native-capture": ("test_native_upload_validation.rb", {"NativeUploadValidationTest"}, 13),
+            "ruby-native-spawn": ("test_native_process_spawn.rb", {"NativeProcessSpawnTests"}, 52),
+            "ruby-native-owner": ("test_native_upload_process.rb",
+                                  {"NativeUploadProtocolTest", "NativeUploadTaskSlotTest", "NativeUploadRoleTest"}, 52),
+            "ruby-native-capture": ("test_native_upload_validation.rb", {"NativeUploadValidationTest"}, 21),
             "ruby-native-signal-observation": ("test_native_signal_observation.rb", {"NativeSignalObservationTest"}, 1),
             "ruby-play_store": ("test_play_store.rb", {"PreservingSupplyUploaderTests"}, 35),
             "ruby-play_lanes": ("test_play_lanes.rb", {"PlayReleaseLanesTest", "BoundedPlayImageTest"}, 46),
@@ -249,9 +1950,12 @@ class CICoordinatorResultTests(unittest.TestCase):
             "ruby-apple_production": ("test_apple_production.rb", {"AppleProductionTest", "AppleCreateRetryContractTest"}, 47),
             "ruby-apple_production_lane": ("test_apple_production_lane.rb", {"AppleProductionLaneTest"}, 2),
             "ruby-apple_asset_upload": ("test_apple_asset_upload.rb", {"AppleAssetUploadTest"}, 8),
-            "ruby-ios_upload_validation": ("test_ios_upload_validation.rb", {"IosUploadValidationTest"}, 26),
-            "ruby-android_upload_validation": ("test_android_upload_validation.rb", {"AndroidUploadValidationTest"}, 26),
+            "ruby-ios_upload_validation": ("test_ios_upload_validation.rb", {"IosUploadValidationTest"}, 32),
+            "ruby-android_upload_validation": ("test_android_upload_validation.rb", {"AndroidUploadValidationTest"}, 32),
             "ruby-workflow-yaml": ("test_workflow_yaml.rb", {"WorkflowYamlStructureTest"}, 1),
+            "ruby-packaged-capture-source": ("test_installed_ruby_capture.rb", {"PackagedRubyCaptureTest"}, 6),
+            "ruby-packaged-capture-wheel": ("test_installed_ruby_capture.rb",
+                                              {"PackagedRubyCaptureTest", "InstalledRubyCaptureMissingHelperTest"}, 8),
         }
         shared_literal = {
             "test_deadline_terminates_validator_without_authorizing_upload",
@@ -261,10 +1965,17 @@ class CICoordinatorResultTests(unittest.TestCase):
             "test_fixture_detects_leader_only_cleanup_and_missing_deadline",
             "test_fixture_rejects_an_immediate_timeout_even_when_the_leader_is_killed",
             "test_slow_cleanup_cannot_supply_a_positive_deadline_wait",
-            "test_driver_termination_stops_startup_and_orphan_via_control_eof",
+            "test_driver_loss_during_startup_retains_unknown_native_custody",
+            "test_driver_loss_with_inherited_pipes_retains_unknown_native_custody",
             "test_process_observation_rejects_errors_malformed_output_and_foreign_groups",
             "test_setup_primary_survives_cleanup_failure_and_real_queued_cancellation",
             "test_indeterminate_observations_never_prove_readiness_or_renew_native_death_budget",
+            "test_process_ownership_unknown_creation_through_real_capture",
+            "test_process_ownership_unknown_wait_through_real_capture",
+            "test_process_ownership_echild_after_original_wait_through_real_capture",
+            "test_process_ownership_unknown_creation_through_real_run",
+            "test_process_ownership_unknown_wait_through_real_run",
+            "test_process_ownership_echild_after_original_wait_through_real_run",
         }
         shared = (ROOT / "tests/workflow/upload_process_fixture.rb").read_text().split("  module Contracts\n")
         self.assertEqual(len(shared), 2)
@@ -272,7 +1983,7 @@ class CICoordinatorResultTests(unittest.TestCase):
                           if line.startswith("    def test_")}, shared_literal)
         shared_ids = shared_literal | {
             "test_process_ownership_" + family + "_through_both_real_fixture_callers"
-            for family in ("async", "signals", "policies", "unknown")
+            for family in ("async", "signals", "policies")
         }
         gates = {step.id: step for step in controller.catalog(paths, "linux", deadline=20.0)
                  if step.parser == "minitest"}
@@ -295,6 +2006,13 @@ class CICoordinatorResultTests(unittest.TestCase):
                         ids.append(owner + "#" + name)
                     elif owner is not None and line == "  include UploadProcessFixture::Contracts":
                         ids.extend(owner + "#" + name for name in shared_ids)
+                if gate == "ruby-packaged-capture-source":
+                    # Both classes inhabit the fixed file, but the literal source
+                    # CLI selects only the common class; missing-helper mutations
+                    # belong exclusively to the separately installed wheel gate.
+                    self.assertEqual(classes, {"PackagedRubyCaptureTest", "InstalledRubyCaptureMissingHelperTest"})
+                    classes = {owner for owner in classes if owner == "PackagedRubyCaptureTest"}
+                    ids = [identifier for identifier in ids if identifier.partition("#")[0] in classes]
                 expected = tuple(sorted(ids))
                 self.assertEqual(classes, expected_classes)
                 self.assertEqual(len(expected), count)
@@ -315,6 +2033,9 @@ class CICoordinatorResultTests(unittest.TestCase):
                 wrong_method = expected[0].split("#")[0] + "#test_unknown_fixture_contract"
                 wrong_class = "WrongFixtureSuite#" + expected[0].split("#")[1]
                 mutations = [(wrong_method, *expected[1:]), (wrong_class, *expected[1:])]
+                if gate == "ruby-packaged-capture-source":
+                    mutations.append(("InstalledRubyCaptureMissingHelperTest#test_missing_installed_spawn_helper_refuses_fallback",
+                                      *expected[1:]))
                 if count > 1:
                     mutations.append((expected[1], *expected[1:]))  # Same count, duplicate ID.
                 for mutated in mutations:
