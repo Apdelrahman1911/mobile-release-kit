@@ -378,6 +378,66 @@ OWNERSHIP_FAILURE_ERROR_KINDS = {
     }),
     "os-error": frozenset({"echild", "other"}),
 }
+NATIVE_SIGNAL_FAILURE_PREFIX = "MRK_NATIVE_SIGNAL_FAILURE="
+NATIVE_SIGNAL_FAILURE_CALLBACK = (
+    "NativeSignalObservationTest#test_native_first_close_and_post_reap_signals_with_safe_veto_controls"
+)
+NATIVE_SIGNAL_FAILURE_MAX_BYTES = 4096
+NATIVE_SIGNAL_FAILURE_FIELDS = ("schema", "mode", "guard", "result", "rows")
+NATIVE_SIGNAL_FAILURE_MODES = (
+    "native-setup-interrupt", "native-setup-system-exit", "native-setup-io-error", "native-setup-post-reap-cancel",
+)
+NATIVE_SIGNAL_FAILURE_GUARD_FIELDS = (
+    "caseMatches", "kindMatches", "sourceMatches", "failuresEmpty", "hooksRestored",
+    "baseDriverReturnZero", "driverExitStatusZero",
+)
+NATIVE_SIGNAL_FAILURE_RESULT_FIELDS = ("kind", "mode", "driverExitStatus")
+NATIVE_SIGNAL_FAILURE_RESULT_KINDS = tuple(kind for kind in ADAPTER_FAILURE_RESULT_KINDS if kind != "invalid")
+NATIVE_SIGNAL_FAILURE_ROW_FIELDS = (
+    "role", "state", "mode", "identities", "returnCode", "checks", "failuresState",
+    "failedCheckMask", "causeMasks", "refusalMasks", "unknownFailure",
+)
+NATIVE_SIGNAL_FAILURE_IDENTITY_FIELDS = (
+    "kindMatches", "roleMatches", "helperRoleMatches", "sourceMatches", "helperCopyMatches",
+)
+NATIVE_SIGNAL_FAILURE_CHECK_FIELDS = (
+    "hooksRestored", "originalWaitBound", "creatorJoined", "taskJoinsObserved", "actualOriginalPrimary",
+    "actualCustodianReceiptBound", "actualNativeDescriptorsClosed",
+)
+NATIVE_SIGNAL_FAILURE_ROLES = ("driver", "custodian", "keeper")
+NATIVE_SIGNAL_FAILURE_STATES = ("present", "missing", "invalid")
+NATIVE_SIGNAL_FAILURE_FAILURES_STATES = ("empty", "nonempty", "missing", "invalid")
+# Bit0 first. Fixed names preserve finite failure attribution without exposing
+# the underlying private proof, exception text, request or process identities.
+NATIVE_SIGNAL_FAILURE_CHECK_CODES = (
+    "spawn-unowned", "keeper-wait-before-retire", "fixture-not-reaped", "source-changed", "helper-copy-changed",
+    "helper-owner", "helper-creator", "helper-create-count", "helper-wait", "helper-task-joins",
+    "helper-acquisitions", "helper-null-lifetime", "helper-close", "custodian-group-lifetime",
+    "custodian-retire-before-wait", "base-driver", "native-primary", "io-redaction", "native-original",
+    "system-exit-status", "native-finality", "ready", "first-close-entered", "first-close-native",
+    "original-close-complete", "watchdog-started", "dead-before-fallback", "descriptors-closed",
+    "watchdog-joined", "tasks-joined", "injectors-joined", "handlers-restored", "registry-inactive",
+    "first-close-count", "fallback-or-pending", "custodian-proof", "keeper-proof", "failed-final-exit2",
+    "custodian-return", "keeper-return", "validator-kill", "group-finality", "reserved-group-kill",
+    "custodian-zero", "post-reap-repeat", "unexpected-self-signal", "hook-changed", "hook-unrestored",
+    "entry-hook-changed", "entry-hook-unrestored",
+)
+NATIVE_SIGNAL_FAILURE_STAGES = (
+    "request-observation", "signal-syscall", "observation-body", "observation-finalization", "driver-proof",
+    "helper-proof", "parent-proof-publication", "hook", "entry-hook",
+)
+NATIVE_SIGNAL_FAILURE_CATEGORIES = (
+    "interrupt", "signal", "system-exit", "fixture-error", "contract-error", "native-error",
+    "native-lifecycle-error", "native-protocol-error", "native-spawn-error", "io-error", "os-error",
+    "json-parser-error", "key-error", "no-method-error", "type-error", "argument-error", "runtime-error",
+    "standard-error", "exception", "other",
+)
+NATIVE_SIGNAL_FAILURE_ROUTES = (
+    "custodian-group", "keeper-self-group", "custodian-direct-keeper", "fixture", "self", "unrecognized",
+)
+NATIVE_SIGNAL_FAILURE_REFUSALS = (
+    "shape", "post-reap", "post-retirement", "unknown", "source", "owner", "target", "signal", "retired",
+)
 PYTHON_POISON_PARTITIONS = (
     "poison-wait-loss",
     "poison-startup-error",
@@ -1692,6 +1752,83 @@ def ownership_failure(raw: bytes, *, deadline: float | None = None) -> dict | No
             check_clock(deadline)
 
 
+def native_signal_failure(raw: bytes, *, deadline: float | None = None) -> dict | None:
+    """Finite original proof-rejection facts, never a native success receipt."""
+    def choice(value, allowed):
+        return type(value) is str and value in allowed
+
+    def return_code(value):
+        return type(value) is int and 0 <= value <= 255 or choice(value, ("missing",))
+
+    def observations(value, fields, not_applicable=()):
+        return (type(value) is dict and tuple(value) == fields
+                and all(choice(item, ("not-applicable",)) if name in not_applicable
+                        else type(item) is bool or choice(item, ("missing",))
+                        for name, item in value.items()))
+
+    def mask(value, bits):
+        return type(value) is int and 0 <= value < 1 << bits
+
+    try:
+        data = _fixture_failure_record(raw, NATIVE_SIGNAL_FAILURE_PREFIX, NATIVE_SIGNAL_FAILURE_MAX_BYTES,
+                                       deadline=deadline, canonical_fields=NATIVE_SIGNAL_FAILURE_FIELDS)
+        if (type(data) is not dict or type(data["schema"]) is not int or data["schema"] != 1
+                or not choice(data["mode"], NATIVE_SIGNAL_FAILURE_MODES)
+                or not observations(data["guard"], NATIVE_SIGNAL_FAILURE_GUARD_FIELDS)
+                or all(value is True for value in data["guard"].values())):
+            return None
+        result = data["result"]
+        modes = (*NATIVE_SIGNAL_FAILURE_MODES, "other", "missing")
+        if (type(result) is not dict or tuple(result) != NATIVE_SIGNAL_FAILURE_RESULT_FIELDS
+                or not choice(result["kind"], NATIVE_SIGNAL_FAILURE_RESULT_KINDS)
+                or not choice(result["mode"], modes) or not return_code(result["driverExitStatus"])
+                or type(data["rows"]) is not list or len(data["rows"]) != len(NATIVE_SIGNAL_FAILURE_ROLES)):
+            return None
+        for role, row in zip(NATIVE_SIGNAL_FAILURE_ROLES, data["rows"]):
+            if deadline is not None:
+                check_clock(deadline)
+            identity_na = ("helperRoleMatches", "helperCopyMatches") if role == "driver" else ()
+            check_na = (NATIVE_SIGNAL_FAILURE_CHECK_FIELDS[1:4] if role == "driver"
+                        else NATIVE_SIGNAL_FAILURE_CHECK_FIELDS[4:])
+            if (type(row) is not dict or tuple(row) != NATIVE_SIGNAL_FAILURE_ROW_FIELDS
+                    or not choice(row["role"], (role,)) or not choice(row["state"], NATIVE_SIGNAL_FAILURE_STATES)
+                    or not choice(row["mode"], modes) or not return_code(row["returnCode"])
+                    or not observations(row["identities"], NATIVE_SIGNAL_FAILURE_IDENTITY_FIELDS, identity_na)
+                    or not observations(row["checks"], NATIVE_SIGNAL_FAILURE_CHECK_FIELDS, check_na)
+                    or not choice(row["failuresState"], NATIVE_SIGNAL_FAILURE_FAILURES_STATES)
+                    or not mask(row["failedCheckMask"], len(NATIVE_SIGNAL_FAILURE_CHECK_CODES))
+                    or type(row["unknownFailure"]) is not bool):
+                return None
+            for name, count, bits in (("causeMasks", len(NATIVE_SIGNAL_FAILURE_STAGES), len(NATIVE_SIGNAL_FAILURE_CATEGORIES)),
+                                      ("refusalMasks", len(NATIVE_SIGNAL_FAILURE_ROUTES), len(NATIVE_SIGNAL_FAILURE_REFUSALS))):
+                values = row[name]
+                if type(values) is not list or len(values) != count or any(not mask(value, bits) for value in values):
+                    return None
+            classified = bool(row["failedCheckMask"] or any(row["causeMasks"]) or any(row["refusalMasks"]))
+            if row["state"] != "present":
+                if (row["mode"] != "missing" or row["returnCode"] != "missing"
+                        or any(item != ("not-applicable" if name in identity_na else "missing")
+                               for name, item in row["identities"].items())
+                        or any(item != ("not-applicable" if name in check_na else "missing")
+                               for name, item in row["checks"].items())
+                        or row["failuresState"] != "missing" or classified or row["unknownFailure"]):
+                    return None
+            elif row["failuresState"] in {"empty", "missing"}:
+                if classified or row["unknownFailure"]:
+                    return None
+            elif row["failuresState"] == "invalid":
+                if classified or not row["unknownFailure"]:
+                    return None
+            elif not classified and not row["unknownFailure"]:
+                return None  # A nonempty array cannot silently lose every label.
+        # Guard comparisons and proof rows may independently disagree. Preserve
+        # their adverse observations; never recompute production acceptance.
+        return data
+    finally:
+        if deadline is not None:
+            check_clock(deadline)
+
+
 def _minitest_failed_target(text: str, identifier: str, *, deadline: float | None = None) -> bool:
     # Scan the SAME original bytes under the SAME cutoff. A target beyond the
     # public first16 rows still counts, as does a late duplicate. No receipt.
@@ -2017,6 +2154,11 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                 diagnostic = isolated_collector_failure(result.stderr, deadline=deadline)
                 if diagnostic is not None and _minitest_failed_target(text, ISOLATED_COLLECTOR_FAILURE_ID, deadline=deadline):
                     value["isolated_collector_failure"] = diagnostic
+            if (step.id == "ruby-native-signal-observation" and step.native_partition == "all"
+                    and NATIVE_SIGNAL_FAILURE_CALLBACK in expected):
+                diagnostic = native_signal_failure(result.stderr, deadline=deadline)
+                if diagnostic is not None and _minitest_failed_target(text, NATIVE_SIGNAL_FAILURE_CALLBACK, deadline=deadline):
+                    value["signal_failure"] = diagnostic
             if step.id == "ruby-native-capture" and step.native_partition == "healthy":
                 diagnostic = native_primary_failure(result.stderr, deadline=deadline)
                 if diagnostic is not None:

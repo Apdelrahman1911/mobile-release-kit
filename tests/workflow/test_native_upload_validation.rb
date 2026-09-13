@@ -1743,6 +1743,7 @@ class NativeUploadValidationTest < Minitest::Test
       assert_native_setup_failure_projection
       assert_adapter_failure_projection
       assert_ownership_failure_projection
+      assert_native_signal_failure_projection
       assert_missing_cleanup_omission_evidence
       assert_missing_cleanup_watchdog_lifecycle
 
@@ -3443,6 +3444,308 @@ class NativeUploadValidationTest < Minitest::Test
     assert_empty writes
     assert handoffs.all? { |optional| optional.keys == [:ownership_failure_state] && optional[:ownership_failure_state].empty? }
     refute_same(*handoffs.map { |optional| optional.fetch(:ownership_failure_state) })
+  end
+
+  def assert_native_signal_failure_projection
+    # Only finite in-memory operands and the SAME common wrapper/Lifetime/
+    # observer unwind. No native test class, acquisition, proof IO or process
+    # operation is loaded/invoked by these controls; the outer veto stays live.
+    fixture, diagnostic, probe_class = UploadProcessFixture, UploadProcessFixture::NativeSignalFailureDiagnostic,
+      UploadProcessFixture::NativeSignalProbe
+    modes, callback = fixture::NATIVE_SIGNAL_FAILURE_MODES, fixture::NATIVE_SIGNAL_FAILURE_CALLBACK
+    prefix = "MRK_NATIVE_SIGNAL_FAILURE="
+    copy = {"path" => "PRIVATE_SIGNAL_TOKEN", "sha256" => "PRIVATE_SIGNAL_TOKEN"}
+    sources = {"PRIVATE_SIGNAL_SOURCE" => "PRIVATE_SIGNAL_TOKEN"}
+    clone = ->(value) { JSON.parse(JSON.generate(value)) }
+    good = {"kind" => "native-signal-observation", "role" => "driver", "case" => modes.first,
+      "sourceSha256" => sources, "hooksRestored" => true, "baseDriverReturn" => 0, "failures" => [],
+      "helperCopy" => copy, "actualOriginalPrimary" => true, "actualCustodianReceiptBound" => true,
+      "actualNativeDescriptorsClosed" => false, "private" => "PRIVATE_SIGNAL_TOKEN", "pid" => 999_887_766}
+    good["helpers"] = %w[custodian keeper].to_h do |role|
+      [role, {"kind" => "native-signal-observation", "role" => "helper", "helperRole" => role,
+        "case" => modes.first, "sourceSha256" => sources, "helperCopy" => copy, "helperReturn" => 2,
+        "hooksRestored" => true, "originalWaitBound" => true, "creatorJoined" => false,
+        "taskJoinsObserved" => true, "failures" => []}]
+    end
+    raw_result = {"kind" => "pass", "mode" => modes.first, "private" => "PRIVATE_SIGNAL_TOKEN"}
+    project = lambda do |proof = good, mode: modes.first, exit_status: 0|
+      diagnostic.project(mode: mode, proof: proof, result: raw_result,
+        status: Struct.new(:exitstatus).new(exit_status), expected_sources: sources)
+    end
+    assert_equal [50, 9, 20, 6, 9], [fixture::NATIVE_SIGNAL_FAILURE_CHECK_CODES.length,
+      fixture::NATIVE_SIGNAL_FAILURE_STAGES.length, fixture::NATIVE_SIGNAL_FAILURE_CATEGORIES.length,
+      fixture::NATIVE_SIGNAL_FAILURE_ROUTES.length, fixture::NATIVE_SIGNAL_FAILURE_REFUSALS.length]
+    assert_equal probe_class::MODES, modes
+    assert_nil project.call # All seven comparisons true is not a failure record.
+    faults = [["caseMatches", "case", "PRIVATE_SIGNAL_TOKEN"], ["kindMatches", "kind", nil],
+      ["sourceMatches", "sourceSha256", {}], ["failuresEmpty", "failures", ["actual native finality"]],
+      ["hooksRestored", "hooksRestored", false], ["baseDriverReturnZero", "baseDriverReturn", 1],
+      ["driverExitStatusZero", nil, nil]]
+    faults.each do |predicate, key, value|
+      proof = key ? good.merge(key => value) : good
+      row = project.call(proof, exit_status: key ? 0 : 1)
+      assert_equal fixture::NATIVE_SIGNAL_FAILURE_GUARD_FIELDS.to_h { |name| [name, name != predicate] }, row.fetch("guard")
+      assert diagnostic.line(row)
+    end
+    missing_case = project.call(good.reject { |key, _| key == "case" })
+    assert_equal "missing", missing_case.fetch("guard").fetch("caseMatches")
+    # Original == semantics are not replaced by normalized return-code types.
+    equality = project.call(good.merge("kind" => nil, "baseDriverReturn" => 0.0), exit_status: 0.0)
+    assert_equal [true, true], equality.fetch("guard").values_at("baseDriverReturnZero", "driverExitStatusZero")
+    assert_equal "missing", equality.fetch("rows").first.fetch("returnCode")
+    assert_equal "missing", equality.fetch("result").fetch("driverExitStatus")
+    bad = good.merge("failures" => ["actual native finality"])
+    packet = diagnostic.line(project.call(bad))
+    modes.each do |mode|
+      record = project.call(bad.merge("case" => mode), mode: mode)
+      assert_equal mode, record.fetch("mode")
+      assert_equal %w[driver custodian keeper], record.fetch("rows").map { |row| row.fetch("role") }
+      assert_equal [true, false, true], record.fetch("rows")[1].fetch("checks").values_at(
+        "hooksRestored", "creatorJoined", "taskJoinsObserved")
+      assert_equal 1 << 20, record.fetch("rows").first.fetch("failedCheckMask")
+      line = diagnostic.line(record)
+      assert line.frozen? && line.ascii_only?
+      refute_match(/PRIVATE_SIGNAL|999887766/, line)
+    end
+    absent = project.call(bad.reject { |key, _| key == "helpers" }).fetch("rows")
+    invalid = project.call(bad.merge("helpers" => {"custodian" => nil, "keeper" => []})).fetch("rows")
+    [absent, invalid].zip(%w[missing invalid]).each do |rows, state|
+      rows.drop(1).each do |row|
+        assert_equal [state, "missing", "missing", "missing", 0, false],
+          row.values_at("state", "mode", "returnCode", "failuresState", "failedCheckMask", "unknownFailure")
+        assert_equal ["missing"], row.fetch("identities").values.uniq
+        assert_equal %w[missing not-applicable], row.fetch("checks").values.uniq
+        assert_equal [0], (row.fetch("causeMasks") + row.fetch("refusalMasks")).uniq
+      end
+    end
+    labels = fixture::NATIVE_SIGNAL_FAILURE_LABEL_CODES.keys + ["driver proof:IOError", "driver proof:Interrupt",
+      "helper proof:PRIVATE_SIGNAL_TOKEN", "hook:entry:IOError", "custodian-group:owner", "custodian-group:source",
+      "unrecognized:shape", "PRIVATE_SIGNAL_TOKEN", 123, "PRIVATE_é"]
+    mixed_proof = clone.call(bad).merge("failures" => labels)
+    mixed = project.call(mixed_proof)
+    row = mixed.fetch("rows").first
+    assert_equal (1 << 50) - 1, row.fetch("failedCheckMask")
+    assert_equal [(1 << 9) | 1, 1 << 19, 1 << 9], row.fetch("causeMasks").values_at(4, 5, 8)
+    assert_equal [(1 << 4) | (1 << 5), 1], row.fetch("refusalMasks").values_at(0, 5)
+    assert row.fetch("unknownFailure")
+    assert row.frozen? && row.fetch("checks").frozen? && row.fetch("causeMasks").frozen?
+    mixed_proof.fetch("failures").clear
+    mixed_proof.fetch("helpers").clear
+    assert_equal "nonempty", row.fetch("failuresState")
+    assert_equal "present", mixed.fetch("rows")[1].fetch("state")
+    refute_match(/PRIVATE_SIGNAL|PRIVATE_|999887766/, diagnostic.line(mixed))
+    [[:absent, "missing", false], [nil, "invalid", true], [[], "empty", false], [[nil], "nonempty", true]].each do |value, state, unknown|
+      proof = good.merge("kind" => nil)
+      if value == :absent
+        proof.delete("failures")
+      else
+        proof["failures"] = value
+      end
+      row = project.call(proof).fetch("rows").first
+      assert_equal [state, 0, unknown], row.values_at("failuresState", "failedCheckMask", "unknownFailure")
+    end
+    unavailable = project.call(bad.merge("hooksRestored" => 1, "helpers" => {
+      "keeper" => {"role" => "PRIVATE_SIGNAL_TOKEN", "case" => "PRIVATE_SIGNAL_TOKEN", "sourceSha256" => {},
+        "helperCopy" => {}, "originalWaitBound" => 1, "failures" => []}}))
+    assert_equal false, unavailable.fetch("guard").fetch("hooksRestored")
+    assert_equal "missing", unavailable.fetch("rows").first.fetch("checks").fetch("hooksRestored")
+    assert_equal [false, false, false], unavailable.fetch("rows").last.fetch("identities").values_at("roleMatches", "sourceMatches", "helperCopyMatches")
+
+    # Full format-level bound includes the prefix and LF, not just JSON bytes.
+    largest = clone.call(mixed)
+    largest["mode"] = modes.max_by(&:bytesize)
+    largest["guard"].transform_values! { "missing" }
+    largest["result"] = {"kind" => fixture::ADAPTER_FAILURE_KINDS.max_by(&:bytesize),
+      "mode" => largest["mode"], "driverExitStatus" => "missing"}
+    largest.fetch("rows").each do |item|
+      item.merge!("state" => "present", "mode" => largest["mode"], "returnCode" => "missing", "failuresState" => "nonempty",
+        "failedCheckMask" => (1 << 50) - 1, "causeMasks" => Array.new(9, (1 << 20) - 1),
+        "refusalMasks" => Array.new(6, 511), "unknownFailure" => false)
+      %w[identities checks].each { |key| item[key].transform_values! { |value| value == "not-applicable" ? value : "missing" } }
+    end
+    assert_equal 2574, diagnostic.line(largest).bytesize
+    assert_operator diagnostic.line(largest).bytesize, :<=, fixture::NATIVE_SIGNAL_FAILURE_MAX_BYTES
+    mutations = [->(value) { value["schema"] = true }, ->(value) { value["guard"].transform_values! { true } },
+      ->(value) { value["rows"].reverse! }, ->(value) { value["rows"][0]["failedCheckMask"] = 1 << 50 },
+      ->(value) { value["rows"][0]["causeMasks"][0] = true }, ->(value) { value["rows"][0]["refusalMasks"] << 0 },
+      ->(value) { value["rows"][0]["identities"]["helperRoleMatches"] = "missing" },
+      ->(value) { value["rows"][1]["checks"]["hooksRestored"] = "not-applicable" },
+      ->(value) { value["rows"][0]["state"] = "missing" }, ->(value) { value["rows"][0]["failuresState"] = "empty" },
+      ->(value) { value["rows"][1]["failuresState"] = "nonempty" },
+      ->(value) { value["rows"][0]["checks"] = value["rows"][0]["checks"].to_a.reverse.to_h },
+      ->(value) { value["private"] = "PRIVATE_SIGNAL_TOKEN" }]
+    mutations.each do |mutate|
+      value = clone.call(project.call(bad))
+      mutate.call(value)
+      assert_nil diagnostic.line(value)
+    end
+
+    with_stubs = lambda do |bindings, &body|
+      if bindings.empty?
+        body.call
+      else
+        receiver, name, replacement = bindings.first
+        receiver.stub(name, replacement) { with_stubs.call(bindings.drop(1), &body) }
+      end
+    end
+    exercise = lambda do |mode: modes.first, fault: nil, write_result: :full|
+      now, depth, state, selected, escaped = 1, 0, nil, nil, nil
+      events, writes, observations, source_reads = [], [], [], []
+      later = IOError.new("PRIVATE_SIGNAL_TOKEN")
+      earlier = fixture::Failure.new("fixture-result", "PRIVATE_SIGNAL_EARLIER")
+      proof = clone.call(bad).merge("case" => mode)
+      status = Struct.new(:exitstatus).new(0)
+      policy = Object.new
+      policy.define_singleton_method(:install) { events << :lifetime_install }
+      policy.define_singleton_method(:cleanup_depth) { depth }
+      policy.define_singleton_method(:cleanup) do |&body|
+        depth += 1
+        begin
+          body.call
+        ensure
+          depth -= 1
+        end
+      end
+      policy.define_singleton_method(:restore) do |&body|
+        body.call
+        events << :lifetime_restore
+        raise later if fault == :restoration
+      end
+      policy.define_singleton_method(:errors) { [] }
+      policy.define_singleton_method(:replay_custom_pending) { events << :lifetime_replay }
+      hooks = Object.new
+      hooks.define_singleton_method(:restore) { events << :observer_restore; raise later if fault == :observer_restore; [] }
+      probe = probe_class.allocate
+      {role: :parent, mode: mode, root: "/inert-native-signal", source_hashes: sources, hooks: hooks,
+        records: [], requests: [], failures: [], control_forwards: 0, hooks_restored: false}.each do |key, value|
+        probe.instance_variable_set(:"@#{key}", value)
+      end
+      probe.define_singleton_method(:install) { probe_class.current = self; events << :observer_install }
+      probe.define_singleton_method(:source_hashes) do
+        source_reads << probe_class.current.equal?(self)
+        raise later if fault == :source_operand
+        @source_hashes
+      end
+      probe.define_singleton_method(:source_snapshot) { events << :source_validation; raise later if fault == :source_validation; sources }
+      formatter, projector = diagnostic.method(:line), diagnostic.method(:project)
+      projection = lambda do |**arguments|
+        raise later if fault == :projection
+        projector.call(**arguments)
+      end
+      formatting = lambda do |value|
+        raise later if fault == :format
+        line = formatter.call(value)
+        now = 10 if fault == :before_write
+        line
+      end
+      sink = lambda do |bytes|
+        writes << bytes
+        observations << [state[:rejection], state[:report_attempted], state[:write_attempted], events.dup,
+          fixture.instance_variable_get(:@cancellation_scope), probe_class.current]
+        raise write_result if write_result.is_a?(Exception)
+        write_result == :short ? 1 : bytes.bytesize
+      end
+      previous = [probe_class.current, probe_class.last_parent]
+      assert_nil previous.first
+      assert_nil fixture.instance_variable_get(:@cancellation_scope)
+      bindings = [[fixture, :clock_ns, -> { now }], [fixture::CancellationScope, :new, policy],
+        [Thread.current, :pending_interrupt?, false], [probe_class, :new, probe],
+        [fixture, :atomic_json, ->(*) { events << :parent_proof; raise later if fault == :parent_proof }],
+        [diagnostic, :project, projection], [diagnostic, :line, formatting], [STDERR, :write, sink]]
+      actual = nil
+      with_stubs.call(bindings) do
+        actual = assert_raises(fixture::Failure) do
+          fixture.with_native_signal_failure_diagnostic(mode: mode, callback: fault == :callback ? "PRIVATE_SIGNAL_TOKEN" : callback) do |optional|
+            state = optional.fetch(:signal_failure_state)
+            state.freeze if fault == :state
+            begin
+              probe_class.observe_parent("/inert-native-signal", mode) do
+                fixture.lifetime(deadline_ns: 10) do |frame|
+                  frame.define_singleton_method(:report) { events << :lifetime_report } # Keep synthetic diagnostics private.
+                  frame.remember(earlier) if fault == :prior
+                  begin
+                    frame.active do
+                      selected = fixture::Failure.new("fixture-result", "native signal proof rejected")
+                      begin
+                        fixture.remember_native_signal_failure(state, selected, mode: mode, proof: proof, result: raw_result,
+                          status: status, expected_sources: probe_class.current.source_hashes, deadline_ns: 10)
+                      rescue Exception
+                        nil # Same post-selected optional capture seam as the original guard.
+                      end
+                      raise selected
+                    end
+                  ensure
+                    frame.cleanup do
+                      events << :driver_cleanup
+                      proof.fetch("failures").clear
+                      proof.fetch("helpers").clear
+                      raise later if fault == :cleanup
+                    end
+                  end
+                end
+              end
+            rescue Exception => original
+              escaped = original
+              raise fixture::Failure.new(original.kind, original.message) if fault == :lookalike
+              raise
+            ensure
+              events << :yield_unwound
+              now = 10 if fault == :before_report
+            end
+          end
+        end
+        fixture.report_native_signal_failure(state, actual, mode: mode, callback: callback) # Never retry an attempt.
+      end
+      expected_primary = fault == :prior ? earlier : selected
+      assert_same expected_primary, escaped
+      fault == :lookalike ? refute_same(expected_primary, actual) : assert_same(expected_primary, actual)
+      assert_equal [true], source_reads
+      assert_nil fixture.instance_variable_get(:@cancellation_scope)
+      assert_nil probe_class.current
+      assert_equal [:driver_cleanup, :lifetime_restore, :lifetime_replay, :observer_restore, :parent_proof, :yield_unwound],
+        events.select { |event| %i[driver_cleanup lifetime_restore lifetime_replay observer_restore parent_proof yield_unwound].include?(event) }
+      observations.each do |original, report_attempted, write_attempted, seen, registry, current|
+        assert_same selected, original
+        assert report_attempted && write_attempted
+        assert_equal :yield_unwound, seen.last
+        assert_nil registry
+        assert_nil current
+      end
+      {state: state, original: actual, writes: writes, expected: diagnostic.line(project.call(bad.merge("case" => mode), mode: mode))}
+    ensure
+      probe_class.current, probe_class.last_parent = previous if previous
+    end
+    (modes.map { |mode| {mode: mode} } + %i[cleanup restoration observer_restore source_validation parent_proof].map { |fault| {fault: fault} }).each do |options|
+      outcome = exercise.call(**options)
+      assert_equal [outcome.fetch(:expected)], outcome.fetch(:writes)
+      assert_equal [10, true], outcome.fetch(:state).values_at(:deadline_ns, :write_complete)
+    end
+    %i[state source_operand projection format prior lookalike callback before_report before_write].each do |fault|
+      assert_empty exercise.call(fault: fault).fetch(:writes)
+    end
+    [:short, IOError.new("PRIVATE_SIGNAL_TOKEN"), Interrupt.new("PRIVATE_SIGNAL_TOKEN"), SystemExit.new(19, "PRIVATE_SIGNAL_TOKEN")].each do |result|
+      outcome = exercise.call(write_result: result)
+      assert_equal [outcome.fetch(:expected)], outcome.fetch(:writes)
+      assert_equal "fixture-result", outcome.fetch(:original).kind
+      result.is_a?(Exception) ? assert_same(result, outcome.fetch(:state).fetch(:diagnostic_error)) : refute(outcome.fetch(:state).fetch(:write_complete))
+    end
+    handoffs, writes, continued = [], [], []
+    STDERR.stub(:write, ->(bytes) { writes << bytes; bytes.bytesize }) do
+      2.times do
+        assert_equal :success, fixture.with_native_signal_failure_diagnostic(mode: modes.first, callback: callback) { |optional| handoffs << optional; :success }
+      end
+      [Interrupt.new("PRIVATE_SIGNAL_TOKEN"), SystemExit.new(19, "PRIVATE_SIGNAL_TOKEN"), IOError.new("PRIVATE_SIGNAL_TOKEN")].each do |original|
+        actual = assert_raises(original.class) do
+          fixture.with_native_signal_failure_diagnostic(mode: modes.first, callback: callback) { raise original }
+          continued << true
+        end
+        assert_same original, actual
+      end
+    end
+    assert_empty writes
+    assert_empty continued
+    assert handoffs.all? { |optional| optional.keys == [:signal_failure_state] && optional[:signal_failure_state].empty? }
+    refute_same(*handoffs.map { |optional| optional.fetch(:signal_failure_state) })
   end
 
   def missing_cleanup_omission_sample

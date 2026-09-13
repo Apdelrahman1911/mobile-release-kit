@@ -2714,7 +2714,7 @@ class CIControllerContractTests(unittest.TestCase):
                     self.assertIs(raised.exception, interruption)
 
             # Plain source constants bind this parser to the real Ruby wire.
-            # These three fixed bounded reads do not load Ruby or a native module.
+            # These fixed bounded DATA reads do not load Ruby or a native module.
             def ruby_text(relative):
                 with (ROOT / relative).open("rb") as source:
                     raw = source.read(1_048_577)
@@ -2968,6 +2968,275 @@ class CIControllerContractTests(unittest.TestCase):
                     with patch.object(controller, "strict_json", side_effect=interruption), \
                             self.assertRaises(type(interruption)) as raised:
                         controller.failure_details(failed_capture, ownership_step, paths, deadline=1000.0)
+                    self.assertIs(raised.exception, interruption)
+
+            # One additional literal DATA file, not the native observation test
+            # class or any Ruby execution. Masks must mean the same on both sides.
+            signal_source = ruby_text("tests/workflow/upload_process_fixture.rb")
+            for suffix in ("FIELDS", "MODES", "GUARD_FIELDS", "RESULT_FIELDS", "ROW_FIELDS", "ROLES",
+                           "STATES", "FAILURES_STATES", "IDENTITY_FIELDS", "CHECK_FIELDS", "STAGES",
+                           "CATEGORIES", "ROUTES", "REFUSALS"):
+                name = "NATIVE_SIGNAL_FAILURE_" + suffix
+                self.assertEqual(ruby_words(signal_source, name), getattr(controller, name))
+            self.assertEqual(controller.NATIVE_SIGNAL_FAILURE_PREFIX, "MRK_NATIVE_SIGNAL_FAILURE=")
+            self.assertEqual(controller.NATIVE_SIGNAL_FAILURE_MAX_BYTES, 4096)
+            signal_target = controller.NATIVE_SIGNAL_FAILURE_CALLBACK
+            self.assertEqual(signal_target,
+                "NativeSignalObservationTest#test_native_first_close_and_post_reap_signals_with_safe_veto_controls")
+            for name, value in (("PREFIX", controller.NATIVE_SIGNAL_FAILURE_PREFIX), ("CALLBACK", signal_target)):
+                self.assertIn(f'NATIVE_SIGNAL_FAILURE_{name} = "{value}"', signal_source)
+            self.assertIn("NATIVE_SIGNAL_FAILURE_MAX_BYTES = 4096", signal_source)
+            self.assertEqual(controller.NATIVE_SIGNAL_FAILURE_RESULT_KINDS,
+                             (*ruby_words(signal_source, "ADAPTER_FAILURE_KINDS"), "other", "missing"))
+
+            def signal_literal_pairs(name):
+                bodies = controller.re.findall(r"(?ms)^\s*" + name + r" = \{(.*?)^\s*\}\.freeze", signal_source)
+                self.assertEqual(len(bodies), 1, name)
+                pattern = r'"([^"\r\n]+)" => "([^"\r\n]+)"'
+                pairs = controller.re.findall(pattern, bodies[0])
+                self.assertEqual(len(pairs), len(dict(pairs)))
+                residue = controller.re.sub(pattern + r"\s*,?", "", bodies[0])
+                self.assertEqual("".join(residue.split()), "")
+                return dict(pairs)
+
+            labels = signal_literal_pairs("NATIVE_SIGNAL_FAILURE_LABEL_CODES")
+            self.assertEqual(tuple(labels.values()), controller.NATIVE_SIGNAL_FAILURE_CHECK_CODES)
+            self.assertEqual(len(set(labels.values())), 50)
+            self.assertEqual(signal_literal_pairs("NATIVE_SIGNAL_FAILURE_STAGE_PREFIXES"), dict(zip(
+                controller.NATIVE_SIGNAL_FAILURE_STAGES,
+                ("request observation:", "signal syscall:", "observation body:", "observation finalization:",
+                 "driver proof:", "helper proof:", "parent proof publication:", "hook:", "hook:entry:"))))
+            classes = ("Interrupt", "SignalException", "SystemExit", "UploadProcessFixture::Failure",
+                "MobileReleaseKit::ContractError", "MobileReleaseKit::NativeUploadProcess::Error",
+                "MobileReleaseKit::NativeUploadProcess::LifecycleError", "MobileReleaseKit::NativeUploadProcess::ProtocolError",
+                "MobileReleaseKit::NativeProcessSpawn::Error", "IOError", "SystemCallError", "JSON::ParserError", "KeyError",
+                "NoMethodError", "TypeError", "ArgumentError", "RuntimeError", "StandardError", "Exception")
+            class_categories = dict(zip(classes, controller.NATIVE_SIGNAL_FAILURE_CATEGORIES[:-1]))
+            class_categories.update(("Errno::" + name, "os-error") for name in
+                ("ECHILD", "ESRCH", "EINTR", "EBADF", "EINVAL", "EIO", "EPERM", "EACCES", "EAGAIN", "ENOMEM",
+                 "EMFILE", "ENFILE", "ENOENT", "EPIPE"))
+            self.assertEqual(signal_literal_pairs("NATIVE_SIGNAL_FAILURE_CLASS_CATEGORIES"), class_categories)
+            self.assertEqual(tuple(len(getattr(controller, "NATIVE_SIGNAL_FAILURE_" + name))
+                                   for name in ("CHECK_CODES", "STAGES", "CATEGORIES", "ROUTES", "REFUSALS")),
+                             (50, 9, 20, 6, 9))
+
+            def signal_row(role, state="present"):
+                identity_na = {"helperRoleMatches", "helperCopyMatches"} if role == "driver" else set()
+                check_na = ({"originalWaitBound", "creatorJoined", "taskJoinsObserved"} if role == "driver" else
+                            {"actualOriginalPrimary", "actualCustodianReceiptBound", "actualNativeDescriptorsClosed"})
+                return {"role": role, "state": state, "mode": "missing",
+                    "identities": {name: "not-applicable" if name in identity_na else "missing"
+                                   for name in controller.NATIVE_SIGNAL_FAILURE_IDENTITY_FIELDS},
+                    "returnCode": "missing",
+                    "checks": {name: "not-applicable" if name in check_na else "missing"
+                               for name in controller.NATIVE_SIGNAL_FAILURE_CHECK_FIELDS},
+                    "failuresState": "missing", "failedCheckMask": 0, "causeMasks": [0] * 9,
+                    "refusalMasks": [0] * 6, "unknownFailure": False}
+
+            signal_record = {"schema": 1, "mode": "native-setup-interrupt",
+                "guard": {name: name != "failuresEmpty" for name in controller.NATIVE_SIGNAL_FAILURE_GUARD_FIELDS},
+                "result": {"kind": "pass", "mode": "native-setup-interrupt", "driverExitStatus": 1},
+                "rows": [signal_row(role) for role in controller.NATIVE_SIGNAL_FAILURE_ROLES]}
+            signal_record["rows"][0].update(failuresState="nonempty", failedCheckMask=1 << 20,
+                causeMasks=[0, 0, 0, 0, (1 << 3) | (1 << 19), 0, 0, 0, 0],
+                refusalMasks=[(1 << 1) | (1 << 2), 0, 0, 0, 0, 0], unknownFailure=True)
+            signal_record["rows"][0]["checks"]["hooksRestored"] = True
+
+            def signal_bytes(record):
+                return (controller.NATIVE_SIGNAL_FAILURE_PREFIX
+                        + json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
+
+            def signal_with_row(index, row):
+                return {**signal_record, "rows": [row if i == index else value
+                                                  for i, value in enumerate(signal_record["rows"])]}
+
+            signal_marker = signal_bytes(signal_record)
+            signal_step = controller.Step("ruby-native-signal-observation", parser="minitest", expected_tests=1)
+            signal_failed = signal_target + " = PRIVATE_MESSAGE\n0.01 s = E\n"
+            signal_footer = "\nFinished in 0.03s.\n1 runs, 606 assertions, 0 failures, 1 errors, 0 skips\n"
+            signal_stdout = signal_failed + signal_footer
+            with patch.object(controller, "ruby_expected_ids", return_value=(signal_target,)), \
+                    patch.object(controller, "ruby_capture_ids", return_value=(signal_target,)), \
+                    patch.object(controller.time, "monotonic", return_value=999.0):
+                with patch.object(controller, "_fixture_failure_record", wraps=controller._fixture_failure_record) as strict:
+                    self.assertEqual(controller.native_signal_failure(signal_marker, deadline=1000.0), signal_record)
+                strict.assert_called_once_with(signal_marker, "MRK_NATIVE_SIGNAL_FAILURE=", 4096,
+                                               deadline=1000.0, canonical_fields=controller.NATIVE_SIGNAL_FAILURE_FIELDS)
+                for mode in controller.NATIVE_SIGNAL_FAILURE_MODES:
+                    record = {**signal_record, "mode": mode}
+                    for terminal in ("E", "F"):
+                        transcript = signal_stdout if terminal == "E" else signal_stdout.replace(
+                            "0.01 s = E", "0.01 s = F").replace("0 failures, 1 errors", "1 failures, 0 errors")
+                        original = capture(transcript, stderr=signal_bytes(record), ok=False, returncode=1)
+                        detail = controller.failure_details(original, signal_step, paths, deadline=1000.0)
+                        self.assertEqual(detail["signal_failure"], record)
+                        self.assertEqual(detail["returncode"], 1)
+                        self.assertEqual(detail["persisted"], list(original.persisted))
+                        self.assertNotIn("PRIVATE_", json.dumps(detail))
+                # Each original comparison alone can explain the rejection.
+                # Missing helpers/empty labels or contradictory facts are not
+                # promoted to a new acceptance rule or silently normalized.
+                for name in controller.NATIVE_SIGNAL_FAILURE_GUARD_FIELDS:
+                    for adverse in (False, "missing"):
+                        record = {**signal_record, "guard": dict.fromkeys(controller.NATIVE_SIGNAL_FAILURE_GUARD_FIELDS, True)}
+                        record["guard"][name] = adverse
+                        self.assertEqual(controller.native_signal_failure(signal_bytes(record)), record)
+                for index, role in enumerate(controller.NATIVE_SIGNAL_FAILURE_ROLES):
+                    for state in controller.NATIVE_SIGNAL_FAILURE_STATES:
+                        record = signal_with_row(index, signal_row(role, state))
+                        self.assertEqual(controller.native_signal_failure(signal_bytes(record)), record)
+                    for failure_state, unknown, bits in (("empty", False, 0), ("missing", False, 0),
+                                                        ("invalid", True, 0), ("nonempty", True, 0),
+                                                        ("nonempty", False, 1)):
+                        row = signal_row(role)
+                        row.update(failuresState=failure_state, unknownFailure=unknown, failedCheckMask=bits)
+                        record = signal_with_row(index, row)
+                        self.assertEqual(controller.native_signal_failure(signal_bytes(record)), record)
+                # Complete conservative format bound, including prefix and LF;
+                # no truncation and no assumption of healthy proof semantics.
+                longest_mode = max(controller.NATIVE_SIGNAL_FAILURE_MODES, key=len)
+                maximum = {**signal_record, "mode": longest_mode,
+                    "guard": dict.fromkeys(controller.NATIVE_SIGNAL_FAILURE_GUARD_FIELDS, "missing"),
+                    "result": {"kind": max(controller.NATIVE_SIGNAL_FAILURE_RESULT_KINDS, key=len),
+                               "mode": longest_mode, "driverExitStatus": "missing"},
+                    "rows": [signal_row(role) for role in controller.NATIVE_SIGNAL_FAILURE_ROLES]}
+                for row in maximum["rows"]:
+                    row.update(mode=longest_mode, failuresState="nonempty", failedCheckMask=(1 << 50) - 1,
+                               causeMasks=[(1 << 20) - 1] * 9, refusalMasks=[511] * 6)
+                compact_json = lambda value: json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+                self.assertEqual(len(controller.NATIVE_SIGNAL_FAILURE_PREFIX.encode("ascii")), 26)
+                self.assertEqual(len(compact_json(maximum["guard"])), 193)
+                self.assertEqual([len(compact_json(row)) for row in maximum["rows"]], [733, 722, 719])
+                self.assertEqual(len(signal_bytes(maximum)), 2574)
+                self.assertLessEqual(len(signal_bytes(maximum)), controller.NATIVE_SIGNAL_FAILURE_MAX_BYTES)
+                self.assertEqual(controller.native_signal_failure(signal_bytes(maximum)), maximum)
+
+                failed_capture = capture(signal_stdout, stderr=signal_marker, ok=False, returncode=1)
+                with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                    controller.parse_capture(signal_step, failed_capture, paths, "linux", None)
+                zero_capture = capture(signal_stdout, stderr=signal_marker)
+                self.assertEqual(controller.failure_details(zero_capture, signal_step, paths)["signal_failure"], signal_record)
+                with self.assertRaisesRegex(controller.VerificationError, "MINITEST_RESULT_REJECTED"):
+                    controller.parse_capture(signal_step, zero_capture, paths, "macos", None)
+                success_stdout = signal_stdout.replace("0.01 s = E", "0.01 s = .").replace("1 errors", "0 errors")
+                successful = capture(success_stdout, stderr=signal_marker)
+                self.assertNotIn("signal_failure", controller.failure_details(successful, signal_step, paths))
+                self.assertTrue(controller.parse_capture(signal_step, successful, paths, "linux", None).ok)
+                for transcript in (signal_footer, signal_target + ":\n" + signal_footer,
+                    signal_target + " = unfinished\n" + signal_footer,
+                    signal_stdout.replace("0.01 s = E", "0.01 s = S"),
+                    signal_stdout.replace("0.01 s = E", "0.01 s = .\n0.01 s = E"),
+                    signal_failed * 2 + signal_footer, signal_footer + signal_failed):
+                    self.assertNotIn("signal_failure", controller.failure_details(
+                        capture(transcript, stderr=signal_marker, ok=False, returncode=1), signal_step, paths))
+                self.assertNotIn("signal_failure", controller.failure_details(capture(
+                    signal_stdout + signal_marker.decode("ascii"), ok=False, returncode=1), signal_step, paths))
+                with patch.object(controller, "ruby_expected_ids", return_value=expected):
+                    self.assertNotIn("signal_failure", controller.failure_details(failed_capture, signal_step, paths))
+                for wrong_step in (dataclasses.replace(signal_step, id="ruby-native-capture"),
+                    dataclasses.replace(signal_step, id="ruby-native-owner"),
+                    dataclasses.replace(signal_step, native_partition="healthy"),
+                    dataclasses.replace(signal_step, native_partition="native-setup-interrupt"),
+                    dataclasses.replace(signal_step, parser="exit")):
+                    self.assertNotIn("signal_failure", controller.failure_details(failed_capture, wrong_step, paths))
+
+                invalid_signal = [
+                    {**signal_record, "guard": dict.fromkeys(controller.NATIVE_SIGNAL_FAILURE_GUARD_FIELDS, True)},
+                    *({**signal_record, "schema": value} for value in (True, 1.0, "1", 2)),
+                    *({**signal_record, "mode": value} for value in (None, "missing", "PRIVATE_MODE")),
+                    *({**signal_record, "rows": value} for value in (None, [], signal_record["rows"][:2],
+                        signal_record["rows"] + [signal_record["rows"][0]], list(reversed(signal_record["rows"])))),
+                ]
+                # Every ordered container is closed; every row has fixed-role
+                # applicability, and no bool can become an integer mask/status.
+                containers = [(signal_record, lambda value: value),
+                    (signal_record["guard"], lambda value: {**signal_record, "guard": value}),
+                    (signal_record["result"], lambda value: {**signal_record, "result": value})]
+                for index, row in enumerate(signal_record["rows"]):
+                    containers.append((row, lambda value, index=index: signal_with_row(index, value)))
+                    for group in ("identities", "checks"):
+                        containers.append((row[group], lambda value, index=index, row=row, group=group:
+                                           signal_with_row(index, {**row, group: value})))
+                for original, replace in containers:
+                    invalid_signal.extend(replace(value) for value in (None, [],
+                        {key: value for key, value in original.items() if key != next(iter(original))},
+                        {**original, "PRIVATE_FIELD": "PRIVATE_VALUE"},
+                        {key: original[key] for key in reversed(original)}))
+                invalid_signal.extend({**signal_record, "guard": {**signal_record["guard"], "caseMatches": value}}
+                                      for value in (None, 0, 1.0, "invalid", "not-applicable", "PRIVATE_VALUE"))
+                invalid_signal.extend({**signal_record, "result": {**signal_record["result"], key: value}}
+                    for key, value in (("kind", "invalid"), ("kind", "PRIVATE_KIND"), ("mode", "invalid"),
+                                       *(("driverExitStatus", value) for value in (True, 1.0, -1, 256, "invalid"))))
+                for index, row in enumerate(signal_record["rows"]):
+                    for key, values in (("role", ("PRIVATE_ROLE", None)), ("state", ("PRIVATE_STATE", None)),
+                        ("mode", ("PRIVATE_MODE", None)), ("returnCode", (True, 1.0, -1, 256, "invalid")),
+                        ("failuresState", ("PRIVATE_FAILURES", None)), ("unknownFailure", (0, 1, "false")),
+                        ("failedCheckMask", (True, 1.0, -1, 1 << 50)),
+                        ("causeMasks", (None, [0] * 8, [0] * 10, *([value] * 9 for value in (True, 1.0, -1, 1 << 20)))),
+                        ("refusalMasks", (None, [0] * 5, [0] * 7, *([value] * 6 for value in (True, 1.0, -1, 512))))):
+                        invalid_signal.extend(signal_with_row(index, {**row, key: value}) for value in values)
+                    for group in ("identities", "checks"):
+                        for key, current in row[group].items():
+                            wrong = "missing" if current == "not-applicable" else "not-applicable"
+                            invalid_signal.append(signal_with_row(index, {**row, group: {**row[group], key: wrong}}))
+                        invalid_signal.append(signal_with_row(index,
+                            {**row, group: {**row[group], "hooksRestored" if group == "checks" else "kindMatches": 1}}))
+                    for state in ("missing", "invalid"):
+                        missing = signal_row(row["role"], state)
+                        for key, value in (("mode", "other"), ("returnCode", 0), ("failuresState", "empty"),
+                                           ("failedCheckMask", 1), ("unknownFailure", True),
+                                           ("checks", {**missing["checks"], "hooksRestored": False})):
+                            invalid_signal.append(signal_with_row(index, {**missing, key: value}))
+                    for failure_state, unknown, bits in (("empty", False, 1), ("empty", True, 0),
+                        ("missing", False, 1), ("missing", True, 0), ("invalid", False, 0),
+                        ("invalid", True, 1), ("nonempty", False, 0)):
+                        missing = signal_row(row["role"])
+                        missing.update(failuresState=failure_state, unknownFailure=unknown, failedCheckMask=bits)
+                        invalid_signal.append(signal_with_row(index, missing))
+                invalid_markers = [*(signal_bytes(record) for record in invalid_signal), signal_marker * 2,
+                    signal_marker.replace(b'"schema":1', b'"schema":1,"schema":1'),
+                    signal_marker.replace(b'"caseMatches":true', b'"caseMatches":true,"caseMatches":true'),
+                    signal_marker.replace(b'"failedCheckMask":1048576', b'"failedCheckMask":1048576,"failedCheckMask":1048576'),
+                    signal_marker.replace(b'"schema":1', b'"schema": 1'),
+                    signal_marker.replace(b'"native-setup-interrupt"', br'"\u006eative-setup-interrupt"'),
+                    signal_marker[:-1], signal_marker[:-1] + b"\r\n",
+                    b"MRK_NATIVE_SIGNAL_FAILURE=\xff\n", b"progress " + signal_marker]
+                for raw in invalid_markers:
+                    detail = controller.failure_details(capture(signal_stdout, stderr=raw, ok=False, returncode=1),
+                                                        signal_step, paths, deadline=1000.0)
+                    self.assertNotIn("signal_failure", detail)
+                    self.assertEqual(detail["returncode"], 1)
+                    self.assertNotIn("PRIVATE_", json.dumps(detail))
+                oversized = signal_marker[:-1] + b" " * (4097 - len(signal_marker)) + b"\n"
+                self.assertEqual(len(oversized), 4097)
+                with patch.object(controller, "strict_json", side_effect=AssertionError("oversized signal JSON was parsed")) as decode:
+                    self.assertIsNone(controller.native_signal_failure(oversized))
+                decode.assert_not_called()
+                expired = [False]
+                def expired_signal_parse(_text):
+                    expired[0] = True
+                    raise ValueError("PRIVATE_MESSAGE")
+                with patch.object(controller, "strict_json", side_effect=expired_signal_parse), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(failed_capture, signal_step, paths, deadline=1000.0)
+                expired[0] = False
+                original_scan = controller.minitest_records
+                def expire_signal_scan(text, identifiers, *, deadline):
+                    if identifiers == (signal_target,):
+                        expired[0] = True
+                    return original_scan(text, identifiers, deadline=deadline)
+                # Initial source inventory differs; expire specifically during
+                # the later singleton target rescan, not the first parse.
+                with patch.object(controller, "ruby_expected_ids", return_value=(*expected, signal_target)), \
+                        patch.object(controller, "minitest_records", side_effect=expire_signal_scan), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(failed_capture, signal_step, paths, deadline=1000.0)
+                for interruption in (KeyboardInterrupt("PRIVATE_MESSAGE"), SystemExit(7)):
+                    with patch.object(controller, "strict_json", side_effect=interruption), \
+                            self.assertRaises(type(interruption)) as raised:
+                        controller.failure_details(failed_capture, signal_step, paths, deadline=1000.0)
                     self.assertIs(raised.exception, interruption)
 
             for field, value in (("returncode", False), ("waited", False), ("stdout_eof", False),

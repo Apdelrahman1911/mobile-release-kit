@@ -54,7 +54,9 @@ class NativeSignalObservationTest < Minitest::Test
     summaries, last_helpers = [], nil
     EXPECTED_MODES.each do |mode|
       UploadProcessFixture.assert_domain_reusable!
-      value = UploadProcessFixture.run(platform: "native", root: @root, parameters: {}, mode: mode, observe_signals: true)
+      value = UploadProcessFixture.with_native_signal_failure_diagnostic(mode: mode, callback: "#{self.class.name}##{name}") do |optional|
+        UploadProcessFixture.run(platform: "native", root: @root, parameters: {}, mode: mode, observe_signals: true, **optional)
+      end
       assert_equal "pass", value.fetch("kind")
       assert_equal 0, value.fetch("observedDriverExitStatus") # Actual direct-child OS status.
       assert value.fetch("driverJoined")

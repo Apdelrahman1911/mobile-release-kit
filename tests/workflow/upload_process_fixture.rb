@@ -170,6 +170,271 @@ module UploadProcessFixture
   ADAPTER_FAILURE_SLOW_CHECKS = %w[handoffPerformed delayEntered delayGuardPassed delayFailed delayFinished
     originalCleanupCalled originalCleanupFinished].freeze
 
+  NATIVE_SIGNAL_FAILURE_PREFIX = "MRK_NATIVE_SIGNAL_FAILURE="
+  NATIVE_SIGNAL_FAILURE_CALLBACK = "NativeSignalObservationTest#test_native_first_close_and_post_reap_signals_with_safe_veto_controls"
+  NATIVE_SIGNAL_FAILURE_MAX_BYTES = 4096
+  NATIVE_SIGNAL_FAILURE_FIELDS = %w[schema mode guard result rows].freeze
+  NATIVE_SIGNAL_FAILURE_MODES = %w[native-setup-interrupt native-setup-system-exit native-setup-io-error
+    native-setup-post-reap-cancel].freeze
+  NATIVE_SIGNAL_FAILURE_GUARD_FIELDS = %w[caseMatches kindMatches sourceMatches failuresEmpty hooksRestored
+    baseDriverReturnZero driverExitStatusZero].freeze
+  NATIVE_SIGNAL_FAILURE_RESULT_FIELDS = %w[kind mode driverExitStatus].freeze
+  NATIVE_SIGNAL_FAILURE_ROW_FIELDS = %w[role state mode identities returnCode checks failuresState failedCheckMask
+    causeMasks refusalMasks unknownFailure].freeze
+  NATIVE_SIGNAL_FAILURE_ROLES = %w[driver custodian keeper].freeze
+  NATIVE_SIGNAL_FAILURE_STATES = %w[present missing invalid].freeze
+  NATIVE_SIGNAL_FAILURE_FAILURES_STATES = %w[empty nonempty missing invalid].freeze
+  NATIVE_SIGNAL_FAILURE_IDENTITY_FIELDS = %w[kindMatches roleMatches helperRoleMatches sourceMatches helperCopyMatches].freeze
+  NATIVE_SIGNAL_FAILURE_CHECK_FIELDS = %w[hooksRestored originalWaitBound creatorJoined taskJoinsObserved
+    actualOriginalPrimary actualCustodianReceiptBound actualNativeDescriptorsClosed].freeze
+  NATIVE_SIGNAL_FAILURE_LABEL_CODES = {
+    "unowned Process.spawn" => "spawn-unowned",
+    "keeper wait preceded actual group retirement" => "keeper-wait-before-retire",
+    "fixture reservation not finally reaped" => "fixture-not-reaped",
+    "source changed during observation" => "source-changed",
+    "helper copy changed" => "helper-copy-changed",
+    "actual helper owner" => "helper-owner",
+    "actual helper creator publication" => "helper-creator",
+    "one actual helper child creation" => "helper-create-count",
+    "actual helper original child wait" => "helper-wait",
+    "actual helper task joins" => "helper-task-joins",
+    "actual helper acquisitions settled" => "helper-acquisitions",
+    "helper declared process-lifetime null" => "helper-null-lifetime",
+    "actual helper owned close" => "helper-close",
+    "actual C group lifetime" => "custodian-group-lifetime",
+    "actual C group retirement before first K wait" => "custodian-retire-before-wait",
+    "base driver result" => "base-driver",
+    "actual native original primary" => "native-primary",
+    "actual IOError redaction" => "io-redaction",
+    "actual native original" => "native-original",
+    "actual SystemExit status" => "system-exit-status",
+    "actual native finality" => "native-finality",
+    "ready" => "ready",
+    "firstCloseEntered" => "first-close-entered",
+    "firstCloseFromNative" => "first-close-native",
+    "originalCloseCompleted" => "original-close-complete",
+    "watchdogStarted" => "watchdog-started",
+    "deadBeforeFallback" => "dead-before-fallback",
+    "ownedDescriptorsClosed" => "descriptors-closed",
+    "watchdogJoined" => "watchdog-joined",
+    "tasksJoined" => "tasks-joined",
+    "injectorsJoined" => "injectors-joined",
+    "handlersRestored" => "handlers-restored",
+    "registryInactive" => "registry-inactive",
+    "one actual first close" => "first-close-count",
+    "no fallback or pending cleanup" => "fallback-or-pending",
+    "custodian helper proof" => "custodian-proof",
+    "keeper helper proof" => "keeper-proof",
+    "actual failed FINAL with settled C exit2" => "failed-final-exit2",
+    "C method return bound to actual OS receipt" => "custodian-return",
+    "K method return bound to actual C wait" => "keeper-return",
+    "actual original V SIGKILL" => "validator-kill",
+    "actual reserved group finality" => "group-finality",
+    "actual per-case reserved-group KILL" => "reserved-group-kill",
+    "actual per-case custodian signal zero" => "custodian-zero",
+    "actual post-reap repeats" => "post-reap-repeat",
+    "no unexpected self signal" => "unexpected-self-signal",
+    "hook:changed_observation_hook" => "hook-changed",
+    "hook:unrestored_observation_hook" => "hook-unrestored",
+    "hook:entry:changed_observation_hook" => "entry-hook-changed",
+    "hook:entry:unrestored_observation_hook" => "entry-hook-unrestored",
+  }.freeze
+  NATIVE_SIGNAL_FAILURE_CHECK_CODES = NATIVE_SIGNAL_FAILURE_LABEL_CODES.values.freeze
+  NATIVE_SIGNAL_FAILURE_STAGES = %w[request-observation signal-syscall observation-body observation-finalization
+    driver-proof helper-proof parent-proof-publication hook entry-hook].freeze
+  NATIVE_SIGNAL_FAILURE_STAGE_PREFIXES = {
+    "request-observation" => "request observation:", "signal-syscall" => "signal syscall:",
+    "observation-body" => "observation body:", "observation-finalization" => "observation finalization:",
+    "driver-proof" => "driver proof:", "helper-proof" => "helper proof:",
+    "parent-proof-publication" => "parent proof publication:", "hook" => "hook:", "entry-hook" => "hook:entry:",
+  }.freeze
+  NATIVE_SIGNAL_FAILURE_CATEGORIES = %w[interrupt signal system-exit fixture-error contract-error native-error
+    native-lifecycle-error native-protocol-error native-spawn-error io-error os-error json-parser-error key-error
+    no-method-error type-error argument-error runtime-error standard-error exception other].freeze
+  NATIVE_SIGNAL_FAILURE_CLASS_CATEGORIES = {
+    "Interrupt" => "interrupt", "SignalException" => "signal", "SystemExit" => "system-exit",
+    "UploadProcessFixture::Failure" => "fixture-error", "MobileReleaseKit::ContractError" => "contract-error",
+    "MobileReleaseKit::NativeUploadProcess::Error" => "native-error",
+    "MobileReleaseKit::NativeUploadProcess::LifecycleError" => "native-lifecycle-error",
+    "MobileReleaseKit::NativeUploadProcess::ProtocolError" => "native-protocol-error",
+    "MobileReleaseKit::NativeProcessSpawn::Error" => "native-spawn-error", "IOError" => "io-error",
+    "SystemCallError" => "os-error", "JSON::ParserError" => "json-parser-error", "KeyError" => "key-error",
+    "NoMethodError" => "no-method-error", "TypeError" => "type-error", "ArgumentError" => "argument-error",
+    "RuntimeError" => "runtime-error", "StandardError" => "standard-error", "Exception" => "exception",
+    "Errno::ECHILD" => "os-error", "Errno::ESRCH" => "os-error", "Errno::EINTR" => "os-error",
+    "Errno::EBADF" => "os-error", "Errno::EINVAL" => "os-error", "Errno::EIO" => "os-error",
+    "Errno::EPERM" => "os-error", "Errno::EACCES" => "os-error", "Errno::EAGAIN" => "os-error",
+    "Errno::ENOMEM" => "os-error", "Errno::EMFILE" => "os-error", "Errno::ENFILE" => "os-error",
+    "Errno::ENOENT" => "os-error", "Errno::EPIPE" => "os-error",
+  }.freeze
+  NATIVE_SIGNAL_FAILURE_ROUTES = %w[custodian-group keeper-self-group custodian-direct-keeper fixture self unrecognized].freeze
+  NATIVE_SIGNAL_FAILURE_REFUSALS = %w[shape post-reap post-retirement unknown source owner target signal retired].freeze
+
+  # Finite, detached comparisons of already-read ORIGINAL operands. This is
+  # neither a proof reader nor authority to wait, signal, clean up, or accept.
+  module NativeSignalFailureDiagnostic
+    module_function
+
+    def boolean(value)
+      value.equal?(true) || value.equal?(false) ? value : "missing"
+    end
+
+    def compare(proof, key, expected, available: true)
+      return "missing" unless available && proof.instance_of?(Hash) && proof.key?(key)
+      proof[key] == expected
+    end
+
+    def choice(proof, key, choices)
+      return "missing" unless proof.instance_of?(Hash) && proof.key?(key)
+      choices.find { |value| value == proof[key] } || "other"
+    end
+
+    def return_code(value)
+      value.instance_of?(Integer) && value.between?(0, 255) ? value : "missing"
+    end
+
+    def applicable?(role, key)
+      key == "hooksRestored" || (role == "driver") == NATIVE_SIGNAL_FAILURE_CHECK_FIELDS.last(3).include?(key)
+    end
+
+    def failure_masks(proof)
+      causes = Array.new(NATIVE_SIGNAL_FAILURE_STAGES.length, 0)
+      refusals = Array.new(NATIVE_SIGNAL_FAILURE_ROUTES.length, 0)
+      return ["missing", 0, causes, refusals, false] unless proof.key?("failures")
+      labels = proof["failures"]
+      return ["invalid", 0, causes, refusals, true] unless labels.instance_of?(Array)
+      mask, unknown = 0, false
+      labels.each do |label|
+        unless label.instance_of?(String)
+          unknown = true
+          next
+        end
+        if (code = NATIVE_SIGNAL_FAILURE_LABEL_CODES[label])
+          mask |= 1 << NATIVE_SIGNAL_FAILURE_CHECK_CODES.index(code)
+        elsif (stage = NATIVE_SIGNAL_FAILURE_STAGE_PREFIXES.keys.sort_by { |name| -NATIVE_SIGNAL_FAILURE_STAGE_PREFIXES.fetch(name).length }
+          .find { |name| label.start_with?(NATIVE_SIGNAL_FAILURE_STAGE_PREFIXES.fetch(name)) })
+          suffix = label.delete_prefix(NATIVE_SIGNAL_FAILURE_STAGE_PREFIXES.fetch(stage))
+          category = NATIVE_SIGNAL_FAILURE_CLASS_CATEGORIES.fetch(suffix, "other")
+          causes[NATIVE_SIGNAL_FAILURE_STAGES.index(stage)] |= 1 << NATIVE_SIGNAL_FAILURE_CATEGORIES.index(category)
+        else
+          route, reason = label.split(":", 2)
+          if NATIVE_SIGNAL_FAILURE_ROUTES.include?(route) && NATIVE_SIGNAL_FAILURE_REFUSALS.include?(reason)
+            refusals[NATIVE_SIGNAL_FAILURE_ROUTES.index(route)] |= 1 << NATIVE_SIGNAL_FAILURE_REFUSALS.index(reason)
+          else
+            unknown = true
+          end
+        end
+      end
+      [labels.empty? ? "empty" : "nonempty", mask, causes, refusals, unknown]
+    end
+
+    def row(role, raw, present:, sources:, driver:)
+      state = !present ? "missing" : raw.instance_of?(Hash) ? "present" : "invalid"
+      proof = state == "present" ? raw : {}
+      identities = {
+        "kindMatches" => compare(proof, "kind", "native-signal-observation"),
+        "roleMatches" => compare(proof, "role", role == "driver" ? "driver" : "helper"),
+        "helperRoleMatches" => role == "driver" ? "not-applicable" : compare(proof, "helperRole", role),
+        "sourceMatches" => compare(proof, "sourceSha256", sources, available: sources.instance_of?(Hash)),
+        "helperCopyMatches" => role == "driver" ? "not-applicable" :
+          compare(proof, "helperCopy", driver["helperCopy"], available: driver.key?("helperCopy")),
+      }
+      checks = NATIVE_SIGNAL_FAILURE_CHECK_FIELDS.to_h do |key|
+        [key, applicable?(role, key) ? boolean(proof[key]) : "not-applicable"]
+      end
+      failures, mask, causes, refusals, unknown = failure_masks(proof)
+      {"role" => role, "state" => state, "mode" => choice(proof, "case", NATIVE_SIGNAL_FAILURE_MODES),
+       "identities" => identities, "returnCode" => return_code(proof[role == "driver" ? "baseDriverReturn" : "helperReturn"]),
+       "checks" => checks, "failuresState" => failures, "failedCheckMask" => mask, "causeMasks" => causes,
+       "refusalMasks" => refusals, "unknownFailure" => unknown}
+    end
+
+    def project(mode:, proof:, result:, status:, expected_sources:)
+      return unless mode.instance_of?(String) && NATIVE_SIGNAL_FAILURE_MODES.include?(mode) && proof.instance_of?(Hash)
+      exit_status = status&.exitstatus # The retained owned receipt; no process observation.
+      guard = {"caseMatches" => compare(proof, "case", mode),
+        "kindMatches" => compare(proof, "kind", "native-signal-observation"),
+        "sourceMatches" => compare(proof, "sourceSha256", expected_sources, available: expected_sources.instance_of?(Hash)),
+        "failuresEmpty" => compare(proof, "failures", []), "hooksRestored" => compare(proof, "hooksRestored", true),
+        "baseDriverReturnZero" => compare(proof, "baseDriverReturn", 0),
+        "driverExitStatusZero" => status.nil? ? "missing" : exit_status == 0}
+      return if guard.values.all? { |value| value.equal?(true) }
+      helpers = proof["helpers"].instance_of?(Hash) ? proof["helpers"] : {}
+      value = {"schema" => 1, "mode" => NATIVE_SIGNAL_FAILURE_MODES.find { |candidate| candidate == mode }, "guard" => guard,
+        "result" => {"kind" => choice(result, "kind", ADAPTER_FAILURE_KINDS),
+          "mode" => choice(result, "mode", NATIVE_SIGNAL_FAILURE_MODES), "driverExitStatus" => return_code(exit_status)},
+        "rows" => NATIVE_SIGNAL_FAILURE_ROLES.map do |role|
+          row(role, role == "driver" ? proof : helpers[role], present: role == "driver" || helpers.key?(role),
+              sources: expected_sources, driver: proof)
+        end}
+      OwnershipFailureDiagnostic.freeze_value(value) if valid?(value)
+    end
+
+    def ordered?(value, fields)
+      value.instance_of?(Hash) && value.keys.all? { |key| key.instance_of?(String) } && value.keys == fields
+    end
+
+    def enum?(value, choices)
+      value.instance_of?(String) && choices.include?(value)
+    end
+
+    def boolean_or_missing?(value)
+      value.equal?(true) || value.equal?(false) || value.instance_of?(String) && value == "missing"
+    end
+
+    def code?(value)
+      value.instance_of?(Integer) && value.between?(0, 255) || value.instance_of?(String) && value == "missing"
+    end
+
+    def masks?(values, length, width)
+      values.instance_of?(Array) && values.length == length &&
+        values.all? { |value| value.instance_of?(Integer) && value >= 0 && value < (1 << width) }
+    end
+
+    def valid_row?(row, role)
+      return false unless ordered?(row, NATIVE_SIGNAL_FAILURE_ROW_FIELDS) && enum?(row["role"], [role]) &&
+        enum?(row["state"], NATIVE_SIGNAL_FAILURE_STATES) && enum?(row["mode"], NATIVE_SIGNAL_FAILURE_MODES + %w[other missing]) &&
+        code?(row["returnCode"]) && enum?(row["failuresState"], NATIVE_SIGNAL_FAILURE_FAILURES_STATES) &&
+        ordered?(row["identities"], NATIVE_SIGNAL_FAILURE_IDENTITY_FIELDS) && ordered?(row["checks"], NATIVE_SIGNAL_FAILURE_CHECK_FIELDS) &&
+        masks?([row["failedCheckMask"]], 1, NATIVE_SIGNAL_FAILURE_CHECK_CODES.length) &&
+        masks?(row["causeMasks"], NATIVE_SIGNAL_FAILURE_STAGES.length, NATIVE_SIGNAL_FAILURE_CATEGORIES.length) &&
+        masks?(row["refusalMasks"], NATIVE_SIGNAL_FAILURE_ROUTES.length, NATIVE_SIGNAL_FAILURE_REFUSALS.length) &&
+        (row["unknownFailure"].equal?(true) || row["unknownFailure"].equal?(false))
+      return false unless row["identities"].all? do |key, value|
+        role == "driver" && %w[helperRoleMatches helperCopyMatches].include?(key) ? enum?(value, ["not-applicable"]) : boolean_or_missing?(value)
+      end
+      return false unless row["checks"].all? { |key, value| applicable?(role, key) ? boolean_or_missing?(value) : enum?(value, ["not-applicable"]) }
+      any_mask = row["failedCheckMask"].positive? || (row["causeMasks"] + row["refusalMasks"]).any?(&:positive?)
+      if row["state"] != "present"
+        return row.values_at("mode", "returnCode", "failuresState") == %w[missing missing missing] && !any_mask && !row["unknownFailure"] &&
+          row["identities"].values.all? { |value| %w[missing not-applicable].include?(value) } &&
+          row["checks"].values.all? { |value| %w[missing not-applicable].include?(value) }
+      end
+      case row["failuresState"]
+      when "empty", "missing" then !any_mask && !row["unknownFailure"]
+      when "invalid" then !any_mask && row["unknownFailure"]
+      when "nonempty" then any_mask || row["unknownFailure"]
+      end
+    end
+
+    def valid?(value)
+      return false unless ordered?(value, NATIVE_SIGNAL_FAILURE_FIELDS) && value["schema"].instance_of?(Integer) && value["schema"] == 1 &&
+        enum?(value["mode"], NATIVE_SIGNAL_FAILURE_MODES) && ordered?(value["guard"], NATIVE_SIGNAL_FAILURE_GUARD_FIELDS) &&
+        value["guard"].values.all? { |item| boolean_or_missing?(item) } && !value["guard"].values.all? { |item| item.equal?(true) } &&
+        ordered?(value["result"], NATIVE_SIGNAL_FAILURE_RESULT_FIELDS) &&
+        enum?(value["result"]["kind"], ADAPTER_FAILURE_KINDS + %w[other missing]) &&
+        enum?(value["result"]["mode"], NATIVE_SIGNAL_FAILURE_MODES + %w[other missing]) && code?(value["result"]["driverExitStatus"]) &&
+        value["rows"].instance_of?(Array) && value["rows"].length == NATIVE_SIGNAL_FAILURE_ROLES.length
+      value["rows"].zip(NATIVE_SIGNAL_FAILURE_ROLES).all? { |row, role| valid_row?(row, role) }
+    end
+
+    def line(value)
+      return unless valid?(value)
+      bytes = "#{NATIVE_SIGNAL_FAILURE_PREFIX}#{JSON.generate(value)}\n"
+      bytes.freeze if bytes.ascii_only? && bytes.bytesize <= NATIVE_SIGNAL_FAILURE_MAX_BYTES
+    end
+  end
+
   class Failure < StandardError
     attr_reader :kind
 
@@ -1135,9 +1400,64 @@ module UploadProcessFixture
     nil
   end
 
+  def remember_native_signal_failure(state, original, mode:, proof:, result:, status:, expected_sources:, deadline_ns:)
+    return unless state.instance_of?(Hash) && !state.key?(:rejection)
+
+    state[:rejection] = original
+    state[:mode] = mode.dup.freeze
+    state[:deadline_ns] = deadline_ns
+    return unless deadline_ns.instance_of?(Integer) && deadline_ns.positive? && clock_ns < deadline_ns
+
+    # Freeze only the finite projection, never the private input/proof objects.
+    state[:record] = NativeSignalFailureDiagnostic.project(mode: mode, proof: proof, result: result,
+      status: status, expected_sources: expected_sources)
+  end
+
+  def report_native_signal_failure(state, original, mode:, callback:)
+    return unless state.instance_of?(Hash) && original.instance_of?(Failure) && state[:rejection].equal?(original)
+    return if state[:report_attempted]
+
+    state[:report_attempted] = true
+    return unless mode.instance_of?(String) && NATIVE_SIGNAL_FAILURE_MODES.include?(mode) &&
+      state[:mode].instance_of?(String) && state[:mode] == mode &&
+      callback.instance_of?(String) && callback == NATIVE_SIGNAL_FAILURE_CALLBACK
+    deadline_ns = state[:deadline_ns]
+    return unless deadline_ns.instance_of?(Integer) && deadline_ns.positive? && clock_ns < deadline_ns
+    value = state[:record]
+    return unless value.instance_of?(Hash) && value["mode"] == mode
+    line = NativeSignalFailureDiagnostic.line(value)
+    return unless line && clock_ns < deadline_ns
+
+    state[:write_attempted] = true
+    state[:write_complete] = STDERR.write(line) == line.bytesize
+    nil
+  rescue Exception => diagnostic_error
+    begin
+      state[:diagnostic_error] ||= diagnostic_error if state.instance_of?(Hash)
+    rescue Exception
+      nil # Only optional reporting, after an actual escaping error was chosen.
+    end
+    nil
+  end
+
+  def with_native_signal_failure_diagnostic(mode:, callback:)
+    state = {}
+    begin
+      yield(signal_failure_state: state)
+    rescue Exception => original
+      # Outside ALL run/observe/observe_parent unwinds, not an inner ensure.
+      begin
+        report_native_signal_failure(state, original, mode: mode, callback: callback)
+      rescue Exception
+        nil
+      end
+      raise
+    end
+  end
+
   def run(platform:, root:, parameters:, mode:, observe_signals: false, deadline_ns: nil,
           primary_failure_state: nil, order_failure_state: nil, setup_failure_state: nil, adapter_failure_state: nil,
-          ownership_failure_state: nil)
+          ownership_failure_state: nil, signal_failure_state: nil)
     assert_domain_reusable!
     validate_request!(platform, mode, parameters)
     validate_signal_observation!(platform, mode, observe_signals)
@@ -1149,7 +1469,8 @@ module UploadProcessFixture
         run(platform: platform, root: root, parameters: parameters, mode: mode,
             observe_signals: true, deadline_ns: deadline_ns, primary_failure_state: primary_failure_state,
             order_failure_state: order_failure_state, setup_failure_state: setup_failure_state,
-            adapter_failure_state: adapter_failure_state, ownership_failure_state: ownership_failure_state)
+            adapter_failure_state: adapter_failure_state, ownership_failure_state: ownership_failure_state,
+            signal_failure_state: signal_failure_state)
       end
     end
     if observe_signals && !NativeSignalProbe.current.parent_for?(root, mode)
@@ -1271,7 +1592,15 @@ module UploadProcessFixture
                      signal_proof["sourceSha256"] == NativeSignalProbe.current.source_hashes &&
                      signal_proof["failures"] == [] && signal_proof["hooksRestored"] == true &&
                      signal_proof["baseDriverReturn"] == 0 && child.status.exitstatus == 0
-                raise Failure.new("fixture-result", "native signal proof rejected")
+                original = Failure.new("fixture-result", "native signal proof rejected")
+                begin
+                  remember_native_signal_failure(signal_failure_state, original, mode: mode, proof: signal_proof,
+                    result: result, status: child.status, expected_sources: NativeSignalProbe.current.source_hashes,
+                    deadline_ns: run_ns) if signal_failure_state
+                rescue Exception
+                  nil # Optional operands/bookkeeping cannot replace the selected rejection.
+                end
+                raise original
               end
               result = result.merge("nativeSignalProof" => signal_proof, "observedDriverExitStatus" => child.status.exitstatus)
             end

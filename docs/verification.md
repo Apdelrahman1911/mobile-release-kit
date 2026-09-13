@@ -789,6 +789,19 @@ partition. No private messages, paths, process identities or proof contents are
 published. Missing observations remain missing; reporting cannot authorize
 success, cleanup, a retry or a changed deadline, or establish a cause by itself.
 
+The separate native signal-observation test may emit one canonical schema-1
+`MRK_NATIVE_SIGNAL_FAILURE` line, bounded to 4096 bytes including prefix/newline.
+It compares already-read original proof operands and preserves finite driver,
+custodian and keeper failure codes, error-category and refusal masks. Missing
+helper rows stay missing; unknown adverse labels never become an empty success.
+These are diagnostic comparisons, not claims that all short-circuited guard
+expressions executed. The same original proof rejection must survive complete
+fixture cleanup, observer restoration and parent-proof publication before the
+outer caller can report, under the original cutoff. No new proof/process read
+or private value is published. The controller requires the unique failing
+source-known signal callback in its nonpartitioned gate; success-shaped,
+malformed, duplicate or wrong-scope records cannot qualify or alter acceptance.
+
 The slow-cleanup fixture uses the original two-second run, five-second cleanup
 grace and eight-second capture watchdog. Only an eligible direct original-body
 observation can hand the already-selected timeout object into the existing run
