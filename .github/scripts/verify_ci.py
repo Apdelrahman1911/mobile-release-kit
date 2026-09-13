@@ -444,7 +444,9 @@ NATIVE_SIGNAL_FAILURE_CALLBACK = (
     "NativeSignalObservationTest#test_native_first_close_and_post_reap_signals_with_safe_veto_controls"
 )
 NATIVE_SIGNAL_FAILURE_MAX_BYTES = 4096
-NATIVE_SIGNAL_FAILURE_FIELDS = ("schema", "mode", "guard", "result", "rows")
+NATIVE_SIGNAL_FAILURE_MAX_REQUESTS = 64
+NATIVE_SIGNAL_FAILURE_MAX_ERROR_CODE = 360
+NATIVE_SIGNAL_FAILURE_FIELDS = ("schema", "mode", "guard", "result", "rows", "nativeOutcomes")
 NATIVE_SIGNAL_FAILURE_MODES = (
     "native-setup-interrupt", "native-setup-system-exit", "native-setup-io-error", "native-setup-post-reap-cancel",
 )
@@ -456,7 +458,7 @@ NATIVE_SIGNAL_FAILURE_RESULT_FIELDS = ("kind", "mode", "driverExitStatus")
 NATIVE_SIGNAL_FAILURE_RESULT_KINDS = tuple(kind for kind in ADAPTER_FAILURE_RESULT_KINDS if kind != "invalid")
 NATIVE_SIGNAL_FAILURE_ROW_FIELDS = (
     "role", "state", "mode", "identities", "returnCode", "checks", "failuresState",
-    "failedCheckMask", "causeMasks", "refusalMasks", "unknownFailure",
+    "failedCheckMask", "causeMasks", "refusalMasks", "unknownFailure", "observedHelperReturn", "backendErrorCodes",
 )
 NATIVE_SIGNAL_FAILURE_IDENTITY_FIELDS = (
     "kindMatches", "roleMatches", "helperRoleMatches", "sourceMatches", "helperCopyMatches",
@@ -496,6 +498,12 @@ NATIVE_SIGNAL_FAILURE_CATEGORIES = (
 NATIVE_SIGNAL_FAILURE_ROUTES = (
     "custodian-group", "keeper-self-group", "custodian-direct-keeper", "fixture", "self", "unrecognized",
 )
+NATIVE_SIGNAL_FAILURE_SIGNALS = ("0", "KILL", "INT", "other")
+NATIVE_SIGNAL_FAILURE_ERRNOS = (
+    "ECHILD", "ESRCH", "EINTR", "EBADF", "EINVAL", "EIO", "EPERM", "EACCES", "EAGAIN", "ENOMEM",
+    "EMFILE", "ENFILE", "ENOENT", "EPIPE", "other",
+)
+NATIVE_SIGNAL_FAILURE_NATIVE_OUTCOME_FIELDS = ("custodian", "finalOutcome", "finalCleanup", "groupState")
 NATIVE_SIGNAL_FAILURE_REFUSALS = (
     "shape", "post-reap", "post-retirement", "unknown", "source", "owner", "target", "signal", "retired",
 )
@@ -1918,10 +1926,15 @@ def native_signal_failure(raw: bytes, *, deadline: float | None = None) -> dict 
     def mask(value, bits):
         return type(value) is int and 0 <= value < 1 << bits
 
+    def backend_errors(value):
+        return (choice(value, ("missing", "invalid"))
+                or type(value) is list and len(value) <= NATIVE_SIGNAL_FAILURE_MAX_REQUESTS
+                and all(type(code) is int and 0 <= code <= NATIVE_SIGNAL_FAILURE_MAX_ERROR_CODE for code in value))
+
     try:
         data = _fixture_failure_record(raw, NATIVE_SIGNAL_FAILURE_PREFIX, NATIVE_SIGNAL_FAILURE_MAX_BYTES,
                                        deadline=deadline, canonical_fields=NATIVE_SIGNAL_FAILURE_FIELDS)
-        if (type(data) is not dict or type(data["schema"]) is not int or data["schema"] != 1
+        if (type(data) is not dict or type(data["schema"]) is not int or data["schema"] != 2
                 or not choice(data["mode"], NATIVE_SIGNAL_FAILURE_MODES)
                 or not observations(data["guard"], NATIVE_SIGNAL_FAILURE_GUARD_FIELDS)
                 or all(value is True for value in data["guard"].values())):
@@ -1932,6 +1945,10 @@ def native_signal_failure(raw: bytes, *, deadline: float | None = None) -> dict 
                 or not choice(result["kind"], NATIVE_SIGNAL_FAILURE_RESULT_KINDS)
                 or not choice(result["mode"], modes) or not return_code(result["driverExitStatus"])
                 or type(data["rows"]) is not list or len(data["rows"]) != len(NATIVE_SIGNAL_FAILURE_ROLES)):
+            return None
+        outcomes = data["nativeOutcomes"]
+        if (type(outcomes) is not dict or tuple(outcomes) != NATIVE_SIGNAL_FAILURE_NATIVE_OUTCOME_FIELDS
+                or any(not choice(value, ADAPTER_FAILURE_NATIVE_OUTCOMES[name]) for name, value in outcomes.items())):
             return None
         for role, row in zip(NATIVE_SIGNAL_FAILURE_ROLES, data["rows"]):
             if deadline is not None:
@@ -1946,7 +1963,10 @@ def native_signal_failure(raw: bytes, *, deadline: float | None = None) -> dict 
                     or not observations(row["checks"], NATIVE_SIGNAL_FAILURE_CHECK_FIELDS, check_na)
                     or not choice(row["failuresState"], NATIVE_SIGNAL_FAILURE_FAILURES_STATES)
                     or not mask(row["failedCheckMask"], len(NATIVE_SIGNAL_FAILURE_CHECK_CODES))
-                    or type(row["unknownFailure"]) is not bool):
+                    or type(row["unknownFailure"]) is not bool
+                    or not (choice(row["observedHelperReturn"], ("not-applicable",)) if role == "driver"
+                            else return_code(row["observedHelperReturn"]))
+                    or not backend_errors(row["backendErrorCodes"])):
                 return None
             for name, count, bits in (("causeMasks", len(NATIVE_SIGNAL_FAILURE_STAGES), len(NATIVE_SIGNAL_FAILURE_CATEGORIES)),
                                       ("refusalMasks", len(NATIVE_SIGNAL_FAILURE_ROUTES), len(NATIVE_SIGNAL_FAILURE_REFUSALS))):
@@ -1956,6 +1976,8 @@ def native_signal_failure(raw: bytes, *, deadline: float | None = None) -> dict 
             classified = bool(row["failedCheckMask"] or any(row["causeMasks"]) or any(row["refusalMasks"]))
             if row["state"] != "present":
                 if (row["mode"] != "missing" or row["returnCode"] != "missing"
+                        or row["observedHelperReturn"] != ("not-applicable" if role == "driver" else "missing")
+                        or row["backendErrorCodes"] != "missing"
                         or any(item != ("not-applicable" if name in identity_na else "missing")
                                for name, item in row["identities"].items())
                         or any(item != ("not-applicable" if name in check_na else "missing")

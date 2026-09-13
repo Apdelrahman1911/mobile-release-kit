@@ -809,11 +809,21 @@ codes disclose no raw proof, path, identity or error message. Diagnostic
 bookkeeping cannot skip cleanup, change retention or replace the primary error;
 the complete line still has the same 4096-byte bound without truncation.
 
-The separate native signal-observation test may emit one canonical schema-1
+The separate native signal-observation test may emit one canonical schema-2
 `MRK_NATIVE_SIGNAL_FAILURE` line, bounded to 4096 bytes including prefix/newline.
 It compares already-read original proof operands and preserves finite driver,
 custodian and keeper failure codes, error-category and refusal masks. Missing
 helper rows stay missing; unknown adverse labels never become an empty success.
+The diagnostic also retains each original request's position using at most 64
+finite `backendErrorCodes` per row. Zero means no recorded backend error, not
+successful signalling; positive codes distinguish fixed route, signal and errno
+classes, with an explicit unknown class. No raw request or target is exported.
+`observedHelperReturn` reports the already-assigned original helper return after
+observer/entry-hook unwind, independently of the observer's enforced failure
+exit. It neither fills missing helper proofs nor changes acceptance. Four
+`nativeOutcomes` describe the already-recorded custodian receipt and FINAL
+outcome/cleanup/group state, not fresh observations. The complete maximum is
+3641 bytes without truncation; historical schema-1 evidence remains historical.
 These are diagnostic comparisons, not claims that all short-circuited guard
 expressions executed. The same original proof rejection must survive complete
 fixture cleanup, observer restoration and parent-proof publication before the

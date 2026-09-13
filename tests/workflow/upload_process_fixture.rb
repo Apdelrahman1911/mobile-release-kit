@@ -173,14 +173,16 @@ module UploadProcessFixture
   NATIVE_SIGNAL_FAILURE_PREFIX = "MRK_NATIVE_SIGNAL_FAILURE="
   NATIVE_SIGNAL_FAILURE_CALLBACK = "NativeSignalObservationTest#test_native_first_close_and_post_reap_signals_with_safe_veto_controls"
   NATIVE_SIGNAL_FAILURE_MAX_BYTES = 4096
-  NATIVE_SIGNAL_FAILURE_FIELDS = %w[schema mode guard result rows].freeze
+  NATIVE_SIGNAL_FAILURE_MAX_REQUESTS = 64
+  NATIVE_SIGNAL_FAILURE_MAX_ERROR_CODE = 360
+  NATIVE_SIGNAL_FAILURE_FIELDS = %w[schema mode guard result rows nativeOutcomes].freeze
   NATIVE_SIGNAL_FAILURE_MODES = %w[native-setup-interrupt native-setup-system-exit native-setup-io-error
     native-setup-post-reap-cancel].freeze
   NATIVE_SIGNAL_FAILURE_GUARD_FIELDS = %w[caseMatches kindMatches sourceMatches failuresEmpty hooksRestored
     baseDriverReturnZero driverExitStatusZero].freeze
   NATIVE_SIGNAL_FAILURE_RESULT_FIELDS = %w[kind mode driverExitStatus].freeze
   NATIVE_SIGNAL_FAILURE_ROW_FIELDS = %w[role state mode identities returnCode checks failuresState failedCheckMask
-    causeMasks refusalMasks unknownFailure].freeze
+    causeMasks refusalMasks unknownFailure observedHelperReturn backendErrorCodes].freeze
   NATIVE_SIGNAL_FAILURE_ROLES = %w[driver custodian keeper].freeze
   NATIVE_SIGNAL_FAILURE_STATES = %w[present missing invalid].freeze
   NATIVE_SIGNAL_FAILURE_FAILURES_STATES = %w[empty nonempty missing invalid].freeze
@@ -269,6 +271,10 @@ module UploadProcessFixture
   }.freeze
   NATIVE_SIGNAL_FAILURE_ROUTES = %w[custodian-group keeper-self-group custodian-direct-keeper fixture self unrecognized].freeze
   NATIVE_SIGNAL_FAILURE_REFUSALS = %w[shape post-reap post-retirement unknown source owner target signal retired].freeze
+  NATIVE_SIGNAL_FAILURE_SIGNALS = %w[0 KILL INT other].freeze
+  NATIVE_SIGNAL_FAILURE_ERRNOS = %w[ECHILD ESRCH EINTR EBADF EINVAL EIO EPERM EACCES EAGAIN
+    ENOMEM EMFILE ENFILE ENOENT EPIPE other].freeze
+  NATIVE_SIGNAL_FAILURE_NATIVE_OUTCOME_FIELDS = %w[custodian finalOutcome finalCleanup groupState].freeze
 
   # Finite, detached comparisons of already-read ORIGINAL operands. This is
   # neither a proof reader nor authority to wait, signal, clean up, or accept.
@@ -328,6 +334,35 @@ module UploadProcessFixture
       [labels.empty? ? "empty" : "nonempty", mask, causes, refusals, unknown]
     end
 
+    def backend_error_codes(proof)
+      return "missing" unless proof.key?("requests")
+      requests = proof["requests"]
+      return "invalid" unless requests.instance_of?(Array) && requests.length <= NATIVE_SIGNAL_FAILURE_MAX_REQUESTS &&
+        requests.all? { |request| request.instance_of?(Hash) }
+
+      requests.map do |request|
+        next 0 unless request.key?("backendErrorClass") # Not evidence of success or absence.
+        route, signal, error = request.values_at("route", "signal", "backendErrorClass")
+        route_index = route.instance_of?(String) ? NATIVE_SIGNAL_FAILURE_ROUTES.index(route) : nil
+        signal_index = signal.instance_of?(String) ? NATIVE_SIGNAL_FAILURE_SIGNALS.index(signal) : nil
+        errno_index = if error.instance_of?(String)
+          NATIVE_SIGNAL_FAILURE_ERRNOS.index { |name| error == "Errno::#{name}" }
+        end
+        route_index ||= NATIVE_SIGNAL_FAILURE_ROUTES.length - 1
+        signal_index ||= NATIVE_SIGNAL_FAILURE_SIGNALS.length - 1
+        errno_index ||= NATIVE_SIGNAL_FAILURE_ERRNOS.length - 1
+        1 + ((route_index * NATIVE_SIGNAL_FAILURE_SIGNALS.length + signal_index) * NATIVE_SIGNAL_FAILURE_ERRNOS.length + errno_index)
+      end
+    end
+
+    def native_outcomes(mode, result)
+      # Whole unavailable and malformed operands stay distinct. The shared
+      # projector has no emission gate and reads only these original values.
+      input = result.nil? ? {} : result.instance_of?(Hash) ? result : {"nativeObservation" => nil}
+      outcomes = UploadProcessFixture.adapter_result_projection(mode: mode, result: input).fetch("nativeOutcomes")
+      NATIVE_SIGNAL_FAILURE_NATIVE_OUTCOME_FIELDS.to_h { |key| [key, outcomes.fetch(key)] }
+    end
+
     def row(role, raw, present:, sources:, driver:)
       state = !present ? "missing" : raw.instance_of?(Hash) ? "present" : "invalid"
       proof = state == "present" ? raw : {}
@@ -346,7 +381,9 @@ module UploadProcessFixture
       {"role" => role, "state" => state, "mode" => choice(proof, "case", NATIVE_SIGNAL_FAILURE_MODES),
        "identities" => identities, "returnCode" => return_code(proof[role == "driver" ? "baseDriverReturn" : "helperReturn"]),
        "checks" => checks, "failuresState" => failures, "failedCheckMask" => mask, "causeMasks" => causes,
-       "refusalMasks" => refusals, "unknownFailure" => unknown}
+       "refusalMasks" => refusals, "unknownFailure" => unknown,
+       "observedHelperReturn" => role == "driver" ? "not-applicable" : return_code(proof["observedHelperReturn"]),
+       "backendErrorCodes" => backend_error_codes(proof)}
     end
 
     def project(mode:, proof:, result:, status:, expected_sources:)
@@ -360,13 +397,13 @@ module UploadProcessFixture
         "driverExitStatusZero" => status.nil? ? "missing" : exit_status == 0}
       return if guard.values.all? { |value| value.equal?(true) }
       helpers = proof["helpers"].instance_of?(Hash) ? proof["helpers"] : {}
-      value = {"schema" => 1, "mode" => NATIVE_SIGNAL_FAILURE_MODES.find { |candidate| candidate == mode }, "guard" => guard,
+      value = {"schema" => 2, "mode" => NATIVE_SIGNAL_FAILURE_MODES.find { |candidate| candidate == mode }, "guard" => guard,
         "result" => {"kind" => choice(result, "kind", ADAPTER_FAILURE_KINDS),
           "mode" => choice(result, "mode", NATIVE_SIGNAL_FAILURE_MODES), "driverExitStatus" => return_code(exit_status)},
         "rows" => NATIVE_SIGNAL_FAILURE_ROLES.map do |role|
           row(role, role == "driver" ? proof : helpers[role], present: role == "driver" || helpers.key?(role),
               sources: expected_sources, driver: proof)
-        end}
+        end, "nativeOutcomes" => native_outcomes(mode, result)}
       OwnershipFailureDiagnostic.freeze_value(value) if valid?(value)
     end
 
@@ -391,6 +428,11 @@ module UploadProcessFixture
         values.all? { |value| value.instance_of?(Integer) && value >= 0 && value < (1 << width) }
     end
 
+    def backend_error_codes_valid?(value)
+      enum?(value, %w[missing invalid]) || value.instance_of?(Array) && value.length <= NATIVE_SIGNAL_FAILURE_MAX_REQUESTS &&
+        value.all? { |code| code.instance_of?(Integer) && code.between?(0, NATIVE_SIGNAL_FAILURE_MAX_ERROR_CODE) }
+    end
+
     def valid_row?(row, role)
       return false unless ordered?(row, NATIVE_SIGNAL_FAILURE_ROW_FIELDS) && enum?(row["role"], [role]) &&
         enum?(row["state"], NATIVE_SIGNAL_FAILURE_STATES) && enum?(row["mode"], NATIVE_SIGNAL_FAILURE_MODES + %w[other missing]) &&
@@ -399,7 +441,9 @@ module UploadProcessFixture
         masks?([row["failedCheckMask"]], 1, NATIVE_SIGNAL_FAILURE_CHECK_CODES.length) &&
         masks?(row["causeMasks"], NATIVE_SIGNAL_FAILURE_STAGES.length, NATIVE_SIGNAL_FAILURE_CATEGORIES.length) &&
         masks?(row["refusalMasks"], NATIVE_SIGNAL_FAILURE_ROUTES.length, NATIVE_SIGNAL_FAILURE_REFUSALS.length) &&
-        (row["unknownFailure"].equal?(true) || row["unknownFailure"].equal?(false))
+        (row["unknownFailure"].equal?(true) || row["unknownFailure"].equal?(false)) &&
+        (role == "driver" ? enum?(row["observedHelperReturn"], ["not-applicable"]) : code?(row["observedHelperReturn"])) &&
+        backend_error_codes_valid?(row["backendErrorCodes"])
       return false unless row["identities"].all? do |key, value|
         role == "driver" && %w[helperRoleMatches helperCopyMatches].include?(key) ? enum?(value, ["not-applicable"]) : boolean_or_missing?(value)
       end
@@ -408,7 +452,8 @@ module UploadProcessFixture
       if row["state"] != "present"
         return row.values_at("mode", "returnCode", "failuresState") == %w[missing missing missing] && !any_mask && !row["unknownFailure"] &&
           row["identities"].values.all? { |value| %w[missing not-applicable].include?(value) } &&
-          row["checks"].values.all? { |value| %w[missing not-applicable].include?(value) }
+          row["checks"].values.all? { |value| %w[missing not-applicable].include?(value) } &&
+          row["observedHelperReturn"] == (role == "driver" ? "not-applicable" : "missing") && row["backendErrorCodes"] == "missing"
       end
       case row["failuresState"]
       when "empty", "missing" then !any_mask && !row["unknownFailure"]
@@ -418,13 +463,15 @@ module UploadProcessFixture
     end
 
     def valid?(value)
-      return false unless ordered?(value, NATIVE_SIGNAL_FAILURE_FIELDS) && value["schema"].instance_of?(Integer) && value["schema"] == 1 &&
+      return false unless ordered?(value, NATIVE_SIGNAL_FAILURE_FIELDS) && value["schema"].instance_of?(Integer) && value["schema"] == 2 &&
         enum?(value["mode"], NATIVE_SIGNAL_FAILURE_MODES) && ordered?(value["guard"], NATIVE_SIGNAL_FAILURE_GUARD_FIELDS) &&
         value["guard"].values.all? { |item| boolean_or_missing?(item) } && !value["guard"].values.all? { |item| item.equal?(true) } &&
         ordered?(value["result"], NATIVE_SIGNAL_FAILURE_RESULT_FIELDS) &&
         enum?(value["result"]["kind"], ADAPTER_FAILURE_KINDS + %w[other missing]) &&
         enum?(value["result"]["mode"], NATIVE_SIGNAL_FAILURE_MODES + %w[other missing]) && code?(value["result"]["driverExitStatus"]) &&
-        value["rows"].instance_of?(Array) && value["rows"].length == NATIVE_SIGNAL_FAILURE_ROLES.length
+        value["rows"].instance_of?(Array) && value["rows"].length == NATIVE_SIGNAL_FAILURE_ROLES.length &&
+        ordered?(value["nativeOutcomes"], NATIVE_SIGNAL_FAILURE_NATIVE_OUTCOME_FIELDS) &&
+        value["nativeOutcomes"].all? { |key, item| enum?(item, ADAPTER_FAILURE_NATIVE_OUTCOMES.fetch(key)) }
       value["rows"].zip(NATIVE_SIGNAL_FAILURE_ROLES).all? { |row, role| valid_row?(row, role) }
     end
 
@@ -3519,7 +3566,10 @@ module UploadProcessFixture
           restoration.each { |reason| probe.fail!("hook:entry:#{reason}") }
           probe.instance_variable_set(:@hooks_restored, false) unless restoration.empty?
         end
-        proof = probe.evidence.merge(facts)
+        # The original call's already-assigned return survives an observation
+        # Failure without supplying helper facts or changing wrapper exit1.
+        # Publish only after BOTH observer and entry-hook restoration.
+        proof = probe.evidence.merge(facts).merge("observedHelperReturn" => NativeSignalFailureDiagnostic.return_code(result))
         raise "oversized helper signal proof" if JSON.generate(proof).bytesize > OUTPUT_LIMIT
         OwnedChild.write_record(File.join(directory, "signal-helper-#{argv.first}.json"), proof)
         probe.failures.empty? ? result : 1

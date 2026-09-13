@@ -3261,17 +3261,21 @@ class CIControllerContractTests(unittest.TestCase):
             signal_source = ruby_text("tests/workflow/upload_process_fixture.rb")
             for suffix in ("FIELDS", "MODES", "GUARD_FIELDS", "RESULT_FIELDS", "ROW_FIELDS", "ROLES",
                            "STATES", "FAILURES_STATES", "IDENTITY_FIELDS", "CHECK_FIELDS", "STAGES",
-                           "CATEGORIES", "ROUTES", "REFUSALS"):
+                           "CATEGORIES", "ROUTES", "REFUSALS", "SIGNALS", "ERRNOS", "NATIVE_OUTCOME_FIELDS"):
                 name = "NATIVE_SIGNAL_FAILURE_" + suffix
                 self.assertEqual(ruby_words(signal_source, name), getattr(controller, name))
             self.assertEqual(controller.NATIVE_SIGNAL_FAILURE_PREFIX, "MRK_NATIVE_SIGNAL_FAILURE=")
             self.assertEqual(controller.NATIVE_SIGNAL_FAILURE_MAX_BYTES, 4096)
+            self.assertEqual(controller.NATIVE_SIGNAL_FAILURE_MAX_REQUESTS, 64)
+            self.assertEqual(controller.NATIVE_SIGNAL_FAILURE_MAX_ERROR_CODE, 360)
             signal_target = controller.NATIVE_SIGNAL_FAILURE_CALLBACK
             self.assertEqual(signal_target,
                 "NativeSignalObservationTest#test_native_first_close_and_post_reap_signals_with_safe_veto_controls")
             for name, value in (("PREFIX", controller.NATIVE_SIGNAL_FAILURE_PREFIX), ("CALLBACK", signal_target)):
                 self.assertIn(f'NATIVE_SIGNAL_FAILURE_{name} = "{value}"', signal_source)
             self.assertIn("NATIVE_SIGNAL_FAILURE_MAX_BYTES = 4096", signal_source)
+            self.assertIn("NATIVE_SIGNAL_FAILURE_MAX_REQUESTS = 64", signal_source)
+            self.assertIn("NATIVE_SIGNAL_FAILURE_MAX_ERROR_CODE = 360", signal_source)
             self.assertEqual(controller.NATIVE_SIGNAL_FAILURE_RESULT_KINDS,
                              (*ruby_words(signal_source, "ADAPTER_FAILURE_KINDS"), "other", "missing"))
 
@@ -3298,10 +3302,17 @@ class CIControllerContractTests(unittest.TestCase):
                 "MobileReleaseKit::NativeProcessSpawn::Error", "IOError", "SystemCallError", "JSON::ParserError", "KeyError",
                 "NoMethodError", "TypeError", "ArgumentError", "RuntimeError", "StandardError", "Exception")
             class_categories = dict(zip(classes, controller.NATIVE_SIGNAL_FAILURE_CATEGORIES[:-1]))
-            class_categories.update(("Errno::" + name, "os-error") for name in
-                ("ECHILD", "ESRCH", "EINTR", "EBADF", "EINVAL", "EIO", "EPERM", "EACCES", "EAGAIN", "ENOMEM",
-                 "EMFILE", "ENFILE", "ENOENT", "EPIPE"))
+            signal_errnos = ("ECHILD", "ESRCH", "EINTR", "EBADF", "EINVAL", "EIO", "EPERM", "EACCES", "EAGAIN", "ENOMEM",
+                            "EMFILE", "ENFILE", "ENOENT", "EPIPE")
+            class_categories.update(("Errno::" + name, "os-error") for name in signal_errnos)
             self.assertEqual(signal_literal_pairs("NATIVE_SIGNAL_FAILURE_CLASS_CATEGORIES"), class_categories)
+            self.assertEqual(controller.NATIVE_SIGNAL_FAILURE_SIGNALS, ("0", "KILL", "INT", "other"))
+            self.assertEqual(controller.NATIVE_SIGNAL_FAILURE_ERRNOS, (*signal_errnos, "other"))
+            self.assertEqual(controller.NATIVE_SIGNAL_FAILURE_NATIVE_OUTCOME_FIELDS,
+                             ("custodian", "finalOutcome", "finalCleanup", "groupState"))
+            self.assertEqual(len(controller.NATIVE_SIGNAL_FAILURE_ROUTES)
+                             * len(controller.NATIVE_SIGNAL_FAILURE_SIGNALS)
+                             * len(controller.NATIVE_SIGNAL_FAILURE_ERRNOS), 360)
             self.assertEqual(tuple(len(getattr(controller, "NATIVE_SIGNAL_FAILURE_" + name))
                                    for name in ("CHECK_CODES", "STAGES", "CATEGORIES", "ROUTES", "REFUSALS")),
                              (50, 9, 20, 6, 9))
@@ -3317,16 +3328,23 @@ class CIControllerContractTests(unittest.TestCase):
                     "checks": {name: "not-applicable" if name in check_na else "missing"
                                for name in controller.NATIVE_SIGNAL_FAILURE_CHECK_FIELDS},
                     "failuresState": "missing", "failedCheckMask": 0, "causeMasks": [0] * 9,
-                    "refusalMasks": [0] * 6, "unknownFailure": False}
+                    "refusalMasks": [0] * 6, "unknownFailure": False,
+                    "observedHelperReturn": "not-applicable" if role == "driver" else "missing",
+                    "backendErrorCodes": "missing"}
 
-            signal_record = {"schema": 1, "mode": "native-setup-interrupt",
+            signal_record = {"schema": 2, "mode": "native-setup-interrupt",
                 "guard": {name: name != "failuresEmpty" for name in controller.NATIVE_SIGNAL_FAILURE_GUARD_FIELDS},
                 "result": {"kind": "pass", "mode": "native-setup-interrupt", "driverExitStatus": 1},
-                "rows": [signal_row(role) for role in controller.NATIVE_SIGNAL_FAILURE_ROLES]}
+                "rows": [signal_row(role) for role in controller.NATIVE_SIGNAL_FAILURE_ROLES],
+                "nativeOutcomes": {"custodian": "exit1", "finalOutcome": "failed",
+                                   "finalCleanup": "confirmed", "groupState": "retired"}}
             signal_record["rows"][0].update(failuresState="nonempty", failedCheckMask=1 << 20,
                 causeMasks=[0, 0, 0, 0, (1 << 3) | (1 << 19), 0, 0, 0, 0],
                 refusalMasks=[(1 << 1) | (1 << 2), 0, 0, 0, 0, 0], unknownFailure=True)
             signal_record["rows"][0]["checks"]["hooksRestored"] = True
+            # The original helper return can survive an aggregate observation
+            # failure while helper_facts remains absent and the wrapper exits 1.
+            signal_record["rows"][1].update(observedHelperReturn=2, backendErrorCodes=[7, 0, 18, 7, 360])
 
             def signal_bytes(record):
                 return (controller.NATIVE_SIGNAL_FAILURE_PREFIX
@@ -3378,22 +3396,43 @@ class CIControllerContractTests(unittest.TestCase):
                         row.update(failuresState=failure_state, unknownFailure=unknown, failedCheckMask=bits)
                         record = signal_with_row(index, row)
                         self.assertEqual(controller.native_signal_failure(signal_bytes(record)), record)
-                # Complete conservative format bound, including prefix and LF;
-                # no truncation and no assumption of healthy proof semantics.
+                    # Preserve request chronology, repetition and non-error
+                    # slots even without labels; zero is not a success receipt.
+                    for codes in ("missing", "invalid", [], [0, 1, 360], [7, 0, 18, 7, 360], [0] * 64, [360] * 64):
+                        row = {**signal_row(role), "backendErrorCodes": codes}
+                        record = signal_with_row(index, row)
+                        self.assertEqual(controller.native_signal_failure(signal_bytes(record)), record)
+                    if role != "driver":
+                        for observed_return in (0, 1, 2, 255, "missing"):
+                            row = {**signal_row(role), "observedHelperReturn": observed_return}
+                            record = signal_with_row(index, row)
+                            self.assertEqual(controller.native_signal_failure(signal_bytes(record)), record)
+                for name in controller.NATIVE_SIGNAL_FAILURE_NATIVE_OUTCOME_FIELDS:
+                    for outcome in controller.ADAPTER_FAILURE_NATIVE_OUTCOMES[name]:
+                        record = {**signal_record, "nativeOutcomes": {**signal_record["nativeOutcomes"], name: outcome}}
+                        self.assertEqual(controller.native_signal_failure(signal_bytes(record)), record)
+                # Exact complete worst-case format bound, including prefix/LF,
+                # longest actual kind and all 64 maximum-width codes per row.
                 longest_mode = max(controller.NATIVE_SIGNAL_FAILURE_MODES, key=len)
                 maximum = {**signal_record, "mode": longest_mode,
                     "guard": dict.fromkeys(controller.NATIVE_SIGNAL_FAILURE_GUARD_FIELDS, "missing"),
                     "result": {"kind": max(controller.NATIVE_SIGNAL_FAILURE_RESULT_KINDS, key=len),
                                "mode": longest_mode, "driverExitStatus": "missing"},
-                    "rows": [signal_row(role) for role in controller.NATIVE_SIGNAL_FAILURE_ROLES]}
+                    "rows": [signal_row(role) for role in controller.NATIVE_SIGNAL_FAILURE_ROLES],
+                    "nativeOutcomes": {"custodian": "not-attempted", "finalOutcome": "rejected",
+                                       "finalCleanup": "confirmed", "groupState": "not-created"}}
                 for row in maximum["rows"]:
                     row.update(mode=longest_mode, failuresState="nonempty", failedCheckMask=(1 << 50) - 1,
-                               causeMasks=[(1 << 20) - 1] * 9, refusalMasks=[511] * 6)
+                               causeMasks=[(1 << 20) - 1] * 9, refusalMasks=[511] * 6, backendErrorCodes=[360] * 64)
                 compact_json = lambda value: json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("ascii")
                 self.assertEqual(len(controller.NATIVE_SIGNAL_FAILURE_PREFIX.encode("ascii")), 26)
                 self.assertEqual(len(compact_json(maximum["guard"])), 193)
-                self.assertEqual([len(compact_json(row)) for row in maximum["rows"]], [733, 722, 719])
-                self.assertEqual(len(signal_bytes(maximum)), 2574)
+                self.assertEqual([len(compact_json(row)) for row in maximum["rows"]], [1051, 1033, 1030])
+                self.assertEqual(len(compact_json(maximum["nativeOutcomes"])), 109)
+                self.assertTrue(all(len(value) == max(map(len, controller.ADAPTER_FAILURE_NATIVE_OUTCOMES[name]))
+                                    for name, value in maximum["nativeOutcomes"].items()))
+                self.assertEqual(len(signal_bytes(maximum)), 3641)
+                self.assertEqual(controller.NATIVE_SIGNAL_FAILURE_MAX_BYTES - len(signal_bytes(maximum)), 455)
                 self.assertLessEqual(len(signal_bytes(maximum)), controller.NATIVE_SIGNAL_FAILURE_MAX_BYTES)
                 self.assertEqual(controller.native_signal_failure(signal_bytes(maximum)), maximum)
 
@@ -3428,7 +3467,7 @@ class CIControllerContractTests(unittest.TestCase):
 
                 invalid_signal = [
                     {**signal_record, "guard": dict.fromkeys(controller.NATIVE_SIGNAL_FAILURE_GUARD_FIELDS, True)},
-                    *({**signal_record, "schema": value} for value in (True, 1.0, "1", 2)),
+                    *({**signal_record, "schema": value} for value in (True, 2.0, "2", 1, 3)),
                     *({**signal_record, "mode": value} for value in (None, "missing", "PRIVATE_MODE")),
                     *({**signal_record, "rows": value} for value in (None, [], signal_record["rows"][:2],
                         signal_record["rows"] + [signal_record["rows"][0]], list(reversed(signal_record["rows"])))),
@@ -3437,7 +3476,8 @@ class CIControllerContractTests(unittest.TestCase):
                 # applicability, and no bool can become an integer mask/status.
                 containers = [(signal_record, lambda value: value),
                     (signal_record["guard"], lambda value: {**signal_record, "guard": value}),
-                    (signal_record["result"], lambda value: {**signal_record, "result": value})]
+                    (signal_record["result"], lambda value: {**signal_record, "result": value}),
+                    (signal_record["nativeOutcomes"], lambda value: {**signal_record, "nativeOutcomes": value})]
                 for index, row in enumerate(signal_record["rows"]):
                     containers.append((row, lambda value, index=index: signal_with_row(index, value)))
                     for group in ("identities", "checks"):
@@ -3453,9 +3493,17 @@ class CIControllerContractTests(unittest.TestCase):
                 invalid_signal.extend({**signal_record, "result": {**signal_record["result"], key: value}}
                     for key, value in (("kind", "invalid"), ("kind", "PRIVATE_KIND"), ("mode", "invalid"),
                                        *(("driverExitStatus", value) for value in (True, 1.0, -1, 256, "invalid"))))
+                invalid_signal.extend({**signal_record, "nativeOutcomes": {**signal_record["nativeOutcomes"], key: value}}
+                    for key in controller.NATIVE_SIGNAL_FAILURE_NATIVE_OUTCOME_FIELDS
+                    for value in (None, True, 1, "PRIVATE_OUTCOME", "other"))
                 for index, row in enumerate(signal_record["rows"]):
                     for key, values in (("role", ("PRIVATE_ROLE", None)), ("state", ("PRIVATE_STATE", None)),
                         ("mode", ("PRIVATE_MODE", None)), ("returnCode", (True, 1.0, -1, 256, "invalid")),
+                        ("observedHelperReturn", (None, True, 2.0, -1, 256, "invalid", "PRIVATE_RETURN",
+                                                 "missing" if index == 0 else "not-applicable",
+                                                 2 if index == 0 else "2")),
+                        ("backendErrorCodes", (None, True, 0, {}, "not-applicable", "PRIVATE_REQUEST",
+                            [0] * 65, [360] * 65, *([value] for value in (True, 1.0, -1, 361, "7", None, {}, [])))),
                         ("failuresState", ("PRIVATE_FAILURES", None)), ("unknownFailure", (0, 1, "false")),
                         ("failedCheckMask", (True, 1.0, -1, 1 << 50)),
                         ("causeMasks", (None, [0] * 8, [0] * 10, *([value] * 9 for value in (True, 1.0, -1, 1 << 20)))),
@@ -3471,6 +3519,8 @@ class CIControllerContractTests(unittest.TestCase):
                         missing = signal_row(row["role"], state)
                         for key, value in (("mode", "other"), ("returnCode", 0), ("failuresState", "empty"),
                                            ("failedCheckMask", 1), ("unknownFailure", True),
+                                           ("backendErrorCodes", []), ("backendErrorCodes", "invalid"),
+                                           ("observedHelperReturn", "missing" if index == 0 else 2),
                                            ("checks", {**missing["checks"], "hooksRestored": False})):
                             invalid_signal.append(signal_with_row(index, {**missing, key: value}))
                     for failure_state, unknown, bits in (("empty", False, 1), ("empty", True, 0),
@@ -3479,11 +3529,20 @@ class CIControllerContractTests(unittest.TestCase):
                         missing = signal_row(row["role"])
                         missing.update(failuresState=failure_state, unknownFailure=unknown, failedCheckMask=bits)
                         invalid_signal.append(signal_with_row(index, missing))
+                    for absent in ("observedHelperReturn", "backendErrorCodes"):
+                        invalid_signal.append(signal_with_row(index, {key: value for key, value in row.items() if key != absent}))
+                historical_signal = {key: value for key, value in signal_record.items() if key != "nativeOutcomes"}
+                historical_signal["rows"] = [{key: value for key, value in row.items()
+                                               if key not in {"observedHelperReturn", "backendErrorCodes"}}
+                                              for row in signal_record["rows"]]
+                # The current decoder never promotes an old shape (or a
+                # mixed old/new shape) into evidence for this source.
+                invalid_signal.extend({**historical_signal, "schema": schema} for schema in (1, 2))
                 invalid_markers = [*(signal_bytes(record) for record in invalid_signal), signal_marker * 2,
-                    signal_marker.replace(b'"schema":1', b'"schema":1,"schema":1'),
+                    signal_marker.replace(b'"schema":2', b'"schema":2,"schema":2'),
                     signal_marker.replace(b'"caseMatches":true', b'"caseMatches":true,"caseMatches":true'),
                     signal_marker.replace(b'"failedCheckMask":1048576', b'"failedCheckMask":1048576,"failedCheckMask":1048576'),
-                    signal_marker.replace(b'"schema":1', b'"schema": 1'),
+                    signal_marker.replace(b'"schema":2', b'"schema": 2'),
                     signal_marker.replace(b'"native-setup-interrupt"', br'"\u006eative-setup-interrupt"'),
                     signal_marker[:-1], signal_marker[:-1] + b"\r\n",
                     b"MRK_NATIVE_SIGNAL_FAILURE=\xff\n", b"progress " + signal_marker]

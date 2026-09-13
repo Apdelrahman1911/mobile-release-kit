@@ -3931,16 +3931,18 @@ class NativeUploadValidationTest < Minitest::Test
     good = {"kind" => "native-signal-observation", "role" => "driver", "case" => modes.first,
       "sourceSha256" => sources, "hooksRestored" => true, "baseDriverReturn" => 0, "failures" => [],
       "helperCopy" => copy, "actualOriginalPrimary" => true, "actualCustodianReceiptBound" => true,
-      "actualNativeDescriptorsClosed" => false, "private" => "PRIVATE_SIGNAL_TOKEN", "pid" => 999_887_766}
+      "actualNativeDescriptorsClosed" => false, "requests" => [], "private" => "PRIVATE_SIGNAL_TOKEN", "pid" => 999_887_766}
     good["helpers"] = %w[custodian keeper].to_h do |role|
       [role, {"kind" => "native-signal-observation", "role" => "helper", "helperRole" => role,
         "case" => modes.first, "sourceSha256" => sources, "helperCopy" => copy, "helperReturn" => 2,
         "hooksRestored" => true, "originalWaitBound" => true, "creatorJoined" => false,
-        "taskJoinsObserved" => true, "failures" => []}]
+        "taskJoinsObserved" => true, "failures" => [], "observedHelperReturn" => 2, "requests" => []}]
     end
-    raw_result = {"kind" => "pass", "mode" => modes.first, "private" => "PRIVATE_SIGNAL_TOKEN"}
-    project = lambda do |proof = good, mode: modes.first, exit_status: 0|
-      diagnostic.project(mode: mode, proof: proof, result: raw_result,
+    raw_result = {"kind" => "pass", "mode" => modes.first, "private" => "PRIVATE_SIGNAL_TOKEN",
+      "nativeObservation" => {"custodian" => {"state" => "reaped", "status_kind" => "exit", "status_code" => 1},
+        "final" => {"outcome" => "failed", "cleanup" => "confirmed", "group" => {"state" => "retired"}}}}
+    project = lambda do |proof = good, mode: modes.first, exit_status: 0, result: raw_result|
+      diagnostic.project(mode: mode, proof: proof, result: result,
         status: Struct.new(:exitstatus).new(exit_status), expected_sources: sources)
     end
     assert_equal [50, 9, 20, 6, 9], [fixture::NATIVE_SIGNAL_FAILURE_CHECK_CODES.length,
@@ -3957,6 +3959,9 @@ class NativeUploadValidationTest < Minitest::Test
       row = project.call(proof, exit_status: key ? 0 : 1)
       assert_equal fixture::NATIVE_SIGNAL_FAILURE_GUARD_FIELDS.to_h { |name| [name, name != predicate] }, row.fetch("guard")
       assert diagnostic.line(row)
+      assert_equal 2, row.fetch("schema")
+      assert_equal %w[exit1 failed confirmed retired], row.fetch("nativeOutcomes").values
+      assert_equal ["not-applicable", 2, 2], row.fetch("rows").map { |item| item.fetch("observedHelperReturn") }
     end
     missing_case = project.call(good.reject { |key, _| key == "case" })
     assert_equal "missing", missing_case.fetch("guard").fetch("caseMatches")
@@ -3987,7 +3992,67 @@ class NativeUploadValidationTest < Minitest::Test
         assert_equal ["missing"], row.fetch("identities").values.uniq
         assert_equal %w[missing not-applicable], row.fetch("checks").values.uniq
         assert_equal [0], (row.fetch("causeMasks") + row.fetch("refusalMasks")).uniq
+        assert_equal %w[missing missing], row.values_at("observedHelperReturn", "backendErrorCodes")
       end
+    end
+
+    # Exact, non-coercing route/signal/errno packing of ORIGINAL request
+    # occurrences. No-error slots and repeated objects keep their positions.
+    routes = %w[custodian-group keeper-self-group custodian-direct-keeper fixture self unrecognized]
+    signals = %w[0 KILL INT other]
+    errnos = %w[ECHILD ESRCH EINTR EBADF EINVAL EIO EPERM EACCES EAGAIN ENOMEM EMFILE ENFILE ENOENT EPIPE other]
+    outcome_fields = %w[custodian finalOutcome finalCleanup groupState]
+    assert_equal routes, fixture::NATIVE_SIGNAL_FAILURE_ROUTES
+    assert_equal signals, fixture::NATIVE_SIGNAL_FAILURE_SIGNALS
+    assert_equal errnos, fixture::NATIVE_SIGNAL_FAILURE_ERRNOS
+    assert_equal outcome_fields, fixture::NATIVE_SIGNAL_FAILURE_NATIVE_OUTCOME_FIELDS
+    assert_equal [64, 360], [fixture::NATIVE_SIGNAL_FAILURE_MAX_REQUESTS, fixture::NATIVE_SIGNAL_FAILURE_MAX_ERROR_CODE]
+    packed_requests = routes.product(signals, errnos).map do |route, signal, errno|
+      {"route" => route, "signal" => signal, "backendErrorClass" => "Errno::#{errno}"}
+    end
+    packed = packed_requests.each_slice(64).flat_map { |requests| diagnostic.backend_error_codes("requests" => requests) }
+    assert_equal (1..360).to_a, packed
+    repeated_request = {"route" => "custodian-group", "signal" => "0", "backendErrorClass" => +"Errno::EPERM",
+      "targets" => [999_887_766], "private" => "PRIVATE_SIGNAL_TOKEN"}
+    requests = [repeated_request, {}, repeated_request,
+      {"route" => "custodian-group", "signal" => "KILL", "backendErrorClass" => "Errno::EINTR"},
+      {"route" => "custodian-group", "signal" => 0, "backendErrorClass" => "Errno::EPERM"},
+      {"route" => "PRIVATE_SIGNAL_TOKEN", "signal" => "PRIVATE_SIGNAL_TOKEN", "backendErrorClass" => "PRIVATE_SIGNAL_TOKEN"},
+      {"backendErrorClass" => nil}]
+    detail_proof = clone.call(bad)
+    detail_proof.fetch("helpers").fetch("custodian")["requests"] = requests
+    detailed = project.call(detail_proof)
+    assert_equal [7, 0, 7, 18, 52, 360, 360], detailed.fetch("rows")[1].fetch("backendErrorCodes")
+    refute requests.frozen?
+    refute repeated_request.frozen?
+    repeated_request.fetch("backendErrorClass").replace("PRIVATE_SIGNAL_TOKEN")
+    requests.clear
+    assert_equal [7, 0, 7, 18, 52, 360, 360], detailed.fetch("rows")[1].fetch("backendErrorCodes")
+    assert detailed.fetch("rows")[1].fetch("backendErrorCodes").frozen?
+    refute_match(/PRIVATE_SIGNAL|999887766/, diagnostic.line(detailed))
+    assert_equal "missing", diagnostic.backend_error_codes({})
+    assert_equal [], diagnostic.backend_error_codes("requests" => [])
+    assert_equal [0] * 64, diagnostic.backend_error_codes("requests" => [{}] * 64)
+    [nil, {}, "PRIVATE_SIGNAL_TOKEN", [nil], [{}] * 65].each do |requests_value|
+      assert_equal "invalid", diagnostic.backend_error_codes("requests" => requests_value)
+    end
+    ["EPERM", "Errno::EPERM PRIVATE_SIGNAL_TOKEN", nil, true, 7].each do |error|
+      assert_equal [15], diagnostic.backend_error_codes("requests" => [{"route" => "custodian-group", "signal" => "0", "backendErrorClass" => error}])
+    end
+    [[0, 0], [2, 2], [255, 255], [-1, "missing"], [256, "missing"], [true, "missing"], [2.0, "missing"], ["2", "missing"]].each do |raw, expected|
+      proof = clone.call(bad)
+      proof.fetch("helpers").fetch("custodian")["observedHelperReturn"] = raw
+      assert_equal expected, project.call(proof).fetch("rows")[1].fetch("observedHelperReturn")
+    end
+    [[nil, "missing"], [{}, "missing"], [[], "invalid"], [false, "invalid"], [7, "invalid"],
+     [{"nativeObservation" => nil}, "invalid"], [{"nativeObservation" => []}, "invalid"]].each do |raw, expected|
+      view = project.call(bad, result: raw)
+      assert_equal outcome_fields.to_h { |key| [key, expected] }, view.fetch("nativeOutcomes")
+    end
+    # Native outcomes never borrow the adapter's separate failure-line gate.
+    fixture.stub(:adapter_failure_line, ->(**_) { raise "native signal view borrowed adapter failure eligibility" }) do
+      expected = fixture.adapter_result_projection(mode: modes.first, result: raw_result).fetch("nativeOutcomes").slice(*outcome_fields)
+      assert_equal expected, project.call(bad).fetch("nativeOutcomes")
     end
     labels = fixture::NATIVE_SIGNAL_FAILURE_LABEL_CODES.keys + ["driver proof:IOError", "driver proof:Interrupt",
       "helper proof:PRIVATE_SIGNAL_TOKEN", "hook:entry:IOError", "custodian-group:owner", "custodian-group:source",
@@ -4031,12 +4096,15 @@ class NativeUploadValidationTest < Minitest::Test
     largest.fetch("rows").each do |item|
       item.merge!("state" => "present", "mode" => largest["mode"], "returnCode" => "missing", "failuresState" => "nonempty",
         "failedCheckMask" => (1 << 50) - 1, "causeMasks" => Array.new(9, (1 << 20) - 1),
-        "refusalMasks" => Array.new(6, 511), "unknownFailure" => false)
+        "refusalMasks" => Array.new(6, 511), "unknownFailure" => false,
+        "observedHelperReturn" => item.fetch("role") == "driver" ? "not-applicable" : "missing",
+        "backendErrorCodes" => [360] * 64)
       %w[identities checks].each { |key| item[key].transform_values! { |value| value == "not-applicable" ? value : "missing" } }
     end
-    assert_equal 2574, diagnostic.line(largest).bytesize
+    largest["nativeOutcomes"] = outcome_fields.to_h { |key| [key, fixture::ADAPTER_FAILURE_NATIVE_OUTCOMES.fetch(key).max_by(&:bytesize)] }
+    assert_equal 3641, diagnostic.line(largest).bytesize
     assert_operator diagnostic.line(largest).bytesize, :<=, fixture::NATIVE_SIGNAL_FAILURE_MAX_BYTES
-    mutations = [->(value) { value["schema"] = true }, ->(value) { value["guard"].transform_values! { true } },
+    mutations = [->(value) { value["schema"] = true }, ->(value) { value["schema"] = 1 }, ->(value) { value["guard"].transform_values! { true } },
       ->(value) { value["rows"].reverse! }, ->(value) { value["rows"][0]["failedCheckMask"] = 1 << 50 },
       ->(value) { value["rows"][0]["causeMasks"][0] = true }, ->(value) { value["rows"][0]["refusalMasks"] << 0 },
       ->(value) { value["rows"][0]["identities"]["helperRoleMatches"] = "missing" },
@@ -4044,11 +4112,29 @@ class NativeUploadValidationTest < Minitest::Test
       ->(value) { value["rows"][0]["state"] = "missing" }, ->(value) { value["rows"][0]["failuresState"] = "empty" },
       ->(value) { value["rows"][1]["failuresState"] = "nonempty" },
       ->(value) { value["rows"][0]["checks"] = value["rows"][0]["checks"].to_a.reverse.to_h },
+      ->(value) { value["rows"][0]["observedHelperReturn"] = 0 },
+      ->(value) { value["rows"][1]["observedHelperReturn"] = true },
+      ->(value) { value["rows"][1]["observedHelperReturn"] = 256 },
+      ->(value) { value["rows"][1]["observedHelperReturn"] = "not-applicable" },
+      ->(value) { value["rows"][1]["backendErrorCodes"] = [true] },
+      ->(value) { value["rows"][1]["backendErrorCodes"] = [-1] },
+      ->(value) { value["rows"][1]["backendErrorCodes"] = [361] },
+      ->(value) { value["rows"][1]["backendErrorCodes"] = [1] * 65 },
+      ->(value) { value["rows"][1]["backendErrorCodes"] = nil },
+      ->(value) { value["nativeOutcomes"] = value["nativeOutcomes"].to_a.reverse.to_h },
+      ->(value) { value["nativeOutcomes"]["custodian"] = "exit3" },
+      ->(value) { value["nativeOutcomes"]["finalCleanup"] = true },
+      ->(value) { value["nativeOutcomes"]["private"] = "PRIVATE_SIGNAL_TOKEN" },
       ->(value) { value["private"] = "PRIVATE_SIGNAL_TOKEN" }]
     mutations.each do |mutate|
       value = clone.call(project.call(bad))
       mutate.call(value)
       assert_nil diagnostic.line(value)
+    end
+    %w[observedHelperReturn backendErrorCodes].each do |key|
+      value = clone.call(project.call(bad.reject { |name, _| name == "helpers" }))
+      value.fetch("rows")[1][key] = key == "observedHelperReturn" ? 2 : []
+      assert_nil diagnostic.line(value) # Missing rows cannot borrow partial detail.
     end
 
     with_stubs = lambda do |bindings, &body|
@@ -4059,6 +4145,112 @@ class NativeUploadValidationTest < Minitest::Test
         receiver.stub(name, replacement) { with_stubs.call(bindings.drop(1), &body) }
       end
     end
+    # Execute the REAL helper-entry wrapper and observe unwind over inert
+    # method/source/proof endpoints. The original native helper never executes.
+    helper_return = lambda do |returned: 2, original_error: nil, observer_failure: false, entry_error: nil|
+      test = self
+      events, writes, observed_errors, facts_calls = [], [], [], []
+      directory = "/inert-native-signal"
+      helper_copy = {"path" => "#{directory}/signal-observed-helper.rb", "label" => "signal-observed"}
+      entry_block = nil
+      entry = Object.new
+      entry.define_singleton_method(:wrap) do |receiver, method, &body|
+        test.assert_same MobileReleaseKit::NativeUploadProcess.singleton_class, receiver
+        test.assert_equal :helper_main, method
+        entry_block = body
+      end
+      entry.define_singleton_method(:restore) { events << :entry_restore; raise entry_error if entry_error; [] }
+      hooks = Object.new
+      hooks.define_singleton_method(:restore) { events << :observer_restore; [] }
+      probe = probe_class.allocate
+      labels = observer_failure ? ["signal syscall:Errno::EPERM", "request observation:Errno::EPERM"] : []
+      {role: :helper, mode: modes.first, root: directory, source_hashes: sources, hooks: hooks,
+        records: [], requests: [], failures: labels, control_forwards: 0, hooks_restored: false}.each do |key, value|
+        probe.instance_variable_set(:"@#{key}", value)
+      end
+      probe.define_singleton_method(:install) { probe_class.current = self; events << :observer_install }
+      probe.define_singleton_method(:source_snapshot) { events << :source_validation; sources }
+      probe.define_singleton_method(:helper_facts) do |result, argv|
+        facts_calls << [result, argv]
+        {"helperReturn" => result, "helperRole" => argv.first}
+      end
+      observer = probe.method(:observe)
+      probe.define_singleton_method(:observe) do |&body|
+        observer.call(&body)
+      rescue Exception => error
+        observed_errors << error
+        raise
+      end
+      original = lambda do |argv|
+        assert_equal ["custodian"], argv
+        events << :original_call
+        raise original_error if original_error
+        returned
+      end
+      normalizer = diagnostic.method(:return_code)
+      normalization = lambda do |result|
+        assert_equal :entry_restore, events.last
+        assert_nil probe_class.current
+        events << :return_normalization
+        normalizer.call(result)
+      end
+      previous = [probe_class.current, probe_class.last_parent]
+      assert_nil previous.first
+      bindings = [[fixture, :owned_fixture_directory, directory], [fixture::OwnedChild, :bounded_file, JSON.generate(helper_copy)],
+        [File, :realpath, helper_copy.fetch("path")], [probe_class, :new, probe],
+        [fixture::CaptureObservation::Hooks, :new, entry], [diagnostic, :return_code, normalization],
+        [fixture::OwnedChild, :write_record, ->(path, proof) do
+          assert_equal "#{directory}/signal-helper-custodian.json", path
+          assert_equal :return_normalization, events.last
+          events << :helper_proof
+          writes << proof
+        end]]
+      actual = nil
+      with_stubs.call(bindings) do
+        probe_class.install_helper_observation(directory, modes.first)
+        refute_nil entry_block
+        invoke = -> { entry_block.call(original, nil, [["custodian"]], {}, nil) }
+        if entry_error
+          assert_same entry_error, assert_raises(entry_error.class) { invoke.call }
+        else
+          actual = invoke.call
+          assert_same(original_error || observer_failure ? 1 : returned, actual)
+        end
+      end
+      assert_equal %i[observer_restore source_validation entry_restore], events.select { |event| %i[observer_restore source_validation entry_restore].include?(event) }
+      assert_nil probe_class.current
+      if original_error || observer_failure
+        assert_empty facts_calls # Do not collect facts after a failed observation.
+        assert_equal 1, observed_errors.length
+        original_error ? assert_same(original_error, observed_errors.first) : assert_equal("signal-observation", observed_errors.first.kind)
+      else
+        assert_equal [[returned, ["custodian"]]], facts_calls
+      end
+      if entry_error
+        assert_empty writes
+        refute_includes events, :return_normalization
+      else
+        assert_equal 1, writes.length
+        assert_equal(original_error ? "missing" : normalizer.call(returned), writes.first.fetch("observedHelperReturn"))
+        refute writes.first.key?("helperReturn") if original_error || observer_failure
+      end
+      {returned: actual, proof: writes.first, observer_errors: observed_errors}
+    ensure
+      probe_class.current, probe_class.last_parent = previous if previous
+    end
+    retained_return = helper_return.call(observer_failure: true)
+    assert_equal 1, retained_return.fetch(:returned)
+    assert_equal 2, retained_return.fetch(:proof).fetch("observedHelperReturn")
+    helper_view = project.call(bad.merge("helpers" => {"custodian" => retained_return.fetch(:proof)}))
+    assert_equal ["missing", 2], helper_view.fetch("rows")[1].values_at("returnCode", "observedHelperReturn")
+    assert_equal "exit1", helper_view.fetch("nativeOutcomes").fetch("custodian")
+    helper_return.call
+    helper_return.call(returned: true) # Invalid normalization does not change the original return choice.
+    [Interrupt.new("PRIVATE_SIGNAL_TOKEN"), SystemExit.new(19, "PRIVATE_SIGNAL_TOKEN")].each do |original|
+      helper_return.call(original_error: original)
+    end
+    helper_return.call(observer_failure: true, entry_error: IOError.new("PRIVATE_SIGNAL_TOKEN"))
+
     exercise = lambda do |mode: modes.first, fault: nil, write_result: :full|
       now, depth, state, selected, escaped = 1, 0, nil, nil, nil
       events, writes, observations, source_reads = [], [], [], []
