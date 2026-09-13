@@ -1373,17 +1373,17 @@ module UploadProcessFixture
     return if state[:report_attempted]
 
     state[:report_attempted] = true
-    return unless mode.instance_of?(String) && mode == "ownership-async" &&
+    return unless mode.instance_of?(String) && OWNERSHIP_FAILURE_MODES.key?(mode) &&
       platform.instance_of?(String) && OWNERSHIP_FAILURE_PLATFORMS.include?(platform) &&
       state[:platform].instance_of?(String) && state[:platform] == platform &&
       state[:mode].instance_of?(String) && state[:mode] == mode && callback.instance_of?(String) &&
-      callback == "#{ADAPTER_FAILURE_CLASSES.fetch(platform)}#test_process_ownership_async_through_both_real_fixture_callers"
+      callback == "#{ADAPTER_FAILURE_CLASSES.fetch(platform)}##{OWNERSHIP_FAILURE_CALLBACKS.fetch(OWNERSHIP_FAILURE_MODES.fetch(mode))}"
 
     deadline_ns = state.fetch(:deadline_ns)
     return unless deadline_ns.instance_of?(Integer) && deadline_ns.positive? && clock_ns < deadline_ns
 
     value = OwnershipFailureDiagnostic.parse(state.fetch(:stderr), deadline_ns: deadline_ns)
-    return unless value && value["platform"] == platform && value["family"] == "async"
+    return unless value && value["platform"] == platform && value["family"] == OWNERSHIP_FAILURE_MODES.fetch(mode)
 
     line = OwnershipFailureDiagnostic.line(value)
     return unless line && clock_ns < deadline_ns
@@ -5097,7 +5097,7 @@ module UploadProcessFixture
     end
   rescue Exception => original
     begin
-      probe.report_async_failure(original) if mode == "ownership-async" && probe
+      probe.report_failure(original) if OWNERSHIP_FAILURE_MODES.key?(mode) && probe
     rescue Exception
       nil
     end
@@ -5107,7 +5107,7 @@ module UploadProcessFixture
   module Contracts
     def with_adapter_failure_diagnostic(platform:, mode:)
       state = {} if UploadProcessFixture.adapter_failure_mode?(platform, mode)
-      ownership_state = {} if mode.instance_of?(String) && mode == "ownership-async" &&
+      ownership_state = {} if mode.instance_of?(String) && UploadProcessFixture::OWNERSHIP_FAILURE_MODES.key?(mode) &&
         platform.instance_of?(String) && UploadProcessFixture::OWNERSHIP_FAILURE_PLATFORMS.include?(platform)
       optional = state ? {adapter_failure_state: state} : {}
       optional[:ownership_failure_state] = ownership_state if ownership_state

@@ -335,12 +335,28 @@ ADAPTER_FAILURE_SLOW_CHECKS = (
     "handoffPerformed", "delayEntered", "delayGuardPassed", "delayFailed", "delayFinished",
     "originalCleanupCalled", "originalCleanupFinished",
 )
-OWNERSHIP_FAILURE_PREFIX = "MRK_OWNERSHIP_ASYNC_FAILURE="
-OWNERSHIP_FAILURE_CALLBACK = "test_process_ownership_async_through_both_real_fixture_callers"
+OWNERSHIP_FAILURE_PREFIX = "MRK_OWNERSHIP_FAILURE="
+OWNERSHIP_FAILURE_CALLBACKS = {
+    "async": "test_process_ownership_async_through_both_real_fixture_callers",
+    "signals": "test_process_ownership_signals_through_both_real_fixture_callers",
+    "policies": "test_process_ownership_policies_through_both_real_fixture_callers",
+}
 OWNERSHIP_FAILURE_FIELDS = (
     "schema", "platform", "family", "helper", "case", "phase", "errorCategory", "errorKind", "row",
 )
-OWNERSHIP_FAILURE_CASES = ("async-spawn", "async-reap", "cleanup-first-async", "repeated")
+OWNERSHIP_FAILURE_CASES = {
+    "async": ("async-spawn", "async-reap", "cleanup-first-async", "repeated"),
+    "signals": (
+        "INT-spawn", "TERM-spawn", "INT-reap", "TERM-reap", "cleanup-first-INT", "cleanup-first-TERM",
+        "install-before-INT", "install-before-TERM", "install-buffered-INT", "install-buffered-TERM",
+        "install-published-INT", "install-published-TERM", "restore-before-INT", "restore-before-TERM",
+        "restore-after-INT", "restore-after-TERM",
+    ),
+    "policies": (
+        "normal", "ignored-INT", "ignored-TERM", "custom-INT", "custom-TERM", "custom-pending-INT",
+        "partial-install", "changed-handler", "finalize-report", "finalize-drain",
+    ),
+}
 OWNERSHIP_FAILURE_PHASES = (
     "entry", "invoke", "injector-cleanup", "hook-restoration", "snapshot", "row-checks",
     "proof-publication", "row-rejection", "case-cleanup", "restoration", "missing",
@@ -361,8 +377,11 @@ OWNERSHIP_FAILURE_COMMAND_CHECKS = (
 OWNERSHIP_FAILURE_FAILED_CHECKS = (
     "numeric-route-veto", "handlers-not-restored", "registry-active", "hooks-not-restored",
     "injector-cleanup", "primary-not-preserved", "injectors-not-joined", "injector-custody",
-    "pending-interrupt", "cancellation-not-propagated", "injection-boundary-missing", "wrong-signal",
+    "pending-interrupt", "normal-command-not-finalized", "policy-not-fail-closed", "policy-native-creation",
+    "custom-pending-lost", "partial-install-not-exercised", "finalization-cleanup", "finalization-outer-lifetime",
+    "cancellation-not-propagated", "injection-boundary-missing", "wrong-signal",
     "command-not-finalized", "pre-go-barrier-missing", "nested-cancellation-missing", "fixture-retained",
+    "other-failed-check",
 )
 OWNERSHIP_FAILURE_ERROR_KINDS = {
     **dict.fromkeys(("none", "interrupt", "signal", "system-exit", "io-error", "other"), frozenset({"none"})),
@@ -1704,7 +1723,7 @@ def adapter_failure(raw: bytes, *, deadline: float | None = None) -> dict | None
 
 
 def ownership_failure(raw: bytes, *, deadline: float | None = None) -> dict | None:
-    """Finite original async failure facts; never a replacement native result."""
+    """Finite original healthy ownership failure facts, never a native result."""
     def error_pair(category, kind):
         return (type(category) is str and category in OWNERSHIP_FAILURE_ERROR_KINDS
                 and type(kind) is str and kind in OWNERSHIP_FAILURE_ERROR_KINDS[category])
@@ -1712,11 +1731,11 @@ def ownership_failure(raw: bytes, *, deadline: float | None = None) -> dict | No
     try:
         data = _fixture_failure_record(raw, OWNERSHIP_FAILURE_PREFIX, 4096, deadline=deadline,
                                        canonical_fields=OWNERSHIP_FAILURE_FIELDS)
-        if (type(data) is not dict or type(data["schema"]) is not int or data["schema"] != 1
+        if (type(data) is not dict or type(data["schema"]) is not int or data["schema"] != 2
                 or type(data["platform"]) is not str or data["platform"] not in ADAPTER_FAILURE_PLATFORMS
-                or type(data["family"]) is not str or data["family"] != "async"
+                or type(data["family"]) is not str or data["family"] not in OWNERSHIP_FAILURE_CASES
                 or type(data["helper"]) is not str or data["helper"] not in {"capture", "run"}
-                or type(data["case"]) is not str or data["case"] not in OWNERSHIP_FAILURE_CASES
+                or type(data["case"]) is not str or data["case"] not in OWNERSHIP_FAILURE_CASES[data["family"]]
                 or type(data["phase"]) is not str or data["phase"] not in OWNERSHIP_FAILURE_PHASES
                 or not error_pair(data["errorCategory"], data["errorKind"]) or data["errorCategory"] == "none"):
             return None
@@ -1734,9 +1753,30 @@ def ownership_failure(raw: bytes, *, deadline: float | None = None) -> dict | No
             return None
         failed = row["failedChecks"]
         if (type(failed) is not list or not failed or any(type(name) is not str for name in failed)
-                or failed != [name for name in OWNERSHIP_FAILURE_FAILED_CHECKS if name in failed]
-                or "pre-go-barrier-missing" in failed and data["case"] != "async-spawn"
-                or "nested-cancellation-missing" in failed and (data["helper"], data["case"]) != ("run", "repeated")):
+                or failed != [name for name in OWNERSHIP_FAILURE_FAILED_CHECKS if name in failed]):
+            return None
+        family, helper, case = data["family"], data["helper"], data["case"]
+        # These are the original evaluator's branch boundaries, not a fresh
+        # interpretation of the optional (possibly inconsistent) observations.
+        if (family == "policies" and any(name in failed for name in (
+                "cancellation-not-propagated", "injection-boundary-missing", "wrong-signal", "command-not-finalized"))
+                or "pre-go-barrier-missing" in failed and (family, case) not in {
+                    ("async", "async-spawn"), ("signals", "INT-spawn"), ("signals", "TERM-spawn")}
+                or "nested-cancellation-missing" in failed and (family, helper, case) != ("async", "run", "repeated")):
+            return None
+        policy_cases = {
+            "normal-command-not-finalized": {"normal", "ignored-INT", "ignored-TERM"},
+            "policy-not-fail-closed": {
+                "custom-INT", "custom-TERM", "custom-pending-INT", "partial-install", "changed-handler",
+                "finalize-report", "finalize-drain",
+            },
+            "policy-native-creation": {"custom-INT", "custom-TERM", "custom-pending-INT", "partial-install"},
+            "custom-pending-lost": {"custom-pending-INT"},
+            "partial-install-not-exercised": {"partial-install"},
+            "finalization-cleanup": {"finalize-report", "finalize-drain"},
+            "finalization-outer-lifetime": {"finalize-report", "finalize-drain"},
+        }
+        if any(name in failed and (family != "policies" or case not in cases) for name, cases in policy_cases.items()):
             return None
         for key, fields in (("checks", OWNERSHIP_FAILURE_CHECKS), ("commandChecks", OWNERSHIP_FAILURE_COMMAND_CHECKS)):
             checks = row[key]
@@ -2198,7 +2238,7 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                 diagnostic = ownership_failure(result.stderr, deadline=deadline)
                 if diagnostic is not None:
                     gate, class_name = ADAPTER_FAILURE_PLATFORMS[diagnostic["platform"]]
-                    target = class_name + "#" + OWNERSHIP_FAILURE_CALLBACK
+                    target = class_name + "#" + OWNERSHIP_FAILURE_CALLBACKS[diagnostic["family"]]
                     if (step.id == gate and target in expected
                             and _minitest_failed_target(text, target, deadline=deadline)):
                         value["ownership_failure"] = diagnostic

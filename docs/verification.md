@@ -775,19 +775,25 @@ success. The controller requires the matching platform and source-known unique
 adverse callback in that adapter's healthy partition. Native/ownership/kill
 partitions, passing or ambiguous callbacks and malformed records cannot qualify.
 
-The async ownership family has a separate `MRK_OWNERSHIP_ASYNC_FAILURE` projection
-for its four fixed cases through `capture` and `run`. One canonical ASCII line
-is bounded to 4096 bytes including prefix/newline. A frozen original failed row
+The healthy ownership families have a separate schema-2 `MRK_OWNERSHIP_FAILURE`
+projection for their fixed async (4), signals (16), and policies (10) cases
+through `capture` and `run`. Family, case, and callback must match the closed
+catalog; unknown/setup/observation contracts are not admitted by this projection.
+One canonical ASCII line is bounded to 4096 bytes including prefix/newline.
+A frozen original failed row
 can report finite check codes and observed owner/error/finality/restoration facts
 only when its identical rejection survives restoration. Earlier or replacement
 errors carry only finite phase/error data with the row explicitly missing; a
 previous successful case never supplies another call's observations. The parent
 requires original driver custody/request/dispatch, then the same rejection after
 its complete fixture lifetime, before relaying. The controller attributes it only
-to the unique failed source-known async callback in the matching adapter's healthy
+to the unique failed source-known family callback in the matching adapter's healthy
 partition. No private messages, paths, process identities or proof contents are
-published. Missing observations remain missing; reporting cannot authorize
-success, cleanup, a retry or a changed deadline, or establish a cause by itself.
+published. Unknown failed labels remain adverse through `other-failed-check`,
+never an empty success. Missing observations remain missing. Failures outside an
+actual row invocation, including family setup/cutoff and the later CLI output,
+cannot borrow a previous successful row. Reporting cannot authorize success,
+cleanup, a retry or a changed deadline, or establish a cause by itself.
 
 The separate native signal-observation test may emit one canonical schema-1
 `MRK_NATIVE_SIGNAL_FAILURE` line, bounded to 4096 bytes including prefix/newline.

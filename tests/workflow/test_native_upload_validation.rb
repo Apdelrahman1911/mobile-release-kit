@@ -3005,7 +3005,7 @@ class NativeUploadValidationTest < Minitest::Test
       2.times do
         assert_same successful, receiver.with_adapter_failure_diagnostic(platform: "ios", mode: "real-deadline") { |optional| handoffs << optional; successful }
       end
-      [["native", "real-deadline"], ["ios", "native-setup-interrupt"], ["ios", "ownership-signals"], ["android", "kill-descendant"]].each do |platform, mode|
+      [["native", "real-deadline"], ["ios", "native-setup-interrupt"], ["ios", "ownership-observation"], ["android", "kill-descendant"]].each do |platform, mode|
         assert_same successful, receiver.with_adapter_failure_diagnostic(platform: platform, mode: mode) { |optional| assert_empty optional; successful }
       end
       assert_raises(Minitest::Assertion) do
@@ -3023,9 +3023,29 @@ class NativeUploadValidationTest < Minitest::Test
     # No synthetic observation below is a native receipt or cleanup authority.
     fixture, probe_class = UploadProcessFixture, UploadProcessFixture::OwnershipProbe
     diagnostic = UploadProcessFixture::OwnershipFailureDiagnostic
-    prefix = "MRK_OWNERSHIP_ASYNC_FAILURE="
-    callback = "test_process_ownership_async_through_both_real_fixture_callers"
+    prefix = "MRK_OWNERSHIP_FAILURE="
+    cases = {
+      "async" => %w[async-spawn async-reap cleanup-first-async repeated],
+      "signals" => %w[INT-spawn TERM-spawn INT-reap TERM-reap cleanup-first-INT cleanup-first-TERM
+        install-before-INT install-before-TERM install-buffered-INT install-buffered-TERM install-published-INT
+        install-published-TERM restore-before-INT restore-before-TERM restore-after-INT restore-after-TERM],
+      "policies" => %w[normal ignored-INT ignored-TERM custom-INT custom-TERM custom-pending-INT
+        partial-install changed-handler finalize-report finalize-drain],
+    }
+    callbacks = {
+      "async" => "test_process_ownership_async_through_both_real_fixture_callers",
+      "signals" => "test_process_ownership_signals_through_both_real_fixture_callers",
+      "policies" => "test_process_ownership_policies_through_both_real_fixture_callers",
+    }
     classes = {"ios" => "IosUploadValidationTest", "android" => "AndroidUploadValidationTest"}
+    assert_equal cases, fixture::OWNERSHIP_FAILURE_CASES
+    assert_equal callbacks, fixture::OWNERSHIP_FAILURE_CALLBACKS
+    assert_equal cases.keys.to_h { |family| ["ownership-#{family}", family] }, fixture::OWNERSHIP_FAILURE_MODES
+    cases.each do |family, names|
+      assert_equal names, probe_class::CASES.fetch(family)
+      refute_same probe_class::CASES.fetch(family), fixture::OWNERSHIP_FAILURE_CASES.fetch(family)
+      refute probe_class::CASES.fetch(family).frozen?, "diagnostic must not freeze executable case arrays"
+    end
     with_stubs = lambda do |bindings, &body|
       if bindings.empty?
         body.call
@@ -3040,7 +3060,7 @@ class NativeUploadValidationTest < Minitest::Test
     [Interrupt.new("private-marker"), SystemExit.new(19, "private-marker"), IOError.new("private-marker")].each do |original|
       probe = probe_class.allocate
       family = Object.new
-      family.define_singleton_method(:==) { |_other| raise original }
+      family.define_singleton_method(:hash) { raise original }
       probe.instance_variable_set(:@family, family)
       later, failed_domain = [], []
       with_stubs.call([
@@ -3052,13 +3072,15 @@ class NativeUploadValidationTest < Minitest::Test
       end
       assert_empty later
       assert_equal [:original_rescue], failed_domain
-      probe.instance_variable_set(:@family, "async")
-      diagnostic.stub(:row, ->(**_) { raise original }) do
-        actual = assert_raises(original.class) do
-          probe.ownership_failure_row({"failures" => ["known cancellation did not finish original ownership"]}, {}, nil)
-          later << :continued
+      cases.each_key do |selected_family|
+        probe.instance_variable_set(:@family, selected_family)
+        diagnostic.stub(:row, ->(**_) { raise original }) do
+          actual = assert_raises(original.class) do
+            probe.ownership_failure_row({"failures" => ["known case left an unresolved reusable domain"]}, {}, nil)
+            later << :continued
+          end
+          assert_same original, actual
         end
-        assert_same original, actual
       end
       assert_empty later
     end
@@ -3072,6 +3094,13 @@ class NativeUploadValidationTest < Minitest::Test
       ["original injectors not joined", "injectors-not-joined"],
       ["original injector custody/gate changed", "injector-custody"],
       ["pending cancellation leaked", "pending-interrupt"],
+      ["normal/ignored original command did not finalize", "normal-command-not-finalized"],
+      ["unsupported policy did not fail closed", "policy-not-fail-closed"],
+      ["unsupported policy attempted native creation", "policy-native-creation"],
+      ["original custom pending signal lost", "custom-pending-lost"],
+      ["intended before-TERM partial installation was not exercised", "partial-install-not-exercised"],
+      ["finalization failure skipped original command cleanup", "finalization-cleanup"],
+      ["finalization fault missed the original outermost lifetime", "finalization-outer-lifetime"],
       ["cancellation/lost-publication fault not propagated", "cancellation-not-propagated"],
       ["original injection boundary missing", "injection-boundary-missing"],
       ["wrong original cancellation signal", "wrong-signal"],
@@ -3081,15 +3110,15 @@ class NativeUploadValidationTest < Minitest::Test
       ["known case left an unresolved reusable domain", "fixture-retained"],
     ]
     assert_equal labels.to_h, fixture::OWNERSHIP_FAILURE_LABEL_CODES
-    assert_equal labels.map(&:last), fixture::OWNERSHIP_FAILURE_FAILED_CHECKS
+    assert_equal labels.map(&:last) + ["other-failed-check"], fixture::OWNERSHIP_FAILURE_FAILED_CHECKS
     assert_equal MobileReleaseKit::NativeUploadProcess::REASONS + ["other"], fixture::OWNERSHIP_FAILURE_ERROR_KINDS.fetch("native-lifecycle-error")
     assert_equal MobileReleaseKit::NativeProcessSpawn::CODES + ["other"], fixture::OWNERSHIP_FAILURE_ERROR_KINDS.fetch("native-spawn-error")
     first = Interrupt.new("private-marker")
-    raw_summary = {"failures" => [labels[12].first], "firstExceptionPreserved" => false,
+    raw_summary = {"failures" => ["known cancellation did not finish original ownership"], "firstExceptionPreserved" => false,
       "handlersRestored" => true, "pendingInterrupt" => false, "retainedFixture" => true, "private" => "private-marker"}
     raw_snapshot = {"settled" => false, "unknown" => true, "observerErrors" => [], "private" => "private-marker", "pid" => 999_887_766}
     row = diagnostic.row(summary: raw_summary, snapshot: raw_snapshot, owner_phase: :reaped, first: first, operation: first)
-    expected = {"schema" => 1, "platform" => "ios", "family" => "async", "helper" => "capture", "case" => "async-spawn",
+    expected = {"schema" => 2, "platform" => "ios", "family" => "async", "helper" => "capture", "case" => "async-spawn",
       "phase" => "row-rejection", "errorCategory" => "fixture-error", "errorKind" => "ownership-probe", "row" => row}
     packet = diagnostic.line(expected)
     assert_equal "#{prefix}#{JSON.generate(expected)}\n", packet
@@ -3108,14 +3137,56 @@ class NativeUploadValidationTest < Minitest::Test
     refute row.fetch("checks").fetch("firstExceptionPreserved")
     refute row.fetch("commandChecks").fetch("settled")
     assert row.fetch("commandChecks").fetch("observerErrorsEmpty")
+    constrained = {
+      "cancellation-not-propagated" => {"async" => cases.fetch("async"), "signals" => cases.fetch("signals")},
+      "injection-boundary-missing" => {"async" => cases.fetch("async"), "signals" => cases.fetch("signals")},
+      "wrong-signal" => {"async" => cases.fetch("async"), "signals" => cases.fetch("signals")},
+      "command-not-finalized" => {"async" => cases.fetch("async"), "signals" => cases.fetch("signals")},
+      "pre-go-barrier-missing" => {"async" => %w[async-spawn], "signals" => %w[INT-spawn TERM-spawn]},
+      "nested-cancellation-missing" => {"async" => %w[repeated]},
+      "normal-command-not-finalized" => {"policies" => %w[normal ignored-INT ignored-TERM]},
+      "policy-not-fail-closed" => {"policies" => %w[custom-INT custom-TERM custom-pending-INT partial-install changed-handler finalize-report finalize-drain]},
+      "policy-native-creation" => {"policies" => %w[custom-INT custom-TERM custom-pending-INT partial-install]},
+      "custom-pending-lost" => {"policies" => %w[custom-pending-INT]},
+      "partial-install-not-exercised" => {"policies" => %w[partial-install]},
+      "finalization-cleanup" => {"policies" => %w[finalize-report finalize-drain]},
+      "finalization-outer-lifetime" => {"policies" => %w[finalize-report finalize-drain]},
+    }
+    applicable = lambda do |code, family, helper, name|
+      (!constrained.key?(code) || constrained.fetch(code).fetch(family, []).include?(name)) &&
+        (code != "nested-cancellation-missing" || helper == "run")
+    end
     labels.each do |label, code|
       projected = diagnostic.row(summary: {"failures" => [label]}, snapshot: {}, owner_phase: nil, first: nil, operation: nil)
-      value = expected.merge("helper" => "run", "case" => code == "nested-cancellation-missing" ? "repeated" : "async-spawn", "row" => projected)
       assert_equal [code], projected.fetch("failedChecks")
       assert_equal ["missing", "none", "none", "none", "none"], projected.values_at(*fixture::OWNERSHIP_FAILURE_ROW_FIELDS.first(5))
-      assert diagnostic.line(value)
+      cases.each do |family, names|
+        names.product(%w[capture run]).each do |name, helper|
+          value = expected.merge("family" => family, "helper" => helper, "case" => name, "row" => projected)
+          assert_equal applicable.call(code, family, helper, name), !!diagnostic.line(value), "#{family}/#{helper}/#{name}/#{code}"
+        end
+      end
     end
-    assert_raises(KeyError) { diagnostic.row(summary: {"failures" => ["private-marker"]}, snapshot: {}, owner_phase: nil, first: nil, operation: nil) }
+    adverse = diagnostic.row(summary: {"failures" => ["private-marker", nil, Object.new, labels.last.first, labels.first.first, "private-marker"]},
+      snapshot: {}, owner_phase: nil, first: nil, operation: nil)
+    assert_equal %w[numeric-route-veto fixture-retained other-failed-check], adverse.fetch("failedChecks")
+    refute_includes diagnostic.line(expected.merge("row" => adverse)), "private-marker"
+    all_codes = labels.map(&:last) + ["other-failed-check"]
+    widest = row.merge("ownerPhase" => "unstarted", "firstErrorCategory" => "native-lifecycle-error", "firstErrorKind" => "parent_lost",
+      "operationErrorCategory" => "native-lifecycle-error", "operationErrorKind" => "parent_lost",
+      "checks" => row.fetch("checks").keys.to_h { |key| [key, "missing"] },
+      "commandChecks" => row.fetch("commandChecks").keys.to_h { |key| [key, "missing"] })
+    sizes = cases.flat_map do |family, names|
+      names.product(%w[capture run]).map do |name, helper|
+        value = expected.merge("platform" => "android", "family" => family, "helper" => helper, "case" => name,
+          "row" => widest.merge("failedChecks" => all_codes.select { |code| applicable.call(code, family, helper, name) }))
+        diagnostic.line(value).bytesize
+      end
+    end
+    assert_equal 1215, sizes.max # Complete prefix + canonical JSON + LF; independently calculated from literals.
+    missing = expected.merge("platform" => "android", "family" => "signals", "helper" => "capture", "case" => "install-published-TERM",
+      "phase" => "proof-publication", "errorCategory" => "native-lifecycle-error", "errorKind" => "parent_lost", "row" => "missing")
+    assert_equal 237, diagnostic.line(missing).bytesize
     [[nil, "none", "none"], [first, "interrupt", "none"], [SignalException.new("TERM"), "signal", "none"],
      [SystemExit.new(19, "private-marker"), "system-exit", "none"], [IOError.new("private-marker"), "io-error", "none"],
      [fixture::Failure.new("fixture-cleanup", "private-marker"), "fixture-error", "fixture-cleanup"],
@@ -3125,7 +3196,7 @@ class NativeUploadValidationTest < Minitest::Test
      [Errno::ECHILD.new("private-marker"), "os-error", "echild"], [RuntimeError.new("private-marker"), "other", "none"]].each do |error, category, kind|
       assert_equal [category, kind], diagnostic.error_pair(error)
     end
-    malformed = [expected.merge("schema" => true), expected.merge("platform" => "native"), expected.merge("family" => "signals"),
+    malformed = [expected.merge("schema" => true), expected.merge("schema" => 1), expected.merge("platform" => "native"), expected.merge("family" => "signals"),
       expected.merge("helper" => "private-marker"), expected.merge("case" => "normal"), expected.merge("phase" => "snapshot"),
       expected.merge("errorCategory" => "interrupt", "errorKind" => "none"), expected.merge("private" => "private-marker"),
       expected.merge("row" => row.merge("failedChecks" => [])), expected.merge("row" => row.merge("failedChecks" => ["command-not-finalized"] * 2)),
@@ -3135,8 +3206,8 @@ class NativeUploadValidationTest < Minitest::Test
     malformed.each { |value| assert_nil diagnostic.line(value) }
     fixture.stub(:clock_ns, 1) do
       assert_equal expected, diagnostic.parse("private chatter\n#{packet}", deadline_ns: 10)
-      [packet * 2, packet.chomp, packet.sub("\n", "\r\n"), packet.sub('"schema":1', '"schema":1,"schema":1'),
-       packet.sub('{', '{ '), "#{prefix}{bad}\n", "#{prefix}#{'x' * 4096}\n", "#{prefix}é\n"].each do |bytes|
+      [packet * 2, packet.chomp, packet.sub("\n", "\r\n"), packet.sub('"schema":2', '"schema":2,"schema":2'),
+       packet.sub(prefix, "MRK_OWNERSHIP_ASYNC_FAILURE="), packet.sub('{', '{ '), "#{prefix}{bad}\n", "#{prefix}#{'x' * 4096}\n", "#{prefix}é\n"].each do |bytes|
         assert_nil diagnostic.parse(bytes, deadline_ns: 10)
       end
       assert_nil diagnostic.parse(packet, deadline_ns: 1)
@@ -3144,13 +3215,16 @@ class NativeUploadValidationTest < Minitest::Test
 
     # Run actual one -> execute -> driver-rescue. Directory, proof, observation,
     # trace and signal endpoints are inert; acquisition veto remains outside.
-    produce = lambda do |helper: "capture", name: "async-spawn", platform: "ios", fault: nil, write_result: :full|
+    produce = lambda do |family: "async", helper: "capture", name: nil, platform: "ios", fault: nil, write_result: :full|
+      name ||= cases.fetch(family).first
       now, constructions, current, lookalike = 1, 0, nil, nil
       events, writes, proofs, rows = [], [], [], []
       directory = "/inert-ownership-driver"
-      input = {"platform" => platform, "parameters" => {}, "mode" => "ownership-async", "deadlineNs" => 10}
+      mode = "ownership-#{family}"
+      input = {"platform" => platform, "parameters" => {}, "mode" => mode, "deadlineNs" => 10}
       late = IOError.new("private-marker")
       first_error = Interrupt.new("private-marker")
+      handlers = {"INT" => "DEFAULT", "TERM" => "DEFAULT"}
       snapshot = fixture::OWNERSHIP_FAILURE_COMMAND_CHECKS.reject { |key| key == "observerErrorsEmpty" }.to_h { |key| [key, true] }
       snapshot.merge!("noProducers" => false, "unknown" => false, "observerErrors" => [])
       digest = Struct.new(:hexdigest).new("a" * 64)
@@ -3162,18 +3236,21 @@ class NativeUploadValidationTest < Minitest::Test
       observation.define_singleton_method(:snapshot) do
         events << :snapshot
         raise late if fault == :snapshot && current.instance_variable_get(:@target)
-        snapshot.merge("settled" => !current.instance_variable_get(:@target), "unknown" => !!current.instance_variable_get(:@target))
+        selected = current.instance_variable_get(:@case)
+        no_producers = family == "policies" && (selected.start_with?("custom-") || selected == "partial-install")
+        snapshot.merge("settled" => !current.instance_variable_get(:@target), "unknown" => !!current.instance_variable_get(:@target),
+          "noProducers" => no_producers && !current.instance_variable_get(:@target))
       end
       fresh = lambda do
         probe = probe_class.allocate
-        {directory: directory, family: "async", input: input, deadline_ns: 10, records: []}.each do |key, value|
+        {directory: directory, family: family, input: input, deadline_ns: 10, records: []}.each do |key, value|
           probe.instance_variable_set(:"@#{key}", value)
         end
         probe
       end
       driver_probe = fresh.call
-      constructor = lambda do |selected_directory, family|
-        raise "inert constructor scope changed" unless selected_directory == directory && family == "async"
+      constructor = lambda do |selected_directory, selected_family|
+        raise "inert constructor scope changed" unless selected_directory == directory && selected_family == family
         constructions += 1
         next driver_probe if constructions == 1
         raise late if fault == :next_constructor && constructions == 3
@@ -3193,13 +3270,33 @@ class NativeUploadValidationTest < Minitest::Test
           end
         end
         probe.define_singleton_method(:install) { nil }
-        probe.define_singleton_method(:trap_state) { {"INT" => "DEFAULT", "TERM" => "DEFAULT"} }
+        probe.define_singleton_method(:trap_state) { handlers.dup }
         probe.define_singleton_method(:invoke) do
           @owner = Struct.new(:phase).new(:reaped)
-          @first, @first_message = first_error, first_error.message
-          @events << {"boundary" => "inert-original-cancellation"}
-          @pre_go_cancellation = @nested_cancelled = true
-          raise(@target && fault == :first_replaced ? Interrupt.new(first_error.message) : first_error)
+          @owner.define_singleton_method(:complete?) { true }
+          # Exercise the REAL policy evaluator, not an async row relabelled
+          # as policy. These are inert operation endpoints, never receipts.
+          if @family == "policies"
+            next if @case == "normal" || @case.start_with?("ignored-")
+            original = @target && @case == "custom-INT" ? first_error : fixture::Failure.new("signal-policy", "private-marker")
+            @custom_deliveries << Signal.list.fetch("INT") if @case == "custom-pending-INT" && !@target
+            if @case == "partial-install" && !@target
+              @partial_install_error = original
+              @events << {"boundary" => "before-original-TERM-policy-installation", "intTrapCalls" => 1, "termTrapCalls" => 1}
+            end
+            handlers["INT"] = @foreign if @case == "changed-handler"
+            if @case.start_with?("finalize-") && !@target
+              @injected, @outer_lifetime = true, Object.new
+              @events << {"boundary" => "finalization-#{@case.delete_prefix('finalize-')}-failure", "originalOutermostLifetime" => true}
+            end
+          else
+            original = @case.include?("TERM") ? SignalException.new("TERM") : first_error
+            @events << {"boundary" => "inert-original-cancellation"}
+            @pre_go_cancellation = !(@target && @family == "signals")
+            @nested_cancelled = true
+          end
+          @first, @first_message = original, original.message
+          raise(@target && fault == :first_replaced ? Interrupt.new(original.message) : original)
         end
         probe
       end
@@ -3222,9 +3319,11 @@ class NativeUploadValidationTest < Minitest::Test
         [fixture, :validate_driver_input!, ->(_directory, value, **_) { value }],
         [fixture::OwnedChild, :write_record, ->(*) { events << :dispatch }], [File, :realpath, ->(path) { path }],
         [Digest::SHA256, :file, digest], [probe_class, :new, constructor], [fixture::CommandObservation, :new, observation],
-        [TracePoint, :new, trace], [Signal, :trap, ->(*) do
+        # Construction registers a callback; a fixed-value Minitest stub would
+        # incorrectly invoke it immediately, without an event argument.
+        [TracePoint, :new, ->(*) { trace }], [Signal, :trap, ->(key, handler) do
           events << :restore
-          if current&.instance_variable_get(:@target)
+          if current&.instance_variable_get(:@target) && current.instance_variable_get(:@ownership_failure_caught)
             raise late if fault == :restoration
             if fault == :restoration_lookalike
               original = current.instance_variable_get(:@ownership_failure_caught).first
@@ -3232,6 +3331,7 @@ class NativeUploadValidationTest < Minitest::Test
               raise lookalike
             end
           end
+          handlers[key] = handler
         end],
         [ENV, :[], ->(key) { environment[key] }], [ENV, :[]=, ->(key, value) { environment[key] = value }],
         [ENV, :delete, ->(key) { environment.delete(key) }], [ENV, :to_h, {}], [Thread.current, :pending_interrupt?, false],
@@ -3243,11 +3343,11 @@ class NativeUploadValidationTest < Minitest::Test
       actual = nil
       with_stubs.call(bindings) do
         if fault == :success
-          assert_equal "pass", fixture.ownership_driver(directory, "ownership-async").fetch("kind")
+          assert_equal "pass", fixture.ownership_driver(directory, mode).fetch("kind")
         else
-          actual = assert_raises(fixture::Failure, IOError) { fixture.ownership_driver(directory, "ownership-async") }
-          driver_probe.report_async_failure(actual) # A failed or short first write cannot authorize retry.
-          driver_probe.report_async_failure(fixture::Failure.new("ownership-probe", actual.message))
+          actual = assert_raises(fixture::Failure, IOError) { fixture.ownership_driver(directory, mode) }
+          driver_probe.report_failure(actual) # A failed or short first write cannot authorize retry.
+          driver_probe.report_failure(fixture::Failure.new("ownership-probe", actual.message))
         end
       end
       # A real original ensure stops at the replacement trap error. Reflect
@@ -3262,13 +3362,44 @@ class NativeUploadValidationTest < Minitest::Test
       {error: actual, writes: writes, row: writes.empty? ? nil : JSON.parse(writes.first.delete_prefix(prefix)),
        proofs: proofs, rows: rows, late: late, probe: current, driver: driver_probe}
     end
-    fixture::OWNERSHIP_FAILURE_HELPERS.product(fixture::OWNERSHIP_FAILURE_CASES).each do |helper, name|
+    fixture::OWNERSHIP_FAILURE_HELPERS.product(cases.fetch("async")).each do |helper, name|
       outcome = produce.call(helper: helper, name: name, platform: helper == "capture" ? "ios" : "android")
       value = outcome.fetch(:row)
       assert_equal [helper, name, "row-rejection", "fixture-error", "ownership-probe"], value.values_at("helper", "case", "phase", "errorCategory", "errorKind")
       assert_equal %w[command-not-finalized fixture-retained], value.fetch("row").fetch("failedChecks")
       assert_equal %w[interrupt none interrupt none], value.fetch("row").values_at("firstErrorCategory", "firstErrorKind", "operationErrorCategory", "operationErrorKind")
       assert value.fetch("row").fetch("checks").fetch("firstExceptionPreserved")
+    end
+    %w[INT-spawn TERM-spawn TERM-reap restore-after-TERM].each do |name|
+      value = produce.call(family: "signals", name: name, helper: "run", platform: "android").fetch(:row)
+      assert_equal ["signals", "run", name], value.values_at("family", "helper", "case")
+      assert_equal(name.end_with?("-spawn") ? %w[command-not-finalized pre-go-barrier-missing fixture-retained] :
+        %w[command-not-finalized fixture-retained], value.fetch("row").fetch("failedChecks"))
+      assert_equal(name.include?("TERM") ? "signal" : "interrupt", value.fetch("row").fetch("operationErrorCategory"))
+    end
+    policy_failures = {
+      "normal" => %w[normal-command-not-finalized fixture-retained],
+      "ignored-TERM" => %w[normal-command-not-finalized fixture-retained],
+      "custom-INT" => %w[policy-not-fail-closed policy-native-creation fixture-retained],
+      "custom-TERM" => %w[policy-native-creation fixture-retained],
+      "custom-pending-INT" => %w[policy-native-creation custom-pending-lost fixture-retained],
+      "partial-install" => %w[policy-native-creation partial-install-not-exercised fixture-retained],
+      "changed-handler" => %w[fixture-retained],
+      "finalize-report" => %w[finalization-cleanup finalization-outer-lifetime fixture-retained],
+      "finalize-drain" => %w[finalization-cleanup finalization-outer-lifetime fixture-retained],
+    }
+    policy_failures.each do |name, codes|
+      value = produce.call(family: "policies", name: name, helper: "run", platform: "android").fetch(:row)
+      assert_equal ["policies", "run", name], value.values_at("family", "helper", "case")
+      assert_equal codes, value.fetch("row").fetch("failedChecks")
+      assert value.fetch("row").fetch("checks").fetch("firstExceptionPreserved")
+    end
+    {"signals" => "TERM-reap", "policies" => "partial-install"}.each do |family, name|
+      outcome = produce.call(family: family, name: name, fault: :snapshot)
+      assert_operator outcome.fetch(:proofs).length, :>, 0 # Earlier success cannot supply THIS missing row.
+      assert_equal [family, name, "snapshot", "missing"], outcome.fetch(:row).values_at("family", "case", "phase", "row")
+      assert_same outcome.fetch(:late), outcome.fetch(:error)
+      assert_empty produce.call(family: family, fault: :success).fetch(:writes)
     end
     replaced = produce.call(fault: :first_replaced).fetch(:row).fetch("row")
     assert_equal %w[primary-not-preserved command-not-finalized fixture-retained], replaced.fetch("failedChecks")
@@ -3298,10 +3429,11 @@ class NativeUploadValidationTest < Minitest::Test
 
     # Original parent custody/request/dispatch checks, optional state transfer,
     # and complete real Lifetime unwind precede the actual Contracts relay.
-    relay = lambda do |platform: "ios", fault: nil, stderr: packet, write_result: :full|
+    relay = lambda do |family: "async", platform: "ios", fault: nil, stderr: packet, write_result: :full|
       now, dispatch, snapshot, state, escaped = 1, nil, nil, nil, nil
       events, writes, supplied_states = [], [], []
-      directory, mode = "/inert-ownership-parent", "ownership-async"
+      directory, mode = "/inert-ownership-parent", "ownership-#{family}"
+      callback = callbacks.fetch(family)
       digest = Struct.new(:hexdigest).new("a" * 64)
       policy = Object.new
       depth = 0
@@ -3337,7 +3469,9 @@ class NativeUploadValidationTest < Minitest::Test
         ["not-json-success", stderr, 1] # Failed status must remain a rejection without parsing stdout.
       end
       receiver = Object.new.extend(fixture::Contracts)
-      receiver.define_singleton_method(:name) { fault == :callback ? "test_other" : callback }
+      receiver.define_singleton_method(:name) do
+        fault == :callback ? "test_other" : fault == :other_family_callback ? callbacks.fetch(family == "async" ? "signals" : "async") : callback
+      end
       replacement = IOError.new("private-marker")
       formatter = diagnostic.method(:line)
       projection_count = 0
@@ -3407,13 +3541,18 @@ class NativeUploadValidationTest < Minitest::Test
       end
       assert_empty directory_hook.restore if directory_hook
     end
-    classes.each_key do |platform|
-      bytes = diagnostic.line(expected.merge("platform" => platform))
-      outcome = relay.call(platform: platform, stderr: bytes)
+    classes.keys.product(cases.keys).each do |platform, family|
+      bytes = diagnostic.line(expected.merge("platform" => platform, "family" => family, "case" => cases.fetch(family).first,
+        "row" => row.merge("failedChecks" => ["fixture-retained"])))
+      outcome = relay.call(platform: platform, family: family, stderr: bytes)
       assert_equal [bytes], outcome.fetch(:writes)
       assert_same outcome.fetch(:error), outcome.fetch(:state).fetch(:rejection)
       assert_equal [10, true], outcome.fetch(:state).values_at(:deadline_ns, :write_complete)
       assert_equal "ownership-probe", outcome.fetch(:error).kind
+      assert_empty relay.call(platform: platform, family: family, stderr: bytes, fault: :other_family_callback).fetch(:writes)
+      other_family = family == "async" ? "signals" : "async"
+      other_bytes = diagnostic.line(expected.merge("platform" => platform, "family" => other_family, "case" => cases.fetch(other_family).first))
+      assert_empty relay.call(platform: platform, family: family, stderr: other_bytes).fetch(:writes)
     end
     %i[custody request dispatch state same_message outer_replacement before_report before_write format callback].each do |fault|
       outcome = relay.call(fault: fault)
@@ -3437,13 +3576,18 @@ class NativeUploadValidationTest < Minitest::Test
     receiver.define_singleton_method(:name) { raise "successful call must not inspect callback" }
     handoffs, writes = [], []
     STDERR.stub(:write, ->(bytes) { writes << bytes; bytes.bytesize }) do
-      2.times do
-        assert_equal :success, receiver.with_adapter_failure_diagnostic(platform: "ios", mode: "ownership-async") { |optional| handoffs << optional; :success }
+      cases.each_key do |family|
+        2.times do
+          assert_equal :success, receiver.with_adapter_failure_diagnostic(platform: "ios", mode: "ownership-#{family}") { |optional| handoffs << optional; :success }
+        end
+      end
+      %w[ownership-unknown-capture-spawn ownership-setup ownership-observation ownership-private-marker].each do |mode|
+        receiver.with_adapter_failure_diagnostic(platform: "ios", mode: mode) { |optional| assert_empty optional }
       end
     end
     assert_empty writes
     assert handoffs.all? { |optional| optional.keys == [:ownership_failure_state] && optional[:ownership_failure_state].empty? }
-    refute_same(*handoffs.map { |optional| optional.fetch(:ownership_failure_state) })
+    assert_equal 6, handoffs.map { |optional| optional.fetch(:ownership_failure_state).object_id }.uniq.length
   end
 
   def assert_native_signal_failure_projection

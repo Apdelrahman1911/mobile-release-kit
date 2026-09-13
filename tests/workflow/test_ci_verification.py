@@ -2727,16 +2727,38 @@ class CIControllerContractTests(unittest.TestCase):
                 return tuple(matches[0].split())
 
             ownership_source = ruby_text("tests/workflow/upload_process_ownership.rb")
-            self.assertIn('OWNERSHIP_FAILURE_PREFIX = "MRK_OWNERSHIP_ASYNC_FAILURE="', ownership_source)
-            self.assertEqual(controller.OWNERSHIP_FAILURE_PREFIX, "MRK_OWNERSHIP_ASYNC_FAILURE=")
-            self.assertEqual(controller.OWNERSHIP_FAILURE_CALLBACK,
-                             "test_process_ownership_async_through_both_real_fixture_callers")
-            for suffix in ("FIELDS", "ROW_FIELDS", "CASES", "PHASES", "OWNER_PHASES",
+            self.assertIn('OWNERSHIP_FAILURE_PREFIX = "MRK_OWNERSHIP_FAILURE="', ownership_source)
+            self.assertEqual(controller.OWNERSHIP_FAILURE_PREFIX, "MRK_OWNERSHIP_FAILURE=")
+            for suffix in ("FIELDS", "ROW_FIELDS", "PHASES", "OWNER_PHASES",
                            "CHECKS", "COMMAND_CHECKS", "FAILED_CHECKS"):
                 name = "OWNERSHIP_FAILURE_" + suffix
                 self.assertEqual(ruby_words(ownership_source, name), getattr(controller, name))
             self.assertEqual(ruby_words(ownership_source, "OWNERSHIP_FAILURE_HELPERS"), ("capture", "run"))
             self.assertEqual(ruby_words(ownership_source, "OWNERSHIP_FAILURE_PLATFORMS"), ("ios", "android"))
+
+            def ownership_literal_table(name, *, words=False):
+                bodies = controller.re.findall(r"(?ms)^\s*" + name
+                    + r" = \{(.*?)^\s*\}\.(?:transform_values\(&:freeze\)\.)?freeze", ownership_source)
+                self.assertEqual(len(bodies), 1, name)
+                pattern = (r'"([^"\r\n]+)" => %w\[([A-Za-z0-9_\-\s]*)\]' if words else
+                           r'"([^"\r\n]+)" => "([^"\r\n]+)"')
+                pairs = controller.re.findall(pattern, bodies[0])
+                self.assertEqual(len(pairs), len(dict(pairs)), name)
+                self.assertEqual("".join(controller.re.sub(pattern + r"\s*,?", "", bodies[0]).split()), "", name)
+                return {key: tuple(value.split()) if words else value for key, value in pairs}
+
+            self.assertEqual(ownership_literal_table("OWNERSHIP_FAILURE_CASES", words=True),
+                             controller.OWNERSHIP_FAILURE_CASES)
+            self.assertEqual(tuple(controller.OWNERSHIP_FAILURE_CASES), ("async", "signals", "policies"))
+            self.assertEqual(tuple(map(len, controller.OWNERSHIP_FAILURE_CASES.values())), (4, 16, 10))
+            self.assertEqual(ownership_literal_table("OWNERSHIP_FAILURE_CALLBACKS"), controller.OWNERSHIP_FAILURE_CALLBACKS)
+            self.assertEqual(controller.OWNERSHIP_FAILURE_CALLBACKS, {family:
+                f"test_process_ownership_{family}_through_both_real_fixture_callers"
+                for family in ("async", "signals", "policies")})
+            labels = ownership_literal_table("OWNERSHIP_FAILURE_LABEL_CODES")
+            self.assertEqual(tuple(labels.values()), controller.OWNERSHIP_FAILURE_FAILED_CHECKS[:-1])
+            self.assertEqual(len(labels), 23)
+            self.assertEqual(controller.OWNERSHIP_FAILURE_FAILED_CHECKS[-1], "other-failed-check")
             kind_body = controller.re.findall(
                 r"(?ms)^\s*OWNERSHIP_FAILURE_ERROR_KINDS = \{(.*?)^\s*\}\.transform_values\(&:freeze\)\.freeze",
                 ownership_source)
@@ -2762,17 +2784,46 @@ class CIControllerContractTests(unittest.TestCase):
                                   for index, name in enumerate(controller.OWNERSHIP_FAILURE_COMMAND_CHECKS)},
             }
             ownership_record = {
-                "schema": 1, "platform": "ios", "family": "async", "helper": "capture", "case": "async-spawn",
+                "schema": 2, "platform": "ios", "family": "async", "helper": "capture", "case": "async-spawn",
                 "phase": "row-rejection", "errorCategory": "fixture-error", "errorKind": "ownership-probe",
                 "row": ownership_row,
             }
 
             def ownership_bytes(record):
-                return ("MRK_OWNERSHIP_ASYNC_FAILURE="
+                return ("MRK_OWNERSHIP_FAILURE="
                         + json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
 
+            # Independent finite model of the original one() branches. The
+            # cancellation cases cannot lend their check labels to policies.
+            policy_code_cases = {
+                "normal-command-not-finalized": ("normal", "ignored-INT", "ignored-TERM"),
+                "policy-not-fail-closed": ("custom-INT", "custom-TERM", "custom-pending-INT", "partial-install",
+                                          "changed-handler", "finalize-report", "finalize-drain"),
+                "policy-native-creation": ("custom-INT", "custom-TERM", "custom-pending-INT", "partial-install"),
+                "custom-pending-lost": ("custom-pending-INT",),
+                "partial-install-not-exercised": ("partial-install",),
+                "finalization-cleanup": ("finalize-report", "finalize-drain"),
+                "finalization-outer-lifetime": ("finalize-report", "finalize-drain"),
+            }
+            cancellation_codes = {"cancellation-not-propagated", "injection-boundary-missing", "wrong-signal",
+                                  "command-not-finalized"}
+
+            def ownership_case_codes(family, helper, case):
+                allowed = {"numeric-route-veto", "handlers-not-restored", "registry-active", "hooks-not-restored",
+                    "injector-cleanup", "primary-not-preserved", "injectors-not-joined", "injector-custody",
+                    "pending-interrupt", "fixture-retained", "other-failed-check"}
+                if family in {"async", "signals"}:
+                    allowed.update(cancellation_codes)
+                    if case in {"async-spawn", "INT-spawn", "TERM-spawn"}:
+                        allowed.add("pre-go-barrier-missing")
+                    if (family, helper, case) == ("async", "run", "repeated"):
+                        allowed.add("nested-cancellation-missing")
+                else:
+                    allowed.update(code for code, cases in policy_code_cases.items() if case in cases)
+                return [code for code in controller.OWNERSHIP_FAILURE_FAILED_CHECKS if code in allowed]
+
             ownership_marker = ownership_bytes(ownership_record)
-            ownership_target = "IosUploadValidationTest#" + controller.OWNERSHIP_FAILURE_CALLBACK
+            ownership_target = "IosUploadValidationTest#" + controller.OWNERSHIP_FAILURE_CALLBACKS["async"]
             ownership_ids = tuple(sorted((*expected, ownership_target)))
             ownership_step = controller.Step("ruby-ios_upload_validation", parser="minitest", expected_tests=3,
                                              native_partition="healthy")
@@ -2783,29 +2834,50 @@ class CIControllerContractTests(unittest.TestCase):
                     patch.object(controller.time, "monotonic", return_value=999.0):
                 with patch.object(controller, "_fixture_failure_record", wraps=controller._fixture_failure_record) as strict:
                     self.assertEqual(controller.ownership_failure(ownership_marker, deadline=1000.0), ownership_record)
-                strict.assert_called_once_with(ownership_marker, "MRK_OWNERSHIP_ASYNC_FAILURE=", 4096,
+                strict.assert_called_once_with(ownership_marker, "MRK_OWNERSHIP_FAILURE=", 4096,
                                                deadline=1000.0, canonical_fields=controller.OWNERSHIP_FAILURE_FIELDS)
                 # Every source-defined helper/case routes only to its actual
-                # platform's failed async callback, never an inferred cause.
+                # platform/family callback, never a neighboring healthy family.
                 for platform, (gate, class_name) in adapter_platforms.items():
-                    target = class_name + "#" + controller.OWNERSHIP_FAILURE_CALLBACK
+                    for family, cases in controller.OWNERSHIP_FAILURE_CASES.items():
+                        target = class_name + "#" + controller.OWNERSHIP_FAILURE_CALLBACKS[family]
+                        for helper in ("capture", "run"):
+                            for case in cases:
+                                record = {**ownership_record, "platform": platform, "family": family,
+                                    "helper": helper, "case": case,
+                                    "row": {**ownership_row, "failedChecks": ownership_case_codes(family, helper, case)}}
+                                transcript = clean + target + " = 0.01 s = F\n" + failed_footer
+                                with patch.object(controller, "ruby_capture_ids", return_value=tuple(sorted((*expected, target)))):
+                                    detail = controller.failure_details(capture(transcript, stderr=ownership_bytes(record),
+                                        ok=False, returncode=1), dataclasses.replace(ownership_step, id=gate), paths,
+                                        deadline=1000.0)
+                                self.assertEqual(detail["ownership_failure"], record)
+                                self.assertEqual(detail["returncode"], 1)
+                                self.assertNotIn("PRIVATE_", json.dumps(detail))
+                for family, cases in controller.OWNERSHIP_FAILURE_CASES.items():
                     for helper in ("capture", "run"):
-                        for case in controller.OWNERSHIP_FAILURE_CASES:
-                            failed = [*ownership_row["failedChecks"]]
-                            if case == "async-spawn":
-                                failed.append("pre-go-barrier-missing")
-                            if (helper, case) == ("run", "repeated"):
-                                failed.append("nested-cancellation-missing")
-                            record = {**ownership_record, "platform": platform, "helper": helper, "case": case,
-                                      "row": {**ownership_row, "failedChecks": failed}}
-                            transcript = clean + target + " = 0.01 s = F\n" + failed_footer
-                            with patch.object(controller, "ruby_capture_ids", return_value=tuple(sorted((*expected, target)))):
-                                detail = controller.failure_details(capture(transcript, stderr=ownership_bytes(record),
-                                    ok=False, returncode=1), dataclasses.replace(ownership_step, id=gate), paths,
-                                    deadline=1000.0)
-                            self.assertEqual(detail["ownership_failure"], record)
-                            self.assertEqual(detail["returncode"], 1)
-                            self.assertNotIn("PRIVATE_", json.dumps(detail))
+                        for case in cases:
+                            record = {**ownership_record, "family": family, "helper": helper, "case": case}
+                            allowed = ownership_case_codes(family, helper, case)
+                            for code in controller.OWNERSHIP_FAILURE_FAILED_CHECKS:
+                                if code not in allowed:
+                                    self.assertIsNone(controller.ownership_failure(ownership_bytes({**record,
+                                        "row": {**ownership_row, "failedChecks": [code]}})), (family, helper, case, code))
+                            # A literal adverse sentinel is valid, but it never
+                            # claims which check ran or creates a success result.
+                            sentinel = {**record, "row": {**ownership_row, "failedChecks": ["other-failed-check"]}}
+                            self.assertEqual(controller.ownership_failure(ownership_bytes(sentinel)), sentinel)
+                    callbacks = tuple("IosUploadValidationTest#" + name for name in controller.OWNERSHIP_FAILURE_CALLBACKS.values())
+                    target = "IosUploadValidationTest#" + controller.OWNERSHIP_FAILURE_CALLBACKS[family]
+                    for other_family, other_cases in controller.OWNERSHIP_FAILURE_CASES.items():
+                        if other_family == family:
+                            continue
+                        record = {**ownership_record, "family": other_family, "case": other_cases[0],
+                                  "row": {**ownership_row, "failedChecks": ["other-failed-check"]}}
+                        with patch.object(controller, "ruby_capture_ids", return_value=tuple(sorted((*expected, *callbacks)))):
+                            self.assertNotIn("ownership_failure", controller.failure_details(capture(
+                                clean + target + " = 0.01 s = E\n" + ownership_footer,
+                                stderr=ownership_bytes(record), ok=False, returncode=1), ownership_step, paths))
                 for phase in controller.OWNERSHIP_FAILURE_PHASES:
                     record = {**ownership_record, "phase": phase, "row": "missing"}
                     self.assertEqual(controller.ownership_failure(ownership_bytes(record)), record)
@@ -2883,9 +2955,10 @@ class CIControllerContractTests(unittest.TestCase):
                     {key: value for key, value in ownership_record.items() if key != "row"},
                     {**ownership_record, "private": "PRIVATE_VALUE"},
                     {key: ownership_record[key] for key in reversed(ownership_record)},
-                    *({**ownership_record, "schema": value} for value in (True, 1.0, "1", 2)),
+                    *({**ownership_record, "schema": value} for value in (True, 2.0, "2", 1)),
                     *({**ownership_record, key: value} for key, value in (
                         ("platform", "PRIVATE_PLATFORM"), ("family", "signals"), ("helper", "PRIVATE_HELPER"),
+                        ("family", "unknown"), ("family", "setup"), ("family", "observation"), ("family", False),
                         ("case", "unknown-reap"), ("phase", "PRIVATE_PHASE"), ("phase", "restoration"),
                         ("errorCategory", None), ("errorKind", "PRIVATE_KIND"), ("row", None), ("row", False),
                     )),
@@ -2915,13 +2988,16 @@ class CIControllerContractTests(unittest.TestCase):
                     "row": {**ownership_row, "failedChecks": ["pre-go-barrier-missing"]}})
                 invalid_markers = [*(ownership_bytes(record) for record in invalid_ownership),
                     ownership_marker * 2,
-                    ownership_marker.replace(b'"schema":1', b'"schema":1,"schema":1'),
+                    ownership_marker.replace(b'"schema":2', b'"schema":2,"schema":2'),
                     ownership_marker.replace(b'"ownerPhase":"unknown"', b'"ownerPhase":"unknown","ownerPhase":"unknown"'),
                     ownership_marker.replace(b'"firstExceptionPreserved":true', b'"firstExceptionPreserved":true,"firstExceptionPreserved":true'),
-                    ownership_marker.replace(b'"schema":1', b'"schema": 1'),
+                    ownership_marker.replace(b'"schema":2', b'"schema": 2'),
                     ownership_marker.replace(b'"async"', br'"\u0061sync"'),
                     ownership_marker[:-1], ownership_marker[:-1] + b"\r\n",
-                    b"MRK_OWNERSHIP_ASYNC_FAILURE=\xff\n", b"progress " + ownership_marker,
+                    b"MRK_OWNERSHIP_FAILURE=\xff\n", b"progress " + ownership_marker,
+                    ownership_marker.replace(b"MRK_OWNERSHIP_FAILURE=", b"MRK_OWNERSHIP_ASYNC_FAILURE="),
+                    ownership_bytes({**ownership_record, "schema": 1}).replace(
+                        b"MRK_OWNERSHIP_FAILURE=", b"MRK_OWNERSHIP_ASYNC_FAILURE="),
                 ]
                 for raw in invalid_markers:
                     detail = controller.failure_details(capture(ownership_stdout, stderr=raw, ok=False, returncode=1),
@@ -2929,17 +3005,30 @@ class CIControllerContractTests(unittest.TestCase):
                     self.assertNotIn("ownership_failure", detail)
                     self.assertEqual(detail["returncode"], 1)
                     self.assertNotIn("PRIVATE_", json.dumps(detail))
-                maximum_record = {**ownership_record, "platform": "android", "helper": "run", "case": "repeated",
-                    "row": {
+                # Enumerate the finite family/case/helper domain with every
+                # applicable code and each field's longest allowed encoding.
+                # This is a complete-line bound, including prefix and LF; an
+                # impossible mixture of all24 codes is not a valid maximum.
+                maximum_records = [{**ownership_record, "platform": "android", "family": family,
+                    "helper": helper, "case": case, "row": {
                         **ownership_row, "ownerPhase": "unstarted",
                         "firstErrorCategory": "native-lifecycle-error", "firstErrorKind": "parent_lost",
                         "operationErrorCategory": "native-lifecycle-error", "operationErrorKind": "parent_lost",
-                        "failedChecks": [name for name in controller.OWNERSHIP_FAILURE_FAILED_CHECKS if name != "pre-go-barrier-missing"],
+                        "failedChecks": ownership_case_codes(family, helper, case),
                         "checks": dict.fromkeys(controller.OWNERSHIP_FAILURE_CHECKS, "missing"),
                         "commandChecks": dict.fromkeys(controller.OWNERSHIP_FAILURE_COMMAND_CHECKS, "missing"),
-                    }}
+                    }} for family, cases in controller.OWNERSHIP_FAILURE_CASES.items()
+                    for helper in ("capture", "run") for case in cases]
+                maximum_record = max(maximum_records, key=lambda record: len(ownership_bytes(record)))
+                self.assertEqual([maximum_record[key] for key in ("family", "helper", "case")],
+                                 ["signals", "capture", "TERM-spawn"])
+                self.assertEqual(len(ownership_bytes(maximum_record)), 1215)
                 self.assertLessEqual(len(ownership_bytes(maximum_record)), 4096)
                 self.assertEqual(controller.ownership_failure(ownership_bytes(maximum_record)), maximum_record)
+                largest_missing = {**maximum_record, "case": "install-published-TERM", "phase": "proof-publication",
+                    "errorCategory": "native-lifecycle-error", "errorKind": "parent_lost", "row": "missing"}
+                self.assertEqual(len(ownership_bytes(largest_missing)), 237)
+                self.assertEqual(controller.ownership_failure(ownership_bytes(largest_missing)), largest_missing)
                 oversized = ownership_marker[:-1] + b" " * (4097 - len(ownership_marker)) + b"\n"
                 self.assertEqual(len(oversized), 4097)
                 with patch.object(controller, "strict_json", side_effect=AssertionError("oversized ownership JSON was parsed")) as decode:
