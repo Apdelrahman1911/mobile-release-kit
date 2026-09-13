@@ -10,6 +10,7 @@ module UploadProcessFixture
   # an O-owned child. Installed callers pass their ALREADY loaded module here.
   class CaptureObservation
     VERSION = 1
+    SETTLEMENT_CHECKS = %w[taskCleanupComplete creationSettled custodianWaitBroken acquisitionUnknown].freeze
     class << self
       attr_accessor :current
     end
@@ -223,12 +224,19 @@ module UploadProcessFixture
           rescue Exception => error
             @observer_errors << error.class.name
           end
+          settlement = SETTLEMENT_CHECKS.to_h { |key| [key, @session.nil? ? "missing" : "invalid"] }
           begin
-            @snapshot = build_snapshot.merge(additions)
+            settlement = settlement_checks
+            @snapshot = build_snapshot.merge(additions).merge("settlementChecks" => settlement)
           rescue Exception => error
+            # Optional ordinary read failures are handled below. A cancellation
+            # escaping any snapshot operation must not become a clean return,
+            # nor replace the original capture exception already selected.
+            primary ||= error unless error.is_a?(StandardError)
             @observer_errors << error.class.name
             @snapshot = {"version" => VERSION, "finalized" => false, "noProducers" => false,
-                         "unknown" => true, "observerErrors" => @observer_errors.dup}.merge(additions)
+                         "unknown" => true, "observerErrors" => @observer_errors.dup}.merge(additions).
+              merge("settlementChecks" => settlement)
           end
           if @snapshot.fetch("unknown")
             (UploadProcessFixture.instance_variable_get(:@unresolved_roots) ||
@@ -258,6 +266,78 @@ module UploadProcessFixture
     # including when the native snapshot cannot be built. Never resample a late
     # producer to repair an already retained UNKNOWN observation.
     def snapshot_additions = {}
+
+    # Diagnostic operands at the same original-return boundary as the existing
+    # snapshot. Never used by settlement, finality, retention, or admission.
+    def settlement_checks
+      checks = SETTLEMENT_CHECKS.to_h { |key| [key, @session.nil? ? "missing" : "invalid"] }
+      return checks if @session.nil?
+      return checks unless @session.instance_of?(MobileReleaseKit::NativeUploadValidation.const_get(:CaptureSession, false))
+
+      read = lambda do |&body|
+        value = body.call
+        value.equal?(true) || value.equal?(false) ||
+          (value.instance_of?(String) && %w[missing invalid].include?(value)) ? value : "invalid"
+      rescue StandardError
+        "invalid" # No optional read failure can poison the original snapshot.
+      end
+      {"taskCleanupComplete" => :@task_cleanup_complete, "custodianWaitBroken" => :@wait_broken}.each do |key, variable|
+        checks[key] = read.call do
+          next "missing" unless @session.instance_variable_defined?(variable)
+          value = @session.instance_variable_get(variable)
+          value.equal?(true) || value.equal?(false) ? value : "invalid"
+        end
+      end
+      checks["creationSettled"] = read.call do
+        next "missing" unless @session.instance_variable_defined?(:@capture_slot)
+        capture = @session.instance_variable_get(:@capture_slot)
+        creator = @session.instance_variable_get(:@creator_slot)
+        acquisition = @session.instance_variable_get(:@acquisition)
+        # The existing pure aggregate can reach these subordinate objects. Do
+        # not invoke a replacement object's task/acquisition methods as data.
+        next "invalid" unless capture.instance_of?(MobileReleaseKit::NativeUploadProcess::TaskSlot) &&
+          (creator.nil? || creator.instance_of?(MobileReleaseKit::NativeUploadProcess::TaskSlot)) &&
+          (acquisition.nil? || acquisition.instance_of?(MobileReleaseKit::NativeProcessSpawn::Acquisition))
+        # These original getters are pure, but malformed return values must not
+        # acquire truth through the aggregate's Ruby truthiness or an arbitrary
+        # replacement cleanup collection's #empty?. Normal missing creator/
+        # acquisition references are allowed by the no-attempt branch itself.
+        slots = acquisition ? [creator].compact : [capture]
+        valid_slots = slots.all? do |slot|
+          %i[joined? start_attempted? launch_retired?].all? do |predicate|
+            value = slot.public_send(predicate)
+            value.equal?(true) || value.equal?(false)
+          end
+        end
+        next "invalid" unless valid_slots
+        latch = acquisition ? :@creation_finish_returned : :@creator_entered
+        next "missing" unless @session.instance_variable_defined?(latch)
+        value = @session.instance_variable_get(latch)
+        next "invalid" unless value.equal?(true) || value.equal?(false)
+        if acquisition
+          state = acquisition.state
+          next "invalid" unless state.instance_of?(Symbol) &&
+            %i[configuring initialized attempting pid_published settled failed unknown].include?(state)
+          next "invalid" unless acquisition.cleanup_errors.instance_of?(Array)
+          attempted = acquisition.not_attempted?
+          next "invalid" unless attempted.equal?(true) || attempted.equal?(false)
+        end
+        @session.__send__(:creation_settled?)
+      end
+      checks["acquisitionUnknown"] = read.call do
+        acquisition = @session.instance_variable_get(:@acquisition)
+        next "missing" if acquisition.nil?
+        next "invalid" unless acquisition.instance_of?(MobileReleaseKit::NativeProcessSpawn::Acquisition)
+        state = acquisition.state
+        next "invalid" unless state.instance_of?(Symbol) &&
+          %i[configuring initialized attempting pid_published settled failed unknown].include?(state)
+        state == :unknown
+      end
+      checks
+    rescue StandardError
+      # Missing/unusable optional type information is not observation authority.
+      checks
+    end
 
     def receipt_record(receipt)
       return {"state" => "unknown"} unless receipt

@@ -2164,7 +2164,8 @@ class CIControllerContractTests(unittest.TestCase):
                             "test_cancellation_or_io_error_at_first_setup_step_cleans_up_the_real_child")
             setup_modes = ("native-setup-interrupt", "native-setup-system-exit", "native-setup-io-error")
             setup_fields = ("schema", "mode", "failedPredicates", "resultKind", "driverExitStatus",
-                            "errorCategory", "nativeErrorCategory", "resultChecks", "nativeChecks")
+                            "errorCategory", "nativeErrorCategory", "resultChecks", "nativeChecks",
+                            "settlementChecks", "nativeOutcomes")
             setup_kinds = ("pass", "fixture-cleanup", "readiness", "setup-fixture-fault", "process-observation",
                            "process-ownership", "fixture-result", "unexpected", "other", "missing", "invalid")
             setup_categories = ("none", "fixture-error", "contract-error", "native-lifecycle-error", "io-error",
@@ -2175,7 +2176,18 @@ class CIControllerContractTests(unittest.TestCase):
                 "ownedDescriptorsClosed", "watchdogJoined", "tasksJoined", "injectorsJoined",
                 "handlersRestored", "registryInactive", "pendingInterrupt", "cleanupErrorsEmpty",
             )
-            setup_native_checks = ("finalized", "noProducers", "settled", "unknown", "hooksRestored")
+            setup_native_checks = (
+                "finalized", "noProducers", "settled", "unknown", "hooksRestored", "observerErrorsEmpty",
+                "productionFinality", "retainedUnknown", "statusValid", "statusDecodedEOF", "cleanupErrorsEmpty",
+                "originalWaitObserved", "tasksJoined", "leasesClosed", "allActualEOFObserved",
+                "captureSettled", "captureFinished", "captureJoined", "captureActualJoinObserved",
+                "creatorSettled", "creatorFinished", "creatorJoined", "creatorActualJoinObserved",
+                "stdoutEOF", "stdoutActualEOFObserved", "stderrEOF", "stderrActualEOFObserved",
+                "statusEOF", "statusActualEOFObserved", "groupAbsent",
+            )
+            setup_settlement_checks = (
+                "taskCleanupComplete", "creationSettled", "custodianWaitBroken", "acquisitionUnknown",
+            )
             self.assertEqual(controller.NATIVE_SETUP_FAILURE_PREFIX, "MRK_NATIVE_SETUP_FAILURE=")
             self.assertEqual(controller.NATIVE_SETUP_FAILURE_CALLBACK_MODES, {setup_target: setup_modes})
             self.assertEqual(controller.NATIVE_SETUP_FAILURE_MODES, frozenset(setup_modes))
@@ -2185,19 +2197,25 @@ class CIControllerContractTests(unittest.TestCase):
             self.assertEqual(controller.NATIVE_SETUP_ERROR_CATEGORIES, setup_categories)
             self.assertEqual(controller.NATIVE_SETUP_RESULT_CHECKS, setup_result_checks)
             self.assertEqual(controller.NATIVE_SETUP_NATIVE_CHECKS, setup_native_checks)
+            self.assertEqual(controller.NATIVE_SETUP_SETTLEMENT_CHECKS, setup_settlement_checks)
+            self.assertIs(controller.NATIVE_SETUP_NATIVE_CHECKS, controller.ADAPTER_FAILURE_NATIVE_CHECKS)
 
             def setup_bytes(record):
                 return (controller.NATIVE_SETUP_FAILURE_PREFIX
                         + json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
 
             setup_record = {
-                "schema": 1, "mode": setup_modes[0], "failedPredicates": ["result-kind", "driver-status"],
+                "schema": 2, "mode": setup_modes[0], "failedPredicates": ["result-kind", "driver-status"],
                 "resultKind": "fixture-cleanup", "driverExitStatus": 1,
                 "errorCategory": "interrupt", "nativeErrorCategory": "io-error",
                 "resultChecks": {name: (True, False, "missing", "invalid")[index % 4]
                                  for index, name in enumerate(setup_result_checks)},
                 "nativeChecks": {name: (False, "missing", "invalid", True)[index % 4]
                                  for index, name in enumerate(setup_native_checks)},
+                "settlementChecks": dict(zip(setup_settlement_checks, (True, False, "missing", "invalid"))),
+                "nativeOutcomes": {"custodian": "exit2", "keeper": "exit1", "validator": "signal",
+                                   "finalOutcome": "failed", "finalCleanup": "unknown", "groupState": "unknown",
+                                   "captureState": "attempted", "creatorState": "attempted"},
             }
             setup_marker = setup_bytes(setup_record)
             setup_ids = tuple(sorted((*expected, setup_target)))
@@ -2210,10 +2228,13 @@ class CIControllerContractTests(unittest.TestCase):
             with patch.object(controller, "ruby_expected_ids", return_value=setup_ids), \
                     patch.object(controller, "ruby_capture_ids", return_value=setup_ids), \
                     patch.object(controller.time, "monotonic", return_value=999.0):
-                with patch.object(controller, "_fixture_failure_record", wraps=controller._fixture_failure_record) as strict:
+                with patch.object(controller, "_fixture_failure_record", wraps=controller._fixture_failure_record) as strict, \
+                        patch.object(controller, "_native_result_projection_valid",
+                                     wraps=controller._native_result_projection_valid) as native_grammar:
                     self.assertEqual(controller.native_setup_failure(setup_marker, deadline=1000.0), setup_record)
                 strict.assert_called_once_with(setup_marker, "MRK_NATIVE_SETUP_FAILURE=", 2048, deadline=1000.0,
                                                canonical_fields=setup_fields)
+                native_grammar.assert_called_once_with(setup_record["nativeChecks"], setup_record["nativeOutcomes"])
                 for mode in setup_modes:
                     for terminal in ("F", "E"):
                         record = {**setup_record, "mode": mode}
@@ -2253,8 +2274,42 @@ class CIControllerContractTests(unittest.TestCase):
                 for check_value in (True, False, "missing", "invalid"):
                     record = {**setup_record,
                               "resultChecks": dict.fromkeys(setup_result_checks, check_value),
-                              "nativeChecks": dict.fromkeys(setup_native_checks, check_value)}
+                              "nativeChecks": dict.fromkeys(setup_native_checks, check_value),
+                              "settlementChecks": dict.fromkeys(setup_settlement_checks, check_value)}
                     self.assertEqual(controller.native_setup_failure(setup_bytes(record)), record)
+
+                # All native enums are exercised by the shared adapter grammar
+                # below; here bind the setup wire's full finite size and source.
+                setup_maximum = {**setup_record, "mode": max(setup_modes, key=len),
+                    "resultKind": max(setup_kinds, key=len), "driverExitStatus": 255,
+                    "errorCategory": max(setup_categories, key=len), "nativeErrorCategory": max(setup_categories, key=len),
+                    "resultChecks": dict.fromkeys(setup_result_checks, "missing"),
+                    "nativeChecks": dict.fromkeys(setup_native_checks, "missing"),
+                    "settlementChecks": dict.fromkeys(setup_settlement_checks, "missing"),
+                    "nativeOutcomes": {"custodian": "not-attempted", "keeper": "not-attempted", "validator": "not-attempted",
+                                       "finalOutcome": "rejected", "finalCleanup": "confirmed", "groupState": "not-created",
+                                       "captureState": "not-constructed", "creatorState": "not-constructed"}}
+                maximum_marker = setup_bytes(setup_maximum)
+                self.assertEqual(tuple(setup_maximum), setup_fields)
+                self.assertTrue(all(len(value) == max(map(len, controller.ADAPTER_FAILURE_NATIVE_OUTCOMES[name]))
+                                    for name, value in setup_maximum["nativeOutcomes"].items()))
+                self.assertEqual(len(maximum_marker), 2002)
+                self.assertEqual(2048 - len(maximum_marker), 46)
+                self.assertEqual(controller.native_setup_failure(maximum_marker), setup_maximum)
+                self.assertEqual(controller.failure_details(capture(setup_stdout, stderr=maximum_marker, ok=False, returncode=1),
+                    setup_step, paths)["native_setup_failure"], setup_maximum)
+
+                # IOError redaction deliberately changes the external object;
+                # its false identity flag must neither invent a predicate nor
+                # repair the original failed kind/status or native settlement.
+                io_record = {**setup_record, "mode": "native-setup-io-error", "errorCategory": "fixture-error",
+                    "nativeErrorCategory": "contract-error",
+                    "resultChecks": {**setup_record["resultChecks"], "nativeOriginalErrorPreserved": False},
+                    "nativeChecks": {**setup_record["nativeChecks"], "settled": False, "finalized": False, "unknown": True}}
+                io_capture = capture(setup_stdout, stderr=setup_bytes(io_record), ok=False, returncode=1)
+                self.assertEqual(controller.failure_details(io_capture, setup_step, paths)["native_setup_failure"], io_record)
+                with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                    controller.parse_capture(setup_step, io_capture, paths, "macos", None)
 
                 success_stdout = setup_stdout.replace("0.01 s = F", "0.01 s = .").replace("1 failures", "0 failures")
                 self.assertNotIn("native_setup_failure", controller.failure_details(
@@ -2301,7 +2356,7 @@ class CIControllerContractTests(unittest.TestCase):
                     *({key: value for key, value in setup_record.items() if key != absent} for absent in setup_fields),
                     {**setup_record, "private": "PRIVATE_ROOT"}, {**setup_record, "pid": 123},
                     {key: setup_record[key] for key in reversed(setup_fields)},
-                    *({**setup_record, "schema": value} for value in (True, 1.0, 2, "1")),
+                    *({**setup_record, "schema": value} for value in (True, 2.0, 1, "2")),
                     *({**setup_record, "mode": value} for value in ([], False, "PRIVATE_MODE", "native-setup-no-cleanup")),
                     *({**setup_record, "resultKind": value} for value in (None, True, 0, [], "PRIVATE_KIND")),
                     *({**setup_record, "driverExitStatus": value} for value in (None, True, False, 1.0, "1", -1, 256)),
@@ -2315,7 +2370,12 @@ class CIControllerContractTests(unittest.TestCase):
                     {**setup_record, "resultKind": "pass", "driverExitStatus": 0},
                     {**setup_record, "resultKind": "pass"}, {**setup_record, "driverExitStatus": 0},
                 ]
-                for key in ("resultChecks", "nativeChecks"):
+                legacy_setup = {key: value for key, value in setup_record.items()
+                                if key not in ("settlementChecks", "nativeOutcomes")}
+                legacy_setup.update(schema=1, nativeChecks={name: setup_record["nativeChecks"][name]
+                                                           for name in setup_native_checks[:5]})
+                invalid_setup.append(legacy_setup)
+                for key in ("resultChecks", "nativeChecks", "settlementChecks"):
                     checks = setup_record[key]
                     invalid_setup.extend({**setup_record, key: value} for value in (
                         None, [], True, {}, {**checks, "PRIVATE_CHECK": False},
@@ -2324,14 +2384,25 @@ class CIControllerContractTests(unittest.TestCase):
                         *({**checks, name: 0} for name in checks),
                         *({**checks, next(iter(checks)): value} for value in (1, None, [], {}, "false", "PRIVATE_VALUE")),
                     ))
+                outcomes = setup_record["nativeOutcomes"]
+                invalid_setup.extend({**setup_record, "nativeOutcomes": value} for value in (
+                    None, [], True, {}, {**outcomes, "PRIVATE_OUTCOME": "missing"},
+                    {name: value for name, value in outcomes.items() if name != "custodian"},
+                    {name: outcomes[name] for name in reversed(outcomes)},
+                    *({**outcomes, name: "exit0" if name in ("captureState", "creatorState") else "attempted"}
+                      for name in outcomes),
+                    *({**outcomes, "custodian": value} for value in (None, True, 0, [], {}, "PRIVATE_VALUE")),
+                ))
                 prefix = controller.NATIVE_SETUP_FAILURE_PREFIX.encode("ascii")
                 malformed_marker = prefix + b"not-json\n"
                 invalid_setup_markers = [*(setup_bytes(record) for record in invalid_setup),
                     setup_marker * 2, setup_marker + malformed_marker, malformed_marker + setup_marker,
-                    setup_marker.replace(b'"schema":1', b'"schema":1,"schema":1'),
+                    setup_marker.replace(b'"schema":2', b'"schema":2,"schema":2'),
                     setup_marker.replace(b'"ready":true', b'"ready":true,"ready":true'),
                     setup_marker.replace(b'"finalized":false', b'"finalized":false,"finalized":false'),
-                    setup_marker.replace(b'"schema":1', b'"schema": 1'),
+                    setup_marker.replace(b'"taskCleanupComplete":true', b'"taskCleanupComplete":true,"taskCleanupComplete":true'),
+                    setup_marker.replace(b'"custodian":"exit2"', b'"custodian":"exit2","custodian":"exit2"'),
+                    setup_marker.replace(b'"schema":2', b'"schema": 2'),
                     setup_marker.replace(b"native-setup", br"native\u002dsetup"),
                     prefix + b"x" * 2048 + b"\n", prefix + b"\xff\n", setup_marker[:-1],
                     setup_marker[:-1] + b"\r\n", b"progress " + setup_marker,

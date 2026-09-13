@@ -543,6 +543,7 @@ class NativeUploadProtocolTest < Minitest::Test
         end
       end
     end
+    assert_retained_keeper_movement
   end
 
   def test_early_failed_final_is_truthful_without_fabricated_success_phases
@@ -648,7 +649,7 @@ class NativeUploadProtocolTest < Minitest::Test
 
   private
 
-  def with_inert_keeper_control_effects_rejected(&body)
+  def with_inert_keeper_control_effects_rejected(process_steps: nil, &body)
     effects = []
     reject = lambda do |*_arguments, **_keywords|
       effects << :unexpected_effect
@@ -666,11 +667,264 @@ class NativeUploadProtocolTest < Minitest::Test
         body.call
       else
         object, name = operations.fetch(index)
-        object.stub(name, reject) { enter.call(index + 1) }
+        replacement = reject
+        if process_steps && object.equal?(Process) && %i[getsid getpgid kill].include?(name)
+          # One stub per seam: Minitest's fixed alias cannot safely nest a
+          # second same-method stub. No script entry can call the real method.
+          replacement = lambda do |*arguments, **keywords|
+            step = process_steps.shift
+            reject.call unless step && step[0] == name && step[1] == arguments && keywords.empty?
+
+            result = step.fetch(2)
+            raise result if result.is_a?(Exception)
+
+            result
+          end
+        end
+        object.stub(name, replacement) { enter.call(index + 1) }
       end
     end
     enter.call(0)
+    assert_empty process_steps, "an expected inert process observation was skipped" if process_steps
     assert_empty effects, "a rescued error swallowed an inert-effect tripwire"
+  end
+
+  def assert_retained_keeper_movement
+    now = 1_000_000_000
+    steps = []
+    with_inert_keeper_control_effects_rejected(process_steps: steps) do
+      Owner.stub(:monotonic_ns, -> { now }) do
+        Process.stub(:ppid, 100) do
+          hello = simple("HELLO").merge("pid" => 102, "ppid" => 101, "sid" => 101,
+                                         "pgid" => 102, "fd_map_version" => 1)
+          moved = simple("MOVED").merge("validator_pid" => 103, "group_id" => 102, "keeper_pgid" => 101)
+          observe_hello = lambda do |fixture, actual_group = 102|
+            steps.concat([[:getsid, [102], 101], [:getpgid, [102], actual_group]])
+            fixture.fetch(:role).send(:accept_keeper_hello, hello)
+          end
+          new_moved = lambda do
+            fixture = inert_keeper_movement_control
+            role, channel = fixture.values_at(:role, :channel)
+            observe_hello.call(fixture)
+            assert_nil role.instance_variable_get(:@keeper_moved_original)
+            channel.queue(configuration("keeper"))
+            channel.queue(simple("RUN"))
+            role.send(:flush_keeper)
+            steps.concat([[:getsid, [102], 101], [:getpgid, [102], 101]])
+            role.send(:accept_moved, moved)
+            assert_same moved, role.instance_variable_get(:@moved)
+            assert_same fixture.fetch(:keeper), role.instance_variable_get(:@keeper_moved_original)
+            assert_equal %w[RESERVED READY], fixture.fetch(:published).map { |frame| frame.fetch("type") }
+            fixture
+          end
+          fail_original = lambda do |fixture|
+            fixture[:primary] = IOError.new("inert original operation error")
+            fixture.fetch(:role).send(:fail!, "io", error: fixture.fetch(:primary), cutoff: 3_000_000_000)
+          end
+          unchanged_failure = lambda do |fixture|
+            role = fixture.fetch(:role)
+            assert_same fixture.fetch(:primary), role.instance_variable_get(:@first_error)
+            assert_equal 3_000_000_000, role.send(:effective_deadline_ns)
+            assert_equal "io", role.instance_variable_get(:@failure_reason)
+            assert role.instance_variable_get(:@failed)
+            assert_raises(Owner::ProtocolError) { role.send(:receive_command, simple("RUN")) }
+          end
+
+          # Accepted MOVED survives disappearance of LIVE K metadata. Only the
+          # real GroupLease decision code consumes these exact inert syscalls.
+          # The old method instead attempts an unmodelled metadata read here.
+          fixture = new_moved.call
+          role = fixture.fetch(:role)
+          fail_original.call(fixture)
+          steps.concat([[:kill, [0, -102], 1], [:kill, ["KILL", -102], 1]])
+          role.send(:cleanup_group)
+          assert role.instance_variable_get(:@group_kill_attempted)
+          refute role.group.absent?
+          refute role.group.retired?
+          steps << [:kill, [0, -102], Errno::ESRCH.new]
+          role.send(:cleanup_group)
+          assert role.group.absent?
+          assert role.group.retired?
+          assert role.instance_variable_get(:@group_routes_retired)
+          role.send(:cleanup_group) # Retired routes admit no further observation.
+          refute role.instance_variable_get(:@cleanup_unknown)
+          unchanged_failure.call(fixture)
+
+          [false, true].each do |kill_spent|
+            fixture = new_moved.call
+            role = fixture.fetch(:role)
+            role.instance_variable_set(:@group_kill_attempted, kill_spent)
+            role.instance_variable_set(:@cleanup_unknown, kill_spent)
+            steps << [:kill, [0, -102], Errno::ESRCH.new]
+            role.send(:cleanup_group)
+            assert role.group.absent?
+            assert role.group.retired?
+            assert_equal kill_spent, role.instance_variable_get(:@group_kill_attempted)
+            assert_equal kill_spent, role.instance_variable_get(:@cleanup_unknown)
+          end
+
+          # The existing positive fallback is retained, not a synthetic MOVED.
+          fixture = inert_keeper_movement_control
+          role = fixture.fetch(:role)
+          observe_hello.call(fixture)
+          fail_original.call(fixture)
+          steps.concat([[:getsid, [102], 101], [:getpgid, [102], 101]])
+          assert role.send(:keeper_outside_group?)
+          assert_same fixture.fetch(:keeper), role.instance_variable_get(:@keeper_moved_original)
+          assert_nil role.instance_variable_get(:@moved)
+          steps << [:kill, [0, -102], Errno::ESRCH.new]
+          role.send(:cleanup_group)
+          assert role.group.absent?
+          unchanged_failure.call(fixture)
+
+          # A validated HELLO already in C is cleanup-only, even without an
+          # earlier error; caching it must never create RESERVED, READY or RUN.
+          [false, true].each do |already_failed|
+            fixture = inert_keeper_movement_control
+            role = fixture.fetch(:role)
+            fail_original.call(fixture) if already_failed
+            observe_hello.call(fixture, 101)
+            cutoff = role.send(:effective_deadline_ns)
+            assert_same fixture.fetch(:keeper), role.instance_variable_get(:@keeper_moved_original)
+            assert_equal 102, role.group.id
+            assert role.instance_variable_get(:@failed)
+            assert role.instance_variable_get(:@keeper_launch_closed)
+            assert_nil role.instance_variable_get(:@moved)
+            assert_empty fixture.fetch(:published)
+            assert_empty fixture.fetch(:writes)
+            assert_raises(Owner::ProtocolError) { role.send(:receive_command, simple("RUN")) }
+            steps << [:kill, [0, -102], Errno::ESRCH.new]
+            role.send(:cleanup_group)
+            assert role.group.absent?
+            assert_equal cutoff, role.send(:effective_deadline_ns)
+            unchanged_failure.call(fixture) if already_failed
+          end
+
+          # No prior movement, RELEASED alone, or an equal-valued foreign K is
+          # not a cache hit. Missing/wrong live metadata cannot invent absence.
+          [[:none, [[:getsid, [102], Errno::ESRCH.new]]],
+           [:released, [[:getsid, [102], Errno::ESRCH.new]]],
+           [:foreign, [[:getsid, [102], Errno::ESRCH.new]]],
+           [:none, [[:getsid, [102], 100]]],
+           [:none, [[:getsid, [102], 101], [:getpgid, [102], 102]]],
+           [:none, [[:getsid, [102], 101], [:getpgid, [102], Errno::ESRCH.new]]]].each do |marker, script|
+            fixture = inert_keeper_movement_control
+            role = fixture.fetch(:role)
+            observe_hello.call(fixture)
+            if marker == :released
+              role.send(:accept_released, simple("RELEASED").merge("validator" => { "state" => "not_attempted" }))
+            elsif marker == :foreign
+              role.instance_variable_set(:@keeper_moved_original, fixture.fetch(:keeper).dup)
+            end
+            original = role.instance_variable_get(:@keeper_moved_original)
+            steps.concat(script)
+            role.send(:cleanup_group)
+            assert_same original, role.instance_variable_get(:@keeper_moved_original)
+            refute role.group.absent?
+            refute role.group.retired?
+            refute role.instance_variable_get(:@group_kill_attempted)
+            refute role.instance_variable_get(:@group_routes_retired)
+          end
+
+          # Neither acceptance path publishes movement on invalid metadata.
+          %i[hello moved].each do |edge|
+            [[[:getsid, [102], 100]], [[:getsid, [102], 101], [:getpgid, [102], 103]]].each do |script|
+              fixture = inert_keeper_movement_control
+              role, channel = fixture.values_at(:role, :channel)
+              if edge == :moved
+                observe_hello.call(fixture)
+                channel.queue(configuration("keeper"))
+                channel.queue(simple("RUN"))
+                role.send(:flush_keeper)
+              end
+              published = fixture.fetch(:published).dup
+              steps.concat(script)
+              assert_raises(Owner::ProtocolError) do
+                role.send(edge == :hello ? :accept_keeper_hello : :accept_moved, edge == :hello ? hello : moved)
+              end
+              assert_nil role.instance_variable_get(:@keeper_moved_original)
+              assert_nil role.instance_variable_get(:@moved)
+              assert_equal published, fixture.fetch(:published)
+            end
+          end
+
+          # Even a genuine retained move cannot reopen custody after first
+          # wait, receipt, numeric/group retirement or the ORIGINAL cutoff.
+          %i[missing receipt pollable wait_in_flight reaped unknown numeric_retired group_retired routes_retired cutoff].each do |veto|
+            fixture = new_moved.call
+            role, keeper = fixture.values_at(:role, :keeper)
+            fail_original.call(fixture)
+            case veto
+            when :missing then role.instance_variable_set(:@keeper, nil)
+            when :receipt then keeper.receipt = Object.new
+            when :pollable, :wait_in_flight, :reaped, :unknown then keeper.state = veto
+            when :numeric_retired then keeper.numeric_retired = true
+            when :group_retired then role.group.retire!(absent: false)
+            when :routes_retired then role.instance_variable_set(:@group_routes_retired, true)
+            when :cutoff then now = 3_000_000_000
+            end
+            if veto == :group_retired
+              assert_raises(Owner::LifecycleError) { role.send(:cleanup_group) }
+            else
+              refute role.send(:keeper_outside_group?) unless %i[routes_retired cutoff].include?(veto)
+              role.send(:cleanup_group)
+            end
+            assert_raises(Owner::LifecycleError) { role.group.request(0) } if veto == :cutoff
+            refute role.group.absent?
+            refute role.instance_variable_get(:@group_kill_attempted)
+            now = 1_000_000_000
+            unchanged_failure.call(fixture)
+          end
+
+          %i[metadata group].each do |denied_edge|
+            fixture = denied_edge == :group ? new_moved.call : inert_keeper_movement_control
+            observe_hello.call(fixture) if denied_edge == :metadata
+            role = fixture.fetch(:role)
+            fail_original.call(fixture)
+            denied = Errno::EPERM.new
+            steps << (denied_edge == :group ? [:kill, [0, -102], denied] : [:getsid, [102], denied])
+            assert_same denied, assert_raises(Errno::EPERM) { role.send(:cleanup_group) }
+            refute role.group.absent?
+            refute role.group.retired?
+            unchanged_failure.call(fixture)
+          end
+
+          # Continued presence after the single KILL remains UNKNOWN at the
+          # unchanged cutoff. A positive request is never an absence receipt.
+          fixture = new_moved.call
+          role = fixture.fetch(:role)
+          fail_original.call(fixture)
+          steps.concat([[:kill, [0, -102], 1], [:kill, ["KILL", -102], 1]])
+          role.send(:cleanup_group)
+          now = 3_000_000_000 - Owner::POLL_NS
+          steps << [:kill, [0, -102], 1]
+          role.send(:cleanup_group)
+          assert role.group.retired?
+          refute role.group.absent?
+          assert role.instance_variable_get(:@cleanup_unknown)
+          assert role.instance_variable_get(:@group_routes_retired)
+          unchanged_failure.call(fixture)
+        end
+      end
+    end
+  end
+
+  def inert_keeper_movement_control
+    fixture = inert_keeper_control
+    keeper_type = Struct.new(:pid, :state, :receipt, :numeric_retired) do
+      def numeric_retired?
+        numeric_retired
+      end
+    end
+    keeper = keeper_type.new(102, :running, nil, false)
+    role = fixture.fetch(:role)
+    { keeper: keeper, keeper_hello: nil, group: nil, keeper_moved_original: nil,
+      moved: nil, group_kill_attempted: false }.each do |name, value|
+      role.instance_variable_set(:"@#{name}", value)
+    end
+    published = []
+    role.instance_variable_get(:@parent_channel).define_singleton_method(:queue) { |frame| published << frame }
+    fixture.merge(keeper: keeper, published: published)
   end
 
   def inert_keeper_control(reads: [], writes: [])

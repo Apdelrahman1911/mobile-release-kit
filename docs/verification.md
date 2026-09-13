@@ -656,6 +656,13 @@ for existing native, upload, entitlement, recovery or fixture tests:
   a genuine return, never an empty slot; `ECHILD`, wrong/lost wait publication and
   ambiguous startup are UNKNOWN. Decisive mutants must be vetoed before a
   stale-identity syscall, not demonstrated by signaling an unrelated process.
+  Ruby retains a positively observed one-way keeper move, bound to that original
+  child object: an exited but unreaped keeper may disappear from live SID/PGID
+  lookup while still reserving its original group number. Cleanup must not lose
+  that prior observation, but neither it nor RELEASED proves group absence.
+  Original lease, receipt, first-wait, retirement and deadline guards still apply;
+  only the actual group operation can establish absence. Cover both an already
+  absent group and a present group requiring the single allowed KILL request.
 - Withhold COMMIT until **real EOF**: descendant cleanup and the Python payload
   write/close must progress first, and unused Ruby writer copies must already
   close. Permanent withholding fails at the original cutoff. Exercise pre-RUN
@@ -750,11 +757,24 @@ record. Unknown/duplicate identities, ambiguous terminals, adverse outcomes and
 footer/count mismatches fail. Failure observations contain only finite structural
 reasons/counts and bounded source-known missing/duplicate IDs, never raw body logs.
 
-The native first-close cancellation test may additionally report one bounded
+The native first-close cancellation test may additionally report one schema-2
 `MRK_NATIVE_SETUP_FAILURE` observation for its three fixed setup modes, only when
 the original result-kind/driver-status rejection survives the complete fixture
 lifetime. Closed categories and true/false/missing/invalid checks retain the
 already-read result without publishing private messages, paths or identities.
+The complete line remains bounded to 2048 bytes including prefix and newline.
+It reuses the ordinary adapter's 30 native checks and eight finite outcomes,
+plus four original-return settlement checks: task cleanup completion, creation
+settlement, the original custodian-wait failure latch, and acquisition UNKNOWN.
+These distinguish unresolved cleanup categories; they neither establish every
+underlying cause nor replace the original waits, EOFs, joins or finality decision.
+Missing is distinct from false. An ordinary optional-read error is invalid;
+caller cancellation is not swallowed as optional diagnostic data. The existing
+fixture cleanup-error flag is separate from native session cleanup errors.
+For the synthetic IOError mode, a sanitized `ContractError` and a false external
+original-object flag are expected: the fixture separately checks the original
+session primary. Those two fields alone are not a failure diagnosis. Historical
+schema-1 records do not acquire the added observations retrospectively.
 Reporting uses the same original cutoff and never changes rejection or cleanup
 authority. The controller binds it to the exact failing source-known callback in
 the healthy partition; successful or duplicate callbacks cannot qualify.

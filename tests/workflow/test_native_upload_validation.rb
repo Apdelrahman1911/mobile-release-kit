@@ -112,7 +112,8 @@ class NativeUploadValidationTest < Minitest::Test
   NATIVE_SETUP_RESULT_CHECKS = %w[ready firstCloseEntered originalCloseCompleted nativeOriginalErrorPreserved watchdogStarted
     watchdogIntervened fallbackUsed deadBeforeFallback ownedDescriptorsClosed watchdogJoined tasksJoined injectorsJoined
     handlersRestored registryInactive pendingInterrupt cleanupErrorsEmpty].freeze
-  NATIVE_SETUP_NATIVE_CHECKS = %w[finalized noProducers settled unknown hooksRestored].freeze
+  NATIVE_SETUP_NATIVE_CHECKS = UploadProcessFixture::ADAPTER_FAILURE_NATIVE_CHECKS
+  NATIVE_SETUP_SETTLEMENT_CHECKS = UploadProcessFixture::CaptureObservation::SETTLEMENT_CHECKS
 
   def setup
     UploadProcessFixture.assert_domain_reusable!
@@ -339,13 +340,27 @@ class NativeUploadValidationTest < Minitest::Test
       end
       [key, value]
     end
-    native_checks = NATIVE_SETUP_NATIVE_CHECKS.to_h do |key|
-      [key, check.call(result["nativeObservation"], key, absent: !result.key?("nativeObservation"))]
+    projected = UploadProcessFixture.adapter_result_projection(mode: mode, result: result)
+    native = result["nativeObservation"]
+    settlement_checks = NATIVE_SETUP_SETTLEMENT_CHECKS.to_h do |key|
+      value = if !result.key?("nativeObservation") || (native.instance_of?(Hash) && !native.key?("settlementChecks"))
+        "missing"
+      elsif !native.instance_of?(Hash) || !native["settlementChecks"].instance_of?(Hash)
+        "invalid"
+      elsif !native["settlementChecks"].key?(key)
+        "missing"
+      else
+        item = native["settlementChecks"].fetch(key)
+        item.equal?(true) || item.equal?(false) ||
+          (item.instance_of?(String) && %w[missing invalid].include?(item)) ? item : "invalid"
+      end
+      [key, value]
     end
-    line = "#{NATIVE_SETUP_FAILURE_PREFIX}#{JSON.generate({"schema" => 1, "mode" => mode,
+    line = "#{NATIVE_SETUP_FAILURE_PREFIX}#{JSON.generate({"schema" => 2, "mode" => mode,
       "failedPredicates" => failed, "resultKind" => kind, "driverExitStatus" => code,
       "errorCategory" => category.call("errorClass"), "nativeErrorCategory" => category.call("nativeErrorClass"),
-      "resultChecks" => result_checks, "nativeChecks" => native_checks})}\n"
+      "resultChecks" => result_checks, "nativeChecks" => projected.fetch("nativeChecks"),
+      "settlementChecks" => settlement_checks, "nativeOutcomes" => projected.fetch("nativeOutcomes")})}\n"
     line.freeze if line.ascii_only? && line.bytesize <= 2048
   end
 
@@ -1741,6 +1756,7 @@ class NativeUploadValidationTest < Minitest::Test
 
       assert_native_order_failure_projection
       assert_native_setup_failure_projection
+      assert_original_capture_settlement_projection
       assert_adapter_failure_projection
       assert_ownership_failure_projection
       assert_native_signal_failure_projection
@@ -2393,22 +2409,37 @@ class NativeUploadValidationTest < Minitest::Test
     result_keys = %w[ready firstCloseEntered originalCloseCompleted nativeOriginalErrorPreserved watchdogStarted
       watchdogIntervened fallbackUsed deadBeforeFallback ownedDescriptorsClosed watchdogJoined tasksJoined injectorsJoined
       handlersRestored registryInactive pendingInterrupt cleanupErrorsEmpty]
-    native_keys = %w[finalized noProducers settled unknown hooksRestored]
+    native_keys = %w[finalized noProducers settled unknown hooksRestored observerErrorsEmpty productionFinality retainedUnknown
+      statusValid statusDecodedEOF cleanupErrorsEmpty originalWaitObserved tasksJoined leasesClosed allActualEOFObserved
+      captureSettled captureFinished captureJoined captureActualJoinObserved creatorSettled creatorFinished creatorJoined
+      creatorActualJoinObserved stdoutEOF stdoutActualEOFObserved stderrEOF stderrActualEOFObserved statusEOF statusActualEOFObserved groupAbsent]
+    settlement_keys = %w[taskCleanupComplete creationSettled custodianWaitBroken acquisitionUnknown]
+    outcome_keys = %w[custodian keeper validator finalOutcome finalCleanup groupState captureState creatorState]
     assert_equal modes, UploadProcessFixture::NATIVE_SETUP_FAILURE_MODES
     assert_equal callback, NATIVE_SETUP_FAILURE_CALLBACK
     assert_equal result_keys, NATIVE_SETUP_RESULT_CHECKS
     assert_equal native_keys, NATIVE_SETUP_NATIVE_CHECKS
+    assert_equal settlement_keys, NATIVE_SETUP_SETTLEMENT_CHECKS
     status_class = Struct.new(:exitstatus) # Comparison data only.
     status = status_class.new(1)
     raw = result_keys.reject { |key| key == "cleanupErrorsEmpty" }.to_h { |key| [key, true] }
     raw.merge!("kind" => "fixture-cleanup", "errorClass" => "UploadProcessFixture::Failure", "nativeErrorClass" => "Interrupt",
       "cleanupErrors" => ["private-marker"], "error" => "private-marker", "private" => "private-marker",
-      "nativeObservation" => native_keys.to_h { |key| [key, false] }.merge("private" => "private-marker"))
+      "nativeObservation" => native_keys.reject { |key| key == "observerErrorsEmpty" }.to_h { |key| [key, false] }.merge(
+        "observerErrors" => [], "private" => "private-marker",
+        "settlementChecks" => settlement_keys.zip([true, true, false, false]).to_h,
+        "custodian" => {"state" => "reaped", "status_kind" => "exit", "status_code" => 2},
+        "final" => {"outcome" => "failed", "cleanup" => "unknown", "group" => {"state" => "retired"},
+          "keeper" => {"state" => "reaped", "status_kind" => "exit", "status_code" => 2},
+          "validator" => {"state" => "reaped", "status_kind" => "signal", "status_code" => 9}},
+        "tasks" => [{"role" => "capture", "state" => "attempted"}, {"role" => "creator", "state" => "not_started"}]))
     formatter = fixture_class.method(:native_setup_failure_line)
-    expected = {"schema" => 1, "mode" => modes.first, "failedPredicates" => %w[result-kind driver-status],
+    expected = {"schema" => 2, "mode" => modes.first, "failedPredicates" => %w[result-kind driver-status],
       "resultKind" => "fixture-cleanup", "driverExitStatus" => 1, "errorCategory" => "fixture-error", "nativeErrorCategory" => "interrupt",
       "resultChecks" => result_keys.to_h { |key| [key, key != "cleanupErrorsEmpty"] },
-      "nativeChecks" => native_keys.to_h { |key| [key, false] }}
+      "nativeChecks" => native_keys.to_h { |key| [key, key == "observerErrorsEmpty"] },
+      "settlementChecks" => settlement_keys.zip([true, true, false, false]).to_h,
+      "nativeOutcomes" => outcome_keys.zip(%w[exit2 exit2 signal failed unknown retired attempted not-started]).to_h}
     modes.each do |mode|
       packet = formatter.call(mode: mode, result: raw, status: status)
       assert_equal "#{NATIVE_SETUP_FAILURE_PREFIX}#{JSON.generate(expected.merge("mode" => mode))}\n", packet
@@ -2446,16 +2477,49 @@ class NativeUploadValidationTest < Minitest::Test
     missing = project.call({})
     assert_equal ["missing"] * 3, missing.values_at("resultKind", "errorCategory", "nativeErrorCategory")
     assert_equal({"resultChecks" => result_keys.to_h { |key| [key, "missing"] },
-      "nativeChecks" => native_keys.to_h { |key| [key, "missing"] }}, missing.slice("resultChecks", "nativeChecks"))
+      "nativeChecks" => native_keys.to_h { |key| [key, "missing"] },
+      "settlementChecks" => settlement_keys.to_h { |key| [key, "missing"] },
+      "nativeOutcomes" => outcome_keys.to_h { |key| [key, "missing"] }},
+      missing.slice("resultChecks", "nativeChecks", "settlementChecks", "nativeOutcomes"))
     malformed = result_keys.to_h { |key| [key, "private-marker"] }.merge("cleanupErrors" => nil, "nativeObservation" => nil)
     invalid = project.call(malformed)
     assert_equal ["invalid"], invalid.fetch("resultChecks").values.uniq
     assert_equal ["invalid"], invalid.fetch("nativeChecks").values.uniq
+    assert_equal ["invalid"], invalid.fetch("settlementChecks").values.uniq
+    assert_equal ["invalid"], invalid.fetch("nativeOutcomes").values.uniq
     assert_equal ["missing"], project.call(raw.merge("nativeObservation" => {})).fetch("nativeChecks").values.uniq
     explicit_false = raw.merge(result_keys.to_h { |key| [key, false] }).merge("cleanupErrors" => [])
     assert_equal result_keys.to_h { |key| [key, key == "cleanupErrorsEmpty"] }, project.call(explicit_false).fetch("resultChecks")
     assert_equal native_keys.to_h { |key| [key, "invalid"] }, project.call(raw.merge(
-      "nativeObservation" => native_keys.to_h { |key| [key, 0] })).fetch("nativeChecks")
+      "nativeObservation" => native_keys.to_h { |key| [key, 0] }.merge("observerErrors" => 0))).fetch("nativeChecks")
+    [nil, false, "private-marker"].each do |record|
+      changed = raw.merge("nativeObservation" => raw.fetch("nativeObservation").merge("settlementChecks" => record))
+      assert_equal settlement_keys.to_h { |key| [key, "invalid"] }, project.call(changed).fetch("settlementChecks")
+    end
+    [true, false, "missing", "invalid", nil, 0, "private-marker"].each do |item|
+      changed = raw.merge("nativeObservation" => raw.fetch("nativeObservation").merge(
+        "settlementChecks" => settlement_keys.to_h { |key| [key, item] }))
+      expected_item = [true, false, "missing", "invalid"].include?(item) ? item : "invalid"
+      assert_equal settlement_keys.to_h { |key| [key, expected_item] }, project.call(changed).fetch("settlementChecks")
+    end
+    [{}, {"settlementChecks" => {}}].each do |snapshot|
+      assert_equal settlement_keys.to_h { |key| [key, "missing"] }, project.call(raw.merge(
+        "nativeObservation" => snapshot)).fetch("settlementChecks")
+    end
+    # Shared native projection grammar has its own full malformed-input matrix.
+    # This integration must keep that original finite projection unchanged.
+    shared = UploadProcessFixture.adapter_result_projection(mode: modes.first, result: raw)
+    assert_equal shared.slice("nativeChecks", "nativeOutcomes"), project.call(raw).slice("nativeChecks", "nativeOutcomes")
+    largest_raw = {"kind" => "setup-fixture-fault", "errorClass" => "MobileReleaseKit::NativeUploadProcess::LifecycleError",
+      "nativeErrorClass" => "MobileReleaseKit::NativeUploadProcess::LifecycleError", "nativeObservation" => {
+        "custodian" => {"state" => "not_attempted"},
+        "final" => {"outcome" => "rejected", "cleanup" => "confirmed", "group" => {"state" => "not_created"},
+          "keeper" => {"state" => "not_attempted"}, "validator" => {"state" => "not_attempted"}},
+        "tasks" => [{"role" => "capture", "state" => "not_constructed"}, {"role" => "creator", "state" => "not_constructed"}]}}
+    largest = formatter.call(mode: modes[1], result: largest_raw, status: status_class.new(255))
+    assert_equal 2002, largest.bytesize # 1976 JSON + 25 prefix + LF, under unchanged2048.
+    assert_equal 1976, largest.delete_prefix(NATIVE_SETUP_FAILURE_PREFIX).delete_suffix("\n").bytesize
+    assert_operator largest.bytesize, :<=, 2048
 
     exercise = lambda do |selected: modes.first, write_result: :full, expiry: nil, mutate: nil,
                             publication_error: nil, projection_error: nil, callback_name: callback.split("#", 2).last,
@@ -2625,6 +2689,205 @@ class NativeUploadValidationTest < Minitest::Test
       assert_equal modes.include?(arguments.fetch(:mode)), arguments.key?(:setup_failure_state)
       assert_empty arguments.fetch(:primary_failure_state)
     end
+  end
+
+  def assert_original_capture_settlement_projection
+    # Exact admitted Ruby types, deliberately allocated WITHOUT initialization,
+    # native creation, a task, a clock, or an IO. Only pure original getters run.
+    fixture = UploadProcessFixture
+    native = MobileReleaseKit::NativeUploadValidation
+    observer_class = fixture::CaptureObservation
+    keys = %w[taskCleanupComplete creationSettled custodianWaitBroken acquisitionUnknown]
+    assert_equal keys, observer_class::SETTLEMENT_CHECKS
+    make = lambda do
+      task = lambda do
+        value = MobileReleaseKit::NativeUploadProcess::TaskSlot.allocate
+        {lock: Mutex.new, launch: :retired, joined: false, start_attempted: false}.each do |key, item|
+          value.instance_variable_set(:"@#{key}", item)
+        end
+        value
+      end
+      capture, creator = task.call, task.call
+      acquisition = MobileReleaseKit::NativeProcessSpawn::Acquisition.allocate
+      {lock: Mutex.new, state: :settled, cleanup_errors: [], creator_joined: false,
+       creator_absent: true, finished: true, launch: :retired, child_attempted: false}.each do |key, item|
+        acquisition.instance_variable_set(:"@#{key}", item)
+      end
+      session = native.const_get(:CaptureSession, false).allocate
+      {capture_slot: capture, creator_slot: creator, acquisition: acquisition, creator_entered: true,
+       creation_finish_returned: true, task_cleanup_complete: true, wait_broken: false}.each do |key, item|
+        session.instance_variable_set(:"@#{key}", item)
+      end
+      observer = observer_class.new(native: native, root: Object.new)
+      observer.instance_variable_set(:@session, session)
+      {observer: observer, session: session, capture: capture, creator: creator, acquisition: acquisition}
+    end
+    good = keys.zip([true, true, false, false]).to_h
+    rig = make.call
+    assert_equal good, rig[:observer].settlement_checks
+    %i[@task_cleanup_complete @wait_broken].each { |key| rig[:session].remove_instance_variable(key) }
+    assert_equal good.merge("taskCleanupComplete" => "missing", "custodianWaitBroken" => "missing"), rig[:observer].settlement_checks
+    rig[:session].instance_variable_set(:@task_cleanup_complete, 0)
+    rig[:session].instance_variable_set(:@wait_broken, "false")
+    assert_equal good.merge("taskCleanupComplete" => "invalid", "custodianWaitBroken" => "invalid"), rig[:observer].settlement_checks
+    rig = make.call
+    rig[:session].instance_variable_set(:@acquisition, nil)
+    rig[:session].instance_variable_set(:@creator_slot, nil)
+    rig[:session].instance_variable_set(:@creator_entered, false)
+    assert_equal good.merge("acquisitionUnknown" => "missing"), rig[:observer].settlement_checks
+    rig[:capture].instance_variable_set(:@launch, :open)
+    assert_equal false, rig[:observer].settlement_checks.fetch("creationSettled")
+    rig[:session].remove_instance_variable(:@capture_slot)
+    assert_equal "missing", rig[:observer].settlement_checks.fetch("creationSettled")
+    rig = make.call
+    rig[:session].remove_instance_variable(:@creation_finish_returned)
+    assert_equal "missing", rig[:observer].settlement_checks.fetch("creationSettled")
+    rig[:session].instance_variable_set(:@creation_finish_returned, "true")
+    assert_equal "invalid", rig[:observer].settlement_checks.fetch("creationSettled")
+    %i[configuring initialized attempting pid_published settled failed unknown].each do |state|
+      rig = make.call
+      rig[:acquisition].instance_variable_set(:@state, state)
+      assert_equal good.merge("creationSettled" => state != :unknown, "acquisitionUnknown" => state == :unknown),
+        rig[:observer].settlement_checks
+    end
+    [nil, "unknown", :other].each do |state|
+      rig = make.call
+      rig[:acquisition].instance_variable_set(:@state, state)
+      assert_equal good.merge("creationSettled" => "invalid", "acquisitionUnknown" => "invalid"), rig[:observer].settlement_checks
+    end
+    # A lookalike session/task/acquisition/collection is never optional method
+    # authority, including a subclass of the otherwise admitted session class.
+    calls = []
+    replacement = Object.new
+    %i[creation_settled? state cleanup_errors not_attempted? joined? start_attempted? launch_retired? empty?].each do |name|
+      replacement.define_singleton_method(name) { calls << name; raise "unexpected diagnostic lookalike call" }
+    end
+    [nil, replacement, Class.new(native.const_get(:CaptureSession, false)).allocate].each do |session|
+      rig = make.call
+      rig[:observer].instance_variable_set(:@session, session)
+      assert_equal keys.to_h { |key| [key, session.nil? ? "missing" : "invalid"] }, rig[:observer].settlement_checks
+    end
+    %i[@capture_slot @creator_slot @acquisition].each do |variable|
+      rig = make.call
+      rig[:session].instance_variable_set(variable, replacement)
+      checks = rig[:observer].settlement_checks
+      assert_equal "invalid", checks.fetch("creationSettled")
+      assert_equal variable == :@acquisition ? "invalid" : false, checks.fetch("acquisitionUnknown")
+    end
+    rig = make.call
+    rig[:acquisition].stub(:cleanup_errors, replacement) do
+      assert_equal "invalid", rig[:observer].settlement_checks.fetch("creationSettled")
+    end
+    rig[:creator].stub(:joined?, "true") do
+      assert_equal "invalid", rig[:observer].settlement_checks.fetch("creationSettled")
+    end
+    rig[:creator].stub(:joined?, -> { raise IOError, "optional original getter" }) do
+      assert_equal "invalid", rig[:observer].settlement_checks.fetch("creationSettled")
+    end
+    assert_empty calls
+    assert_empty rig[:observer].instance_variable_get(:@observer_errors)
+
+    # The real original-return observe path runs with an inert install and base
+    # snapshot only. Keep the actual Adapter subclass's slow snapshot additions.
+    # Rebind retention to an isolated receiver; remove only this test's inert
+    # object-key entry from the shared UNKNOWN diagnostic map in ensure.
+    retain_case = fixture.instance_method(:retain_process_case!)
+    retain_unknown = fixture.instance_method(:retain_unknown_domain!)
+    exercise = lambda do |read_error: nil, primary: nil, session_present: true, snapshot_error: nil|
+      current = observer_class.current
+      assert_nil current
+      rig = make.call
+      root, registry = Object.new, Object.new.extend(fixture)
+      observer = fixture::AdapterDriver::Observation.new(nil, native: native, root: root)
+      observer.instance_variable_set(:@session, rig[:session]) if session_present
+      observer.instance_variable_set(:@slow_enabled, true)
+      observer.instance_variable_set(:@slow_handoff_performed, false)
+      additions = observer.snapshot_additions
+      base = {"version" => 1, "finalized" => true, "noProducers" => false,
+        "settled" => true, "unknown" => false, "observerErrors" => []}.freeze
+      observer.define_singleton_method(:install) do
+        @hooks = UploadProcessFixture::CaptureObservation::Hooks.new # No wrapped methods.
+        UploadProcessFixture::CaptureObservation.current = self
+      end
+      observer.define_singleton_method(:build_snapshot) do
+        raise snapshot_error if snapshot_error
+        base
+      end
+      rig[:acquisition].define_singleton_method(:state) { raise read_error } if read_error
+      roots_defined = fixture.instance_variable_defined?(:@unresolved_roots)
+      original_roots = fixture.instance_variable_get(:@unresolved_roots)
+      prior_roots = (original_roots || {}).dup
+      returned = Object.new
+      fatal = read_error && !read_error.is_a?(StandardError)
+      expected_error = primary || (fatal ? read_error : snapshot_error)
+      invoke = -> { observer.observe { raise primary if primary; returned } }
+      begin
+        fixture.stub(:retain_process_case!, retain_case.bind(registry)) do
+          fixture.stub(:retain_unknown_domain!, retain_unknown.bind(registry)) do
+            if expected_error
+              error_class = primary || fatal ? expected_error.class : fixture::Failure
+              error = assert_raises(error_class, &invoke)
+              assert_same expected_error, error if primary || fatal
+            else
+              assert_same returned, invoke.call
+            end
+          end
+        end
+        snapshot = observer.snapshot
+        assert_equal additions.fetch("slowCleanup"), snapshot.fetch("slowCleanup")
+        assert_equal keys, snapshot.fetch("settlementChecks").keys
+        if fatal || snapshot_error
+          assert snapshot.fetch("unknown")
+          refute snapshot.fetch("finalized")
+          refute snapshot.fetch("noProducers")
+          assert_includes snapshot.fetch("observerErrors"), (fatal ? read_error : snapshot_error).class.name
+          if session_present
+            assert registry.__send__(:domain_disposal_required?)
+            assert_same observer, registry.instance_variable_get(:@retained_fixture_cases).fetch(observer.object_id)
+          else
+            refute registry.__send__(:domain_disposal_required?) # No actual install or session in this inert case.
+          end
+          assert fixture.cleanup_unresolved?(root)
+        else
+          assert_equal base, snapshot.reject { |key, _| %w[settlementChecks slowCleanup].include?(key) }
+          expected = session_present ? good : keys.to_h { |key| [key, "missing"] }
+          expected = expected.merge("creationSettled" => "invalid", "acquisitionUnknown" => "invalid") if read_error
+          assert_equal expected, snapshot.fetch("settlementChecks")
+          refute registry.__send__(:domain_disposal_required?)
+        end
+        assert_equal keys.to_h { |key| [key, "invalid"] }, snapshot.fetch("settlementChecks") if fatal
+        assert_equal keys.to_h { |key| [key, "missing"] }, snapshot.fetch("settlementChecks") unless session_present
+        assert_nil observer.source_origins
+        assert_nil observer.custodian_spec
+        assert_empty observer.events
+        %i[@slots @attempts @constructed_slots @actual_joins @actual_closes @actual_waits].each do |name|
+          assert_empty observer.instance_variable_get(name)
+        end
+        assert_nil observer_class.current
+        # Late mutable state cannot repair or resample the original snapshot.
+        rig[:session].instance_variable_set(:@task_cleanup_complete, false)
+        assert_equal snapshot, observer.snapshot
+      ensure
+        roots = fixture.instance_variable_get(:@unresolved_roots)
+        roots.delete(root) if roots # Only the just-created inert object identity.
+        assert_equal prior_roots, roots || {}
+        if original_roots.nil? && roots && roots.empty?
+          roots_defined ? fixture.instance_variable_set(:@unresolved_roots, nil) : fixture.remove_instance_variable(:@unresolved_roots)
+        end
+        assert_same original_roots, fixture.instance_variable_get(:@unresolved_roots)
+        assert_same current, observer_class.current
+      end
+    end
+    exercise.call
+    exercise.call(session_present: false)
+    exercise.call(read_error: IOError.new("ordinary optional read"))
+    exercise.call(read_error: IOError.new("ordinary optional read"), primary: RuntimeError.new("original primary"))
+    [Interrupt.new("optional interruption"), SystemExit.new(23, "optional exit")].each do |error|
+      exercise.call(read_error: error)
+      exercise.call(read_error: error, primary: IOError.new("earlier primary"))
+    end
+    exercise.call(snapshot_error: IOError.new("original snapshot failed"))
+    exercise.call(session_present: false, snapshot_error: IOError.new("no-session snapshot failed"))
   end
 
   def assert_adapter_failure_projection

@@ -222,7 +222,7 @@ NATIVE_SETUP_FAILURE_MODES = frozenset(
 )
 NATIVE_SETUP_FAILURE_FIELDS = (
     "schema", "mode", "failedPredicates", "resultKind", "driverExitStatus",
-    "errorCategory", "nativeErrorCategory", "resultChecks", "nativeChecks",
+    "errorCategory", "nativeErrorCategory", "resultChecks", "nativeChecks", "settlementChecks", "nativeOutcomes",
 )
 NATIVE_SETUP_FAILURE_PREDICATES = ("result-kind", "driver-status")
 NATIVE_SETUP_RESULT_KINDS = (
@@ -239,7 +239,9 @@ NATIVE_SETUP_RESULT_CHECKS = (
     "ownedDescriptorsClosed", "watchdogJoined", "tasksJoined", "injectorsJoined",
     "handlersRestored", "registryInactive", "pendingInterrupt", "cleanupErrorsEmpty",
 )
-NATIVE_SETUP_NATIVE_CHECKS = ("finalized", "noProducers", "settled", "unknown", "hooksRestored")
+NATIVE_SETUP_SETTLEMENT_CHECKS = (
+    "taskCleanupComplete", "creationSettled", "custodianWaitBroken", "acquisitionUnknown",
+)
 ADAPTER_FAILURE_PREFIX = "MRK_ADAPTER_FAILURE="
 ADAPTER_FAILURE_PLATFORMS = {
     "ios": ("ruby-ios_upload_validation", "IosUploadValidationTest"),
@@ -313,6 +315,7 @@ ADAPTER_FAILURE_NATIVE_CHECKS = (
     "stdoutEOF", "stdoutActualEOFObserved", "stderrEOF", "stderrActualEOFObserved",
     "statusEOF", "statusActualEOFObserved", "groupAbsent",
 )
+NATIVE_SETUP_NATIVE_CHECKS = ADAPTER_FAILURE_NATIVE_CHECKS
 ADAPTER_FAILURE_TIMING_CHECKS = (
     "runSpanMatchesMode", "firstTimeoutCutoff", "selectedTimeoutCutoff", "blockedDataWaitsPositive",
     "firstBlockedDataWithinRun", "captureWithinLimit", "slowCleanupAtLeastFour", "captureCoversSlowCleanup",
@@ -1691,11 +1694,11 @@ def native_order_failure(raw: bytes, *, deadline: float | None = None) -> dict |
 
 
 def native_setup_failure(raw: bytes, *, deadline: float | None = None) -> dict | None:
-    """Finite original kind/status operands, never success or cleanup authority."""
+    """Finite original setup/settlement facts, never success or cleanup authority."""
     try:
         data = _fixture_failure_record(raw, NATIVE_SETUP_FAILURE_PREFIX, 2048, deadline=deadline,
                                        canonical_fields=NATIVE_SETUP_FAILURE_FIELDS)
-        if (type(data) is not dict or type(data["schema"]) is not int or data["schema"] != 1
+        if (type(data) is not dict or type(data["schema"]) is not int or data["schema"] != 2
                 or type(data["mode"]) is not str or data["mode"] not in NATIVE_SETUP_FAILURE_MODES
                 or type(data["resultKind"]) is not str or data["resultKind"] not in NATIVE_SETUP_RESULT_KINDS
                 or type(data["driverExitStatus"]) is not int or not 0 <= data["driverExitStatus"] <= 255
@@ -1709,17 +1712,30 @@ def native_setup_failure(raw: bytes, *, deadline: float | None = None) -> dict |
                 or data["failedPredicates"] != predicates):
             return None
         for key, fields in (("resultChecks", NATIVE_SETUP_RESULT_CHECKS),
-                            ("nativeChecks", NATIVE_SETUP_NATIVE_CHECKS)):
+                            ("settlementChecks", NATIVE_SETUP_SETTLEMENT_CHECKS)):
             checks = data[key]
             if (type(checks) is not dict or tuple(checks) != fields
                     or any(type(value) is not bool and not (type(value) is str and value in {"missing", "invalid"})
                            for value in checks.values())):
                 return None
+        if not _native_result_projection_valid(data["nativeChecks"], data["nativeOutcomes"]):
+            return None
         return data
     finally:
         # Invalid optional projections cannot consume the original cutoff.
         if deadline is not None:
             check_clock(deadline)
+
+
+def _native_result_projection_valid(checks: object, outcomes: object) -> bool:
+    """Shared finite native snapshot grammar, without either caller's eligibility."""
+    if (type(checks) is not dict or tuple(checks) != ADAPTER_FAILURE_NATIVE_CHECKS
+            or any(type(value) is not bool and not (type(value) is str and value in {"missing", "invalid"})
+                   for value in checks.values())):
+        return False
+    return (type(outcomes) is dict and tuple(outcomes) == tuple(ADAPTER_FAILURE_NATIVE_OUTCOMES)
+            and all(type(value) is str and value in ADAPTER_FAILURE_NATIVE_OUTCOMES[name]
+                    for name, value in outcomes.items()))
 
 
 def _adapter_result_projection_valid(data: object) -> bool:
@@ -1731,15 +1747,7 @@ def _adapter_result_projection_valid(data: object) -> bool:
             or type(data["retainedDriverErrorCode"]) is not str
             or data["retainedDriverErrorCode"] not in ADAPTER_FAILURE_DRIVER_CODES[data["retainedDriverErrorCategory"]]):
         return False
-    checks = data["nativeChecks"]
-    if (type(checks) is not dict or tuple(checks) != ADAPTER_FAILURE_NATIVE_CHECKS
-            or any(type(value) is not bool and not (type(value) is str and value in {"missing", "invalid"})
-                   for value in checks.values())):
-        return False
-    outcomes = data["nativeOutcomes"]
-    return (type(outcomes) is dict and tuple(outcomes) == tuple(ADAPTER_FAILURE_NATIVE_OUTCOMES)
-            and all(type(value) is str and value in ADAPTER_FAILURE_NATIVE_OUTCOMES[name]
-                    for name, value in outcomes.items()))
+    return _native_result_projection_valid(data["nativeChecks"], data["nativeOutcomes"])
 
 
 def adapter_failure(raw: bytes, *, deadline: float | None = None) -> dict | None:

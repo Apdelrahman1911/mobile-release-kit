@@ -1561,6 +1561,7 @@ module MobileReleaseKit
         @keeper = @group = @keeper_channel = nil
         @keeper_handoff = false
         @keeper_hello = @moved = @validator_status = @released = nil
+        @keeper_moved_original = nil
         @admitted = @run_forwarded = @commit_received = false
         @cleanup_started = @group_routes_retired = false
         @group_kill_attempted = @keeper_kill_attempted = false
@@ -1735,6 +1736,7 @@ module MobileReleaseKit
         # A helper may have detected failure and moved before its HELLO was
         # read. Its bound HELLO still records original G, and the actual K still
         # pins that number, but current C-group membership is cleanup-only.
+        @keeper_moved_original = @keeper if actual_group == @pid
         fail!("lifecycle") if actual_group != @keeper.pid && !@failed
         close_data_copies
         if launch_allowed?
@@ -1750,6 +1752,7 @@ module MobileReleaseKit
           raise ProtocolError
         end
         @moved = frame
+        @keeper_moved_original = @keeper
         if launch_allowed?
           send_parent("READY", "validator_pid" => frame["validator_pid"],
                               "group_id" => @group.id, "keeper_pgid" => @pid)
@@ -1860,9 +1863,16 @@ module MobileReleaseKit
       end
 
       def keeper_outside_group?
-        return false unless @keeper && @keeper.state == :running && !@keeper.numeric_retired?
+        return false unless @keeper && @keeper.state == :running && @keeper.receipt.nil? && !@keeper.numeric_retired?
+        return true if @keeper_moved_original.equal?(@keeper)
 
-        Process.getsid(@keeper.pid) == @pid && Process.getpgid(@keeper.pid) == @pid
+        # K's observed move to C is one-way. The original unreaped child still
+        # reserves G when live metadata has disappeared; only the GroupLease
+        # may establish G's absence, before its original numeric route retires.
+        return false unless Process.getsid(@keeper.pid) == @pid && Process.getpgid(@keeper.pid) == @pid
+
+        @keeper_moved_original = @keeper
+        true
       rescue Errno::ESRCH
         false
       end
