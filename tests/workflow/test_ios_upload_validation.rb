@@ -81,11 +81,13 @@ class IosUploadValidationTest < Minitest::Test
   end
 
   def process_case(mode)
-    UploadProcessFixture.run(platform: "ios", root: @root, mode: mode, parameters: {
-      python: @python, module_root: @module_root, app_root: @app,
-      config_path: @config, intent_path: @intent, ipa_path: @ipa,
-      intent_sha256: "a" * 64, tooling_directory: @tooling_directory,
-    })
+    with_adapter_failure_diagnostic(platform: "ios", mode: mode) do |optional|
+      UploadProcessFixture.run(platform: "ios", root: @root, mode: mode, parameters: {
+        python: @python, module_root: @module_root, app_root: @app,
+        config_path: @config, intent_path: @intent, ipa_path: @ipa,
+        intent_sha256: "a" * 64, tooling_directory: @tooling_directory,
+      }, **optional)
+    end
   end
 
   def observe_capture

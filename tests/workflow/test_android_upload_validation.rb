@@ -80,11 +80,13 @@ class AndroidUploadValidationTest < Minitest::Test
   end
 
   def process_case(mode)
-    UploadProcessFixture.run(platform: "android", root: @root, mode: mode, parameters: {
-      python: @python, module_root: @module_root, app_root: @app,
-      config_path: @config, intent_path: @intent, aab_path: @aab,
-      intent_sha256: "a" * 64, tooling_directory: @tooling_directory,
-    })
+    with_adapter_failure_diagnostic(platform: "android", mode: mode) do |optional|
+      UploadProcessFixture.run(platform: "android", root: @root, mode: mode, parameters: {
+        python: @python, module_root: @module_root, app_root: @app,
+        config_path: @config, intent_path: @intent, aab_path: @aab,
+        intent_sha256: "a" * 64, tooling_directory: @tooling_directory,
+      }, **optional)
+    end
   end
 
   def observe_capture

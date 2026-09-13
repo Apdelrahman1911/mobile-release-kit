@@ -2370,6 +2370,254 @@ class CIControllerContractTests(unittest.TestCase):
                                                    setup_step, paths, deadline=1000.0)
                     self.assertIs(raised.exception, interruption)
 
+            adapter_contracts = {
+                "real-deadline": ("test_deadline_terminates_validator_without_authorizing_upload", "pass"),
+                "inherited": ("test_deadline_terminates_inherited_pipe_children_after_validator_parent_exits", "pass"),
+                "delayed-start": ("test_descendant_boundary_survives_delayed_start_and_late_parent_record", "pass"),
+                "late-record": ("test_descendant_boundary_survives_delayed_start_and_late_parent_record", "pass"),
+                "unready": ("test_unready_fixture_fails_distinctly_and_stops_before_any_late_pid_record", "readiness"),
+                "leader-only": ("test_fixture_detects_leader_only_cleanup_and_missing_deadline", "descendant-alive"),
+                "no-deadline": ("test_fixture_detects_leader_only_cleanup_and_missing_deadline", "capture-watchdog"),
+                "immediate-deadline": ("test_fixture_rejects_an_immediate_timeout_even_when_the_leader_is_killed", "elapsed-bound"),
+                "real-deadline-slow-cleanup": ("test_slow_cleanup_cannot_supply_a_positive_deadline_wait", "pass"),
+                "immediate-deadline-slow-cleanup": ("test_slow_cleanup_cannot_supply_a_positive_deadline_wait", "elapsed-bound"),
+            }
+            adapter_platforms = {
+                "ios": ("ruby-ios_upload_validation", "IosUploadValidationTest"),
+                "android": ("ruby-android_upload_validation", "AndroidUploadValidationTest"),
+            }
+            adapter_fields = (
+                "schema", "platform", "mode", "expectedKind", "failedPredicates", "resultKind", "driverExitStatus",
+                "retainedDriverErrorCategory", "retainedDriverErrorCode", "adapterErrorCategory",
+                "resultChecks", "nativeChecks", "timingChecks",
+            )
+            adapter_result_checks = (
+                "ready", "stdinClosedAfterReady", "deadlinePrimarySameObject", "deadlineResultSameObject",
+                "watchdogStarted", "watchdogIntervened", "fallbackUsed", "deadBeforeFallback", "nativeFinalityBeforeFallback",
+                "adapterRejected", "adapterCallObserved", "captureEntered", "descendantLiveBeforeRelease",
+                "inheritedPipeBlockObserved", "validatorReapedAfterRelease", "commitAfterDataEOF", "ownedDescriptorsClosed",
+                "watchdogJoined", "tasksJoined", "injectorsJoined", "handlersRestored", "registryInactive",
+                "pendingInterrupt", "cleanupErrorsEmpty",
+            )
+            adapter_native_checks = ("finalized", "noProducers", "settled", "unknown", "hooksRestored", "observerErrorsEmpty")
+            adapter_timing_checks = (
+                "runSpanMatchesMode", "firstTimeoutCutoff", "selectedTimeoutCutoff", "blockedDataWaitsPositive",
+                "firstBlockedDataWithinRun", "captureWithinLimit", "slowCleanupAtLeastFour", "captureCoversSlowCleanup",
+            )
+            self.assertEqual(controller.ADAPTER_FAILURE_PREFIX, "MRK_ADAPTER_FAILURE=")
+            self.assertEqual(controller.ADAPTER_FAILURE_MODE_CONTRACTS, adapter_contracts)
+            self.assertEqual(controller.ADAPTER_FAILURE_PLATFORMS, adapter_platforms)
+            self.assertEqual(controller.ADAPTER_FAILURE_FIELDS, adapter_fields)
+            self.assertEqual(controller.ADAPTER_FAILURE_RESULT_CHECKS, adapter_result_checks)
+            self.assertEqual(controller.ADAPTER_FAILURE_NATIVE_CHECKS, adapter_native_checks)
+            self.assertEqual(controller.ADAPTER_FAILURE_TIMING_CHECKS, adapter_timing_checks)
+
+            def adapter_bytes(record):
+                return ("MRK_ADAPTER_FAILURE="
+                        + json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
+
+            adapter_record = {
+                "schema": 1, "platform": "ios", "mode": "real-deadline", "expectedKind": "pass",
+                "failedPredicates": ["result-kind", "driver-status"], "resultKind": "fixture-cleanup", "driverExitStatus": 1,
+                "retainedDriverErrorCategory": "native-lifecycle-error", "retainedDriverErrorCode": "native-deadline",
+                "adapterErrorCategory": "contract-error",
+                "resultChecks": {name: (True, False, "missing", "invalid")[index % 4]
+                                 for index, name in enumerate(adapter_result_checks)},
+                "nativeChecks": {name: (False, "missing", "invalid", True)[index % 4]
+                                 for index, name in enumerate(adapter_native_checks)},
+                "timingChecks": dict(zip(adapter_timing_checks,
+                    (True, "before-cutoff", "at-or-after-cutoff", True, False, True, "missing", "missing"))),
+            }
+            adapter_marker = adapter_bytes(adapter_record)
+            adapter_target = "IosUploadValidationTest#" + adapter_contracts["real-deadline"][0]
+            adapter_ids = tuple(sorted((*expected, adapter_target)))
+            adapter_step = controller.Step("ruby-ios_upload_validation", parser="minitest", expected_tests=3,
+                                           native_partition="healthy")
+            adapter_target_failure = adapter_target + " = PRIVATE_MESSAGE\n0.01 s = F\n"
+            adapter_stdout = clean + adapter_target_failure + failed_footer
+            # Use source-known adapter identities, but keep both discovery
+            # functions inert. No Ruby source or actual adapter is loaded here.
+            with patch.object(controller, "ruby_expected_ids", return_value=adapter_ids), \
+                    patch.object(controller, "ruby_capture_ids", return_value=adapter_ids), \
+                    patch.object(controller.time, "monotonic", return_value=999.0):
+                with patch.object(controller, "_fixture_failure_record", wraps=controller._fixture_failure_record) as strict:
+                    self.assertEqual(controller.adapter_failure(adapter_marker, deadline=1000.0), adapter_record)
+                strict.assert_called_once_with(adapter_marker, "MRK_ADAPTER_FAILURE=", 2048, deadline=1000.0,
+                                               canonical_fields=adapter_fields)
+                # Representative ordinary, slow and negative-control cases
+                # prove platform routing and mode-specific status, not a matrix
+                # of every flag crossed with every callback.
+                examples = (
+                    adapter_record,
+                    {**adapter_record, "platform": "android", "mode": "immediate-deadline-slow-cleanup",
+                     "expectedKind": "elapsed-bound", "failedPredicates": ["result-kind"],
+                     "timingChecks": {**adapter_record["timingChecks"], "slowCleanupAtLeastFour": True,
+                                      "captureCoversSlowCleanup": True}},
+                    {**adapter_record, "mode": "no-deadline", "expectedKind": "capture-watchdog",
+                     "resultKind": "capture-watchdog", "driverExitStatus": 0, "failedPredicates": ["driver-status"]},
+                )
+                for index, record in enumerate(examples):
+                    gate, class_name = adapter_platforms[record["platform"]]
+                    target = class_name + "#" + adapter_contracts[record["mode"]][0]
+                    ids = tuple(sorted((*expected, target)))
+                    selected_step = dataclasses.replace(adapter_step, id=gate)
+                    terminal = "E" if index == 1 else "F"
+                    transcript = clean + target + " = PRIVATE_MESSAGE\n0.01 s = " + terminal + "\n" + failed_footer
+                    raw = adapter_bytes(record)
+                    self.assertLessEqual(len(raw), 2048)
+                    with patch.object(controller, "ruby_capture_ids", return_value=ids), \
+                            patch.object(controller, "minitest_records", wraps=controller.minitest_records) as scans:
+                        detail = controller.failure_details(capture(transcript, stderr=raw, ok=False, returncode=1),
+                                                            selected_step, paths, deadline=1000.0)
+                    self.assertEqual([call.args for call in scans.call_args_list], [(transcript, ids), (transcript, (target,))])
+                    self.assertEqual([call.kwargs for call in scans.call_args_list], [{"deadline": 1000.0}] * 2)
+                    self.assertEqual(detail["adapter_failure"], record)
+                    self.assertEqual(detail["returncode"], 1)
+                    self.assertNotIn("PRIVATE_", json.dumps(detail))
+                    all_pass = {**record, "resultKind": record["expectedKind"],
+                                "driverExitStatus": 0 if record["expectedKind"] == "pass" else 1, "failedPredicates": []}
+                    self.assertIsNone(controller.adapter_failure(adapter_bytes(all_pass)))
+                    self.assertIsNone(controller.adapter_failure(adapter_bytes({**all_pass, "failedPredicates": record["failedPredicates"]})))
+
+                failed_capture = capture(adapter_stdout, stderr=adapter_marker, ok=False, returncode=1)
+                with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                    controller.parse_capture(adapter_step, failed_capture, paths, "linux", None)
+                rc_zero = capture(adapter_stdout, stderr=adapter_marker)
+                self.assertEqual(controller.failure_details(rc_zero, adapter_step, paths)["adapter_failure"], adapter_record)
+                with self.assertRaisesRegex(controller.VerificationError, "MINITEST_RESULT_REJECTED"):
+                    controller.parse_capture(adapter_step, rc_zero, paths, "macos", None)
+                success_stdout = adapter_stdout.replace("0.01 s = F", "0.01 s = .").replace("1 failures", "0 failures")
+                self.assertNotIn("adapter_failure", controller.failure_details(
+                    capture(success_stdout, stderr=adapter_marker), adapter_step, paths))
+                self.assertTrue(controller.parse_capture(adapter_step, capture(success_stdout, stderr=adapter_marker),
+                                                         paths, "linux", None).ok)
+
+                # Class/message sentinels need not match: a missing message
+                # coexists with a recognized class, and nil class + String
+                # message is category=none/code=invalid, never a known cause.
+                for category, code in (
+                    ("missing", "missing"), ("none", "missing"), ("none", "none"), ("none", "invalid"),
+                    ("invalid", "missing"), ("invalid", "invalid"), ("fixture-error", "missing"),
+                    ("fixture-error", "invalid"), ("fixture-error", "elapsed-bound"), ("native-lifecycle-error", "other"),
+                    ("native-error", "native-deadline"), ("native-protocol-error", "native-protocol"),
+                    ("native-spawn-error", "spawn-waitability"), ("io-error", "other"), ("other", "other"),
+                ):
+                    record = {**adapter_record, "retainedDriverErrorCategory": category, "retainedDriverErrorCode": code}
+                    self.assertEqual(controller.adapter_failure(adapter_bytes(record)), record)
+                for first_cutoff, selected_cutoff in (("before-start", "before-cutoff"),
+                                                     ("missing", "invalid"), ("at-or-after-cutoff", "before-start")):
+                    record = {**adapter_record, "timingChecks": {**adapter_record["timingChecks"],
+                              "firstTimeoutCutoff": first_cutoff, "selectedTimeoutCutoff": selected_cutoff,
+                              "slowCleanupAtLeastFour": False, "captureCoversSlowCleanup": "invalid"}}
+                    self.assertEqual(controller.adapter_failure(adapter_bytes(record)), record)
+
+                for transcript in (
+                    clean + failed_footer, clean + adapter_target + ":\n" + failed_footer,
+                    clean + adapter_target + " = unfinished\n" + failed_footer,
+                    adapter_stdout.replace("0.01 s = F", "0.01 s = S"),
+                    adapter_stdout.replace("0.01 s = F", "0.01 s = .\n0.01 s = F"),
+                    clean + adapter_target_failure * 2 + failed_footer,
+                    clean + failed_footer + adapter_target_failure,
+                ):
+                    self.assertNotIn("adapter_failure", controller.failure_details(
+                        capture(transcript, stderr=adapter_marker, ok=False, returncode=1), adapter_step, paths))
+                self.assertNotIn("adapter_failure", controller.failure_details(
+                    capture(adapter_stdout + adapter_marker.decode("ascii"), ok=False, returncode=1), adapter_step, paths))
+                wrong_platform = adapter_bytes({**adapter_record, "platform": "android"})
+                self.assertNotIn("adapter_failure", controller.failure_details(
+                    capture(adapter_stdout, stderr=wrong_platform, ok=False, returncode=1), adapter_step, paths))
+                wrong_target = "IosUploadValidationTest#" + adapter_contracts["inherited"][0]
+                with patch.object(controller, "ruby_capture_ids", return_value=(*adapter_ids, wrong_target)):
+                    self.assertNotIn("adapter_failure", controller.failure_details(capture(adapter_stdout,
+                        stderr=adapter_bytes({**adapter_record, "mode": "inherited"}), ok=False, returncode=1),
+                        adapter_step, paths))
+                with patch.object(controller, "ruby_capture_ids", return_value=expected):
+                    self.assertNotIn("adapter_failure", controller.failure_details(failed_capture, adapter_step, paths))
+                for wrong_step in (
+                    dataclasses.replace(adapter_step, id="ruby-native-capture"),
+                    dataclasses.replace(adapter_step, id="ruby-native-owner"),
+                    dataclasses.replace(adapter_step, id="ruby-play_store"),
+                    dataclasses.replace(adapter_step, id="ruby-android_upload_validation"),
+                    dataclasses.replace(adapter_step, native_partition="all"),
+                    dataclasses.replace(adapter_step, native_partition="ownership-unknown-capture-reap"),
+                    dataclasses.replace(adapter_step, native_partition="kill-startup"),
+                    dataclasses.replace(adapter_step, parser="exit"),
+                ):
+                    self.assertNotIn("adapter_failure", controller.failure_details(failed_capture, wrong_step, paths))
+                with patch.object(controller, "ruby_capture_ids", return_value=tuple(sorted((*many_ids, adapter_target)))):
+                    detail = controller.failure_details(capture(many_stdout + adapter_target_failure, stderr=adapter_marker,
+                        ok=False, returncode=1), adapter_step, paths)
+                    self.assertGreater(detail["minitest_structure"]["start_records_omitted"], 0)
+                    self.assertEqual(detail["adapter_failure"], adapter_record)
+                    self.assertNotIn("adapter_failure", controller.failure_details(capture(
+                        adapter_target_failure + many_stdout + adapter_target_failure,
+                        stderr=adapter_marker, ok=False, returncode=1), adapter_step, paths))
+
+                invalid_adapter = [
+                    {key: value for key, value in adapter_record.items() if key != "expectedKind"},
+                    {**adapter_record, "private": "PRIVATE_ROOT"}, {key: adapter_record[key] for key in reversed(adapter_fields)},
+                    {**adapter_record, "schema": True}, {**adapter_record, "platform": "PRIVATE_PLATFORM"},
+                    {**adapter_record, "mode": "native-setup-interrupt"}, {**adapter_record, "expectedKind": "readiness"},
+                    {**adapter_record, "resultKind": "PRIVATE_KIND"}, {**adapter_record, "resultKind": None},
+                    *({**adapter_record, "driverExitStatus": value} for value in (True, 1.0, -1, 256)),
+                    {**adapter_record, "retainedDriverErrorCategory": []}, {**adapter_record, "adapterErrorCategory": "PRIVATE_CLASS"},
+                    {**adapter_record, "retainedDriverErrorCode": None}, {**adapter_record, "retainedDriverErrorCode": "PRIVATE_MESSAGE"},
+                    *({**adapter_record, "failedPredicates": value} for value in
+                      ([], ["driver-status", "result-kind"], ["result-kind"], ["result-kind", "driver-status", "driver-status"])),
+                ]
+                invalid_adapter.extend({**adapter_record, "retainedDriverErrorCategory": category, "retainedDriverErrorCode": code}
+                    for category, code in (("missing", "invalid"), ("none", "other"), ("invalid", "none"),
+                        ("native-protocol-error", "native-deadline"), ("fixture-error", "native-lifecycle"),
+                        ("native-spawn-error", "elapsed-bound"), ("other", "native-unknown"), ("io-error", "none")))
+                for group in ("resultChecks", "nativeChecks", "timingChecks"):
+                    group_checks = adapter_record[group]
+                    invalid_adapter.extend({**adapter_record, group: value} for value in (
+                        None, [], {name: value for name, value in group_checks.items() if name != next(iter(group_checks))},
+                        {**group_checks, "PRIVATE_CHECK": True}, {name: group_checks[name] for name in reversed(group_checks)},
+                        {**group_checks, next(iter(group_checks)): 0},
+                    ))
+                invalid_adapter.extend({**adapter_record, "timingChecks": {**adapter_record["timingChecks"], key: value}}
+                    for key, value in (("firstTimeoutCutoff", True), ("selectedTimeoutCutoff", "PRIVATE_TIME"),
+                        ("captureWithinLimit", 0.5), ("captureWithinLimit", float("nan")),
+                        ("slowCleanupAtLeastFour", float("inf")), ("captureCoversSlowCleanup", None)))
+                # Common framing is already exhaustively covered above. These
+                # new-shape cases prove this decoder actually uses that reader.
+                invalid_markers = [*(adapter_bytes(record) for record in invalid_adapter),
+                    adapter_marker * 2, adapter_marker.replace(b'"schema":1', b'"schema":1,"schema":1'),
+                    adapter_marker.replace(b'"ready":true', b'"ready":true,"ready":true'),
+                    adapter_marker.replace(b'"schema":1', b'"schema": 1'), adapter_marker[:-1],
+                ]
+                for raw in invalid_markers:
+                    detail = controller.failure_details(capture(adapter_stdout, stderr=raw, ok=False, returncode=1),
+                                                        adapter_step, paths, deadline=1000.0)
+                    self.assertNotIn("adapter_failure", detail)
+                    self.assertEqual(detail["returncode"], 1)
+                    self.assertNotIn("PRIVATE_", json.dumps(detail))
+
+                expired = [False]
+                def expired_adapter_parse(_text):
+                    expired[0] = True
+                    raise ValueError("PRIVATE_MESSAGE")
+                with patch.object(controller, "strict_json", side_effect=expired_adapter_parse), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(failed_capture, adapter_step, paths, deadline=1000.0)
+                expired[0] = False
+                original_scan = controller.minitest_records
+                def expire_adapter_scan(text, identifiers, *, deadline):
+                    if identifiers == (adapter_target,):
+                        expired[0] = True
+                    return original_scan(text, identifiers, deadline=deadline)
+                with patch.object(controller, "minitest_records", side_effect=expire_adapter_scan), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(failed_capture, adapter_step, paths, deadline=1000.0)
+                for interruption in (KeyboardInterrupt("PRIVATE_MESSAGE"), SystemExit(7)):
+                    with patch.object(controller, "strict_json", side_effect=interruption), \
+                            self.assertRaises(type(interruption)) as raised:
+                        controller.failure_details(failed_capture, adapter_step, paths, deadline=1000.0)
+                    self.assertIs(raised.exception, interruption)
+
             for field, value in (("returncode", False), ("waited", False), ("stdout_eof", False),
                                  ("stderr_eof", False), ("domain_finality", False),
                                  ("primary_error", "fixture"), ("cleanup_errors", ("fixture",))):

@@ -1741,6 +1741,7 @@ class NativeUploadValidationTest < Minitest::Test
 
       assert_native_order_failure_projection
       assert_native_setup_failure_projection
+      assert_adapter_failure_projection
       assert_missing_cleanup_omission_evidence
       assert_missing_cleanup_watchdog_lifecycle
 
@@ -2621,6 +2622,319 @@ class NativeUploadValidationTest < Minitest::Test
       assert_equal modes.include?(arguments.fetch(:mode)), arguments.key?(:setup_failure_state)
       assert_empty arguments.fetch(:primary_failure_state)
     end
+  end
+
+  def assert_adapter_failure_projection
+    # Pure operands and the real shared wrapper/Lifetime only. These anonymous
+    # receivers model callback names; no adapter test class or native owner runs.
+    callback_modes = {
+      "test_deadline_terminates_validator_without_authorizing_upload" => %w[real-deadline],
+      "test_deadline_terminates_inherited_pipe_children_after_validator_parent_exits" => %w[inherited],
+      "test_descendant_boundary_survives_delayed_start_and_late_parent_record" => %w[delayed-start late-record],
+      "test_unready_fixture_fails_distinctly_and_stops_before_any_late_pid_record" => %w[unready],
+      "test_fixture_detects_leader_only_cleanup_and_missing_deadline" => %w[leader-only no-deadline],
+      "test_fixture_rejects_an_immediate_timeout_even_when_the_leader_is_killed" => %w[immediate-deadline],
+      "test_slow_cleanup_cannot_supply_a_positive_deadline_wait" => %w[real-deadline-slow-cleanup immediate-deadline-slow-cleanup],
+    }
+    classes = {"ios" => "IosUploadValidationTest", "android" => "AndroidUploadValidationTest"}
+    expected_kinds = {"real-deadline" => "pass", "inherited" => "pass", "delayed-start" => "pass", "late-record" => "pass",
+      "unready" => "readiness", "leader-only" => "descendant-alive", "no-deadline" => "capture-watchdog",
+      "immediate-deadline" => "elapsed-bound", "real-deadline-slow-cleanup" => "pass", "immediate-deadline-slow-cleanup" => "elapsed-bound"}
+    fields = %w[schema platform mode expectedKind failedPredicates resultKind driverExitStatus retainedDriverErrorCategory
+      retainedDriverErrorCode adapterErrorCategory resultChecks nativeChecks timingChecks]
+    result_keys = %w[ready stdinClosedAfterReady deadlinePrimarySameObject deadlineResultSameObject watchdogStarted watchdogIntervened
+      fallbackUsed deadBeforeFallback nativeFinalityBeforeFallback adapterRejected adapterCallObserved captureEntered descendantLiveBeforeRelease
+      inheritedPipeBlockObserved validatorReapedAfterRelease commitAfterDataEOF ownedDescriptorsClosed watchdogJoined tasksJoined injectorsJoined
+      handlersRestored registryInactive pendingInterrupt cleanupErrorsEmpty]
+    native_keys = %w[finalized noProducers settled unknown hooksRestored observerErrorsEmpty]
+    timing_keys = %w[runSpanMatchesMode firstTimeoutCutoff selectedTimeoutCutoff blockedDataWaitsPositive firstBlockedDataWithinRun
+      captureWithinLimit slowCleanupAtLeastFour captureCoversSlowCleanup]
+    assert_equal expected_kinds, UploadProcessFixture::ADAPTER_FAILURE_EXPECTED_KINDS
+    assert_equal classes.values.flat_map { |class_name| callback_modes.map { |suffix, modes| ["#{class_name}##{suffix}", modes] } }.to_h,
+      UploadProcessFixture::ADAPTER_FAILURE_CALLBACK_MODES
+    assert_equal fields, UploadProcessFixture::ADAPTER_FAILURE_FIELDS
+    assert_equal result_keys, UploadProcessFixture::ADAPTER_FAILURE_RESULT_CHECKS
+    assert_equal native_keys, UploadProcessFixture::ADAPTER_FAILURE_NATIVE_CHECKS
+    assert_equal timing_keys, UploadProcessFixture::ADAPTER_FAILURE_TIMING_CHECKS
+    assert_equal "MRK_ADAPTER_FAILURE=", UploadProcessFixture::ADAPTER_FAILURE_PREFIX
+    status_class = Struct.new(:exitstatus) # Already-read comparison data, not a Process::Status receipt.
+    status = status_class.new(1)
+    start, cutoff = 100, 2_000_000_100
+    raw = result_keys.reject { |key| key == "cleanupErrorsEmpty" }.to_h { |key| [key, true] }
+    raw.merge!("kind" => "fixture-cleanup", "errorClass" => "UploadProcessFixture::Failure",
+      "error" => "actual ready timeout cause was not observed", "adapterErrorClass" => "MobileReleaseKit::ContractError",
+      "cleanupErrors" => ["private-marker"], "private" => "private-marker", "pid" => 999_887_766,
+      "nativeObservation" => native_keys.reject { |key| key == "observerErrorsEmpty" }.to_h { |key| [key, false] }.merge(
+        "observerErrors" => [], "private" => "private-marker"),
+      "nativeStartedNs" => start, "nativeRunDeadlineNs" => cutoff, "firstTimeoutDecisionNs" => cutoff - 1,
+      "selectedTimeoutNs" => cutoff, "blockedDataWaits" => 2, "firstBlockedDataNs" => start + 1,
+      "captureSeconds" => 6.0, "slowCleanupSeconds" => 4.0)
+    formatter = UploadProcessFixture.method(:adapter_failure_line)
+    expected = {"schema" => 1, "platform" => "ios", "mode" => "real-deadline", "expectedKind" => "pass",
+      "failedPredicates" => %w[result-kind driver-status], "resultKind" => "fixture-cleanup", "driverExitStatus" => 1,
+      "retainedDriverErrorCategory" => "fixture-error", "retainedDriverErrorCode" => "ready-timeout-unobserved",
+      "adapterErrorCategory" => "contract-error", "resultChecks" => result_keys.to_h { |key| [key, key != "cleanupErrorsEmpty"] },
+      "nativeChecks" => native_keys.to_h { |key| [key, key == "observerErrorsEmpty"] },
+      "timingChecks" => {"runSpanMatchesMode" => true, "firstTimeoutCutoff" => "before-cutoff", "selectedTimeoutCutoff" => "at-or-after-cutoff",
+        "blockedDataWaitsPositive" => true, "firstBlockedDataWithinRun" => true, "captureWithinLimit" => true,
+        "slowCleanupAtLeastFour" => true, "captureCoversSlowCleanup" => true}}
+    classes.each_key do |platform|
+      packet = formatter.call(platform: platform, mode: "real-deadline", result: raw, status: status)
+      assert_equal "MRK_ADAPTER_FAILURE=#{JSON.generate(expected.merge("platform" => platform))}\n", packet
+      assert packet.ascii_only?
+      assert packet.frozen?
+      assert_operator packet.bytesize, :<=, 2048
+      %w[private-marker 999887766 2000000100].each { |private_value| refute_includes packet, private_value }
+      refute_includes packet, raw.fetch("error")
+    end
+    project = lambda do |value, mode: "real-deadline", code: 1|
+      packet = formatter.call(platform: "ios", mode: mode, result: value, status: status_class.new(code))
+      JSON.parse(packet.delete_prefix("MRK_ADAPTER_FAILURE=")) if packet
+    end
+    expected_kinds.each do |mode, kind|
+      accepted_status = kind == "pass" ? 0 : 1
+      assert_nil project.call(raw.merge("kind" => kind), mode: mode, code: accepted_status)
+      row = project.call(raw.merge("kind" => kind), mode: mode, code: 255)
+      assert_equal [kind, ["driver-status"]], row.values_at("expectedKind", "failedPredicates")
+    end
+    assert_equal ["result-kind"], project.call(raw, code: 0).fetch("failedPredicates")
+    assert_equal "other", project.call(raw.merge("kind" => "private-marker")).fetch("resultKind")
+    assert_equal "invalid", project.call(raw.merge("kind" => nil)).fetch("resultKind")
+    [nil, true, -1, 256, 1.0].each { |code| assert_nil formatter.call(platform: "ios", mode: "real-deadline", result: raw, status: status_class.new(code)) }
+    assert_nil formatter.call(platform: "ios", mode: "real-deadline", result: Class.new(Hash).new.merge!(raw), status: status)
+    [["native", "real-deadline"], ["ios", "native-setup-interrupt"], ["android", "ownership-async"], ["ios", "kill-startup"]].each do |platform, mode|
+      assert_nil formatter.call(platform: platform, mode: mode, result: raw, status: status)
+    end
+
+    # The retained driver pair is independent of a cleanup-overridden kind. Only
+    # exact persisted literals select codes; private lookalikes remain unquoted.
+    [
+      ["MobileReleaseKit::NativeUploadProcess::LifecycleError", "native capture deadline failure", "native-lifecycle-error", "native-deadline"],
+      ["MobileReleaseKit::NativeUploadProcess::ProtocolError", "native capture protocol failure", "native-protocol-error", "native-protocol"],
+      ["MobileReleaseKit::NativeUploadProcess::ProtocolError", "native capture deadline failure", "native-protocol-error", "other"],
+      ["MobileReleaseKit::NativeProcessSpawn::Error", "native process close failure", "native-spawn-error", "spawn-close"],
+      ["UploadProcessFixture::Failure", "private-marker actual ready timeout cause was not observed", "fixture-error", "other"],
+      ["private-marker", "private-marker", "other", "other"],
+      [nil, nil, "none", "none"], [nil, "private-marker", "none", "invalid"],
+      ["UploadProcessFixture::Failure", nil, "fixture-error", "invalid"], [false, "private-marker", "invalid", "invalid"],
+    ].each do |class_name, message, category, code|
+      row = project.call(raw.merge("errorClass" => class_name, "error" => message))
+      assert_equal [category, code], row.values_at("retainedDriverErrorCategory", "retainedDriverErrorCode")
+      refute_includes JSON.generate(row), "private-marker"
+    end
+    missing = project.call({})
+    assert_equal ["missing"] * 4, missing.values_at("resultKind", "retainedDriverErrorCategory", "retainedDriverErrorCode", "adapterErrorCategory")
+    %w[resultChecks nativeChecks timingChecks].each { |key| assert_equal ["missing"], missing.fetch(key).values.uniq }
+    assert_equal "missing", project.call(raw.reject { |key, _| key == "errorClass" }).fetch("retainedDriverErrorCode")
+    malformed = raw.merge(result_keys.to_h { |key| [key, "private-marker"] }).merge("cleanupErrors" => nil, "nativeObservation" => nil)
+    invalid = project.call(malformed)
+    assert_equal ["invalid"], invalid.fetch("resultChecks").values.uniq
+    assert_equal ["invalid"], invalid.fetch("nativeChecks").values.uniq
+    false_checks = raw.merge(result_keys.to_h { |key| [key, false] }).merge("cleanupErrors" => [])
+    assert_equal result_keys.to_h { |key| [key, key == "cleanupErrorsEmpty"] }, project.call(false_checks).fetch("resultChecks")
+
+    # Original first construction and selected primary are separate observations.
+    # These are scalar vectors; no clock or runtime deadline is changed by them.
+    [[start - 1, "before-start"], [start, "before-cutoff"], [cutoff, "at-or-after-cutoff"]].each do |time, relation|
+      row = project.call(raw.merge("firstTimeoutDecisionNs" => time)).fetch("timingChecks")
+      assert_equal [relation, "at-or-after-cutoff"], row.values_at("firstTimeoutCutoff", "selectedTimeoutCutoff")
+    end
+    [0, true, start.to_f, 2**63].each do |time|
+      assert_equal "invalid", project.call(raw.merge("selectedTimeoutNs" => time)).fetch("timingChecks").fetch("selectedTimeoutCutoff")
+    end
+    row = project.call(raw.reject { |key, _| key == "firstTimeoutDecisionNs" }.merge("nativeStartedNs" => 0)).fetch("timingChecks")
+    assert_equal ["missing", "invalid"], row.values_at("firstTimeoutCutoff", "selectedTimeoutCutoff")
+    assert_equal "invalid", project.call(raw.merge("nativeRunDeadlineNs" => start)).fetch("timingChecks").fetch("runSpanMatchesMode")
+    assert_equal false, project.call(raw, mode: "no-deadline").fetch("timingChecks").fetch("runSpanMatchesMode")
+    assert_equal true, project.call(raw.merge("nativeRunDeadlineNs" => start + 10_000_000_000), mode: "no-deadline").fetch("timingChecks").fetch("runSpanMatchesMode")
+    [[0, false], [-1, "invalid"], [1.0, "invalid"]].each do |count, expected_value|
+      assert_equal expected_value, project.call(raw.merge("blockedDataWaits" => count)).fetch("timingChecks").fetch("blockedDataWaitsPositive")
+    end
+    [[start, true], [cutoff, false], [nil, "invalid"]].each do |time, expected_value|
+      assert_equal expected_value, project.call(raw.merge("firstBlockedDataNs" => time)).fetch("timingChecks").fetch("firstBlockedDataWithinRun")
+    end
+    [[8, false], [Float::INFINITY, "invalid"], [Float::NAN, "invalid"], [-1, "invalid"], [nil, "invalid"]].each do |seconds, expected_value|
+      assert_equal expected_value, project.call(raw.merge("captureSeconds" => seconds)).fetch("timingChecks").fetch("captureWithinLimit")
+    end
+    row = project.call(raw.merge("captureSeconds" => 3, "slowCleanupSeconds" => 3.5)).fetch("timingChecks")
+    assert_equal [false, false], row.values_at("slowCleanupAtLeastFour", "captureCoversSlowCleanup")
+    row = project.call(raw.reject { |key, _| key == "slowCleanupSeconds" }.merge("captureSeconds" => nil)).fetch("timingChecks")
+    assert_equal ["missing", "missing"], row.values_at("slowCleanupAtLeastFour", "captureCoversSlowCleanup")
+
+    exercise = lambda do |platform: "ios", selected: "real-deadline", class_name: nil, method_name: nil,
+                            write_result: :full, expiry: nil, mutate: nil, publication_error: nil, projection_error: nil,
+                            callback_error: nil, cleanup_error: nil, restoration_error: nil, prior_error: nil|
+      class_name ||= classes.fetch(platform)
+      method_name ||= callback_modes.find { |_suffix, modes| modes.include?(selected) }.first
+      callback = "#{class_name}##{method_name}"
+      now, sequence, depth = 1, nil, 0
+      state = escaped = dispatch = nil
+      events, writes, projections, observations, cleanup_messages = [], [], [], [], []
+      policy = Object.new
+      policy.define_singleton_method(:install) { events << :install }
+      policy.define_singleton_method(:cleanup_depth) { depth }
+      policy.define_singleton_method(:cleanup) do |&body|
+        depth += 1
+        begin
+          body.call
+        ensure
+          depth -= 1
+        end
+      end
+      policy.define_singleton_method(:restore) { |&body| body.call; events << :restored }
+      policy.define_singleton_method(:errors) { restoration_error ? [restoration_error] : [] }
+      policy.define_singleton_method(:replay_custom_pending) { events << :replay }
+      receiver = Object.new.extend(UploadProcessFixture::Contracts)
+      receiver.define_singleton_method(:name) { events << :callback; raise callback_error if callback_error; method_name }
+      run = lambda do |**optional|
+        dispatch, state = optional, optional.fetch(:adapter_failure_state)
+        events << :run
+        begin
+          UploadProcessFixture.lifetime(deadline_ns: 10) do |frame|
+            # Retain synthetic cleanup diagnostics privately, without an extra
+            # real STDERR channel competing with the reporter under test.
+            frame.define_singleton_method(:warn) { |message| cleanup_messages << message }
+            frame.remember(prior_error) if prior_error
+            begin
+              frame.active do
+                reject = -> { UploadProcessFixture.reject_adapter_result!(platform: platform, mode: selected, result: raw,
+                  status: status, deadline_ns: 10, state: state) }
+                if publication_error
+                  original_writer = state.method(:[]=)
+                  state.stub(:[]=, ->(key, value) { raise publication_error if key == :mode; original_writer.call(key, value) }) { reject.call }
+                else
+                  reject.call
+                end
+              end
+            ensure
+              frame.cleanup { events << :cleanup; raise cleanup_error if cleanup_error }
+            end
+          end
+        rescue Exception => error
+          escaped = error
+          raise
+        ensure
+          mutate.call(state) if mutate
+          events << :unwound
+          now = 10 if expiry == :before_report
+          sequence = [1, 10] if expiry == :before_write
+        end
+      end
+      sink = lambda do |packet|
+        observations << [state[:rejection], state[:report_attempted], state[:write_attempted], events.dup,
+          UploadProcessFixture.instance_variable_get(:@cancellation_scope)]
+        writes << packet
+        raise write_result if write_result.is_a?(Exception)
+        write_result == :short ? 1 : packet.bytesize
+      end
+      projection = lambda do |**arguments|
+        projections << arguments
+        raise projection_error if projection_error
+        formatter.call(**arguments)
+      end
+      actual = nil
+      expected_error = (prior_error || publication_error)&.class || UploadProcessFixture::Failure
+      UploadProcessFixture::CancellationScope.stub(:new, policy) do
+        Thread.current.stub(:pending_interrupt?, false) do
+          UploadProcessFixture.stub(:clock_ns, -> { sequence ? sequence.shift || now : now }) do
+            receiver.stub(:class, Struct.new(:name).new(class_name)) do
+              UploadProcessFixture.stub(:adapter_failure_line, projection) do
+                STDERR.stub(:write, sink) do
+                  actual = assert_raises(expected_error) do
+                    receiver.with_adapter_failure_diagnostic(platform: platform, mode: selected) { |optional| run.call(**optional) }
+                  end
+                  # A renewed test clock cannot reopen an already attempted
+                  # optional report, even when the first attempt produced nothing.
+                  now, sequence = 1, nil
+                  UploadProcessFixture.report_adapter_failure(state, actual, platform: platform, mode: selected, callback: callback)
+                end
+              end
+            end
+          end
+        end
+      end
+      assert_same escaped, actual
+      assert_equal [:adapter_failure_state], dispatch.keys
+      assert_equal %i[run install cleanup restored replay unwound], events.reject { |event| event == :callback }
+      assert events.each_index.select { |index| events[index] == :callback }.all? { |index| index > events.index(:unwound) }
+      assert_nil UploadProcessFixture.instance_variable_get(:@cancellation_scope)
+      assert_operator writes.length, :<=, 1
+      assert_operator projections.length, :<=, 1
+      assert_equal cleanup_error ? 1 : 0, cleanup_messages.length
+      observations.each do |original, attempted, writing, prior, scope|
+        assert_same actual, original
+        assert_equal [true, true, events, nil], [attempted, writing, prior, scope]
+      end
+      writes.each { |packet| assert_equal formatter.call(platform: platform, mode: selected, result: raw, status: status), packet }
+      {state: state, original: actual, writes: writes, projections: projections}
+    end
+    cases = [exercise.call, exercise.call(platform: "android", selected: "immediate-deadline-slow-cleanup")]
+    cases.each do |outcome|
+      state = outcome.fetch(:state)
+      assert_equal 1, outcome.fetch(:writes).length
+      assert_same raw, state.fetch(:result)
+      assert_same status, state.fetch(:status)
+      assert_same outcome.fetch(:original), state.fetch(:rejection)
+      assert_equal [10, true], state.values_at(:deadline_ns, :write_complete)
+      assert_equal ["fixture-result", "unexpected fixture result kind/status"], [outcome[:original].kind, outcome[:original].message]
+    end
+    refute_same(*cases.map { |outcome| outcome.fetch(:state) })
+    [:short, IOError.new("private-marker")].each do |write_result|
+      outcome = exercise.call(write_result: write_result)
+      assert_equal 1, outcome.fetch(:writes).length
+      if write_result.is_a?(Exception)
+        assert_same write_result, outcome.fetch(:state).fetch(:diagnostic_error)
+      else
+        assert_equal false, outcome.fetch(:state).fetch(:write_complete)
+      end
+    end
+    %i[before_report before_write].each do |expiry|
+      outcome = exercise.call(expiry: expiry)
+      assert_empty outcome.fetch(:writes)
+      assert_equal expiry == :before_report ? 0 : 1, outcome.fetch(:projections).length
+    end
+    [->(s) { s.delete(:status) }, ->(s) { s[:status] = nil }, ->(s) { s[:platform] = "android" }, ->(s) { s[:mode] = "inherited" },
+     ->(s) { s[:rejection] = UploadProcessFixture::Failure.new("fixture-result", "private-marker") },
+     ->(s) { s[:deadline_ns] = 10.0 }, ->(s) { s[:result] = raw.merge("kind" => "pass"); s[:status] = status_class.new(0) },
+     ->(s) { s.freeze }].each { |mutate| assert_empty exercise.call(mutate: mutate).fetch(:writes) }
+    assert_empty exercise.call(class_name: "NativeUploadValidationTest").fetch(:writes)
+    assert_empty exercise.call(method_name: callback_modes.keys.last).fetch(:writes)
+    [[:projection_error, Interrupt.new("private-marker")], [:callback_error, SystemExit.new(19, "private-marker")]].each do |key, error|
+      outcome = exercise.call(**{key => error})
+      assert_empty outcome.fetch(:writes)
+      assert_same error, outcome.fetch(:state).fetch(:diagnostic_error)
+      assert_equal true, outcome.fetch(:state).fetch(:report_attempted)
+    end
+    secondary = IOError.new("later private cleanup error")
+    assert_equal 1, exercise.call(cleanup_error: secondary, restoration_error: secondary).fetch(:writes).length
+    [:publication_error, :prior_error].each do |key|
+      original = Interrupt.new("private-marker")
+      outcome = exercise.call(**{key => original})
+      assert_same original, outcome.fetch(:original)
+      refute_same original, outcome.fetch(:state).fetch(:rejection)
+      assert_empty outcome.fetch(:writes)
+    end
+
+    # Unrelated modes receive no keyword; successful eligible calls use fresh
+    # empty states. A later assertion is outside the original guarded run.
+    receiver = Object.new.extend(UploadProcessFixture::Contracts)
+    receiver.define_singleton_method(:name) { raise "successful wrapper must not inspect a callback" }
+    successful, writes, handoffs = Object.new, [], []
+    STDERR.stub(:write, ->(packet) { writes << packet; packet.bytesize }) do
+      2.times do
+        assert_same successful, receiver.with_adapter_failure_diagnostic(platform: "ios", mode: "real-deadline") { |optional| handoffs << optional; successful }
+      end
+      [["native", "real-deadline"], ["ios", "native-setup-interrupt"], ["ios", "ownership-async"], ["android", "kill-descendant"]].each do |platform, mode|
+        assert_same successful, receiver.with_adapter_failure_diagnostic(platform: platform, mode: mode) { |optional| assert_empty optional; successful }
+      end
+      assert_raises(Minitest::Assertion) do
+        receiver.with_adapter_failure_diagnostic(platform: "android", mode: "real-deadline") { |optional| handoffs << optional; successful }
+        flunk "later synthetic assertion"
+      end
+    end
+    assert_empty writes
+    assert_equal 3, handoffs.map { |optional| optional.fetch(:adapter_failure_state).object_id }.uniq.length
+    assert handoffs.all? { |optional| optional.keys == [:adapter_failure_state] && optional[:adapter_failure_state].empty? }
   end
 
   def missing_cleanup_omission_sample

@@ -742,6 +742,18 @@ Reporting uses the same original cutoff and never changes rejection or cleanup
 authority. The controller binds it to the exact failing source-known callback in
 the healthy partition; successful or duplicate callbacks cannot qualify.
 
+The ten ordinary adapter fixture modes may similarly emit one canonical
+`MRK_ADAPTER_FAILURE` line, at most 2048 bytes, only for the same escaping original
+result-kind/driver-status rejection after fixture cleanup. Its closed projection
+distinguishes the expected operands, retained driver Lifetime error category/code,
+cleanup/native checks and first-versus-selected timeout relations; it publishes
+no raw error, timestamp, process identity or private capture. The retained driver
+error is not necessarily the earliest exercise failure. Reporting keeps the
+original cutoff, never retries, and cannot replace the primary or authorize
+success. The controller requires the matching platform and source-known unique
+adverse callback in that adapter's healthy partition. Native/ownership/kill
+partitions, passing or ambiguous callbacks and malformed records cannot qualify.
+
 The shared adapter's silent-observer timeout test uses its existing two-second
 startup-inclusive fixture budget, rather than racing native bootstrap within
 50ms. It still requires the exact observation-deadline error and an actual child

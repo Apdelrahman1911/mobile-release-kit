@@ -240,6 +240,77 @@ NATIVE_SETUP_RESULT_CHECKS = (
     "handlersRestored", "registryInactive", "pendingInterrupt", "cleanupErrorsEmpty",
 )
 NATIVE_SETUP_NATIVE_CHECKS = ("finalized", "noProducers", "settled", "unknown", "hooksRestored")
+ADAPTER_FAILURE_PREFIX = "MRK_ADAPTER_FAILURE="
+ADAPTER_FAILURE_PLATFORMS = {
+    "ios": ("ruby-ios_upload_validation", "IosUploadValidationTest"),
+    "android": ("ruby-android_upload_validation", "AndroidUploadValidationTest"),
+}
+ADAPTER_FAILURE_MODE_CONTRACTS = {
+    "real-deadline": ("test_deadline_terminates_validator_without_authorizing_upload", "pass"),
+    "inherited": ("test_deadline_terminates_inherited_pipe_children_after_validator_parent_exits", "pass"),
+    "delayed-start": ("test_descendant_boundary_survives_delayed_start_and_late_parent_record", "pass"),
+    "late-record": ("test_descendant_boundary_survives_delayed_start_and_late_parent_record", "pass"),
+    "unready": ("test_unready_fixture_fails_distinctly_and_stops_before_any_late_pid_record", "readiness"),
+    "leader-only": ("test_fixture_detects_leader_only_cleanup_and_missing_deadline", "descendant-alive"),
+    "no-deadline": ("test_fixture_detects_leader_only_cleanup_and_missing_deadline", "capture-watchdog"),
+    "immediate-deadline": ("test_fixture_rejects_an_immediate_timeout_even_when_the_leader_is_killed", "elapsed-bound"),
+    "real-deadline-slow-cleanup": ("test_slow_cleanup_cannot_supply_a_positive_deadline_wait", "pass"),
+    "immediate-deadline-slow-cleanup": ("test_slow_cleanup_cannot_supply_a_positive_deadline_wait", "elapsed-bound"),
+}
+ADAPTER_FAILURE_FIELDS = (
+    "schema", "platform", "mode", "expectedKind", "failedPredicates", "resultKind", "driverExitStatus",
+    "retainedDriverErrorCategory", "retainedDriverErrorCode", "adapterErrorCategory",
+    "resultChecks", "nativeChecks", "timingChecks",
+)
+ADAPTER_FAILURE_PREDICATES = ("result-kind", "driver-status")
+ADAPTER_FAILURE_RESULT_KINDS = (
+    "pass", "readiness", "descendant-alive", "capture-watchdog", "elapsed-bound", "fixture-cleanup",
+    "setup-fixture-fault", "process-observation", "process-ownership", "fixture-result", "fixture-source",
+    "fixture-input", "fixture-observation", "fixture-control", "signal-policy", "diagnostic", "control",
+    "unexpected", "other", "missing", "invalid",
+)
+ADAPTER_FAILURE_DRIVER_CODES = {
+    "missing": frozenset({"missing"}),
+    "none": frozenset({"missing", "none", "invalid"}),
+    "invalid": frozenset({"missing", "invalid"}),
+    **dict.fromkeys(("contract-error", "io-error", "interrupt", "system-exit", "other"),
+                   frozenset({"missing", "invalid", "other"})),
+    "fixture-error": frozenset({
+        "missing", "invalid", "other", "source-size", "mutation-anchor", "capture-contract", "parser-contract",
+        "capture-clock-binding", "record-cutoff", "validator-marker", "validator-cutoff", "validator-live",
+        "descendant-marker", "descendant-cutoff", "descendant-live", "native-ready", "deliberately-unready",
+        "dispatch-contract", "descendant-fork", "pipe-interval", "pipes-not-blocked", "watchdog-admission",
+        "timeout-construction-count", "omission-binding", "omission-not-live", "native-unknown",
+        "watchdog-intervened", "omission-unobserved", "omission-fallback", "ready-timeout-unobserved",
+        "premature-interval-consumed", "elapsed-bound", "inherited-progress", "worker-delay",
+        "fallback-before-finality", "slow-cleanup-budget", "watchdog-join", "injector-join",
+    }),
+    **dict.fromkeys(("native-error", "native-lifecycle-error"), frozenset({
+        "missing", "invalid", "other",
+        *("native-" + reason for reason in ("cancelled", "deadline", "parent_lost", "protocol", "io", "creation", "lifecycle")),
+    })),
+    "native-protocol-error": frozenset({"missing", "invalid", "other", "native-protocol"}),
+    "native-spawn-error": frozenset({
+        "missing", "invalid", "other",
+        *("spawn-" + code for code in ("abi", "runtime", "origin", "symbol", "spec", "launch", "deadline", "state", "io",
+                                      "fd", "busy", "native", "waitability", "spawn", "wait", "join", "close", "unknown")),
+    }),
+}
+ADAPTER_FAILURE_RESULT_CHECKS = (
+    "ready", "stdinClosedAfterReady", "deadlinePrimarySameObject", "deadlineResultSameObject",
+    "watchdogStarted", "watchdogIntervened", "fallbackUsed", "deadBeforeFallback", "nativeFinalityBeforeFallback",
+    "adapterRejected", "adapterCallObserved", "captureEntered", "descendantLiveBeforeRelease",
+    "inheritedPipeBlockObserved", "validatorReapedAfterRelease", "commitAfterDataEOF", "ownedDescriptorsClosed",
+    "watchdogJoined", "tasksJoined", "injectorsJoined", "handlersRestored", "registryInactive",
+    "pendingInterrupt", "cleanupErrorsEmpty",
+)
+ADAPTER_FAILURE_NATIVE_CHECKS = ("finalized", "noProducers", "settled", "unknown", "hooksRestored", "observerErrorsEmpty")
+ADAPTER_FAILURE_TIMING_CHECKS = (
+    "runSpanMatchesMode", "firstTimeoutCutoff", "selectedTimeoutCutoff", "blockedDataWaitsPositive",
+    "firstBlockedDataWithinRun", "captureWithinLimit", "slowCleanupAtLeastFour", "captureCoversSlowCleanup",
+)
+ADAPTER_FAILURE_CUTOFF_CHECKS = ("firstTimeoutCutoff", "selectedTimeoutCutoff")
+ADAPTER_FAILURE_CUTOFF_VALUES = frozenset({"before-start", "before-cutoff", "at-or-after-cutoff", "missing", "invalid"})
 PYTHON_POISON_PARTITIONS = (
     "poison-wait-loss",
     "poison-startup-error",
@@ -1455,6 +1526,48 @@ def native_setup_failure(raw: bytes, *, deadline: float | None = None) -> dict |
             check_clock(deadline)
 
 
+def adapter_failure(raw: bytes, *, deadline: float | None = None) -> dict | None:
+    """Closed original guard operands, not a native cause or acceptance receipt."""
+    try:
+        data = _fixture_failure_record(raw, ADAPTER_FAILURE_PREFIX, 2048, deadline=deadline,
+                                       canonical_fields=ADAPTER_FAILURE_FIELDS)
+        if (type(data) is not dict or type(data["schema"]) is not int or data["schema"] != 1
+                or type(data["platform"]) is not str or data["platform"] not in ADAPTER_FAILURE_PLATFORMS
+                or type(data["mode"]) is not str or data["mode"] not in ADAPTER_FAILURE_MODE_CONTRACTS
+                or type(data["expectedKind"]) is not str
+                or data["expectedKind"] != ADAPTER_FAILURE_MODE_CONTRACTS[data["mode"]][1]
+                or type(data["resultKind"]) is not str or data["resultKind"] not in ADAPTER_FAILURE_RESULT_KINDS
+                or type(data["driverExitStatus"]) is not int or not 0 <= data["driverExitStatus"] <= 255
+                or any(type(data[key]) is not str or data[key] not in ADAPTER_FAILURE_DRIVER_CODES
+                       for key in ("retainedDriverErrorCategory", "adapterErrorCategory"))
+                or type(data["retainedDriverErrorCode"]) is not str
+                or data["retainedDriverErrorCode"] not in ADAPTER_FAILURE_DRIVER_CODES[data["retainedDriverErrorCategory"]]):
+            return None
+        expected_status = 0 if data["expectedKind"] == "pass" else 1
+        predicates = [name for name, failed in zip(ADAPTER_FAILURE_PREDICATES,
+                      (data["resultKind"] != data["expectedKind"], data["driverExitStatus"] != expected_status)) if failed]
+        if (not predicates or type(data["failedPredicates"]) is not list
+                or any(type(name) is not str for name in data["failedPredicates"])
+                or data["failedPredicates"] != predicates):
+            return None
+        for key, fields in (("resultChecks", ADAPTER_FAILURE_RESULT_CHECKS),
+                            ("nativeChecks", ADAPTER_FAILURE_NATIVE_CHECKS),
+                            ("timingChecks", ADAPTER_FAILURE_TIMING_CHECKS)):
+            checks = data[key]
+            if type(checks) is not dict or tuple(checks) != fields:
+                return None
+            for name, value in checks.items():
+                if key == "timingChecks" and name in ADAPTER_FAILURE_CUTOFF_CHECKS:
+                    if type(value) is not str or value not in ADAPTER_FAILURE_CUTOFF_VALUES:
+                        return None
+                elif type(value) is not bool and not (type(value) is str and value in {"missing", "invalid"}):
+                    return None
+        return data
+    finally:
+        if deadline is not None:
+            check_clock(deadline)
+
+
 def _minitest_failed_target(text: str, identifier: str, *, deadline: float | None = None) -> bool:
     # Scan the SAME original bytes under the SAME cutoff. A target beyond the
     # public first16 rows still counts, as does a late duplicate. No receipt.
@@ -1806,6 +1919,16 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                     if (len(targets) == 1 and targets[0] in expected
                             and _minitest_failed_target(text, targets[0], deadline=deadline)):
                         value["native_setup_failure"] = diagnostic
+            if (step.id in {"ruby-ios_upload_validation", "ruby-android_upload_validation"}
+                    and step.native_partition == "healthy"):
+                diagnostic = adapter_failure(result.stderr, deadline=deadline)
+                if diagnostic is not None:
+                    gate, class_name = ADAPTER_FAILURE_PLATFORMS[diagnostic["platform"]]
+                    callback, _ = ADAPTER_FAILURE_MODE_CONTRACTS[diagnostic["mode"]]
+                    target = class_name + "#" + callback
+                    if (step.id == gate and target in expected
+                            and _minitest_failed_target(text, target, deadline=deadline)):
+                        value["adapter_failure"] = diagnostic
         except (VerificationError, OSError, UnicodeError):
             if deadline is not None:
                 check_clock(deadline)

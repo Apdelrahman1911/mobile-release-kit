@@ -60,6 +60,100 @@ module UploadProcessFixture
              ownership-async ownership-signals ownership-policies
              ownership-setup ownership-observation] + OWNERSHIP_UNKNOWN_MODES.keys + NATIVE_MODES).freeze
 
+  ADAPTER_FAILURE_PREFIX = "MRK_ADAPTER_FAILURE="
+  ADAPTER_FAILURE_CLASSES = {"ios" => "IosUploadValidationTest", "android" => "AndroidUploadValidationTest"}.freeze
+  ADAPTER_FAILURE_EXPECTED_KINDS = {
+    "real-deadline" => "pass", "inherited" => "pass", "delayed-start" => "pass", "late-record" => "pass",
+    "unready" => "readiness", "leader-only" => "descendant-alive", "no-deadline" => "capture-watchdog",
+    "immediate-deadline" => "elapsed-bound", "real-deadline-slow-cleanup" => "pass",
+    "immediate-deadline-slow-cleanup" => "elapsed-bound",
+  }.freeze
+  ADAPTER_FAILURE_CALLBACK_MODES = {
+    "test_deadline_terminates_validator_without_authorizing_upload" => %w[real-deadline],
+    "test_deadline_terminates_inherited_pipe_children_after_validator_parent_exits" => %w[inherited],
+    "test_descendant_boundary_survives_delayed_start_and_late_parent_record" => %w[delayed-start late-record],
+    "test_unready_fixture_fails_distinctly_and_stops_before_any_late_pid_record" => %w[unready],
+    "test_fixture_detects_leader_only_cleanup_and_missing_deadline" => %w[leader-only no-deadline],
+    "test_fixture_rejects_an_immediate_timeout_even_when_the_leader_is_killed" => %w[immediate-deadline],
+    "test_slow_cleanup_cannot_supply_a_positive_deadline_wait" => %w[real-deadline-slow-cleanup immediate-deadline-slow-cleanup],
+  }.each_with_object({}) do |(callback, modes), table|
+    ADAPTER_FAILURE_CLASSES.each_value { |name| table["#{name}##{callback}".freeze] = modes.freeze }
+  end.freeze
+  ADAPTER_FAILURE_FIELDS = %w[schema platform mode expectedKind failedPredicates resultKind driverExitStatus
+    retainedDriverErrorCategory retainedDriverErrorCode adapterErrorCategory resultChecks nativeChecks timingChecks].freeze
+  ADAPTER_FAILURE_KINDS = %w[pass readiness descendant-alive capture-watchdog elapsed-bound fixture-cleanup
+    setup-fixture-fault process-observation process-ownership fixture-result fixture-source fixture-input
+    fixture-observation fixture-control signal-policy diagnostic control unexpected].freeze
+  ADAPTER_FAILURE_CATEGORIES = {
+    "UploadProcessFixture::Failure" => "fixture-error", "MobileReleaseKit::ContractError" => "contract-error",
+    "MobileReleaseKit::NativeUploadProcess::Error" => "native-error",
+    "MobileReleaseKit::NativeUploadProcess::LifecycleError" => "native-lifecycle-error",
+    "MobileReleaseKit::NativeUploadProcess::ProtocolError" => "native-protocol-error",
+    "MobileReleaseKit::NativeProcessSpawn::Error" => "native-spawn-error",
+    "IOError" => "io-error", "Interrupt" => "interrupt", "SystemExit" => "system-exit",
+  }.freeze
+  # Only exact source-literal pairs classify the already persisted driver error.
+  # This is not necessarily the earliest exercise/native cause: cleanup may own it.
+  ADAPTER_FAILURE_CODES = begin
+    literals = {
+      "oversized adapter source" => "source-size",
+      "adapter mutation anchor changed" => "mutation-anchor",
+      "complete actual adapter capture contract changed" => "capture-contract",
+      "actual adapter result parser call changed" => "parser-contract",
+      "actual capture start/cutoff was not observed" => "capture-clock-binding",
+      "fixture record missed original capture cutoff" => "record-cutoff",
+      "validator record is not bound" => "validator-marker",
+      "validator original cutoff expired" => "validator-cutoff",
+      "validator was not independently live before the original cutoff" => "validator-live",
+      "descendant record is not bound" => "descendant-marker",
+      "descendant original cutoff expired" => "descendant-cutoff",
+      "descendant was not independently live before the original cutoff" => "descendant-live",
+      "actual native READY was not accepted" => "native-ready",
+      "fixture deliberately never became ready" => "deliberately-unready",
+      "actual validator dispatch contract changed" => "dispatch-contract",
+      "descendant was not the actual original fork" => "descendant-fork",
+      "no original inherited-pipe observation interval" => "pipe-interval",
+      "real inherited data pipes were not blocked" => "pipes-not-blocked",
+      "watchdog was not admitted" => "watchdog-admission",
+      "unbounded timeout construction" => "timeout-construction-count",
+      "group cleanup omission was not bound" => "omission-binding",
+      "omission did not leave a live original descendant" => "omission-not-live",
+      "adapter capture retained UNKNOWN" => "native-unknown",
+      "capture required independent writer watchdog" => "watchdog-intervened",
+      "group omission boundary was not actually observed" => "omission-unobserved",
+      "omitted native group cleanup required independent writer EOF" => "omission-fallback",
+      "actual ready timeout cause was not observed" => "ready-timeout-unobserved",
+      "startup consumed the premature-timeout control interval" => "premature-interval-consumed",
+      "timeout decision preceded original bound or real blocked data interval" => "elapsed-bound",
+      "genuine V0/descendant/EOF-before-COMMIT progress was not observed" => "inherited-progress",
+      "actual worker delay was not observed" => "worker-delay",
+      "fixture fallback preceded death proof" => "fallback-before-finality",
+      "slow cleanup lacks original bound" => "slow-cleanup-budget",
+      "fixture watchdog did not join" => "watchdog-join",
+      "fixture injector did not join" => "injector-join",
+    }
+    table = literals.to_h { |message, code| [["UploadProcessFixture::Failure", message].freeze, code] }
+    %w[Error LifecycleError ProtocolError].each do |name|
+      reasons = name == "ProtocolError" ? %w[protocol] : %w[cancelled deadline parent_lost protocol io creation lifecycle]
+      reasons.each do |reason|
+        key = ["MobileReleaseKit::NativeUploadProcess::#{name}".freeze, "native capture #{reason} failure".freeze].freeze
+        table[key] = "native-#{reason}".freeze
+      end
+    end
+    %w[abi runtime origin symbol spec launch deadline state io fd busy native waitability spawn wait join close unknown].each do |code|
+      table[["MobileReleaseKit::NativeProcessSpawn::Error", "native process #{code} failure".freeze].freeze] = "spawn-#{code}".freeze
+    end
+    table.freeze
+  end
+  ADAPTER_FAILURE_RESULT_CHECKS = %w[ready stdinClosedAfterReady deadlinePrimarySameObject deadlineResultSameObject
+    watchdogStarted watchdogIntervened fallbackUsed deadBeforeFallback nativeFinalityBeforeFallback adapterRejected
+    adapterCallObserved captureEntered descendantLiveBeforeRelease inheritedPipeBlockObserved validatorReapedAfterRelease
+    commitAfterDataEOF ownedDescriptorsClosed watchdogJoined tasksJoined injectorsJoined handlersRestored registryInactive
+    pendingInterrupt cleanupErrorsEmpty].freeze
+  ADAPTER_FAILURE_NATIVE_CHECKS = %w[finalized noProducers settled unknown hooksRestored observerErrorsEmpty].freeze
+  ADAPTER_FAILURE_TIMING_CHECKS = %w[runSpanMatchesMode firstTimeoutCutoff selectedTimeoutCutoff blockedDataWaitsPositive
+    firstBlockedDataWithinRun captureWithinLimit slowCleanupAtLeastFour captureCoversSlowCleanup].freeze
+
   class Failure < StandardError
     attr_reader :kind
 
@@ -789,8 +883,150 @@ module UploadProcessFixture
     raise original
   end
 
+  def adapter_failure_mode?(platform, mode)
+    platform.instance_of?(String) && mode.instance_of?(String) &&
+      ADAPTER_FAILURE_CLASSES.key?(platform) && ADAPTER_FAILURE_EXPECTED_KINDS.key?(mode)
+  end
+
+  def reject_adapter_result!(platform:, mode:, result:, status:, deadline_ns:, state:)
+    original = Failure.new("fixture-result", "unexpected fixture result kind/status")
+    if state.instance_of?(Hash) && adapter_failure_mode?(platform, mode)
+      state[:rejection] = original
+      state[:platform] = platform
+      state[:mode] = mode
+      state[:deadline_ns] = deadline_ns
+      state[:result] = result
+      state[:status] = status
+    end
+    raise original
+  end
+
+  def adapter_failure_line(platform:, mode:, result:, status:)
+    return unless adapter_failure_mode?(platform, mode) && result.instance_of?(Hash)
+
+    code = status.exitstatus
+    return unless code.instance_of?(Integer) && code.between?(0, 255)
+
+    expected = ADAPTER_FAILURE_EXPECTED_KINDS.fetch(mode)
+    failed = []
+    failed << "result-kind" unless result["kind"] == expected
+    failed << "driver-status" unless code == (expected == "pass" ? 0 : 1)
+    return if failed.empty?
+
+    kind = if !result.key?("kind")
+      "missing"
+    elsif !result["kind"].instance_of?(String)
+      "invalid"
+    else
+      ADAPTER_FAILURE_KINDS.include?(result["kind"]) ? result["kind"] : "other"
+    end
+    category = lambda do |key|
+      next "missing" unless result.key?(key)
+      value = result.fetch(key)
+      next "none" if value.nil?
+      next "invalid" unless value.instance_of?(String)
+      ADAPTER_FAILURE_CATEGORIES.fetch(value, "other")
+    end
+    error_code = if !result.key?("errorClass") || !result.key?("error")
+      "missing"
+    elsif result["errorClass"].nil? && result["error"].nil?
+      "none"
+    elsif !result["errorClass"].instance_of?(String) || !result["error"].instance_of?(String)
+      "invalid"
+    else
+      ADAPTER_FAILURE_CODES.fetch([result["errorClass"], result["error"]], "other")
+    end
+    check = lambda do |record, key, absent: false, empty: false|
+      next "missing" if absent
+      next "invalid" unless record.instance_of?(Hash)
+      next "missing" unless record.key?(key)
+      value = record.fetch(key)
+      if empty
+        value.instance_of?(Array) ? value.empty? : "invalid"
+      else
+        value.equal?(true) || value.equal?(false) ? value : "invalid"
+      end
+    end
+    result_checks = ADAPTER_FAILURE_RESULT_CHECKS.to_h do |key|
+      [key, key == "cleanupErrorsEmpty" ? check.call(result, "cleanupErrors", empty: true) : check.call(result, key)]
+    end
+    native_checks = ADAPTER_FAILURE_NATIVE_CHECKS.to_h do |key|
+      empty = key == "observerErrorsEmpty"
+      [key, check.call(result["nativeObservation"], empty ? "observerErrors" : key,
+        absent: !result.key?("nativeObservation"), empty: empty)]
+    end
+    # Only relations on already recorded operands; no fresh clock/native query.
+    timestamp = ->(value) { value.instance_of?(Integer) && value.positive? && value <= (1 << 63) - 1 }
+    duration = lambda do |value|
+      (value.instance_of?(Integer) || value.instance_of?(Float)) && value.finite? && value >= 0
+    end
+    measure = lambda do |keys, valid, &relation|
+      next "missing" unless keys.all? { |key| result.key?(key) }
+      values = keys.map { |key| result.fetch(key) }
+      next "invalid" unless values.all? { |value| valid.call(value) }
+      relation.call(*values)
+    end
+    cutoff_relation = lambda do |key|
+      measure.call(["nativeStartedNs", "nativeRunDeadlineNs", key], timestamp) do |start, cutoff, decision|
+        if cutoff <= start then "invalid"
+        elsif decision < start then "before-start"
+        elsif decision < cutoff then "before-cutoff"
+        else "at-or-after-cutoff"
+        end
+      end
+    end
+    timing_checks = {
+      "runSpanMatchesMode" => measure.call(%w[nativeStartedNs nativeRunDeadlineNs], timestamp) { |start, cutoff|
+        cutoff > start ? cutoff - start == (mode == "no-deadline" ? 10 : DEADLINE) * 1_000_000_000 : "invalid"
+      },
+      "firstTimeoutCutoff" => cutoff_relation.call("firstTimeoutDecisionNs"),
+      "selectedTimeoutCutoff" => cutoff_relation.call("selectedTimeoutNs"),
+      "blockedDataWaitsPositive" => measure.call(["blockedDataWaits"], ->(value) { value.instance_of?(Integer) && value >= 0 }) { |count| count.positive? },
+      "firstBlockedDataWithinRun" => measure.call(%w[nativeStartedNs nativeRunDeadlineNs firstBlockedDataNs], timestamp) { |start, cutoff, first|
+        cutoff > start ? first >= start && first < cutoff : "invalid"
+      },
+      "captureWithinLimit" => measure.call(["captureSeconds"], duration) { |seconds| seconds < CAPTURE_LIMIT },
+      "slowCleanupAtLeastFour" => measure.call(["slowCleanupSeconds"], duration) { |seconds| seconds >= 4 },
+      "captureCoversSlowCleanup" => measure.call(%w[captureSeconds slowCleanupSeconds], duration) { |capture, cleanup| capture >= cleanup },
+    }
+    line = "#{ADAPTER_FAILURE_PREFIX}#{JSON.generate({"schema" => 1, "platform" => platform, "mode" => mode,
+      "expectedKind" => expected, "failedPredicates" => failed, "resultKind" => kind, "driverExitStatus" => code,
+      "retainedDriverErrorCategory" => category.call("errorClass"), "retainedDriverErrorCode" => error_code,
+      "adapterErrorCategory" => category.call("adapterErrorClass"), "resultChecks" => result_checks,
+      "nativeChecks" => native_checks, "timingChecks" => timing_checks})}\n"
+    line.freeze if line.ascii_only? && line.bytesize <= 2048
+  end
+
+  def report_adapter_failure(state, original, platform:, mode:, callback:)
+    return unless state.instance_of?(Hash) && original.instance_of?(Failure) && state[:rejection].equal?(original)
+    return if state[:report_attempted]
+
+    state[:report_attempted] = true
+    return unless adapter_failure_mode?(platform, mode) && state[:platform].instance_of?(String) &&
+      state[:platform] == platform && state[:mode].instance_of?(String) && state[:mode] == mode &&
+      callback.instance_of?(String) && ADAPTER_FAILURE_CALLBACK_MODES.fetch(callback, []).include?(mode) &&
+      callback.start_with?("#{ADAPTER_FAILURE_CLASSES.fetch(platform)}#")
+
+    deadline_ns = state.fetch(:deadline_ns)
+    return unless deadline_ns.instance_of?(Integer) && deadline_ns.positive? && clock_ns < deadline_ns
+
+    line = adapter_failure_line(platform: platform, mode: mode, result: state.fetch(:result), status: state.fetch(:status))
+    return unless line && clock_ns < deadline_ns
+
+    state[:write_attempted] = true
+    state[:write_complete] = STDERR.write(line) == line.bytesize
+    nil
+  rescue Exception => diagnostic_error
+    begin
+      state[:diagnostic_error] ||= diagnostic_error if state.instance_of?(Hash)
+    rescue Exception
+      nil # Partial/frozen optional custody must not replace the escaping primary.
+    end
+    nil
+  end
+
   def run(platform:, root:, parameters:, mode:, observe_signals: false, deadline_ns: nil,
-          primary_failure_state: nil, order_failure_state: nil, setup_failure_state: nil)
+          primary_failure_state: nil, order_failure_state: nil, setup_failure_state: nil, adapter_failure_state: nil)
     assert_domain_reusable!
     validate_request!(platform, mode, parameters)
     validate_signal_observation!(platform, mode, observe_signals)
@@ -801,7 +1037,8 @@ module UploadProcessFixture
       return NativeSignalProbe.observe_parent(root, mode) do
         run(platform: platform, root: root, parameters: parameters, mode: mode,
             observe_signals: true, deadline_ns: deadline_ns, primary_failure_state: primary_failure_state,
-            order_failure_state: order_failure_state, setup_failure_state: setup_failure_state)
+            order_failure_state: order_failure_state, setup_failure_state: setup_failure_state,
+            adapter_failure_state: adapter_failure_state)
       end
     end
     if observe_signals && !NativeSignalProbe.current.parent_for?(root, mode)
@@ -956,6 +1193,9 @@ module UploadProcessFixture
                 if NATIVE_SETUP_FAILURE_MODES.include?(mode)
                   reject_native_setup_result!(mode: mode, result: result, status: child.status,
                     deadline_ns: run_ns, state: setup_failure_state)
+                elsif adapter_failure_mode?(platform, mode)
+                  reject_adapter_result!(platform: platform, mode: mode, result: result, status: child.status,
+                    deadline_ns: run_ns, state: adapter_failure_state)
                 end
                 raise Failure.new("fixture-result", "unexpected fixture result kind/status")
               end
@@ -4221,6 +4461,27 @@ module UploadProcessFixture
   end
 
   module Contracts
+    def with_adapter_failure_diagnostic(platform:, mode:)
+      state = {} if UploadProcessFixture.adapter_failure_mode?(platform, mode)
+      yield(state ? {adapter_failure_state: state} : {})
+    rescue Exception => original
+      # Only the same post-run Lifetime rejection may report; no new primary.
+      begin
+        UploadProcessFixture.report_adapter_failure(state, original, platform: platform, mode: mode,
+          callback: "#{self.class.name}##{name}") if state
+      rescue Exception => diagnostic_error
+        begin
+          if state.instance_of?(Hash)
+            state[:report_attempted] = true # A failed callback lookup is not retryable.
+            state[:diagnostic_error] ||= diagnostic_error
+          end
+        rescue Exception
+          nil
+        end
+      end
+      raise
+    end
+
     def assert_original_fixture_driver(value, mode)
       assert value.fetch("driverJoined"), value.inspect
       if mode.start_with?("ownership-")
