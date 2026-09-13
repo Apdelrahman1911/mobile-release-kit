@@ -665,6 +665,15 @@ for existing native, upload, entitlement, recovery or fixture tests:
   closure before a confirmed FINAL; neither the notification nor an enqueued
   cancellation proves completion. Preserve partial-write uncertainty and the
   original cutoff.
+  Ruby custodian-to-keeper control retires irreversibly after the original valid
+  RELEASED, even before status EOF. Pending bytes keep their attempted/written/
+  partial history but cannot flush again; retirement never invents a RELEASE
+  grant. A genuine original control-write EPIPE can be an operation failure with
+  independently proved cleanup, not proof of unknown child custody by itself.
+  Partial or lost publication, earlier write failures, unrelated exceptions and
+  failed closes remain adverse; all terminal/EOF/original-wait/group/close/join
+  requirements still apply. Exercise both terminal-before-write and
+  broken-pipe-before-terminal orderings without new grants or retries.
 - Exercise success, rejection, timeout, independent stdout/stderr overflow,
   dead validator with live pipe holders, closed pipes with live work, setup
   failure, cancellation and parent loss. Keep Ruby's maximum 3600 seconds and
@@ -742,17 +751,33 @@ Reporting uses the same original cutoff and never changes rejection or cleanup
 authority. The controller binds it to the exact failing source-known callback in
 the healthy partition; successful or duplicate callbacks cannot qualify.
 
-The ten ordinary adapter fixture modes may similarly emit one canonical
-`MRK_ADAPTER_FAILURE` line, at most 2048 bytes, only for the same escaping original
-result-kind/driver-status rejection after fixture cleanup. Its closed projection
+The ten ordinary adapter fixture modes may similarly emit one canonical schema-2
+`MRK_ADAPTER_FAILURE` line, at most 4096 bytes including prefix and newline, only
+for the same escaping original result-kind/driver-status rejection after fixture
+cleanup. Its closed projection
 distinguishes the expected operands, retained driver Lifetime error category/code,
-cleanup/native checks and first-versus-selected timeout relations; it publishes
+cleanup/native checks, finite helper outcomes, original wait/join/close/EOF
+conjunctions, and first-versus-selected timeout relations; it publishes
 no raw error, timestamp, process identity or private capture. The retained driver
-error is not necessarily the earliest exercise failure. Reporting keeps the
+error is not necessarily the earliest exercise failure. Native and slow-cleanup
+fields come from the original immutable observation, with missing distinct from
+false; later completion cannot repair an UNKNOWN return. Reporting keeps the
 original cutoff, never retries, and cannot replace the primary or authorize
 success. The controller requires the matching platform and source-known unique
 adverse callback in that adapter's healthy partition. Native/ownership/kill
 partitions, passing or ambiguous callbacks and malformed records cannot qualify.
+
+The slow-cleanup fixture uses the original two-second run, five-second cleanup
+grace and eight-second capture watchdog. Only an eligible direct original-body
+observation can hand the already-selected timeout object into the existing run
+ensure; nested writes and entered cleanup cannot consume that one-shot. A body
+that reaches ensure naturally needs no handoff. The four-second delay never
+renews the cutoff or substitutes for actual blocked
+waiting. Original cleanup is called once even if the delay guard or sleep fails;
+a separate fixture failure latch rejects that failure even when the earlier
+timeout remains primary and native cleanup settles. Duration alone cannot prove
+the delay succeeded. Immediate-timeout controls must still reject premature
+decisions despite slow cleanup.
 
 The shared adapter's silent-observer timeout test uses its existing two-second
 startup-inclusive fixture budget, rather than racing native bootstrap within

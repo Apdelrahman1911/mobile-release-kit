@@ -278,6 +278,271 @@ class NativeUploadProtocolTest < Minitest::Test
     assert_raises(Owner::ProtocolError) { decoded([configuration("keeper"), simple("RELEASE")], :c_to_k) }
     assert_equal [cancel], decoded([cancel], :o_to_c)
     assert_raises(Owner::ProtocolError) { decoded([cancel, configuration], :o_to_c) }
+
+    # Decision/transport models only: allocated C, inert endpoints and no native
+    # receipts. The genuine process/EOF/wait matrix remains a separate owner run.
+    with_inert_keeper_control_effects_rejected do
+      Owner.stub(:monotonic_ns, -> { 1_000_000_000 }) do
+        Process.stub(:ppid, 100) do
+          released = simple("RELEASED").merge("validator" => child(103))
+          fixture = inert_keeper_control(reads: [encoded(released, :k_to_c), :wait_readable, nil])
+          role, channel, reader, writer = fixture.values_at(:role, :channel, :reader, :writer)
+          channel.queue(configuration("keeper"))
+          channel.queue(simple("RUN"))
+          role.send(:flush_keeper)
+          assert channel.written?("RUN")
+          primary = IOError.new("inert original operation error")
+          role.send(:fail!, "deadline", error: primary, cutoff: 3_000_000_000)
+          role.send(:send_keeper_cancel)
+          history = keeper_control_history(channel)
+          original_fail = role.method(:fail!)
+          role.define_singleton_method(:fail!) do |*arguments, **keywords|
+            raise "terminal callback preceded retirement" unless channel.writes_retired?
+            raise "terminal callback preceded accounting" unless @released
+
+            send(:queue_keeper, { "v" => 1, "type" => "RUN" })
+            send(:flush_keeper)
+            original_fail.call(*arguments, **keywords)
+          end
+          role.send(:receive_keeper)
+          assert_equal released, role.instance_variable_get(:@released)
+          assert channel.writes_retired?
+          refute channel.eof?, "RELEASED does not imply status EOF"
+          refute channel.write_failed?
+          assert channel.pending?, "retirement must not fabricate publication"
+          assert_equal history, keeper_control_history(channel)
+          assert_same primary, role.instance_variable_get(:@first_error)
+          assert_equal 3_000_000_000, role.send(:effective_deadline_ns)
+          refute role.instance_variable_get(:@release_requested)
+          assert_equal 1, writer.closes
+          assert_equal :open, reader.state
+          assert_inert_keeper_route_retired(fixture)
+          keeper_record, group_record = child(102, 2), { "state" => "retired", "id" => 102, "absent" => true }
+          refute role.send(:records_confirmed?, keeper_record, child(103), group_record)
+          refute role.send(:own_resources_settled?)
+          role.send(:receive_keeper)
+          assert channel.eof?
+          assert_equal 1, reader.closes
+          assert role.send(:records_confirmed?, keeper_record, child(103), group_record)
+          assert role.send(:own_resources_settled?)
+          assert_equal history, keeper_control_history(channel)
+          refute role.instance_variable_get(:@release_requested)
+          assert_same primary, role.instance_variable_get(:@first_error)
+          assert_equal 3_000_000_000, role.send(:effective_deadline_ns)
+
+          # Keep every original finality conjunction: a terminal, EOF and an
+          # obsolete writer alone cannot repair bad/missing cleanup operands.
+          [child(102, 1), child(102).merge("status_kind" => "signal", "status_code" => 9),
+           { "state" => "unknown" }].each do |record|
+            refute role.send(:records_confirmed?, record, child(103), group_record)
+          end
+          refute role.send(:records_confirmed?, keeper_record, { "state" => "unknown" }, group_record)
+          refute role.send(:records_confirmed?, keeper_record, child(103), group_record.merge("absent" => false))
+          role.instance_variable_set(:@released, nil)
+          refute role.send(:records_confirmed?, keeper_record, child(103), group_record)
+          role.instance_variable_set(:@released, released)
+          writer.state = :unknown
+          refute role.send(:own_resources_settled?)
+          writer.state = :closed
+          role.instance_variable_set(:@settled, {})
+          refute role.send(:own_resources_settled?)
+          role.instance_variable_set(:@settled, { fixture.fetch(:acquisition).object_id => true })
+          unjoined = Object.new
+          unjoined.define_singleton_method(:start_attempted?) { true }
+          unjoined.define_singleton_method(:joined?) { false }
+          role.instance_variable_set(:@slots, [unjoined])
+          refute role.send(:own_resources_settled?)
+          role.instance_variable_set(:@slots, [])
+          role.instance_variable_set(:@cleanup_unknown, true)
+          refute role.send(:own_resources_settled?)
+
+          # The pre-observation EPIPE disposition is fixed on FIRST retirement.
+          # A later terminal must neither clear write_failed nor poison the same
+          # already-classified transport merely because write_failed is now true.
+          closed = Errno::EPIPE.new
+          fixture = inert_keeper_control(writes: [closed])
+          role, channel, writer = fixture.values_at(:role, :channel, :writer)
+          channel.queue(configuration("keeper"))
+          role.send(:flush_keeper)
+          assert_same closed, channel.write_error
+          assert channel.original_unfragmented_write_error?(closed)
+          assert channel.write_failed?
+          assert channel.writes_retired?
+          assert channel.write_attempted?("CONFIG")
+          refute channel.written?("CONFIG")
+          assert channel.pending?
+          assert_same closed, role.instance_variable_get(:@first_error)
+          assert role.instance_variable_get(:@failed)
+          refute role.instance_variable_get(:@cleanup_unknown)
+          refute role.send(:own_resources_settled?)
+          assert_equal 1, writer.closes
+          cutoff = role.send(:effective_deadline_ns)
+          history = keeper_control_history(channel)
+          not_attempted = { "state" => "not_attempted" }
+          early = simple("RELEASED").merge("validator" => not_attempted)
+          fixture.fetch(:reads).concat([encoded(early, :k_to_c), :wait_readable, nil])
+          role.send(:receive_keeper)
+          refute channel.eof?
+          refute role.send(:records_confirmed?, keeper_record, not_attempted, group_record)
+          role.send(:receive_keeper)
+          assert channel.eof?
+          assert role.send(:records_confirmed?, keeper_record, not_attempted, group_record)
+          assert role.send(:own_resources_settled?)
+          refute role.instance_variable_get(:@cleanup_unknown)
+          assert_equal history, keeper_control_history(channel)
+          assert_same closed, role.instance_variable_get(:@first_error)
+          assert_equal cutoff, role.send(:effective_deadline_ns)
+          refute role.instance_variable_get(:@release_requested)
+          assert_equal 1, writer.closes
+          assert_inert_keeper_route_retired(fixture)
+
+          # A positively recorded prefix or prior failure is not the clean
+          # pre-call context above. Neither terminal observation can repair it.
+          partial_error = Errno::EPIPE.new
+          fixture = inert_keeper_control(writes: [1, :wait_writable, partial_error])
+          role, channel = fixture.values_at(:role, :channel)
+          channel.queue(configuration("keeper"))
+          role.send(:flush_keeper)
+          assert channel.partial_frame?
+          prefix = keeper_control_history(channel)
+          role.send(:flush_keeper)
+          assert_same partial_error, channel.write_error
+          refute channel.original_unfragmented_write_error?(partial_error)
+          assert_equal prefix, keeper_control_history(channel)
+          assert role.instance_variable_get(:@cleanup_unknown)
+          role.send(:accept_released, early)
+          assert role.instance_variable_get(:@cleanup_unknown)
+          assert_inert_keeper_route_retired(fixture)
+
+          [:partial, :prior_failure, :prior_unknown].each do |mode|
+            script = mode == :partial ? [1, :wait_writable] : [mode == :prior_unknown ? Errno::EPIPE.new : IOError.new]
+            fixture = inert_keeper_control(writes: script)
+            role, channel = fixture.values_at(:role, :channel)
+            channel.queue(configuration("keeper"))
+            if mode == :partial
+              role.send(:flush_keeper)
+            elsif mode == :prior_failure
+              assert_raises(IOError) { channel.flush(deadline_ns: 55_000_000_000, launch_allowed: -> { true }) }
+            else
+              role.instance_variable_set(:@cleanup_unknown, true)
+              role.send(:flush_keeper)
+            end
+            role.send(:accept_released, early)
+            assert role.instance_variable_get(:@cleanup_unknown), mode.to_s
+            assert_inert_keeper_route_retired(fixture)
+          end
+
+          # Identical errno is insufficient: accessor, callback, encoder and
+          # post-return publication exceptions never came from the actual write.
+          [:accessor, :callback, :encoder, :publication, :other_write, :invalid_return].each do |mode|
+            error = mode == :other_write ? IOError.new("inert write error") : Errno::EPIPE.new
+            returned = Object.new
+            returned.define_singleton_method(:==) { |_other| raise error }
+            scripted = case mode
+                       when :publication then [returned]
+                       when :other_write then [error]
+                       when :invalid_return then [nil]
+                       else []
+                       end
+            fixture = inert_keeper_control(writes: scripted)
+            role, channel, writer = fixture.values_at(:role, :channel, :writer)
+            if mode == :encoder
+              Protocol.stub(:encode, ->(*_arguments, **_keywords) { raise error }) do
+                refute role.send(:queue_keeper, configuration("keeper"))
+              end
+            else
+              channel.queue(configuration("keeper"))
+              if mode == :callback
+                role.send(:flush_keeper)
+                channel.queue(simple("RUN"))
+                role.define_singleton_method(:launch_allowed?) { raise error }
+              elsif mode == :accessor
+                writer.define_singleton_method(:io) { raise error }
+              end
+              role.send(:flush_keeper)
+            end
+            assert role.instance_variable_get(:@cleanup_unknown), mode.to_s
+            assert channel.writes_retired?, mode.to_s
+            assert_equal 1, writer.closes, mode.to_s
+            refute channel.original_unfragmented_write_error?(error) unless mode == :other_write
+            assert_same error, role.instance_variable_get(:@first_error) unless mode == :invalid_return
+            assert_inert_keeper_route_retired(fixture)
+          end
+
+          # An eligible transport failure still cannot hide an owned close
+          # failure or suppress that close when error-recording callbacks unwind.
+          [:close_failure, :recording_unwind].each do |mode|
+            error = Errno::EPIPE.new
+            fixture = inert_keeper_control(writes: [error])
+            role, channel, writer = fixture.values_at(:role, :channel, :writer)
+            channel.queue(configuration("keeper"))
+            if mode == :close_failure
+              writer.close_error = IOError.new("inert close error")
+              role.send(:flush_keeper)
+              assert_equal :unknown, writer.state
+            else
+              recording = RuntimeError.new("inert recording unwind")
+              original_fail = role.method(:fail!)
+              role.define_singleton_method(:fail!) do |*arguments, **keywords|
+                raise "write failure callback preceded retirement" unless channel.writes_retired?
+
+                send(:queue_keeper, { "v" => 1, "type" => "RUN" })
+                send(:flush_keeper)
+                original_fail.call(*arguments, **keywords)
+                raise recording
+              end
+              close_body = writer.method(:close_once)
+              writer.define_singleton_method(:close_once) do
+                raise "owned close preceded retirement" unless channel.writes_retired?
+
+                role.send(:flush_keeper)
+                close_body.call
+              end
+              assert_same recording, assert_raises(RuntimeError) { role.send(:flush_keeper) }
+              assert_equal :closed, writer.state
+            end
+            assert channel.original_unfragmented_write_error?(error)
+            assert_same error, role.instance_variable_get(:@first_error)
+            assert role.instance_variable_get(:@cleanup_unknown)
+            refute role.send(:own_resources_settled?)
+            role.send(:retire_keeper_writes)
+            assert_equal 1, writer.closes
+            assert_inert_keeper_route_retired(fixture)
+          end
+
+          # Retirement during an ordinary launch callback cannot permit the
+          # pending RUN (or a later callback) to reach even this inert endpoint.
+          fixture = inert_keeper_control
+          role, channel = fixture.values_at(:role, :channel)
+          channel.queue(configuration("keeper"))
+          role.send(:flush_keeper)
+          channel.queue(simple("RUN"))
+          calls = fixture.fetch(:writes).dup
+          channel.flush(deadline_ns: 55_000_000_000, launch_allowed: -> { channel.retire_writes!; true })
+          assert_equal calls, fixture.fetch(:writes)
+          refute channel.write_attempted?("RUN")
+          refute channel.written?("RUN")
+          refute channel.retire_writes!, "retirement is irreversible and idempotent"
+          refute channel.flush(deadline_ns: 55_000_000_000, launch_allowed: -> { flunk "retired callback" })
+          assert_raises(Owner::ProtocolError) { role.send(:receive_command, simple("RUN")) }
+          refute role.instance_variable_get(:@run_forwarded)
+          role.send(:retire_keeper_writes)
+          assert_inert_keeper_route_retired(fixture)
+
+          # A malformed/extra status stream is still adverse after retirement;
+          # the terminal is never a substitute for reading its actual tail.
+          fixture = inert_keeper_control(reads: [encoded(early, :k_to_c), :wait_readable,
+                                                 encoded(early, :k_to_c), nil])
+          role = fixture.fetch(:role)
+          role.send(:receive_keeper)
+          refute role.instance_variable_get(:@cleanup_unknown)
+          role.send(:receive_keeper)
+          assert role.instance_variable_get(:@cleanup_unknown)
+          assert fixture.fetch(:channel).read_failed?
+          refute fixture.fetch(:channel).eof?
+        end
+      end
+    end
   end
 
   def test_early_failed_final_is_truthful_without_fabricated_success_phases
@@ -379,6 +644,117 @@ class NativeUploadProtocolTest < Minitest::Test
     assert_raises(Owner::ProtocolError) { Owner.helper_argv(role: "--enable=gems", parent_context: context, deadlines: deadlines) }
     assert_raises(Owner::ProtocolError) { Owner.helper_argv(role: "keeper", parent_context: context.merge(path: "/application"), deadlines: deadlines) }
     assert_raises(Owner::ProtocolError) { Owner.helper_argv(role: "keeper", parent_context: context.merge(parent_pid: true), deadlines: deadlines) }
+  end
+
+  private
+
+  def with_inert_keeper_control_effects_rejected(&body)
+    effects = []
+    reject = lambda do |*_arguments, **_keywords|
+      effects << :unexpected_effect
+      raise "inert keeper-control model attempted an effect"
+    end
+    operations = [[Owner, :native], [Owner, :nsig], [Owner::Custodian, :new], [Owner::Keeper, :new],
+                  [Thread, :new], [Thread, :start], [Owner::TaskSlot, :retain],
+                  [File, :open], [File, :read], [File, :binread], [File, :write],
+                  [IO, :pipe], [IO, :new], [IO, :for_fd], [Process, :spawn], [Process, :fork],
+                  [Process, :kill], [Process, :waitpid], [Process, :waitpid2],
+                  [Process, :setsid], [Process, :setpgid], [Process, :getsid], [Process, :getpgid],
+                  [Process, :clock_gettime], [Signal, :trap]]
+    enter = lambda do |index|
+      if index == operations.length
+        body.call
+      else
+        object, name = operations.fetch(index)
+        object.stub(name, reject) { enter.call(index + 1) }
+      end
+    end
+    enter.call(0)
+    assert_empty effects, "a rescued error swallowed an inert-effect tripwire"
+  end
+
+  def inert_keeper_control(reads: [], writes: [])
+    # No descriptor numbers or native child/group instances exist in this model.
+    calls = []
+    input, output = Object.new, Object.new
+    input.define_singleton_method(:read_nonblock) do |_size, exception:|
+      raise "blocking model read" unless exception == false
+
+      reads.empty? ? :wait_readable : reads.shift
+    end
+    output.define_singleton_method(:write_nonblock) do |bytes, exception:|
+      raise "blocking model write" unless exception == false
+
+      calls << bytes.dup.freeze
+      result = writes.empty? ? bytes.bytesize : writes.shift
+      raise result if result.is_a?(Exception)
+
+      result
+    end
+    lease_type = Struct.new(:state, :io, :closes, :close_error) do
+      def process_lifetime?
+        false
+      end
+
+      def close_once
+        self.closes += 1
+        self.state = close_error ? :unknown : :closed
+        raise close_error if close_error
+
+        true
+      end
+    end
+    reader, writer = lease_type.new(:open, input, 0, nil), lease_type.new(:open, output, 0, nil)
+    channel = Owner::Channel.new(reader: reader, writer: writer, incoming: :k_to_c, outgoing: :c_to_k, nsig: SIGNAL_LIMIT)
+    acquisition = Struct.new(:resources).new({ reader: reader, writer: writer })
+    parent_channel = Object.new
+    parent_channel.define_singleton_method(:written?) { |type| type == "RESERVED" }
+    group = Struct.new(:id).new(102)
+    group.define_singleton_method(:retired?) { false }
+    role = Owner::Custodian.allocate
+    { pid: 101, parent_pid: 100, run_deadline_ns: 50_000_000_000, hard_cleanup_deadline_ns: 55_000_000_000,
+      cleanup_unknown: false, failed: false, first_error: nil, cleanup_deadline_ns: nil,
+      terminal_started: false, slots: [], acquisitions: [acquisition], roles: {},
+      settled: { acquisition.object_id => true }, close_attempted: {}, keeper_channel: channel,
+      keeper: Struct.new(:pid).new(102), keeper_hello: true, group: group, parent_channel: parent_channel,
+      release_requested: false, run_forwarded: false, cleanup_started: false, group_routes_retired: false,
+      cancel_sent: false }.each { |name, value| role.instance_variable_set(:"@#{name}", value) }
+    { role: role, channel: channel, reader: reader, writer: writer, reads: reads, writes: calls, acquisition: acquisition }
+  end
+
+  def keeper_control_history(channel)
+    [channel.instance_variable_get(:@queue).map(&:dup),
+     channel.instance_variable_get(:@write_attempted).dup, channel.instance_variable_get(:@written_types).dup]
+  end
+
+  def assert_inert_keeper_route_retired(fixture)
+    role, channel = fixture.values_at(:role, :channel)
+    history, writes = keeper_control_history(channel), fixture.fetch(:writes).dup
+    assert channel.writes_retired?
+    [configuration("keeper"), simple("RUN"), simple("CANCEL"), simple("GROUP_RETIRED"), simple("RELEASE")].each do |frame|
+      assert_raises(Owner::LifecycleError) { channel.queue(frame) }
+      refute role.send(:queue_keeper, frame)
+    end
+    original_group = role.instance_variable_get(:@group)
+    original_routes = role.instance_variable_get(:@group_routes_retired)
+    release_requested = role.instance_variable_get(:@release_requested)
+    retired_group = Struct.new(:id).new(102)
+    retired_group.define_singleton_method(:retired?) { true }
+    retired_group.define_singleton_method(:absent?) { true }
+    begin
+      role.instance_variable_set(:@group, retired_group)
+      role.instance_variable_set(:@group_routes_retired, true)
+      role.send(:send_keeper_cancel)
+      role.send(:release_keeper)
+      role.send(:flush_keeper)
+      assert_equal release_requested, role.instance_variable_get(:@release_requested)
+    ensure
+      role.instance_variable_set(:@group, original_group)
+      role.instance_variable_set(:@group_routes_retired, original_routes)
+    end
+    refute channel.flush(deadline_ns: 55_000_000_000, launch_allowed: -> { flunk "retired launch callback" })
+    assert_equal history, keeper_control_history(channel)
+    assert_equal writes, fixture.fetch(:writes)
   end
 end
 

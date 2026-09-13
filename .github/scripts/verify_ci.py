@@ -260,7 +260,7 @@ ADAPTER_FAILURE_MODE_CONTRACTS = {
 ADAPTER_FAILURE_FIELDS = (
     "schema", "platform", "mode", "expectedKind", "failedPredicates", "resultKind", "driverExitStatus",
     "retainedDriverErrorCategory", "retainedDriverErrorCode", "adapterErrorCategory",
-    "resultChecks", "nativeChecks", "timingChecks",
+    "resultChecks", "nativeChecks", "timingChecks", "nativeOutcomes", "slowChecks",
 )
 ADAPTER_FAILURE_PREDICATES = ("result-kind", "driver-status")
 ADAPTER_FAILURE_RESULT_KINDS = (
@@ -304,13 +304,37 @@ ADAPTER_FAILURE_RESULT_CHECKS = (
     "watchdogJoined", "tasksJoined", "injectorsJoined", "handlersRestored", "registryInactive",
     "pendingInterrupt", "cleanupErrorsEmpty",
 )
-ADAPTER_FAILURE_NATIVE_CHECKS = ("finalized", "noProducers", "settled", "unknown", "hooksRestored", "observerErrorsEmpty")
+ADAPTER_FAILURE_NATIVE_CHECKS = (
+    "finalized", "noProducers", "settled", "unknown", "hooksRestored", "observerErrorsEmpty",
+    "productionFinality", "retainedUnknown", "statusValid", "statusDecodedEOF", "cleanupErrorsEmpty",
+    "originalWaitObserved", "tasksJoined", "leasesClosed", "allActualEOFObserved",
+    "captureSettled", "captureFinished", "captureJoined", "captureActualJoinObserved",
+    "creatorSettled", "creatorFinished", "creatorJoined", "creatorActualJoinObserved",
+    "stdoutEOF", "stdoutActualEOFObserved", "stderrEOF", "stderrActualEOFObserved",
+    "statusEOF", "statusActualEOFObserved", "groupAbsent",
+)
 ADAPTER_FAILURE_TIMING_CHECKS = (
     "runSpanMatchesMode", "firstTimeoutCutoff", "selectedTimeoutCutoff", "blockedDataWaitsPositive",
     "firstBlockedDataWithinRun", "captureWithinLimit", "slowCleanupAtLeastFour", "captureCoversSlowCleanup",
+    "slowCleanupWithinOriginalCutoff",
 )
 ADAPTER_FAILURE_CUTOFF_CHECKS = ("firstTimeoutCutoff", "selectedTimeoutCutoff")
 ADAPTER_FAILURE_CUTOFF_VALUES = frozenset({"before-start", "before-cutoff", "at-or-after-cutoff", "missing", "invalid"})
+ADAPTER_FAILURE_NATIVE_OUTCOMES = {
+    **dict.fromkeys(("custodian", "keeper", "validator"), frozenset({
+        "missing", "invalid", "not-attempted", "unknown", "exit0", "exit1", "exit2", "other-exit", "signal",
+    })),
+    "finalOutcome": frozenset({"missing", "invalid", "ok", "rejected", "failed"}),
+    "finalCleanup": frozenset({"missing", "invalid", "confirmed", "unknown"}),
+    "groupState": frozenset({"missing", "invalid", "not-created", "retired", "unknown"}),
+    **dict.fromkeys(("captureState", "creatorState"), frozenset({
+        "missing", "invalid", "unpublished", "not-constructed", "not-started", "attempted",
+    })),
+}
+ADAPTER_FAILURE_SLOW_CHECKS = (
+    "handoffPerformed", "delayEntered", "delayGuardPassed", "delayFailed", "delayFinished",
+    "originalCleanupCalled", "originalCleanupFinished",
+)
 PYTHON_POISON_PARTITIONS = (
     "poison-wait-loss",
     "poison-startup-error",
@@ -1529,9 +1553,9 @@ def native_setup_failure(raw: bytes, *, deadline: float | None = None) -> dict |
 def adapter_failure(raw: bytes, *, deadline: float | None = None) -> dict | None:
     """Closed original guard operands, not a native cause or acceptance receipt."""
     try:
-        data = _fixture_failure_record(raw, ADAPTER_FAILURE_PREFIX, 2048, deadline=deadline,
+        data = _fixture_failure_record(raw, ADAPTER_FAILURE_PREFIX, 4096, deadline=deadline,
                                        canonical_fields=ADAPTER_FAILURE_FIELDS)
-        if (type(data) is not dict or type(data["schema"]) is not int or data["schema"] != 1
+        if (type(data) is not dict or type(data["schema"]) is not int or data["schema"] != 2
                 or type(data["platform"]) is not str or data["platform"] not in ADAPTER_FAILURE_PLATFORMS
                 or type(data["mode"]) is not str or data["mode"] not in ADAPTER_FAILURE_MODE_CONTRACTS
                 or type(data["expectedKind"]) is not str
@@ -1552,7 +1576,8 @@ def adapter_failure(raw: bytes, *, deadline: float | None = None) -> dict | None
             return None
         for key, fields in (("resultChecks", ADAPTER_FAILURE_RESULT_CHECKS),
                             ("nativeChecks", ADAPTER_FAILURE_NATIVE_CHECKS),
-                            ("timingChecks", ADAPTER_FAILURE_TIMING_CHECKS)):
+                            ("timingChecks", ADAPTER_FAILURE_TIMING_CHECKS),
+                            ("slowChecks", ADAPTER_FAILURE_SLOW_CHECKS)):
             checks = data[key]
             if type(checks) is not dict or tuple(checks) != fields:
                 return None
@@ -1562,6 +1587,13 @@ def adapter_failure(raw: bytes, *, deadline: float | None = None) -> dict | None
                         return None
                 elif type(value) is not bool and not (type(value) is str and value in {"missing", "invalid"}):
                     return None
+        outcomes = data["nativeOutcomes"]
+        if (type(outcomes) is not dict or tuple(outcomes) != tuple(ADAPTER_FAILURE_NATIVE_OUTCOMES)
+                or any(type(value) is not str or value not in ADAPTER_FAILURE_NATIVE_OUTCOMES[name]
+                       for name, value in outcomes.items())):
+            return None
+        # Detached original-snapshot facts may disagree on a failed capture.
+        # Never turn their diagnostic projection into a new acceptance gate.
         return data
     finally:
         if deadline is not None:

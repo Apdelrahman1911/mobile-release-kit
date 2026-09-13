@@ -217,12 +217,18 @@ module UploadProcessFixture
         ensure
           CaptureObservation.current = nil if CaptureObservation.current.equal?(self)
           @finished = true
+          additions = {}
           begin
-            @snapshot = build_snapshot
+            additions = snapshot_additions
+          rescue Exception => error
+            @observer_errors << error.class.name
+          end
+          begin
+            @snapshot = build_snapshot.merge(additions)
           rescue Exception => error
             @observer_errors << error.class.name
             @snapshot = {"version" => VERSION, "finalized" => false, "noProducers" => false,
-                         "unknown" => true, "observerErrors" => @observer_errors.dup}
+                         "unknown" => true, "observerErrors" => @observer_errors.dup}.merge(additions)
           end
           if @snapshot.fetch("unknown")
             (UploadProcessFixture.instance_variable_get(:@unresolved_roots) ||
@@ -247,6 +253,11 @@ module UploadProcessFixture
       end
       value
     end
+
+    # Detached fixture facts are sampled at this SAME original-return boundary,
+    # including when the native snapshot cannot be built. Never resample a late
+    # producer to repair an already retained UNKNOWN observation.
+    def snapshot_additions = {}
 
     def receipt_record(receipt)
       return {"state" => "unknown"} unless receipt
@@ -384,19 +395,40 @@ module UploadProcessFixture
       receipt = @session.custodian_receipt
       exact_wait = child && acq && child.equal?(acq.child) && receipt && receipt.equal?(child.receipt) &&
         child.pid == receipt.pid && @actual_waits.any? { |owner, observed| owner.equal?(child) && observed.equal?(receipt) }
-      finalized = @session.finality_confirmed? && settled && joined && closed && exact_wait &&
+      production_finality = @session.finality_confirmed?
+      retained_unknown = @session.retained_unknown?
+      finalized = production_finality && settled && joined && closed && exact_wait &&
         custodian["state"] == "reaped" && custodian["status_kind"] == "exit" &&
         custodian["status_code"] == (@session.final && @session.final["outcome"] == "failed" ? 2 : 0) &&
         stream_eofs.values.all? { |value| value.equal?(true) } && eof_objects && terminal_cleanup_confirmed?(@session.final) &&
-        @hooks_restored && @observer_errors.empty? && !@session.retained_unknown?
-      none = no_attempt && settled && joined && closed && @hooks_restored && @observer_errors.empty? && !@session.retained_unknown?
-      base.merge("custodian" => custodian, "final" => @session.final,
+        @hooks_restored && @observer_errors.empty? && !retained_unknown
+      none = no_attempt && settled && joined && closed && @hooks_restored && @observer_errors.empty? && !retained_unknown
+      predicates = {"productionFinality" => production_finality, "retainedUnknown" => retained_unknown,
+        "cleanupErrorsEmpty" => @session.cleanup_errors.empty?, "originalWaitObserved" => !!exact_wait,
+        "tasksJoined" => !!joined, "leasesClosed" => closed, "allActualEOFObserved" => eof_objects,
+        "captureSettled" => task_settled?(tasks.first), "creatorSettled" => !!(creator_absent || task_settled?(tasks.last))}
+      {"statusValid" => :@status_valid, "statusDecodedEOF" => :@status_decoded_eof}.each do |key, variable|
+        predicates[key] = @session.instance_variable_get(variable) if @session.instance_variable_defined?(variable)
+      end
+      %w[capture creator].zip(tasks).each do |role, task|
+        %w[finished joined actualJoinObserved].each do |key|
+          predicates[role + key.sub(/\A./, &:upcase)] = task[key] if task.key?(key)
+        end
+      end
+      %w[stdout stderr status].each do |role|
+        predicates["#{role}EOF"] = stream_eofs.fetch("#{role}EOF")
+        lease = @session.leases["#{role}_read".to_sym]
+        predicates["#{role}ActualEOFObserved"] = @actual_eofs.include?(lease.io) if lease
+      end
+      group = @session.final && @session.final["group"]
+      predicates["groupAbsent"] = group["absent"] if group.is_a?(Hash) && group.key?("absent")
+      base.merge(predicates).merge("custodian" => custodian, "final" => @session.final,
                  "protocolContext" => {"hello" => @session.hello, "reserved" => @session.reserved, "ready" => @session.ready},
                  "tasks" => tasks, "leases" => leases,
                  "streams" => stream_eofs.merge("actualEOFObserved" => eof_objects),
                  "ready" => @session.ready, "stdinCloseReturned" => @session.stdin_close_returned,
                  "settled" => settled, "finalized" => !!finalized, "noProducers" => !!none,
-                 "unknown" => @session.retained_unknown? || (!finalized && !none) || !@observer_errors.empty?)
+                 "unknown" => retained_unknown || (!finalized && !none) || !@observer_errors.empty?)
     end
 
     def snapshot

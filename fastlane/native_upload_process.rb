@@ -812,7 +812,7 @@ module MobileReleaseKit
     class Channel
       POSITIVE_TYPES = %w[HELLO ADMIT RESERVED RUN MOVED READY STATUS COMMIT].freeze
 
-      attr_reader :reader, :writer
+      attr_reader :reader, :writer, :write_error
 
       def initialize(reader:, writer:, incoming:, outgoing:, nsig:)
         @reader = reader
@@ -825,6 +825,8 @@ module MobileReleaseKit
         @read_eof = false
         @read_failed = false
         @write_failed = false
+        @writes_retired = false
+        @write_error = @write_error_prior_failure = @write_error_partial_frame = nil
         @launch_vetoed = false
         @write_attempted = {}
         @written_types = {}
@@ -854,22 +856,30 @@ module MobileReleaseKit
       end
 
       def queue(frame)
-        raise LifecycleError, "io" if @write_failed || !@writer || @writer.state != :open
+        raise LifecycleError, "io" if @writes_retired || @write_failed || !@writer || @writer.state != :open
 
         bytes = Protocol.encode(frame, direction: @outgoing_direction, nsig: @nsig)
+        raise LifecycleError, "io" if @writes_retired
+
         @outgoing_check.feed(bytes)
-        @queue << [frame.fetch("type"), bytes, 0]
+        type = frame.fetch("type")
+        raise LifecycleError, "io" if @writes_retired
+
+        @queue << [type, bytes, 0]
         true
       end
 
       def flush(deadline_ns:, launch_allowed:)
-        return false if @write_failed
+        return false if @writes_retired || @write_failed
 
         40.times do
-          break if @queue.empty? || NativeUploadProcess.monotonic_ns >= deadline_ns
+          break if @writes_retired || @write_failed || @queue.empty? || NativeUploadProcess.monotonic_ns >= deadline_ns
 
           entry = @queue.first
-          if POSITIVE_TYPES.include?(entry[0]) && !launch_allowed.call
+          allowed = !POSITIVE_TYPES.include?(entry[0]) || launch_allowed.call
+          break if @writes_retired || @write_failed
+
+          unless allowed
             @launch_vetoed = true
             # No byte of an ungranted RUN is delivered late. A partial frame
             # cannot be retracted or replaced: retire that writer instead.
@@ -882,7 +892,21 @@ module MobileReleaseKit
           end
           remaining = entry[1].byteslice(entry[2]..)
           @write_attempted[entry[0]] = true
-          count = @writer.io.write_nonblock(remaining, exception: false)
+          io = @writer.io
+          break if @writes_retired || @write_failed
+
+          prior_failure = @write_failed
+          partial_frame = partial_frame?
+          begin
+            count = io.write_nonblock(remaining, exception: false)
+          rescue Exception => error
+            # Capture only the actual original write call, not an accessor,
+            # clock, launch callback or subsequent publication exception.
+            @write_error = error
+            @write_error_prior_failure = prior_failure
+            @write_error_partial_frame = partial_frame
+            raise
+          end
           break if count == :wait_writable
           unless count.instance_of?(Integer) && count.positive? && count <= remaining.bytesize
             raise LifecycleError, "io"
@@ -898,6 +922,28 @@ module MobileReleaseKit
       rescue Exception
         @write_failed = true
         raise
+      end
+
+      def retire_writes!
+        return false if @writes_retired
+
+        # No FD effects here. Keep queued offsets and attempted/written facts;
+        # an obsolete transport is not evidence that its frames were delivered.
+        @writes_retired = true
+        true
+      end
+
+      def writes_retired?
+        @writes_retired
+      end
+
+      def partial_frame?
+        @queue.any? { |entry| entry[2].positive? }
+      end
+
+      def original_unfragmented_write_error?(error)
+        # This pre-call context does NOT assert zero bytes from the failed call.
+        @write_error.equal?(error) && @write_error_prior_failure == false && @write_error_partial_frame == false
       end
 
       def pending?
@@ -1575,11 +1621,12 @@ module MobileReleaseKit
           start_keeper_creator
         when "RUN"
           unless @keeper_hello && @parent_channel.written?("RESERVED") && !@run_forwarded &&
-                 !@cleanup_started && @group && !@group.retired? && launch_allowed?
+                 !@cleanup_started && @group && !@group.retired? && @keeper_channel &&
+                 !@keeper_channel.writes_retired? && launch_allowed?
             raise ProtocolError
           end
           @run_forwarded = true
-          @keeper_channel.queue("v" => VERSION, "type" => "RUN")
+          queue_keeper("v" => VERSION, "type" => "RUN")
         when "COMMIT"
           unless @validator_status && @validator_status["status_kind"] == "exit" &&
                  @validator_status["status_code"].zero? && @parent_channel.written?("STATUS") &&
@@ -1645,7 +1692,7 @@ module MobileReleaseKit
         @keeper_channel = Channel.new(reader: reader, writer: writer, incoming: :k_to_c,
                                       outgoing: :c_to_k, nsig: NativeUploadProcess.nsig)
         if launch_allowed?
-          @keeper_channel.queue(@configuration.merge("role" => "keeper"))
+          queue_keeper(@configuration.merge("role" => "keeper"))
         end
       end
 
@@ -1740,31 +1787,72 @@ module MobileReleaseKit
           raise ProtocolError unless record == expected
         end
         @released = frame
-        # An early failed RELEASED is useful accounting, not evidence that the
-        # success protocol or C's release grant occurred.
-        fail!("lifecycle") unless @release_requested && @validator_status
-        @cleanup_started = true
+        retire_keeper_writes do
+          # An early failed RELEASED is useful accounting, not evidence that
+          # the success protocol or C's release grant occurred. Retire before
+          # any failure callback can revisit a queued control or launch route.
+          @cleanup_started = true
+          fail!("lifecycle") unless @release_requested && @validator_status
+        end
+      end
+
+      def retire_keeper_writes(channel = @keeper_channel, error: nil)
+        return unless channel
+
+        first_retirement = channel.retire_writes!
+        writer = channel.writer
+        begin
+          if first_retirement
+            closed_transport = error.is_a?(Errno::EPIPE) && channel.original_unfragmented_write_error?(error)
+            if channel.partial_frame? || ((error || channel.write_failed?) && !closed_transport)
+              @cleanup_unknown = true
+            end
+          elsif error
+            @cleanup_unknown = true # A new error cannot reuse an earlier disposition.
+          end
+          yield if block_given?
+        rescue Exception
+          @cleanup_unknown = true
+          raise
+        ensure
+          # Bind the original lease before recording callbacks. Neither an
+          # unwind nor callback reentry may suppress this one owned close.
+          close_lease(writer)
+        end
+      end
+
+      def queue_keeper(frame)
+        channel = @keeper_channel
+        return false unless channel && !channel.writes_retired?
+
+        channel.queue(frame)
+      rescue Exception => error
+        retire_keeper_writes(channel, error: error) do
+          fail!(NativeUploadProcess.reason_for(error), error: error)
+        end
+        false
       end
 
       def send_keeper_cancel
         return unless @failed && @keeper_channel && !@cancel_sent && !@released
-        return if @keeper_channel.write_failed? || @keeper_channel.writer.state != :open
+        return if @keeper_channel.writes_retired? || @keeper_channel.write_failed? || @keeper_channel.writer.state != :open
 
         @cancel_sent = true
-        @keeper_channel.queue("v" => VERSION, "type" => "CANCEL",
-                              "reason_code" => @failure_reason || "cancelled",
-                              "cleanup_deadline_ns" => effective_deadline_ns)
+        queue_keeper("v" => VERSION, "type" => "CANCEL",
+                     "reason_code" => @failure_reason || "cancelled",
+                     "cleanup_deadline_ns" => effective_deadline_ns)
       end
 
       def flush_keeper
-        return unless @keeper_channel
+        channel = @keeper_channel
+        return unless channel && !channel.writes_retired?
 
-        @keeper_channel.flush(deadline_ns: effective_deadline_ns, launch_allowed: method(:launch_allowed?))
-        fail!("cancelled") if @keeper_channel.launch_vetoed? && !@failed
+        channel.flush(deadline_ns: effective_deadline_ns, launch_allowed: method(:launch_allowed?))
+        fail!("cancelled") if channel.launch_vetoed? && !@failed
       rescue Exception => error
-        fail!(NativeUploadProcess.reason_for(error), error: error)
-        close_lease(@keeper_channel.writer)
-        @cleanup_unknown = true
+        retire_keeper_writes(channel, error: error) do
+          fail!(NativeUploadProcess.reason_for(error), error: error)
+        end
       end
 
       def near_cutoff?
@@ -1818,13 +1906,14 @@ module MobileReleaseKit
       end
 
       def release_keeper
-        return unless @group_routes_retired && @group && @group.retired? && @keeper_channel && !@release_requested
-        return if @keeper_channel.write_failed? || @keeper_channel.writer.state != :open || @keeper_channel.eof?
+        return unless @group_routes_retired && @group && @group.retired? && @keeper_channel && !@release_requested && !@released
+        return if @keeper_channel.writes_retired? || @keeper_channel.write_failed? ||
+                  @keeper_channel.writer.state != :open || @keeper_channel.eof?
 
         @release_requested = true
-        @keeper_channel.queue("v" => VERSION, "type" => "GROUP_RETIRED", "group_id" => @group.id,
-                              "absent" => @group.absent?)
-        @keeper_channel.queue("v" => VERSION, "type" => "RELEASE")
+        queue_keeper("v" => VERSION, "type" => "GROUP_RETIRED", "group_id" => @group.id,
+                     "absent" => @group.absent?)
+        queue_keeper("v" => VERSION, "type" => "RELEASE")
       end
 
       def last_resort_keeper_kill

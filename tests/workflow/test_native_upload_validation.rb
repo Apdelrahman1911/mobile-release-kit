@@ -1768,6 +1768,7 @@ class NativeUploadValidationTest < Minitest::Test
         assert driver.frame_published
       end
       assert_late_final_deadline_choreography
+      assert_slow_cleanup_choreography
 
       # Only the actual readiness algorithm runs here. Restoring file/clock/sleep
       # seams supply no child, wait receipt, real IO or native readiness proof.
@@ -2641,14 +2642,19 @@ class NativeUploadValidationTest < Minitest::Test
       "unready" => "readiness", "leader-only" => "descendant-alive", "no-deadline" => "capture-watchdog",
       "immediate-deadline" => "elapsed-bound", "real-deadline-slow-cleanup" => "pass", "immediate-deadline-slow-cleanup" => "elapsed-bound"}
     fields = %w[schema platform mode expectedKind failedPredicates resultKind driverExitStatus retainedDriverErrorCategory
-      retainedDriverErrorCode adapterErrorCategory resultChecks nativeChecks timingChecks]
+      retainedDriverErrorCode adapterErrorCategory resultChecks nativeChecks timingChecks nativeOutcomes slowChecks]
     result_keys = %w[ready stdinClosedAfterReady deadlinePrimarySameObject deadlineResultSameObject watchdogStarted watchdogIntervened
       fallbackUsed deadBeforeFallback nativeFinalityBeforeFallback adapterRejected adapterCallObserved captureEntered descendantLiveBeforeRelease
       inheritedPipeBlockObserved validatorReapedAfterRelease commitAfterDataEOF ownedDescriptorsClosed watchdogJoined tasksJoined injectorsJoined
       handlersRestored registryInactive pendingInterrupt cleanupErrorsEmpty]
-    native_keys = %w[finalized noProducers settled unknown hooksRestored observerErrorsEmpty]
+    native_keys = %w[finalized noProducers settled unknown hooksRestored observerErrorsEmpty productionFinality retainedUnknown
+      statusValid statusDecodedEOF cleanupErrorsEmpty originalWaitObserved tasksJoined leasesClosed allActualEOFObserved
+      captureSettled captureFinished captureJoined captureActualJoinObserved creatorSettled creatorFinished creatorJoined
+      creatorActualJoinObserved stdoutEOF stdoutActualEOFObserved stderrEOF stderrActualEOFObserved statusEOF statusActualEOFObserved groupAbsent]
     timing_keys = %w[runSpanMatchesMode firstTimeoutCutoff selectedTimeoutCutoff blockedDataWaitsPositive firstBlockedDataWithinRun
-      captureWithinLimit slowCleanupAtLeastFour captureCoversSlowCleanup]
+      captureWithinLimit slowCleanupAtLeastFour captureCoversSlowCleanup slowCleanupWithinOriginalCutoff]
+    outcome_keys = %w[custodian keeper validator finalOutcome finalCleanup groupState captureState creatorState]
+    slow_keys = %w[handoffPerformed delayEntered delayGuardPassed delayFailed delayFinished originalCleanupCalled originalCleanupFinished]
     assert_equal expected_kinds, UploadProcessFixture::ADAPTER_FAILURE_EXPECTED_KINDS
     assert_equal classes.values.flat_map { |class_name| callback_modes.map { |suffix, modes| ["#{class_name}##{suffix}", modes] } }.to_h,
       UploadProcessFixture::ADAPTER_FAILURE_CALLBACK_MODES
@@ -2656,6 +2662,8 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal result_keys, UploadProcessFixture::ADAPTER_FAILURE_RESULT_CHECKS
     assert_equal native_keys, UploadProcessFixture::ADAPTER_FAILURE_NATIVE_CHECKS
     assert_equal timing_keys, UploadProcessFixture::ADAPTER_FAILURE_TIMING_CHECKS
+    assert_equal outcome_keys, UploadProcessFixture::ADAPTER_FAILURE_NATIVE_OUTCOMES.keys
+    assert_equal slow_keys, UploadProcessFixture::ADAPTER_FAILURE_SLOW_CHECKS
     assert_equal "MRK_ADAPTER_FAILURE=", UploadProcessFixture::ADAPTER_FAILURE_PREFIX
     status_class = Struct.new(:exitstatus) # Already-read comparison data, not a Process::Status receipt.
     status = status_class.new(1)
@@ -2665,25 +2673,35 @@ class NativeUploadValidationTest < Minitest::Test
       "error" => "actual ready timeout cause was not observed", "adapterErrorClass" => "MobileReleaseKit::ContractError",
       "cleanupErrors" => ["private-marker"], "private" => "private-marker", "pid" => 999_887_766,
       "nativeObservation" => native_keys.reject { |key| key == "observerErrorsEmpty" }.to_h { |key| [key, false] }.merge(
-        "observerErrors" => [], "private" => "private-marker"),
+        "observerErrors" => [], "private" => "private-marker",
+        "custodian" => {"state" => "reaped", "status_kind" => "exit", "status_code" => 2},
+        "final" => {"outcome" => "failed", "cleanup" => "confirmed", "group" => {"state" => "retired", "absent" => true},
+          "keeper" => {"state" => "reaped", "status_kind" => "exit", "status_code" => 2},
+          "validator" => {"state" => "reaped", "status_kind" => "signal", "status_code" => 9}},
+        "tasks" => [{"role" => "capture", "state" => "attempted"}, {"role" => "creator", "state" => "not_started"}],
+        "slowCleanup" => slow_keys.to_h { |key| [key, key != "delayFailed"] }.merge("slowCleanupSeconds" => 4.0,
+          "originalCleanupFinishedNs" => 6_000_000_000, "originalCleanupCutoffNs" => 7_000_000_000)),
       "nativeStartedNs" => start, "nativeRunDeadlineNs" => cutoff, "firstTimeoutDecisionNs" => cutoff - 1,
       "selectedTimeoutNs" => cutoff, "blockedDataWaits" => 2, "firstBlockedDataNs" => start + 1,
-      "captureSeconds" => 6.0, "slowCleanupSeconds" => 4.0)
+      "captureSeconds" => 6.0, "slowCleanupSeconds" => 999.0) # Mutable driver data is NOT the slow snapshot authority.
     formatter = UploadProcessFixture.method(:adapter_failure_line)
-    expected = {"schema" => 1, "platform" => "ios", "mode" => "real-deadline", "expectedKind" => "pass",
+    expected = {"schema" => 2, "platform" => "ios", "mode" => "real-deadline", "expectedKind" => "pass",
       "failedPredicates" => %w[result-kind driver-status], "resultKind" => "fixture-cleanup", "driverExitStatus" => 1,
       "retainedDriverErrorCategory" => "fixture-error", "retainedDriverErrorCode" => "ready-timeout-unobserved",
       "adapterErrorCategory" => "contract-error", "resultChecks" => result_keys.to_h { |key| [key, key != "cleanupErrorsEmpty"] },
       "nativeChecks" => native_keys.to_h { |key| [key, key == "observerErrorsEmpty"] },
       "timingChecks" => {"runSpanMatchesMode" => true, "firstTimeoutCutoff" => "before-cutoff", "selectedTimeoutCutoff" => "at-or-after-cutoff",
         "blockedDataWaitsPositive" => true, "firstBlockedDataWithinRun" => true, "captureWithinLimit" => true,
-        "slowCleanupAtLeastFour" => true, "captureCoversSlowCleanup" => true}}
+        "slowCleanupAtLeastFour" => true, "captureCoversSlowCleanup" => true, "slowCleanupWithinOriginalCutoff" => true},
+      "nativeOutcomes" => {"custodian" => "exit2", "keeper" => "exit2", "validator" => "signal", "finalOutcome" => "failed",
+        "finalCleanup" => "confirmed", "groupState" => "retired", "captureState" => "attempted", "creatorState" => "not-started"},
+      "slowChecks" => slow_keys.to_h { |key| [key, key != "delayFailed"] }}
     classes.each_key do |platform|
       packet = formatter.call(platform: platform, mode: "real-deadline", result: raw, status: status)
       assert_equal "MRK_ADAPTER_FAILURE=#{JSON.generate(expected.merge("platform" => platform))}\n", packet
       assert packet.ascii_only?
       assert packet.frozen?
-      assert_operator packet.bytesize, :<=, 2048
+      assert_operator packet.bytesize, :<=, 4096
       %w[private-marker 999887766 2000000100].each { |private_value| refute_includes packet, private_value }
       refute_includes packet, raw.fetch("error")
     end
@@ -2724,12 +2742,14 @@ class NativeUploadValidationTest < Minitest::Test
     end
     missing = project.call({})
     assert_equal ["missing"] * 4, missing.values_at("resultKind", "retainedDriverErrorCategory", "retainedDriverErrorCode", "adapterErrorCategory")
-    %w[resultChecks nativeChecks timingChecks].each { |key| assert_equal ["missing"], missing.fetch(key).values.uniq }
+    %w[resultChecks nativeChecks timingChecks nativeOutcomes slowChecks].each { |key| assert_equal ["missing"], missing.fetch(key).values.uniq }
     assert_equal "missing", project.call(raw.reject { |key, _| key == "errorClass" }).fetch("retainedDriverErrorCode")
     malformed = raw.merge(result_keys.to_h { |key| [key, "private-marker"] }).merge("cleanupErrors" => nil, "nativeObservation" => nil)
     invalid = project.call(malformed)
     assert_equal ["invalid"], invalid.fetch("resultChecks").values.uniq
     assert_equal ["invalid"], invalid.fetch("nativeChecks").values.uniq
+    assert_equal ["invalid"], invalid.fetch("nativeOutcomes").values.uniq
+    assert_equal ["invalid"], invalid.fetch("slowChecks").values.uniq
     false_checks = raw.merge(result_keys.to_h { |key| [key, false] }).merge("cleanupErrors" => [])
     assert_equal result_keys.to_h { |key| [key, key == "cleanupErrorsEmpty"] }, project.call(false_checks).fetch("resultChecks")
 
@@ -2756,10 +2776,69 @@ class NativeUploadValidationTest < Minitest::Test
     [[8, false], [Float::INFINITY, "invalid"], [Float::NAN, "invalid"], [-1, "invalid"], [nil, "invalid"]].each do |seconds, expected_value|
       assert_equal expected_value, project.call(raw.merge("captureSeconds" => seconds)).fetch("timingChecks").fetch("captureWithinLimit")
     end
-    row = project.call(raw.merge("captureSeconds" => 3, "slowCleanupSeconds" => 3.5)).fetch("timingChecks")
+    with_slow = lambda do |value|
+      raw.merge("nativeObservation" => raw.fetch("nativeObservation").merge("slowCleanup" => value))
+    end
+    slow_snapshot = raw.fetch("nativeObservation").fetch("slowCleanup")
+    row = project.call(with_slow.call(slow_snapshot.merge("slowCleanupSeconds" => 3.5)).merge("captureSeconds" => 3)).fetch("timingChecks")
     assert_equal [false, false], row.values_at("slowCleanupAtLeastFour", "captureCoversSlowCleanup")
-    row = project.call(raw.reject { |key, _| key == "slowCleanupSeconds" }.merge("captureSeconds" => nil)).fetch("timingChecks")
+    row = project.call(with_slow.call(slow_snapshot.reject { |key, _| key == "slowCleanupSeconds" }).merge("captureSeconds" => nil)).fetch("timingChecks")
     assert_equal ["missing", "missing"], row.values_at("slowCleanupAtLeastFour", "captureCoversSlowCleanup")
+    assert_equal expected.fetch("timingChecks"), project.call(raw.merge("slowCleanupSeconds" => -1)).fetch("timingChecks")
+    [Float::INFINITY, Float::NAN, nil, -1, true].each do |duration|
+      row = project.call(with_slow.call(slow_snapshot.merge("slowCleanupSeconds" => duration))).fetch("timingChecks")
+      assert_equal ["invalid", "invalid"], row.values_at("slowCleanupAtLeastFour", "captureCoversSlowCleanup")
+    end
+    [[6_999_999_999, true], [7_000_000_000, false], [7_000_000_001, false], [nil, "invalid"], [1.0, "invalid"]].each do |finish, relation|
+      row = project.call(with_slow.call(slow_snapshot.merge("originalCleanupFinishedNs" => finish))).fetch("timingChecks")
+      assert_equal relation, row.fetch("slowCleanupWithinOriginalCutoff")
+    end
+    slow_keys.each do |key|
+      assert_equal false, project.call(with_slow.call(slow_snapshot.merge(key => false))).fetch("slowChecks").fetch(key)
+      assert_equal "invalid", project.call(with_slow.call(slow_snapshot.merge(key => nil))).fetch("slowChecks").fetch(key)
+      assert_equal "missing", project.call(with_slow.call(slow_snapshot.reject { |name, _| name == key })).fetch("slowChecks").fetch(key)
+    end
+    child_vectors = [[{}, "missing"], [nil, "invalid"], [{"state" => "unknown"}, "unknown"],
+      [{"state" => "not_attempted"}, "not-attempted"], [{"state" => "private-marker"}, "invalid"],
+      [{"state" => :unknown}, "invalid"], [{"state" => "reaped", "status_kind" => :exit, "status_code" => 0}, "invalid"]]
+    [0, 1, 2, 3, 255, 256, true].each do |code|
+      category = code.instance_of?(Integer) && code.between?(0, 255) ? (code <= 2 ? "exit#{code}" : "other-exit") : "invalid"
+      child_vectors << [{"state" => "reaped", "status_kind" => "exit", "status_code" => code}, category]
+    end
+    child_vectors << [{"state" => "reaped", "status_kind" => "signal", "status_code" => 9}, "signal"]
+    %w[custodian keeper validator].each do |role|
+      child_vectors.each do |record, category|
+        native = raw.fetch("nativeObservation").dup
+        if role == "custodian"
+          native[role] = record
+        else
+          native["final"] = native.fetch("final").merge(role => record)
+        end
+        assert_equal category, project.call(raw.merge("nativeObservation" => native)).fetch("nativeOutcomes").fetch(role)
+      end
+    end
+    {"finalOutcome" => ["outcome", %w[ok rejected failed]], "finalCleanup" => ["cleanup", %w[confirmed unknown]]}.each do |key, (field, values)|
+      (values + ["private-marker", nil]).each do |value|
+        native = raw.fetch("nativeObservation").merge("final" => raw.fetch("nativeObservation").fetch("final").merge(field => value))
+        assert_equal values.include?(value) ? value : "invalid", project.call(raw.merge("nativeObservation" => native)).fetch("nativeOutcomes").fetch(key)
+      end
+    end
+    %w[not_created retired unknown].each do |state|
+      native = raw.fetch("nativeObservation").merge("final" => raw.fetch("nativeObservation").fetch("final").merge("group" => {"state" => state}))
+      assert_equal state.tr("_", "-"), project.call(raw.merge("nativeObservation" => native)).fetch("nativeOutcomes").fetch("groupState")
+    end
+    %w[capture creator].each do |role|
+      %w[unpublished not_constructed not_started attempted].each do |state|
+        native = raw.fetch("nativeObservation").merge("tasks" => [{"role" => role, "state" => state}])
+        assert_equal state.tr("_", "-"), project.call(raw.merge("nativeObservation" => native)).fetch("nativeOutcomes").fetch("#{role}State")
+      end
+      [nil, [false], [{"role" => role, "state" => "attempted"}] * 2].each do |records|
+        native = raw.fetch("nativeObservation").merge("tasks" => records)
+        assert_equal "invalid", project.call(raw.merge("nativeObservation" => native)).fetch("nativeOutcomes").fetch("#{role}State")
+      end
+    end
+    no_final = project.call(raw.merge("nativeObservation" => raw.fetch("nativeObservation").merge("final" => nil))).fetch("nativeOutcomes")
+    assert_equal ["missing"] * 5, no_final.values_at("keeper", "validator", "finalOutcome", "finalCleanup", "groupState")
 
     exercise = lambda do |platform: "ios", selected: "real-deadline", class_name: nil, method_name: nil,
                             write_result: :full, expiry: nil, mutate: nil, publication_error: nil, projection_error: nil,
@@ -4180,6 +4259,18 @@ class NativeUploadValidationTest < Minitest::Test
     else
       assert_equal %w[capture creator], observation.fetch("tasks").map { |task| task.fetch("role") }.sort
       assert observation.fetch("tasks").all? { |task| task.fetch("startAttempted") }
+      %w[productionFinality statusValid statusDecodedEOF cleanupErrorsEmpty originalWaitObserved
+        tasksJoined leasesClosed allActualEOFObserved captureSettled captureFinished captureJoined captureActualJoinObserved
+        creatorSettled creatorFinished creatorJoined creatorActualJoinObserved stdoutEOF stdoutActualEOFObserved
+        stderrEOF stderrActualEOFObserved statusEOF statusActualEOFObserved].each do |key|
+        assert_equal true, observation.fetch(key), key
+      end
+      assert_equal false, observation.fetch("retainedUnknown")
+      if observation.fetch("final").fetch("group").fetch("state") == "retired"
+        assert_equal true, observation.fetch("groupAbsent")
+      else
+        refute observation.key?("groupAbsent"), "absence of a group is not a group-absence observation"
+      end
       assert_child_terminal(observation.fetch("custodian"), allow_no_attempt: false)
       expected_exit = observation.fetch("final").fetch("outcome") == "failed" ? 2 : 0
       assert_equal ["exit", expected_exit], observation.fetch("custodian").values_at("status_kind", "status_code")
@@ -4349,6 +4440,320 @@ class NativeUploadValidationTest < Minitest::Test
         ->(c) { c[:driver].instance_variable_set(:@late_final_yielded, true) },
       ]
       bypasses.each { |mutate| assert_empty exercise.call(mutate: mutate).fetch(:sleeps) }
+    ensure
+      assert_empty install_seam.restore
+      assert_equal before_install, parent.instance_method(:install)
+      assert_same before_observer, UploadProcessFixture::CaptureObservation.current
+    end
+  end
+
+  def assert_slow_cleanup_choreography
+    # Real hook registrations and their ordinary Ruby bodies, but only inert
+    # session/task operands. No native observer, thread, IO, signal or wait is
+    # installed. The sole parent-install seam is reversed below.
+    helper = MobileReleaseKit::NativeUploadProcess
+    native = MobileReleaseKit::NativeUploadValidation
+    parent = UploadProcessFixture::NativeSetupDriver::Observation
+    before_install = parent.instance_method(:install)
+    before_observer = UploadProcessFixture::CaptureObservation.current
+    install_seam = UploadProcessFixture::CaptureObservation::Hooks.new
+    begin
+      install_seam.wrap(parent, :install) { nil }
+      model = lambda do |mode = "real-deadline-slow-cleanup"|
+        primary = MobileReleaseKit::ContractError.new("original modeled timeout")
+        state = {now: 2_000_000_000, cutoff: 7_000_000_000, primary: primary}
+        slot = Struct.new(:thread, :run_deadline_ns, :hard_cleanup_deadline_ns).
+          new(Thread.current, 2_000_000_000, 7_000_000_000)
+        session = Struct.new(:capture_slot, :ready, :reserved).new(slot, {}, {})
+        session.define_singleton_method(:primary_error) { state.fetch(:primary) }
+        session.define_singleton_method(:cleanup_deadline_ns) { state.fetch(:cutoff) }
+        driver = UploadProcessFixture::AdapterDriver.new(@root, "ios", mode, {})
+        observer = UploadProcessFixture::AdapterDriver::Observation.new(driver, native: native, root: Object.new)
+        driver.instance_variable_set(:@observation, observer)
+        observer.instance_variable_set(:@session, session)
+        driver.observed.merge!("ready" => true, "blockedDataWaits" => 1, "nativeRunDeadlineNs" => slot.run_deadline_ns)
+        selected = [primary, slot.run_deadline_ns]
+        driver.instance_variable_set(:@selected_timeout, selected)
+        driver.instance_variable_set(:@timeout_objects, [selected])
+        registrations = {}
+        hooks = Object.new
+        hooks.define_singleton_method(:wrap) { |target, name, &body| registrations[[target, name]] = body }
+        observer.instance_variable_set(:@hooks, hooks)
+        observer.instance_variable_set(:@helper, helper)
+        observer.install
+        target = native.const_get(:CaptureSession, false)
+        invoke = lambda do |name, &original|
+          registrations.fetch([target, name]).call(original, session, [], {}, nil)
+        end
+        {state: state, slot: slot, session: session, driver: driver, observer: observer, invoke: invoke,
+         primary: primary, selected: selected, registrations: registrations}
+      end
+      observe = ->(m) { m.fetch(:invoke).call(:observe_cancellation) { :observed } }
+      run = ->(m, &body) { m.fetch(:invoke).call(:run, &body) }
+
+      m = model.call
+      seen = []
+      original = -> { seen << :original; :observed }
+      run.call(m) do
+        hook = m.fetch(:registrations).fetch([native.const_get(:CaptureSession, false), :observe_cancellation])
+        actual = assert_raises(MobileReleaseKit::ContractError) { hook.call(original, m.fetch(:session), [], {}, nil) }
+        assert_same m.fetch(:primary), actual
+        assert_equal [:original], seen
+        assert m.fetch(:observer).snapshot_additions.fetch("slowCleanup").fetch("handoffPerformed")
+        assert_equal :observed, observe.call(m) # One-shot; no second delivery/construction.
+      end
+      assert_equal 0, m.fetch(:observer).instance_variable_get(:@slow_body_depth)
+
+      bypasses = [
+        ->(c) { c[:observer].instance_variable_set(:@session, Object.new) },
+        ->(c) { c[:slot].thread = Object.new }, ->(c) { c[:session].ready = nil }, ->(c) { c[:session].reserved = nil },
+        ->(c) { c[:driver].observed["ready"] = false }, ->(c) { c[:driver].observed["blockedDataWaits"] = 0 },
+        ->(c) { c[:driver].observed["blockedDataWaits"] = true }, ->(c) { c[:slot].run_deadline_ns = 2.0 },
+        ->(c) { c[:driver].observed["nativeRunDeadlineNs"] += 1 }, ->(c) { c[:selected][1] -= 1 },
+        ->(c) { c[:selected][1] = 2.0 }, ->(c) { c[:state][:primary] = IOError.new("earlier original error") },
+        ->(c) { c[:driver].instance_variable_set(:@selected_timeout, nil) },
+        ->(c) { c[:driver].instance_variable_set(:@timeout_objects, [c[:selected].dup]) },
+        ->(c) { c[:observer].instance_variable_set(:@slow_cleanup_entered, true) },
+      ]
+      bypasses.each do |mutate|
+        m = model.call
+        mutate.call(m)
+        run.call(m) { assert_equal :observed, observe.call(m) }
+        refute m.fetch(:observer).instance_variable_get(:@slow_handoff_performed)
+      end
+      %w[real-deadline immediate-deadline immediate-deadline-slow-cleanup no-deadline inherited].each do |mode|
+        m = model.call(mode)
+        run.call(m) { assert_equal :observed, observe.call(m) }
+        refute m.fetch(:observer).instance_variable_get(:@slow_handoff_performed)
+        assert_equal({}, m.fetch(:observer).snapshot_additions) unless mode.end_with?("-slow-cleanup")
+      end
+      m = model.call
+      assert_equal :observed, observe.call(m) # Not in the original run-body scope.
+      refute m.fetch(:observer).instance_variable_get(:@slow_handoff_performed)
+      run.call(m) do
+        run.call(m) { assert_equal :observed, observe.call(m) } # Nested run is not the original body.
+        assert_same m.fetch(:primary), assert_raises(MobileReleaseKit::ContractError) { observe.call(m) }
+      end
+
+      [nil, IOError.new("nested write failure")].each do |write_error|
+        m = model.call
+        run.call(m) do
+          nested = lambda do
+            m.fetch(:invoke).call(:write_control) do
+              m.fetch(:invoke).call(:write_control) do
+                assert_equal :observed, observe.call(m)
+                refute m.fetch(:observer).instance_variable_get(:@slow_handoff_performed)
+                raise write_error if write_error
+              end
+            end
+          end
+          if write_error
+            assert_same write_error, assert_raises(IOError) { nested.call }
+          else
+            nested.call
+          end
+          assert_equal 0, m.fetch(:observer).instance_variable_get(:@slow_write_depth)
+          assert_same m.fetch(:primary), assert_raises(MobileReleaseKit::ContractError) { observe.call(m) }
+        end
+      end
+      m = model.call
+      run.call(m) do
+        error = IOError.new("original observation failed before handoff")
+        actual = assert_raises(IOError) { m.fetch(:invoke).call(:observe_cancellation) { raise error } }
+        assert_same error, actual
+        refute m.fetch(:observer).instance_variable_get(:@slow_handoff_performed)
+        assert_same m.fetch(:primary), assert_raises(MobileReleaseKit::ContractError) { observe.call(m) }
+      end
+
+      # Both legitimate real-slow paths reach the ORIGINAL body ensure: the
+      # direct handoff above, or natural loop completion after its already
+      # recorded timeout, without another direct observation. These inert
+      # models retain that timeout; neither creates a replacement or a receipt.
+      [false, true].each do |handoff|
+        m = model.call
+        driver, observer, state = m.values_at(:driver, :observer, :state)
+        cutoff, primary, selected = state.values_at(:cutoff, :primary) + [m.fetch(:selected)]
+        cleanups, sleeps = [], []
+        sleeper = lambda do |seconds|
+          sleeps << seconds
+          assert_equal 4, seconds
+          state[:now] += 4_000_000_000
+        end
+        returned = nil
+        UploadProcessFixture.stub(:clock_ns, -> { state.fetch(:now) }) do
+          observer.stub(:sleep, sleeper) do
+            returned = run.call(m) do
+              begin
+                if handoff
+                  observe.call(m)
+                  flunk "eligible original handoff did not transfer its timeout"
+                end
+                :original_body_returned
+              rescue MobileReleaseKit::ContractError => error
+                assert handoff
+                assert_same primary, error
+                :original_timeout_handled
+              ensure
+                m.fetch(:invoke).call(:finish_task_ownership) do
+                  cleanups << :original
+                  assert_equal :observed, observe.call(m) # Entered cleanup cannot supply a missing handoff.
+                  state[:now] += 10_000_000
+                  :cleaned
+                end
+              end
+            end
+          end
+        end
+        assert_equal handoff ? :original_timeout_handled : :original_body_returned, returned
+        assert_equal [4], sleeps
+        assert_equal [:original], cleanups
+        assert_equal cutoff, state.fetch(:cutoff)
+        assert_same primary, state.fetch(:primary)
+        assert_same selected, driver.original_timeout_record(m.fetch(:session))
+        assert_equal [selected], driver.instance_variable_get(:@timeout_objects)
+        assert_equal 0, observer.instance_variable_get(:@slow_body_depth)
+        snapshot = observer.snapshot_additions
+        slow = snapshot.fetch("slowCleanup")
+        assert_equal handoff, slow.fetch("handoffPerformed")
+        assert_nil driver.validate_slow_cleanup_snapshot!(snapshot)
+        malformed = [slow.reject { |key, _| key == "handoffPerformed" }]
+        [nil, 0, "false"].each { |value| malformed << slow.merge("handoffPerformed" => value) }
+        {"delayFailed" => true, "delayFinished" => false, "originalCleanupCalled" => false,
+         "slowCleanupSeconds" => 3.99, "originalCleanupFinishedNs" => cutoff}.each do |key, value|
+          malformed << slow.merge(key => value)
+        end
+        malformed.each do |facts|
+          assert_raises(UploadProcessFixture::Failure) { driver.validate_slow_cleanup_snapshot!("slowCleanup" => facts) }
+        end
+        assert_equal handoff, slow.fetch("handoffPerformed") # No domain correction rewrites the original snapshot.
+      end
+
+      # Failure while inspecting the context, even a failing recorder, must
+      # still call the original cleanup once and preserve known call facts.
+      [false, true].each do |recording_fault|
+        m = model.call
+        driver, observer = m.values_at(:driver, :observer)
+        failure, recording_failure = IOError.new("context observation failure"), IOError.new("context recorder failure")
+        calls = []
+        invoke = lambda do
+          observer.stub(:slow_capture_task?, ->(_object) { raise failure }) do
+            actual = assert_raises(IOError) do
+              m.fetch(:invoke).call(:finish_task_ownership) { calls << :original; :cleaned }
+            end
+            assert_same recording_fault ? recording_failure : failure, actual
+          end
+        end
+        if recording_fault
+          observer.stub(:remember_slow_failure, ->(_error) { raise recording_failure }) { invoke.call }
+        else
+          invoke.call
+        end
+        assert_equal [:original], calls
+        slow = observer.snapshot_additions.fetch("slowCleanup")
+        assert slow.fetch("delayFailed") && slow.fetch("originalCleanupCalled") && slow.fetch("originalCleanupFinished")
+        refute slow.fetch("delayEntered")
+        refute slow.key?("slowCleanupSeconds")
+        assert_raises(UploadProcessFixture::Failure) { driver.validate_slow_cleanup_snapshot!(observer.snapshot_additions) }
+      end
+
+      # Each mode uses fresh inert state. Clock/sleep failures cannot suppress
+      # the original cleanup call, even when the failure recorder itself raises.
+      cases = %i[complete guard cleanup_cutoff first_clock sleep sleep_after_four delay_clock cleanup_clock recording failure_recording original_cleanup oversleep nested_entry]
+      cases.each do |fault|
+        m = model.call("immediate-deadline-slow-cleanup")
+        driver, observer, state = m.values_at(:driver, :observer, :state)
+        state[:cutoff] = state[:now] + 4_250_000_000 if fault == :guard
+        original_cutoff = state[:cutoff]
+        clock_calls, sleeps, cleanups = 0, [], []
+        failure, recording_failure, cleanup_failure = IOError.new("delay failure"), IOError.new("recording failure"), IOError.new("original cleanup failure")
+        m.fetch(:session).define_singleton_method(:cleanup_deadline_ns) { raise failure } if fault == :cleanup_cutoff
+        now = lambda do
+          clock_calls += 1
+          fail_at = {first_clock: 1, delay_clock: 2, cleanup_clock: 3}[fault]
+          raise failure if fail_at == clock_calls
+          state.fetch(:now)
+        end
+        sleeper = lambda do |seconds|
+          sleeps << seconds
+          assert_equal 4, seconds
+          raise failure if %i[sleep failure_recording].include?(fault)
+          if fault == :nested_entry
+            assert_raises(UploadProcessFixture::Failure) do
+              m.fetch(:invoke).call(:finish_task_ownership) { cleanups << :unexpected_nested_cleanup }
+            end
+          end
+          state[:now] += fault == :oversleep ? 5_000_000_000 : 4_000_000_000
+          raise failure if fault == :sleep_after_four
+        end
+        original = lambda do
+          cleanups << :original
+          assert observer.instance_variable_get(:@slow_cleanup_entered)
+          assert_equal :observed, observe.call(m) # Entered cleanup cannot consume the handoff.
+          state[:now] += 10_000_000
+          raise cleanup_failure if fault == :original_cleanup
+          :cleaned
+        end
+        action = -> { run.call(m) { m.fetch(:invoke).call(:finish_task_ownership, &original) } }
+        written = driver.observed.method(:[]=)
+        writer = lambda do |key, value|
+          raise recording_failure if fault == :recording && key == "cleanupSeconds"
+          written.call(key, value)
+        end
+        perform = lambda do
+          if fault == :failure_recording
+            observer.stub(:remember_slow_failure, ->(_error) { raise recording_failure }) do
+              assert_same recording_failure, assert_raises(IOError) { action.call }
+            end
+          elsif fault == :original_cleanup
+            assert_same cleanup_failure, assert_raises(IOError) { action.call }
+          else
+            assert_equal :cleaned, action.call
+          end
+        end
+        UploadProcessFixture.stub(:clock_ns, now) do
+          observer.stub(:sleep, sleeper) do
+            driver.observed.stub(:[]=, writer) { perform.call }
+          end
+        end
+        assert_equal [:original], cleanups
+        assert_equal original_cutoff, state.fetch(:cutoff)
+        assert_equal 0, observer.instance_variable_get(:@slow_body_depth)
+        assert_same m.fetch(:primary), state.fetch(:primary)
+        snapshot = observer.snapshot_additions
+        slow = snapshot.fetch("slowCleanup")
+        assert snapshot.frozen? && slow.frozen?
+        assert slow.fetch("delayEntered") && slow.fetch("originalCleanupCalled")
+        assert_equal fault != :original_cleanup, slow.fetch("originalCleanupFinished")
+        assert_equal !%i[complete original_cleanup oversleep].include?(fault), slow.fetch("delayFailed")
+        assert_equal [], sleeps if %i[guard cleanup_cutoff first_clock].include?(fault)
+        refute slow.key?("slowCleanupSeconds") if %i[cleanup_cutoff first_clock delay_clock].include?(fault)
+        assert_operator slow.fetch("slowCleanupSeconds"), :>=, 4 if fault == :sleep_after_four
+        if fault == :complete
+          assert_nil driver.validate_slow_cleanup_snapshot!(snapshot)
+          [true, nil, 0, "false"].each do |handoff|
+            changed = snapshot.merge("slowCleanup" => slow.merge("handoffPerformed" => handoff))
+            assert_raises(UploadProcessFixture::Failure) { driver.validate_slow_cleanup_snapshot!(changed) }
+          end
+          missing = snapshot.merge("slowCleanup" => slow.reject { |key, _| key == "handoffPerformed" })
+          assert_raises(UploadProcessFixture::Failure) { driver.validate_slow_cleanup_snapshot!(missing) }
+        else
+          assert_raises(UploadProcessFixture::Failure) { driver.validate_slow_cleanup_snapshot!(snapshot) }
+        end
+        # Later task progress cannot repair the original immutable failure facts.
+        old = slow.dup
+        observer.instance_variable_set(:@slow_delay_failed, false)
+        observer.instance_variable_set(:@slow_delay_finished, true)
+        observer.instance_variable_set(:@slow_original_cleanup_finished, true)
+        assert_equal old, slow
+        assert_raises(UploadProcessFixture::Failure) { driver.validate_slow_cleanup_snapshot!(snapshot) } unless fault == :complete
+        # A repeated wrapper call may fail, but cannot repeat the original
+        # cleanup or replace the already captured facts above.
+        assert_raises(UploadProcessFixture::Failure) do
+          m.fetch(:invoke).call(:finish_task_ownership) { cleanups << :unexpected_repeat_cleanup }
+        end
+        assert_equal [:original], cleanups
+        assert_equal old, slow
+      end
     ensure
       assert_empty install_seam.restore
       assert_equal before_install, parent.instance_method(:install)

@@ -80,7 +80,7 @@ module UploadProcessFixture
     ADAPTER_FAILURE_CLASSES.each_value { |name| table["#{name}##{callback}".freeze] = modes.freeze }
   end.freeze
   ADAPTER_FAILURE_FIELDS = %w[schema platform mode expectedKind failedPredicates resultKind driverExitStatus
-    retainedDriverErrorCategory retainedDriverErrorCode adapterErrorCategory resultChecks nativeChecks timingChecks].freeze
+    retainedDriverErrorCategory retainedDriverErrorCode adapterErrorCategory resultChecks nativeChecks timingChecks nativeOutcomes slowChecks].freeze
   ADAPTER_FAILURE_KINDS = %w[pass readiness descendant-alive capture-watchdog elapsed-bound fixture-cleanup
     setup-fixture-fault process-observation process-ownership fixture-result fixture-source fixture-input
     fixture-observation fixture-control signal-policy diagnostic control unexpected].freeze
@@ -150,9 +150,25 @@ module UploadProcessFixture
     adapterCallObserved captureEntered descendantLiveBeforeRelease inheritedPipeBlockObserved validatorReapedAfterRelease
     commitAfterDataEOF ownedDescriptorsClosed watchdogJoined tasksJoined injectorsJoined handlersRestored registryInactive
     pendingInterrupt cleanupErrorsEmpty].freeze
-  ADAPTER_FAILURE_NATIVE_CHECKS = %w[finalized noProducers settled unknown hooksRestored observerErrorsEmpty].freeze
+  ADAPTER_FAILURE_NATIVE_CHECKS = %w[finalized noProducers settled unknown hooksRestored observerErrorsEmpty
+    productionFinality retainedUnknown statusValid statusDecodedEOF cleanupErrorsEmpty originalWaitObserved tasksJoined
+    leasesClosed allActualEOFObserved captureSettled captureFinished captureJoined captureActualJoinObserved
+    creatorSettled creatorFinished creatorJoined creatorActualJoinObserved stdoutEOF stdoutActualEOFObserved
+    stderrEOF stderrActualEOFObserved statusEOF statusActualEOFObserved groupAbsent].freeze
   ADAPTER_FAILURE_TIMING_CHECKS = %w[runSpanMatchesMode firstTimeoutCutoff selectedTimeoutCutoff blockedDataWaitsPositive
-    firstBlockedDataWithinRun captureWithinLimit slowCleanupAtLeastFour captureCoversSlowCleanup].freeze
+    firstBlockedDataWithinRun captureWithinLimit slowCleanupAtLeastFour captureCoversSlowCleanup slowCleanupWithinOriginalCutoff].freeze
+  ADAPTER_FAILURE_NATIVE_OUTCOMES = {
+    "custodian" => %w[missing invalid not-attempted unknown exit0 exit1 exit2 other-exit signal],
+    "keeper" => %w[missing invalid not-attempted unknown exit0 exit1 exit2 other-exit signal],
+    "validator" => %w[missing invalid not-attempted unknown exit0 exit1 exit2 other-exit signal],
+    "finalOutcome" => %w[missing invalid ok rejected failed],
+    "finalCleanup" => %w[missing invalid confirmed unknown],
+    "groupState" => %w[missing invalid not-created retired unknown],
+    "captureState" => %w[missing invalid unpublished not-constructed not-started attempted],
+    "creatorState" => %w[missing invalid unpublished not-constructed not-started attempted],
+  }.transform_values(&:freeze).freeze
+  ADAPTER_FAILURE_SLOW_CHECKS = %w[handoffPerformed delayEntered delayGuardPassed delayFailed delayFinished
+    originalCleanupCalled originalCleanupFinished].freeze
 
   class Failure < StandardError
     attr_reader :kind
@@ -955,14 +971,71 @@ module UploadProcessFixture
       [key, check.call(result["nativeObservation"], empty ? "observerErrors" : key,
         absent: !result.key?("nativeObservation"), empty: empty)]
     end
+    missing = Object.new
+    field = lambda do |record, key|
+      next missing if record.equal?(missing)
+      next nil unless record.instance_of?(Hash)
+      record.fetch(key, missing)
+    end
+    native = result.fetch("nativeObservation", missing)
+    final = field.call(native, "final")
+    final = missing if native.instance_of?(Hash) && final.nil? # An originally absent FINAL, not a malformed snapshot.
+    group = field.call(final, "group")
+    child_outcome = lambda do |record|
+      next "missing" if record.equal?(missing)
+      next "invalid" unless record.instance_of?(Hash)
+      state = record.fetch("state", missing)
+      next "missing" if state.equal?(missing)
+      next "invalid" unless state.instance_of?(String)
+      next "not-attempted" if state == "not_attempted"
+      next "unknown" if state == "unknown"
+      next "invalid" unless state == "reaped" && record["status_code"].instance_of?(Integer)
+      child_kind, child_code = record.values_at("status_kind", "status_code")
+      next "invalid" unless child_kind.instance_of?(String)
+      if child_kind == "signal" && child_code.positive? && child_code <= (1 << 31) - 1
+        "signal"
+      elsif child_kind == "exit" && child_code.between?(0, 255)
+        child_code <= 2 ? "exit#{child_code}" : "other-exit"
+      else
+        "invalid"
+      end
+    end
+    enum = lambda do |record, key, allowed|
+      value = field.call(record, key)
+      next "missing" if value.equal?(missing)
+      value.instance_of?(String) && allowed.include?(value) ? value.tr("_", "-") : "invalid"
+    end
+    task = lambda do |role|
+      records = field.call(native, "tasks")
+      next missing if records.equal?(missing)
+      next nil unless records.instance_of?(Array) && records.all? { |entry| entry.instance_of?(Hash) }
+      matches = records.select { |entry| entry["role"] == role }
+      matches.empty? ? missing : matches.length == 1 ? matches.first : nil
+    end
+    native_outcomes = {
+      "custodian" => child_outcome.call(field.call(native, "custodian")),
+      "keeper" => child_outcome.call(field.call(final, "keeper")),
+      "validator" => child_outcome.call(field.call(final, "validator")),
+      "finalOutcome" => enum.call(final, "outcome", %w[ok rejected failed]),
+      "finalCleanup" => enum.call(final, "cleanup", %w[confirmed unknown]),
+      "groupState" => enum.call(group, "state", %w[not_created retired unknown]),
+      "captureState" => enum.call(task.call("capture"), "state", %w[unpublished not_constructed not_started attempted]),
+      "creatorState" => enum.call(task.call("creator"), "state", %w[unpublished not_constructed not_started attempted]),
+    }
+    slow = field.call(native, "slowCleanup")
+    slow_checks = ADAPTER_FAILURE_SLOW_CHECKS.to_h do |key|
+      [key, check.call(slow, key, absent: slow.equal?(missing))]
+    end
     # Only relations on already recorded operands; no fresh clock/native query.
     timestamp = ->(value) { value.instance_of?(Integer) && value.positive? && value <= (1 << 63) - 1 }
     duration = lambda do |value|
       (value.instance_of?(Integer) || value.instance_of?(Float)) && value.finite? && value >= 0
     end
-    measure = lambda do |keys, valid, &relation|
-      next "missing" unless keys.all? { |key| result.key?(key) }
-      values = keys.map { |key| result.fetch(key) }
+    measure = lambda do |keys, valid, operands: result, &relation|
+      next "missing" if operands.equal?(missing)
+      next "invalid" unless operands.instance_of?(Hash)
+      next "missing" unless keys.all? { |key| operands.key?(key) }
+      values = keys.map { |key| operands.fetch(key) }
       next "invalid" unless values.all? { |value| valid.call(value) }
       relation.call(*values)
     end
@@ -975,6 +1048,8 @@ module UploadProcessFixture
         end
       end
     end
+    slow_operands = slow.instance_of?(Hash) ? slow.dup : slow
+    slow_operands["captureSeconds"] = result["captureSeconds"] if slow_operands.instance_of?(Hash) && result.key?("captureSeconds")
     timing_checks = {
       "runSpanMatchesMode" => measure.call(%w[nativeStartedNs nativeRunDeadlineNs], timestamp) { |start, cutoff|
         cutoff > start ? cutoff - start == (mode == "no-deadline" ? 10 : DEADLINE) * 1_000_000_000 : "invalid"
@@ -986,15 +1061,18 @@ module UploadProcessFixture
         cutoff > start ? first >= start && first < cutoff : "invalid"
       },
       "captureWithinLimit" => measure.call(["captureSeconds"], duration) { |seconds| seconds < CAPTURE_LIMIT },
-      "slowCleanupAtLeastFour" => measure.call(["slowCleanupSeconds"], duration) { |seconds| seconds >= 4 },
-      "captureCoversSlowCleanup" => measure.call(%w[captureSeconds slowCleanupSeconds], duration) { |capture, cleanup| capture >= cleanup },
+      "slowCleanupAtLeastFour" => measure.call(["slowCleanupSeconds"], duration, operands: slow_operands) { |seconds| seconds >= 4 },
+      "captureCoversSlowCleanup" => measure.call(%w[captureSeconds slowCleanupSeconds], duration, operands: slow_operands) { |capture, cleanup| capture >= cleanup },
+      "slowCleanupWithinOriginalCutoff" => measure.call(%w[originalCleanupFinishedNs originalCleanupCutoffNs], timestamp,
+        operands: slow_operands) { |finished, cutoff| finished < cutoff },
     }
-    line = "#{ADAPTER_FAILURE_PREFIX}#{JSON.generate({"schema" => 1, "platform" => platform, "mode" => mode,
+    line = "#{ADAPTER_FAILURE_PREFIX}#{JSON.generate({"schema" => 2, "platform" => platform, "mode" => mode,
       "expectedKind" => expected, "failedPredicates" => failed, "resultKind" => kind, "driverExitStatus" => code,
       "retainedDriverErrorCategory" => category.call("errorClass"), "retainedDriverErrorCode" => error_code,
       "adapterErrorCategory" => category.call("adapterErrorClass"), "resultChecks" => result_checks,
-      "nativeChecks" => native_checks, "timingChecks" => timing_checks})}\n"
-    line.freeze if line.ascii_only? && line.bytesize <= 2048
+      "nativeChecks" => native_checks, "timingChecks" => timing_checks,
+      "nativeOutcomes" => native_outcomes, "slowChecks" => slow_checks})}\n"
+    line.freeze if line.ascii_only? && line.bytesize <= 4096
   end
 
   def report_adapter_failure(state, original, platform:, mode:, callback:)
@@ -3044,6 +3122,24 @@ module UploadProcessFixture
         super
         driver, observer = @driver, self
         session_class = @native.const_get(:CaptureSession, false)
+        @slow_enabled = driver.slow_mode?
+        if @slow_enabled
+          @slow_body_depth = @slow_write_depth = 0
+          @slow_handoff_performed = @slow_cleanup_entered = false
+          @slow_delay_entered = @slow_guard_passed = @slow_delay_failed = @slow_delay_finished = false
+          @slow_original_cleanup_called = @slow_original_cleanup_finished = false
+        end
+        @hooks.wrap(session_class, :run) do |original, object, arguments, keywords, block|
+          observer.with_slow_run_body(object) { original.call(*arguments, **keywords, &block) }
+        end
+        @hooks.wrap(session_class, :write_control) do |original, object, arguments, keywords, block|
+          observer.with_slow_write_control(object) { original.call(*arguments, **keywords, &block) }
+        end
+        @hooks.wrap(session_class, :observe_cancellation) do |original, object, arguments, keywords, block|
+          value = original.call(*arguments, **keywords, &block)
+          observer.slow_timeout_handoff(object)
+          value
+        end
         @hooks.wrap(session_class, :initialize) do |original, object, arguments, keywords, block|
           started = nil
           source = original.source_location.first
@@ -3099,10 +3195,33 @@ module UploadProcessFixture
           value
         end
         @hooks.wrap(session_class, :finish_task_ownership) do |original, object, arguments, keywords, block|
-          started = UploadProcessFixture.clock_ns
-          value = original.call(*arguments, **keywords, &block)
-          driver.observed["cleanupSeconds"] = (UploadProcessFixture.clock_ns - started) / 1_000_000_000.0
-          value
+          called, cleanup_owned = false, true
+          begin
+            cleanup_owned = observer.claim_slow_cleanup_entry(object)
+            raise Failure.new("fixture-observation", "slow cleanup was already entered") unless cleanup_owned
+            if observer.slow_capture_task?(object)
+              observer.finish_slow_cleanup(object) do
+                called = true
+                original.call(*arguments, **keywords, &block)
+              end
+            else
+              started = UploadProcessFixture.clock_ns
+              called = true
+              value = original.call(*arguments, **keywords, &block)
+              driver.observed["cleanupSeconds"] = (UploadProcessFixture.clock_ns - started) / 1_000_000_000.0
+              value
+            end
+          rescue Exception => error
+            observer.slow_wrapper_failure(object, error) unless called
+            raise
+          ensure
+            # Even failure while identifying the fixture's original context
+            # cannot suppress the runtime's real ensure body. A nested/repeated
+            # entry cannot steal or repeat the first wrapper's cleanup call.
+            if cleanup_owned && !called
+              observer.fallback_original_cleanup(object) { original.call(*arguments, **keywords, &block) }
+            end
+          end
         end
         @hooks.wrap(IO.singleton_class, :select) do |original, _object, arguments, keywords, block|
           session = observer.session
@@ -3117,6 +3236,144 @@ module UploadProcessFixture
           value
         end
       end
+
+      def slow_capture_task?(object)
+        @slow_enabled && object.equal?(@session) && object.capture_slot.thread.equal?(Thread.current)
+      end
+
+      def with_slow_run_body(object)
+        return yield unless slow_capture_task?(object)
+        previous = @slow_body_depth
+        @slow_body_depth = previous + 1
+        begin
+          yield
+        ensure
+          @slow_body_depth = previous
+        end
+      end
+
+      def with_slow_write_control(object)
+        return yield unless slow_capture_task?(object)
+        previous = @slow_write_depth
+        @slow_write_depth = previous + 1
+        begin
+          yield
+        ensure
+          @slow_write_depth = previous
+        end
+      end
+
+      def slow_timeout_handoff(object)
+        return unless @driver.real_slow_mode? && slow_capture_task?(object) && @slow_body_depth == 1 &&
+          @slow_write_depth.zero? && !@slow_cleanup_entered && !@slow_handoff_performed
+        selected = @driver.original_timeout_record(object)
+        return unless selected && object.ready && object.reserved && @driver.observed["ready"].equal?(true)
+        waits = @driver.observed["blockedDataWaits"]
+        cutoff = object.capture_slot.run_deadline_ns
+        return unless waits.instance_of?(Integer) && waits.positive? && cutoff.instance_of?(Integer) &&
+          cutoff == @driver.observed["nativeRunDeadlineNs"] && selected.last.instance_of?(Integer) && selected.last >= cutoff
+        @slow_handoff_performed = true # BEFORE raising this already recorded original object.
+        raise selected.first
+      end
+
+      def remember_slow_failure(error)
+        @slow_delay_error ||= error # One fixture-owned error; never overwrite the native first-error record.
+      end
+
+      def slow_wrapper_failure(object, error)
+        return unless @slow_enabled && object.equal?(@session)
+        @slow_delay_failed = true
+        remember_slow_failure(error)
+      end
+
+      def claim_slow_cleanup_entry(object)
+        return true unless @slow_enabled && object.equal?(@session)
+        return false if @slow_cleanup_entered
+        @slow_cleanup_entered = true # Monotonic BEFORE context inspection, any clock, guard or sleep.
+      end
+
+      def fallback_original_cleanup(object)
+        tracked = @slow_enabled && object.equal?(@session)
+        @slow_original_cleanup_called = true if tracked
+        value = yield
+        @slow_original_cleanup_finished = true if tracked
+        value
+      end
+
+      def finish_slow_cleanup(object)
+        @slow_delay_entered = true
+        slept = false
+        value = nil
+        begin
+          begin
+            @slow_cleanup_cutoff_ns = object.__send__(:cleanup_deadline_ns)
+            @slow_delay_started_ns = UploadProcessFixture.clock_ns
+            unless @slow_cleanup_cutoff_ns.instance_of?(Integer) && @slow_delay_started_ns.instance_of?(Integer) &&
+                   @slow_delay_started_ns.positive? && @slow_cleanup_cutoff_ns - @slow_delay_started_ns > 4_250_000_000
+              raise Failure.new("readiness", "slow cleanup lacks original bound")
+            end
+            @slow_guard_passed = true
+            sleep 4
+            slept = true
+          rescue Exception => error
+            @slow_delay_failed = true # Even error-recording failure cannot conceal the failed delay.
+            remember_slow_failure(error)
+          ensure
+            begin
+              @slow_delay_finished_ns = UploadProcessFixture.clock_ns
+              if @slow_delay_started_ns
+                unless @slow_delay_finished_ns.instance_of?(Integer) && @slow_delay_started_ns.instance_of?(Integer) &&
+                       @slow_delay_finished_ns >= @slow_delay_started_ns
+                  raise Failure.new("fixture-observation", "slow cleanup clock was not monotonic")
+                end
+                @slow_delay_seconds = (@slow_delay_finished_ns - @slow_delay_started_ns) / 1_000_000_000.0
+              end
+              @slow_delay_finished = slept && !@slow_delay_failed
+            rescue Exception => error
+              @slow_delay_failed = true
+              remember_slow_failure(error)
+            end
+          end
+        ensure
+          # This is the ORIGINAL cleanup, once, even if the guard, sleep, either
+          # clock sample or the fixture's own recording code unwinds above.
+          @slow_original_cleanup_called = true
+          begin
+            value = yield
+            @slow_original_cleanup_finished = true
+          ensure
+            begin
+              @slow_cleanup_finished_ns = UploadProcessFixture.clock_ns
+              unless @slow_cleanup_finished_ns.instance_of?(Integer) && @slow_cleanup_finished_ns.positive?
+                raise Failure.new("fixture-observation", "slow cleanup clock was not observed")
+              end
+              if @slow_delay_started_ns.instance_of?(Integer)
+                @driver.observed["cleanupSeconds"] = (@slow_cleanup_finished_ns - @slow_delay_started_ns) / 1_000_000_000.0
+              end
+            rescue Exception => error
+              @slow_delay_failed = true
+              remember_slow_failure(error)
+            end
+          end
+        end
+        value
+      end
+
+      def snapshot_additions
+        return super unless @slow_enabled
+        facts = {
+          "handoffPerformed" => @slow_handoff_performed, "delayEntered" => @slow_delay_entered,
+          "delayGuardPassed" => @slow_guard_passed, "delayFailed" => @slow_delay_failed,
+          "delayFinished" => @slow_delay_finished, "originalCleanupCalled" => @slow_original_cleanup_called,
+          "originalCleanupFinished" => @slow_original_cleanup_finished,
+        }
+        {"delayStartedNs" => @slow_delay_started_ns, "delayFinishedNs" => @slow_delay_finished_ns,
+         "slowCleanupSeconds" => @slow_delay_seconds, "originalCleanupCutoffNs" => @slow_cleanup_cutoff_ns,
+         "originalCleanupFinishedNs" => @slow_cleanup_finished_ns}.each do |key, value|
+          facts[key] = value unless value.nil? # Missing publication is never coerced to zero.
+        end
+        {"slowCleanup" => facts.freeze}.freeze
+      end
     end
 
     def initialize(directory, platform, mode, parameters)
@@ -3127,6 +3384,34 @@ module UploadProcessFixture
       @observed.merge!("blockedDataWaits" => 0, "legacyRecordUsedForOwnership" => false,
         "adapterCallObserved" => false, "captureEntered" => false, "stdinClosedAfterReady" => false,
         "descendantLiveBeforeRelease" => false, "inheritedPipeBlockObserved" => false)
+    end
+
+    def slow_mode? = %w[real-deadline-slow-cleanup immediate-deadline-slow-cleanup].include?(@mode)
+    def real_slow_mode? = @mode == "real-deadline-slow-cleanup"
+
+    def original_timeout_record(session)
+      return unless @observation && session.equal?(@observation.session) && @selected_timeout &&
+        @timeout_objects.any? { |record| record.equal?(@selected_timeout) } && session.primary_error.equal?(@selected_timeout.first)
+      @selected_timeout
+    end
+
+    def validate_slow_cleanup_snapshot!(snapshot)
+      return unless slow_mode?
+      slow = snapshot["slowCleanup"]
+      handoff = slow["handoffPerformed"] if slow.instance_of?(Hash)
+      # The real body can reach its original ensure without another loop
+      # observation. Handoff is optional choreography, never timeout/finality
+      # authority; the immediate control must still never perform it.
+      unless slow.instance_of?(Hash) && slow["delayFailed"].equal?(false) &&
+             (handoff.equal?(false) || (real_slow_mode? && handoff.equal?(true))) &&
+             %w[delayEntered delayGuardPassed delayFinished originalCleanupCalled originalCleanupFinished].all? { |key| slow[key].equal?(true) }
+        raise Failure.new("fixture-observation", "slow cleanup observation failed")
+      end
+      duration, finished, cutoff = slow.values_at("slowCleanupSeconds", "originalCleanupFinishedNs", "originalCleanupCutoffNs")
+      unless (duration.instance_of?(Integer) || duration.instance_of?(Float)) && duration.finite? && duration >= 4 &&
+             finished.instance_of?(Integer) && cutoff.instance_of?(Integer) && finished.positive? && finished < cutoff
+        raise Failure.new("fixture-observation", "slow cleanup original timing was not proved")
+      end
     end
 
     def source_copy(path, label, replacements)
@@ -3149,7 +3434,7 @@ module UploadProcessFixture
       base = File.realpath(File.expand_path("../../fastlane", __dir__))
       outer = File.join(base, "native_upload_validation.rb")
       adapter = File.join(base, "#{@platform}_upload_validation.rb")
-      if @base_mode == "immediate-deadline" || @base_mode == "no-deadline" || @mode.end_with?("-slow-cleanup")
+      if @base_mode == "immediate-deadline" || @base_mode == "no-deadline"
         changes = %w[release_support native_process_spawn native_upload_process].map do |name|
           [%(require_relative "#{name}"), "require #{File.join(base, "#{name}.rb").inspect}"]
         end
@@ -3158,20 +3443,6 @@ module UploadProcessFixture
                       '@run_deadline_ns = started_ns + 10 * NANOSECONDS # Test-only shared O/C/K bound.']
         elsif @base_mode == "immediate-deadline"
           changes << ['@stdin_close_returned = true', "@stdin_close_returned = true\n        raise timeout_error # Deliberately premature AFTER the real close."]
-        end
-        if @mode.end_with?("-slow-cleanup")
-          anchor = "      def finish_task_ownership\n"
-          delay = <<~'RUBY'
-                  unless @fixture_slow_cleanup
-                    @fixture_slow_cleanup = true
-                    remaining = cleanup_deadline_ns - monotonic_ns
-                    raise UploadProcessFixture::Failure.new("readiness", "slow cleanup lacks original bound") unless remaining > 4_250_000_000
-                    before = monotonic_ns
-                    sleep 4
-                    @fixture_slow_cleanup_ns = monotonic_ns - before
-                  end
-          RUBY
-          changes << [anchor, anchor + delay.lines.map { |line| "        " + line }.join]
         end
         copy, facts = source_copy(outer, "#{@mode}-outer", changes)
         @observed["mutationSourceSha256"], @observed["mutationSha256"] = facts.values_at("originalSha256", "sha256")
@@ -3501,10 +3772,16 @@ module UploadProcessFixture
       @observed["adapterRejected"] = value.nil? && error.is_a?(MobileReleaseKit::ContractError)
       @observed["adapterJSONErrorSameObject"] = !!(@adapter_json_error && error.equal?(@adapter_json_error))
       @observed["adapterErrorClass"], @observed["adapterError"] = error&.class&.name, error&.message
-      @observed["stdinClosedAfterReady"] = @observation.snapshot["stdinCloseReturned"].equal?(true)
+      snapshot = @observation.snapshot
+      @observed["stdinClosedAfterReady"] = snapshot["stdinCloseReturned"].equal?(true)
+      slow = snapshot["slowCleanup"]
+      if slow_mode? && slow.instance_of?(Hash) && slow.key?("slowCleanupSeconds")
+        @observed["slowCleanupSeconds"] = slow.fetch("slowCleanupSeconds")
+      end
       unless @observation.finalized? || @observation.no_producers?
         raise Failure.new("fixture-cleanup", "adapter capture retained UNKNOWN")
       end
+      validate_slow_cleanup_snapshot!(snapshot)
       @observed["nativeFinalityBeforeFallback"] = !@observed["fallbackUsed"]
       raise error if error && !error.is_a?(MobileReleaseKit::ContractError)
       raise Failure.new("capture-watchdog", "capture required independent writer watchdog") if @observed["watchdogIntervened"]
@@ -3516,9 +3793,6 @@ module UploadProcessFixture
         session = @observation.session
         failure_recorded(session.capture_slot)
         @observed["deadlineResultSameObject"] = !!(@selected_timeout && error.equal?(@selected_timeout.first) && session.primary_error.equal?(error))
-        if @mode.end_with?("-slow-cleanup")
-          @observed["slowCleanupSeconds"] = session.instance_variable_get(:@fixture_slow_cleanup_ns).to_i / 1_000_000_000.0
-        end
         unless @observed["ready"] && @observed["deadlinePrimarySameObject"] && @observed["deadlineResultSameObject"] &&
                error&.message&.include?("timed out") && @observed["firstTimeoutDecisionNs"]
           raise Failure.new("readiness", "actual ready timeout cause was not observed")
