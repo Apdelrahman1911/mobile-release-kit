@@ -3864,7 +3864,8 @@ module UploadProcessFixture
       end
 
       def snapshot_additions
-        return super unless @slow_enabled
+        additions = {"capturePrimary" => OwnershipFailureDiagnostic.capture_primary(@session)}
+        return additions.freeze unless @slow_enabled
         facts = {
           "handoffPerformed" => @slow_handoff_performed, "delayEntered" => @slow_delay_entered,
           "delayGuardPassed" => @slow_guard_passed, "delayFailed" => @slow_delay_failed,
@@ -3876,7 +3877,7 @@ module UploadProcessFixture
          "originalCleanupFinishedNs" => @slow_cleanup_finished_ns}.each do |key, value|
           facts[key] = value unless value.nil? # Missing publication is never coerced to zero.
         end
-        {"slowCleanup" => facts.freeze}.freeze
+        additions.merge("slowCleanup" => facts.freeze).freeze
       end
     end
 
@@ -4086,9 +4087,9 @@ module UploadProcessFixture
       remaining = run_remaining_ns
       raise Failure.new("readiness", "#{label} original cutoff expired") unless remaining.positive?
       session = @observation.session
+      # Parent custody caps RUN and cleanup separately; RUN is not an overall deadline.
       live = UploadProcessFixture.ready?(marker.fetch("pid"), marker.fetch("group"),
-        seconds: [remaining / 1_000_000_000.0, 2].min,
-        deadline: Rational(session.capture_slot.run_deadline_ns, 1_000_000_000), parent_slot: session.capture_slot)
+        seconds: [remaining / 1_000_000_000.0, 2].min, parent_slot: session.capture_slot)
       raise Failure.new("readiness", "#{label} was not independently live before the original cutoff") unless live && run_remaining_ns.positive?
     end
 
@@ -4251,8 +4252,7 @@ module UploadProcessFixture
       end
       remaining = run_remaining_ns
       alive = UploadProcessFixture.ready?(@descendant.fetch("pid"), @descendant.fetch("group"),
-        seconds: [remaining / 1_000_000_000.0, 2].min, parent_slot: session.capture_slot,
-        deadline: Rational(session.capture_slot.run_deadline_ns, 1_000_000_000))
+        seconds: [remaining / 1_000_000_000.0, 2].min, parent_slot: session.capture_slot)
       raise Failure.new("readiness", "omission did not leave a live original descendant") unless alive && run_remaining_ns.positive?
       observe_inherited_block!
       @omission_observed = true

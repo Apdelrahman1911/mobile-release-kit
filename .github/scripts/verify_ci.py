@@ -442,6 +442,19 @@ OWNERSHIP_RUN_CONDITIONS = {
 OWNERSHIP_RUN_RESULT_FIELDS = (
     "resultKind", "retainedDriverErrorCategory", "retainedDriverErrorCode", "nativeChecks", "nativeOutcomes",
 )
+OWNERSHIP_RUN_EXTENDED_RESULT_FIELDS = (
+    "resultKind", "retainedDriverErrorCategory", "retainedDriverErrorCode", "nativeChecks", "nativeOutcomes", "captureDetail",
+)
+OWNERSHIP_CAPTURE_DETAIL_FIELDS = (
+    "adapterErrorCategory", "resultChecks", "timingChecks", "settlementChecks", "protocolContext", "primary",
+)
+OWNERSHIP_CAPTURE_PROTOCOL_FIELDS = ("hello", "reserved", "ready")
+OWNERSHIP_CAPTURE_PRIMARY_EXTRA_KINDS = {
+    "contract-error": frozenset({"none"}),
+    "missing": frozenset({"missing"}),
+    "invalid": frozenset({"invalid"}),
+}
+OWNERSHIP_CAPTURE_PRIMARY_ERROR_KINDS = {**OWNERSHIP_FAILURE_ERROR_KINDS, **OWNERSHIP_CAPTURE_PRIMARY_EXTRA_KINDS}
 NATIVE_SIGNAL_FAILURE_PREFIX = "MRK_NATIVE_SIGNAL_FAILURE="
 NATIVE_SIGNAL_FAILURE_CALLBACK = (
     "NativeSignalObservationTest#test_native_first_close_and_post_reap_signals_with_safe_veto_controls"
@@ -1796,6 +1809,31 @@ def _ownership_error_pair_valid(category: object, kind: object) -> bool:
             and type(kind) is str and kind in OWNERSHIP_FAILURE_ERROR_KINDS[category])
 
 
+def _ownership_capture_detail_valid(data: object) -> bool:
+    """Exact finite original-return operands, not protocol/finality authority."""
+    if type(data) is not list or len(data) != len(OWNERSHIP_CAPTURE_DETAIL_FIELDS):
+        return False
+    category, result, timing, settlement, protocol, primary = data
+    if (type(category) is not str or category not in ADAPTER_FAILURE_DRIVER_CODES
+            or type(result) is not str or re.fullmatch(r"[01mx]{24}", result) is None
+            or type(timing) is not str or re.fullmatch(r"[01mx][sbamx]{2}[01mx]{6}", timing) is None
+            or type(settlement) is not str or re.fullmatch(r"[01mx]{4}", settlement) is None
+            or type(protocol) is not str or re.fullmatch(r"[01mx]{3}", protocol) is None
+            or type(primary) is not list or len(primary) != 2):
+        return False
+    primary_category, primary_code = primary
+    return (type(primary_category) is str and primary_category in OWNERSHIP_CAPTURE_PRIMARY_ERROR_KINDS
+            and type(primary_code) is str and primary_code in OWNERSHIP_CAPTURE_PRIMARY_ERROR_KINDS[primary_category])
+
+
+def _ownership_run_driver_result_valid(data: object) -> bool:
+    # The five-field core is also used by standalone adapter schema2. Its
+    # grammar/eligibility stays unchanged; only ownership schema4 adds detail.
+    return (type(data) is dict and tuple(data) == OWNERSHIP_RUN_EXTENDED_RESULT_FIELDS
+            and _adapter_result_projection_valid({name: data[name] for name in OWNERSHIP_RUN_RESULT_FIELDS})
+            and _ownership_capture_detail_valid(data["captureDetail"]))
+
+
 def _ownership_run_cleanup_valid(data: object, *, helper: str, operation_category: str) -> bool:
     """Original failed-run observations only, never a second cleanup decision."""
     def choice(value, allowed):
@@ -1844,7 +1882,7 @@ def _ownership_run_cleanup_valid(data: object, *, helper: str, operation_categor
     result = data["driverResult"]
     # A recovered pass/status0 is useful failure evidence. Do not call the
     # adapter's different original result/status-rejection gate here.
-    return choice(result, ("missing", "invalid")) or _adapter_result_projection_valid(result)
+    return choice(result, ("missing", "invalid")) or _ownership_run_driver_result_valid(result)
 
 
 def ownership_failure(raw: bytes, *, deadline: float | None = None) -> dict | None:
@@ -1853,7 +1891,7 @@ def ownership_failure(raw: bytes, *, deadline: float | None = None) -> dict | No
     try:
         data = _fixture_failure_record(raw, OWNERSHIP_FAILURE_PREFIX, 4096, deadline=deadline,
                                        canonical_fields=OWNERSHIP_FAILURE_FIELDS)
-        if (type(data) is not dict or type(data["schema"]) is not int or data["schema"] != 3
+        if (type(data) is not dict or type(data["schema"]) is not int or data["schema"] != 4
                 or type(data["platform"]) is not str or data["platform"] not in ADAPTER_FAILURE_PLATFORMS
                 or type(data["family"]) is not str or data["family"] not in OWNERSHIP_FAILURE_CASES
                 or type(data["helper"]) is not str or data["helper"] not in {"capture", "run"}

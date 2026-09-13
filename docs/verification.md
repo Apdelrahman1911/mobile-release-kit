@@ -804,7 +804,7 @@ success. The controller requires the matching platform and source-known unique
 adverse callback in that adapter's healthy partition. Native/ownership/kill
 partitions, passing or ambiguous callbacks and malformed records cannot qualify.
 
-The healthy ownership families have a separate schema-3 `MRK_OWNERSHIP_FAILURE`
+The healthy ownership families have a separate schema-4 `MRK_OWNERSHIP_FAILURE`
 projection for their fixed async (4), signals (16), and policies (10) cases
 through `capture` and `run`. Family, case, and callback must match the closed
 catalog; unknown/setup/observation contracts are not admitted by this projection.
@@ -837,6 +837,31 @@ Capture, stale, successful or replacement-error state cannot supply it. Closed
 codes disclose no raw proof, path, identity or error message. Diagnostic
 bookkeeping cannot skip cleanup, change retention or replace the primary error;
 the complete line still has the same 4096-byte bound without truncation.
+
+Its ownership-only `driverResult.captureDetail` tuple retains, in order, the
+adapter error category, the existing 24 result checks, nine timing relations,
+four settlement operands, HELLO/RESERVED/READY presence, and the original native
+primary's finite category/code pair. Check vectors use `0`/`1`/`m`/`x` for
+false/true/missing/invalid. The two timeout-relation positions instead use
+`s`/`b`/`a` for before-start/before-cutoff/at-or-after-cutoff, with `m`/`x` retained.
+Protocol positions distinguish explicit nil (`0`), exact Hash presence (`1`),
+missing (`m`) and invalid (`x`): a Hash is not a validated protocol receipt.
+The primary is sampled once at the original capture-return snapshot boundary,
+not inferred from the public redacted exception or reread during later cleanup.
+Absent, unreadable and genuinely nil primary observations remain distinct.
+Optional ordinary read failures cannot change operation success; cancellation
+still preserves the original selected error. The complete legal maximum is
+3983 bytes, below the unchanged 4096-byte cap. Standalone adapter schema2 and
+native-signal schema2 keep their independent contracts. These observations do
+not establish a historical initiating cause or grant cleanup authority.
+
+Adapter readiness observers inherit their actual capture task's RUN bound via
+`parent_slot`; they do not pass that RUN bound as a second, overall deadline.
+Execution and accepted readiness still end at RUN, while nested cleanup retains
+only its existing bounded grace, capped by the original parent's hard endpoint
+and nonincreasing shared first-failure cutoff. Genuine standalone overall
+observation deadlines still cap both work and cleanup. No validation timeout,
+finality requirement or signal/ownership boundary is extended by this distinction.
 
 The separate native signal-observation test may emit one canonical schema-2
 `MRK_NATIVE_SIGNAL_FAILURE` line, bounded to 4096 bytes including prefix/newline.

@@ -2805,9 +2805,19 @@ class CIControllerContractTests(unittest.TestCase):
                 name = "OWNERSHIP_FAILURE_" + suffix
                 self.assertEqual(ruby_words(ownership_source, name), getattr(controller, name))
             for suffix in ("CLEANUP_FIELDS", "DIRECTORY_STATES", "STATUS_FIELDS", "RESULT_SOURCES", "CHECKS",
-                           "NATIVE_PROOF_FIELDS", "OWNER_FINALITIES", "ERROR_STAGES", "ERROR_FIELDS", "RESULT_FIELDS"):
+                           "NATIVE_PROOF_FIELDS", "OWNER_FINALITIES", "ERROR_STAGES", "ERROR_FIELDS", "RESULT_FIELDS",
+                           "EXTENDED_RESULT_FIELDS"):
                 name = "OWNERSHIP_RUN_" + suffix
                 self.assertEqual(ruby_words(ownership_source, name), getattr(controller, name))
+            for suffix in ("DETAIL_FIELDS", "PROTOCOL_FIELDS"):
+                name = "OWNERSHIP_CAPTURE_" + suffix
+                self.assertEqual(ruby_words(ownership_source, name), getattr(controller, name))
+            capture_detail_fields = ("adapterErrorCategory", "resultChecks", "timingChecks", "settlementChecks", "protocolContext", "primary")
+            self.assertEqual(controller.OWNERSHIP_CAPTURE_DETAIL_FIELDS, capture_detail_fields)
+            self.assertEqual(controller.OWNERSHIP_CAPTURE_PROTOCOL_FIELDS, ("hello", "reserved", "ready"))
+            self.assertEqual((len(adapter_result_checks), len(adapter_timing_checks),
+                              len(controller.NATIVE_SETUP_SETTLEMENT_CHECKS)), (24, 9, 4))
+            self.assertEqual(ruby_words(ownership_source, "SETTLEMENT_CHECKS"), controller.NATIVE_SETUP_SETTLEMENT_CHECKS)
             self.assertEqual(ruby_words(ownership_source, "OWNERSHIP_FAILURE_HELPERS"), ("capture", "run"))
             self.assertEqual(ruby_words(ownership_source, "OWNERSHIP_FAILURE_PLATFORMS"), ("ios", "android"))
 
@@ -2839,6 +2849,7 @@ class CIControllerContractTests(unittest.TestCase):
             run_proof_fields = ("versionOne", "ownerFinality", "custodianMatches", "keeperMatches", "validatorMatches",
                                 "groupMatches", "noProducersMatch")
             run_result_fields = ("resultKind", "retainedDriverErrorCategory", "retainedDriverErrorCode", "nativeChecks", "nativeOutcomes")
+            run_extended_result_fields = (*run_result_fields, "captureDetail")
             run_stages = ("child-stop", "transcript-out-close", "transcript-err-close", "held-writer-close",
                           "native-recovery", "death-observation", "directory-removal", "missing")
             run_conditions = {
@@ -2864,6 +2875,7 @@ class CIControllerContractTests(unittest.TestCase):
             self.assertEqual(controller.OWNERSHIP_RUN_ERROR_STAGES, run_stages)
             self.assertEqual(controller.OWNERSHIP_RUN_ERROR_FIELDS, ("stage", "errorCategory", "errorKind", "condition"))
             self.assertEqual(controller.OWNERSHIP_RUN_RESULT_FIELDS, run_result_fields)
+            self.assertEqual(controller.OWNERSHIP_RUN_EXTENDED_RESULT_FIELDS, run_extended_result_fields)
             self.assertEqual(ownership_literal_table("OWNERSHIP_RUN_CONDITIONS"), run_conditions)
             self.assertEqual(controller.OWNERSHIP_RUN_CONDITIONS, run_conditions)
             labels = ownership_literal_table("OWNERSHIP_FAILURE_LABEL_CODES")
@@ -2878,6 +2890,13 @@ class CIControllerContractTests(unittest.TestCase):
             self.assertEqual(len(kind_rows), len(controller.OWNERSHIP_FAILURE_ERROR_KINDS))
             self.assertEqual({category: frozenset(kinds.split()) for category, kinds in kind_rows},
                              controller.OWNERSHIP_FAILURE_ERROR_KINDS)
+            primary_extras = {"contract-error": ("none",), "missing": ("missing",), "invalid": ("invalid",)}
+            self.assertEqual(ownership_literal_table("OWNERSHIP_CAPTURE_PRIMARY_EXTRA_KINDS", words=True), primary_extras)
+            self.assertEqual(controller.OWNERSHIP_CAPTURE_PRIMARY_EXTRA_KINDS,
+                             {category: frozenset(codes) for category, codes in primary_extras.items()})
+            self.assertEqual(controller.OWNERSHIP_CAPTURE_PRIMARY_ERROR_KINDS,
+                             {**controller.OWNERSHIP_FAILURE_ERROR_KINDS, **controller.OWNERSHIP_CAPTURE_PRIMARY_EXTRA_KINDS})
+            self.assertFalse(set(primary_extras) & controller.OWNERSHIP_FAILURE_ERROR_KINDS.keys())
             for relative, name, category in (
                 ("fastlane/native_upload_process.rb", "REASONS", "native-lifecycle-error"),
                 ("fastlane/native_process_spawn.rb", "CODES", "native-spawn-error"),
@@ -2887,6 +2906,8 @@ class CIControllerContractTests(unittest.TestCase):
 
             run_result = {name: adapter_record[name] for name in run_result_fields}
             run_result.update(resultKind="pass", retainedDriverErrorCategory="none", retainedDriverErrorCode="none")
+            capture_detail = ["contract-error", "01mx" * 6, "1bamx01mx", "01mx", "m01", ["native-lifecycle-error", "deadline"]]
+            run_result["captureDetail"] = capture_detail
             run_cleanup = {
                 "directoryState": "canonical", "driverStatus": {"kind": "exit", "code": 0}, "resultSource": "recovered",
                 "checks": dict(zip(run_checks, (True, True, True, True, True, True, False, False,
@@ -2909,7 +2930,7 @@ class CIControllerContractTests(unittest.TestCase):
                 "runCleanup": "missing",
             }
             ownership_record = {
-                "schema": 3, "platform": "ios", "family": "async", "helper": "capture", "case": "async-spawn",
+                "schema": 4, "platform": "ios", "family": "async", "helper": "capture", "case": "async-spawn",
                 "phase": "row-rejection", "errorCategory": "fixture-error", "errorKind": "ownership-probe",
                 "row": ownership_row,
             }
@@ -2964,6 +2985,41 @@ class CIControllerContractTests(unittest.TestCase):
                 run_record = {**ownership_record, "helper": "run", "case": "async-reap", "row": {
                     **ownership_row, "ownerPhase": "reaped", "failedChecks": ["fixture-retained"], "runCleanup": run_cleanup}}
                 run_marker = ownership_bytes(run_record)
+                # Ownership-only detail must neither enter the common five-field
+                # parser nor change standalone adapter schema2's existing wire.
+                self.assertTrue(controller._adapter_result_projection_valid(
+                    {name: run_result[name] for name in run_result_fields}))
+                self.assertFalse(controller._adapter_result_projection_valid(run_result))
+                self.assertEqual(controller.adapter_failure(adapter_bytes(adapter_record)), adapter_record)
+                self.assertFalse(controller._ownership_run_driver_result_valid(
+                    {name: run_result[name] for name in run_result_fields}))
+                self.assertFalse(controller._ownership_capture_detail_valid(tuple(capture_detail)))
+
+                def record_with_detail(detail):
+                    return {**run_record, "row": {**run_record["row"], "runCleanup": {
+                        **run_cleanup, "driverResult": {**run_result, "captureDetail": detail}}}}
+
+                # Rotate/broadcast finite values, not a Cartesian matrix. Typed
+                # protocol presence can disagree with original ready/finality;
+                # the diagnostic preserves both, never repairs the failed case.
+                for index, cutoff in enumerate("sbamx"):
+                    code = "01mx"[index % 4]
+                    detail = [capture_detail[0], code * 24, code + cutoff * 2 + code * 6,
+                              code * 4, code * 3, capture_detail[5]]
+                    record = record_with_detail(detail)
+                    self.assertEqual(controller.ownership_failure(ownership_bytes(record)), record)
+                for category in controller.ADAPTER_FAILURE_DRIVER_CODES:
+                    record = record_with_detail([category, *capture_detail[1:]])
+                    self.assertEqual(controller.ownership_failure(ownership_bytes(record)), record)
+                for category, codes in controller.OWNERSHIP_CAPTURE_PRIMARY_ERROR_KINDS.items():
+                    for code in codes:
+                        record = record_with_detail([*capture_detail[:5], [category, code]])
+                        self.assertEqual(controller.ownership_failure(ownership_bytes(record)), record)
+                        if category in primary_extras:
+                            # Additional capture-only sentinels/categories cannot
+                            # broaden the independent outer ownership error grammar.
+                            self.assertIsNone(controller.ownership_failure(ownership_bytes({**ownership_record,
+                                "phase": "restoration", "errorCategory": category, "errorKind": code, "row": "missing"})))
                 # Inner pass/status0 is not adapter_failure eligibility. The
                 # original outer failed ownership callback remains mandatory.
                 with patch.object(controller, "adapter_failure", side_effect=AssertionError("borrowed adapter rejection gate")):
@@ -3125,7 +3181,7 @@ class CIControllerContractTests(unittest.TestCase):
                     {key: value for key, value in ownership_record.items() if key != "row"},
                     {**ownership_record, "private": "PRIVATE_VALUE"},
                     {key: ownership_record[key] for key in reversed(ownership_record)},
-                    *({**ownership_record, "schema": value} for value in (True, 3.0, "3", 2, 1)),
+                    *({**ownership_record, "schema": value} for value in (True, 4.0, "4", 3, 2, 1)),
                     *({**ownership_record, key: value} for key, value in (
                         ("platform", "PRIVATE_PLATFORM"), ("family", "signals"), ("helper", "PRIVATE_HELPER"),
                         ("family", "unknown"), ("family", "setup"), ("family", "observation"), ("family", False),
@@ -3197,7 +3253,7 @@ class CIControllerContractTests(unittest.TestCase):
                 ]
                 invalid_run_cleanup.extend({**run_cleanup, "cleanupErrors": [error]} for error in invalid_errors)
                 invalid_results = [
-                    *({key: value for key, value in run_result.items() if key != field} for field in run_result_fields),
+                    *({key: value for key, value in run_result.items() if key != field} for field in run_extended_result_fields),
                     {**run_result, "private": "PRIVATE_RECORD"}, {key: run_result[key] for key in reversed(run_result)},
                     *({**run_result, key: value} for key, value in (
                         ("resultKind", "PRIVATE_KIND"), ("resultKind", False),
@@ -3205,6 +3261,35 @@ class CIControllerContractTests(unittest.TestCase):
                     )),
                     {**run_result, "retainedDriverErrorCategory": "native-spawn-error", "retainedDriverErrorCode": "native-deadline"},
                 ]
+                invalid_details = [None, False, "missing", "invalid", {}, [], capture_detail[:-1],
+                    capture_detail + ["PRIVATE_VALUE"], list(reversed(capture_detail))]
+                for index, invalid_values in (
+                    (0, (None, False, 0, [], {}, "PRIVATE_CATEGORY")),
+                    (5, (None, False, "missing", {}, [], ["none"], ["none", "none", "PRIVATE_VALUE"],
+                         ["missing", "none"], ["invalid", "missing"], ["contract-error", "deadline"],
+                         ["native-spawn-error", "parent_lost"], ["native-lifecycle-error", "waitability"],
+                         ["fixture-error", "PRIVATE_KIND"], ["PRIVATE_CATEGORY", "none"],
+                         [True, "none"], ["none", False])),
+                ):
+                    invalid_details.extend([*capture_detail[:index], value, *capture_detail[index + 1:]]
+                                           for value in invalid_values)
+                for index, length in ((1, 24), (2, 9), (3, 4), (4, 3)):
+                    original = capture_detail[index]
+                    invalid_details.extend([*capture_detail[:index], value, *capture_detail[index + 1:]] for value in (
+                        None, False, 0, 1.0, [], {}, "", original[:-1], original + "m",
+                        original + "\n", original + "\r\n", "m" * (length - 1) + "\u03bc",
+                        "m" * (length - 1) + "\uff10", "m" * (length - 1) + "\0",
+                    ))
+                    # At each position use a code from the WRONG domain. Timing
+                    # offsets1/2 reject bool codes; other positions reject cutoff
+                    # codes. No off-by-one alphabet shift can remain unnoticed.
+                    for offset in range(length):
+                        wrong = "0" if index == 2 and offset in (1, 2) else "a"
+                        value = original[:offset] + wrong + original[offset + 1:]
+                        invalid_details.append([*capture_detail[:index], value, *capture_detail[index + 1:]])
+                self.assertFalse(controller._ownership_capture_detail_valid(
+                    [*capture_detail[:5], tuple(capture_detail[5])]))
+                invalid_results.extend({**run_result, "captureDetail": detail} for detail in invalid_details)
                 for group in ("nativeChecks", "nativeOutcomes"):
                     original = run_result[group]
                     invalid_results.extend({**run_result, group: value} for value in (
@@ -3223,13 +3308,15 @@ class CIControllerContractTests(unittest.TestCase):
                 ))
                 invalid_markers = [*(ownership_bytes(record) for record in invalid_ownership),
                     ownership_marker * 2,
-                    ownership_marker.replace(b'"schema":3', b'"schema":3,"schema":3'),
+                    ownership_marker.replace(b'"schema":4', b'"schema":4,"schema":4'),
                     ownership_marker.replace(b'"ownerPhase":"unknown"', b'"ownerPhase":"unknown","ownerPhase":"unknown"'),
                     ownership_marker.replace(b'"firstExceptionPreserved":true', b'"firstExceptionPreserved":true,"firstExceptionPreserved":true'),
-                    ownership_marker.replace(b'"schema":3', b'"schema": 3'),
+                    ownership_marker.replace(b'"schema":4', b'"schema": 4'),
                     run_marker.replace(b'"driverStatus":', b'"driverStatus":null,"driverStatus":'),
                     run_marker.replace(b'"nativeFinal":false', b'"nativeFinal":false,"nativeFinal":false'),
                     run_marker.replace(b'"resultKind":"pass"', b'"resultKind":"pass","resultKind":"pass"'),
+                    run_marker.replace(b'"captureDetail":', b'"captureDetail":[],"captureDetail":'),
+                    run_marker.replace(b'"01mx"', br'"01m\u0078"'),
                     ownership_marker.replace(b'"async"', br'"\u0061sync"'),
                     ownership_marker[:-1], ownership_marker[:-1] + b"\r\n",
                     b"MRK_OWNERSHIP_FAILURE=\xff\n", b"progress " + ownership_marker,
@@ -3250,11 +3337,21 @@ class CIControllerContractTests(unittest.TestCase):
                 driver_category, driver_code = max(
                     ((category, code) for category, values in controller.ADAPTER_FAILURE_DRIVER_CODES.items() for code in values),
                     key=lambda pair: len(pair[0]) + len(pair[1]))
+                primary_pairs = [[category, code]
+                    for category, codes in controller.OWNERSHIP_CAPTURE_PRIMARY_ERROR_KINDS.items() for code in codes]
+                maximum_primary = max(primary_pairs, key=lambda item: len(json.dumps(item, separators=(",", ":"))))
+                self.assertEqual(maximum_primary, ["native-lifecycle-error", "parent_lost"])
+                self.assertEqual(len(json.dumps(maximum_primary, separators=(",", ":"))), 40)
+                maximum_capture_detail = [max(controller.ADAPTER_FAILURE_DRIVER_CODES, key=len),
+                    "m" * 24, "maa" + "m" * 6, "m" * 4, "m" * 3, maximum_primary]
+                self.assertEqual(len(json.dumps(maximum_capture_detail, separators=(",", ":"))), 119)
+                self.assertEqual(len(',"captureDetail":'), 17)
                 maximum_run_result = {
                     "resultKind": max(controller.ADAPTER_FAILURE_RESULT_KINDS, key=len),
                     "retainedDriverErrorCategory": driver_category, "retainedDriverErrorCode": driver_code,
                     "nativeChecks": dict.fromkeys(adapter_native_checks, "missing"),
                     "nativeOutcomes": {name: max(values, key=len) for name, values in adapter_native_outcomes.items()},
+                    "captureDetail": maximum_capture_detail,
                 }
                 error_tuples = [[max(run_stages, key=len), category, kind, condition]
                     for category, kinds in controller.OWNERSHIP_FAILURE_ERROR_KINDS.items() if category != "none"
@@ -3264,7 +3361,7 @@ class CIControllerContractTests(unittest.TestCase):
                 self.assertEqual(maximum_error,
                     ["transcript-out-close", "fixture-error", "fixture-cleanup", "enumeration-before-identity"])
                 self.assertEqual(len(json.dumps(maximum_error, separators=(",", ":"))), 88)
-                self.assertEqual(len(json.dumps(maximum_run_result, separators=(",", ":"))), 1239)
+                self.assertEqual(len(json.dumps(maximum_run_result, separators=(",", ":"))), 1375)
                 maximum_run_cleanup = {
                     "directoryState": max(controller.OWNERSHIP_RUN_DIRECTORY_STATES, key=len),
                     "driverStatus": {"kind": "missing", "code": "missing"},
@@ -3274,7 +3371,7 @@ class CIControllerContractTests(unittest.TestCase):
                                     else "missing" for name in run_proof_fields},
                     "cleanupErrors": [maximum_error] * 7, "driverResult": maximum_run_result,
                 }
-                self.assertEqual(len(json.dumps(maximum_run_cleanup, separators=(",", ":"))), 2621)
+                self.assertEqual(len(json.dumps(maximum_run_cleanup, separators=(",", ":"))), 2757)
                 maximum_records = [{**ownership_record, "platform": "android", "family": family,
                     "helper": helper, "case": case, "row": {
                         **ownership_row, "ownerPhase": "unstarted",
@@ -3289,7 +3386,7 @@ class CIControllerContractTests(unittest.TestCase):
                 maximum_record = max(maximum_records, key=lambda record: len(ownership_bytes(record)))
                 self.assertEqual([maximum_record[key] for key in ("family", "helper", "case")],
                                  ["async", "run", "repeated"])
-                self.assertEqual(len(ownership_bytes(maximum_record)), 3847)
+                self.assertEqual(len(ownership_bytes(maximum_record)), 3983)
                 self.assertLessEqual(len(ownership_bytes(maximum_record)), 4096)
                 self.assertEqual(controller.ownership_failure(ownership_bytes(maximum_record)), maximum_record)
                 largest_missing = {**maximum_record, "family": "signals", "helper": "capture",

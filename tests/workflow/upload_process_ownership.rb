@@ -222,6 +222,7 @@ module UploadProcessFixture
           begin
             additions = snapshot_additions
           rescue Exception => error
+            primary ||= error unless error.is_a?(StandardError)
             @observer_errors << error.class.name
           end
           settlement = SETTLEMENT_CHECKS.to_h { |key| [key, @session.nil? ? "missing" : "invalid"] }
@@ -1748,11 +1749,129 @@ module UploadProcessFixture
     "observer-metadata" => "process-observation", "death-cutoff" => "fixture-cleanup",
   }.freeze
   OWNERSHIP_RUN_RESULT_FIELDS = %w[resultKind retainedDriverErrorCategory retainedDriverErrorCode nativeChecks nativeOutcomes].freeze
+  OWNERSHIP_RUN_EXTENDED_RESULT_FIELDS = %w[resultKind retainedDriverErrorCategory retainedDriverErrorCode nativeChecks nativeOutcomes captureDetail].freeze
+  OWNERSHIP_CAPTURE_DETAIL_FIELDS = %w[adapterErrorCategory resultChecks timingChecks settlementChecks protocolContext primary].freeze
+  OWNERSHIP_CAPTURE_PROTOCOL_FIELDS = %w[hello reserved ready].freeze
+  OWNERSHIP_CAPTURE_PRIMARY_EXTRA_KINDS = {
+    "contract-error" => %w[none], "missing" => %w[missing], "invalid" => %w[invalid],
+  }.transform_values(&:freeze).freeze
+  OWNERSHIP_CAPTURE_PRIMARY_ERROR_KINDS = OWNERSHIP_FAILURE_ERROR_KINDS.merge(OWNERSHIP_CAPTURE_PRIMARY_EXTRA_KINDS).freeze
 
   # A finite view of the ORIGINAL failed row. None of these values supplies
   # execution, wait, cleanup or finality authority, and no private proof is read.
   module OwnershipFailureDiagnostic
     module_function
+
+    # Sample the SAME stored primary as CaptureSession#primary_error, under its
+    # original FailureRecord mutex. No replacement object's getter is diagnostic
+    # authority, and nil is meaningful only after confirming initialized shape.
+    # This runs once at the existing original-return snapshot, never on recovery.
+    def capture_primary(session)
+      return %w[missing missing].freeze if session.nil?
+      session_class = MobileReleaseKit::NativeUploadValidation.const_get(:CaptureSession, false)
+      slot_class = MobileReleaseKit::NativeUploadProcess::TaskSlot
+      record_class = slot_class.const_get(:FailureRecord, false)
+      return %w[invalid invalid].freeze unless session.instance_of?(session_class)
+
+      read = Object.instance_method(:instance_variable_get)
+      present = Object.instance_method(:instance_variable_defined?)
+      slot = read.bind_call(session, :@capture_slot)
+      return %w[invalid invalid].freeze unless slot.instance_of?(slot_class)
+      record = read.bind_call(slot, :@failure)
+      return %w[invalid invalid].freeze unless record.instance_of?(record_class)
+      lock = read.bind_call(record, :@lock)
+      return %w[invalid invalid].freeze unless lock.instance_of?(Mutex) && present.bind_call(record, :@first_error)
+      error = Mutex.instance_method(:synchronize).bind_call(lock) { read.bind_call(record, :@first_error) }
+      return %w[invalid invalid].freeze unless error.nil? || error.is_a?(Exception)
+
+      category, kind = case error
+      when nil then ["none", "none"]
+      when Interrupt then ["interrupt", "none"]
+      when SignalException then ["signal", "none"]
+      when SystemExit then ["system-exit", "none"]
+      when Failure then ["fixture-error", Failure.instance_method(:kind).bind_call(error)]
+      when IOError then ["io-error", "none"]
+      when SystemCallError then ["os-error", error.is_a?(Errno::ECHILD) ? "echild" : "other"]
+      when MobileReleaseKit::ContractError then ["contract-error", "none"]
+      when MobileReleaseKit::NativeUploadProcess::Error
+        ["native-lifecycle-error", MobileReleaseKit::NativeUploadProcess::Error.instance_method(:code).bind_call(error)]
+      when MobileReleaseKit::NativeProcessSpawn::Error
+        ["native-spawn-error", MobileReleaseKit::NativeProcessSpawn::Error.instance_method(:code).bind_call(error)]
+      else ["other", "none"]
+      end
+      return %w[invalid invalid].freeze unless kind.instance_of?(String)
+      # Select closed, source-owned literals; never freeze an error's own kind.
+      kind = OWNERSHIP_CAPTURE_PRIMARY_ERROR_KINDS.fetch(category).find { |candidate| candidate == kind } || "other"
+      [category, kind].freeze
+    rescue StandardError
+      %w[invalid invalid].freeze
+    end
+
+    def capture_primary_valid?(value)
+      value.instance_of?(Array) && value.length == 2 && value.all? { |item| item.instance_of?(String) } &&
+        OWNERSHIP_CAPTURE_PRIMARY_ERROR_KINDS.fetch(value.first, []).include?(value.last)
+    end
+
+    # Compact only the existing finite projections and already-recorded native
+    # snapshot. No fresh clock, task, protocol-validation or process query.
+    def capture_detail(result, projected:)
+      missing = Object.new
+      field = lambda do |record, key|
+        next missing if record.equal?(missing)
+        record.instance_of?(Hash) ? record.fetch(key, missing) : nil
+      end
+      code = lambda do |value|
+        if value.equal?(true) then "1"
+        elsif value.equal?(false) then "0"
+        elsif value.equal?(missing) || value.instance_of?(String) && value == "missing" then "m"
+        else "x"
+        end
+      end
+      native = result.fetch("nativeObservation", missing)
+      settlement = field.call(native, "settlementChecks")
+      protocol = field.call(native, "protocolContext")
+      primary = field.call(native, "capturePrimary")
+      primary = if primary.equal?(missing)
+        %w[missing missing]
+      elsif capture_primary_valid?(primary)
+        primary
+      else
+        %w[invalid invalid]
+      end
+      result_codes = ADAPTER_FAILURE_RESULT_CHECKS.map { |key| code.call(projected.fetch("resultChecks").fetch(key)) }.join
+      timing_codes = ADAPTER_FAILURE_TIMING_CHECKS.map.with_index do |key, index|
+        value = projected.fetch("timingChecks").fetch(key)
+        if [1, 2].include?(index)
+          {"before-start" => "s", "before-cutoff" => "b", "at-or-after-cutoff" => "a", "missing" => "m"}.fetch(value, "x")
+        else
+          code.call(value)
+        end
+      end.join
+      settlement_codes = CaptureObservation::SETTLEMENT_CHECKS.map { |key| code.call(field.call(settlement, key)) }.join
+      protocol_codes = OWNERSHIP_CAPTURE_PROTOCOL_FIELDS.map do |key|
+        if protocol.equal?(missing)
+          "m"
+        elsif !protocol.instance_of?(Hash)
+          "x"
+        else
+          value = protocol.fetch(key, missing)
+          if value.equal?(missing) then "m"
+          elsif value.nil? then "0"
+          elsif value.instance_of?(Hash) then "1"
+          else "x"
+          end
+        end
+      end.join
+      [projected.fetch("adapterErrorCategory"), result_codes, timing_codes, settlement_codes, protocol_codes, primary]
+    end
+
+    def capture_detail_valid?(value)
+      return false unless value.instance_of?(Array) && value.length == OWNERSHIP_CAPTURE_DETAIL_FIELDS.length &&
+        value.first.instance_of?(String) && (ADAPTER_FAILURE_CATEGORIES.values + %w[none missing invalid other]).include?(value.first)
+      patterns = [/\A[01mx]{24}\z/, /\A[01mx][sbamx]{2}[01mx]{6}\z/, /\A[01mx]{4}\z/, /\A[01mx]{3}\z/]
+      patterns.zip(value[1, 4]).all? { |pattern, item| item.instance_of?(String) && item.ascii_only? && pattern.match?(item) } &&
+        capture_primary_valid?(value.last)
+    end
 
     def error_pair(error)
       category, kind = case error
@@ -1898,7 +2017,8 @@ module UploadProcessFixture
         "invalid"
       else
         projected = UploadProcessFixture.adapter_result_projection(mode: "inherited", result: state[:result])
-        OWNERSHIP_RUN_RESULT_FIELDS.to_h { |name| [name, projected.fetch(name)] }
+        OWNERSHIP_RUN_RESULT_FIELDS.to_h { |name| [name, projected.fetch(name)] }.
+          merge("captureDetail" => capture_detail(state[:result], projected: projected))
       end
       directory_state = record["directoryState"].is_a?(Symbol) ? record["directoryState"].to_s : "missing"
       directory_state = "missing" unless OWNERSHIP_RUN_DIRECTORY_STATES.include?(directory_state)
@@ -1915,8 +2035,9 @@ module UploadProcessFixture
 
     def run_driver_result_valid?(value)
       return %w[missing invalid].include?(value) if value.instance_of?(String)
-      return false unless value.instance_of?(Hash) && value.keys == OWNERSHIP_RUN_RESULT_FIELDS &&
-        value["resultKind"].instance_of?(String) && (ADAPTER_FAILURE_KINDS + %w[missing invalid other]).include?(value["resultKind"])
+      return false unless value.instance_of?(Hash) && value.keys == OWNERSHIP_RUN_EXTENDED_RESULT_FIELDS &&
+        value["resultKind"].instance_of?(String) && (ADAPTER_FAILURE_KINDS + %w[missing invalid other]).include?(value["resultKind"]) &&
+        capture_detail_valid?(value["captureDetail"])
 
       category, code = value.values_at("retainedDriverErrorCategory", "retainedDriverErrorCode")
       return false unless category.instance_of?(String) && code.instance_of?(String)
@@ -1996,7 +2117,7 @@ module UploadProcessFixture
 
     def valid?(value)
       return false unless value.instance_of?(Hash) && value.keys == OWNERSHIP_FAILURE_FIELDS &&
-        value["schema"].instance_of?(Integer) && value["schema"] == 3 &&
+        value["schema"].instance_of?(Integer) && value["schema"] == 4 &&
         %w[platform family helper case phase].all? { |name| value[name].instance_of?(String) } &&
         OWNERSHIP_FAILURE_PLATFORMS.include?(value["platform"]) && OWNERSHIP_FAILURE_CASES.key?(value["family"]) &&
         OWNERSHIP_FAILURE_HELPERS.include?(value["helper"]) && OWNERSHIP_FAILURE_CASES.fetch(value["family"]).include?(value["case"]) &&
@@ -2159,7 +2280,7 @@ module UploadProcessFixture
           OwnershipFailureDiagnostic.run_cleanup(run_binding[2], operation: run_binding[1])))
       end
       category, kind = OwnershipFailureDiagnostic.error_pair(error)
-      line = OwnershipFailureDiagnostic.line({"schema" => 3, "platform" => @input["platform"], "family" => @family,
+      line = OwnershipFailureDiagnostic.line({"schema" => 4, "platform" => @input["platform"], "family" => @family,
         "helper" => helper, "case" => name, "phase" => phase, "errorCategory" => category, "errorKind" => kind, "row" => row})
       return unless line && UploadProcessFixture.clock_ns < @deadline_ns
 
