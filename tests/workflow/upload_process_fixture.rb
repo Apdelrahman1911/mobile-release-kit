@@ -810,9 +810,26 @@ module UploadProcessFixture
     raise
   end
 
-  def remove_fixture_directory(directory, root:, layout:)
-    assert_fixture_cleanup!(directory, root: root, layout: layout)
-    FileUtils.remove_entry(directory)
+  def remove_fixture_directory(directory, root:, layout:, diagnostic_state: nil, diagnostic_primary: nil)
+    layout_accepted, removal_error = false, nil
+    begin
+      assert_fixture_cleanup!(directory, root: root, layout: layout)
+      layout_accepted = true
+      FileUtils.remove_entry(directory)
+    rescue Exception => error
+      removal_error = error
+      raise
+    ensure
+      # No optional Hash write separates the original check and removal. A
+      # mark failure cannot replace their pending error/selected run primary;
+      # with no primary, propagate the SAME caller error after required removal.
+      # This ensure remains inside the original unresolved-root rescue below.
+      begin
+        diagnostic_state["layoutAccepted"] = true if diagnostic_state && layout_accepted
+      rescue Exception
+        raise unless removal_error || diagnostic_primary
+      end
+    end
   rescue Exception
     (@unresolved_roots ||= {})[root] = true
     raise
@@ -1194,6 +1211,20 @@ module UploadProcessFixture
     failed << "driver-status" unless code == (expected == "pass" ? 0 : 1)
     return if failed.empty?
 
+    projected = adapter_result_projection(mode: mode, result: result)
+    line = "#{ADAPTER_FAILURE_PREFIX}#{JSON.generate({"schema" => 2, "platform" => platform, "mode" => mode,
+      "expectedKind" => expected, "failedPredicates" => failed, "resultKind" => projected.fetch("resultKind"), "driverExitStatus" => code,
+      "retainedDriverErrorCategory" => projected.fetch("retainedDriverErrorCategory"), "retainedDriverErrorCode" => projected.fetch("retainedDriverErrorCode"),
+      "adapterErrorCategory" => projected.fetch("adapterErrorCategory"), "resultChecks" => projected.fetch("resultChecks"),
+      "nativeChecks" => projected.fetch("nativeChecks"), "timingChecks" => projected.fetch("timingChecks"),
+      "nativeOutcomes" => projected.fetch("nativeOutcomes"), "slowChecks" => projected.fetch("slowChecks")})}\n"
+    line.freeze if line.ascii_only? && line.bytesize <= 4096
+  end
+
+  # Pure finite projection of already-read driver data. Keep the adapter's
+  # separate kind/status failure gate above; run-cleanup diagnostics may need
+  # the same native facts even when that original result was pass/status0.
+  def adapter_result_projection(mode:, result:)
     kind = if !result.key?("kind")
       "missing"
     elsif !result["kind"].instance_of?(String)
@@ -1331,13 +1362,10 @@ module UploadProcessFixture
       "slowCleanupWithinOriginalCutoff" => measure.call(%w[originalCleanupFinishedNs originalCleanupCutoffNs], timestamp,
         operands: slow_operands) { |finished, cutoff| finished < cutoff },
     }
-    line = "#{ADAPTER_FAILURE_PREFIX}#{JSON.generate({"schema" => 2, "platform" => platform, "mode" => mode,
-      "expectedKind" => expected, "failedPredicates" => failed, "resultKind" => kind, "driverExitStatus" => code,
-      "retainedDriverErrorCategory" => category.call("errorClass"), "retainedDriverErrorCode" => error_code,
-      "adapterErrorCategory" => category.call("adapterErrorClass"), "resultChecks" => result_checks,
-      "nativeChecks" => native_checks, "timingChecks" => timing_checks,
-      "nativeOutcomes" => native_outcomes, "slowChecks" => slow_checks})}\n"
-    line.freeze if line.ascii_only? && line.bytesize <= 4096
+    {"resultKind" => kind, "retainedDriverErrorCategory" => category.call("errorClass"),
+      "retainedDriverErrorCode" => error_code, "adapterErrorCategory" => category.call("adapterErrorClass"),
+      "resultChecks" => result_checks, "nativeChecks" => native_checks, "timingChecks" => timing_checks,
+      "nativeOutcomes" => native_outcomes, "slowChecks" => slow_checks}
   end
 
   def report_adapter_failure(state, original, platform:, mode:, callback:)
@@ -1457,7 +1485,7 @@ module UploadProcessFixture
 
   def run(platform:, root:, parameters:, mode:, observe_signals: false, deadline_ns: nil,
           primary_failure_state: nil, order_failure_state: nil, setup_failure_state: nil, adapter_failure_state: nil,
-          ownership_failure_state: nil, signal_failure_state: nil)
+          ownership_failure_state: nil, signal_failure_state: nil, run_cleanup_state: nil)
     assert_domain_reusable!
     validate_request!(platform, mode, parameters)
     validate_signal_observation!(platform, mode, observe_signals)
@@ -1470,7 +1498,7 @@ module UploadProcessFixture
             observe_signals: true, deadline_ns: deadline_ns, primary_failure_state: primary_failure_state,
             order_failure_state: order_failure_state, setup_failure_state: setup_failure_state,
             adapter_failure_state: adapter_failure_state, ownership_failure_state: ownership_failure_state,
-            signal_failure_state: signal_failure_state)
+            signal_failure_state: signal_failure_state, run_cleanup_state: run_cleanup_state)
       end
     end
     if observe_signals && !NativeSignalProbe.current.parent_for?(root, mode)
@@ -1478,13 +1506,24 @@ module UploadProcessFixture
     end
     return run_ownership_probe(platform: platform, root: root, parameters: parameters, mode: mode,
                                deadline_ns: deadline_ns, ownership_failure_state: ownership_failure_state) if mode.start_with?("ownership-")
+    run_cleanup_enabled = run_cleanup_state.instance_of?(Hash) && mode == "inherited"
+    # Local references/scalars only at execution boundaries. Optional Hash
+    # publication waits until the complete original run/Lifetime has escaped.
+    cleanup_frame = record = cleanup_status = cleanup_owner = cleanup_result = nil
+    cleanup_result_source = "missing"
+    cleanup_driver_complete = cleanup_recovery_entered = cleanup_files_complete = :missing
+    cleanup_dispatch_matched = cleanup_owner_validated = cleanup_native_verdict = cleanup_known_dead = :missing
+    cleanup_directory_matched = :missing
+    cleanup_death_attempted = cleanup_death_completed = cleanup_removal_attempted = cleanup_removal_completed = false
     run_ns = [clock_ns + DRIVER_LIMIT * 1_000_000_000, deadline_ns].compact.min
     hard_ns = [run_ns + CLEANUP_LIMIT * 1_000_000_000, deadline_ns].compact.min
     accepted = lifetime(deadline_ns: hard_ns) do |scope|
+      cleanup_frame = scope
       directory = child = result = proof = order_proof = owner = death_deadline = nil
       transcripts = [OwnedChild::ControlLease.new, OwnedChild::ControlLease.new]
       held_writer = OwnedChild::ControlLease.new if ContainmentEvidence::HARD_LOSS.include?(mode)
       known_dead = native_final = false
+      cleanup_known_dead = known_dead
       record = {"directory" => nil, "directoryState" => :unattempted, "child" => nil, "transcripts" => transcripts,
         "heldWriter" => held_writer}
       (@driver_records ||= {})[record.object_id] = record
@@ -1564,14 +1603,17 @@ module UploadProcessFixture
           child.stop # Original wait, actual creator join and all owned pipe closes.
           transcripts.each(&:close_once)
           raise Failure.new("driver", "driver receipt/close arrived after original deadline") unless clock_ns < run_ns
-          unless child.complete? && child.status && child.status.equal?(child.child.receipt.raw_status)
+          unless (cleanup_driver_complete = child.complete?) && (cleanup_status = child.status) && child.status.equal?(child.child.receipt.raw_status)
             raise Failure.new("driver", "direct driver ownership did not finalize")
           end
           dispatch = JSON.parse(OwnedChild.bounded_file(File.join(directory, "driver-dispatch.json")))
           expected_dispatch = record.fetch("requestedDispatch").merge("pid" => child.pid)
-          raise Failure.new("driver", "driver dispatch was not the original requested CLI") unless dispatch == expected_dispatch
+          raise Failure.new("driver", "driver dispatch was not the original requested CLI") unless (cleanup_dispatch_matched = dispatch == expected_dispatch)
           owner ||= read_json(File.join(directory, "owner.json"))
+          cleanup_owner = owner
+          cleanup_owner_validated = false
           owner_processes!(owner)
+          cleanup_owner_validated = true
           if mode.start_with?("kill-")
             unless killed && child.status.signaled? && child.status.termsig == Signal.list.fetch("KILL") && owner["phase"] == mode
               raise Failure.new("driver", "driver did not terminate at the requested known phase")
@@ -1586,6 +1628,7 @@ module UploadProcessFixture
           else
             raise Failure.new("driver", "driver did not exit normally") unless child.status.exited?
             result = read_json(File.join(directory, "result.json"))
+            cleanup_result, cleanup_result_source = result, "ordinary"
             if observe_signals
               signal_proof = read_json(File.join(directory, "native-signal-proof.json"))
               unless signal_proof["case"] == mode && signal_proof["kind"] == "native-signal-observation" &&
@@ -1641,7 +1684,7 @@ module UploadProcessFixture
               end
             end
             snapshot = result["nativeObservation"]
-            native_final = native_owner_finality?(mode, owner, result, proof)
+            native_final = cleanup_native_verdict = native_owner_finality?(mode, owner, result, proof)
             if order_proof && order_proof["expectedUnknown"]
               unless snapshot && snapshot["unknown"] && !snapshot["finalized"] && !snapshot["noProducers"] &&
                      order_proof["retainedOriginalSession"] && !order_proof["captureFinished"] && order_proof["captureJoined"]
@@ -1661,7 +1704,9 @@ module UploadProcessFixture
           end
           if native_final
             death_deadline ||= Rational([clock_ns + CLEANUP_LIMIT * 1_000_000_000, hard_ns].min, 1_000_000_000)
+            cleanup_death_attempted, cleanup_known_dead = true, false
             known_dead = observe_owner_death!(owner, deadline: death_deadline, root: root)
+            cleanup_known_dead, cleanup_death_completed = known_dead, true
           else
             # The direct driver receipt/EOF is not a C/K/V wait. Fixed held
             # channel/event proofs below are separate containment evidence;
@@ -1684,51 +1729,65 @@ module UploadProcessFixture
                            "ownedDirectory" => directory, "driverPhase" => child&.phase&.to_s) if error.is_a?(StandardError)
         raise
       ensure
-        scope.cleanup { child&.stop }
-        transcripts.each { |lease| scope.cleanup { lease.close_once } }
-        scope.cleanup { ContainmentEvidence.close_held!(record) } if held_writer
-        scope.cleanup do
-          if directory && child&.complete? && !native_final && !domain_disposal_required?
+        scope.cleanup(diagnostic_stage: run_cleanup_enabled ? "child-stop" : nil) { child&.stop }
+        transcripts.each_with_index do |lease, index|
+          scope.cleanup(diagnostic_stage: run_cleanup_enabled ? (index == 0 ? "transcript-out-close" : "transcript-err-close") : nil) { lease.close_once }
+        end
+        scope.cleanup(diagnostic_stage: run_cleanup_enabled ? "held-writer-close" : nil) { ContainmentEvidence.close_held!(record) } if held_writer
+        scope.cleanup(diagnostic_stage: run_cleanup_enabled ? "native-recovery" : nil) do
+          if (cleanup_recovery_entered = directory && (cleanup_driver_complete = child&.complete?) && !native_final && !domain_disposal_required?)
             provenance = child.provenance
             if provenance["grant"] == {"state" => "closed", "bytesWritten" => 0}
               # Positive original no-GO transition, NOT a missing marker. The
               # fixed bootstrap cannot dispatch the driver without this grant.
               # Its genuine original terminal status may itself be SIGKILL.
               record["driverTargetNeverDispatched"] = true
-              native_final = known_dead = true
-            elsif child.status&.exited? && record["requestedDispatch"] &&
-                  %w[driver-dispatch.json owner.json result.json].all? { |name| File.file?(File.join(directory, name)) }
+              native_final = known_dead = cleanup_native_verdict = cleanup_known_dead = true
+            elsif (cleanup_status = child.status)&.exited? && record["requestedDispatch"] &&
+                  (cleanup_files_complete = %w[driver-dispatch.json owner.json result.json].all? { |name| File.file?(File.join(directory, name)) })
+              # Rejected recovery operands must not borrow ordinary-path facts.
+              cleanup_owner = cleanup_result = nil
+              cleanup_result_source = "missing"
+              cleanup_dispatch_matched = cleanup_owner_validated = cleanup_native_verdict = :missing
               recovered_dispatch = JSON.parse(OwnedChild.bounded_file(File.join(directory, "driver-dispatch.json")))
-              unless recovered_dispatch == record.fetch("requestedDispatch").merge("pid" => child.pid)
+              unless (cleanup_dispatch_matched = recovered_dispatch == record.fetch("requestedDispatch").merge("pid" => child.pid))
                 raise Failure.new("fixture-cleanup", "completed driver dispatch changed before cleanup accounting")
               end
               recovered_owner = read_json(File.join(directory, "owner.json"))
+              cleanup_owner, cleanup_owner_validated = recovered_owner, false
               owner_processes!(recovered_owner)
+              cleanup_owner_validated = true
               recovered_result = read_json(File.join(directory, "result.json"))
-              if native_owner_finality?(mode, recovered_owner, recovered_result)
+              cleanup_result, cleanup_result_source = recovered_result, "recovered"
+              if (cleanup_native_verdict = native_owner_finality?(mode, recovered_owner, recovered_result))
                 owner, native_final = recovered_owner, true
               end
             end
           end
         end
-        scope.cleanup do
-          if directory && child&.complete? && native_final && !known_dead &&
+        scope.cleanup(diagnostic_stage: run_cleanup_enabled ? "death-observation" : nil) do
+          if directory && (cleanup_driver_complete = child&.complete?) && native_final && !known_dead &&
              (!domain_disposal_required? || death_deadline && clock >= death_deadline) &&
              File.file?(File.join(directory, "owner.json"))
             owner ||= read_json(File.join(directory, "owner.json"))
             death_deadline ||= Rational([clock_ns + CLEANUP_LIMIT * 1_000_000_000, hard_ns].min, 1_000_000_000)
+            cleanup_death_attempted, cleanup_known_dead = true, false
             known_dead = observe_owner_death!(owner, deadline: death_deadline, root: root)
+            cleanup_known_dead, cleanup_death_completed = known_dead, true
           end
         end
-        scope.cleanup do
-          never_started = child.nil? || child.phase == :unstarted && child.complete?
+        scope.cleanup(diagnostic_stage: run_cleanup_enabled ? "directory-removal" : nil) do
+          never_started = child.nil? || child.phase == :unstarted && (cleanup_driver_complete = child.complete?)
           if directory && record["directoryState"] == :canonical &&
              (transcripts + [held_writer].compact).all? { |lease| %i[unattempted closed].include?(lease.state) } &&
-             (never_started || child.complete? && known_dead && native_final)
-            unless OwnedChild.directory_identity(directory) == record["directoryIdentity"]
+             (never_started || (cleanup_driver_complete = child.complete?) && known_dead && native_final)
+            unless (cleanup_directory_matched = OwnedChild.directory_identity(directory) == record["directoryIdentity"])
               raise Failure.new("fixture-cleanup", "driver directory identity changed")
             end
-            remove_fixture_directory(directory, root: root, layout: :driver)
+            cleanup_removal_attempted = true
+            remove_fixture_directory(directory, root: root, layout: :driver,
+              diagnostic_state: run_cleanup_enabled ? record : nil, diagnostic_primary: run_cleanup_enabled ? scope.primary : nil)
+            cleanup_removal_completed = true
             @driver_records.delete(record.object_id)
           elsif record["directoryState"] == :unattempted
             @driver_records.delete(record.object_id)
@@ -1746,6 +1805,27 @@ module UploadProcessFixture
     # every required cleanup. Grace is not a renewed result-acceptance window.
     raise Failure.new("driver", "driver result arrived after original deadline") unless clock_ns < run_ns
     accepted
+  rescue Exception => error
+    # This rescue is outside lifetime: report/drains/traps and every original
+    # ensure have finished. A success has no escaping-error binding at all.
+    begin
+      if run_cleanup_enabled && record && cleanup_frame
+        run_cleanup_state.merge!(escaped_error: error, unwound: true, mode: mode, record: record,
+          lifetime: cleanup_frame, status: cleanup_status, owner: cleanup_owner, result: cleanup_result,
+          result_source: cleanup_result_source, checks: {
+            "driverComplete" => cleanup_driver_complete, "dispatchRequested" => record.key?("requestedDispatch"),
+            "recoveryEntered" => cleanup_recovery_entered == :missing ? "missing" : !!cleanup_recovery_entered,
+            "recoveryFilesComplete" => cleanup_files_complete, "dispatchMatched" => cleanup_dispatch_matched,
+            "ownerValidated" => cleanup_owner_validated,
+            "nativeFinal" => cleanup_native_verdict == :missing ? "missing" : !!cleanup_native_verdict,
+            "knownDead" => cleanup_known_dead, "deathAttempted" => cleanup_death_attempted, "deathCompleted" => cleanup_death_completed,
+            "directoryIdentityMatched" => cleanup_directory_matched, "layoutAccepted" => record["layoutAccepted"],
+            "removalAttempted" => cleanup_removal_attempted, "removalCompleted" => cleanup_removal_completed})
+      end
+    rescue Exception
+      nil # Optional failed/frozen publication cannot replace this original error.
+    end
+    raise
   end
 
   # A fixture-only fallback channel, opened by V after exec. Native inheritance
@@ -5741,24 +5821,38 @@ module UploadProcessFixture
       vectors = [false, true].product(%i[none cleanup io_primary system_exit_primary]).map { |residue, fault| [residue, fault, nil, false, false] }
       vectors += [[false, :none, 3_000_000_000, false, false], [false, :none, nil, true, false],
                   [false, :none, 3_000_000_000, false, true]]
-      vectors.each do |residue, fault, outer_span, late_handoff, nil_polls|
+      # This boundary was missing from the old result.merge fault vectors:
+      # publish the SAME model wait receipt, then interrupt BEFORE run parses.
+      %i[recovered missing_files dispatch_mismatch native_unknown native_missing death identity scratch remove
+         same_error stage_loss layout_publication publication].each do |scenario|
+        vectors << [scenario == :scratch, :none, nil, false, false, scenario]
+      end
+      vectors.each do |residue, fault, outer_span, late_handoff, nil_polls, post_receipt|
         with_inert_contract_fixture do |fixture|
           initial = now = 10_000_000_000
           outer = outer_span && initial + outer_span
           run_ns = [initial + DRIVER_LIMIT * 1_000_000_000, outer].compact.min
           hard_ns = [run_ns + CLEANUP_LIMIT * 1_000_000_000, outer].compact.min
-          primary = fault == :io_primary ? IOError.new("synthetic original active failure") :
+          primary = post_receipt ? Interrupt.new("synthetic original postreceipt interrupt") :
+                    fault == :io_primary ? IOError.new("synthetic original active failure") :
                     fault == :system_exit_primary ? SystemExit.new(23, "synthetic original active exit") : nil
-          secondary = fault == :none ? nil : IOError.new("synthetic independent stop failure")
+          secondary = fault == :none && !%i[same_error stage_loss].include?(post_receipt) ? nil : IOError.new("synthetic independent stop failure")
+          death_error = Failure.new("fixture-cleanup", "fixture-cleanup deadline expired")
+          remove_error = IOError.new("synthetic original removal failure")
+          publication_error = Interrupt.new("synthetic optional scalar publication interruption")
+          cleanup_state = post_receipt ? {} : nil
+          cleanup_state.freeze if post_receipt == :publication
+          request_platform, request_mode = post_receipt ? %w[ios inherited] : %w[native native-setup-second-pipe]
+          metadata = nil
           removed, visited, starts, constructions, records, observations, events, masks = Array.new(8) { [] }
-          observer_calls, signal_calls, settles = [], [], []
+          observer_calls, signal_calls, settles, file_checks, original_reads = [], [], [], [], []
           ios = Array.new(2) { io_type.new(+"", 0) }
           leases = Array.new(2) { lease_type.new(nil, :unattempted, 0, 0) }
           pending_leases = leases.dup
           phase, status, settled, stops, polls, sleeps = :unstarted, nil, false, 0, 0, 0
-          original_status = Struct.new(:exitstatus) { def exited? = true }.new(1)
+          original_status = Struct.new(:exitstatus) { def exited? = true }.new(post_receipt ? 0 : 1)
           receipt = Struct.new(:raw_status).new(original_status)
-          original_child = Struct.new(:receipt).new(nil_polls ? nil : receipt)
+          original_child = Struct.new(:receipt).new(nil_polls || post_receipt ? nil : receipt)
           stream_reads, eofs = {out: 0, err: 0}, {out: false, err: false}
           child = OwnedChild.allocate # No real constructor/creator/resource acquisition.
           child.define_singleton_method(:start) do |environment, *argv, **options|
@@ -5794,6 +5888,8 @@ module UploadProcessFixture
             events << :wait
             phase, status = :reaped, original_status
             @phase = :reaped
+            original_child.receipt = receipt
+            raise primary if post_receipt
             status
           end
           actual_stop = OwnedChild.instance_method(:stop)
@@ -5803,7 +5899,8 @@ module UploadProcessFixture
             next actual_stop.bind(self).call if nil_polls
             raise "model stop before original wait" unless phase == :reaped
             settled = true
-            raise secondary if stops == 2 && secondary
+            metadata.ino += 1 if post_receipt == :identity
+            raise secondary if stops == (post_receipt ? 1 : 2) && secondary
             true
           end
           child.define_singleton_method(:complete?) { phase == :reaped && settled }
@@ -5833,8 +5930,16 @@ module UploadProcessFixture
                    "custodian" => none, "keeper" => none, "validator" => none, "group" => {"state" => "not_created"}, "processes" => []}
           result = {"kind" => "setup-fixture-fault", "nativeObservation" => {"version" => 1, "noProducers" => true,
                     "settled" => true, "unknown" => false, "hooksRestored" => true, "observerErrors" => [], "custodian" => none}}
-          result.define_singleton_method(:merge) { |*| raise primary } if primary
+          result["kind"] = "pass" if post_receipt
+          result["nativeObservation"]["unknown"] = true if post_receipt == :native_unknown
+          result.delete("nativeObservation") if post_receipt == :native_missing
+          result.define_singleton_method(:merge) { |*| raise primary } if primary && !post_receipt
+          if %i[same_error stage_loss].include?(post_receipt)
+            close_once = leases.first.method(:close_once)
+            leases.first.define_singleton_method(:close_once) { close_once.call; raise secondary }
+          end
           frame = Lifetime.new(scope_type.new(0), deadline_ns: -> { hard_ns })
+          frame.instance_variable_set(:@cleanup_error_stages, {}.freeze) if post_receipt == :stage_loss
           lifetime = lambda do |deadline_ns:, &body|
             assert_equal hard_ns, deadline_ns
             value = nil
@@ -5844,6 +5949,10 @@ module UploadProcessFixture
               frame.remember(error)
             end
             now = run_ns if late_handoff # All cleanup finished, still not a renewed acceptance window.
+            if post_receipt
+              assert_empty cleanup_state # A body/ensure is NOT the completed lifetime.
+              events << :lifetime_unwound
+            end
             raise frame.primary if frame.primary
             value
           end
@@ -5857,7 +5966,17 @@ module UploadProcessFixture
           observe_death = fixture.method(:observe_owner_death!)
           forbidden = ->(*, **) { raise "inert run reached an unmocked acquisition" }
           bindings = [
-            [OwnedChild, :new, ->(**options) { constructions << options; child }],
+            [OwnedChild, :new, lambda { |**options|
+              constructions << options
+              if post_receipt == :layout_publication
+                record = fixture.instance_variable_get(:@driver_records).values.fetch(0)
+                record.define_singleton_method(:[]=) do |key, value|
+                  raise publication_error if key == "layoutAccepted"
+                  super(key, value)
+                end
+              end
+              child
+            }],
             [OwnedChild::ControlLease, :new, -> { pending_leases.shift || raise("unexpected model control lease") }],
             [OwnedChild, :native_modules, forbidden], [Thread, :new, forbidden], [Signal, :trap, forbidden],
             [Process, :spawn, forbidden], [Process, :fork, forbidden], [Process, :kill, forbidden],
@@ -5875,11 +5994,19 @@ module UploadProcessFixture
               metadata.nlink += 1 # Model an entry-counting filesystem, not a native observation.
               ios.fetch(index)
             }],
-            [File, :file?, ->(path) { %w[driver-dispatch.json owner.json result.json].map { |name| File.join(directory, name) }.include?(path) }],
+            [File, :file?, lambda { |path|
+              file_checks << File.basename(path)
+              next false if post_receipt == :missing_files && File.basename(path) == "owner.json"
+              %w[driver-dispatch.json owner.json result.json].map { |name| File.join(directory, name) }.include?(path)
+            }],
             [File, :exist?, forbidden], [File, :write, forbidden], [File, :rename, forbidden],
             [Digest::SHA256, :file, ->(path) { assert_equal source, path; Struct.new(:hexdigest).new(digest) }],
-            [OwnedChild, :bounded_file, ->(path) { assert_equal File.join(directory, "driver-dispatch.json"), path; JSON.generate(dispatch) }],
-            [FileUtils, :remove_entry, ->(path) { removed << path }],
+            [OwnedChild, :bounded_file, lambda { |path|
+              assert_equal File.join(directory, "driver-dispatch.json"), path
+              original_reads << "driver-dispatch.json"
+              JSON.generate(post_receipt == :dispatch_mismatch ? dispatch.merge("pid" => 124) : dispatch)
+            }],
+            [FileUtils, :remove_entry, ->(path) { removed << path; raise remove_error if post_receipt == :remove }],
             [fixture, :fixture_entry_names, ->(path) { visited << path; assert_equal directory, path; residue ? ["mrk-process-observation-retained"] : [] }],
             [fixture, :lifetime, lifetime], [fixture, :clock_ns, -> { now }], [UploadProcessFixture, :clock_ns, -> { now }],
             [fixture, :clock, -> { Rational(now, 1_000_000_000) }],
@@ -5890,10 +6017,18 @@ module UploadProcessFixture
               now = nil_polls && sleeps == 3 ? run_ns : now + 1_000_000
             }],
             [fixture, :atomic_json, ->(path, value) { metadata.nlink += 1; records << [path, value] }],
-            [fixture, :read_json, ->(path) { {File.join(directory, "owner.json") => owner, File.join(directory, "result.json") => result}.fetch(path) }],
+            [fixture, :read_json, lambda { |path|
+              original_reads << File.basename(path)
+              {File.join(directory, "owner.json") => owner, File.join(directory, "result.json") => result}.fetch(path)
+            }],
             [fixture, :state, ->(*arguments, **options) { observer_calls << [arguments, options]; raise "run acquired a fresh process observer" }],
             [fixture, :observe_owner_death!, lambda { |value, deadline:, root:|
               observations << [value, deadline, root]
+              if post_receipt == :death
+                now = (deadline * 1_000_000_000).to_i
+                fixture.retain_unknown_domain!(root)
+                raise death_error
+              end
               observe_death.call(value, deadline: deadline, root: root) # Empty real-validated model graph; no observer acquisition.
             }],
             [fixture, :warn, nil],
@@ -5901,23 +6036,153 @@ module UploadProcessFixture
           returned = observed_error = nil
           with_contract_stubs(bindings) do
             begin
-              returned = fixture.run(platform: "native", root: root, parameters: {}, mode: "native-setup-second-pipe", deadline_ns: outer)
+              returned = fixture.run(platform: request_platform, root: root, parameters: {}, mode: request_mode,
+                deadline_ns: outer, run_cleanup_state: cleanup_state)
             rescue Exception => error
               observed_error = error
             end
           end
           assert_equal [{root: directory, deadline_ns: run_ns, hard_deadline_ns: hard_ns}], constructions
           assert_equal [[environment, dispatch.fetch("argv"), {in: File::NULL, out: :pipe, err: :pipe, unsetenv_others: true, pgroup: true}]], starts
-          assert_equal [[File.join(directory, "input.json"), {"platform" => "native", "parameters" => {}, "mode" => "native-setup-second-pipe", "deadlineNs" => run_ns}]], records
+          assert_equal [[File.join(directory, "input.json"), {"platform" => request_platform, "parameters" => {}, "mode" => request_mode, "deadlineNs" => run_ns}]], records
           assert_equal 5, metadata.nlink # Original snapshot was 2; real run cleanup must not compare that old count.
           assert_empty pending_leases
           assert_equal %w[out err], ios.map(&:bytes)
           assert_equal [1, 1], ios.map(&:closes)
           assert_equal [1, 1], leases.map(&:acquisitions)
-          assert_equal(nil_polls ? [1, 1] : [2, 2], leases.map(&:closes)) # Independent ensure closes survive the stop failure.
+          assert_equal(nil_polls || post_receipt ? [1, 1] : [2, 2], leases.map(&:closes)) # Independent ensure closes survive the stop failure.
           assert_equal [:closed, :closed], leases.map(&:state)
           assert_empty observer_calls
           assert_empty signal_calls
+          if post_receipt
+            assert_same primary, observed_error
+            assert_same primary, frame.primary
+            assert_nil returned
+            assert_same original_status, child.status
+            assert_same original_status, child.child.receipt.raw_status
+            assert_equal [[:eof, :out], [:eof, :err], :retire, :wait, [:stop, 1], :lifetime_unwound], events
+            assert_equal 1, stops
+            diagnostic = OwnershipFailureDiagnostic.run_cleanup(cleanup_state, operation: observed_error)
+            if post_receipt == :publication
+              assert_equal "missing", diagnostic
+              assert_empty cleanup_state
+              assert_equal [directory], removed
+              assert_empty fixture.instance_variable_get(:@driver_records)
+              next
+            end
+            assert_same observed_error, cleanup_state.fetch(:escaped_error)
+            assert_same frame, cleanup_state.fetch(:lifetime)
+            assert cleanup_state.fetch(:unwound)
+            assert_equal "missing", OwnershipFailureDiagnostic.run_cleanup(cleanup_state, operation: Interrupt.new(primary.message))
+            assert_equal "missing", OwnershipFailureDiagnostic.run_cleanup(cleanup_state.merge(unwound: false), operation: observed_error)
+            assert OwnershipFailureDiagnostic.run_cleanup_valid?(diagnostic)
+            assert_equal "canonical", diagnostic.fetch("directoryState")
+            assert_equal({"kind" => "exit", "code" => 0}, diagnostic.fetch("driverStatus"))
+            checks = diagnostic.fetch("checks")
+            assert_equal true, checks.fetch("driverComplete")
+            assert_equal true, checks.fetch("dispatchRequested")
+            assert_equal true, checks.fetch("recoveryEntered")
+            errors = frame.instance_variable_get(:@cleanup_errors)
+            if %i[missing_files dispatch_mismatch].include?(post_receipt)
+              assert_equal "missing", diagnostic.fetch("resultSource")
+              assert_equal "missing", diagnostic.fetch("driverResult")
+              assert_equal "missing", checks.fetch("nativeFinal")
+              assert_empty observations
+              assert_empty removed
+              assert_empty visited
+              refute checks.fetch("deathAttempted")
+              refute checks.fetch("removalAttempted")
+              if post_receipt == :missing_files
+                assert_equal %w[driver-dispatch.json owner.json], file_checks
+                assert_empty original_reads
+                refute checks.fetch("recoveryFilesComplete")
+                assert_empty errors
+              else
+                assert_equal ["driver-dispatch.json"], original_reads
+                assert_equal true, checks.fetch("recoveryFilesComplete")
+                refute checks.fetch("dispatchMatched")
+                assert_equal [["native-recovery", "fixture-error", "fixture-cleanup", "recovery-dispatch-mismatch"]], diagnostic.fetch("cleanupErrors")
+              end
+            else
+              assert_equal "recovered", diagnostic.fetch("resultSource")
+              assert_same owner, cleanup_state.fetch(:owner)
+              assert_same result, cleanup_state.fetch(:result)
+              assert_equal %w[driver-dispatch.json owner.json result.json], original_reads
+              assert_equal "pass", diagnostic.fetch("driverResult").fetch("resultKind")
+              assert_equal true, checks.fetch("recoveryFilesComplete")
+              assert_equal true, checks.fetch("dispatchMatched")
+              assert_equal true, checks.fetch("ownerValidated")
+              if %i[native_unknown native_missing].include?(post_receipt)
+                refute checks.fetch("nativeFinal") # Includes ORIGINAL nil return, not an unexecuted predicate.
+                refute checks.fetch("knownDead") # Original false latch, not a claim of native liveness.
+                assert_empty observations
+                assert_empty removed
+                assert_empty visited
+                assert_empty errors
+                refute checks.fetch("deathAttempted")
+                assert_equal(post_receipt == :native_unknown ? true : "missing", diagnostic.fetch("driverResult").fetch("nativeChecks").fetch("unknown"))
+              else
+                assert_equal true, checks.fetch("nativeFinal")
+                assert_equal true, diagnostic.fetch("nativeProof").fetch("noProducersMatch")
+                assert_equal "no-producers", diagnostic.fetch("nativeProof").fetch("ownerFinality")
+                assert_equal [[owner, Rational([initial + 1_000_000 + CLEANUP_LIMIT * 1_000_000_000, hard_ns].min, 1_000_000_000), root]], observations
+                assert_equal true, checks.fetch("deathAttempted")
+                if post_receipt == :death
+                  refute checks.fetch("knownDead")
+                  refute checks.fetch("deathCompleted")
+                  refute checks.fetch("removalAttempted")
+                  assert_equal [death_error], errors
+                  assert_equal [["death-observation", "fixture-error", "fixture-cleanup", "death-cutoff"]], diagnostic.fetch("cleanupErrors")
+                  assert_empty visited
+                  assert_empty removed
+                else
+                  assert_equal true, checks.fetch("knownDead")
+                  assert_equal true, checks.fetch("deathCompleted")
+                  if post_receipt == :identity
+                    refute checks.fetch("directoryIdentityMatched")
+                    refute checks.fetch("removalAttempted")
+                    assert_empty visited
+                    assert_empty removed
+                    assert_equal [["directory-removal", "fixture-error", "fixture-cleanup", "driver-identity-changed"]], diagnostic.fetch("cleanupErrors")
+                  else
+                    assert_equal true, checks.fetch("directoryIdentityMatched")
+                    assert_equal true, checks.fetch("removalAttempted")
+                    assert_equal [directory], visited
+                    assert_equal(post_receipt == :scratch ? [] : [directory], removed)
+                    if post_receipt == :scratch
+                      assert_equal "missing", checks.fetch("layoutAccepted")
+                      refute checks.fetch("removalCompleted")
+                      assert_equal [["directory-removal", "fixture-error", "fixture-cleanup", "observer-scratch"]], diagnostic.fetch("cleanupErrors")
+                    elsif post_receipt == :remove
+                      assert_equal true, checks.fetch("layoutAccepted")
+                      refute checks.fetch("removalCompleted")
+                      assert_equal [remove_error], errors
+                      assert_equal [["directory-removal", "io-error", "none", "other"]], diagnostic.fetch("cleanupErrors")
+                    else
+                      assert_equal(post_receipt == :layout_publication ? "missing" : true, checks.fetch("layoutAccepted"))
+                      assert_equal true, checks.fetch("removalCompleted")
+                      if %i[same_error stage_loss].include?(post_receipt)
+                        assert_equal 2, errors.length
+                        errors.each { |error| assert_same secondary, error }
+                        stages = post_receipt == :same_error ? %w[child-stop transcript-out-close] : %w[missing missing]
+                        assert_equal stages.map { |stage| [stage, "io-error", "none", "other"] }, diagnostic.fetch("cleanupErrors")
+                      else
+                        assert_empty errors
+                        assert_empty diagnostic.fetch("cleanupErrors")
+                      end
+                    end
+                  end
+                end
+              end
+            end
+            retained = %i[missing_files dispatch_mismatch native_unknown native_missing death identity scratch remove].include?(post_receipt)
+            # Original identity rejection retains the driver record/directory
+            # before entering remove_fixture_directory's separate root latch.
+            assert_equal retained && post_receipt != :identity, fixture.cleanup_unresolved?(root)
+            assert_equal(retained ? 1 : 0, fixture.instance_variable_get(:@driver_records).length)
+            assert masks.all? { |policy| policy.keys == [Exception] && %i[never immediate].include?(policy.fetch(Exception)) }
+            next
+          end
           if nil_polls
             assert_equal [[:eof, :out], [:eof, :err], :retire, [:nil_poll, 1], [:nil_poll, 2], [:stop, 1]], events
             assert_equal 2, polls
@@ -5985,6 +6250,30 @@ module UploadProcessFixture
             assert_empty fixture.instance_variable_get(:@driver_records)
           end
           assert masks.all? { |policy| policy.keys == [Exception] && %i[never immediate].include?(policy.fetch(Exception)) }
+        end
+      end
+      # A publication interruption without a selected primary must not be
+      # swallowed. Required removal still runs, and its original error wins
+      # over a later optional mark error. Both paths retain the original root.
+      %i[publication removal].each do |fault|
+        with_inert_contract_fixture do |fixture|
+          removed = []
+          publication_error = Interrupt.new("synthetic post-removal publication interruption")
+          removal_error = IOError.new("synthetic original removal failure")
+          record = {}
+          record.define_singleton_method(:[]=) { |key, _value| raise publication_error if key == "layoutAccepted" }
+          with_contract_stubs([
+            [fixture, :fixture_entry_names, []],
+            [FileUtils, :remove_entry, ->(path) { removed << path; raise removal_error if fault == :removal }],
+          ]) do
+            expected = fault == :publication ? publication_error : removal_error
+            actual = assert_raises(expected.class) do
+              fixture.remove_fixture_directory(directory, root: root, layout: :driver, diagnostic_state: record)
+            end
+            assert_same expected, actual
+          end
+          assert_equal [directory], removed
+          assert fixture.cleanup_unresolved?(root)
         end
       end
     end

@@ -775,7 +775,7 @@ success. The controller requires the matching platform and source-known unique
 adverse callback in that adapter's healthy partition. Native/ownership/kill
 partitions, passing or ambiguous callbacks and malformed records cannot qualify.
 
-The healthy ownership families have a separate schema-2 `MRK_OWNERSHIP_FAILURE`
+The healthy ownership families have a separate schema-3 `MRK_OWNERSHIP_FAILURE`
 projection for their fixed async (4), signals (16), and policies (10) cases
 through `capture` and `run`. Family, case, and callback must match the closed
 catalog; unknown/setup/observation contracts are not admitted by this projection.
@@ -794,6 +794,20 @@ never an empty success. Missing observations remain missing. Failures outside an
 actual row invocation, including family setup/cutoff and the later CLI output,
 cannot borrow a previous successful row. Reporting cannot authorize success,
 cleanup, a retry or a changed deadline, or establish a cause by itself.
+
+For `run` only, an optional `runCleanup` projection distinguishes the original
+driver receipt/recovery, nested native-finality proof, bounded role-death
+observation, directory checks and removal. It uses already-read facts and the
+original ordered cleanup-error occurrences, including repeated occurrences of
+the same error. Unevaluated facts remain missing; a settled command does not
+prove nested native finality or successful directory removal. The selected
+original result may be success-shaped while a later cleanup veto retains the
+fixture. Projection occurs only after the complete run and ownership-probe
+unwind, bound to the identical escaping operation error and row rejection.
+Capture, stale, successful or replacement-error state cannot supply it. Closed
+codes disclose no raw proof, path, identity or error message. Diagnostic
+bookkeeping cannot skip cleanup, change retention or replace the primary error;
+the complete line still has the same 4096-byte bound without truncation.
 
 The separate native signal-observation test may emit one canonical schema-1
 `MRK_NATIVE_SIGNAL_FAILURE` line, bounded to 4096 bytes including prefix/newline.

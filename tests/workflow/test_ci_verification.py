@@ -2733,6 +2733,10 @@ class CIControllerContractTests(unittest.TestCase):
                            "CHECKS", "COMMAND_CHECKS", "FAILED_CHECKS"):
                 name = "OWNERSHIP_FAILURE_" + suffix
                 self.assertEqual(ruby_words(ownership_source, name), getattr(controller, name))
+            for suffix in ("CLEANUP_FIELDS", "DIRECTORY_STATES", "STATUS_FIELDS", "RESULT_SOURCES", "CHECKS",
+                           "NATIVE_PROOF_FIELDS", "OWNER_FINALITIES", "ERROR_STAGES", "ERROR_FIELDS", "RESULT_FIELDS"):
+                name = "OWNERSHIP_RUN_" + suffix
+                self.assertEqual(ruby_words(ownership_source, name), getattr(controller, name))
             self.assertEqual(ruby_words(ownership_source, "OWNERSHIP_FAILURE_HELPERS"), ("capture", "run"))
             self.assertEqual(ruby_words(ownership_source, "OWNERSHIP_FAILURE_PLATFORMS"), ("ios", "android"))
 
@@ -2755,6 +2759,42 @@ class CIControllerContractTests(unittest.TestCase):
             self.assertEqual(controller.OWNERSHIP_FAILURE_CALLBACKS, {family:
                 f"test_process_ownership_{family}_through_both_real_fixture_callers"
                 for family in ("async", "signals", "policies")})
+            run_fields = ("directoryState", "driverStatus", "resultSource", "checks", "nativeProof", "cleanupErrors", "driverResult")
+            run_checks = (
+                "driverComplete", "dispatchRequested", "recoveryEntered", "recoveryFilesComplete", "dispatchMatched",
+                "ownerValidated", "nativeFinal", "knownDead", "deathAttempted", "deathCompleted", "directoryIdentityMatched",
+                "layoutAccepted", "removalAttempted", "removalCompleted",
+            )
+            run_proof_fields = ("versionOne", "ownerFinality", "custodianMatches", "keeperMatches", "validatorMatches",
+                                "groupMatches", "noProducersMatch")
+            run_result_fields = ("resultKind", "retainedDriverErrorCategory", "retainedDriverErrorCode", "nativeChecks", "nativeOutcomes")
+            run_stages = ("child-stop", "transcript-out-close", "transcript-err-close", "held-writer-close",
+                          "native-recovery", "death-observation", "directory-removal", "missing")
+            run_conditions = {
+                "recovery-dispatch-mismatch": "fixture-cleanup",
+                "owner-shape": "fixture-result", "owner-unbound": "fixture-result",
+                "owner-duplicate": "fixture-result", "owner-graph": "fixture-result",
+                "driver-identity-changed": "fixture-cleanup", "directory-not-canonical": "fixture-cleanup",
+                "directory-not-private": "fixture-cleanup", "enumeration-before-identity": "fixture-cleanup",
+                "enumeration-open-identity": "fixture-cleanup", "enumeration-listing": "fixture-cleanup",
+                "enumeration-after-identity": "fixture-cleanup", "enumeration-io": "fixture-cleanup",
+                "observer-scratch": "fixture-cleanup", "observer-output": "process-observation",
+                "observer-metadata": "process-observation", "death-cutoff": "fixture-cleanup",
+            }
+            self.assertEqual(controller.OWNERSHIP_RUN_CLEANUP_FIELDS, run_fields)
+            self.assertEqual(controller.OWNERSHIP_RUN_DIRECTORY_STATES,
+                             ("unattempted", "acquiring", "published", "canonical", "missing"))
+            self.assertEqual(controller.OWNERSHIP_RUN_STATUS_FIELDS, ("kind", "code"))
+            self.assertEqual(controller.OWNERSHIP_RUN_RESULT_SOURCES, ("ordinary", "recovered", "missing"))
+            self.assertEqual(controller.OWNERSHIP_RUN_CHECKS, run_checks)
+            self.assertEqual(controller.OWNERSHIP_RUN_NATIVE_PROOF_FIELDS, run_proof_fields)
+            self.assertEqual(controller.OWNERSHIP_RUN_OWNER_FINALITIES,
+                             ("active", "finalized", "no-producers", "unknown", "missing", "invalid"))
+            self.assertEqual(controller.OWNERSHIP_RUN_ERROR_STAGES, run_stages)
+            self.assertEqual(controller.OWNERSHIP_RUN_ERROR_FIELDS, ("stage", "errorCategory", "errorKind", "condition"))
+            self.assertEqual(controller.OWNERSHIP_RUN_RESULT_FIELDS, run_result_fields)
+            self.assertEqual(ownership_literal_table("OWNERSHIP_RUN_CONDITIONS"), run_conditions)
+            self.assertEqual(controller.OWNERSHIP_RUN_CONDITIONS, run_conditions)
             labels = ownership_literal_table("OWNERSHIP_FAILURE_LABEL_CODES")
             self.assertEqual(tuple(labels.values()), controller.OWNERSHIP_FAILURE_FAILED_CHECKS[:-1])
             self.assertEqual(len(labels), 23)
@@ -2774,6 +2814,19 @@ class CIControllerContractTests(unittest.TestCase):
                 self.assertEqual(set(ruby_words(ruby_text(relative), name)) | {"other"},
                                  controller.OWNERSHIP_FAILURE_ERROR_KINDS[category])
 
+            run_result = {name: adapter_record[name] for name in run_result_fields}
+            run_result.update(resultKind="pass", retainedDriverErrorCategory="none", retainedDriverErrorCode="none")
+            run_cleanup = {
+                "directoryState": "canonical", "driverStatus": {"kind": "exit", "code": 0}, "resultSource": "recovered",
+                "checks": dict(zip(run_checks, (True, True, True, True, True, True, False, False,
+                                                False, False, "missing", "missing", False, False))),
+                "nativeProof": dict(zip(run_proof_fields, (True, "finalized", True, False, "missing", True, False))),
+                # Occurrences, not exception identities: an identical retained
+                # error may escape two original cleanup calls without deduping.
+                "cleanupErrors": [["native-recovery", "fixture-error", "fixture-result", "owner-shape"],
+                                  ["native-recovery", "fixture-error", "fixture-result", "owner-shape"]],
+                "driverResult": run_result,
+            }
             ownership_row = {
                 "ownerPhase": "unknown", "firstErrorCategory": "interrupt", "firstErrorKind": "none",
                 "operationErrorCategory": "interrupt", "operationErrorKind": "none",
@@ -2782,9 +2835,10 @@ class CIControllerContractTests(unittest.TestCase):
                            for index, name in enumerate(controller.OWNERSHIP_FAILURE_CHECKS)},
                 "commandChecks": {name: ("missing", True, False)[index % 3]
                                   for index, name in enumerate(controller.OWNERSHIP_FAILURE_COMMAND_CHECKS)},
+                "runCleanup": "missing",
             }
             ownership_record = {
-                "schema": 2, "platform": "ios", "family": "async", "helper": "capture", "case": "async-spawn",
+                "schema": 3, "platform": "ios", "family": "async", "helper": "capture", "case": "async-spawn",
                 "phase": "row-rejection", "errorCategory": "fixture-error", "errorKind": "ownership-probe",
                 "row": ownership_row,
             }
@@ -2836,6 +2890,50 @@ class CIControllerContractTests(unittest.TestCase):
                     self.assertEqual(controller.ownership_failure(ownership_marker, deadline=1000.0), ownership_record)
                 strict.assert_called_once_with(ownership_marker, "MRK_OWNERSHIP_FAILURE=", 4096,
                                                deadline=1000.0, canonical_fields=controller.OWNERSHIP_FAILURE_FIELDS)
+                run_record = {**ownership_record, "helper": "run", "case": "async-reap", "row": {
+                    **ownership_row, "ownerPhase": "reaped", "failedChecks": ["fixture-retained"], "runCleanup": run_cleanup}}
+                run_marker = ownership_bytes(run_record)
+                # Inner pass/status0 is not adapter_failure eligibility. The
+                # original outer failed ownership callback remains mandatory.
+                with patch.object(controller, "adapter_failure", side_effect=AssertionError("borrowed adapter rejection gate")):
+                    self.assertEqual(controller.ownership_failure(run_marker, deadline=1000.0), run_record)
+                run_detail = controller.failure_details(capture(ownership_stdout, stderr=run_marker, ok=False, returncode=1),
+                                                        ownership_step, paths, deadline=1000.0)
+                self.assertEqual(run_detail["ownership_failure"], run_record)
+                self.assertEqual(len(run_detail["ownership_failure"]["row"]["runCleanup"]["cleanupErrors"]), 2)
+                self.assertNotIn("adapter_failure", run_detail)
+                run_success = ownership_stdout.replace("0.01 s = E", "0.01 s = .").replace("1 errors", "0 errors")
+                self.assertNotIn("ownership_failure", controller.failure_details(
+                    capture(run_success, stderr=run_marker), ownership_step, paths))
+                self.assertTrue(controller.parse_capture(ownership_step, capture(run_success, stderr=run_marker),
+                                                         paths, "linux", None).ok)
+                for status in ({"kind": "missing", "code": "missing"}, {"kind": "exit", "code": 0},
+                               {"kind": "exit", "code": 255}, {"kind": "signal", "code": 1}, {"kind": "signal", "code": 255}):
+                    record = {**run_record, "row": {**run_record["row"], "runCleanup": {**run_cleanup, "driverStatus": status}}}
+                    self.assertEqual(controller.ownership_failure(ownership_bytes(record)), record)
+                # Broadcast finite values instead of a redundant Cartesian
+                # matrix; failed-snapshot contradictions remain observations.
+                for index, owner in enumerate(controller.OWNERSHIP_RUN_OWNER_FINALITIES):
+                    value = (True, False, "missing")[index % 3]
+                    projection = {**run_cleanup,
+                        "directoryState": controller.OWNERSHIP_RUN_DIRECTORY_STATES[index % 5],
+                        "resultSource": controller.OWNERSHIP_RUN_RESULT_SOURCES[index % 3],
+                        "checks": dict.fromkeys(run_checks, value),
+                        "nativeProof": {name: owner if name == "ownerFinality" else value for name in run_proof_fields}}
+                    record = {**run_record, "row": {**run_record["row"], "runCleanup": projection}}
+                    self.assertEqual(controller.ownership_failure(ownership_bytes(record)), record)
+                for condition, kind in run_conditions.items():
+                    projection = {**run_cleanup, "cleanupErrors": [["native-recovery", "fixture-error", kind, condition]]}
+                    record = {**run_record, "row": {**run_record["row"], "runCleanup": projection}}
+                    self.assertEqual(controller.ownership_failure(ownership_bytes(record)), record)
+                for errors in ([], [[stage, "native-spawn-error", "unknown", "other"] for stage in run_stages[:7]],
+                               [["missing", "os-error", "echild", "missing"]]):
+                    record = {**run_record, "row": {**run_record["row"], "runCleanup": {**run_cleanup, "cleanupErrors": errors}}}
+                    self.assertEqual(controller.ownership_failure(ownership_bytes(record)), record)
+                for result in ("missing", "invalid", *({**run_result, "nativeChecks": dict.fromkeys(adapter_native_checks, value)}
+                                                     for value in (True, False, "missing", "invalid"))):
+                    record = {**run_record, "row": {**run_record["row"], "runCleanup": {**run_cleanup, "driverResult": result}}}
+                    self.assertEqual(controller.ownership_failure(ownership_bytes(record)), record)
                 # Every source-defined helper/case routes only to its actual
                 # platform/family callback, never a neighboring healthy family.
                 for platform, (gate, class_name) in adapter_platforms.items():
@@ -2845,7 +2943,8 @@ class CIControllerContractTests(unittest.TestCase):
                             for case in cases:
                                 record = {**ownership_record, "platform": platform, "family": family,
                                     "helper": helper, "case": case,
-                                    "row": {**ownership_row, "failedChecks": ownership_case_codes(family, helper, case)}}
+                                    "row": {**ownership_row, "failedChecks": ownership_case_codes(family, helper, case),
+                                            "runCleanup": run_cleanup if helper == "run" else "missing"}}
                                 transcript = clean + target + " = 0.01 s = F\n" + failed_footer
                                 with patch.object(controller, "ruby_capture_ids", return_value=tuple(sorted((*expected, target)))):
                                     detail = controller.failure_details(capture(transcript, stderr=ownership_bytes(record),
@@ -2955,7 +3054,7 @@ class CIControllerContractTests(unittest.TestCase):
                     {key: value for key, value in ownership_record.items() if key != "row"},
                     {**ownership_record, "private": "PRIVATE_VALUE"},
                     {key: ownership_record[key] for key in reversed(ownership_record)},
-                    *({**ownership_record, "schema": value} for value in (True, 2.0, "2", 1)),
+                    *({**ownership_record, "schema": value} for value in (True, 3.0, "3", 2, 1)),
                     *({**ownership_record, key: value} for key, value in (
                         ("platform", "PRIVATE_PLATFORM"), ("family", "signals"), ("helper", "PRIVATE_HELPER"),
                         ("family", "unknown"), ("family", "setup"), ("family", "observation"), ("family", False),
@@ -2986,12 +3085,80 @@ class CIControllerContractTests(unittest.TestCase):
                 invalid_ownership.extend({**ownership_record, "row": row} for row in invalid_rows)
                 invalid_ownership.append({**ownership_record, "case": "async-reap",
                     "row": {**ownership_row, "failedChecks": ["pre-go-barrier-missing"]}})
+                invalid_run_cleanup = [None, False, "invalid", {},
+                    *({key: value for key, value in run_cleanup.items() if key != field} for field in run_fields),
+                    {**run_cleanup, "private": "PRIVATE_PATH"}, {key: run_cleanup[key] for key in reversed(run_cleanup)},
+                    *({**run_cleanup, key: value} for key, value in (
+                        ("directoryState", "PRIVATE_DIRECTORY"), ("directoryState", False),
+                        ("resultSource", "PRIVATE_SOURCE"), ("resultSource", None),
+                        ("cleanupErrors", None), ("cleanupErrors", {}),
+                        ("cleanupErrors", run_cleanup["cleanupErrors"] * 4),
+                        ("driverResult", None), ("driverResult", False), ("driverResult", "PRIVATE_RESULT"),
+                        ("driverResult", adapter_record),
+                    )),
+                ]
+                for status in (None, [], {}, {"code": 0, "kind": "exit"}, {"kind": "exit", "code": 0, "pid": 123},
+                               {"kind": "missing", "code": 0}, {"kind": "exit", "code": "missing"},
+                               {"kind": "signal", "code": 0}, {"kind": "signal", "code": -1},
+                               *({"kind": "exit", "code": value} for value in (True, 0.0, None, -1, 256, "0")),
+                               {"kind": False, "code": 0}, {"kind": "PRIVATE_STATUS", "code": 0}):
+                    invalid_run_cleanup.append({**run_cleanup, "driverStatus": status})
+                for group in ("checks", "nativeProof"):
+                    original = run_cleanup[group]
+                    invalid_run_cleanup.extend({**run_cleanup, group: value} for value in (
+                        None, [], {key: value for key, value in original.items() if key != next(iter(original))},
+                        {**original, "PRIVATE_FIELD": True}, {key: original[key] for key in reversed(original)},
+                        *({**original, next(iter(original)): value} for value in (None, 0, 1.0, "invalid", "PRIVATE_VALUE")),
+                    ))
+                invalid_run_cleanup.extend({**run_cleanup, "nativeProof": {**run_cleanup["nativeProof"], "ownerFinality": value}}
+                                           for value in (True, None, "other", "no_producers", "PRIVATE_FINALITY"))
+                valid_error = ["native-recovery", "fixture-error", "fixture-result", "owner-shape"]
+                invalid_errors = [None, False, {}, [], valid_error[:-1], valid_error + ["PRIVATE_MESSAGE"],
+                    *([*valid_error[:index], value, *valid_error[index + 1:]] for index, value in (
+                        (0, "PRIVATE_STAGE"), (0, False), (1, "PRIVATE_CATEGORY"), (1, None),
+                        (2, "PRIVATE_KIND"), (2, False), (3, "PRIVATE_MESSAGE"), (3, None),
+                    )),
+                    ["missing", "none", "none", "other"], ["missing", "io-error", "none", "owner-shape"],
+                    ["missing", "native-spawn-error", "parent_lost", "other"],
+                    *(["native-recovery", "fixture-error",
+                       "fixture-cleanup" if kind == "fixture-result" else "fixture-result", condition]
+                      for condition, kind in run_conditions.items()),
+                ]
+                invalid_run_cleanup.extend({**run_cleanup, "cleanupErrors": [error]} for error in invalid_errors)
+                invalid_results = [
+                    *({key: value for key, value in run_result.items() if key != field} for field in run_result_fields),
+                    {**run_result, "private": "PRIVATE_RECORD"}, {key: run_result[key] for key in reversed(run_result)},
+                    *({**run_result, key: value} for key, value in (
+                        ("resultKind", "PRIVATE_KIND"), ("resultKind", False),
+                        ("retainedDriverErrorCategory", None), ("retainedDriverErrorCode", "PRIVATE_CODE"),
+                    )),
+                    {**run_result, "retainedDriverErrorCategory": "native-spawn-error", "retainedDriverErrorCode": "native-deadline"},
+                ]
+                for group in ("nativeChecks", "nativeOutcomes"):
+                    original = run_result[group]
+                    invalid_results.extend({**run_result, group: value} for value in (
+                        None, [], {key: value for key, value in original.items() if key != next(iter(original))},
+                        {**original, "PRIVATE_FIELD": "missing"}, {key: original[key] for key in reversed(original)},
+                        {**original, next(iter(original)): 0}, {**original, next(iter(original)): "PRIVATE_VALUE"},
+                    ))
+                invalid_run_cleanup.extend({**run_cleanup, "driverResult": result} for result in invalid_results)
+                invalid_ownership.extend({**run_record, "row": {**run_record["row"], "runCleanup": projection}}
+                                         for projection in invalid_run_cleanup)
+                invalid_ownership.extend((
+                    {**run_record, "helper": "capture"},
+                    {**run_record, "row": {**run_record["row"], "operationErrorCategory": "none", "operationErrorKind": "none"}},
+                    {**run_record, "phase": "restoration"},
+                    {**run_record, "errorCategory": "interrupt", "errorKind": "none"},
+                ))
                 invalid_markers = [*(ownership_bytes(record) for record in invalid_ownership),
                     ownership_marker * 2,
-                    ownership_marker.replace(b'"schema":2', b'"schema":2,"schema":2'),
+                    ownership_marker.replace(b'"schema":3', b'"schema":3,"schema":3'),
                     ownership_marker.replace(b'"ownerPhase":"unknown"', b'"ownerPhase":"unknown","ownerPhase":"unknown"'),
                     ownership_marker.replace(b'"firstExceptionPreserved":true', b'"firstExceptionPreserved":true,"firstExceptionPreserved":true'),
-                    ownership_marker.replace(b'"schema":2', b'"schema": 2'),
+                    ownership_marker.replace(b'"schema":3', b'"schema": 3'),
+                    run_marker.replace(b'"driverStatus":', b'"driverStatus":null,"driverStatus":'),
+                    run_marker.replace(b'"nativeFinal":false', b'"nativeFinal":false,"nativeFinal":false'),
+                    run_marker.replace(b'"resultKind":"pass"', b'"resultKind":"pass","resultKind":"pass"'),
                     ownership_marker.replace(b'"async"', br'"\u0061sync"'),
                     ownership_marker[:-1], ownership_marker[:-1] + b"\r\n",
                     b"MRK_OWNERSHIP_FAILURE=\xff\n", b"progress " + ownership_marker,
@@ -3009,6 +3176,34 @@ class CIControllerContractTests(unittest.TestCase):
                 # applicable code and each field's longest allowed encoding.
                 # This is a complete-line bound, including prefix and LF; an
                 # impossible mixture of all24 codes is not a valid maximum.
+                driver_category, driver_code = max(
+                    ((category, code) for category, values in controller.ADAPTER_FAILURE_DRIVER_CODES.items() for code in values),
+                    key=lambda pair: len(pair[0]) + len(pair[1]))
+                maximum_run_result = {
+                    "resultKind": max(controller.ADAPTER_FAILURE_RESULT_KINDS, key=len),
+                    "retainedDriverErrorCategory": driver_category, "retainedDriverErrorCode": driver_code,
+                    "nativeChecks": dict.fromkeys(adapter_native_checks, "missing"),
+                    "nativeOutcomes": {name: max(values, key=len) for name, values in adapter_native_outcomes.items()},
+                }
+                error_tuples = [[max(run_stages, key=len), category, kind, condition]
+                    for category, kinds in controller.OWNERSHIP_FAILURE_ERROR_KINDS.items() if category != "none"
+                    for kind in kinds for condition in ("other", "missing", *run_conditions)
+                    if condition in ("other", "missing") or category == "fixture-error" and kind == run_conditions[condition]]
+                maximum_error = max(error_tuples, key=lambda item: len(json.dumps(item, separators=(",", ":"))))
+                self.assertEqual(maximum_error,
+                    ["transcript-out-close", "fixture-error", "fixture-cleanup", "enumeration-before-identity"])
+                self.assertEqual(len(json.dumps(maximum_error, separators=(",", ":"))), 88)
+                self.assertEqual(len(json.dumps(maximum_run_result, separators=(",", ":"))), 1239)
+                maximum_run_cleanup = {
+                    "directoryState": max(controller.OWNERSHIP_RUN_DIRECTORY_STATES, key=len),
+                    "driverStatus": {"kind": "missing", "code": "missing"},
+                    "resultSource": max(controller.OWNERSHIP_RUN_RESULT_SOURCES, key=len),
+                    "checks": dict.fromkeys(run_checks, "missing"),
+                    "nativeProof": {name: max(controller.OWNERSHIP_RUN_OWNER_FINALITIES, key=len) if name == "ownerFinality"
+                                    else "missing" for name in run_proof_fields},
+                    "cleanupErrors": [maximum_error] * 7, "driverResult": maximum_run_result,
+                }
+                self.assertEqual(len(json.dumps(maximum_run_cleanup, separators=(",", ":"))), 2621)
                 maximum_records = [{**ownership_record, "platform": "android", "family": family,
                     "helper": helper, "case": case, "row": {
                         **ownership_row, "ownerPhase": "unstarted",
@@ -3017,15 +3212,17 @@ class CIControllerContractTests(unittest.TestCase):
                         "failedChecks": ownership_case_codes(family, helper, case),
                         "checks": dict.fromkeys(controller.OWNERSHIP_FAILURE_CHECKS, "missing"),
                         "commandChecks": dict.fromkeys(controller.OWNERSHIP_FAILURE_COMMAND_CHECKS, "missing"),
+                        "runCleanup": maximum_run_cleanup if helper == "run" else "missing",
                     }} for family, cases in controller.OWNERSHIP_FAILURE_CASES.items()
                     for helper in ("capture", "run") for case in cases]
                 maximum_record = max(maximum_records, key=lambda record: len(ownership_bytes(record)))
                 self.assertEqual([maximum_record[key] for key in ("family", "helper", "case")],
-                                 ["signals", "capture", "TERM-spawn"])
-                self.assertEqual(len(ownership_bytes(maximum_record)), 1215)
+                                 ["async", "run", "repeated"])
+                self.assertEqual(len(ownership_bytes(maximum_record)), 3847)
                 self.assertLessEqual(len(ownership_bytes(maximum_record)), 4096)
                 self.assertEqual(controller.ownership_failure(ownership_bytes(maximum_record)), maximum_record)
-                largest_missing = {**maximum_record, "case": "install-published-TERM", "phase": "proof-publication",
+                largest_missing = {**maximum_record, "family": "signals", "helper": "capture",
+                    "case": "install-published-TERM", "phase": "proof-publication",
                     "errorCategory": "native-lifecycle-error", "errorKind": "parent_lost", "row": "missing"}
                 self.assertEqual(len(ownership_bytes(largest_missing)), 237)
                 self.assertEqual(controller.ownership_failure(ownership_bytes(largest_missing)), largest_missing)

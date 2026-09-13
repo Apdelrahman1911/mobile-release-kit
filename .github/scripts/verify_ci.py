@@ -364,7 +364,7 @@ OWNERSHIP_FAILURE_PHASES = (
 OWNERSHIP_FAILURE_OWNER_PHASES = ("unstarted", "acquiring", "reserved", "waiting", "reaped", "unknown", "missing")
 OWNERSHIP_FAILURE_ROW_FIELDS = (
     "ownerPhase", "firstErrorCategory", "firstErrorKind", "operationErrorCategory", "operationErrorKind",
-    "failedChecks", "checks", "commandChecks",
+    "failedChecks", "checks", "commandChecks", "runCleanup",
 )
 OWNERSHIP_FAILURE_CHECKS = (
     "firstExceptionPreserved", "handlersRestored", "registryInactive", "raisersJoined",
@@ -397,6 +397,48 @@ OWNERSHIP_FAILURE_ERROR_KINDS = {
     }),
     "os-error": frozenset({"echild", "other"}),
 }
+OWNERSHIP_RUN_CLEANUP_FIELDS = (
+    "directoryState", "driverStatus", "resultSource", "checks", "nativeProof", "cleanupErrors", "driverResult",
+)
+OWNERSHIP_RUN_DIRECTORY_STATES = ("unattempted", "acquiring", "published", "canonical", "missing")
+OWNERSHIP_RUN_STATUS_FIELDS = ("kind", "code")
+OWNERSHIP_RUN_RESULT_SOURCES = ("ordinary", "recovered", "missing")
+OWNERSHIP_RUN_CHECKS = (
+    "driverComplete", "dispatchRequested", "recoveryEntered", "recoveryFilesComplete", "dispatchMatched",
+    "ownerValidated", "nativeFinal", "knownDead", "deathAttempted", "deathCompleted", "directoryIdentityMatched",
+    "layoutAccepted", "removalAttempted", "removalCompleted",
+)
+OWNERSHIP_RUN_NATIVE_PROOF_FIELDS = (
+    "versionOne", "ownerFinality", "custodianMatches", "keeperMatches", "validatorMatches", "groupMatches", "noProducersMatch",
+)
+OWNERSHIP_RUN_OWNER_FINALITIES = ("active", "finalized", "no-producers", "unknown", "missing", "invalid")
+OWNERSHIP_RUN_ERROR_STAGES = (
+    "child-stop", "transcript-out-close", "transcript-err-close", "held-writer-close", "native-recovery",
+    "death-observation", "directory-removal", "missing",
+)
+OWNERSHIP_RUN_ERROR_FIELDS = ("stage", "errorCategory", "errorKind", "condition")
+OWNERSHIP_RUN_CONDITIONS = {
+    "recovery-dispatch-mismatch": "fixture-cleanup",
+    "owner-shape": "fixture-result",
+    "owner-unbound": "fixture-result",
+    "owner-duplicate": "fixture-result",
+    "owner-graph": "fixture-result",
+    "driver-identity-changed": "fixture-cleanup",
+    "directory-not-canonical": "fixture-cleanup",
+    "directory-not-private": "fixture-cleanup",
+    "enumeration-before-identity": "fixture-cleanup",
+    "enumeration-open-identity": "fixture-cleanup",
+    "enumeration-listing": "fixture-cleanup",
+    "enumeration-after-identity": "fixture-cleanup",
+    "enumeration-io": "fixture-cleanup",
+    "observer-scratch": "fixture-cleanup",
+    "observer-output": "process-observation",
+    "observer-metadata": "process-observation",
+    "death-cutoff": "fixture-cleanup",
+}
+OWNERSHIP_RUN_RESULT_FIELDS = (
+    "resultKind", "retainedDriverErrorCategory", "retainedDriverErrorCode", "nativeChecks", "nativeOutcomes",
+)
 NATIVE_SIGNAL_FAILURE_PREFIX = "MRK_NATIVE_SIGNAL_FAILURE="
 NATIVE_SIGNAL_FAILURE_CALLBACK = (
     "NativeSignalObservationTest#test_native_first_close_and_post_reap_signals_with_safe_veto_controls"
@@ -1672,6 +1714,26 @@ def native_setup_failure(raw: bytes, *, deadline: float | None = None) -> dict |
             check_clock(deadline)
 
 
+def _adapter_result_projection_valid(data: object) -> bool:
+    """Pure finite snapshot grammar; no adapter-failure eligibility or effects."""
+    if (type(data) is not dict or tuple(data) != OWNERSHIP_RUN_RESULT_FIELDS
+            or type(data["resultKind"]) is not str or data["resultKind"] not in ADAPTER_FAILURE_RESULT_KINDS
+            or type(data["retainedDriverErrorCategory"]) is not str
+            or data["retainedDriverErrorCategory"] not in ADAPTER_FAILURE_DRIVER_CODES
+            or type(data["retainedDriverErrorCode"]) is not str
+            or data["retainedDriverErrorCode"] not in ADAPTER_FAILURE_DRIVER_CODES[data["retainedDriverErrorCategory"]]):
+        return False
+    checks = data["nativeChecks"]
+    if (type(checks) is not dict or tuple(checks) != ADAPTER_FAILURE_NATIVE_CHECKS
+            or any(type(value) is not bool and not (type(value) is str and value in {"missing", "invalid"})
+                   for value in checks.values())):
+        return False
+    outcomes = data["nativeOutcomes"]
+    return (type(outcomes) is dict and tuple(outcomes) == tuple(ADAPTER_FAILURE_NATIVE_OUTCOMES)
+            and all(type(value) is str and value in ADAPTER_FAILURE_NATIVE_OUTCOMES[name]
+                    for name, value in outcomes.items()))
+
+
 def adapter_failure(raw: bytes, *, deadline: float | None = None) -> dict | None:
     """Closed original guard operands, not a native cause or acceptance receipt."""
     try:
@@ -1682,12 +1744,9 @@ def adapter_failure(raw: bytes, *, deadline: float | None = None) -> dict | None
                 or type(data["mode"]) is not str or data["mode"] not in ADAPTER_FAILURE_MODE_CONTRACTS
                 or type(data["expectedKind"]) is not str
                 or data["expectedKind"] != ADAPTER_FAILURE_MODE_CONTRACTS[data["mode"]][1]
-                or type(data["resultKind"]) is not str or data["resultKind"] not in ADAPTER_FAILURE_RESULT_KINDS
                 or type(data["driverExitStatus"]) is not int or not 0 <= data["driverExitStatus"] <= 255
-                or any(type(data[key]) is not str or data[key] not in ADAPTER_FAILURE_DRIVER_CODES
-                       for key in ("retainedDriverErrorCategory", "adapterErrorCategory"))
-                or type(data["retainedDriverErrorCode"]) is not str
-                or data["retainedDriverErrorCode"] not in ADAPTER_FAILURE_DRIVER_CODES[data["retainedDriverErrorCategory"]]):
+                or type(data["adapterErrorCategory"]) is not str or data["adapterErrorCategory"] not in ADAPTER_FAILURE_DRIVER_CODES
+                or not _adapter_result_projection_valid({key: data[key] for key in OWNERSHIP_RUN_RESULT_FIELDS})):
             return None
         expected_status = 0 if data["expectedKind"] == "pass" else 1
         predicates = [name for name, failed in zip(ADAPTER_FAILURE_PREDICATES,
@@ -1697,7 +1756,6 @@ def adapter_failure(raw: bytes, *, deadline: float | None = None) -> dict | None
                 or data["failedPredicates"] != predicates):
             return None
         for key, fields in (("resultChecks", ADAPTER_FAILURE_RESULT_CHECKS),
-                            ("nativeChecks", ADAPTER_FAILURE_NATIVE_CHECKS),
                             ("timingChecks", ADAPTER_FAILURE_TIMING_CHECKS),
                             ("slowChecks", ADAPTER_FAILURE_SLOW_CHECKS)):
             checks = data[key]
@@ -1709,11 +1767,6 @@ def adapter_failure(raw: bytes, *, deadline: float | None = None) -> dict | None
                         return None
                 elif type(value) is not bool and not (type(value) is str and value in {"missing", "invalid"}):
                     return None
-        outcomes = data["nativeOutcomes"]
-        if (type(outcomes) is not dict or tuple(outcomes) != tuple(ADAPTER_FAILURE_NATIVE_OUTCOMES)
-                or any(type(value) is not str or value not in ADAPTER_FAILURE_NATIVE_OUTCOMES[name]
-                       for name, value in outcomes.items())):
-            return None
         # Detached original-snapshot facts may disagree on a failed capture.
         # Never turn their diagnostic projection into a new acceptance gate.
         return data
@@ -1722,22 +1775,75 @@ def adapter_failure(raw: bytes, *, deadline: float | None = None) -> dict | None
             check_clock(deadline)
 
 
+def _ownership_error_pair_valid(category: object, kind: object) -> bool:
+    return (type(category) is str and category in OWNERSHIP_FAILURE_ERROR_KINDS
+            and type(kind) is str and kind in OWNERSHIP_FAILURE_ERROR_KINDS[category])
+
+
+def _ownership_run_cleanup_valid(data: object, *, helper: str, operation_category: str) -> bool:
+    """Original failed-run observations only, never a second cleanup decision."""
+    def choice(value, allowed):
+        return type(value) is str and value in allowed
+
+    def boolean(value):
+        return type(value) is bool or choice(value, ("missing",))
+
+    if choice(data, ("missing",)):
+        return True
+    if (helper != "run" or operation_category == "none"
+            or type(data) is not dict or tuple(data) != OWNERSHIP_RUN_CLEANUP_FIELDS
+            or not choice(data["directoryState"], OWNERSHIP_RUN_DIRECTORY_STATES)
+            or not choice(data["resultSource"], OWNERSHIP_RUN_RESULT_SOURCES)):
+        return False
+    status = data["driverStatus"]
+    if type(status) is not dict or tuple(status) != OWNERSHIP_RUN_STATUS_FIELDS:
+        return False
+    kind, code = status["kind"], status["code"]
+    if choice(kind, ("missing",)):
+        if not choice(code, ("missing",)):
+            return False
+    elif not (choice(kind, ("exit", "signal")) and type(code) is int
+              and (0 if kind == "exit" else 1) <= code <= 255):
+        return False
+    checks, proof = data["checks"], data["nativeProof"]
+    if (type(checks) is not dict or tuple(checks) != OWNERSHIP_RUN_CHECKS
+            or not all(boolean(value) for value in checks.values())
+            or type(proof) is not dict or tuple(proof) != OWNERSHIP_RUN_NATIVE_PROOF_FIELDS
+            or not all(choice(value, OWNERSHIP_RUN_OWNER_FINALITIES) if name == "ownerFinality" else boolean(value)
+                       for name, value in proof.items())):
+        return False
+    errors = data["cleanupErrors"]
+    if type(errors) is not list or len(errors) > 7:
+        return False
+    for entry in errors:
+        if type(entry) is not list or len(entry) != len(OWNERSHIP_RUN_ERROR_FIELDS):
+            return False
+        stage, category, kind, condition = entry
+        if (not choice(stage, OWNERSHIP_RUN_ERROR_STAGES) or category == "none"
+                or not _ownership_error_pair_valid(category, kind) or type(condition) is not str):
+            return False
+        if condition not in ("other", "missing") and (condition not in OWNERSHIP_RUN_CONDITIONS
+                or category != "fixture-error" or kind != OWNERSHIP_RUN_CONDITIONS[condition]):
+            return False
+    result = data["driverResult"]
+    # A recovered pass/status0 is useful failure evidence. Do not call the
+    # adapter's different original result/status-rejection gate here.
+    return choice(result, ("missing", "invalid")) or _adapter_result_projection_valid(result)
+
+
 def ownership_failure(raw: bytes, *, deadline: float | None = None) -> dict | None:
     """Finite original healthy ownership failure facts, never a native result."""
-    def error_pair(category, kind):
-        return (type(category) is str and category in OWNERSHIP_FAILURE_ERROR_KINDS
-                and type(kind) is str and kind in OWNERSHIP_FAILURE_ERROR_KINDS[category])
 
     try:
         data = _fixture_failure_record(raw, OWNERSHIP_FAILURE_PREFIX, 4096, deadline=deadline,
                                        canonical_fields=OWNERSHIP_FAILURE_FIELDS)
-        if (type(data) is not dict or type(data["schema"]) is not int or data["schema"] != 2
+        if (type(data) is not dict or type(data["schema"]) is not int or data["schema"] != 3
                 or type(data["platform"]) is not str or data["platform"] not in ADAPTER_FAILURE_PLATFORMS
                 or type(data["family"]) is not str or data["family"] not in OWNERSHIP_FAILURE_CASES
                 or type(data["helper"]) is not str or data["helper"] not in {"capture", "run"}
                 or type(data["case"]) is not str or data["case"] not in OWNERSHIP_FAILURE_CASES[data["family"]]
                 or type(data["phase"]) is not str or data["phase"] not in OWNERSHIP_FAILURE_PHASES
-                or not error_pair(data["errorCategory"], data["errorKind"]) or data["errorCategory"] == "none"):
+                or not _ownership_error_pair_valid(data["errorCategory"], data["errorKind"]) or data["errorCategory"] == "none"):
             return None
         row = data["row"]
         if type(row) is str and row == "missing":
@@ -1748,8 +1854,8 @@ def ownership_failure(raw: bytes, *, deadline: float | None = None) -> dict | No
                 or (data["errorCategory"], data["errorKind"]) != ("fixture-error", "ownership-probe")
                 or type(row) is not dict or tuple(row) != OWNERSHIP_FAILURE_ROW_FIELDS
                 or type(row["ownerPhase"]) is not str or row["ownerPhase"] not in OWNERSHIP_FAILURE_OWNER_PHASES
-                or not error_pair(row["firstErrorCategory"], row["firstErrorKind"])
-                or not error_pair(row["operationErrorCategory"], row["operationErrorKind"])):
+                or not _ownership_error_pair_valid(row["firstErrorCategory"], row["firstErrorKind"])
+                or not _ownership_error_pair_valid(row["operationErrorCategory"], row["operationErrorKind"])):
             return None
         failed = row["failedChecks"]
         if (type(failed) is not list or not failed or any(type(name) is not str for name in failed)
@@ -1784,6 +1890,9 @@ def ownership_failure(raw: bytes, *, deadline: float | None = None) -> dict | No
                     or any(type(value) is not bool and not (type(value) is str and value == "missing")
                            for value in checks.values())):
                 return None
+        if not _ownership_run_cleanup_valid(row["runCleanup"], helper=helper,
+                                            operation_category=row["operationErrorCategory"]):
+            return None
         # The failed-check list comes from the original row evaluation, not
         # recomputation from optional observations (which may disagree).
         return data

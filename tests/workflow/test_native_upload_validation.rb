@@ -3118,13 +3118,15 @@ class NativeUploadValidationTest < Minitest::Test
       "handlersRestored" => true, "pendingInterrupt" => false, "retainedFixture" => true, "private" => "private-marker"}
     raw_snapshot = {"settled" => false, "unknown" => true, "observerErrors" => [], "private" => "private-marker", "pid" => 999_887_766}
     row = diagnostic.row(summary: raw_summary, snapshot: raw_snapshot, owner_phase: :reaped, first: first, operation: first)
-    expected = {"schema" => 2, "platform" => "ios", "family" => "async", "helper" => "capture", "case" => "async-spawn",
+    expected = {"schema" => 3, "platform" => "ios", "family" => "async", "helper" => "capture", "case" => "async-spawn",
       "phase" => "row-rejection", "errorCategory" => "fixture-error", "errorKind" => "ownership-probe", "row" => row}
     packet = diagnostic.line(expected)
     assert_equal "#{prefix}#{JSON.generate(expected)}\n", packet
     assert packet.frozen? && packet.ascii_only?
     assert_operator packet.bytesize, :<=, 4096
     assert row.frozen? && row.fetch("failedChecks").frozen? && row.fetch("checks").frozen? && row.fetch("commandChecks").frozen?
+    assert_equal "runCleanup", row.keys.last
+    assert_equal "missing", row.fetch("runCleanup")
     assert_equal [false, true, "missing", "missing", "missing", false, true], row.fetch("checks").values
     assert_equal [false, "missing", true, "missing", "missing", "missing", "missing", true], row.fetch("commandChecks").values
     refute_includes packet, "private-marker"
@@ -3183,7 +3185,7 @@ class NativeUploadValidationTest < Minitest::Test
         diagnostic.line(value).bytesize
       end
     end
-    assert_equal 1215, sizes.max # Complete prefix + canonical JSON + LF; independently calculated from literals.
+    assert_equal 1238, sizes.max # Complete prefix + canonical JSON + LF, with runCleanup=missing.
     missing = expected.merge("platform" => "android", "family" => "signals", "helper" => "capture", "case" => "install-published-TERM",
       "phase" => "proof-publication", "errorCategory" => "native-lifecycle-error", "errorKind" => "parent_lost", "row" => "missing")
     assert_equal 237, diagnostic.line(missing).bytesize
@@ -3196,7 +3198,7 @@ class NativeUploadValidationTest < Minitest::Test
      [Errno::ECHILD.new("private-marker"), "os-error", "echild"], [RuntimeError.new("private-marker"), "other", "none"]].each do |error, category, kind|
       assert_equal [category, kind], diagnostic.error_pair(error)
     end
-    malformed = [expected.merge("schema" => true), expected.merge("schema" => 1), expected.merge("platform" => "native"), expected.merge("family" => "signals"),
+    malformed = [expected.merge("schema" => true), expected.merge("schema" => 1), expected.merge("schema" => 2), expected.merge("platform" => "native"), expected.merge("family" => "signals"),
       expected.merge("helper" => "private-marker"), expected.merge("case" => "normal"), expected.merge("phase" => "snapshot"),
       expected.merge("errorCategory" => "interrupt", "errorKind" => "none"), expected.merge("private" => "private-marker"),
       expected.merge("row" => row.merge("failedChecks" => [])), expected.merge("row" => row.merge("failedChecks" => ["command-not-finalized"] * 2)),
@@ -3206,19 +3208,264 @@ class NativeUploadValidationTest < Minitest::Test
     malformed.each { |value| assert_nil diagnostic.line(value) }
     fixture.stub(:clock_ns, 1) do
       assert_equal expected, diagnostic.parse("private chatter\n#{packet}", deadline_ns: 10)
-      [packet * 2, packet.chomp, packet.sub("\n", "\r\n"), packet.sub('"schema":2', '"schema":2,"schema":2'),
+      [packet * 2, packet.chomp, packet.sub("\n", "\r\n"), packet.sub('"schema":3', '"schema":3,"schema":3'),
        packet.sub(prefix, "MRK_OWNERSHIP_ASYNC_FAILURE="), packet.sub('{', '{ '), "#{prefix}{bad}\n", "#{prefix}#{'x' * 4096}\n", "#{prefix}é\n"].each do |bytes|
         assert_nil diagnostic.parse(bytes, deadline_ns: 10)
       end
       assert_nil diagnostic.parse(packet, deadline_ns: 1)
     end
 
+    # The bounded run view reads only the original, already-unwound state.
+    # Its inner pass/status0 is not eligibility for an adapter failure line.
+    run_checks = %w[driverComplete dispatchRequested recoveryEntered recoveryFilesComplete dispatchMatched
+      ownerValidated nativeFinal knownDead deathAttempted deathCompleted directoryIdentityMatched layoutAccepted
+      removalAttempted removalCompleted]
+    run_proof_fields = %w[versionOne ownerFinality custodianMatches keeperMatches validatorMatches groupMatches noProducersMatch]
+    run_result_fields = %w[resultKind retainedDriverErrorCategory retainedDriverErrorCode nativeChecks nativeOutcomes]
+    assert_equal run_checks, fixture::OWNERSHIP_RUN_CHECKS
+    assert_equal run_proof_fields, fixture::OWNERSHIP_RUN_NATIVE_PROOF_FIELDS
+    assert_equal run_result_fields, fixture::OWNERSHIP_RUN_RESULT_FIELDS
+    clone = ->(value) { JSON.parse(JSON.generate(value)) }
+    run_status_type = Struct.new(:exitstatus, :termsig) do
+      def exited? = !exitstatus.nil?
+      def signaled? = !termsig.nil?
+    end
+    fresh_run_state = lambda do |original|
+      child = {"state" => "reaped", "status_kind" => "exit", "status_code" => 0}
+      owner = clone.call({"finality" => "finalized", "custodian" => child, "keeper" => child, "validator" => child,
+        "group" => {"state" => "retired"}, "processes" => [], "private" => "private-marker"})
+      result = clone.call({"kind" => "pass", "errorClass" => nil, "error" => nil, "private" => "private-marker",
+        "nativeObservation" => {"version" => 1, "finalized" => true, "noProducers" => false, "settled" => true,
+          "unknown" => false, "hooksRestored" => true, "observerErrors" => [], "custodian" => child,
+          "final" => {"keeper" => child, "validator" => child, "group" => {"state" => "retired"}, "outcome" => "ok", "cleanup" => "confirmed"}}})
+      frame = fixture::Lifetime.allocate
+      frame.instance_variable_set(:@primary, original)
+      frame.instance_variable_set(:@cleanup_errors, [fixture::Failure.new("fixture-cleanup", "unresolved observer scratch prevents fixture removal")])
+      frame.instance_variable_set(:@cleanup_error_stages, {0 => +"directory-removal"})
+      {unwound: true, mode: "inherited", escaped_error: original, record: {"directoryState" => :canonical}, lifetime: frame,
+       status: run_status_type.new(0, nil), owner: owner, result: result, result_source: +"recovered",
+       checks: run_checks.to_h { |key| [key, !%w[layoutAccepted removalCompleted].include?(key)] }}
+    end
+    original_state = fresh_run_state.call(first)
+    original_errors = original_state.fetch(:lifetime).instance_variable_get(:@cleanup_errors)
+    original_stages = original_state.fetch(:lifetime).instance_variable_get(:@cleanup_error_stages)
+    assert_nil fixture.adapter_failure_line(platform: "ios", mode: "inherited", result: original_state.fetch(:result), status: original_state.fetch(:status))
+    run_view = fixture.stub(:adapter_failure_line, ->(**_) { raise "run view borrowed adapter failure eligibility" }) do
+      diagnostic.run_cleanup(original_state, operation: first)
+    end
+    assert_equal %w[directoryState driverStatus resultSource checks nativeProof cleanupErrors driverResult], run_view.keys
+    assert_equal ["canonical", {"kind" => "exit", "code" => 0}, "recovered"], run_view.values_at("directoryState", "driverStatus", "resultSource")
+    assert_equal original_state.fetch(:checks), run_view.fetch("checks")
+    assert_equal [true, "finalized", true, true, true, true, false], run_view.fetch("nativeProof").values
+    assert_equal [["directory-removal", "fixture-error", "fixture-cleanup", "observer-scratch"]], run_view.fetch("cleanupErrors")
+    assert_equal run_result_fields, run_view.fetch("driverResult").keys
+    assert_equal %w[pass none none], run_view.fetch("driverResult").values_at(*run_result_fields.first(3))
+    assert_equal fixture.adapter_result_projection(mode: "inherited", result: original_state.fetch(:result)).slice(*run_result_fields), run_view.fetch("driverResult")
+    deeply_frozen = lambda do |value|
+      next false unless value.frozen?
+      case value
+      when Hash then value.all? { |key, item| deeply_frozen.call(key) && deeply_frozen.call(item) }
+      when Array then value.all? { |item| deeply_frozen.call(item) }
+      else true
+      end
+    end
+    assert deeply_frozen.call(run_view)
+    refute original_errors.frozen?
+    assert_same first, original_state.fetch(:lifetime).primary
+    [original_state, original_state.fetch(:record), original_state.fetch(:checks), original_state.fetch(:owner),
+     original_state.fetch(:result), original_state.fetch(:result).fetch("nativeObservation"), original_stages].each { |value| refute value.frozen? }
+    [[original_state.fetch(:result).fetch("kind"), run_view.fetch("driverResult").fetch("resultKind")],
+     [original_state.fetch(:owner).fetch("finality"), run_view.fetch("nativeProof").fetch("ownerFinality")],
+     [original_state.fetch(:result_source), run_view.fetch("resultSource")],
+     [original_stages.fetch(0), run_view.fetch("cleanupErrors").first.first]].each do |source, projected|
+      refute source.frozen?, "optional run view froze an original operand"
+      refute_same source, projected
+      source.replace("private-marker")
+    end
+    assert_equal %w[pass finalized recovered directory-removal], [run_view.dig("driverResult", "resultKind"),
+      run_view.dig("nativeProof", "ownerFinality"), run_view.fetch("resultSource"), run_view.fetch("cleanupErrors").first.first]
+    refute_includes JSON.generate(run_view), "private-marker"
+
+    # The same secondary raised twice is two original occurrences, with its
+    # original per-occurrence stage; optional missing stages never drop it.
+    repeated_state = fresh_run_state.call(first)
+    secondary = IOError.new("private-marker")
+    repeated_errors = [secondary, secondary]
+    repeated_frame = repeated_state.fetch(:lifetime)
+    repeated_frame.instance_variable_set(:@cleanup_errors, repeated_errors)
+    repeated_frame.instance_variable_set(:@cleanup_error_stages, {0 => "child-stop", 1 => "transcript-out-close"})
+    assert_equal [["child-stop", "io-error", "none", "other"], ["transcript-out-close", "io-error", "none", "other"]],
+      diagnostic.run_cleanup(repeated_state, operation: first).fetch("cleanupErrors")
+    assert_same repeated_errors, repeated_frame.instance_variable_get(:@cleanup_errors)
+    repeated_errors.each { |error| assert_same secondary, error }
+    repeated_frame.instance_variable_set(:@cleanup_error_stages, nil)
+    assert_equal [["missing", "io-error", "none", "other"]] * 2, diagnostic.run_cleanup(repeated_state, operation: first).fetch("cleanupErrors")
+    repeated_errors.concat([secondary] * 6)
+    assert_equal "missing", diagnostic.run_cleanup(repeated_state, operation: first)
+    assert_equal 8, repeated_errors.length # Never truncate to the diagnostic ceiling.
+    assert_same first, repeated_frame.primary
+
+    conditions = {
+      ["fixture-cleanup", "completed driver dispatch changed before cleanup accounting"] => "recovery-dispatch-mismatch",
+      ["fixture-result", "invalid native owner observation"] => "owner-shape",
+      ["fixture-result", "unbound native process observation"] => "owner-unbound",
+      ["fixture-result", "duplicate native observation identity"] => "owner-duplicate",
+      ["fixture-result", "native observation graph changed"] => "owner-graph",
+      ["fixture-cleanup", "driver directory identity changed"] => "driver-identity-changed",
+      ["fixture-cleanup", "fixture directory is not canonical"] => "directory-not-canonical",
+      ["fixture-cleanup", "fixture directory is not private and owned"] => "directory-not-private",
+      ["fixture-cleanup", "fixture directory changed before enumeration"] => "enumeration-before-identity",
+      ["fixture-cleanup", "fixture directory enumeration changed identity"] => "enumeration-open-identity",
+      ["fixture-cleanup", "fixture directory listing is oversized or ambiguous"] => "enumeration-listing",
+      ["fixture-cleanup", "fixture directory changed during enumeration"] => "enumeration-after-identity",
+      ["fixture-cleanup", "fixture directory enumeration failed"] => "enumeration-io",
+      ["fixture-cleanup", "unresolved observer scratch prevents fixture removal"] => "observer-scratch",
+      ["process-observation", "process observer failed or returned unsupported output"] => "observer-output",
+      ["process-observation", "process observer returned malformed or incorrectly scoped metadata"] => "observer-metadata",
+      ["fixture-cleanup", "fixture-cleanup deadline expired"] => "death-cutoff",
+    }
+    assert_equal conditions, fixture::OWNERSHIP_RUN_CONDITION_LITERALS
+    assert_equal conditions.to_h { |(kind, _message), code| [code, kind] }, fixture::OWNERSHIP_RUN_CONDITIONS
+    conditions.each do |(kind, message), code|
+      assert_equal code, diagnostic.run_condition(fixture::Failure.new(kind, message))
+      assert_equal "other", diagnostic.run_condition(fixture::Failure.new(kind, "#{message} private-marker"))
+      assert_equal "other", diagnostic.run_condition(fixture::Failure.new("other", message))
+    end
+    unavailable = fixture::Failure.new("fixture-cleanup", "private-marker")
+    unavailable.define_singleton_method(:message) { raise IOError, "private-marker" }
+    assert_equal "missing", diagnostic.run_condition(unavailable)
+
+    state = fresh_run_state.call(first)
+    [nil, {}, state.merge(unwound: false), state.merge(escaped_error: Interrupt.new(first.message)), state.merge(mode: "real-deadline"),
+     state.merge(record: nil), state.merge(lifetime: Object.new), state.merge(checks: nil)].each do |unbound|
+      assert_equal "missing", diagnostic.run_cleanup(unbound, operation: first)
+    end
+    assert_equal "missing", diagnostic.run_cleanup(state, operation: nil)
+    [[nil, nil, "missing", "missing"], [0, nil, "exit", 0], [255, nil, "exit", 255],
+     [nil, 1, "signal", 1], [nil, 255, "signal", 255], [-1, nil, "missing", "missing"],
+     [256, nil, "missing", "missing"], [true, nil, "missing", "missing"], [nil, 0, "missing", "missing"]].each do |exit_code, signal_code, kind, code|
+      selected = state.merge(status: run_status_type.new(exit_code, signal_code))
+      assert_equal({"kind" => kind, "code" => code}, diagnostic.run_cleanup(selected, operation: first).fetch("driverStatus"))
+    end
+    [["missing", "missing"], ["recovered", "invalid"]].each do |source, expected_result|
+      selected = state.merge(owner: nil, result: nil, result_source: source)
+      view = diagnostic.run_cleanup(selected, operation: first)
+      assert_equal expected_result, view.fetch("driverResult")
+      assert_equal ["missing"] * 7, view.fetch("nativeProof").values
+    end
+    state.fetch(:result).fetch("nativeObservation")["version"] = "1"
+    state.fetch(:result).fetch("nativeObservation")["settled"] = 0
+    state.fetch(:owner)["keeper"] = {"state" => "unknown"}
+    state.fetch(:owner)["finality"] = nil
+    view = diagnostic.run_cleanup(state, operation: first)
+    assert_equal [false, "invalid", true, false, true, true, false], view.fetch("nativeProof").values
+    assert_equal "invalid", view.dig("driverResult", "nativeChecks", "settled")
+    assert view.dig("checks", "nativeFinal") # Do not recompute the actual original verdict from optional comparisons.
+    no_producers = fresh_run_state.call(first)
+    none = {"state" => "not_attempted"}
+    no_producers[:owner] = {"finality" => "no_producers", "custodian" => none, "keeper" => none, "validator" => none,
+      "group" => {"state" => "not_created"}, "processes" => []}
+    no_producers[:result] = {"kind" => "pass", "nativeObservation" => {"version" => 1, "custodian" => none,
+      "noProducers" => true, "settled" => true, "unknown" => false, "hooksRestored" => true}}
+    no_producers[:checks] = no_producers.fetch(:checks).merge("nativeFinal" => false, "knownDead" => false,
+      "deathAttempted" => false, "deathCompleted" => false, "removalAttempted" => false, "removalCompleted" => false)
+    view = diagnostic.run_cleanup(no_producers, operation: first)
+    assert_equal [true, "no-producers", true, "missing", "missing", "missing", true], view.fetch("nativeProof").values
+    assert_equal [false] * 6, view.fetch("checks").values_at("nativeFinal", "knownDead", "deathAttempted", "deathCompleted", "removalAttempted", "removalCompleted")
+    [Interrupt.new("private-marker"), SystemExit.new(19, "private-marker")].each do |projection_error|
+      fixture.stub(:adapter_result_projection, ->(**_) { raise projection_error }) do
+        assert_equal "missing", diagnostic.run_cleanup(state, operation: first)
+      end
+      assert_same first, state.fetch(:lifetime).primary
+      assert_same first, state.fetch(:escaped_error)
+    end
+
+    run_expected = expected.merge("helper" => "run", "case" => "async-reap", "row" => row.merge("runCleanup" => run_view))
+    run_packet = diagnostic.line(run_expected)
+    assert_equal "#{prefix}#{JSON.generate(run_expected)}\n", run_packet
+    assert_nil diagnostic.line(run_expected.merge("helper" => "capture"))
+    assert_nil diagnostic.line(run_expected.merge("row" => run_expected.fetch("row").merge("operationErrorCategory" => "none", "operationErrorKind" => "none")))
+    invalid_views = [nil, run_view.merge("private" => "private-marker"), run_view.to_a.reverse.to_h,
+      run_view.merge("driverStatus" => {"kind" => "exit", "code" => true}),
+      run_view.merge("driverStatus" => {"kind" => "signal", "code" => 256}),
+      run_view.merge("checks" => run_view.fetch("checks").merge("nativeFinal" => 0)),
+      run_view.merge("nativeProof" => run_view.fetch("nativeProof").merge("ownerFinality" => "no_producers")),
+      run_view.merge("cleanupErrors" => [["directory-removal", "fixture-error", "fixture-result", "observer-scratch"]]),
+      run_view.merge("cleanupErrors" => [["directory-removal", "none", "none", "other"]]),
+      run_view.merge("cleanupErrors" => run_view.fetch("cleanupErrors") * 8),
+      run_view.merge("driverResult" => run_view.fetch("driverResult").merge("retainedDriverErrorCode" => "native-deadline")),
+      run_view.merge("driverResult" => run_view.fetch("driverResult").merge("nativeChecks" => run_view.dig("driverResult", "nativeChecks").merge("unknown" => nil)))]
+    invalid_views.each { |value| assert_nil diagnostic.line(run_expected.merge("row" => run_expected.fetch("row").merge("runCleanup" => value))) }
+
+    # Enumerate the complete finite maximum, not a representative failure.
+    # All seven original error occurrences fit; capture cannot carry this view.
+    driver_pairs = fixture::ADAPTER_FAILURE_CODES.map { |(name, _message), code| [fixture::ADAPTER_FAILURE_CATEGORIES.fetch(name), code] }
+    driver_pairs.concat((fixture::ADAPTER_FAILURE_CATEGORIES.values + %w[other]).product(%w[missing invalid other]))
+    driver_pairs.concat([%w[missing missing], %w[none missing], %w[none none], %w[none invalid], %w[invalid missing], %w[invalid invalid]])
+    driver_category, driver_code = driver_pairs.max_by { |pair| pair.sum(&:bytesize) }
+    maximum_result = {"resultKind" => (fixture::ADAPTER_FAILURE_KINDS + %w[missing invalid other]).max_by(&:bytesize),
+      "retainedDriverErrorCategory" => driver_category, "retainedDriverErrorCode" => driver_code,
+      "nativeChecks" => fixture::ADAPTER_FAILURE_NATIVE_CHECKS.to_h { |key| [key, "missing"] },
+      "nativeOutcomes" => fixture::ADAPTER_FAILURE_NATIVE_OUTCOMES.to_h { |key, values| [key, values.max_by(&:bytesize)] }}
+    error_tuples = fixture::OWNERSHIP_FAILURE_ERROR_KINDS.reject { |category, _| category == "none" }.flat_map do |category, kinds|
+      kinds.flat_map do |kind|
+        eligible = %w[other missing] + fixture::OWNERSHIP_RUN_CONDITIONS.filter_map { |code, required| code if category == "fixture-error" && kind == required }
+        eligible.map { |code| [fixture::OWNERSHIP_RUN_ERROR_STAGES.max_by(&:bytesize), category, kind, code] }
+      end
+    end
+    maximum_error = error_tuples.max_by { |value| JSON.generate(value).bytesize }
+    assert_equal %w[transcript-out-close fixture-error fixture-cleanup enumeration-before-identity], maximum_error
+    assert_equal 88, JSON.generate(maximum_error).bytesize
+    assert_equal 1239, JSON.generate(maximum_result).bytesize
+    maximum_view = {"directoryState" => "unattempted", "driverStatus" => {"kind" => "missing", "code" => "missing"}, "resultSource" => "recovered",
+      "checks" => run_checks.to_h { |key| [key, "missing"] },
+      "nativeProof" => run_proof_fields.to_h { |key| [key, key == "ownerFinality" ? "no-producers" : "missing"] },
+      "cleanupErrors" => [maximum_error] * 7, "driverResult" => maximum_result}
+    assert_equal 2621, JSON.generate(maximum_view).bytesize
+    maximum_lines = cases.flat_map do |family, names|
+      names.map do |name|
+        value = expected.merge("platform" => "android", "family" => family, "helper" => "run", "case" => name,
+          "row" => widest.merge("failedChecks" => all_codes.select { |code| applicable.call(code, family, "run", name) }, "runCleanup" => maximum_view))
+        diagnostic.line(value)
+      end
+    end
+    maximum_packet = maximum_lines.max_by(&:bytesize)
+    assert_equal 3847, maximum_packet.bytesize
+    assert_operator maximum_packet.bytesize, :<=, 4096
+    fixture.stub(:clock_ns, 1) do
+      assert_equal run_expected, diagnostic.parse(run_packet, deadline_ns: 10)
+      assert_equal maximum_view, diagnostic.parse(maximum_packet, deadline_ns: 10).fetch("row").fetch("runCleanup")
+      assert_nil diagnostic.parse(run_packet.sub('"runCleanup":', '"runCleanup":"missing","runCleanup":'), deadline_ns: 10)
+    end
+
+    # The real invoke routing gives run a fresh state, not a prior invocation's
+    # error; the capture endpoint never receives this optional run keyword.
+    invoker, invocations = probe_class.allocate, []
+    {family: "async", helper: "run", case: "async-reap", case_root: "/inert-run-route", deadline_ns: 10,
+     input: {"platform" => "ios", "parameters" => {}}}.each { |key, value| invoker.instance_variable_set(:"@#{key}", value) }
+    fixture.stub(:run, ->(**keywords) { invocations << keywords; :inert_run }) do
+      2.times { assert_equal :inert_run, invoker.invoke }
+    end
+    invocations.each do |keywords|
+      assert_equal %i[platform root parameters mode deadline_ns run_cleanup_state], keywords.keys
+      assert_equal ["ios", "/inert-run-route", {}, "inherited", 10], keywords.values_at(:platform, :root, :parameters, :mode, :deadline_ns)
+      assert_empty keywords.fetch(:run_cleanup_state)
+    end
+    refute_same(*invocations.map { |keywords| keywords.fetch(:run_cleanup_state) })
+    invoker.instance_variable_set(:@helper, "capture")
+    with_stubs.call([[File, :realpath, ->(path) { path }], [fixture, :capture_command, ->(argv, **keywords) do
+      assert_equal [RbConfig.ruby, "-e", "exit 0"], argv
+      assert_equal({seconds: 2, root: "/inert-run-route", deadline: Rational(10, 1_000_000_000)}, keywords)
+      :inert_capture
+    end]]) { assert_equal :inert_capture, invoker.invoke }
+
     # Run actual one -> execute -> driver-rescue. Directory, proof, observation,
     # trace and signal endpoints are inert; acquisition veto remains outside.
-    produce = lambda do |family: "async", helper: "capture", name: nil, platform: "ios", fault: nil, write_result: :full|
+    produce = lambda do |family: "async", helper: "capture", name: nil, platform: "ios", fault: nil, run_fault: nil, write_result: :full|
       name ||= cases.fetch(family).first
       now, constructions, current, lookalike = 1, 0, nil, nil
       events, writes, proofs, rows = [], [], [], []
+      run_states, run_projections = [], []
       directory = "/inert-ownership-driver"
       mode = "ownership-#{family}"
       input = {"platform" => platform, "parameters" => {}, "mode" => mode, "deadlineNs" => 10}
@@ -3267,6 +3514,10 @@ class NativeUploadValidationTest < Minitest::Test
             value
           ensure
             now = 10 if @target && fault == :before_report
+            if @target && run_fault == :row_copy && @ownership_run_binding
+              bound_row, operation, state = @ownership_run_binding
+              @ownership_run_binding = [bound_row.dup.freeze, operation, state].freeze
+            end
           end
         end
         probe.define_singleton_method(:install) { nil }
@@ -3277,7 +3528,10 @@ class NativeUploadValidationTest < Minitest::Test
           # Exercise the REAL policy evaluator, not an async row relabelled
           # as policy. These are inert operation endpoints, never receipts.
           if @family == "policies"
-            next if @case == "normal" || @case.start_with?("ignored-")
+            if @case == "normal" || @case.start_with?("ignored-")
+              run_states << (@run_cleanup_state = {}) if @helper == "run" # A successful run has no escaping operation.
+              next
+            end
             original = @target && @case == "custom-INT" ? first_error : fixture::Failure.new("signal-policy", "private-marker")
             @custom_deliveries << Signal.list.fetch("INT") if @case == "custom-pending-INT" && !@target
             if @case == "partial-install" && !@target
@@ -3290,18 +3544,40 @@ class NativeUploadValidationTest < Minitest::Test
               @events << {"boundary" => "finalization-#{@case.delete_prefix('finalize-')}-failure", "originalOutermostLifetime" => true}
             end
           else
-            original = @case.include?("TERM") ? SignalException.new("TERM") : first_error
+            original = @case.include?("TERM") ? SignalException.new("TERM") : @target ? first_error : Interrupt.new("private-marker")
             @events << {"boundary" => "inert-original-cancellation"}
             @pre_go_cancellation = !(@target && @family == "signals")
             @nested_cancelled = true
           end
           @first, @first_message = original, original.message
+          if @helper == "run"
+            state = fresh_run_state.call(original)
+            state[:unwound] = false if @target && run_fault == :unwound
+            state[:escaped_error] = Interrupt.new(original.message) if @target && run_fault == :different_error
+            @run_cleanup_state = if @target && run_fault == :missing
+              nil
+            elsif @target && run_fault == :earlier_state
+              run_states.last
+            else
+              state
+            end
+            run_states << state
+          end
           raise(@target && fault == :first_replaced ? Interrupt.new(original.message) : original)
         end
         probe
       end
       environment = {}
       formatter = diagnostic.method(:line)
+      run_projector = diagnostic.method(:run_cleanup)
+      driver_projector = fixture.method(:adapter_result_projection)
+      project_run = lambda do |state, operation:|
+        assert_empty environment, "run cleanup projected before complete one.ensure environment restoration"
+        assert_equal false, current.instance_variable_get(:@context).fetch(:gate).fetch(:active)
+        events << :run_projection
+        run_projections << [state, operation]
+        run_projector.call(state, operation: operation)
+      end
       projection = lambda do |value|
         raise late if fault == :format
         value = formatter.call(value)
@@ -3338,7 +3614,9 @@ class NativeUploadValidationTest < Minitest::Test
         [fixture, :cleanup_unresolved?, false], [fixture, :fixture_entry_names, []],
         [fixture, :mark_process_domain_failed!, ->(**_) { events << :failed_domain }],
         [fixture, :atomic_json, ->(_path, value) { events << :proof; raise late if fault == :proof && current.instance_variable_get(:@target); proofs << value }],
-        [diagnostic, :line, projection], [STDERR, :write, sink],
+        [diagnostic, :line, projection], [diagnostic, :run_cleanup, project_run],
+        [fixture, :adapter_result_projection, ->(**keywords) { raise late if run_fault == :projection_error; driver_projector.call(**keywords) }],
+        [STDERR, :write, sink],
       ]
       actual = nil
       with_stubs.call(bindings) do
@@ -3359,8 +3637,13 @@ class NativeUploadValidationTest < Minitest::Test
       if writes.any?
         assert_operator events.index(:write), :>, events.rindex(:restore) if events.include?(:restore)
       end
+      if run_projections.any?
+        assert_operator events.index(:run_projection), :>, events.rindex(:restore)
+        assert_equal 1, run_projections.length # Same original no-retry/cutoff contract as the outer marker.
+      end
       {error: actual, writes: writes, row: writes.empty? ? nil : JSON.parse(writes.first.delete_prefix(prefix)),
-       proofs: proofs, rows: rows, late: late, probe: current, driver: driver_probe}
+       proofs: proofs, rows: rows, late: late, probe: current, driver: driver_probe,
+       run_states: run_states, run_projections: run_projections, first_error: first_error}
     end
     fixture::OWNERSHIP_FAILURE_HELPERS.product(cases.fetch("async")).each do |helper, name|
       outcome = produce.call(helper: helper, name: name, platform: helper == "capture" ? "ios" : "android")
@@ -3369,6 +3652,16 @@ class NativeUploadValidationTest < Minitest::Test
       assert_equal %w[command-not-finalized fixture-retained], value.fetch("row").fetch("failedChecks")
       assert_equal %w[interrupt none interrupt none], value.fetch("row").values_at("firstErrorCategory", "firstErrorKind", "operationErrorCategory", "operationErrorKind")
       assert value.fetch("row").fetch("checks").fetch("firstExceptionPreserved")
+      assert_equal 3, value.fetch("schema")
+      assert_equal(helper == "run" ? run_view : "missing", value.fetch("row").fetch("runCleanup"))
+      assert_equal "missing", outcome.fetch(:probe).instance_variable_get(:@ownership_failure_row).last.fetch("runCleanup")
+      if helper == "run"
+        bound_state, operation = outcome.fetch(:run_projections).fetch(0)
+        assert_same outcome.fetch(:probe).instance_variable_get(:@run_cleanup_state), bound_state
+        assert_same outcome.fetch(:first_error), operation
+      else
+        assert_empty outcome.fetch(:run_projections)
+      end
     end
     %w[INT-spawn TERM-spawn TERM-reap restore-after-TERM].each do |name|
       value = produce.call(family: "signals", name: name, helper: "run", platform: "android").fetch(:row)
@@ -3376,6 +3669,7 @@ class NativeUploadValidationTest < Minitest::Test
       assert_equal(name.end_with?("-spawn") ? %w[command-not-finalized pre-go-barrier-missing fixture-retained] :
         %w[command-not-finalized fixture-retained], value.fetch("row").fetch("failedChecks"))
       assert_equal(name.include?("TERM") ? "signal" : "interrupt", value.fetch("row").fetch("operationErrorCategory"))
+      assert_equal run_view, value.fetch("row").fetch("runCleanup")
     end
     policy_failures = {
       "normal" => %w[normal-command-not-finalized fixture-retained],
@@ -3393,7 +3687,27 @@ class NativeUploadValidationTest < Minitest::Test
       assert_equal ["policies", "run", name], value.values_at("family", "helper", "case")
       assert_equal codes, value.fetch("row").fetch("failedChecks")
       assert value.fetch("row").fetch("checks").fetch("firstExceptionPreserved")
+      assert_equal(name == "normal" || name.start_with?("ignored-") ? "missing" : run_view, value.fetch("row").fetch("runCleanup"))
     end
+    %i[missing unwound different_error earlier_state row_copy].each do |run_fault|
+      outcome = produce.call(helper: "run", name: "async-reap", run_fault: run_fault)
+      assert_equal "missing", outcome.fetch(:row).fetch("row").fetch("runCleanup")
+      assert_equal %w[command-not-finalized fixture-retained], outcome.fetch(:row).fetch("row").fetch("failedChecks")
+      assert_empty outcome.fetch(:run_projections)
+      if run_fault == :earlier_state
+        assert_operator outcome.fetch(:proofs).length, :>, 0
+        earlier = outcome.fetch(:probe).instance_variable_get(:@run_cleanup_state)
+        refute_same outcome.fetch(:first_error), earlier.fetch(:escaped_error)
+      end
+    end
+    outcome = produce.call(helper: "run", run_fault: :projection_error)
+    assert_equal "missing", outcome.fetch(:row).fetch("row").fetch("runCleanup")
+    assert_equal 1, outcome.fetch(:run_projections).length
+    assert_same outcome.fetch(:error), outcome.fetch(:probe).instance_variable_get(:@ownership_failure_row).first
+    assert_same outcome.fetch(:first_error), outcome.fetch(:run_states).last.fetch(:lifetime).primary
+    outcome = produce.call(helper: "run", fault: :before_report)
+    assert_empty outcome.fetch(:writes)
+    assert_empty outcome.fetch(:run_projections) # A new optional view cannot renew the original reporting cutoff.
     {"signals" => "TERM-reap", "policies" => "partial-install"}.each do |family, name|
       outcome = produce.call(family: family, name: name, fault: :snapshot)
       assert_operator outcome.fetch(:proofs).length, :>, 0 # Earlier success cannot supply THIS missing row.
@@ -3401,20 +3715,28 @@ class NativeUploadValidationTest < Minitest::Test
       assert_same outcome.fetch(:late), outcome.fetch(:error)
       assert_empty produce.call(family: family, fault: :success).fetch(:writes)
     end
-    replaced = produce.call(fault: :first_replaced).fetch(:row).fetch("row")
-    assert_equal %w[primary-not-preserved command-not-finalized fixture-retained], replaced.fetch("failedChecks")
-    refute replaced.fetch("checks").fetch("firstExceptionPreserved")
+    %w[capture run].each do |helper|
+      outcome = produce.call(helper: helper, fault: :first_replaced)
+      replaced = outcome.fetch(:row).fetch("row")
+      assert_equal %w[primary-not-preserved command-not-finalized fixture-retained], replaced.fetch("failedChecks")
+      refute replaced.fetch("checks").fetch("firstExceptionPreserved")
+      assert_equal "missing", replaced.fetch("runCleanup")
+      assert_empty outcome.fetch(:run_projections)
+    end
     {entry: "entry", snapshot: "snapshot", proof: "proof-publication", restoration: "restoration"}.each do |fault, phase|
       outcome = produce.call(fault: fault)
       value = outcome.fetch(:row)
       assert_equal [phase, "missing"], value.values_at("phase", "row")
       assert_same outcome.fetch(:late), outcome.fetch(:error) unless fault == :entry
     end
-    lookalike = produce.call(fault: :restoration_lookalike)
-    assert_equal ["restoration", "fixture-error", "ownership-probe", "missing"], lookalike.fetch(:row).values_at("phase", "errorCategory", "errorKind", "row")
-    bound = lookalike.fetch(:probe).instance_variable_get(:@ownership_failure_row).first
-    assert_equal bound.message, lookalike.fetch(:error).message
-    refute_same bound, lookalike.fetch(:error)
+    %w[capture run].each do |helper|
+      lookalike = produce.call(helper: helper, fault: :restoration_lookalike)
+      assert_equal ["restoration", "fixture-error", "ownership-probe", "missing"], lookalike.fetch(:row).values_at("phase", "errorCategory", "errorKind", "row")
+      bound = lookalike.fetch(:probe).instance_variable_get(:@ownership_failure_row).first
+      assert_equal bound.message, lookalike.fetch(:error).message
+      refute_same bound, lookalike.fetch(:error)
+      assert_empty lookalike.fetch(:run_projections)
+    end
     %i[next_constructor next_cutoff success format before_report before_write].each { |fault| assert_empty produce.call(fault: fault).fetch(:writes) }
     [:short, IOError.new("private-marker"), Interrupt.new("private-marker"), SystemExit.new(19, "private-marker")].each do |write_result|
       outcome = produce.call(write_result: write_result)
@@ -3554,6 +3876,11 @@ class NativeUploadValidationTest < Minitest::Test
       other_bytes = diagnostic.line(expected.merge("platform" => platform, "family" => other_family, "case" => cases.fetch(other_family).first))
       assert_empty relay.call(platform: platform, family: family, stderr: other_bytes).fetch(:writes)
     end
+    nested_relay = relay.call(stderr: run_packet)
+    assert_equal [run_packet], nested_relay.fetch(:writes)
+    assert_same nested_relay.fetch(:error), nested_relay.fetch(:state).fetch(:rejection)
+    assert_equal [10, true], nested_relay.fetch(:state).values_at(:deadline_ns, :write_complete)
+    assert_empty relay.call(stderr: run_packet, fault: :other_family_callback).fetch(:writes)
     %i[custody request dispatch state same_message outer_replacement before_report before_write format callback].each do |fault|
       outcome = relay.call(fault: fault)
       assert_empty outcome.fetch(:writes)

@@ -559,12 +559,21 @@ module UploadProcessFixture
       result
     end
 
-    def cleanup
+    def cleanup(diagnostic_stage: nil)
       Thread.handle_interrupt(Exception => :never) do
         @scope.cleanup { yield }
       rescue Exception => error
         @cleanup_errors << error
+        occurrence = @cleanup_errors.length - 1
         remember(error)
+        # The original cleanup/error selection precedes optional bookkeeping.
+        # One exception may occur in several stages: retain occurrence indices,
+        # not an identity-keyed map that silently drops a later occurrence.
+        begin
+          (@cleanup_error_stages ||= {})[occurrence] = diagnostic_stage if diagnostic_stage
+        rescue Exception
+          nil
+        end
       end
     end
 
@@ -1549,7 +1558,7 @@ module UploadProcessFixture
   OWNERSHIP_FAILURE_PREFIX = "MRK_OWNERSHIP_FAILURE="
   OWNERSHIP_FAILURE_FIELDS = %w[schema platform family helper case phase errorCategory errorKind row].freeze
   OWNERSHIP_FAILURE_ROW_FIELDS = %w[ownerPhase firstErrorCategory firstErrorKind operationErrorCategory
-    operationErrorKind failedChecks checks commandChecks].freeze
+    operationErrorKind failedChecks checks commandChecks runCleanup].freeze
   OWNERSHIP_FAILURE_HELPERS = %w[capture run].freeze
   OWNERSHIP_FAILURE_PLATFORMS = %w[ios android].freeze
   OWNERSHIP_FAILURE_CASES = {
@@ -1615,6 +1624,51 @@ module UploadProcessFixture
     "known case left an unresolved reusable domain" => "fixture-retained",
   }.freeze
 
+  OWNERSHIP_RUN_CLEANUP_FIELDS = %w[directoryState driverStatus resultSource checks nativeProof cleanupErrors driverResult].freeze
+  OWNERSHIP_RUN_DIRECTORY_STATES = %w[unattempted acquiring published canonical missing].freeze
+  OWNERSHIP_RUN_STATUS_FIELDS = %w[kind code].freeze
+  OWNERSHIP_RUN_RESULT_SOURCES = %w[ordinary recovered missing].freeze
+  OWNERSHIP_RUN_CHECKS = %w[driverComplete dispatchRequested recoveryEntered recoveryFilesComplete dispatchMatched
+    ownerValidated nativeFinal knownDead deathAttempted deathCompleted directoryIdentityMatched layoutAccepted
+    removalAttempted removalCompleted].freeze
+  OWNERSHIP_RUN_NATIVE_PROOF_FIELDS = %w[versionOne ownerFinality custodianMatches keeperMatches validatorMatches
+    groupMatches noProducersMatch].freeze
+  OWNERSHIP_RUN_OWNER_FINALITIES = %w[active finalized no-producers unknown missing invalid].freeze
+  OWNERSHIP_RUN_ERROR_STAGES = %w[child-stop transcript-out-close transcript-err-close held-writer-close native-recovery
+    death-observation directory-removal missing].freeze
+  OWNERSHIP_RUN_ERROR_FIELDS = %w[stage errorCategory errorKind condition].freeze
+  OWNERSHIP_RUN_CONDITION_LITERALS = {
+    ["fixture-cleanup", "completed driver dispatch changed before cleanup accounting"] => "recovery-dispatch-mismatch",
+    ["fixture-result", "invalid native owner observation"] => "owner-shape",
+    ["fixture-result", "unbound native process observation"] => "owner-unbound",
+    ["fixture-result", "duplicate native observation identity"] => "owner-duplicate",
+    ["fixture-result", "native observation graph changed"] => "owner-graph",
+    ["fixture-cleanup", "driver directory identity changed"] => "driver-identity-changed",
+    ["fixture-cleanup", "fixture directory is not canonical"] => "directory-not-canonical",
+    ["fixture-cleanup", "fixture directory is not private and owned"] => "directory-not-private",
+    ["fixture-cleanup", "fixture directory changed before enumeration"] => "enumeration-before-identity",
+    ["fixture-cleanup", "fixture directory enumeration changed identity"] => "enumeration-open-identity",
+    ["fixture-cleanup", "fixture directory listing is oversized or ambiguous"] => "enumeration-listing",
+    ["fixture-cleanup", "fixture directory changed during enumeration"] => "enumeration-after-identity",
+    ["fixture-cleanup", "fixture directory enumeration failed"] => "enumeration-io",
+    ["fixture-cleanup", "unresolved observer scratch prevents fixture removal"] => "observer-scratch",
+    ["process-observation", "process observer failed or returned unsupported output"] => "observer-output",
+    ["process-observation", "process observer returned malformed or incorrectly scoped metadata"] => "observer-metadata",
+    ["fixture-cleanup", "fixture-cleanup deadline expired"] => "death-cutoff",
+  }.each_with_object({}) { |(pair, code), table| table[pair.freeze] = code }.freeze
+  OWNERSHIP_RUN_CONDITIONS = {
+    "recovery-dispatch-mismatch" => "fixture-cleanup",
+    "owner-shape" => "fixture-result", "owner-unbound" => "fixture-result",
+    "owner-duplicate" => "fixture-result", "owner-graph" => "fixture-result",
+    "driver-identity-changed" => "fixture-cleanup", "directory-not-canonical" => "fixture-cleanup",
+    "directory-not-private" => "fixture-cleanup", "enumeration-before-identity" => "fixture-cleanup",
+    "enumeration-open-identity" => "fixture-cleanup", "enumeration-listing" => "fixture-cleanup",
+    "enumeration-after-identity" => "fixture-cleanup", "enumeration-io" => "fixture-cleanup",
+    "observer-scratch" => "fixture-cleanup", "observer-output" => "process-observation",
+    "observer-metadata" => "process-observation", "death-cutoff" => "fixture-cleanup",
+  }.freeze
+  OWNERSHIP_RUN_RESULT_FIELDS = %w[resultKind retainedDriverErrorCategory retainedDriverErrorCode nativeChecks nativeOutcomes].freeze
+
   # A finite view of the ORIGINAL failed row. None of these values supplies
   # execution, wait, cleanup or finality authority, and no private proof is read.
   module OwnershipFailureDiagnostic
@@ -1674,12 +1728,165 @@ module UploadProcessFixture
       freeze_value({"ownerPhase" => phase, "firstErrorCategory" => first_category, "firstErrorKind" => first_kind,
         "operationErrorCategory" => operation_category, "operationErrorKind" => operation_kind,
         "failedChecks" => failures, "checks" => OWNERSHIP_FAILURE_CHECKS.to_h { |name| [name, boolean(summary[name])] },
-        "commandChecks" => command})
+        "commandChecks" => command, "runCleanup" => "missing"})
     end
 
     def error_pair_valid?(category, kind)
       category.instance_of?(String) && kind.instance_of?(String) &&
         OWNERSHIP_FAILURE_ERROR_KINDS.fetch(category, []).include?(kind)
+    end
+
+    def run_condition(error)
+      error.is_a?(Failure) ? OWNERSHIP_RUN_CONDITION_LITERALS.fetch([error.kind, error.message], "other") : "other"
+    rescue Exception
+      "missing"
+    end
+
+    def detached_value(value)
+      case value
+      when Hash then value.to_h { |key, item| [key.dup, detached_value(item)] }
+      when Array then value.map { |item| detached_value(item) }
+      when String then value.dup
+      else value
+      end
+    end
+
+    # These are pure relations on already-read operands, not re-execution of
+    # the native finality predicate and never fresh cleanup authority.
+    def run_native_proof(owner, result)
+      missing = Object.new
+      field = ->(record, key) { record.instance_of?(Hash) ? record.fetch(key, missing) : missing }
+      native = field.call(result, "nativeObservation")
+      final = field.call(native, "final")
+      match = lambda do |left, right, key|
+        a, b = field.call(left, key), field.call(right, key)
+        a.equal?(missing) || b.equal?(missing) ? "missing" : a == b
+      end
+      version, finality = field.call(native, "version"), field.call(owner, "finality")
+      owner_finality = if finality.equal?(missing)
+        "missing"
+      elsif finality.instance_of?(String) && %w[active finalized no_producers unknown].include?(finality)
+        finality.tr("_", "-")
+      else
+        "invalid"
+      end
+      no_producers = if %w[version noProducers settled unknown hooksRestored custodian].all? { |key| !field.call(native, key).equal?(missing) } &&
+          %w[finality custodian keeper validator group processes].all? { |key| !field.call(owner, key).equal?(missing) }
+        native["version"] == 1 && native["noProducers"].equal?(true) && native["settled"].equal?(true) &&
+          !native["unknown"] && native["hooksRestored"].equal?(true) && native["custodian"] == {"state" => "not_attempted"} &&
+          owner["finality"] == "no_producers" &&
+          owner.values_at("custodian", "keeper", "validator").all? { |value| value == {"state" => "not_attempted"} } &&
+          owner["group"] == {"state" => "not_created"} && owner["processes"] == []
+      else
+        "missing"
+      end
+      {"versionOne" => version.equal?(missing) ? "missing" : version == 1, "ownerFinality" => owner_finality,
+        "custodianMatches" => match.call(owner, native, "custodian"), "keeperMatches" => match.call(owner, final, "keeper"),
+        "validatorMatches" => match.call(owner, final, "validator"), "groupMatches" => match.call(owner, final, "group"),
+        "noProducersMatch" => no_producers}
+    end
+
+    def run_cleanup(state, operation:)
+      return "missing" unless state.instance_of?(Hash) && state[:unwound].equal?(true) && state[:mode] == "inherited" &&
+        operation.is_a?(Exception) && state[:escaped_error].equal?(operation) &&
+        state[:record].instance_of?(Hash) && state[:lifetime].instance_of?(Lifetime) && state[:checks].instance_of?(Hash)
+
+      record, frame = state.values_at(:record, :lifetime)
+      errors = frame.instance_variable_get(:@cleanup_errors)
+      return "missing" unless errors.instance_of?(Array) && errors.length <= 7 && errors.all? { |error| error.is_a?(Exception) }
+
+      stages = frame.instance_variable_get(:@cleanup_error_stages)
+      cleanup_errors = errors.each_with_index.map do |error, index|
+        stage = stages.instance_of?(Hash) ? stages[index] : nil
+        stage = "missing" unless OWNERSHIP_RUN_ERROR_STAGES.include?(stage)
+        [stage, *error_pair(error), run_condition(error)]
+      end
+      status = state[:status]
+      driver_status = {"kind" => "missing", "code" => "missing"}
+      if status
+        if status.exited?
+          code = status.exitstatus
+          driver_status = {"kind" => "exit", "code" => code} if code.instance_of?(Integer) && code.between?(0, 255)
+        elsif status.signaled?
+          code = status.termsig
+          driver_status = {"kind" => "signal", "code" => code} if code.instance_of?(Integer) && code.between?(1, 255)
+        end
+      end
+      result = if state[:result_source] == "missing"
+        "missing"
+      elsif !state[:result].instance_of?(Hash)
+        "invalid"
+      else
+        projected = UploadProcessFixture.adapter_result_projection(mode: "inherited", result: state[:result])
+        OWNERSHIP_RUN_RESULT_FIELDS.to_h { |name| [name, projected.fetch(name)] }
+      end
+      directory_state = record["directoryState"].is_a?(Symbol) ? record["directoryState"].to_s : "missing"
+      directory_state = "missing" unless OWNERSHIP_RUN_DIRECTORY_STATES.include?(directory_state)
+      value = {"directoryState" => directory_state, "driverStatus" => driver_status,
+        "resultSource" => state[:result_source], "checks" => OWNERSHIP_RUN_CHECKS.to_h { |name| [name, boolean(state[:checks][name])] },
+        "nativeProof" => run_native_proof(state[:owner], state[:result]), "cleanupErrors" => cleanup_errors, "driverResult" => result}
+      # Some existing adapter fields intentionally borrow already-read String
+      # operands. Detach the VALIDATED finite projection before freezing; never
+      # freeze a driver's original result, its kind, or a Lifetime's stage data.
+      run_cleanup_valid?(value) ? freeze_value(detached_value(value)) : "missing"
+    rescue Exception
+      "missing" # Optional projection cannot replace the already escaping operation.
+    end
+
+    def run_driver_result_valid?(value)
+      return %w[missing invalid].include?(value) if value.instance_of?(String)
+      return false unless value.instance_of?(Hash) && value.keys == OWNERSHIP_RUN_RESULT_FIELDS &&
+        value["resultKind"].instance_of?(String) && (ADAPTER_FAILURE_KINDS + %w[missing invalid other]).include?(value["resultKind"])
+
+      category, code = value.values_at("retainedDriverErrorCategory", "retainedDriverErrorCode")
+      return false unless category.instance_of?(String) && code.instance_of?(String)
+      allowed = case category
+      when "missing" then %w[missing]
+      when "none" then %w[missing none invalid]
+      when "invalid" then %w[missing invalid]
+      else
+        return false unless category == "other" || ADAPTER_FAILURE_CATEGORIES.value?(category)
+        known = ADAPTER_FAILURE_CODES.filter_map do |pair, projected|
+          projected if ADAPTER_FAILURE_CATEGORIES[pair.first] == category
+        end
+        %w[missing invalid other] + known
+      end
+      return false unless allowed.include?(code)
+      checks, outcomes = value.values_at("nativeChecks", "nativeOutcomes")
+      return false unless checks.instance_of?(Hash) && checks.keys == ADAPTER_FAILURE_NATIVE_CHECKS && checks.values.all? do |item|
+        item.equal?(true) || item.equal?(false) || item.instance_of?(String) && %w[missing invalid].include?(item)
+      end
+      outcomes.instance_of?(Hash) && outcomes.keys == ADAPTER_FAILURE_NATIVE_OUTCOMES.keys && outcomes.all? do |name, item|
+        item.instance_of?(String) && ADAPTER_FAILURE_NATIVE_OUTCOMES.fetch(name).include?(item)
+      end
+    end
+
+    def run_cleanup_valid?(value)
+      return value == "missing" if value.instance_of?(String)
+      return false unless value.instance_of?(Hash) && value.keys == OWNERSHIP_RUN_CLEANUP_FIELDS &&
+        value["directoryState"].instance_of?(String) && OWNERSHIP_RUN_DIRECTORY_STATES.include?(value["directoryState"]) &&
+        value["resultSource"].instance_of?(String) && OWNERSHIP_RUN_RESULT_SOURCES.include?(value["resultSource"])
+
+      status = value["driverStatus"]
+      return false unless status.instance_of?(Hash) && status.keys == OWNERSHIP_RUN_STATUS_FIELDS &&
+        status["kind"].instance_of?(String) &&
+        (status["kind"] == "missing" && status["code"].instance_of?(String) && status["code"] == "missing" ||
+          status["kind"] == "exit" && status["code"].instance_of?(Integer) && status["code"].between?(0, 255) ||
+          status["kind"] == "signal" && status["code"].instance_of?(Integer) && status["code"].between?(1, 255))
+      checks, proof, errors = value.values_at("checks", "nativeProof", "cleanupErrors")
+      return false unless checks.instance_of?(Hash) && checks.keys == OWNERSHIP_RUN_CHECKS &&
+        checks.values.all? { |item| item.equal?(true) || item.equal?(false) || item.instance_of?(String) && item == "missing" } &&
+        proof.instance_of?(Hash) && proof.keys == OWNERSHIP_RUN_NATIVE_PROOF_FIELDS && proof.all? do |name, item|
+          name == "ownerFinality" ? item.instance_of?(String) && OWNERSHIP_RUN_OWNER_FINALITIES.include?(item) :
+            item.equal?(true) || item.equal?(false) || item.instance_of?(String) && item == "missing"
+        end
+      return false unless errors.instance_of?(Array) && errors.length <= 7 && errors.all? do |entry|
+        next false unless entry.instance_of?(Array) && entry.length == OWNERSHIP_RUN_ERROR_FIELDS.length && entry.all? { |item| item.instance_of?(String) }
+        stage, category, kind, condition = entry
+        OWNERSHIP_RUN_ERROR_STAGES.include?(stage) && category != "none" && error_pair_valid?(category, kind) &&
+          (%w[other missing].include?(condition) || category == "fixture-error" && OWNERSHIP_RUN_CONDITIONS[condition] == kind)
+      end
+      run_driver_result_valid?(value["driverResult"])
     end
 
     def applicable_check?(code, family, helper, name)
@@ -1709,7 +1916,7 @@ module UploadProcessFixture
 
     def valid?(value)
       return false unless value.instance_of?(Hash) && value.keys == OWNERSHIP_FAILURE_FIELDS &&
-        value["schema"].instance_of?(Integer) && value["schema"] == 2 &&
+        value["schema"].instance_of?(Integer) && value["schema"] == 3 &&
         %w[platform family helper case phase].all? { |name| value[name].instance_of?(String) } &&
         OWNERSHIP_FAILURE_PLATFORMS.include?(value["platform"]) && OWNERSHIP_FAILURE_CASES.key?(value["family"]) &&
         OWNERSHIP_FAILURE_HELPERS.include?(value["helper"]) && OWNERSHIP_FAILURE_CASES.fetch(value["family"]).include?(value["case"]) &&
@@ -1729,12 +1936,14 @@ module UploadProcessFixture
         failures == OWNERSHIP_FAILURE_FAILED_CHECKS.select { |name| failures.include?(name) }
       return false unless failures.all? { |code| applicable_check?(code, *value.values_at("family", "helper", "case")) }
 
-      [["checks", OWNERSHIP_FAILURE_CHECKS], ["commandChecks", OWNERSHIP_FAILURE_COMMAND_CHECKS]].all? do |name, fields|
+      return false unless [["checks", OWNERSHIP_FAILURE_CHECKS], ["commandChecks", OWNERSHIP_FAILURE_COMMAND_CHECKS]].all? do |name, fields|
         checks = row[name]
         checks.instance_of?(Hash) && checks.keys == fields && checks.values.all? do |item|
           item.equal?(true) || item.equal?(false) || item.instance_of?(String) && item == "missing"
         end
       end
+      run_cleanup_valid?(row["runCleanup"]) && (row["runCleanup"] == "missing" ||
+        value["helper"] == "run" && row["operationErrorCategory"] != "none")
     end
 
     def line(value)
@@ -1810,8 +2019,19 @@ module UploadProcessFixture
       # A row rejection has not been constructed. A caller error still escapes.
       return unless OWNERSHIP_FAILURE_CASES.key?(@family) && !summary.fetch("failures").empty?
 
-      OwnershipFailureDiagnostic.row(summary: summary, snapshot: snapshot, owner_phase: @owner&.phase,
+      row = OwnershipFailureDiagnostic.row(summary: summary, snapshot: snapshot, owner_phase: @owner&.phase,
         first: @first, operation: operation)
+      if operation.is_a?(Exception)
+        begin
+          state = @run_cleanup_state
+          if @helper == "run" && state.instance_of?(Hash) && state[:unwound].equal?(true) && state[:escaped_error].equal?(operation)
+            @ownership_run_binding = [row, operation, state].freeze
+          end
+        rescue Exception
+          nil # The row already describes a selected original operation failure.
+        end
+      end
+      row
     end
 
     def bind_ownership_failure_row(error, row)
@@ -1851,8 +2071,15 @@ module UploadProcessFixture
       phase = caught && caught[0].equal?(error) && OWNERSHIP_FAILURE_PHASES.include?(caught[1]) ? caught[1] : "missing"
       bound = @ownership_failure_row
       row = phase == "row-rejection" && bound && bound[0].equal?(error) ? bound[1] : "missing"
+      # Unlike row construction, this is AFTER one.ensure restored traps/ENV.
+      # A different row rejection or operation cannot borrow a prior run state.
+      run_binding = @ownership_run_binding
+      if helper == "run" && row.instance_of?(Hash) && run_binding && run_binding[0].equal?(row)
+        row = OwnershipFailureDiagnostic.freeze_value(row.merge("runCleanup" =>
+          OwnershipFailureDiagnostic.run_cleanup(run_binding[2], operation: run_binding[1])))
+      end
       category, kind = OwnershipFailureDiagnostic.error_pair(error)
-      line = OwnershipFailureDiagnostic.line({"schema" => 2, "platform" => @input["platform"], "family" => @family,
+      line = OwnershipFailureDiagnostic.line({"schema" => 3, "platform" => @input["platform"], "family" => @family,
         "helper" => helper, "case" => name, "phase" => phase, "errorCategory" => category, "errorKind" => kind, "row" => row})
       return unless line && UploadProcessFixture.clock_ns < @deadline_ns
 
@@ -2265,8 +2492,10 @@ module UploadProcessFixture
         UploadProcessFixture.capture_command([File.realpath(RbConfig.ruby), "-e", code],
           seconds: 2, root: @case_root, deadline: Rational(@deadline_ns, 1_000_000_000))
       else
+        @run_cleanup_state = {} if OWNERSHIP_FAILURE_CASES.key?(@family)
         UploadProcessFixture.run(platform: @input.fetch("platform"), root: @case_root,
-          parameters: @input.fetch("parameters"), mode: "inherited", deadline_ns: @deadline_ns)
+          parameters: @input.fetch("parameters"), mode: "inherited", deadline_ns: @deadline_ns,
+          run_cleanup_state: @run_cleanup_state)
       end
     end
 
