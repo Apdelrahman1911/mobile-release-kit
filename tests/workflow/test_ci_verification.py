@@ -2160,6 +2160,216 @@ class CIControllerContractTests(unittest.TestCase):
                                                    order_step, paths, deadline=1000.0)
                     self.assertIs(raised.exception, interruption)
 
+            setup_target = ("NativeUploadValidationTest#"
+                            "test_cancellation_or_io_error_at_first_setup_step_cleans_up_the_real_child")
+            setup_modes = ("native-setup-interrupt", "native-setup-system-exit", "native-setup-io-error")
+            setup_fields = ("schema", "mode", "failedPredicates", "resultKind", "driverExitStatus",
+                            "errorCategory", "nativeErrorCategory", "resultChecks", "nativeChecks")
+            setup_kinds = ("pass", "fixture-cleanup", "readiness", "setup-fixture-fault", "process-observation",
+                           "process-ownership", "fixture-result", "unexpected", "other", "missing", "invalid")
+            setup_categories = ("none", "fixture-error", "contract-error", "native-lifecycle-error", "io-error",
+                                "interrupt", "system-exit", "other", "missing", "invalid")
+            setup_result_checks = (
+                "ready", "firstCloseEntered", "originalCloseCompleted", "nativeOriginalErrorPreserved",
+                "watchdogStarted", "watchdogIntervened", "fallbackUsed", "deadBeforeFallback",
+                "ownedDescriptorsClosed", "watchdogJoined", "tasksJoined", "injectorsJoined",
+                "handlersRestored", "registryInactive", "pendingInterrupt", "cleanupErrorsEmpty",
+            )
+            setup_native_checks = ("finalized", "noProducers", "settled", "unknown", "hooksRestored")
+            self.assertEqual(controller.NATIVE_SETUP_FAILURE_PREFIX, "MRK_NATIVE_SETUP_FAILURE=")
+            self.assertEqual(controller.NATIVE_SETUP_FAILURE_CALLBACK_MODES, {setup_target: setup_modes})
+            self.assertEqual(controller.NATIVE_SETUP_FAILURE_MODES, frozenset(setup_modes))
+            self.assertEqual(controller.NATIVE_SETUP_FAILURE_FIELDS, setup_fields)
+            self.assertEqual(controller.NATIVE_SETUP_FAILURE_PREDICATES, ("result-kind", "driver-status"))
+            self.assertEqual(controller.NATIVE_SETUP_RESULT_KINDS, setup_kinds)
+            self.assertEqual(controller.NATIVE_SETUP_ERROR_CATEGORIES, setup_categories)
+            self.assertEqual(controller.NATIVE_SETUP_RESULT_CHECKS, setup_result_checks)
+            self.assertEqual(controller.NATIVE_SETUP_NATIVE_CHECKS, setup_native_checks)
+
+            def setup_bytes(record):
+                return (controller.NATIVE_SETUP_FAILURE_PREFIX
+                        + json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
+
+            setup_record = {
+                "schema": 1, "mode": setup_modes[0], "failedPredicates": ["result-kind", "driver-status"],
+                "resultKind": "fixture-cleanup", "driverExitStatus": 1,
+                "errorCategory": "interrupt", "nativeErrorCategory": "io-error",
+                "resultChecks": {name: (True, False, "missing", "invalid")[index % 4]
+                                 for index, name in enumerate(setup_result_checks)},
+                "nativeChecks": {name: (False, "missing", "invalid", True)[index % 4]
+                                 for index, name in enumerate(setup_native_checks)},
+            }
+            setup_marker = setup_bytes(setup_record)
+            setup_ids = tuple(sorted((*expected, setup_target)))
+            setup_step = controller.Step("ruby-native-capture", parser="minitest", expected_tests=3,
+                                         native_partition="healthy")
+            setup_target_failure = setup_target + " = PRIVATE_MESSAGE\n0.01 s = F\n"
+            setup_stdout = clean + setup_target_failure + failed_footer
+            # Both discovery entrypoints stay mocked, including every wrong
+            # gate/partition case: this closure reads no Ruby fixture source.
+            with patch.object(controller, "ruby_expected_ids", return_value=setup_ids), \
+                    patch.object(controller, "ruby_capture_ids", return_value=setup_ids), \
+                    patch.object(controller.time, "monotonic", return_value=999.0):
+                with patch.object(controller, "_fixture_failure_record", wraps=controller._fixture_failure_record) as strict:
+                    self.assertEqual(controller.native_setup_failure(setup_marker, deadline=1000.0), setup_record)
+                strict.assert_called_once_with(setup_marker, "MRK_NATIVE_SETUP_FAILURE=", 2048, deadline=1000.0,
+                                               canonical_fields=setup_fields)
+                for mode in setup_modes:
+                    for terminal in ("F", "E"):
+                        record = {**setup_record, "mode": mode}
+                        raw = setup_bytes(record)
+                        self.assertLessEqual(len(raw), 2048)
+                        transcript = setup_stdout.replace("0.01 s = F", "0.01 s = " + terminal)
+                        failed_capture = capture(transcript, stderr=raw, ok=False, returncode=1)
+                        with patch.object(controller, "minitest_records", wraps=controller.minitest_records) as scans:
+                            detail = controller.failure_details(failed_capture, setup_step, paths, deadline=1000.0)
+                        self.assertEqual([call.args for call in scans.call_args_list],
+                                         [(transcript, setup_ids), (transcript, (setup_target,))])
+                        self.assertEqual([call.kwargs for call in scans.call_args_list], [{"deadline": 1000.0}] * 2)
+                        self.assertEqual(detail["native_setup_failure"], record)
+                        self.assertEqual(detail["returncode"], 1)
+                        self.assertNotIn("PRIVATE_MESSAGE", json.dumps(detail))
+                with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                    controller.parse_capture(setup_step, failed_capture, paths, "macos", None)
+                rc_zero = capture(setup_stdout, stderr=setup_marker)
+                self.assertEqual(controller.failure_details(rc_zero, setup_step, paths)["native_setup_failure"], setup_record)
+                with self.assertRaisesRegex(controller.VerificationError, "MINITEST_RESULT_REJECTED"):
+                    controller.parse_capture(setup_step, rc_zero, paths, "macos", None)
+
+                # The two original operands determine the exact ordered
+                # failures; the finite projections are independent observations.
+                for kind in setup_kinds:
+                    record = {**setup_record, "resultKind": kind,
+                              "failedPredicates": ["driver-status"] if kind == "pass" else ["result-kind", "driver-status"]}
+                    self.assertEqual(controller.native_setup_failure(setup_bytes(record)), record)
+                for status in (0, 255):
+                    record = {**setup_record, "driverExitStatus": status,
+                              "failedPredicates": ["result-kind"] if status == 0 else ["result-kind", "driver-status"]}
+                    self.assertEqual(controller.native_setup_failure(setup_bytes(record)), record)
+                for key in ("errorCategory", "nativeErrorCategory"):
+                    for category in setup_categories:
+                        record = {**setup_record, key: category}
+                        self.assertEqual(controller.native_setup_failure(setup_bytes(record)), record)
+                for check_value in (True, False, "missing", "invalid"):
+                    record = {**setup_record,
+                              "resultChecks": dict.fromkeys(setup_result_checks, check_value),
+                              "nativeChecks": dict.fromkeys(setup_native_checks, check_value)}
+                    self.assertEqual(controller.native_setup_failure(setup_bytes(record)), record)
+
+                success_stdout = setup_stdout.replace("0.01 s = F", "0.01 s = .").replace("1 failures", "0 failures")
+                self.assertNotIn("native_setup_failure", controller.failure_details(
+                    capture(success_stdout, stderr=setup_marker), setup_step, paths))
+                self.assertTrue(controller.parse_capture(setup_step, capture(success_stdout, stderr=setup_marker),
+                                                         paths, "macos", None).ok)
+                for transcript in (
+                    clean + failed_footer, clean + setup_target + ":\n" + failed_footer,
+                    clean + setup_target + " = unfinished\n" + failed_footer,
+                    setup_stdout.replace("0.01 s = F", "0.01 s = S"),
+                    setup_stdout.replace("0.01 s = F", "0.01 s = .\n0.01 s = F"),
+                    clean + setup_target_failure * 2 + failed_footer,
+                    clean + failed_footer + setup_target_failure,
+                    success_stdout.replace(first, first.replace("0.01 s = .", "0.01 s = F")),
+                ):
+                    self.assertNotIn("native_setup_failure", controller.failure_details(
+                        capture(transcript, stderr=setup_marker, ok=False, returncode=1), setup_step, paths))
+                self.assertNotIn("native_setup_failure", controller.failure_details(
+                    capture(setup_stdout + setup_marker.decode("ascii"), ok=False, returncode=1), setup_step, paths))
+                with patch.object(controller, "ruby_capture_ids", return_value=expected):
+                    self.assertNotIn("native_setup_failure", controller.failure_details(
+                        capture(setup_stdout, stderr=setup_marker, ok=False, returncode=1), setup_step, paths))
+                for wrong_step in (
+                    dataclasses.replace(setup_step, id="ruby-native-owner"),
+                    dataclasses.replace(setup_step, id="ruby-play_store"),
+                    dataclasses.replace(setup_step, id="ruby-ios_upload_validation"),
+                    dataclasses.replace(setup_step, id="ruby-android_upload_validation"),
+                    dataclasses.replace(setup_step, native_partition="all"),
+                    dataclasses.replace(setup_step, native_partition="native-setup-no-cleanup"),
+                    dataclasses.replace(setup_step, parser="exit"),
+                ):
+                    self.assertNotIn("native_setup_failure", controller.failure_details(
+                        capture(setup_stdout, stderr=setup_marker, ok=False, returncode=1), wrong_step, paths))
+                with patch.object(controller, "ruby_capture_ids", return_value=tuple(sorted((*many_ids, setup_target)))):
+                    detail = controller.failure_details(capture(many_stdout + setup_target_failure, stderr=setup_marker,
+                        ok=False, returncode=1), setup_step, paths)
+                    self.assertGreater(detail["minitest_structure"]["start_records_omitted"], 0)
+                    self.assertEqual(detail["native_setup_failure"], setup_record)
+                    self.assertNotIn("native_setup_failure", controller.failure_details(
+                        capture(setup_target_failure + many_stdout + setup_target_failure, stderr=setup_marker,
+                                ok=False, returncode=1), setup_step, paths))
+
+                invalid_setup = [
+                    *({key: value for key, value in setup_record.items() if key != absent} for absent in setup_fields),
+                    {**setup_record, "private": "PRIVATE_ROOT"}, {**setup_record, "pid": 123},
+                    {key: setup_record[key] for key in reversed(setup_fields)},
+                    *({**setup_record, "schema": value} for value in (True, 1.0, 2, "1")),
+                    *({**setup_record, "mode": value} for value in ([], False, "PRIVATE_MODE", "native-setup-no-cleanup")),
+                    *({**setup_record, "resultKind": value} for value in (None, True, 0, [], "PRIVATE_KIND")),
+                    *({**setup_record, "driverExitStatus": value} for value in (None, True, False, 1.0, "1", -1, 256)),
+                    *({**setup_record, key: value} for key in ("errorCategory", "nativeErrorCategory")
+                      for value in (None, True, [], "PRIVATE_CLASS")),
+                    *({**setup_record, "failedPredicates": value} for value in (
+                        [], None, "result-kind", [True], ["PRIVATE_PREDICATE"], ["result-kind"] * 2,
+                        ["driver-status", "result-kind"], ["result-kind"], ["driver-status"],
+                    )),
+                    {**setup_record, "resultKind": "pass", "driverExitStatus": 0, "failedPredicates": []},
+                    {**setup_record, "resultKind": "pass", "driverExitStatus": 0},
+                    {**setup_record, "resultKind": "pass"}, {**setup_record, "driverExitStatus": 0},
+                ]
+                for key in ("resultChecks", "nativeChecks"):
+                    checks = setup_record[key]
+                    invalid_setup.extend({**setup_record, key: value} for value in (
+                        None, [], True, {}, {**checks, "PRIVATE_CHECK": False},
+                        {name: value for name, value in checks.items() if name != next(iter(checks))},
+                        {name: checks[name] for name in reversed(checks)},
+                        *({**checks, name: 0} for name in checks),
+                        *({**checks, next(iter(checks)): value} for value in (1, None, [], {}, "false", "PRIVATE_VALUE")),
+                    ))
+                prefix = controller.NATIVE_SETUP_FAILURE_PREFIX.encode("ascii")
+                malformed_marker = prefix + b"not-json\n"
+                invalid_setup_markers = [*(setup_bytes(record) for record in invalid_setup),
+                    setup_marker * 2, setup_marker + malformed_marker, malformed_marker + setup_marker,
+                    setup_marker.replace(b'"schema":1', b'"schema":1,"schema":1'),
+                    setup_marker.replace(b'"ready":true', b'"ready":true,"ready":true'),
+                    setup_marker.replace(b'"finalized":false', b'"finalized":false,"finalized":false'),
+                    setup_marker.replace(b'"schema":1', b'"schema": 1'),
+                    setup_marker.replace(b"native-setup", br"native\u002dsetup"),
+                    prefix + b"x" * 2048 + b"\n", prefix + b"\xff\n", setup_marker[:-1],
+                    setup_marker[:-1] + b"\r\n", b"progress " + setup_marker,
+                ]
+                for raw in invalid_setup_markers:
+                    detail = controller.failure_details(capture(setup_stdout, stderr=raw, ok=False, returncode=1),
+                                                        setup_step, paths, deadline=1000.0)
+                    self.assertNotIn("native_setup_failure", detail)
+                    self.assertEqual(detail["returncode"], 1)
+                    self.assertNotIn("PRIVATE_", json.dumps(detail))
+
+                expired = [False]
+                def expired_setup_parse(_text):
+                    expired[0] = True
+                    raise ValueError("PRIVATE_MESSAGE")
+                with patch.object(controller, "strict_json", side_effect=expired_setup_parse), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(capture(setup_stdout, stderr=setup_marker, ok=False, returncode=1),
+                                               setup_step, paths, deadline=1000.0)
+                expired[0] = False
+                original_scan = controller.minitest_records
+                def expire_setup_scan(text, identifiers, *, deadline):
+                    if identifiers == (setup_target,):
+                        expired[0] = True
+                    return original_scan(text, identifiers, deadline=deadline)
+                with patch.object(controller, "minitest_records", side_effect=expire_setup_scan), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(capture(setup_stdout, stderr=setup_marker, ok=False, returncode=1),
+                                               setup_step, paths, deadline=1000.0)
+                for interruption in (KeyboardInterrupt("PRIVATE_MESSAGE"), SystemExit(7)):
+                    with patch.object(controller, "strict_json", side_effect=interruption), \
+                            self.assertRaises(type(interruption)) as raised:
+                        controller.failure_details(capture(setup_stdout, stderr=setup_marker, ok=False, returncode=1),
+                                                   setup_step, paths, deadline=1000.0)
+                    self.assertIs(raised.exception, interruption)
+
             for field, value in (("returncode", False), ("waited", False), ("stdout_eof", False),
                                  ("stderr_eof", False), ("domain_finality", False),
                                  ("primary_error", "fixture"), ("cleanup_errors", ("fixture",))):

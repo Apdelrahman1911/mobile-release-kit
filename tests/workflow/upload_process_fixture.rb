@@ -41,6 +41,7 @@ module UploadProcessFixture
   NATIVE_ORDER_MODES = %w[native-order-task-before-caller-interrupt native-order-task-before-caller-system-exit
     native-order-caller-before-task-interrupt native-order-caller-before-task-system-exit
     native-order-cleanup-before-caller-interrupt native-order-cleanup-before-caller-system-exit].freeze
+  NATIVE_SETUP_FAILURE_MODES = %w[native-setup-interrupt native-setup-system-exit native-setup-io-error].freeze
   NATIVE_MODES = (%w[native-setup-interrupt native-setup-system-exit native-setup-io-error
                     native-setup-no-cleanup native-setup-second-pipe native-setup-owner-failure
                     native-setup-readiness-failure native-setup-watchdog-unavailable
@@ -776,8 +777,20 @@ module UploadProcessFixture
     raise original
   end
 
+  def reject_native_setup_result!(mode:, result:, status:, deadline_ns:, state:)
+    original = Failure.new("fixture-result", "unexpected fixture result kind/status")
+    if state && NATIVE_SETUP_FAILURE_MODES.include?(mode)
+      state[:rejection] = original
+      state[:mode] = mode
+      state[:deadline_ns] = deadline_ns
+      state[:result] = result
+      state[:status] = status
+    end
+    raise original
+  end
+
   def run(platform:, root:, parameters:, mode:, observe_signals: false, deadline_ns: nil,
-          primary_failure_state: nil, order_failure_state: nil)
+          primary_failure_state: nil, order_failure_state: nil, setup_failure_state: nil)
     assert_domain_reusable!
     validate_request!(platform, mode, parameters)
     validate_signal_observation!(platform, mode, observe_signals)
@@ -788,7 +801,7 @@ module UploadProcessFixture
       return NativeSignalProbe.observe_parent(root, mode) do
         run(platform: platform, root: root, parameters: parameters, mode: mode,
             observe_signals: true, deadline_ns: deadline_ns, primary_failure_state: primary_failure_state,
-            order_failure_state: order_failure_state)
+            order_failure_state: order_failure_state, setup_failure_state: setup_failure_state)
       end
     end
     if observe_signals && !NativeSignalProbe.current.parent_for?(root, mode)
@@ -940,6 +953,10 @@ module UploadProcessFixture
                 "native-setup-watchdog-failure" => "setup-fixture-fault"}.fetch(mode.delete_suffix("-slow-cleanup"), "pass")
               expected = %w[setup-fallback fixture-cleanup] if mode == "native-setup-no-cleanup"
               unless Array(expected).include?(result["kind"]) && child.status.exitstatus == (expected == "pass" ? 0 : 1)
+                if NATIVE_SETUP_FAILURE_MODES.include?(mode)
+                  reject_native_setup_result!(mode: mode, result: result, status: child.status,
+                    deadline_ns: run_ns, state: setup_failure_state)
+                end
                 raise Failure.new("fixture-result", "unexpected fixture result kind/status")
               end
             end
@@ -5295,10 +5312,13 @@ module UploadProcessFixture
       observation = UploadProcessFixture::CommandObservation.new
       error = assert_raises(UploadProcessFixture::Failure) do
         observation.observe do
-          UploadProcessFixture.capture_command([RbConfig.ruby, "-e", "sleep 30"], seconds: 0.05, root: @root)
+          # Exercise the silent observation cutoff, not a 50ms bootstrap race.
+          # This is still ONE original startup-inclusive deadline, never renewed.
+          UploadProcessFixture.capture_command([RbConfig.ruby, "-e", "sleep 30"], seconds: DEADLINE, root: @root)
         end
       end
       assert_equal "process-observation", error.kind
+      assert_equal "process observation deadline expired", error.message
       snapshot = observation.snapshot
       assert snapshot.fetch("settled"), snapshot.inspect
       refute snapshot.fetch("unknown"), snapshot.inspect
@@ -5307,12 +5327,20 @@ module UploadProcessFixture
       assert_equal 1, snapshot.fetch("children").length
       child = snapshot.fetch("children").first
       assert child.fetch("actualNativeCloses"), child.inspect
-      if child.fetch("noNativeAttemptConfirmed")
-        assert_equal "no_producers", child.fetch("finality")
-      else
-        assert_equal "finalized", child.fetch("finality")
-        %w[originalWaitObserved creatorJoinObserved actualStreamEOFs].each { |key| assert child.fetch(key), child.inspect }
-      end
+      refute child.fetch("noNativeAttemptConfirmed"), child.inspect
+      assert_equal "finalized", child.fetch("finality")
+      %w[originalWaitObserved creatorJoinObserved actualStreamEOFs].each { |key| assert child.fetch(key), child.inspect }
+      provenance = child.fetch("provenance")
+      requested = provenance.fetch("requested")
+      assert_equal({"executable" => RbConfig.ruby, "argv" => [RbConfig.ruby, "-e", "sleep 30"],
+        "environment" => UploadProcessFixture.process_observer_environment, "cwd" => File.realpath(Dir.pwd)}, requested)
+      assert_equal({"state" => "granted", "bytesWritten" => 3}, provenance.fetch("grant"))
+      # This original record proves attempted exec, not successful target code.
+      # It supplements, never replaces, the actual wait/join/EOF/close witnesses.
+      assert_equal({"version" => 1, "pid" => child.fetch("pid"),
+        "configurationSha256" => provenance.fetch("configuration").fetch("sha256"),
+        "argvSha256" => Digest::SHA256.hexdigest(JSON.generate(requested.fetch("argv"))),
+        "cwd" => requested.fetch("cwd")}, provenance.fetch("execAttempt"))
       refute UploadProcessFixture.cleanup_unresolved?(@root)
       refute UploadProcessFixture.domain_disposal_required?
     end

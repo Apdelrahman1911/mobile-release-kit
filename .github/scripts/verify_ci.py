@@ -210,6 +210,36 @@ NATIVE_ORDER_PROOF_FAILURES = (
     "actual clean body then original cleanup fault", "unknown original task/session retained", "real pre-tail native success not finality",
     "actual body error recorded", "actual settled native cancellation",
 )
+NATIVE_SETUP_FAILURE_PREFIX = "MRK_NATIVE_SETUP_FAILURE="
+NATIVE_SETUP_FAILURE_CALLBACK_MODES = {
+    ("NativeUploadValidationTest#"
+     "test_cancellation_or_io_error_at_first_setup_step_cleans_up_the_real_child"): (
+        "native-setup-interrupt", "native-setup-system-exit", "native-setup-io-error",
+    ),
+}
+NATIVE_SETUP_FAILURE_MODES = frozenset(
+    mode for modes in NATIVE_SETUP_FAILURE_CALLBACK_MODES.values() for mode in modes
+)
+NATIVE_SETUP_FAILURE_FIELDS = (
+    "schema", "mode", "failedPredicates", "resultKind", "driverExitStatus",
+    "errorCategory", "nativeErrorCategory", "resultChecks", "nativeChecks",
+)
+NATIVE_SETUP_FAILURE_PREDICATES = ("result-kind", "driver-status")
+NATIVE_SETUP_RESULT_KINDS = (
+    "pass", "fixture-cleanup", "readiness", "setup-fixture-fault", "process-observation",
+    "process-ownership", "fixture-result", "unexpected", "other", "missing", "invalid",
+)
+NATIVE_SETUP_ERROR_CATEGORIES = (
+    "none", "fixture-error", "contract-error", "native-lifecycle-error", "io-error",
+    "interrupt", "system-exit", "other", "missing", "invalid",
+)
+NATIVE_SETUP_RESULT_CHECKS = (
+    "ready", "firstCloseEntered", "originalCloseCompleted", "nativeOriginalErrorPreserved",
+    "watchdogStarted", "watchdogIntervened", "fallbackUsed", "deadBeforeFallback",
+    "ownedDescriptorsClosed", "watchdogJoined", "tasksJoined", "injectorsJoined",
+    "handlersRestored", "registryInactive", "pendingInterrupt", "cleanupErrorsEmpty",
+)
+NATIVE_SETUP_NATIVE_CHECKS = ("finalized", "noProducers", "settled", "unknown", "hooksRestored")
 PYTHON_POISON_PARTITIONS = (
     "poison-wait-loss",
     "poison-startup-error",
@@ -1393,6 +1423,38 @@ def native_order_failure(raw: bytes, *, deadline: float | None = None) -> dict |
     return {"schema": 1, "mode": data["mode"], "failedPredicates": predicates, "proofFailures": failures}
 
 
+def native_setup_failure(raw: bytes, *, deadline: float | None = None) -> dict | None:
+    """Finite original kind/status operands, never success or cleanup authority."""
+    try:
+        data = _fixture_failure_record(raw, NATIVE_SETUP_FAILURE_PREFIX, 2048, deadline=deadline,
+                                       canonical_fields=NATIVE_SETUP_FAILURE_FIELDS)
+        if (type(data) is not dict or type(data["schema"]) is not int or data["schema"] != 1
+                or type(data["mode"]) is not str or data["mode"] not in NATIVE_SETUP_FAILURE_MODES
+                or type(data["resultKind"]) is not str or data["resultKind"] not in NATIVE_SETUP_RESULT_KINDS
+                or type(data["driverExitStatus"]) is not int or not 0 <= data["driverExitStatus"] <= 255
+                or any(type(data[key]) is not str or data[key] not in NATIVE_SETUP_ERROR_CATEGORIES
+                       for key in ("errorCategory", "nativeErrorCategory"))):
+            return None
+        predicates = [name for name, failed in zip(NATIVE_SETUP_FAILURE_PREDICATES,
+                      (data["resultKind"] != "pass", data["driverExitStatus"] != 0)) if failed]
+        if (not predicates or type(data["failedPredicates"]) is not list
+                or any(type(name) is not str for name in data["failedPredicates"])
+                or data["failedPredicates"] != predicates):
+            return None
+        for key, fields in (("resultChecks", NATIVE_SETUP_RESULT_CHECKS),
+                            ("nativeChecks", NATIVE_SETUP_NATIVE_CHECKS)):
+            checks = data[key]
+            if (type(checks) is not dict or tuple(checks) != fields
+                    or any(type(value) is not bool and not (type(value) is str and value in {"missing", "invalid"})
+                           for value in checks.values())):
+                return None
+        return data
+    finally:
+        # Invalid optional projections cannot consume the original cutoff.
+        if deadline is not None:
+            check_clock(deadline)
+
+
 def _minitest_failed_target(text: str, identifier: str, *, deadline: float | None = None) -> bool:
     # Scan the SAME original bytes under the SAME cutoff. A target beyond the
     # public first16 rows still counts, as does a late duplicate. No receipt.
@@ -1736,6 +1798,14 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                     if (step.native_partition == partition and len(targets) == 1 and targets[0] in expected
                             and _minitest_failed_target(text, targets[0], deadline=deadline)):
                         value["native_order_failure"] = diagnostic
+            if step.id == "ruby-native-capture" and step.native_partition == "healthy":
+                diagnostic = native_setup_failure(result.stderr, deadline=deadline)
+                if diagnostic is not None:
+                    targets = [identifier for identifier, modes in NATIVE_SETUP_FAILURE_CALLBACK_MODES.items()
+                               if diagnostic["mode"] in modes]
+                    if (len(targets) == 1 and targets[0] in expected
+                            and _minitest_failed_target(text, targets[0], deadline=deadline)):
+                        value["native_setup_failure"] = diagnostic
         except (VerificationError, OSError, UnicodeError):
             if deadline is not None:
                 check_clock(deadline)

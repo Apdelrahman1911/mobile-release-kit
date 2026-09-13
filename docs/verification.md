@@ -733,6 +733,22 @@ record. Unknown/duplicate identities, ambiguous terminals, adverse outcomes and
 footer/count mismatches fail. Failure observations contain only finite structural
 reasons/counts and bounded source-known missing/duplicate IDs, never raw body logs.
 
+The native first-close cancellation test may additionally report one bounded
+`MRK_NATIVE_SETUP_FAILURE` observation for its three fixed setup modes, only when
+the original result-kind/driver-status rejection survives the complete fixture
+lifetime. Closed categories and true/false/missing/invalid checks retain the
+already-read result without publishing private messages, paths or identities.
+Reporting uses the same original cutoff and never changes rejection or cleanup
+authority. The controller binds it to the exact failing source-known callback in
+the healthy partition; successful or duplicate callbacks cannot qualify.
+
+The shared adapter's silent-observer timeout test uses its existing two-second
+startup-inclusive fixture budget, rather than racing native bootstrap within
+50ms. It still requires the exact observation-deadline error and an actual child
+with original wait, creator join, both EOFs and closes. GO/exec-attempt records do
+not substitute for finality or prove successful target execution. No production
+timeout, cleanup grace or gate allocation is extended by this test correction.
+
 Native source/wheel failures can identify the actual failing fixed prerequisite
 (`openssl-version`, `clang-discovery`, `dsymutil-discovery`, or `system-code`) or
 at most16 source-known test/fixture callbacks. Only finite category/outcome labels
