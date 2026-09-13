@@ -528,11 +528,19 @@ family import closures, with exact selected source or actual installed-wheel
 origins. The primitive runner does not gain workflow imports from another family.
 There is no generic caller-supplied method selector or broad workflow import grant.
 
-Within each gate, all parts share its original cutoff: 900 seconds for the affected
-Python gates, 120 for the Ruby owner, 180 for native capture and 300 for each
-adapter, always clamped to the original 3300-second aggregate endpoint. The
-macOS authority capture and 2+2 prerequisite routing remain unchanged. These
-splits add no logical gates, jobs, builds, permission profiles or observers.
+All parts retain one fixed gate endpoint: 900 seconds for the affected Python
+gates, 120 for the Ruby owner, 310 for native capture and 300 for each adapter,
+always clamped to the original 3300-second job endpoint. Native capture additionally
+caps its healthy 17-test partition at 180 seconds and each of its four fixed singletons
+at 30 seconds, including preparation, capture, result parsing and finality. Each
+singleton keeps its original 15-second driver and 5-second cleanup limits; another 10 seconds
+is bounded outer framework/startup/result/finality headroom, not a native deadline
+extension. Setup and final-union bookkeeping share a separate 10 seconds. Every
+phase cutoff is fixed before its work; unused partition time cannot be donated,
+and setup time is deducted from the union allowance. These are finite scheduling
+ceilings, not guarantees of a passing run. Other gates retain their shared-cutoff
+behavior. The macOS authority capture and 2+2 prerequisite routing remain unchanged.
+These splits add no logical gates, jobs, builds, permission profiles or observers.
 
 Before any next part, the existing Session must establish the preceding original
 capture's actual wait, stream EOFs, domain finality/disposal and `ensure_idle`.

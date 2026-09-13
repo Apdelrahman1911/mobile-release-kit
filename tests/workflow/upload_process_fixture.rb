@@ -3305,6 +3305,9 @@ module UploadProcessFixture
   class ContainmentEvidence
     HARD_LOSS = %w[kill-native-setup kill-startup kill-descendant].freeze
     MISSING = "native-setup-no-cleanup"
+    OMISSION_LIMIT = 8192
+    OMISSION_FILES = {"custodian" => "containment-custodian-omission.json",
+                      "keeper" => "containment-keeper-omission.json"}.freeze
     SOURCES = NativeSignalProbe::SOURCES
 
     def self.source_hashes
@@ -3481,19 +3484,57 @@ module UploadProcessFixture
       end
       valid &&= UploadProcessFixture.clock_ns < @role.__send__(:effective_deadline_ns)
       raise Failure.new("fixture-source", "unreserved helper group request VETOED before syscall") unless valid
+      return missing_omission!(object, route, group) if @mode == MISSING && signal == "KILL"
       entry = {"route" => route, "group" => group, "signal" => signal, "atNs" => UploadProcessFixture.clock_ns,
         "originalReservedAuthority" => true, "origin" => @origins.fetch(route)}
       @request_counts.fetch(signal.to_s)
       @request_counts[signal.to_s] += 1
-      if @mode == MISSING && signal == "KILL"
-        raise Failure.new("fixture-source", "repeated cleanup omission entry") unless @omissions.empty?
-        @omissions << entry.merge("actualOmissionEntry" => true, "nativeCallOmitted" => true)
-        return 0 # Actual C AND K entry markers, never a successful signal receipt.
-      end
       @route = entry
       original.call(*arguments, **keywords, &block)
     ensure
       @route = nil
+    end
+
+    def missing_omission!(object, route, group)
+      c = route == "custodian-group"
+      role = c ? "custodian" : "keeper"
+      child = own_child
+      moved = @role.instance_variable_get(c ? :@moved : :@moved_frame)
+      graph = {"custodian" => c ? @role.pid : @role.parent_pid,
+        "keeper" => c ? child&.pid : @role.pid,
+        "validator" => c ? moved&.fetch("validator_pid", nil) : child&.pid,
+        "group" => group, "sid" => @role.session_id}
+      unless @omissions.empty? && @mode == MISSING && OMISSION_FILES.key?(role) &&
+             route == (c ? "custodian-group" : "keeper-group") && @role.pid == Process.pid &&
+             child && child.equal?(@role.creator_acquisition&.child) &&
+             graph.values.all? { |pid| pid.instance_of?(Integer) && pid > 1 } &&
+             graph.values_at("custodian", "keeper", "validator").uniq.length == 3 &&
+             graph["group"] == graph["keeper"] && graph["sid"] == graph["custodian"] &&
+             @role.parent_pid.instance_of?(Integer) && @role.parent_pid > 1 &&
+             (c ? object.equal?(@role.group) && object.session_id == graph["sid"] &&
+               !graph.values.include?(@role.parent_pid) && moved.instance_of?(Hash) : object.equal?(@role) &&
+               @role.parent_pid == graph["custodian"]) &&
+             (!moved || moved.instance_of?(Hash) && moved.values_at("validator_pid", "group_id", "keeper_pgid") ==
+               graph.values_at("validator", "group", "custodian"))
+        raise Failure.new("fixture-source", "missing cleanup entry lacks its original role graph")
+      end
+      origin = @origins.fetch(route) # Captured BEFORE the original helper method was wrapped.
+      deadline = @role.__send__(:effective_deadline_ns)
+      at = UploadProcessFixture.clock_ns
+      unless deadline.instance_of?(Integer) && at < deadline
+        raise Failure.new("fixture-source", "original cleanup omission entry deadline expired")
+      end
+      entry = {"route" => route, "group" => group, "signal" => "KILL", "atNs" => at,
+        "effectiveDeadlineNs" => deadline, "originalReservedAuthority" => true, "origin" => origin,
+        "actualOmissionEntry" => true, "nativeCallOmitted" => true}.freeze
+      @omissions << entry # Irreversible before publication, including a write with an uncertain effect.
+      @request_counts["KILL"] = @request_counts.fetch("KILL") + 1
+      record = {"version" => 1, "kind" => "original-helper-cleanup-omission-entry", "mode" => MISSING,
+        "sourceSha256" => @manifest.fetch("sourceSha256"), "helperCopy" => @manifest.fetch("helperCopy"),
+        "role" => role, "pid" => @role.pid, "parentPid" => @role.parent_pid, "identities" => graph, "entry" => entry}
+      raise Failure.new("fixture-source", "cleanup omission entry exceeds bound") if JSON.generate(record).bytesize > OMISSION_LIMIT
+      OwnedChild.write_record(File.join(@directory, OMISSION_FILES.fetch(role)), record)
+      0 # GROUP call omitted, not a syscall/return/terminal receipt; original direct C-to-K cleanup remains.
     end
 
     def actual_kill(original, arguments, keywords, block)
@@ -3573,6 +3614,62 @@ module UploadProcessFixture
         raise Failure.new("fixture-result", "original containment report changed") unless JSON.parse(bytes) == expected
         [name, Digest::SHA256.hexdigest(bytes)]
       end
+    end
+
+    def self.omission_records!(directory, manifest, graph, driver_pid:, deadline_ns:, capture_entry_ns:, arm_ns:, before_ns:)
+      unless graph.instance_of?(Hash) && graph.keys.sort == %w[custodian group keeper sid validator] &&
+             graph.values.all? { |pid| pid.instance_of?(Integer) && pid > 1 } &&
+             graph.values_at("custodian", "keeper", "validator").uniq.length == 3 &&
+             graph["custodian"] == graph["sid"] && graph["keeper"] == graph["group"] &&
+             driver_pid.instance_of?(Integer) && driver_pid > 1 && !graph.values.include?(driver_pid) &&
+             [deadline_ns, capture_entry_ns, arm_ns, before_ns].all? { |time| time.instance_of?(Integer) && time.positive? } &&
+             capture_entry_ns <= arm_ns && arm_ns < before_ns && before_ns < deadline_ns &&
+             manifest.instance_of?(Hash) && manifest["mode"] == MISSING
+        raise Failure.new("fixture-result", "cleanup omission context is not the original capture")
+      end
+      records, bindings = {}, {}
+      OMISSION_FILES.each do |role, name|
+        raise Failure.new("fixture-result", "original cleanup omission read cutoff expired") unless UploadProcessFixture.clock_ns < deadline_ns
+        path = File.join(directory, name)
+        identity = OwnedChild.identity(File.lstat(path))
+        bytes = OwnedChild.bounded_file(path, expected: identity, limit: OMISSION_LIMIT)
+        unless OwnedChild.identity(File.lstat(path)) == identity
+          raise Failure.new("fixture-result", "original cleanup omission path changed during read")
+        end
+        item = JSON.parse(bytes)
+        route = role == "custodian" ? "custodian-group" : "keeper-group"
+        helper = MobileReleaseKit::NativeUploadProcess
+        original = role == "custodian" ? helper::GroupLease.instance_method(:request) : helper::Keeper.instance_method(:request_group)
+        source, line = original.source_location
+        copy = manifest.fetch("helperCopy")
+        unless source && File.realpath(source) == copy.fetch("originalPath") && line.instance_of?(Integer) && line.positive?
+          raise Failure.new("fixture-source", "cleanup omission origin left the original native method")
+        end
+        entry = item.instance_of?(Hash) && item["entry"]
+        unless item.instance_of?(Hash) && item.keys.sort == %w[entry helperCopy identities kind mode parentPid pid role sourceSha256 version] &&
+               item["version"].instance_of?(Integer) && item["version"] == 1 &&
+               item["kind"] == "original-helper-cleanup-omission-entry" && item["mode"] == MISSING &&
+               item["sourceSha256"] == manifest.fetch("sourceSha256") && item["helperCopy"] == copy &&
+               item["identities"].instance_of?(Hash) && item["identities"] == graph &&
+               item["identities"].values.all? { |pid| pid.instance_of?(Integer) } && item["role"] == role &&
+               item["pid"].instance_of?(Integer) && item["pid"] == graph.fetch(role) &&
+               item["parentPid"].instance_of?(Integer) && item["parentPid"] == (role == "custodian" ? driver_pid : graph.fetch("custodian")) &&
+               entry.instance_of?(Hash) && entry.keys.sort == %w[actualOmissionEntry atNs effectiveDeadlineNs group nativeCallOmitted origin originalReservedAuthority route signal] &&
+               entry["route"] == route && entry["group"].instance_of?(Integer) && entry["group"] == graph.fetch("group") &&
+               entry["signal"] == "KILL" && entry["originalReservedAuthority"].equal?(true) &&
+               entry["actualOmissionEntry"].equal?(true) && entry["nativeCallOmitted"].equal?(true) &&
+               entry["origin"].instance_of?(Hash) && entry["origin"] == {"path" => copy.fetch("path"), "line" => line} &&
+               entry["origin"]["line"].instance_of?(Integer) &&
+               entry["atNs"].instance_of?(Integer) && entry["effectiveDeadlineNs"].instance_of?(Integer) &&
+               arm_ns <= entry["atNs"] && entry["atNs"] < before_ns &&
+               entry["atNs"] < entry["effectiveDeadlineNs"] && entry["effectiveDeadlineNs"] <= deadline_ns
+          raise Failure.new("fixture-result", "original cleanup omission entry/source/identity binding changed")
+        end
+        records[name] = item
+        bindings[name] = {"identity" => identity, "sha256" => Digest::SHA256.hexdigest(bytes)}
+      end
+      raise Failure.new("fixture-result", "cleanup omission read passed original cutoff") unless UploadProcessFixture.clock_ns < deadline_ns
+      [records, bindings]
     end
 
     def self.graph!(owner, mode)
@@ -3672,9 +3769,11 @@ module UploadProcessFixture
 
     def self.missing_cleanup!(directory, owner, result, sources, deadline_ns:, driver_dispatch:)
       manifest = manifest!(directory, MISSING, sources)
+      unless manifest == result["containmentSource"]
+        raise Failure.new("fixture-result", "cleanup omission manifest changed after original preparation")
+      end
       graph = graph!(owner, MISSING)
-      records = wait_records(directory, %w[containment-custodian.json containment-keeper.json fallback-writer-close.json leader-eof.json], deadline_ns: deadline_ns)
-      reports = bound_reports!(records, manifest, graph)
+      records = wait_records(directory, %w[fallback-writer-close.json leader-eof.json], deadline_ns: deadline_ns)
       close, eof = records.values_at("fallback-writer-close.json", "leader-eof.json")
       custody = close["watchdogOwnership"]
       times = %w[driverDeadlineNs preparedNs prearmDeadlineNs slotCeilingNs startReturnedNs admitReturnedNs
@@ -3704,13 +3803,17 @@ module UploadProcessFixture
              custody["fallbackNs"] <= close["closeEntryNs"] && close["closeReturnNs"] < custody["effectiveHardDeadlineNs"]
         raise Failure.new("fixture-result", "missing cleanup lacks the original driver-owned bounded fallback")
       end
+      _entries, bindings = omission_records!(directory, manifest, graph, driver_pid: driver_dispatch.fetch("pid"),
+        deadline_ns: deadline_ns, capture_entry_ns: custody.fetch("captureEntryNs"), arm_ns: custody.fetch("armNs"),
+        before_ns: close.fetch("closeEntryNs"))
+      unless bindings == close["omissionRecords"] && bindings.all? { |name, binding|
+          prior_identity = close.fetch("omissionRecords").fetch(name).fetch("identity")
+          binding.fetch("identity").all? { |key, value| prior_identity.fetch(key).instance_of?(value.class) } }
+        raise Failure.new("fixture-result", "cleanup omission bytes or file identity changed after writer admission")
+      end
       unless close == result["fallbackWriterClose"] && close["version"] == 1 && close["identities"] == graph &&
              close["actualOriginalWriterClose"] && close["soleFixtureWriter"] && close["originalWatchdogThread"] &&
              close["watchdogAdmittedBeforeClose"] && result["watchdogJoined"] &&
-             reports.values.all? { |item| item["actualKills"] == [] && item["omissions"].length == 1 &&
-               item["omissions"].all? { |event| event["actualOmissionEntry"] && event["nativeCallOmitted"] &&
-                 event["group"] == graph["group"] && event["signal"] == "KILL" && event["originalReservedAuthority"] &&
-                 event["atNs"] < close["closeEntryNs"] } } &&
              eof["version"] == 1 && eof["eof"] && eof["controlReadNil"] && eof["pid"] == graph["validator"] &&
              eof["group"] == graph["group"] && eof["sid"] == graph["sid"] && eof["fifoIdentity"] == close["fifoIdentity"] &&
              eof["readNilNs"].instance_of?(Integer) && eof["readNilNs"] >= close["closeEntryNs"] &&
@@ -3720,13 +3823,17 @@ module UploadProcessFixture
       # Kernel EOF can reach V before the writer's Ruby close returns. The
       # causal proof is sole original writer + actual close + SAME FIFO readnil,
       # not an invalid readNilNs >= closeReturnNs timestamp requirement.
-      {"version" => 1, "kind" => "validator-survived-until-fixture-eof", "mode" => MISSING,
+      # The two omission flags describe C-/K-issued GROUP KILL only. They do
+      # not assert absence of C's original direct cleanup of its own K child.
+      proof = {"version" => 1, "kind" => "validator-survived-until-fixture-eof", "mode" => MISSING,
        "identities" => graph, "fifoIdentity" => close["fifoIdentity"], "sourceSha256" => sources,
        "helperCopy" => manifest["helperCopy"], "custodianKillOmitted" => true, "keeperKillOmitted" => true,
        "originalWatchdogWriterClosed" => true, "actualValidatorReadNil" => true,
        "validatorSurvivedUntilFallback" => true, "nativeFinality" => "unknown",
        "writerCloseEntryNs" => close["closeEntryNs"], "validatorReadNilNs" => eof["readNilNs"],
-       "reportSha256" => report_hashes(directory, records)}
+       "reportSha256" => bindings.transform_values { |binding| binding.fetch("sha256") }.merge(report_hashes(directory, records))}
+      raise Failure.new("fixture-result", "missing cleanup proof completed after original cutoff") unless UploadProcessFixture.clock_ns < deadline_ns
+      proof
     end
   end
 
@@ -3769,6 +3876,14 @@ module UploadProcessFixture
           "validator" => session.ready.fetch("validator_pid"), "group" => session.ready.fetch("group_id"),
           "sid" => session.custodian_child.pid}
         custody = driver.watchdog_ownership(arm)
+        prepared = driver.observed.fetch("containmentSource")
+        manifest = ContainmentEvidence.manifest!(@directory, ContainmentEvidence::MISSING, prepared.fetch("sourceSha256"))
+        unless manifest == prepared
+          raise Failure.new("fixture-control", "cleanup omission manifest changed after original preparation")
+        end
+        _entries, omission_bindings = ContainmentEvidence.omission_records!(@directory, manifest, graph,
+          driver_pid: custody.fetch("driverPid"), deadline_ns: custody.fetch("driverDeadlineNs"),
+          capture_entry_ns: custody.fetch("captureEntryNs"), arm_ns: arm.fetch(:at_ns), before_ns: UploadProcessFixture.clock_ns)
         # Guard reads precede the short final claim. No lock spans the original
         # close or publication; after a claim the SAME worker keeps custody until
         # its actual join, even if stop is published while close is in flight.
@@ -3784,7 +3899,7 @@ module UploadProcessFixture
           "actualOriginalWriterClose" => @close_result.equal?(true) && @writer.state == :closed && @writer.io.closed?,
           "soleFixtureWriter" => true, "originalWatchdogThread" => true, "watchdogAdmittedBeforeClose" => true,
           "watchdogRunDeadlineNs" => slot.run_deadline_ns, "watchdogHardDeadlineNs" => slot.hard_cleanup_deadline_ns,
-          "watchdogOwnership" => custody}
+          "watchdogOwnership" => custody, "omissionRecords" => omission_bindings}
         OwnedChild.write_record(File.join(@directory, "fallback-writer-close.json"), evidence)
         driver.observed["fallbackWriterClose"] = evidence
         @close_result

@@ -725,18 +725,28 @@ class NativeUploadValidationTest < Minitest::Test
     # Read retained evidence only. No new process observer, task or custody
     # follows UNKNOWN, and a validator read(nil) is not all-role finality.
     hashes = proof.fetch("reportSha256")
-    assert_equal %w[containment-custodian.json containment-keeper.json fallback-writer-close.json leader-eof.json], hashes.keys.sort
+    assert_equal %w[containment-custodian-omission.json containment-keeper-omission.json fallback-writer-close.json leader-eof.json], hashes.keys.sort
+    entry_bindings = {}
     reports = hashes.to_h do |name, digest|
-      bytes = UploadProcessFixture::OwnedChild.bounded_file(File.join(directory, name))
+      path = File.join(directory, name)
+      if name.end_with?("-omission.json")
+        identity = UploadProcessFixture::OwnedChild.identity(File.lstat(path))
+        bytes = UploadProcessFixture::OwnedChild.bounded_file(path, expected: identity, limit: 8192)
+        assert_equal identity, UploadProcessFixture::OwnedChild.identity(File.lstat(path))
+        entry_bindings[name] = {"identity" => identity, "sha256" => Digest::SHA256.hexdigest(bytes)}
+      else
+        bytes = UploadProcessFixture::OwnedChild.bounded_file(path)
+      end
       assert_equal Digest::SHA256.hexdigest(bytes), digest
       [name, JSON.parse(bytes)]
     end
     close, eof = reports.values_at("fallback-writer-close.json", "leader-eof.json")
     assert_equal close, value.fetch("fallbackWriterClose")
-    assert_equal %w[actualOriginalWriterClose closeEntryNs closeReturnNs fifoIdentity identities originalWatchdogThread
+    assert_equal %w[actualOriginalWriterClose closeEntryNs closeReturnNs fifoIdentity identities omissionRecords originalWatchdogThread
                     soleFixtureWriter version watchdogAdmittedBeforeClose watchdogHardDeadlineNs watchdogOwnership
                     watchdogRunDeadlineNs], close.keys.sort
     assert_equal [1, graph, fifo], close.values_at("version", "identities", "fifoIdentity")
+    assert_equal entry_bindings, close.fetch("omissionRecords")
     %w[actualOriginalWriterClose soleFixtureWriter originalWatchdogThread watchdogAdmittedBeforeClose].each do |name|
       assert_equal true, close.fetch(name), name
     end
@@ -787,21 +797,27 @@ class NativeUploadValidationTest < Minitest::Test
                   "pid" => graph.fetch("validator"), "group" => graph.fetch("group"), "sid" => graph.fetch("sid"),
                   "fifoIdentity" => fifo}, eof)
     %w[custodian keeper].each do |role|
-      report = reports.fetch("containment-#{role}.json")
-      assert_equal [1, "original-helper-containment-events", "native-setup-no-cleanup", role, graph.fetch(role), graph],
+      report = reports.fetch("containment-#{role}-omission.json")
+      assert_equal %w[entry helperCopy identities kind mode parentPid pid role sourceSha256 version], report.keys.sort
+      assert_equal [1, "original-helper-cleanup-omission-entry", "native-setup-no-cleanup", role, graph.fetch(role), graph],
                    report.values_at("version", "kind", "mode", "role", "pid", "identities")
+      assert_equal role == "custodian" ? dispatch.fetch("pid") : graph.fetch("custodian"), report.fetch("parentPid")
       assert_equal proof.fetch("sourceSha256"), report.fetch("sourceSha256")
       assert_equal copy, report.fetch("helperCopy")
-      refute report.fetch("terminalAlreadyArmed")
-      assert_empty report.fetch("hookRestorationErrors")
-      assert_empty report.fetch("actualKills")
-      assert_equal 1, report.fetch("omissions").length
-      omission = report.fetch("omissions").first
+      omission = report.fetch("entry")
+      assert_equal %w[actualOmissionEntry atNs effectiveDeadlineNs group nativeCallOmitted origin originalReservedAuthority route signal], omission.keys.sort
       assert_equal [role == "custodian" ? "custodian-group" : "keeper-group", graph.fetch("group"), "KILL"],
                    omission.values_at("route", "group", "signal")
       %w[actualOmissionEntry nativeCallOmitted originalReservedAuthority].each { |name| assert_equal true, omission.fetch(name), name }
+      assert_equal %w[line path], omission.fetch("origin").keys.sort
       assert_equal copy.fetch("path"), omission.fetch("origin").fetch("path")
-      assert_operator omission.fetch("origin").fetch("line"), :>, 0
+      origin = role == "custodian" ? MobileReleaseKit::NativeUploadProcess::GroupLease.instance_method(:request) :
+                                   MobileReleaseKit::NativeUploadProcess::Keeper.instance_method(:request_group)
+      assert_equal origin.source_location.last, omission.fetch("origin").fetch("line")
+      %w[atNs effectiveDeadlineNs].each { |key| assert_instance_of Integer, omission.fetch(key) }
+      assert_operator custody.fetch("armNs"), :<=, omission.fetch("atNs")
+      assert_operator omission.fetch("atNs"), :<, omission.fetch("effectiveDeadlineNs")
+      assert_operator omission.fetch("effectiveDeadlineNs"), :<=, dispatch.fetch("deadlineNs")
       assert_operator omission.fetch("atNs"), :<, close.fetch("closeEntryNs")
     end
     driver = value.fetch("driverProvenance")
@@ -1609,6 +1625,7 @@ class NativeUploadValidationTest < Minitest::Test
       refute_same(*handoffs)
 
       assert_native_order_failure_projection
+      assert_missing_cleanup_omission_evidence
       assert_missing_cleanup_watchdog_lifecycle
 
       # A modeled delivery seam protects the intended callback ordering only;
@@ -2247,11 +2264,166 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal 3, handoffs.map(&:object_id).uniq.length
   end
 
+  def missing_cleanup_omission_sample
+    # In-memory inputs shared by entry, reader and watchdog controls. They are
+    # never written as native receipts or used to authorize a real operation.
+    directory = "/inert-missing-cleanup"
+    sources = UploadProcessFixture::ContainmentEvidence::SOURCES.to_h { |name| [name, "a" * 64] }
+    original_path = File.realpath(MobileReleaseKit::NativeUploadProcess::GroupLease.instance_method(:request).source_location.first)
+    copy = {"label" => "containment-events", "originalPath" => original_path,
+      "originalSha256" => "a" * 64, "path" => "#{directory}/containment-events-helper.rb", "sha256" => "b" * 64}
+    manifest = {"version" => 1, "mode" => "native-setup-no-cleanup", "helperCopy" => copy, "sourceSha256" => sources}
+    graph = {"custodian" => 701, "keeper" => 702, "validator" => 703, "group" => 702, "sid" => 701}
+    stat_class = Struct.new(:dev, :ino, :mode, :uid, :gid, :rdev, :ftype, :nlink)
+    records, bytes, stats = {}, {}, {}
+    %w[custodian keeper].each_with_index do |role, index|
+      name = "containment-#{role}-omission.json"
+      origin = role == "custodian" ? MobileReleaseKit::NativeUploadProcess::GroupLease.instance_method(:request) :
+                                   MobileReleaseKit::NativeUploadProcess::Keeper.instance_method(:request_group)
+      entry = {"route" => "#{role}-group", "group" => 702, "signal" => "KILL", "atNs" => 2_500_000_000,
+        "effectiveDeadlineNs" => 7_000_000_000, "originalReservedAuthority" => true,
+        "origin" => {"path" => copy.fetch("path"), "line" => origin.source_location.last},
+        "actualOmissionEntry" => true, "nativeCallOmitted" => true}
+      records[name] = {"version" => 1, "kind" => "original-helper-cleanup-omission-entry", "mode" => manifest.fetch("mode"),
+        "sourceSha256" => sources, "helperCopy" => copy, "role" => role, "pid" => graph.fetch(role),
+        "parentPid" => role == "custodian" ? 700 : 701, "identities" => graph, "entry" => entry}
+      bytes[name] = JSON.generate(records.fetch(name))
+      stats[name] = stat_class.new(1, 10 + index, 0o100600, 3, 4, 0, "file", 1)
+    end
+    {directory: directory, manifest: manifest, graph: graph, records: records, bytes: bytes, stats: stats}
+  end
+
+  def assert_missing_cleanup_omission_evidence
+    evidence = UploadProcessFixture::ContainmentEvidence
+    native = MobileReleaseKit::NativeUploadProcess
+    assert_equal 8192, evidence::OMISSION_LIMIT
+    assert_equal({"custodian" => "containment-custodian-omission.json", "keeper" => "containment-keeper-omission.json"}, evidence::OMISSION_FILES)
+    make = lambda do |role|
+      sample = missing_cleanup_omission_sample
+      child_class = Struct.new(:pid, :state, :receipt, :retired) { def numeric_retired? = retired }
+      keeper, validator = child_class.new(702, :running, nil, false), child_class.new(703, :pollable, nil, true)
+      object = (role == "custodian" ? native::Custodian : native::Keeper).allocate
+      {pid: sample[:graph].fetch(role), parent_pid: role == "custodian" ? 700 : 701, session_id: 701,
+       inherited_session_id: 701, run_deadline_ns: 7_000_000_000, hard_cleanup_deadline_ns: 7_000_000_000,
+       keeper: keeper, validator: validator, group_created: true, self_group_retired: false, self_group_absent: false,
+       creator_acquisition: Struct.new(:child).new(role == "custodian" ? keeper : validator),
+       moved: {"validator_pid" => 703, "group_id" => 702, "keeper_pgid" => 701},
+       moved_frame: {"validator_pid" => 703, "group_id" => 702, "keeper_pgid" => 701}}.each do |key, value|
+        object.instance_variable_set(:"@#{key}", value)
+      end
+      group = native::GroupLease.allocate
+      {keeper: keeper, id: 702, session_id: 701, retired: false, absent: false}.each do |key, value|
+        group.instance_variable_set(:"@#{key}", value)
+      end
+      object.instance_variable_set(:@group, group)
+      observer = evidence.new(sample[:directory], "native-setup-no-cleanup", sample[:manifest])
+      observer.instance_variable_set(:@role, object)
+      observer.instance_variable_set(:@origins, sample[:records].values.to_h { |record| [record["entry"]["route"], record["entry"]["origin"]] })
+      sample.merge(role: role, object: object, group: group, observer: observer, now: 2_500_000_000,
+        target: role == "custodian" ? group : object, route: "#{role}-group", opens: [], delegated: [], written: nil)
+    end
+    within = lambda do |rig, &body|
+      writer = Object.new
+      writer.define_singleton_method(:write) do |bytes|
+        raise rig[:failure] if rig[:publication] == :before
+        rig[:written] = rig[:publication] == :short ? bytes.byteslice(0, bytes.bytesize - 1) : bytes
+        raise rig[:failure] if rig[:publication] == :after
+        rig[:publication] == :short ? bytes.bytesize - 1 : bytes.bytesize
+      end
+      writer.define_singleton_method(:flush) { true }
+      open = lambda do |path, flags, mode, &block|
+        rig[:opens] << path
+        assert_equal "#{rig[:directory]}/containment-#{rig[:role]}-omission.json", path
+        assert_equal File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW, flags
+        assert_equal 0o600, mode
+        block.call(writer) # No descriptor or file is created, even on an error.
+      end
+      File.stub(:open, open) do
+        Process.stub(:pid, rig[:object].pid) do
+          clock = lambda do
+            rig[:clock_reads] = rig.fetch(:clock_reads, 0) + 1
+            rig[:late_entry] && rig[:clock_reads] > 1 ? 7_000_000_000 : rig[:now]
+          end
+          UploadProcessFixture.stub(:clock_ns, clock) { body.call }
+        end
+      end
+    end
+    invoke = lambda do |rig|
+      original = ->(*args, **kwargs) { rig[:delegated] << [args, kwargs]; raise "omission delegated native operation" }
+      rig[:observer].group_request(original, rig[:target], ["KILL"], {}, nil, rig[:route])
+    end
+    %w[custodian keeper].each do |role|
+      rig = make.call(role)
+      within.call(rig) do
+        assert_equal 0, invoke.call(rig) # Integer0 stays truthy; false would manufacture absence.
+        assert_equal rig[:records].fetch("containment-#{role}-omission.json"), JSON.parse(rig[:written])
+        assert_equal 1, rig[:observer].instance_variable_get(:@omissions).length
+        assert_raises(UploadProcessFixture::Failure) { invoke.call(rig) }
+        assert_equal 1, rig[:opens].length
+        assert_empty rig[:delegated]
+      end
+      # K's original V is already numerically retired. The valid case above
+      # observes only its original identity and never reopens that authority.
+      %i[retired wrong_route graph expired].each do |fault|
+        candidate = make.call(role)
+        case fault
+        when :retired
+          candidate[:group].instance_variable_set(:@retired, true)
+          candidate[:object].instance_variable_set(:@self_group_retired, true)
+        when :wrong_route
+          candidate[:route] = role == "custodian" ? "keeper-group" : "custodian-group"
+          candidate[:target] = role == "custodian" ? candidate[:object] : candidate[:group]
+        when :graph then candidate[:object].instance_variable_set(:@session_id, 799)
+        when :expired then candidate[:now] = 7_000_000_000
+        end
+        within.call(candidate) do
+          assert_raises(UploadProcessFixture::Failure) { invoke.call(candidate) }
+          assert_empty candidate[:opens]
+          assert_empty candidate[:delegated]
+        end
+      end
+      %i[before short after].each do |fault|
+        candidate = make.call(role)
+        candidate[:publication], candidate[:failure] = fault, IOError.new("original inert omission publication")
+        within.call(candidate) do
+          error = assert_raises(fault == :short ? UploadProcessFixture::Failure : IOError) { invoke.call(candidate) }
+          assert_same candidate[:failure], error unless fault == :short
+          assert_equal 1, candidate[:observer].instance_variable_get(:@omissions).length
+          assert_raises(UploadProcessFixture::Failure) { invoke.call(candidate) }
+          assert_equal 1, candidate[:opens].length
+          assert_empty candidate[:delegated]
+          assert_equal fault != :before, !candidate[:written].nil? # After-effect bytes are not a return receipt.
+        end
+      end
+    end
+    %i[oversized late_entry].each do |fault|
+      candidate = make.call("custodian")
+      if fault == :oversized
+        candidate[:manifest]["helperCopy"]["path"] = "x" * 8192
+      else
+        candidate[:late_entry] = true # Earlier reservation guard passed, actual entry sample did not.
+      end
+      within.call(candidate) do
+        assert_raises(UploadProcessFixture::Failure) { invoke.call(candidate) }
+        assert_empty candidate[:opens]
+        assert_empty candidate[:delegated]
+      end
+    end
+  end
+
   def assert_missing_cleanup_watchdog_lifecycle
     # Actual driver/control algorithms; ALL task, thread, lease, clock and output
     # operations are inert. These are not native waits, EOFs or finality receipts.
     klass = UploadProcessFixture::MissingCleanupDriver
-    thread_class = Struct.new(:live) { def alive? = live }
+    thread_class = Struct.new(:live) do
+      def alive? = live
+      # The real JSON parser uses Thread.current thread-local storage. Keep
+      # those ordinary values isolated on each inert identity, not a real task.
+      def [](key) = (@thread_locals ||= {})[key.to_sym]
+      def []=(key, value)
+        (@thread_locals ||= {})[key.to_sym] = value
+      end
+    end
     stat_class = Struct.new(:dev, :ino, :mode, :uid, :gid, :rdev, :ftype, :nlink)
     retain_case = UploadProcessFixture.instance_method(:retain_process_case!)
     retain_unknown = UploadProcessFixture.instance_method(:retain_unknown_domain!)
@@ -2266,7 +2438,9 @@ class NativeUploadValidationTest < Minitest::Test
              driver_thread: thread_class.new(true), capture_thread: thread_class.new(true), worker_thread: thread_class.new(true),
              flags: {attempted: false, published: true, cancelled: false, retired: false, joined: false, finished: false,
                      unresolved: false, first_error: nil, start_return: :slot, admit_return: true, join_return: true},
-             query_hooks: {}, registry: Object.new.extend(UploadProcessFixture), writer_attempts: 0}
+             query_hooks: {}, registry: Object.new.extend(UploadProcessFixture), writer_attempts: 0,
+             omissions: missing_cleanup_omission_sample, entry_reads: [], stat_reads: Hash.new(0)}
+      driver.observed["containmentSource"] = rig[:omissions][:manifest]
       rig[:current] = rig[:driver_thread]
       slot = rig[:slot] = Object.new
       {start_attempted?: :attempted, publication_ready?: :published, cancelled?: :cancelled,
@@ -2371,6 +2545,34 @@ class NativeUploadValidationTest < Minitest::Test
           rig[:now] += (seconds * 1_000_000_000).round
         end
       end
+      sample = rig[:omissions]
+      file_stat = lambda do |path|
+        raise "inert omission read under watchdog state lock" if rig[:driver].instance_variable_get(:@watchdog_lock).owned?
+        assert_equal sample[:directory], File.dirname(path)
+        name = File.basename(path)
+        rig[:stat_reads][name] += 1
+        raise Errno::ENOENT, "inert missing omission record" unless sample[:stats].key?(name)
+        value = sample[:stats].fetch(name)
+        value = value.dup.tap { |stat| stat.ino += 1 } if rig[:changed_path] == name && rig[:stat_reads][name].even?
+        value
+      end
+      read = lambda do |path, expected: nil, limit: UploadProcessFixture::OUTPUT_LIMIT|
+        raise "inert omission read under watchdog state lock" if rig[:driver].instance_variable_get(:@watchdog_lock).owned?
+        assert_equal sample[:directory], File.dirname(path)
+        name = File.basename(path)
+        if name.end_with?("-omission.json")
+          rig[:entry_reads] << name
+          assert_equal 8192, limit
+          assert_equal UploadProcessFixture::OwnedChild.identity(sample[:stats].fetch(name)), expected
+        end
+        value = sample[:bytes].fetch(name)
+        rig[:after_read]&.call(rig, name)
+        value
+      end
+      manifest = lambda do |directory, mode, sources|
+        assert_equal [sample[:directory], "native-setup-no-cleanup", sample[:manifest].fetch("sourceSha256")], [directory, mode, sources]
+        rig.fetch(:manifest_read, sample[:manifest])
+      end
       # Run the ORIGINAL registry algorithms on a private receiver. No real
       # domain latch/registry is reset or exempted; this proves only their
       # inert retention behavior plus the actual close_control call routing.
@@ -2379,10 +2581,18 @@ class NativeUploadValidationTest < Minitest::Test
           MobileReleaseKit::NativeUploadProcess::TaskSlot.stub(:new, factory) do
             Thread.stub(:main, rig[:driver_thread]) do
               Thread.stub(:current, -> { rig[:current] }) do
-                Process.stub(:pid, 701) do
+                Process.stub(:pid, 700) do
                   UploadProcessFixture.stub(:clock_ns, -> { rig[:now] }) do
                     UploadProcessFixture::OwnedChild.stub(:write_record, ->(path, record) { rig[:writes] << [path, record]; true }) do
-                      rig[:driver].stub(:sleep, sleeper) { body.call }
+                      File.stub(:lstat, file_stat) do
+                        File.stub(:file?, ->(path) { sample[:bytes].key?(File.basename(path)) }) do
+                          UploadProcessFixture::OwnedChild.stub(:bounded_file, read) do
+                            UploadProcessFixture::ContainmentEvidence.stub(:manifest!, manifest) do
+                              rig[:driver].stub(:sleep, sleeper) { body.call }
+                            end
+                          end
+                        end
+                      end
                     end
                   end
                 end
@@ -2432,6 +2642,25 @@ class NativeUploadValidationTest < Minitest::Test
       assert_equal true, registry.instance_variable_get(:@domain_disposal_required)
       assert_nil registry.instance_variable_get(:@expected_unknown_roots)
     end
+    parent_proof = lambda do |rig|
+      sample = rig[:omissions]
+      close = rig[:writes].find { |path, _value| File.basename(path) == "fallback-writer-close.json" }.last
+      sample[:bytes]["fallback-writer-close.json"] = JSON.generate(close)
+      sample[:bytes]["leader-eof.json"] = JSON.generate({"version" => 1, "eof" => true, "controlReadNil" => true,
+        "readNilNs" => close.fetch("closeEntryNs"), "pid" => 703, "group" => 702, "sid" => 701,
+        "fifoIdentity" => close.fetch("fifoIdentity")})
+      owner = {"version" => 2, "phase" => "native-setup-no-cleanup", "finality" => "unknown",
+        "custodian" => {"state" => "unknown"}, "keeper" => {"state" => "unknown"},
+        "validator" => {"state" => "unknown"}, "group" => {"state" => "unknown"},
+        "processes" => [{"role" => "custodian", "pid" => 701, "group" => 701},
+                        {"role" => "keeper", "pid" => 702, "group" => 701},
+                        {"role" => "validator", "pid" => 703, "group" => 702}]}
+      result = {"containmentSource" => sample[:manifest], "fallbackWriterClose" => close,
+        "watchdogPreadmitted" => true, "watchdogJoined" => true}
+      UploadProcessFixture::ContainmentEvidence.missing_cleanup!(sample[:directory], owner, result,
+        sample[:manifest].fetch("sourceSha256"), deadline_ns: 20_000_000_000,
+        driver_dispatch: {"pid" => 700, "deadlineNs" => 20_000_000_000})
+    end
 
     # Driver-side publication/admission, then a distinct capture-side arm.
     rig = make.call
@@ -2447,16 +2676,128 @@ class NativeUploadValidationTest < Minitest::Test
       path, report = rig[:writes].first
       assert_equal "/inert-missing-cleanup/fallback-writer-close.json", path
       custody = report.fetch("watchdogOwnership")
-      assert_equal [701, 20_000_000_000, 6_000_000_000, 12_300_000_000, 7_300_000_000, 8_300_000_000],
+      assert_equal [700, 20_000_000_000, 6_000_000_000, 12_300_000_000, 7_300_000_000, 8_300_000_000],
         custody.values_at("driverPid", "driverDeadlineNs", "prearmDeadlineNs", "slotCeilingNs", "fallbackNs", "effectiveHardDeadlineNs")
       assert_equal [true, false, true], custody.values_at("captureFinishedBeforeClose", "captureJoinedBeforeClose", "captureThreadExitedBeforeClose")
       assert_equal true, report.fetch("actualOriginalWriterClose")
+      assert_equal rig[:omissions][:records].keys, rig[:entry_reads]
+      assert_equal rig[:omissions][:records].keys.to_h { |name| [name,
+        {"identity" => UploadProcessFixture::OwnedChild.identity(rig[:omissions][:stats].fetch(name)),
+         "sha256" => Digest::SHA256.hexdigest(rig[:omissions][:bytes].fetch(name))}] }, report.fetch("omissionRecords")
       assert_equal true, rig[:session].retained_unknown? # Never repaired by fallback.
+      # The real parent binder accepts early entries without either terminal
+      # report or callback. These are inert inputs, not native proof receipts.
+      proof = parent_proof.call(rig)
+      assert_equal "unknown", proof.fetch("nativeFinality")
+      assert_equal %w[containment-custodian-omission.json containment-keeper-omission.json fallback-writer-close.json leader-eof.json],
+        proof.fetch("reportSha256").keys.sort
+      assert_equal proof.fetch("reportSha256").keys.sort, rig[:omissions][:bytes].keys.sort
+      assert rig[:session].retained_unknown?
+      # Equal parsed JSON is insufficient: the parent's reread must match the
+      # exact bytes and original file identity admitted BEFORE the same close.
+      name = "containment-keeper-omission.json"
+      original_bytes = rig[:omissions][:bytes].fetch(name)
+      rig[:omissions][:bytes][name] = original_bytes + " "
+      assert_raises(UploadProcessFixture::Failure) { parent_proof.call(rig) }
+      rig[:omissions][:bytes][name] = original_bytes
+      rig[:omissions][:stats].fetch(name).ino += 1
+      assert_raises(UploadProcessFixture::Failure) { parent_proof.call(rig) }
+      rig[:omissions][:stats].fetch(name).ino -= 1
+      final_reads = 0
+      rig[:after_read] = lambda do |c, read_name|
+        next unless read_name == "leader-eof.json"
+        final_reads += 1
+        c[:now] = 20_000_000_000 if final_reads == 2 # Final report hash, after entry admission.
+      end
+      assert_raises(UploadProcessFixture::Failure) { parent_proof.call(rig) }
+      assert_equal 2, final_reads
+      assert_equal 20_000_000_000, rig[:now]
+      rig[:after_read] = nil
+      assert_equal 1, rig[:writer_attempts]
       rig[:now] = 30_000_000_000
       assert_equal 8_300_000_000, rig[:driver].watchdog_join_deadline_ns
       rig[:driver].finish_resources
       assert_includes rig[:events], [:join, 8_300_000_000, true]
       assert_equal 1, rig[:writer_attempts]
+    end
+    # Only materially different entry/source/file/temporal boundaries. Shared
+    # bounded-file permission/size tests and prior watchdog matrices stay reused.
+    invalid_entries = {
+      "role" => ->(item) { item["role"] = "custodian" },
+      "source" => ->(item) { item["sourceSha256"].transform_values! { "c" * 64 } },
+      "copy" => ->(item) { item["helperCopy"]["sha256"] = "c" * 64 },
+      "graph" => ->(item) { item["identities"]["validator"] = 799 },
+      "parent" => ->(item) { item["parentPid"] = 700 },
+      "route" => ->(item) { item["entry"]["route"] = "custodian-group" },
+      "origin" => ->(item) { item["entry"]["origin"]["line"] += 1 },
+      "pre-arm" => ->(item) { item["entry"]["atNs"] = 1_999_999_999 },
+      "expired-entry" => ->(item) { item["entry"]["effectiveDeadlineNs"] = item["entry"]["atNs"] },
+      "terminal-substitute" => ->(item) { item["kind"] = "original-helper-containment-events" },
+    }
+    scenarios = invalid_entries.keys + %w[missing-custodian missing-keeper changed-path changed-manifest read-crosses-H]
+    scenarios.each do |fault|
+      candidate = make.call
+      within.call(candidate) do
+        prepare.call(candidate)
+        arm.call(candidate)
+        ended_capture.call(candidate)
+        name = "containment-keeper-omission.json"
+        if invalid_entries.key?(fault)
+          item = JSON.parse(candidate[:omissions][:bytes].fetch(name))
+          invalid_entries.fetch(fault).call(item)
+          candidate[:omissions][:bytes][name] = JSON.generate(item)
+        elsif fault.start_with?("missing-")
+          candidate[:omissions][:stats].delete("containment-#{fault.delete_prefix('missing-')}-omission.json")
+        elsif fault == "changed-path"
+          candidate[:changed_path] = name
+        elsif fault == "changed-manifest"
+          candidate[:manifest_read] = JSON.parse(JSON.generate(candidate[:omissions][:manifest]))
+          candidate[:manifest_read]["helperCopy"]["sha256"] = "c" * 64
+        else
+          candidate[:after_read] = ->(c, read_name) { c[:now] = 8_300_000_000 if read_name == name }
+        end
+        expected = fault.start_with?("missing-") ? Errno::ENOENT : UploadProcessFixture::Failure
+        error = assert_raises(expected, fault) { candidate[:control].close_writer }
+        assert_same error, candidate[:control].close_error
+        assert_nil candidate[:driver].instance_variable_get(:@watchdog_action)
+        assert_equal 0, candidate[:writer_attempts], fault
+        assert_empty candidate[:writes]
+        assert candidate[:session].retained_unknown?
+      end
+    end
+    # Hardloss keeps its stronger terminal requirement; early omissions must
+    # not silently replace the original C/K terminal receipt wait in that path.
+    candidate = make.call
+    within.call(candidate) do
+      original = IOError.new("inert hardloss terminal wait")
+      wait = lambda do |directory, names, deadline_ns:|
+        assert_equal candidate[:omissions][:directory], directory
+        assert_equal %w[containment-custodian.json containment-keeper.json], names
+        assert_equal 20_000_000_000, deadline_ns
+        raise original
+      end
+      UploadProcessFixture::ContainmentEvidence.stub(:wait_records, wait) do
+        caught = assert_raises(IOError) do
+          UploadProcessFixture::ContainmentEvidence.hardloss!(candidate[:omissions][:directory], "kill-native-setup",
+            {"fifoIdentity" => candidate[:control].instance_variable_get(:@identity)}, candidate[:control].writer,
+            deadline_ns: 20_000_000_000)
+        end
+        assert_same original, caught
+        assert_equal 0, candidate[:writer_attempts]
+      end
+    end
+    candidate = make.call
+    within.call(candidate) do
+      candidate[:now] = 20_000_000_000
+      sample = candidate[:omissions]
+      assert_raises(UploadProcessFixture::Failure) do
+        UploadProcessFixture::ContainmentEvidence.omission_records!(sample[:directory], sample[:manifest], sample[:graph],
+          driver_pid: 700, deadline_ns: 20_000_000_000, capture_entry_ns: 1_000_000_000,
+          arm_ns: 2_000_000_000, before_ns: 7_300_000_000)
+      end
+      assert_empty candidate[:entry_reads]
+      assert_empty candidate[:stat_reads]
+      assert_equal 0, candidate[:writer_attempts]
     end
     # Stop-before-prepare and exhausted original D cannot acquire a new slot.
     [make.call, make.call(deadline: 7_300_000_000), make.call].each_with_index do |candidate, index|

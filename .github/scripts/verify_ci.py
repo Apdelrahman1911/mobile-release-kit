@@ -279,9 +279,19 @@ RUBY_NATIVE_CAPTURE_POISON_PARTITIONS = (
     ("native-order-cleanup-before-caller-interrupt", "NativeUploadValidationTest#test_native_cleanup_error_precedes_later_caller_interrupt_and_retains_unknown"),
     ("native-order-cleanup-before-caller-system-exit", "NativeUploadValidationTest#test_native_cleanup_error_precedes_later_caller_system_exit_and_retains_unknown"),
 )
+# One gate, not five renewed 180-second invocations. Each singleton includes its
+# original driver15/cleanup5 plus bounded outer startup/result/finality overhead.
+RUBY_NATIVE_CAPTURE_BUDGETS = (
+    ("healthy", 180),
+    ("native-setup-no-cleanup", 30),
+    ("kill-native-setup", 30),
+    ("native-order-cleanup-before-caller-interrupt", 30),
+    ("native-order-cleanup-before-caller-system-exit", 30),
+)
+RUBY_NATIVE_CAPTURE_SHARED_SECONDS = 10
 RUBY_PARTITION_CONTRACTS = (
     ("ruby-native-owner", "test_native_upload_process.rb", 52, 44, 120, None),
-    ("ruby-native-capture", "test_native_upload_validation.rb", 21, 17, 180, "NativeUploadValidationTest"),
+    ("ruby-native-capture", "test_native_upload_validation.rb", 21, 17, 310, "NativeUploadValidationTest"),
     ("ruby-ios_upload_validation", "test_ios_upload_validation.rb", 32, 23, 300, "IosUploadValidationTest"),
     ("ruby-android_upload_validation", "test_android_upload_validation.rb", 32, 23, 300, "AndroidUploadValidationTest"),
 )
@@ -599,7 +609,8 @@ def catalog(paths: Paths, platform: str, *, deadline: float) -> tuple[Step, ...]
         command(name, (*paths.bundle, "exec", paths.ruby, paths.source / "tests/workflow" / filename,
                         *(("--verbose",) if name != "ruby-supply-wif" else ())),
                 seconds=120 if name == "ruby-native-owner" else
-                180 if name in {"ruby-native-capture", "ruby-native-signal-observation", "ruby-native-spawn"}
+                310 if name == "ruby-native-capture" else
+                180 if name in {"ruby-native-signal-observation", "ruby-native-spawn"}
                 else 300 if name in NATIVE_RUBY_IDS else 180,
                 parser="supply" if name == "ruby-supply-wif" else "minitest", tests=count)
     for phase, name in zip(("source", "wheel"), PACKAGED_RUBY_GATES):
@@ -2491,7 +2502,7 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
 
 def perform_partitioned_ruby_gate(step: Step, paths: Paths, session, checks, platform: str,
                                   state: NativeABIState | None, *, deadline: float) -> CheckResult:
-    """One of four closed Ruby gates, each retaining its original total cutoff.
+    """One of four closed Ruby gates, with a fixed total cutoff before entry.
 
     The catalog keeps every original logical gate. No child exit, parsed footer or
     retained UNKNOWN is a substitute for each original Session's finality/idle.
@@ -2505,13 +2516,19 @@ def perform_partitioned_ruby_gate(step: Step, paths: Paths, session, checks, pla
     try:
         check_clock(deadline)
         filename, total, healthy_count, seconds, poison = _ruby_partition_contract(step.id)
-        cutoff = min(deadline, started + seconds)
+        gate_cutoff = min(deadline, started + seconds)
+        native_capture = step.id == "ruby-native-capture"
+        cutoff = min(gate_cutoff, started + RUBY_NATIVE_CAPTURE_SHARED_SECONDS) if native_capture else gate_cutoff
         details["partitions"] = [{"partition": name, "status": "UNEXECUTED"} for name in ("healthy", *dict(poison))]
         expected = Step(step.id, argv=(*paths.bundle, "exec", str(paths.ruby),
             str(paths.source / "tests/workflow" / filename), "--verbose"),
             cwd=paths.work, env=environment(paths, platform), seconds=seconds, parser="minitest", expected_tests=total)
         if (platform not in {"linux", "macos"} or step != expected
                 or type(state) is not NativeABIState or "source" not in state.phases):
+            raise VerificationError("RUBY_PARTITION_GATE_CONTRACT")
+        if native_capture and (tuple(name for name, _seconds in RUBY_NATIVE_CAPTURE_BUDGETS)
+                != tuple(row["partition"] for row in details["partitions"])
+                or RUBY_NATIVE_CAPTURE_SHARED_SECONDS + sum(value for _name, value in RUBY_NATIVE_CAPTURE_BUDGETS) != seconds):
             raise VerificationError("RUBY_PARTITION_GATE_CONTRACT")
         session.ensure_idle(deadline=cutoff)
         check_clock(cutoff)
@@ -2532,16 +2549,29 @@ def perform_partitioned_ruby_gate(step: Step, paths: Paths, session, checks, pla
                 or len(joined) != len(set(joined)) or tuple(sorted(joined)) != inventories["all"]):
             raise VerificationError("RUBY_PARTITION_UNION")
         completed = []
+        if native_capture:
+            boundary = time.monotonic()
+            if boundary >= cutoff:
+                raise VerificationError("AGGREGATE_DEADLINE")
+            shared_remaining = RUBY_NATIVE_CAPTURE_SHARED_SECONDS - (boundary - started)
         for row in details["partitions"]:
             active = row
             partition = row["partition"]
             details["stage"] = partition
+            part_seconds = seconds
+            if native_capture:
+                part_seconds = dict(RUBY_NATIVE_CAPTURE_BUDGETS)[partition]
+                # Carry the previous completion sample: a scheduling gap cannot
+                # renew this phase, nor can another part donate unused time.
+                cutoff = min(gate_cutoff, boundary + part_seconds)
             check_clock(cutoff)
             session.ensure_idle(deadline=cutoff)
-            part = dataclasses.replace(step, native_partition=partition,
+            part = dataclasses.replace(step, native_partition=partition, seconds=part_seconds,
                 argv=ruby_capture_argv(paths, step.id, partition, deadline=cutoff), expected_tests=len(inventories[partition]))
+            if native_capture:
+                check_clock(cutoff)
             row["status"] = "RUNNING"
-            value = session.run(list(part.argv), cwd=part.cwd, env=dict(part.env), seconds=seconds,
+            value = session.run(list(part.argv), cwd=part.cwd, env=dict(part.env), seconds=part_seconds,
                 output_limit=8 * 1024**2, cpu_seconds=180, profile="ordinary", absolute_deadline=cutoff)
             originals.append(value)
             row["capture"] = capture_observations(value)
@@ -2568,9 +2598,17 @@ def perform_partitioned_ruby_gate(step: Step, paths: Paths, session, checks, pla
             observed = tuple(sorted(parsed.details["completed"]))
             if observed != inventories[partition]:
                 raise VerificationError("RUBY_PARTITION_RESULT")
-            row.update(status="PASS", tests=len(observed), completed=list(observed), assertions=parsed.details["assertions"])
+            row.update(status="RUNNING" if native_capture else "PASS",
+                tests=len(observed), completed=list(observed), assertions=parsed.details["assertions"])
             completed.extend(observed)
+            if native_capture:
+                boundary = time.monotonic()
+                if boundary >= cutoff:
+                    raise VerificationError("AGGREGATE_DEADLINE")
+                row["status"] = "PASS"
         details["stage"] = "union"
+        if native_capture:
+            cutoff = min(gate_cutoff, boundary + shared_remaining)
         check_clock(cutoff)
         if tuple(sorted(completed)) != inventories["all"] or len(completed) != len(set(completed)):
             raise VerificationError("RUBY_PARTITION_UNION")

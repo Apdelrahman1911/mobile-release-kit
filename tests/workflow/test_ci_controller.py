@@ -87,7 +87,7 @@ def minitest_fixture(identifiers):
 
 _RUBY_PARTITION_FIXTURES = (
     ("ruby-native-owner", "test_native_upload_process.rb", 52, 44, 120, None),
-    ("ruby-native-capture", "test_native_upload_validation.rb", 21, 17, 180, "NativeUploadValidationTest"),
+    ("ruby-native-capture", "test_native_upload_validation.rb", 21, 17, 310, "NativeUploadValidationTest"),
     ("ruby-ios_upload_validation", "test_ios_upload_validation.rb", 32, 23, 300, "IosUploadValidationTest"),
     ("ruby-android_upload_validation", "test_android_upload_validation.rb", 32, 23, 300, "AndroidUploadValidationTest"),
 )
@@ -112,7 +112,8 @@ class NativeProcessCIIntegrationTests(unittest.TestCase):
         state = controller.NativeABIState(phases={"source": tuple(native_capture_fixture() for _ in range(3))})
         rig = SimpleNamespace(controller=controller, paths=paths, platform=platform, complete=complete,
             partitions=partitions, step=step, state=state, clock=10.0, events=[], captures=[], parsed=[], changes={},
-            header_error=None, header_advance=0.0, run_error=None, run_advance=10.0, idle_error_after=None,
+            header_error=None, header_advance=0.0, run_error=None, run_advance=10.0, run_advances={},
+            idle_error_after=None, after_clock_sample=None,
             gate=gate, seconds=seconds, total=total, healthy_count=healthy_count)
 
         def run(argv, **options):
@@ -124,7 +125,7 @@ class NativeProcessCIIntegrationTests(unittest.TestCase):
             capture = native_capture_fixture(**{"stdout": minitest_fixture(partitions[partition]),
                                                 **rig.changes.get(partition, {})})
             rig.captures.append(capture)
-            rig.clock += rig.run_advance
+            rig.clock += rig.run_advances.get(partition, rig.run_advance)
             return capture
 
         def idle(*, deadline):
@@ -153,7 +154,13 @@ class NativeProcessCIIntegrationTests(unittest.TestCase):
             rig.parsed.append(capture)
             return original_parser(part, capture, *args, **kwargs)
 
-        with patch.multiple(controller, time=SimpleNamespace(monotonic=lambda: rig.clock), check_capacity=Mock(),
+        def clock():
+            sampled = rig.clock
+            if rig.after_clock_sample is not None:
+                rig.after_clock_sample()
+            return sampled
+
+        with patch.multiple(controller, time=SimpleNamespace(monotonic=clock), check_capacity=Mock(),
                 require_retained_header=header, ruby_expected_ids=Mock(return_value=rig.complete),
                 parse_capture=Mock(side_effect=parse)):
             return controller.perform_step(step or rig.step, rig.paths, rig.session, SimpleNamespace(), {}, rig.platform,
@@ -353,6 +360,35 @@ class NativeProcessCIIntegrationTests(unittest.TestCase):
         self.assertEqual(controller.PARTITIONED_RUBY_GATES, tuple(row[0] for row in _RUBY_PARTITION_FIXTURES))
         self.assertEqual(controller.RUBY_PROBE_POISON_PARTITIONS, literals)
         self.assertEqual(controller.RUBY_NATIVE_CAPTURE_POISON_PARTITIONS, native_literals)
+        self.assertEqual(controller.RUBY_NATIVE_CAPTURE_BUDGETS, (("healthy", 180), *((name, 30) for name, _ in native_literals)))
+        self.assertEqual(controller.RUBY_NATIVE_CAPTURE_SHARED_SECONDS, 10)
+        self.assertEqual(10 + sum(seconds for _, seconds in controller.RUBY_NATIVE_CAPTURE_BUDGETS), 310)
+        catalog_ids = {gate: tuple(f"CatalogFixture#test_{index:02d}" for index in range(total))
+                       for gate, _filename, total, _healthy, _seconds, _owner in _RUBY_PARTITION_FIXTURES}
+        # Budget agreement needs no real source-presence, Ruby inventory or
+        # workflow-directory observation, including the packaged argv cases.
+        with patch.object(controller, "ruby_expected_ids", side_effect=lambda source, gate:
+                          catalog_ids.get(gate, ("CatalogFixture#test_other",))) as source, \
+                patch.object(Path, "exists", return_value=False) as exists, \
+                patch.object(Path, "glob", return_value=()) as glob:
+            for platform in ("linux", "macos"):
+                steps = {step.id: step for step in controller.catalog(paths, platform, deadline=1000.0)}
+                for gate, _filename, total, _healthy, seconds, _owner in _RUBY_PARTITION_FIXTURES:
+                    self.assertEqual((steps[gate].seconds, steps[gate].expected_tests), (seconds, total))
+                for gate in ("ruby-native-spawn", "ruby-native-signal-observation"):
+                    self.assertEqual(steps[gate].seconds, 180)
+            self.assertEqual(exists.call_count, 2)
+            self.assertEqual(glob.call_count, 4)
+            self.assertTrue({"ruby-packaged-capture-source", "ruby-packaged-capture-wheel"}
+                            <= {call.args[1] for call in source.call_args_list})
+        budgets = controller.RUBY_NATIVE_CAPTURE_BUDGETS
+        for changed in (budgets[::-1], (("healthy", 181), *budgets[1:])):
+            with self.subTest(budgets=changed), patch.object(controller, "RUBY_NATIVE_CAPTURE_BUDGETS", changed):
+                rig = self._ruby_partition_fixture(gate="ruby-native-capture")
+                result = self._perform_ruby_partition_fixture(rig)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error, "RUBY_PARTITION_GATE_CONTRACT")
+                self.assertEqual(rig.events, [])
         for gate, filename, total, healthy_count, _seconds, owner in _RUBY_PARTITION_FIXTURES[1:]:
             with self.subTest(gate=gate):
                 healthy = tuple(f"{owner}#test_{number:02d}" for number in range(healthy_count))
@@ -403,23 +439,45 @@ class NativeProcessCIIntegrationTests(unittest.TestCase):
                     self.assertNotIn("summary", result.details)
                     calls = [event for event in rig.events if event[0] == "run"]
                     self.assertEqual(len(calls), len(rig.partitions))
-                    self.assertEqual([event for event in rig.events if event[0] == "header"], [("header", cutoff)])
-                    self.assertLess(rig.events.index(("header", cutoff)), rig.events.index(calls[0]))
+                    native_capture = gate == "ruby-native-capture"
+                    header_cutoff = min(cutoff, 20.0) if native_capture else cutoff
+                    self.assertEqual([event for event in rig.events if event[0] == "header"], [("header", header_cutoff)])
+                    self.assertLess(rig.events.index(("header", header_cutoff)), rig.events.index(calls[0]))
                     for index, (_, partition, argv, options) in enumerate(calls):
+                        part_seconds = (180 if index == 0 else 30) if native_capture else seconds
+                        part_cutoff = min(cutoff, 10.0 + index * 10.0 + part_seconds) if native_capture else cutoff
                         self.assertEqual(argv, (*rig.step.argv, "--name", "/\\A(?:" + "|".join(rig.partitions[partition]) + ")\\z/"))
-                        self.assertEqual(options, {"cwd": rig.paths.work, "env": dict(rig.step.env), "seconds": seconds,
-                            "output_limit": 8 * 1024**2, "cpu_seconds": 180, "profile": "ordinary", "absolute_deadline": cutoff})
+                        self.assertEqual(options, {"cwd": rig.paths.work, "env": dict(rig.step.env), "seconds": part_seconds,
+                            "output_limit": 8 * 1024**2, "cpu_seconds": 180, "profile": "ordinary", "absolute_deadline": part_cutoff})
                         self.assertIs(rig.parsed[index], rig.captures[index])
                         self.assertEqual(rows[index]["capture"], rig.controller.capture_observations(rig.captures[index]))
                         position = rig.events.index(calls[index])
-                        self.assertEqual(rig.events[position - 1], ("idle", cutoff))
-                        self.assertEqual(rig.events[position + 1], ("idle", cutoff))
+                        self.assertEqual(rig.events[position - 1], ("idle", part_cutoff))
+                        self.assertEqual(rig.events[position + 1], ("idle", part_cutoff))
+        # Synthetic time, not a native receipt: all five originals can finish
+        # beyond the old shared180, without granting any part another's slack.
+        for platform in ("linux", "macos"):
+            rig = self._ruby_partition_fixture(platform, gate="ruby-native-capture")
+            rig.header_advance = 3.0
+            rig.run_advances = {name: 179.0 if name == "healthy" else 29.0 for name in rig.partitions}
+            result = self._perform_ruby_partition_fixture(rig)
+            self.assertTrue(result.ok, result)
+            self.assertEqual([row["status"] for row in result.details["partitions"]], ["PASS"] * 5)
+            self.assertEqual(result.details["completed"], list(rig.complete))
+            self.assertEqual(rig.clock, 308.0)
+            calls = [event for event in rig.events if event[0] == "run"]
+            self.assertEqual([event[3]["absolute_deadline"] for event in calls], [193.0, 222.0, 251.0, 280.0, 309.0])
+            self.assertEqual([event[3]["seconds"] for event in calls], [180, 30, 30, 30, 30])
 
     def test_ruby_non_owner_failures_stop_later_originals_and_diagnostics_never_name_another_partition(self):
         for gate, _filename, _total, _healthy_count, seconds, _owner in _RUBY_PARTITION_FIXTURES[1:]:
             template = self._ruby_partition_fixture(gate=gate)
+            native_capture = gate == "ruby-native-capture"
+            finality_faults = {"wait": {"waited": False}, "stdout": {"stdout_eof": False}, "stderr": {"stderr_eof": False},
+                "domain": {"domain_finality": False}, "timeout": {"timed_out": True}, "cancel": {"cancelled": True},
+                "primary": {"primary_error": "ORIGINAL_ERROR"}, "cleanup": {"cleanup_errors": ("ORIGINAL_CLOSE",)}}
             for failed, partition in enumerate(template.partitions):
-                for fault in ("original-failure", "foreign-class", "deadline"):
+                for fault in ("original-failure", "foreign-class", "deadline", *(finality_faults if native_capture else ())):
                     with self.subTest(gate=gate, partition=partition, fault=fault):
                         rig = self._ruby_partition_fixture(gate=gate)
                         selected = rig.partitions[partition][0]
@@ -435,6 +493,10 @@ class NativeProcessCIIntegrationTests(unittest.TestCase):
                             output = minitest_fixture(rig.partitions[partition]).replace(selected.encode("ascii"),
                                 ("ForeignSuite#" + selected.partition("#")[2]).encode("ascii"), 1)
                             rig.changes[partition] = {"stdout": output}
+                        elif fault in finality_faults:
+                            rig.changes[partition] = finality_faults[fault]
+                        elif native_capture:
+                            rig.run_advances[partition] = (180 if failed == 0 else 30) + 1.0
                         else:
                             rig.run_advance = (seconds + 1.0) / (failed + 1)
                         result = self._perform_ruby_partition_fixture(rig)
@@ -443,15 +505,18 @@ class NativeProcessCIIntegrationTests(unittest.TestCase):
                         rows = result.details["partitions"]
                         self.assertEqual([row["status"] for row in rows], ["PASS"] * failed + ["FAIL"]
                             + ["UNEXECUTED"] * (len(rig.partitions) - failed - 1))
-                        self.assertTrue(all(event[3]["absolute_deadline"] == 10.0 + seconds
-                                            and event[3]["seconds"] == seconds for event in rig.events if event[0] == "run"))
+                        calls = [event for event in rig.events if event[0] == "run"]
+                        for index, event in enumerate(calls):
+                            part_seconds = (180 if index == 0 else 30) if native_capture else seconds
+                            cutoff = min(10.0 + seconds, 10.0 + index * 10.0 + part_seconds) if native_capture else 10.0 + seconds
+                            self.assertEqual((event[3]["absolute_deadline"], event[3]["seconds"]), (cutoff, part_seconds))
                         details = rows[failed]["capture"]
                         for index, capture in enumerate(rig.captures):
                             for name, value in rig.controller.capture_observations(capture).items():
                                 self.assertEqual(rows[index]["capture"][name], value)
                         if fault == "deadline":
                             self.assertEqual(result.error, "AGGREGATE_DEADLINE")
-                        else:
+                        elif fault in {"original-failure", "foreign-class"}:
                             self.assertEqual(details["minitest_structure"]["expected_count"], len(rig.partitions[partition]))
                             self.assertEqual(details["minitest_structure"]["missing_ids"], [selected])
                             self.assertEqual(details["minitest_structure"]["unknown_count"], int(fault == "foreign-class"))
@@ -459,13 +524,147 @@ class NativeProcessCIIntegrationTests(unittest.TestCase):
                             for private in (other, "PRIVATE_CASE_MESSAGE", "PRIVATE_OTHER_CASE", "ForeignSuite"):
                                 self.assertNotIn(private, json.dumps(details))
             for changes in ({"seconds": 120}, {"expected_tests": 1}, {"native_partition": "healthy"},
-                            {"argv": (*template.step.argv[:-2], "test_native_upload_process.rb", "--verbose")}):
+                            {"argv": (*template.step.argv[:-2], "test_native_upload_process.rb", "--verbose")},
+                            *(({"seconds": 180},) if native_capture else ())):
                 with self.subTest(gate=gate, changes=changes):
                     rig = self._ruby_partition_fixture(gate=gate)
                     result = self._perform_ruby_partition_fixture(rig, step=dataclasses.replace(rig.step, **changes))
                     self.assertFalse(result.ok)
                     self.assertEqual(result.error, "RUBY_PARTITION_GATE_CONTRACT")
                     self.assertEqual(rig.captures, [])
+
+        rig = self._ruby_partition_fixture(gate="ruby-native-capture")
+        rig.header_advance = 10.0
+        result = self._perform_ruby_partition_fixture(rig)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error, "AGGREGATE_DEADLINE")
+        self.assertEqual(rig.captures, [])
+        self.assertEqual([row["status"] for row in result.details["partitions"]], ["UNEXECUTED"] * 5)
+        self.assertIn(("header", 20.0), rig.events)
+
+        # Six seconds of setup leaves FOUR, not a fresh ten, for final union.
+        # Advance during the final result's own sorted-list bookkeeping.
+        for union_seconds in (3.0, 4.0):
+            with self.subTest(union_seconds=union_seconds):
+                rig = self._ruby_partition_fixture(gate="ruby-native-capture")
+                rig.header_advance = 6.0
+                reconciliations = []
+
+                def late_sorted(values, *args, **kwargs):
+                    result = sorted(values, *args, **kwargs)
+                    if type(values) is list and tuple(result) == rig.complete:
+                        reconciliations.append(True)
+                        if len(reconciliations) == 2:
+                            rig.clock += union_seconds
+                    return result
+
+                with patch.object(rig.controller, "sorted", create=True, side_effect=late_sorted):
+                    result = self._perform_ruby_partition_fixture(rig)
+                self.assertEqual(result.ok, union_seconds == 3.0)
+                self.assertEqual(len(reconciliations), 2)
+                self.assertEqual(len(rig.captures), 5)
+                self.assertEqual([row["status"] for row in result.details["partitions"]], ["PASS"] * 5)
+                if not result.ok:
+                    self.assertEqual(result.error, "AGGREGATE_DEADLINE")
+
+        # An earlier original job endpoint still clips a fresh singleton; it
+        # cannot turn the fixed310 gate into another310 after healthy returns.
+        rig = self._ruby_partition_fixture(gate="ruby-native-capture")
+        target = tuple(rig.partitions)[1]
+        rig.header_advance = 3.0
+        rig.run_advances = {"healthy": 179.0, target: 18.0}
+        result = self._perform_ruby_partition_fixture(rig, deadline=210.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error, "AGGREGATE_DEADLINE")
+        self.assertEqual([row["status"] for row in result.details["partitions"]], ["PASS", "FAIL", *(["UNEXECUTED"] * 3)])
+        self.assertEqual([event[3]["absolute_deadline"] for event in rig.events if event[0] == "run"], [193.0, 210.0])
+
+        for expiry in ("pre-idle", "post-idle", "argv", "parser", "bookkeeping", "diagnostic", "phase-gap"):
+            with self.subTest(expiry=expiry):
+                rig = self._ruby_partition_fixture(gate="ruby-native-capture")
+                controller = rig.controller
+                target = tuple(rig.partitions)[1]
+                watched = "healthy" if expiry == "phase-gap" else target
+                seen = []
+                original_argv = controller.ruby_capture_argv
+                original_parser = controller.parse_capture
+                original_diagnostic = controller.failure_details
+                original_idle = rig.session.ensure_idle
+
+                def argv(paths, gate, partition, *, deadline):
+                    value = original_argv(paths, gate, partition, deadline=deadline)
+                    if partition == target:
+                        seen.append(("argv", deadline))
+                        if expiry == "argv":
+                            rig.clock = deadline
+                    return value
+
+                def idle(*, deadline):
+                    original_idle(deadline=deadline)
+                    if deadline == 50.0 and len(rig.captures) == (1 if expiry == "pre-idle" else 2):
+                        seen.append(("idle", deadline))
+                        if expiry in {"pre-idle", "post-idle"}:
+                            rig.clock = deadline
+
+                def parse(part, capture, *args, **kwargs):
+                    value = original_parser(part, capture, *args, **kwargs)
+                    if part.native_partition != watched:
+                        return value
+                    cutoff = kwargs["deadline"]
+                    seen.append(("parser", cutoff))
+                    self.assertEqual(part.seconds, 180 if watched == "healthy" else 30)
+                    if expiry == "parser":
+                        rig.clock = cutoff
+                    if expiry in {"bookkeeping", "phase-gap"}:
+                        class LateDetails(dict):
+                            def __getitem__(self, name):
+                                result = super().__getitem__(name)
+                                if name == "assertions":
+                                    if expiry == "bookkeeping":
+                                        rig.clock = cutoff
+                                    else:
+                                        def after_sample():
+                                            rig.after_clock_sample = None
+                                            rig.clock += 31.0
+                                        rig.after_clock_sample = after_sample
+                                return result
+                        value = dataclasses.replace(value, details=LateDetails(value.details))
+                    return value
+
+                def diagnose(capture, part, *args, **kwargs):
+                    value = original_diagnostic(capture, part, *args, **kwargs)
+                    seen.append(("diagnostic", kwargs["deadline"]))
+                    if expiry == "diagnostic":
+                        rig.clock = kwargs["deadline"]
+                        controller.check_clock(kwargs["deadline"])
+                    return value
+
+                if expiry == "diagnostic":
+                    rig.changes[target] = {"returncode": 1}
+                    rig.idle_error_after = 2
+                rig.session.ensure_idle = idle
+                with patch.object(controller, "ruby_capture_argv", side_effect=argv), \
+                        patch.object(controller, "parse_capture", side_effect=parse), \
+                        patch.object(controller, "failure_details", side_effect=diagnose):
+                    result = self._perform_ruby_partition_fixture(rig)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error, "COMMAND_EXIT_OR_FINALITY" if expiry == "diagnostic" else "AGGREGATE_DEADLINE")
+                launched = expiry not in {"pre-idle", "argv", "phase-gap"}
+                self.assertEqual(len(rig.captures), 2 if launched else 1)
+                rows = result.details["partitions"]
+                self.assertEqual([row["status"] for row in rows], ["PASS", "FAIL" if launched else "UNEXECUTED", *(["UNEXECUTED"] * 3)])
+                for index, capture in enumerate(rig.captures):
+                    for name, value in controller.capture_observations(capture).items():
+                        self.assertEqual(rows[index]["capture"][name], value)
+                if expiry == "phase-gap":
+                    self.assertEqual(seen, [("parser", 190.0)])
+                    self.assertEqual(rig.clock, 51.0)
+                else:
+                    self.assertTrue(seen)
+                    self.assertTrue(all(cutoff == 50.0 for _stage, cutoff in seen))
+                if expiry == "diagnostic":
+                    self.assertEqual(rows[1]["idle_error"]["error"], "RUBY_PARTITION_NOT_IDLE")
+                    self.assertEqual(rows[1]["diagnostic_error"]["error"], "AGGREGATE_DEADLINE")
 
     def test_compatibility_provider_bindings_are_closed_narrow_and_disjoint(self):
         controller = controller_module()
