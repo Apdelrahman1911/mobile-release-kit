@@ -935,7 +935,194 @@ class ProfileFixtureBookkeepingTests(unittest.TestCase):
                     self.assertFalse(binding.__exit__(None, None, None))
                 self.assertEqual(restored, ["_worker_argv", "helper_argv"])
 
+    def _assert_pre_run_hello_gate(self):
+        # Only inert originals: the real Channel.take moves its actual list,
+        # but no channel constructor, descriptor, child, observer log or wait is
+        # acquired. Native before-run-cancel must independently prove the race.
+        original_take = owner._Channel.take
+
+        @contextmanager
+        def modeled():
+            model = SimpleNamespace(now=10, c_pid=101, k_pid=201, sid=101, group=201,
+                                    logs=[], trace=[], takes=[], on_group_read=lambda: None)
+            model.child = SimpleNamespace(pid=model.k_pid, wait_state="OWNED", receipt=None, numeric_retired=False)
+            model.context = SimpleNamespace(run=100, hard=130, failure_limit=None, cleanup_limit=None,
+                                            primary=None, launch_closed=False,
+                                            child_acquisition=SimpleNamespace(child=model.child))
+            model.context.cleanup_cutoff = lambda original: owner._Context.cleanup_cutoff(model.context, original)
+            model.reader = SimpleNamespace(state="OPEN", unknown=False, fileno=lambda: 42)
+            model.frame = {"v": 1, "type": "HELLO", "pid": model.k_pid, "ppid": model.c_pid,
+                           "sid": model.c_pid, "pgid": model.k_pid, "fd_map_version": 1}
+            model.frames = [model.frame]
+            model.channel = SimpleNamespace(context=model.context, incoming="k_to_c", outgoing="c_to_k",
+                                            reader=model.reader, reader_closed=False, eof=False,
+                                            decoder=SimpleNamespace(failed=False, ended=False), frames=model.frames,
+                                            write_attempted=set(), sent=set(), write_failed=False, write_in_flight=False)
+            model.binding = fixture.ProfileBindings(None, "before-run-cancel", "custodian")
+            model.binding.children["keeper"] = model.child
+            model.binding.channels["k_to_c"] = model.reader
+            model.binding.channel_objects["k_to_c"] = model.channel
+            model.binding.leases[id(model.reader)] = (model.reader, 42, (7, 8))
+
+            def log(event, **fields):
+                model.logs.append((event, fields))
+                model.trace.append(("log", event))
+            def take(channel):
+                model.takes.append(channel)
+                model.trace.append(("take",))
+                return original_take(channel)
+            def sid(pid):
+                self.assertEqual(pid, model.k_pid)
+                return model.sid
+            def group(pid):
+                self.assertEqual(pid, model.k_pid)
+                model.on_group_read()
+                return model.group
+            def publish_cancel(deadline=50):
+                # Explicit full-write *model*, never native write evidence.
+                model.context.primary, model.context.launch_closed = object(), True
+                model.context.failure_limit = model.context.cleanup_limit = deadline
+                model.cancel = {"v": 1, "type": "CANCEL", "reason_code": "cancelled", "cleanup_deadline_ns": deadline}
+                model.channel.sent.add("CANCEL")
+                model.channel.write_attempted.add("CANCEL")
+                model.channel.write_in_flight = True
+                model.binding.observe("custodian", "frame_sent", edge="c_to_k", frame=model.cancel)
+                model.channel.write_in_flight = False
+
+            model.take = lambda channel=None: model.binding._take_pre_run_hello(
+                model.channel if channel is None else channel, take)
+            model.publish_cancel = publish_cancel
+            traps = []
+            with fixture.ExitStack() as effects:
+                # Existing class traps still forbid native/process/thread/wait
+                # acquisition. These guard every added filesystem/pacing seam,
+                # including saved operations which global os patches cannot veto.
+                for target, name in ((fixture.os, "open"), (fixture.os, "close"), (fixture.os, "read"),
+                                     (fixture.os, "write"), (fixture.os, "pipe"), (fixture.os, "set_blocking"),
+                                     (fixture.os, "setpgid"), (fixture.os, "setsid"), (fixture.time, "sleep"),
+                                     (fixture, "record"), (owner.native, "_Native"), (owner, "_pause"),
+                                     (model.binding, "_real_read"), (model.binding, "_real_write"),
+                                     (model.binding, "_real_killpg"), (model.binding, "_real_fstat")):
+                    traps.append(effects.enter_context(patch.object(
+                        target, name, side_effect=AssertionError("inert HELLO gate attempted a resource operation"))))
+                model.log = effects.enter_context(patch.object(model.binding, "log", side_effect=log))
+                effects.enter_context(patch.object(fixture.os, "getpid", return_value=model.c_pid))
+                model.getsid = effects.enter_context(patch.object(fixture.os, "getsid", side_effect=sid))
+                model.getpgid = effects.enter_context(patch.object(fixture.os, "getpgid", side_effect=group))
+                effects.enter_context(patch.object(fixture.time, "monotonic_ns", side_effect=lambda: model.now))
+                try:
+                    yield model
+                finally:
+                    for trap in traps:
+                        trap.assert_not_called()
+
+        with modeled() as model:
+            for _ in range(2):
+                self.assertEqual(model.take(), [])
+                self.assertIs(model.channel.frames, model.frames)
+                self.assertIs(model.frames[0], model.frame)
+            self.assertEqual(model.binding._pre_run_hello_gate, "HELD")
+            self.assertEqual(model.takes, [])
+            model.getsid.assert_not_called(); model.getpgid.assert_not_called()
+            model.publish_cancel()
+            self.assertEqual(model.take(), [])  # Real K membership would still hold the gate.
+            self.assertIs(model.channel.frames, model.frames)
+            self.assertEqual(model.takes, [])
+            model.context.cleanup_limit, model.group = 40, model.c_pid
+            self.assertIs(model.take(), model.frames)
+            self.assertEqual(model.channel.frames, [])
+            self.assertEqual(model.binding._pre_run_hello_gate, "RELEASED")
+            self.assertEqual(model.binding._pre_run_hello_cutoff, 40)
+            self.assertEqual(model.takes, [model.channel])
+            self.assertEqual(model.trace, [("log", "pre_run_hello_gate_entered"), ("log", "frame_sent"),
+                                           ("log", "pre_run_hello_gate_released"), ("take",)])
+            entered, _cancel, released = (fields for _event, fields in model.logs)
+            self.assertEqual(entered["frame_id"], released["frame_id"])
+            self.assertEqual(released["session_id"], model.c_pid)
+            self.assertEqual(released["keeper_pgid"], model.c_pid)
+            self.assertIs(model.binding._pre_run_cancel_frame, model.cancel)
+            # Post-release calls belong to normal dispatch, not another gate.
+            model.child.numeric_retired, model.now = True, 100
+            model.channel.frames = later = [{"type": "RELEASED"}]
+            self.assertIs(model.take(), later)
+            self.assertEqual((model.getsid.call_count, model.getpgid.call_count), (2, 2))
+            self.assertEqual(len(model.logs), 3)
+
+        with modeled() as model:
+            # The original first-failure grace can legitimately exceed WORK.
+            # The gate neither creates it nor mistakes that transition for a
+            # renewed cleanup window. Later cleanup growth is rejected below.
+            model.now = 99
+            self.assertEqual(model.take(), [])
+            self.assertIsNone(model.binding._pre_run_hello_cutoff)
+            model.publish_cancel(deadline=120)
+            model.now, model.group = 100, model.c_pid
+            self.assertIs(model.take(), model.frames)
+            self.assertEqual(model.binding._pre_run_hello_cutoff, 120)
+            self.assertEqual((model.context.run, model.context.failure_limit, model.context.hard), (100, 120, 130))
+
+        for bypass in ("other-channel", "other-role", "other-mode", "empty-buffer"):
+            with self.subTest(hello_gate_bypass=bypass), modeled() as model:
+                channel = model.channel
+                if bypass == "other-channel":
+                    channel = SimpleNamespace(incoming="o_to_c", frames=[{"type": "CANCEL"}])
+                elif bypass == "other-role": model.binding.role = "keeper"
+                elif bypass == "other-mode": model.binding.mode = "success"
+                else: channel.frames = []
+                frames = channel.frames
+                self.assertIs(model.take(channel), frames)
+                self.assertEqual(model.binding._pre_run_hello_gate, "NEW")
+                self.assertEqual(model.takes, [channel])
+                model.log.assert_not_called(); model.getsid.assert_not_called(); model.getpgid.assert_not_called()
+
+        for fault in ("foreign-child", "retired-child", "unknown-child", "receipt", "reader", "closed-reader",
+                      "frames-replaced", "frame-replaced", "frames-lost", "eof", "run-attempt", "write-in-flight",
+                      "write-failed", "missing-cancel-witness", "sid", "group", "sid-esrch", "group-esrch",
+                      "expired", "renewed", "shortened-during-metadata", "release-log"):
+            with self.subTest(hello_gate_fault=fault), modeled() as model:
+                self.assertEqual(model.take(), [])
+                model.publish_cancel()
+                self.assertEqual(model.take(), [])  # Bind the original failed-cleanup50 before the fault.
+                model.group = model.c_pid
+                if fault == "foreign-child":
+                    model.context.child_acquisition.child = SimpleNamespace(**vars(model.child))
+                elif fault == "retired-child": model.child.numeric_retired = True
+                elif fault == "unknown-child": model.child.wait_state = "UNKNOWN"
+                elif fault == "receipt": model.child.receipt = object()
+                elif fault == "reader": model.channel.reader = SimpleNamespace(**vars(model.reader))
+                elif fault == "closed-reader": model.reader.state = "CLOSED"
+                elif fault == "frames-replaced": model.channel.frames = list(model.frames)
+                elif fault == "frame-replaced": model.frames[0] = dict(model.frame)
+                elif fault == "frames-lost": model.channel.frames = []
+                elif fault == "eof": model.channel.eof = True
+                elif fault == "run-attempt": model.channel.write_attempted.add("RUN")
+                elif fault == "write-in-flight": model.channel.write_in_flight = True
+                elif fault == "write-failed": model.channel.write_failed = True
+                elif fault == "missing-cancel-witness": model.binding._pre_run_cancel_frame = None
+                elif fault == "sid": model.sid = 301
+                elif fault == "group": model.group = 301
+                elif fault == "sid-esrch": model.getsid.side_effect = ProcessLookupError("inert metadata error")
+                elif fault == "group-esrch": model.getpgid.side_effect = ProcessLookupError("inert metadata error")
+                elif fault == "expired": model.now = 50
+                elif fault == "renewed": model.context.failure_limit = model.context.cleanup_limit = 60
+                elif fault == "shortened-during-metadata":
+                    model.on_group_read = lambda: setattr(model.context, "cleanup_limit", model.now)
+                else: model.log.side_effect = OSError("inert release observation loss")
+                with self.assertRaises((AssertionError, OSError)):
+                    model.take()
+                self.assertEqual(model.binding._pre_run_hello_gate, "FAILED")
+                self.assertEqual(model.takes, [])
+                snapshot = model.getsid.call_count, model.getpgid.call_count, model.log.call_count
+                with self.assertRaisesRegex(AssertionError, "failed HELLO gate cannot be retried"):
+                    model.take()
+                self.assertEqual((model.getsid.call_count, model.getpgid.call_count, model.log.call_count), snapshot)
+                self.assertEqual(model.binding.wait_witnesses, {})
+                self.assertEqual(model.binding.join_witnesses, {})
+                self.assertIsNone(model.binding.group)
+                self.assertFalse(model.binding.absent)
+
     def test_modeled_reaped_and_joined_flags_without_original_operation_returns_are_rejected(self):
+        original_take = owner._Channel.take
         binding = fixture.ProfileBindings(None, "success")
         receipt = SimpleNamespace(pid=987654, status_kind="exit", status_code=0)
         child = SimpleNamespace(pid=receipt.pid, receipt=receipt, wait_state="REAPED", numeric_retired=True)
@@ -966,6 +1153,8 @@ class ProfileFixtureBookkeepingTests(unittest.TestCase):
                     owner.native.Child.poll_wait(unwaited)
             self.assertEqual(binding.patch_state, "CLOSED")
             self.assertEqual(binding.wait_witnesses, {})
+            self.assertIs(owner._Channel.take, original_take)
+        self._assert_pre_run_hello_gate()
 
 
 if __name__ == "__main__":

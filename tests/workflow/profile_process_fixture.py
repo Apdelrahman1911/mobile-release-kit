@@ -487,6 +487,11 @@ class ProfileBindings:
         self._observing = False
         self._injected = set()
         self._sequence = 0
+        self._pre_run_hello_gate = "NEW"
+        self._pre_run_hello_channel = self._pre_run_hello_frames = self._pre_run_hello_frame = None
+        self._pre_run_hello_reader = self._pre_run_hello_child = None
+        self._pre_run_hello_cutoff = None
+        self._pre_run_cancel_frame = None
         self._real_read, self._real_write, self._real_killpg = os.read, os.write, os.killpg
         self._real_fstat = os.fstat
 
@@ -548,6 +553,8 @@ class ProfileBindings:
         self.channels.clear(); self.channel_objects.clear()
         self.wait_witnesses.clear(); self.join_witnesses.clear()
         self.payload_reader = self.payload_writer = self.group = None
+        self._pre_run_hello_channel = self._pre_run_hello_frames = self._pre_run_hello_frame = None
+        self._pre_run_hello_reader = self._pre_run_hello_child = self._pre_run_cancel_frame = None
 
     def log(self, event, **fields):
         with self.lock:
@@ -714,6 +721,91 @@ class ProfileBindings:
         if time.monotonic_ns() >= context.control_cutoff(channel.write_limits["STATUS"]):
             raise BlockingIOError
 
+    def _take_pre_run_hello(self, channel, original_take):
+        """Delay only C's first HELLO dispatch; original control IO stays live."""
+        if self.mode != "before-run-cancel" or self.role != "custodian" or channel.incoming != "k_to_c":
+            return original_take(channel)
+        if self._pre_run_hello_gate == "RELEASED":
+            assert channel is self._pre_run_hello_channel
+            return original_take(channel)
+        assert self._pre_run_hello_gate != "FAILED", "failed HELLO gate cannot be retried"
+        try:
+            context = channel.context
+            assert (channel is self.channel_objects.get("k_to_c") and channel.outgoing == "c_to_k"
+                    and channel.reader is self.channels.get("k_to_c"))
+            assert (not channel.reader_closed and not channel.eof and channel.reader.state == "OPEN"
+                    and not channel.reader.unknown and not channel.decoder.failed and not channel.decoder.ended)
+            reader = self.leases.get(id(channel.reader))
+            assert reader is not None and reader[0] is channel.reader and reader[1] == channel.reader.fileno()
+            if not channel.frames:
+                assert self._pre_run_hello_gate == "NEW", "held HELLO disappeared before original take"
+                return original_take(channel)
+            assert len(channel.frames) == 1 and channel.frames[0]["type"] == "HELLO"
+            child = context.child_acquisition.child
+            assert child is not None and child is self.child_for("keeper")
+            if self._pre_run_hello_gate == "NEW":
+                self._pre_run_hello_gate = "HELD"
+                self._pre_run_hello_channel, self._pre_run_hello_frames = channel, channel.frames
+                self._pre_run_hello_frame = channel.frames[0]
+                self._pre_run_hello_reader, self._pre_run_hello_child = reader, child
+
+            def check_bound():
+                assert (channel is self._pre_run_hello_channel and channel.context is context
+                        and self.channel_objects.get("k_to_c") is channel
+                        and self.channels.get("k_to_c") is channel.reader
+                        and channel.frames is self._pre_run_hello_frames
+                        and channel.frames[0] is self._pre_run_hello_frame
+                        and self.leases.get(id(channel.reader)) is self._pre_run_hello_reader
+                        and channel.reader is reader[0] and channel.reader.fileno() == reader[1]
+                        and channel.reader.state == "OPEN" and not channel.reader.unknown
+                        and not channel.reader_closed and not channel.eof
+                        and not channel.decoder.failed and not channel.decoder.ended)
+                assert (child is self._pre_run_hello_child and context.child_acquisition.child is child
+                        and self.child_for("keeper") is child and child.wait_state == "OWNED"
+                        and child.receipt is None and not child.numeric_retired)
+                assert "RUN" not in channel.write_attempted and not channel.write_failed and not channel.write_in_flight
+                if context.primary is None:
+                    assert self._pre_run_hello_cutoff is None
+                    cutoff = context.cleanup_cutoff(context.run)
+                else:
+                    assert context.failure_limit is not None
+                    cutoff = context.cleanup_cutoff(context.failure_limit)
+                    assert self._pre_run_hello_cutoff is None or cutoff <= self._pre_run_hello_cutoff
+                    # The product's FIRST cleanup grace may cross its earlier
+                    # WORK endpoint. Only subsequent cleanup renewal is barred.
+                    self._pre_run_hello_cutoff = cutoff
+                assert time.monotonic_ns() < cutoff, "HELLO gate exceeded the original cleanup cutoff"
+                return cutoff
+
+            cutoff = check_bound()
+            if "pre-run-hello-entered" not in self._injected:
+                self._injected.add("pre-run-hello-entered")
+                self.log("pre_run_hello_gate_entered", child_pid=child.pid, frame_id=id(channel.frames[0]),
+                         reader=id(channel.reader), descriptor=reader[1], reader_identity=list(reader[2]))
+                cutoff = check_bound()
+            if "CANCEL" not in channel.sent:
+                return []  # Keep the actual decoded HELLO; pump still flushes CANCEL.
+            cancel = self._pre_run_cancel_frame
+            assert (cancel is not None and context.primary is not None and context.launch_closed
+                    and cutoff <= cancel["cleanup_deadline_ns"])
+            custodian_pid = os.getpid()
+            actual_sid, actual_group = os.getsid(child.pid), os.getpgid(child.pid)
+            cutoff = check_bound()
+            assert actual_sid == custodian_pid and actual_group in (child.pid, custodian_pid)
+            if actual_group == child.pid:
+                return []  # Only a positive original-K move releases dispatch.
+            self._pre_run_hello_gate = "RELEASED"
+            self.log("pre_run_hello_gate_released", child_pid=child.pid, frame_id=id(channel.frames[0]),
+                     reader=id(channel.reader), descriptor=reader[1], reader_identity=list(reader[2]),
+                     session_id=actual_sid, keeper_pgid=actual_group, cutoff_ns=cutoff)
+            assert check_bound() <= cutoff
+            frames = original_take(channel)
+            assert frames is self._pre_run_hello_frames and frames[0] is self._pre_run_hello_frame
+            return frames
+        except BaseException:
+            self._pre_run_hello_gate = "FAILED"
+            raise
+
     def observe(self, role, event, **evidence):
         assert role == self.role
         fields = {}
@@ -745,6 +837,22 @@ class ProfileBindings:
             fields["identity"] = self.descriptor_evidence(self.payload_fd)
         elif event == "ready" and role == "outer":
             self.outer_ready = evidence["frame"]
+        elif self.mode == "before-run-cancel" and role == "custodian" and event == "hello":
+            assert self._pre_run_hello_gate == "RELEASED" and evidence["frame"] is self._pre_run_hello_frame
+            fields["gate_frame_id"] = id(evidence["frame"])
+        elif self.mode == "before-run-cancel" and role == "keeper" and event == "empty_group_moved":
+            channel = self.channel_objects["c_to_k"]
+            context, acquisition = channel.context, channel.context.child_acquisition
+            assert (channel.outgoing == "k_to_c" and "HELLO" in channel.sent
+                    and "CANCEL" in channel.decoder.direction.seen and "RUN" not in channel.decoder.direction.seen)
+            assert (context.launch_closed and acquisition.launch_retired and not acquisition.attempted
+                    and acquisition.settled and not acquisition.cleanup_unknown and acquisition.child is None
+                    and not context.tasks and context.primary is not None and not context.cleanup_unknown)
+            keeper_pid, session_id, current_group = os.getpid(), os.getsid(0), os.getpgrp()
+            assert (evidence["group_id"] == keeper_pid and evidence["keeper_pgid"] == context.parent_pid
+                    and session_id == current_group == context.parent_pid and os.getppid() == context.parent_pid)
+            fields.update(group=keeper_pid, session_id=session_id, keeper_pgid=current_group,
+                          parent_pid=context.parent_pid, received_cancel=True, validator_never_attempted=True)
         elif event.startswith("task_"):
             task = evidence["task"]
             self.tasks[id(task)] = task
@@ -856,6 +964,13 @@ class ProfileBindings:
         if "edge" in evidence:
             fields["edge"] = evidence["edge"]
         self.log(event, **fields)
+        if (self.mode == "before-run-cancel" and role == "custodian" and event == "frame_sent"
+                and evidence["edge"] == "c_to_k" and evidence["frame"]["type"] == "CANCEL"):
+            channel = self.channel_objects["k_to_c"]
+            assert (channel.outgoing == "c_to_k" and "CANCEL" in channel.sent and channel.write_in_flight
+                    and not channel.write_failed and "RUN" not in channel.write_attempted
+                    and self._pre_run_cancel_frame is None)
+            self._pre_run_cancel_frame = evidence["frame"]
         if self.on_event is not None:
             self.on_event(role, event, evidence)
         if (self.mode == "partial-write-failure" and role == "outer" and event == "frame_sent"
@@ -913,6 +1028,7 @@ class ProfileBindings:
         owner, native = self.owner, self.native
         original_helper, original_worker = owner.helper_argv, owner._worker_argv
         original_channel_init, original_send = owner._Channel.__init__, owner._Channel.send
+        original_take = owner._Channel.take
         original_create, original_close = native.create, native.FDLease.close
         original_wait, original_join = native.Child.poll_wait, owner.threading.Thread.join
         original_frame, original_parser = profiles.completion_frame, profiles.completed_content
@@ -984,6 +1100,9 @@ class ProfileBindings:
                     self.log("commit_withheld")
                     return
             return original_send(channel, kind, **fields)
+
+        def take(channel):
+            return self._take_pre_run_hello(channel, original_take)
 
         def create(acquisition, spec):
             child = original_create(acquisition, spec)
@@ -1191,7 +1310,8 @@ class ProfileBindings:
 
         for obj, name, implementation in ((owner, "helper_argv", helper_argv), (owner, "_worker_argv", worker_argv),
                                            (owner, "_role_event", self.observe), (owner._Channel, "__init__", channel_init),
-                                           (owner._Channel, "send", send), (native, "create", create),
+                                           (owner._Channel, "send", send), (owner._Channel, "take", take),
+                                           (native, "create", create),
                                            (native.Child, "poll_wait", poll_wait), (owner.threading.Thread, "join", join),
                                            (native.FDLease, "close", close), (owner.os, "read", read),
                                            (owner.os, "write", write), (owner.os, "killpg", killpg)):
@@ -1413,6 +1533,65 @@ def _assert_native_finality(root, *, allow_no_validator=False):
     return items
 
 
+def _assert_pre_run_hello_interleaving(items):
+    """C-local actual-metadata gate, plus K's independent real no-V move."""
+    published = [item for item in selected(items, "custodian", "child_published")
+                 if item["child_role"] == "keeper"]
+    entered = selected(items, "custodian", "pre_run_hello_gate_entered")
+    released = selected(items, "custodian", "pre_run_hello_gate_released")
+    hello = selected(items, "custodian", "hello")
+    cancel = [item for item in selected(items, "custodian", "frame_sent")
+              if item["edge"] == "c_to_k" and item["frame"]["type"] == "CANCEL"]
+    waits = selected(items, "custodian", "keeper_reaped")
+    originals = selected(items, "custodian", "original_wait_return")
+    retired = selected(items, "custodian", "group_retired")
+    absent = selected(items, "custodian", "actual_group_esrch")
+    assert len(published) == len(entered) == len(released) == len(hello) == len(cancel) == 1
+    assert len(waits) == len(originals) == len(retired) == 1 and absent
+    c_pid, k_pid = published[0]["pid"], published[0]["child_pid"]
+    assert c_pid != k_pid and waits[0]["receipt"] == originals[0]["receipt"]
+    assert waits[0]["receipt"]["pid"] == k_pid
+    assert waits[0]["receipt"]["status_kind"] == "exit" and waits[0]["receipt"]["status_code"] in (0, 2)
+    assert all(item["pid"] == c_pid for item in (*entered, *released, *hello, *cancel, *waits, *retired, *absent))
+    assert entered[0]["child_pid"] == released[0]["child_pid"] == k_pid
+    assert entered[0]["frame_id"] == released[0]["frame_id"] == hello[0]["gate_frame_id"]
+    for field in ("reader", "descriptor", "reader_identity"):
+        assert entered[0][field] == released[0][field]
+    assert released[0]["session_id"] == released[0]["keeper_pgid"] == c_pid
+    frame = hello[0]["frame"]
+    assert frame["pid"] == frame["pgid"] == k_pid and frame["ppid"] == frame["sid"] == c_pid
+    assert released[0]["time_ns"] < released[0]["cutoff_ns"] <= cancel[0]["frame"]["cleanup_deadline_ns"]
+    assert published[0]["sequence"] < entered[0]["sequence"] < released[0]["sequence"]
+    assert (cancel[0]["sequence"] < released[0]["sequence"] < hello[0]["sequence"]
+            < absent[0]["sequence"] <= absent[-1]["sequence"] < retired[0]["sequence"]
+            < originals[0]["sequence"] < waits[0]["sequence"])
+    assert retired[0]["group"] == k_pid and retired[0]["absent"]
+    assert all(item["group"] == k_pid for item in absent)
+
+    moved = selected(items, "keeper", "empty_group_moved")
+    k_frames = selected(items, "keeper", "frame_sent")
+    k_hello = [item for item in k_frames if item["frame"]["type"] == "HELLO"]
+    k_released = [item for item in k_frames if item["frame"]["type"] == "RELEASED"]
+    assert len(moved) == len(k_hello) == len(k_released) == 1
+    assert moved[0]["pid"] == moved[0]["group"] == k_pid
+    assert moved[0]["parent_pid"] == moved[0]["session_id"] == moved[0]["keeper_pgid"] == c_pid
+    assert moved[0]["received_cancel"] and moved[0]["validator_never_attempted"]
+    assert k_hello[0]["frame"] == frame and k_released[0]["frame"]["validator"] == {"state": "not_attempted"}
+    # K can be descheduled just after setpgid and before its event. Never order
+    # its log against C's metadata observation/release/HELLO timestamps.
+    assert k_hello[0]["sequence"] < moved[0]["sequence"] < k_released[0]["sequence"]
+    assert not selected(items, "keeper", "child_published")
+    assert not selected(items, "keeper", "task_published") and not selected(items, "keeper", "task_granted")
+    assert not selected(items, "keeper", "validator_reaped")
+    assert not [item for item in items if item["event"] == "frame_sent"
+                and item["frame"]["type"] in {"RUN", "RESERVED", "MOVED", "READY", "STATUS", "COMMIT"}]
+    for role in ("custodian", "keeper"):
+        leases = selected(items, role, "local_leases_accounted")
+        assert len(leases) == 1 and not leases[0]["unresolved"]
+    assert len(selected(items, "outer", "payload_eof")) == 1
+    assert any(item["edge"] == "k_to_c" for item in selected(items, "custodian", "status_eof"))
+
+
 def driver(root, mode):
     native_platform = sys.platform  # Capture the host, not the profile module's Darwin shim below.
     assert_fixture_idle()
@@ -1494,6 +1673,8 @@ def driver(root, mode):
             assert final_state == "NO_PRODUCERS"
         else:
             items = _assert_native_finality(root, allow_no_validator=True)
+            if mode == "before-run-cancel":
+                _assert_pre_run_hello_interleaving(items)
     else:
         items = _assert_native_finality(root)
     if mode in {"payload-writer-close-failure", "payload-reader-close-failure", "payload-reader-close-unresolved"}:

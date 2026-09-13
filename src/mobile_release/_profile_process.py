@@ -1303,12 +1303,22 @@ class _Custodian:
         for frame in channel.take():
             kind = frame["type"]
             if kind == "HELLO":
-                _require(not self.routes_retired and not self.keeper.numeric_retired
-                         and frame["pid"] == self.keeper.pid and frame["ppid"] == os.getpid()
-                         and frame["sid"] == os.getpid() and frame["pgid"] == self.keeper.pid)
-                _require(os.getsid(self.keeper.pid) == os.getpid() and os.getpgid(self.keeper.pid) == self.keeper.pid)
+                custodian_pid = os.getpid()
+                _require(not self.routes_retired and self.keeper is ctx.child_acquisition.child
+                         and self.keeper.wait_state == "OWNED" and self.keeper.receipt is None
+                         and not self.keeper.numeric_retired
+                         and frame["pid"] == self.keeper.pid and frame["ppid"] == custodian_pid
+                         and frame["sid"] == custodian_pid and frame["pgid"] == self.keeper.pid)
+                _require(os.getsid(self.keeper.pid) == custodian_pid)
+                actual_group = os.getpgid(self.keeper.pid)
+                _require(actual_group in (self.keeper.pid, custodian_pid))
                 self.keeper_hello = frame
                 self.group = _GroupReservation(ctx, self.keeper)
+                # K can flush HELLO, receive CANCEL and move before C consumes
+                # that frame. The original child still pins G, but this valid
+                # current C-group membership grants cleanup, never new work.
+                if actual_group == custodian_pid and ctx.primary is None:
+                    ctx.record(ValidationError(ERROR), "lifecycle")
                 _role_event(ctx.role, "hello", frame=frame)
             elif kind == "MOVED":
                 _require(self.run_sent and self.group is not None and not self.routes_retired

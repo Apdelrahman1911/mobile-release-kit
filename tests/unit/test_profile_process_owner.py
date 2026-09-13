@@ -7,6 +7,7 @@ the separately owned process-bearing fixture suites, not these unit controls.
 from __future__ import annotations
 
 import copy
+from contextlib import ExitStack
 import gc
 import json
 import signal
@@ -2142,6 +2143,113 @@ class ProfileOwnerHandshakeTests(unittest.TestCase):
                 self.assertEqual(channel.writer.close_calls, 1)
                 context.close_all()  # Only inert leases were ever acquired.
 
+    def _assert_keeper_hello_cleanup_only(self):
+        cases = ("normal", "moved", "cancelled", "uncertain", "frame_pid", "frame_ppid",
+                 "frame_sid", "frame_group", "actual_sid", "actual_group", "sid_esrch", "group_esrch",
+                 "retired", "routes_retired", "foreign_child", "unknown_child", "receipt")
+        valid = {"normal", "moved", "cancelled", "uncertain"}
+        for case in cases:
+            context = _context("custodian", parent_pid=429)
+            custodian, child = _custodian(context), _Child(pid=431)
+            context.child_acquisition.child = custodian.keeper = child
+            context.child_acquisition.attempted = True
+            channel = _wire_channel(context, "k_to_c", "c_to_k")
+            custodian.keeper_channel = channel
+            context.io.leases.extend((channel.reader, channel.writer))
+            frame = {**_hello(), "sid": 430}
+            if case.startswith("frame_"):
+                frame[{"pid": "pid", "ppid": "ppid", "sid": "sid", "group": "pgid"}[case[6:]]] += 1
+            if case == "retired":
+                child.numeric_retired = True
+            elif case == "routes_retired":
+                custodian.routes_retired = True
+            elif case == "foreign_child":
+                context.child_acquisition.child = _Child(pid=child.pid)
+            elif case == "unknown_child":
+                child.wait_state = "UNKNOWN"
+                child.numeric_retired = True
+            elif case == "receipt":
+                child.receipt = _receipt()
+            packet = owner.Protocol.encode(frame)
+            effects = []
+
+            def forbidden(*_args, **_kwargs):
+                effects.append("forbidden effect")
+                raise AssertionError("inert HELLO regression attempted a resource operation")
+
+            with self.subTest(keeper_hello=case), ExitStack() as stack:
+                # A swallowed assertion still trips effects below. All actual
+                # descriptors/children/metadata are explicit inert models.
+                for target, name in ((owner.native, "create"), (owner.native, "_Native"),
+                                     (owner.native, "assert_child_waitability"), (owner.TaskSlot, "start"),
+                                     (owner.threading.Thread, "start"), (owner.os, "write"),
+                                     (owner.os, "pipe"), (owner.os, "set_blocking"),
+                                     (owner.os, "setpgid"), (owner.os, "setsid"),
+                                     (owner.os, "kill"), (owner.os, "killpg"), (owner.os, "waitpid"),
+                                     (owner, "_spawn"), (owner, "_pause")):
+                    stack.enter_context(patch.object(target, name, side_effect=forbidden))
+                stack.enter_context(patch.object(owner.time, "monotonic_ns", return_value=1))
+                stack.enter_context(patch.object(owner.os, "getpid", return_value=430))
+                stack.enter_context(patch.object(owner.os, "getppid", return_value=429))
+                read = stack.enter_context(patch.object(owner.os, "read", side_effect=[packet]))
+                sid = stack.enter_context(patch.object(owner.os, "getsid", side_effect=[
+                    ProcessLookupError("inert missing metadata") if case == "sid_esrch" else
+                    429 if case == "actual_sid" else 430]))
+                pgid = stack.enter_context(patch.object(owner.os, "getpgid", side_effect=[
+                    ProcessLookupError("inert missing metadata") if case == "group_esrch" else
+                    999 if case == "actual_group" else 431 if case == "normal" else 430]))
+                event = stack.enter_context(patch.object(owner, "_role_event"))
+                first = ValidationError("inert original cancellation")
+                if case in {"cancelled", "uncertain"}:
+                    context.record(first, "cancelled", cleanup=case == "uncertain")
+                previous = (context.primary, context.reason, context.failure_limit,
+                            context.cleanup_limit, context.error_epoch, context.cleanup_unknown)
+                try:
+                    if case in valid:
+                        custodian.pump_keeper()
+                        self.assertIs(custodian.keeper_hello, event.call_args.kwargs["frame"])
+                        self.assertEqual(custodian.keeper_hello, frame)
+                        self.assertIs(custodian.group.keeper, child)
+                        self.assertEqual(custodian.group.id, child.pid)
+                        self.assertFalse(custodian.group.absent or custodian.group.retired)
+                        self.assertFalse(custodian.reserved or custodian.ready or custodian.run_granted or custodian.run_sent)
+                        self.assertEqual(custodian.outer.offers, [])
+                        self.assertEqual(channel.pending, [])
+                        self.assertIsNone(custodian.moved)
+                        if case in {"cancelled", "uncertain"}:
+                            self.assertEqual((context.primary, context.reason, context.failure_limit,
+                                              context.cleanup_limit, context.error_epoch, context.cleanup_unknown), previous)
+                            self.assertIs(context.primary, first)
+                        elif case == "moved":
+                            self.assertEqual(context.primary.args, (owner.ERROR,))
+                            self.assertEqual(context.reason, "lifecycle")
+                            self.assertFalse(context.cleanup_unknown)
+                            self.assertEqual(context.failure_limit, 1 + owner.CLEANUP_SECONDS * owner.NANOSECOND)
+                            self.assertEqual(context.cleanup_limit, context.failure_limit)
+                        else:
+                            self.assertIsNone(context.primary)
+                            self.assertFalse(context.launch_closed)
+                        if case != "normal":
+                            self.assertTrue(context.launch_closed and context.child_acquisition.launch_retired)
+                            with self.assertRaises(ValidationError) as raised:
+                                context.check()  # The real pre-RESERVED work gate.
+                            self.assertIs(raised.exception, context.primary)
+                        self.assertEqual((sid.call_count, pgid.call_count), (1, 1))
+                    else:
+                        with self.assertRaises((ValidationError, ProcessLookupError)):
+                            custodian.pump_keeper()
+                        self.assertIsNone(custodian.keeper_hello)
+                        self.assertIsNone(custodian.group)
+                        event.assert_not_called()
+                        if case not in {"actual_sid", "actual_group", "sid_esrch", "group_esrch"}:
+                            sid.assert_not_called()
+                        if case not in {"actual_group", "group_esrch"}:
+                            pgid.assert_not_called()
+                    read.assert_called_once()
+                    self.assertEqual(effects, [])
+                finally:
+                    context.close_all()  # Fake leases only, never native IO.
+
     def test_helpers_require_actual_hello_and_reserved_before_accepting_admission(self):
         context = _context("custodian", parent_pid=429)
         custodian = _custodian(context)
@@ -2173,6 +2281,7 @@ class ProfileOwnerHandshakeTests(unittest.TestCase):
             keeper.channel.frames = [{"v": 1, "type": "RUN"}]
             keeper.pump()
         self.assertTrue(keeper.run_granted)
+        self._assert_keeper_hello_cleanup_only()
 
     def test_no_grant_and_disjoint_role_identities_constrain_outer_terminal_records(self):
         base = {**_failed(), "keeper": {"state": "reaped", "pid": 431, "status_kind": "exit", "status_code": 2},

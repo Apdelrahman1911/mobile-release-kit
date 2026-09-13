@@ -4408,9 +4408,112 @@ class NativeUploadValidationTest < Minitest::Test
         receiver.stub(name, replacement) { with_stubs.call(bindings.drop(1), &body) }
       end
     end
+    # Original request/dispatch algorithms over finite data and a saved lambda,
+    # NEVER a process syscall. Error origin and identity, not class alone,
+    # distinguish handled backend outcomes from broken instrumentation.
+    request_rig = lambda do |probe: nil, role: :helper, origin: "native", route: "custodian-group", signal: 0,
+                             backend_error: Errno::EPERM.new, phase: nil, observation_error: nil, owner_bound: true|
+      probe ||= probe_class.allocate
+      requests, calls = [], []
+      helper_path = "/inert-native-signal/signal-observed-helper.rb"
+      {role: role, requests: requests, paths: {}, helper_path: helper_path, source_hashes: sources}.each do |key, value|
+        probe.instance_variable_set(:"@#{key}", value)
+      end
+      probe.instance_variable_set(:@failures, []) unless probe.instance_variable_defined?(:@failures)
+      targets = [route == "custodian-direct-keeper" || origin == "self" ? 701 : -701]
+      context = {"origin" => origin, "route" => route, "signal" => signal, "targets" => targets,
+        "source" => [helper_path, 101], "state" => origin == "self" ? "self" : "reserved",
+        "sourceBound" => true, "ownerBound" => owner_bound, "targetBound" => true,
+        "beforeFirstWait" => origin != "self", "numericRetired" => origin == "self",
+        "groupRetired" => route == "custodian-direct-keeper", "absent" => false}
+      probe.define_singleton_method(:context_for) do |actual_signal, actual_targets, _source|
+        raise observation_error if phase == :context
+        raise "changed inert syscall operands" unless actual_signal == signal && actual_targets == targets
+        context
+      end
+      probe.define_singleton_method(:refusal) { |_| raise observation_error } if phase == :refusal
+      if %i[record result].include?(phase)
+        append = requests.method(:<<)
+        requests.define_singleton_method(:<<) do |item|
+          write = item.method(:[]=)
+          key = phase == :result ? "result" : backend_error.is_a?(Errno::ESRCH) ? "absenceObserved" : "backendErrorClass"
+          item.define_singleton_method(:[]=) do |name, value|
+            raise observation_error if name == key
+            write.call(name, value)
+          end
+          append.call(item)
+        end
+      end
+      if phase == :block
+        dispatch = probe.method(:dispatch)
+        probe.define_singleton_method(:dispatch) do |value, **keywords, &_handoff|
+          dispatch.call(value, **keywords) { |_| raise observation_error }
+        end
+      end
+      backend = lambda do |*arguments|
+        calls << arguments
+        raise backend_error if backend_error
+        1
+      end
+      {probe: probe, calls: calls, context: context,
+       invoke: -> { probe.request(signal, targets, nil, backend) }}
+    end
+    healthy = request_rig.call(backend_error: nil)
+    assert_equal 1, healthy.fetch(:invoke).call
+    assert_equal [1, false], healthy.fetch(:probe).requests.fetch(0).values_at("result", "absenceObserved")
+    assert_empty healthy.fetch(:probe).failures
+    [Errno::EPERM.new, Errno::ESRCH.new].each do |original|
+      rig = request_rig.call(backend_error: original)
+      assert_same original, assert_raises(original.class, &rig.fetch(:invoke))
+      assert_equal [[0, -701]], rig.fetch(:calls)
+      probe = rig.fetch(:probe)
+      assert_empty probe.failures
+      request = probe.requests.fetch(0)
+      assert_equal [true, nil, nil, original.is_a?(Errno::ESRCH)],
+        request.values_at("forwarded", "rejection", "result", "absenceObserved")
+      assert_equal original.is_a?(Errno::ESRCH) ? [0] : [7], diagnostic.backend_error_codes("requests" => probe.requests)
+      # Reusing even the SAME exception in the next context cannot borrow the
+      # previous invocation's successful backend-error handoff.
+      probe.define_singleton_method(:context_for) { |*_| raise original }
+      assert_same original, assert_raises(original.class, &rig.fetch(:invoke))
+      assert_equal ["request observation:#{original.class.name}"], probe.failures
+      assert_equal 1, rig.fetch(:calls).length
+    end
+    fixture_absence = Errno::ESRCH.new
+    rig = request_rig.call(role: :parent, origin: "fixture", route: "fixture", backend_error: fixture_absence)
+    assert_same fixture_absence, assert_raises(Errno::ESRCH, &rig.fetch(:invoke))
+    assert_empty rig.fetch(:probe).failures # Existing ESRCH is not narrowed to the new EPERM route.
+    assert_equal true, rig.fetch(:probe).requests.fetch(0).fetch("absenceObserved")
+    [{role: :driver}, {origin: "fixture"}, {route: "keeper-self-group"},
+     {route: "custodian-direct-keeper", signal: "KILL"}, {route: "fixture", origin: "fixture"},
+     {route: "self", origin: "self", signal: "INT"}, {signal: "KILL"},
+     {backend_error: Errno::EACCES.new}].each do |variant|
+      original = variant.fetch(:backend_error, Errno::EPERM.new)
+      rig = request_rig.call(**variant.merge(backend_error: original))
+      assert_same original, assert_raises(original.class, &rig.fetch(:invoke))
+      assert_equal ["signal syscall:#{original.class.name}", "request observation:#{original.class.name}"], rig.fetch(:probe).failures
+      assert_equal 1, rig.fetch(:calls).length
+      assert_equal false, rig.fetch(:probe).requests.fetch(0).fetch("absenceObserved")
+    end
+    [Errno::EPERM, Errno::ESRCH].product(%i[context refusal record result block]).each do |error_class, phase|
+      original, instrumentation = error_class.new, error_class.new
+      rig = request_rig.call(backend_error: phase == :result ? nil : original,
+        phase: phase, observation_error: instrumentation)
+      assert_same instrumentation, assert_raises(error_class, &rig.fetch(:invoke))
+      assert_equal ["request observation:#{error_class.name}"], rig.fetch(:probe).failures
+      assert_equal %i[context refusal].include?(phase) ? 0 : 1, rig.fetch(:calls).length
+    end
+    veto = request_rig.call(owner_bound: false)
+    assert_equal 0, veto.fetch(:invoke).call
+    assert_empty veto.fetch(:calls)
+    assert_equal ["custodian-group:owner"], veto.fetch(:probe).failures
+    assert_equal [false, "owner", nil, false], veto.fetch(:probe).requests.fetch(0).
+      values_at("forwarded", "rejection", "result", "absenceObserved")
+
     # Execute the REAL helper-entry wrapper and observe unwind over inert
     # method/source/proof endpoints. The original native helper never executes.
-    helper_return = lambda do |returned: 2, original_error: nil, observer_failure: false, entry_error: nil|
+    helper_return = lambda do |returned: 2, original_error: nil, observer_failure: false, entry_error: nil,
+                              backend_error: nil, backend_handled: false|
       test = self
       events, writes, observed_errors, facts_calls = [], [], [], []
       directory = "/inert-native-signal"
@@ -4444,10 +4547,21 @@ class NativeUploadValidationTest < Minitest::Test
         observed_errors << error
         raise
       end
+      request = request_rig.call(probe: probe, backend_error: backend_error) if backend_error
+      body_error = original_error || (backend_error unless backend_handled)
       original = lambda do |argv|
         assert_equal ["custodian"], argv
         events << :original_call
         raise original_error if original_error
+        if request
+          begin
+            request.fetch(:invoke).call
+          rescue Exception => error
+            assert_same backend_error, error
+            raise unless backend_handled # Only the original caller may handle it.
+            events << :original_backend_handled
+          end
+        end
         returned
       end
       normalizer = diagnostic.method(:return_code)
@@ -4477,15 +4591,16 @@ class NativeUploadValidationTest < Minitest::Test
           assert_same entry_error, assert_raises(entry_error.class) { invoke.call }
         else
           actual = invoke.call
-          assert_same(original_error || observer_failure ? 1 : returned, actual)
+          assert_same(body_error || observer_failure ? 1 : returned, actual)
         end
       end
       assert_equal %i[observer_restore source_validation entry_restore], events.select { |event| %i[observer_restore source_validation entry_restore].include?(event) }
+      assert_equal [[0, -701]], request.fetch(:calls) if request && !original_error
       assert_nil probe_class.current
-      if original_error || observer_failure
+      if body_error || observer_failure
         assert_empty facts_calls # Do not collect facts after a failed observation.
         assert_equal 1, observed_errors.length
-        original_error ? assert_same(original_error, observed_errors.first) : assert_equal("signal-observation", observed_errors.first.kind)
+        body_error ? assert_same(body_error, observed_errors.first) : assert_equal("signal-observation", observed_errors.first.kind)
       else
         assert_equal [[returned, ["custodian"]]], facts_calls
       end
@@ -4494,8 +4609,8 @@ class NativeUploadValidationTest < Minitest::Test
         refute_includes events, :return_normalization
       else
         assert_equal 1, writes.length
-        assert_equal(original_error ? "missing" : normalizer.call(returned), writes.first.fetch("observedHelperReturn"))
-        refute writes.first.key?("helperReturn") if original_error || observer_failure
+        assert_equal(body_error ? "missing" : normalizer.call(returned), writes.first.fetch("observedHelperReturn"))
+        refute writes.first.key?("helperReturn") if body_error || observer_failure
       end
       {returned: actual, proof: writes.first, observer_errors: observed_errors}
     ensure
@@ -4513,6 +4628,16 @@ class NativeUploadValidationTest < Minitest::Test
       helper_return.call(original_error: original)
     end
     helper_return.call(observer_failure: true, entry_error: IOError.new("PRIVATE_SIGNAL_TOKEN"))
+    handled = helper_return.call(backend_error: Errno::EPERM.new, backend_handled: true)
+    assert_equal 2, handled.fetch(:returned)
+    assert_equal [2, 2], handled.fetch(:proof).values_at("helperReturn", "observedHelperReturn")
+    assert_equal [7], diagnostic.backend_error_codes(handled.fetch(:proof))
+    assert_empty handled.fetch(:proof).fetch("failures")
+    helper_return.call(observer_failure: true, backend_error: Errno::EPERM.new, backend_handled: true)
+    escaped = helper_return.call(backend_error: Errno::EPERM.new)
+    assert_equal 1, escaped.fetch(:returned)
+    assert_equal [7], diagnostic.backend_error_codes(escaped.fetch(:proof))
+    assert_equal ["observation body:Errno::EPERM", "helper proof:Errno::EPERM"], escaped.fetch(:proof).fetch("failures")
 
     exercise = lambda do |mode: modes.first, fault: nil, write_result: :full|
       now, depth, state, selected, escaped = 1, 0, nil, nil, nil

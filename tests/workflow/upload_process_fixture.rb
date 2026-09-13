@@ -3145,11 +3145,12 @@ module UploadProcessFixture
     end
 
     def request(signal, targets, location, backend)
+      classified_backend_error = nil # Custody belongs to this invocation only.
       source = location ? [location.absolute_path || location.path, location.lineno] : [nil, nil]
       context = context_for(signal, targets, source)
-      dispatch(context, backend: backend)
+      dispatch(context, backend: backend) { |error| classified_backend_error = error }
     rescue Exception => error
-      fail!("request observation:#{error.class.name}") unless error.is_a?(Errno::ESRCH)
+      fail!("request observation:#{error.class.name}") unless error.equal?(classified_backend_error)
       raise
     end
 
@@ -3175,16 +3176,27 @@ module UploadProcessFixture
         item["result"] = 1
       else
         raise "actual signal lacks its saved syscall" unless backend
+        signal, target = context.fetch("signal"), context.fetch("targets").first
         begin
-          item["result"] = backend.call(context.fetch("signal"), *context.fetch("targets"))
-        rescue Errno::ESRCH
+          result = backend.call(signal, target) # The unchanged veto admits exactly one target.
+        rescue Errno::ESRCH => error
           item["absenceObserved"] = true
+          yield error if block_given? # Only after the original outcome was recorded.
           raise # The actual owner, not this observer, interprets ESRCH.
         rescue Exception => error
           item["backendErrorClass"] = error.class.name
-          fail!("signal syscall:#{error.class.name}")
+          if block_given? && @role == :helper && context["origin"] == "native" &&
+             context["route"] == "custodian-group" && signal.instance_of?(Integer) && signal.zero? &&
+             error.instance_of?(Errno::EPERM)
+            # A handled failed group0 syscall can precede real cleanup. It is
+            # never success/absence, and cannot excuse an instrumentation error.
+            yield error
+          else
+            fail!("signal syscall:#{error.class.name}")
+          end
           raise
         end
+        item["result"] = result # Recording errors are not saved-backend outcomes.
       end
     end
 

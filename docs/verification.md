@@ -663,6 +663,15 @@ for existing native, upload, entitlement, recovery or fixture tests:
   Original lease, receipt, first-wait, retirement and deadline guards still apply;
   only the actual group operation can establish absence. Cover both an already
   absent group and a present group requiring the single allowed KILL request.
+  Python also accepts the original bound keeper HELLO when its actual session
+  is still C but it has already moved into C's group during pre-RUN cleanup.
+  This is cleanup-only admission: preserve the first failure/cutoff, or latch
+  lifecycle failure if none exists, without publishing RESERVED/READY/RUN.
+  The original group reservation still needs its own actual absence and all
+  original receipts/EOFs/closes/joins. Exercise delayed HELLO consumption after
+  the actual move by withholding only C's original channel dispatch, while
+  genuine CANCEL writes continue. Require C-local observed-move-before-HELLO
+  order, not an assumed ordering between separate processes' diagnostic logs.
 - Withhold COMMIT until **real EOF**: descendant cleanup and the Python payload
   write/close must progress first, and unused Ruby writer copies must already
   close. Permanent withholding fails at the original cutoff. Exercise pre-RUN
@@ -851,6 +860,19 @@ outer caller can report, under the original cutoff. No new proof/process read
 or private value is published. The controller requires the unique failing
 source-known signal callback in its nonpartitioned gate; success-shaped,
 malformed, duplicate or wrong-scope records cannot qualify or alter acceptance.
+
+The signal observer distinguishes a correctly admitted but unsuccessful backend
+operation from an instrumentation failure. An original custodian-group signal0
+`Errno::EPERM` remains the exact exception delivered to production, with no
+successful result or observed absence; it cannot by itself make the observer
+replace a genuinely settled failed helper's return2 with exit1. Only the exact
+exception from that request's saved backend qualifies, after every ownership,
+source, target and lifetime guard. The existing genuine backend ESRCH path uses
+the same request-local origin discrimination; unrelated instrumentation errors
+remain failures. Each native case still requires a genuine successful reserved-
+group KILL, actual later absence and complete original helper/outer finality.
+Finite backend-error codes remain in successful per-case summaries. Neither a
+permission error nor a recovered cleanup establishes the kernel's initial cause.
 
 The slow-cleanup fixture uses the original two-second run, five-second cleanup
 grace and eight-second capture watchdog. Only an eligible direct original-body

@@ -133,6 +133,7 @@ class NativeSignalObservationTest < Minitest::Test
                     "validatorTermSignal" => helpers.fetch("keeper").fetch("child").fetch("status_code"),
                     "successfulReservedGroupKILLs" => kills.length, "selfINTs" => self_signals.length,
                     "nativeRequestsByRoute" => production.group_by { |request| request.fetch("route") }.transform_values(&:length),
+                    "backendErrorCodes" => helpers.transform_values { |proof| UploadProcessFixture::NativeSignalFailureDiagnostic.backend_error_codes(proof) },
                     "fixtureReservationsReaped" => [parent, native].sum { |proof| proof.fetch("fixtureReservations").length },
                     "vetoes" => 0, "sourceSha256" => native.fetch("sourceSha256")}
       last_helpers = helpers
@@ -329,8 +330,13 @@ class NativeSignalObservationTest < Minitest::Test
     assert_nil request.fetch("rejection"), request.inspect
     assert_equal true, request.fetch("forwarded")
     %w[sourceBound ownerBound targetBound].each { |name| assert_equal true, request.fetch(name), request.inspect }
-    refute request.key?("backendErrorClass")
-    if request.fetch("absenceObserved")
+    if request.key?("backendErrorClass")
+      assert_equal ["helper", "custodian", "native", "custodian-group", "0", "Errno::EPERM"],
+        [proof.fetch("role"), proof.fetch("helperRole"), request.fetch("origin"),
+         request.fetch("route"), request.fetch("signal"), request.fetch("backendErrorClass")]
+      assert_nil request.fetch("result")
+      assert_equal false, request.fetch("absenceObserved") # Failed query, never absence or successful signalling.
+    elsif request.fetch("absenceObserved")
       assert_nil request.fetch("result") # A genuine ESRCH is not a successful KILL.
     else
       assert_equal false, request.fetch("absenceObserved")
