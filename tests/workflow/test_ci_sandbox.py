@@ -934,6 +934,196 @@ class CISandboxPureTests(unittest.TestCase):
             with self.subTest(values=values), self.assertRaises(self.module.SessionError):
                 session._environment(values)
 
+        # Compose the real producer/consumer. Only inert controller definitions
+        # are loaded; no workflow, product, packaging or native entry is called.
+        from .test_ci_verification import controller_module
+        controller = controller_module()
+        for platform, controller_platform in (("linux", "linux"), ("darwin", "macos")):
+            session = session_double(self.module, platform)
+            paths = controller.Paths(session.source, session.work, session.inputs, session.python, session.ruby)
+            wheel = session.work / "wheel-venv"
+            tooling = wheel / "share/mobile-release-kit"
+            directories = (session.root, session.work, session.source, wheel, wheel / "share", tooling)
+            nodes = {path: dict(st_dev=7, st_ino=81 + index, st_uid=0, st_gid=19 if index == 0 else 0,
+                               st_mode=stat.S_IFDIR | (0o755 if index < 2 else 0o555))
+                     for index, path in enumerate(directories)}
+            files = {root / name: [raw, (7 + index, 501 + index, stat.S_IFREG | 0o444, 0, 0, 1,
+                                       len(raw), 11 + index, 21 + index)]
+                     for index, (root, name, raw) in enumerate(
+                         (root, name, raw) for name, raw in (("Gemfile", b"# inert original Gemfile\n"),
+                                                           ("Gemfile.lock", b"inert original lock\n"))
+                         for root in (session.source, tooling))}
+            expected_files = list(files)
+            clock = SimpleNamespace(now=1.0)
+
+            def file_input(path, *, deadline, uid, gid, root_owned, maximum):
+                self.assertEqual((deadline, uid, gid, root_owned, maximum),
+                                 (20.0, session.uid, session.gid, True, 64 * 1024))
+                self.assertIn(path, files)
+                return tuple(files[path])
+
+            def directory_stat(path):
+                self.assertIn(path, nodes)  # No real path, observer or new inventory.
+                return SimpleNamespace(**nodes[path])
+
+            reads = Mock(side_effect=file_input)
+            canonical = Mock(side_effect=lambda path: path)
+            with patch.multiple(self.module, os=SimpleNamespace(), subprocess=SimpleNamespace(),
+                    socket=SimpleNamespace(), signal=SimpleNamespace(), _canonical=canonical, _native_file=reads,
+                    time=SimpleNamespace(monotonic=lambda: clock.now)), \
+                 patch.object(Path, "lstat", autospec=True, side_effect=directory_stat) as inspected, \
+                 patch.object(Path, "open", side_effect=AssertionError("no real input FD may open")), \
+                 patch.object(Path, "resolve", side_effect=AssertionError("no real path may resolve")):
+                for phase in ("source", "wheel"):
+                    with self.subTest(bundle_environment=(platform, phase)):
+                        reads.reset_mock()
+                        inspected.reset_mock()
+                        env = controller.native_phase_environment(paths, controller_platform, phase, ruby=True)
+                        actual = session._environment(env, deadline=20.0) if phase == "wheel" else session._environment(env)
+                        self.assertTrue(env.items() <= actual.items())
+                        self.assertEqual([call.args[0] for call in reads.call_args_list],
+                                         expected_files if phase == "wheel" else [])
+                        self.assertEqual([call.args[0] for call in inspected.call_args_list],
+                                         list(directories) * 2 if phase == "wheel" else [])
+                        self.assertEqual(actual["BUNDLE_FROZEN"], "1")
+                        self.assertEqual(actual["PIP_NO_INDEX"], "1")
+                env = controller.native_phase_environment(paths, controller_platform, "wheel", ruby=True)
+                for cutoff in (None, True, False, 0, -1, "20.0", float("nan"), float("inf"), 100.001, 1.0):
+                    with self.subTest(bundle_cutoff=(platform, repr(cutoff))):
+                        reads.reset_mock()
+                        inspected.reset_mock()
+                        canonical.reset_mock()
+                        expected_error = self.module.DeadlineExpired if cutoff == 1.0 and type(cutoff) is float else self.module.SessionError
+                        with self.assertRaises(expected_error):
+                            session._environment(env, deadline=cutoff)
+                        reads.assert_not_called()
+                        inspected.assert_not_called()
+                        canonical.assert_not_called()
+                for selector in (str(session.work / "Gemfile"), str(tooling) + "/./Gemfile",
+                                 str(session.work / "ruby-negative/share/mobile-release-kit/Gemfile"),
+                                 str(tooling / ".." / "Gemfile"), "/foreign/Gemfile"):
+                    with self.subTest(bundle_selector=(platform, selector)):
+                        reads.reset_mock()
+                        with self.assertRaises(self.module.SessionError):
+                            session._environment(env | {"BUNDLE_GEMFILE": selector}, deadline=20.0)
+                        reads.assert_not_called()
+                for path in directories:
+                    changes = [("st_uid", session.uid), ("st_mode", stat.S_IFDIR | 0o777),
+                               ("st_mode", stat.S_IFLNK | 0o555)]
+                    if path != session.root:
+                        changes.append(("st_gid", session.gid))
+                    for field, value in changes:
+                        with self.subTest(bundle_ancestor=(platform, path.name, field, value)):
+                            original = nodes[path][field]
+                            nodes[path][field] = value
+                            reads.reset_mock()
+                            try:
+                                with self.assertRaises(self.module.SessionError):
+                                    session._environment(env, deadline=20.0)
+                                reads.assert_not_called()
+                            finally:
+                                nodes[path][field] = original
+                canonical.side_effect = lambda path: Path("/foreign") if path == wheel else path
+                with self.assertRaises(self.module.SessionError):
+                    session._environment(env, deadline=20.0)
+                canonical.side_effect = lambda path: path
+                for field, value in (("st_ino", nodes[wheel]["st_ino"] + 1), ("st_mode", stat.S_IFDIR | 0o755)):
+                    original = nodes[wheel][field]
+
+                    def replaced_after_read(path, **kwargs):
+                        result = file_input(path, **kwargs)
+                        if path == expected_files[-1]:
+                            nodes[wheel][field] = value
+                        return result
+
+                    reads.side_effect = replaced_after_read
+                    try:
+                        with self.subTest(bundle_ancestor_changed=(platform, field)), self.assertRaises(self.module.SessionError):
+                            session._environment(env, deadline=20.0)
+                    finally:
+                        nodes[wheel][field] = original
+                        reads.side_effect = file_input
+                for path in files:
+                    raw, identity = files[path]
+                    try:
+                        # _native_file permits some root-writable modes; this
+                        # caller must additionally enforce the actual freeze.
+                        files[path][1] = (*identity[:2], stat.S_IFREG | 0o644, *identity[3:])
+                        with self.subTest(bundle_unfrozen_file=(platform, path)), self.assertRaises(self.module.SessionError):
+                            session._environment(env, deadline=20.0)
+                    finally:
+                        files[path] = [raw, identity]
+                for name in ("Gemfile", "Gemfile.lock"):
+                    original = files[tooling / name][0]
+                    files[tooling / name][0] = b"different installed bytes\n"
+                    try:
+                        with self.subTest(bundle_pair_changed=(platform, name)), self.assertRaises(self.module.SessionError):
+                            session._environment(env, deadline=20.0)
+                    finally:
+                        files[tooling / name][0] = original
+                empty_pair = (session.source / "Gemfile.lock", tooling / "Gemfile.lock")
+                original_pair = [files[path] for path in empty_pair]
+                for path in empty_pair:
+                    identity = files[path][1]
+                    files[path] = [b"", (*identity[:6], 0, *identity[7:])]
+                try:
+                    with self.assertRaises(self.module.SessionError):
+                        session._environment(env, deadline=20.0)
+                finally:
+                    for path, original in zip(empty_pair, original_pair):
+                        files[path] = original
+                # Existing _native_file tests cover real no-follow/single-link/
+                # oversized/read+close mechanics. Here preserve their original
+                # failure without retry, fallback or accepting partial pairs.
+                failures = (FileNotFoundError("synthetic missing installed input"),
+                    BaseExceptionGroup("synthetic input read/close failure", [OSError("read"), OSError("close")]),
+                    BaseExceptionGroup("synthetic expired input close", [self.module.DeadlineExpired("original cutoff")]))
+                for failure in failures:
+                    reads.reset_mock()
+
+                    def failed_installed_input(path, **kwargs):
+                        if path == expected_files[1]:
+                            raise failure
+                        return file_input(path, **kwargs)
+
+                    reads.side_effect = failed_installed_input
+                    with self.subTest(bundle_input_failure=(platform, type(failure).__name__)), \
+                         self.assertRaises(type(failure)) as caught:
+                        session._environment(env, deadline=20.0)
+                    self.assertIs(caught.exception, failure)
+                    self.assertEqual([call.args[0] for call in reads.call_args_list], expected_files[:2])
+                reads.side_effect = file_input
+
+            # Original _run -> _environment forwarding, not a direct helper-only
+            # test. The existing collector models every possible process/FD
+            # effect; rejected preparation must not enter even those doubles.
+            for failure in (None, self.module.DeadlineExpired("original wheel cutoff"),
+                            BaseExceptionGroup("synthetic wheel input failure", [OSError("close")])):
+                rig = _Collection(self.module, session_double(self.module, platform))
+                if platform == "darwin" and failure is None:
+                    # The original fake child has one explicit credential row;
+                    # missing fixtures must still veto every native observation.
+                    rig.snapshot_rows = {(rig.child.pid, rig.child.pid):
+                        ((rig.session.uid,) * 3, (rig.session.gid,) * 3, 65536)}
+                with rig.scope(), patch.object(rig.session, "_validate_installed_bundle_input", side_effect=failure) as check:
+                    arguments = dict(cwd=rig.session.work, env=env, seconds=900, output_limit=64, absolute_deadline=0.5)
+                    if failure is None:
+                        result = rig.session.run([str(rig.session.python), "--synthetic"], **arguments)
+                        self.assertTrue(result.ok)
+                        self.assertEqual([event for event in rig.events if event[0] == "root-snapshot"],
+                                         [("root-snapshot", 0.5, rig.child)] if platform == "darwin" else [])
+                    else:
+                        with self.assertRaises(type(failure)) as caught:
+                            rig.session.run([str(rig.session.python), "--synthetic"], **arguments)
+                        self.assertIs(caught.exception, failure)
+                        rig.session._argv.assert_not_called()
+                        self.assertEqual(rig.opened, [])
+                        self.assertFalse(any(event[0] in {"popen", "root-snapshot"} for event in rig.events))
+                        self.assertIsNone(rig.session._active)
+                        self.assertFalse(rig.session._busy)
+                    check.assert_called_once_with(deadline=0.5)
+                    self.assertEqual(rig.session.deadline, 100.0)
+
     def test_linux_namespace_setup_precedes_numeric_drop_without_popen_demotion(self):
         session = session_double(self.module)
         umask = Mock(side_effect=AssertionError("namespace modes must not change controller umask"))

@@ -1546,6 +1546,177 @@ module UploadProcessFixture
     end
   end
 
+  OWNERSHIP_FAILURE_PREFIX = "MRK_OWNERSHIP_ASYNC_FAILURE="
+  OWNERSHIP_FAILURE_FIELDS = %w[schema platform family helper case phase errorCategory errorKind row].freeze
+  OWNERSHIP_FAILURE_ROW_FIELDS = %w[ownerPhase firstErrorCategory firstErrorKind operationErrorCategory
+    operationErrorKind failedChecks checks commandChecks].freeze
+  OWNERSHIP_FAILURE_HELPERS = %w[capture run].freeze
+  OWNERSHIP_FAILURE_PLATFORMS = %w[ios android].freeze
+  OWNERSHIP_FAILURE_CASES = %w[async-spawn async-reap cleanup-first-async repeated].freeze
+  OWNERSHIP_FAILURE_PHASES = %w[entry invoke injector-cleanup hook-restoration snapshot row-checks proof-publication
+    row-rejection case-cleanup restoration missing].freeze
+  OWNERSHIP_FAILURE_OWNER_PHASES = %w[unstarted acquiring reserved waiting reaped unknown missing].freeze
+  OWNERSHIP_FAILURE_CHECKS = %w[firstExceptionPreserved handlersRestored registryInactive raisersJoined hooksRestored
+    pendingInterrupt retainedFixture].freeze
+  OWNERSHIP_FAILURE_COMMAND_CHECKS = %w[settled noProducers unknown nativeAttemptsBound actualOwnedControlCloses
+    actualTaskJoins hooksRestored observerErrorsEmpty].freeze
+  OWNERSHIP_FAILURE_FAILED_CHECKS = %w[numeric-route-veto handlers-not-restored registry-active hooks-not-restored
+    injector-cleanup primary-not-preserved injectors-not-joined injector-custody pending-interrupt
+    cancellation-not-propagated injection-boundary-missing wrong-signal command-not-finalized pre-go-barrier-missing
+    nested-cancellation-missing fixture-retained].freeze
+  OWNERSHIP_FAILURE_ERROR_KINDS = {
+    "none" => %w[none], "interrupt" => %w[none], "signal" => %w[none], "system-exit" => %w[none],
+    "fixture-error" => %w[ownership-probe process-ownership process-observation signal-policy fixture-domain fixture-input
+      fixture-result fixture-cleanup fixture-observation fixture-source diagnostic driver readiness control other],
+    "native-lifecycle-error" => %w[cancelled deadline parent_lost protocol io creation lifecycle other],
+    "native-spawn-error" => %w[abi runtime origin symbol spec launch deadline state io fd busy native waitability
+      spawn wait join close unknown other],
+    "io-error" => %w[none], "os-error" => %w[echild other], "other" => %w[none],
+  }.transform_values(&:freeze).freeze
+  OWNERSHIP_FAILURE_LABEL_CODES = {
+    "numeric requests were vetoed" => "numeric-route-veto",
+    "original handler policy not restored" => "handlers-not-restored",
+    "lifetime registry remains active" => "registry-active",
+    "observation hooks not restored" => "hooks-not-restored",
+    "independent injector cleanup failed" => "injector-cleanup",
+    "original error object/message replaced" => "primary-not-preserved",
+    "original injectors not joined" => "injectors-not-joined",
+    "original injector custody/gate changed" => "injector-custody",
+    "pending cancellation leaked" => "pending-interrupt",
+    "cancellation/lost-publication fault not propagated" => "cancellation-not-propagated",
+    "original injection boundary missing" => "injection-boundary-missing",
+    "wrong original cancellation signal" => "wrong-signal",
+    "known cancellation did not finish original ownership" => "command-not-finalized",
+    "native creator published GO before caller cancellation" => "pre-go-barrier-missing",
+    "nested cleanup cancellation not exercised" => "nested-cancellation-missing",
+    "known case left an unresolved reusable domain" => "fixture-retained",
+  }.freeze
+
+  # A finite view of the ORIGINAL failed row. None of these values supplies
+  # execution, wait, cleanup or finality authority, and no private proof is read.
+  module OwnershipFailureDiagnostic
+    module_function
+
+    def error_pair(error)
+      category, kind = case error
+      when nil then ["none", "none"]
+      when Interrupt then ["interrupt", "none"]
+      when SignalException then ["signal", "none"]
+      when SystemExit then ["system-exit", "none"]
+      when Failure then ["fixture-error", error.kind]
+      when IOError then ["io-error", "none"]
+      when SystemCallError then ["os-error", error.is_a?(Errno::ECHILD) ? "echild" : "other"]
+      else
+        if defined?(MobileReleaseKit::NativeUploadProcess::Error) && error.is_a?(MobileReleaseKit::NativeUploadProcess::Error)
+          ["native-lifecycle-error", error.code]
+        elsif defined?(MobileReleaseKit::NativeProcessSpawn::Error) && error.is_a?(MobileReleaseKit::NativeProcessSpawn::Error)
+          ["native-spawn-error", error.code]
+        else
+          ["other", "none"]
+        end
+      end
+      allowed = OWNERSHIP_FAILURE_ERROR_KINDS.fetch(category)
+      kind = allowed.find { |candidate| kind.instance_of?(String) && candidate == kind } || "other"
+      [category, kind].freeze
+    end
+
+    def boolean(value)
+      value.equal?(true) || value.equal?(false) ? value : "missing"
+    end
+
+    def freeze_value(value)
+      case value
+      when Hash then value.each { |key, item| key.freeze; freeze_value(item) }
+      when Array then value.each { |item| freeze_value(item) }
+      end
+      value.freeze
+    end
+
+    def row(summary:, snapshot:, owner_phase:, first:, operation:)
+      # Mapping the actual failed labels is deliberately different from
+      # recomputing success out of optional diagnostic booleans.
+      failures = summary.fetch("failures").map { |label| OWNERSHIP_FAILURE_LABEL_CODES.fetch(label) }
+      first_category, first_kind = error_pair(first)
+      operation_category, operation_kind = error_pair(operation)
+      phase = owner_phase.is_a?(Symbol) ? owner_phase.to_s : "missing"
+      phase = "missing" unless OWNERSHIP_FAILURE_OWNER_PHASES.include?(phase)
+      command = OWNERSHIP_FAILURE_COMMAND_CHECKS.to_h do |name|
+        value = name == "observerErrorsEmpty" ?
+          (snapshot["observerErrors"].empty? if snapshot["observerErrors"].instance_of?(Array)) : snapshot[name]
+        [name, boolean(value)]
+      end
+      freeze_value({"ownerPhase" => phase, "firstErrorCategory" => first_category, "firstErrorKind" => first_kind,
+        "operationErrorCategory" => operation_category, "operationErrorKind" => operation_kind,
+        "failedChecks" => failures, "checks" => OWNERSHIP_FAILURE_CHECKS.to_h { |name| [name, boolean(summary[name])] },
+        "commandChecks" => command})
+    end
+
+    def error_pair_valid?(category, kind)
+      category.instance_of?(String) && kind.instance_of?(String) &&
+        OWNERSHIP_FAILURE_ERROR_KINDS.fetch(category, []).include?(kind)
+    end
+
+    def valid?(value)
+      return false unless value.instance_of?(Hash) && value.keys == OWNERSHIP_FAILURE_FIELDS &&
+        value["schema"].instance_of?(Integer) && value["schema"] == 1 &&
+        %w[platform family helper case phase].all? { |name| value[name].instance_of?(String) } &&
+        OWNERSHIP_FAILURE_PLATFORMS.include?(value["platform"]) && value["family"] == "async" &&
+        OWNERSHIP_FAILURE_HELPERS.include?(value["helper"]) && OWNERSHIP_FAILURE_CASES.include?(value["case"]) &&
+        OWNERSHIP_FAILURE_PHASES.include?(value["phase"]) && value["errorCategory"] != "none" &&
+        error_pair_valid?(value["errorCategory"], value["errorKind"])
+      return true if value["row"].instance_of?(String) && value["row"] == "missing"
+
+      row = value["row"]
+      return false unless value.values_at("phase", "errorCategory", "errorKind") == %w[row-rejection fixture-error ownership-probe] &&
+        row.instance_of?(Hash) && row.keys == OWNERSHIP_FAILURE_ROW_FIELDS &&
+        row["ownerPhase"].instance_of?(String) && OWNERSHIP_FAILURE_OWNER_PHASES.include?(row["ownerPhase"]) &&
+        error_pair_valid?(row["firstErrorCategory"], row["firstErrorKind"]) &&
+        error_pair_valid?(row["operationErrorCategory"], row["operationErrorKind"])
+      failures = row["failedChecks"]
+      return false unless failures.instance_of?(Array) && !failures.empty? &&
+        failures.all? { |name| name.instance_of?(String) } &&
+        failures == OWNERSHIP_FAILURE_FAILED_CHECKS.select { |name| failures.include?(name) }
+      return false if failures.include?("pre-go-barrier-missing") && value["case"] != "async-spawn"
+      return false if failures.include?("nested-cancellation-missing") && value.values_at("helper", "case") != %w[run repeated]
+
+      [["checks", OWNERSHIP_FAILURE_CHECKS], ["commandChecks", OWNERSHIP_FAILURE_COMMAND_CHECKS]].all? do |name, fields|
+        checks = row[name]
+        checks.instance_of?(Hash) && checks.keys == fields && checks.values.all? do |item|
+          item.equal?(true) || item.equal?(false) || item.instance_of?(String) && item == "missing"
+        end
+      end
+    end
+
+    def line(value)
+      return unless valid?(value)
+
+      bytes = "#{OWNERSHIP_FAILURE_PREFIX}#{JSON.generate(value)}\n"
+      bytes.freeze if bytes.ascii_only? && bytes.bytesize <= 4096
+    end
+
+    def parse(stderr, deadline_ns:)
+      return unless stderr.instance_of?(String) && stderr.bytesize <= OUTPUT_LIMIT &&
+        deadline_ns.instance_of?(Integer) && deadline_ns.positive? && UploadProcessFixture.clock_ns < deadline_ns
+
+      found = nil
+      stderr.each_line do |bytes|
+        return unless UploadProcessFixture.clock_ns < deadline_ns
+        next unless bytes.start_with?(OWNERSHIP_FAILURE_PREFIX)
+        return if found || bytes.bytesize > 4096 || !bytes.ascii_only? || !bytes.end_with?("\n")
+
+        found = bytes
+      end
+      return unless found && UploadProcessFixture.clock_ns < deadline_ns
+
+      value = JSON.parse(found.delete_prefix(OWNERSHIP_FAILURE_PREFIX), create_additions: false, max_nesting: 8)
+      return unless line(value) == found && UploadProcessFixture.clock_ns < deadline_ns
+
+      value
+    rescue JSON::ParserError
+      nil
+    end
+  end
+
   # Original fixture callers, not an Open3 facade. Every process syscall is
   # either forwarded under its original Child lease or vetoed BEFORE entry.
   # A veto is always a failed regression, never a containment/finality pass.
@@ -1570,6 +1741,81 @@ module UploadProcessFixture
       @records = []
       @deadline_ns = @input.fetch("deadlineNs")
       raise Failure.new("fixture-input", "ownership cutoff is not original") unless @deadline_ns.instance_of?(Integer)
+    end
+
+    def ownership_failure_phase(phase)
+      # No escaping primary exists yet; even bookkeeping must not consume it.
+      @ownership_failure_phase = phase if @family == "async"
+      nil
+    end
+
+    def ownership_failure_caught(error, phase = @ownership_failure_phase)
+      @ownership_failure_caught = [error, phase].freeze if @family == "async"
+      nil
+    rescue Exception
+      nil
+    end
+
+    def ownership_failure_row(summary, snapshot, operation)
+      # A row rejection has not been constructed. A caller error still escapes.
+      return unless @family == "async" && !summary.fetch("failures").empty?
+
+      OwnershipFailureDiagnostic.row(summary: summary, snapshot: snapshot, owner_phase: @owner&.phase,
+        first: @first, operation: operation)
+    end
+
+    def bind_ownership_failure_row(error, row)
+      @ownership_failure_row = [error, row].freeze if @family == "async" && row
+      nil
+    rescue Exception
+      nil
+    end
+
+    def bind_failed_async_call(probe, error, helper, name)
+      @failed_async_call = [probe, error, helper, name].freeze if @family == "async"
+      nil
+    rescue Exception
+      nil
+    end
+
+    # Called only from the original driver rescue, after one and all its
+    # restores have escaped. A preceding successful probe is never selected.
+    def report_async_failure(error)
+      failed = @failed_async_call
+      return unless @family == "async" && failed && failed[1].equal?(error)
+
+      probe, _original, helper, name = failed
+      probe.report_async_row_failure(error, helper: helper, name: name)
+    rescue Exception
+      nil
+    end
+
+    def report_async_row_failure(error, helper:, name:)
+      return unless @family == "async" && error.is_a?(Exception)
+      return if @ownership_failure_report_attempted
+
+      @ownership_failure_report_attempted = true
+      return unless @deadline_ns.instance_of?(Integer) && UploadProcessFixture.clock_ns < @deadline_ns
+
+      caught = @ownership_failure_caught
+      phase = caught && caught[0].equal?(error) && OWNERSHIP_FAILURE_PHASES.include?(caught[1]) ? caught[1] : "missing"
+      bound = @ownership_failure_row
+      row = phase == "row-rejection" && bound && bound[0].equal?(error) ? bound[1] : "missing"
+      category, kind = OwnershipFailureDiagnostic.error_pair(error)
+      line = OwnershipFailureDiagnostic.line({"schema" => 1, "platform" => @input["platform"], "family" => "async",
+        "helper" => helper, "case" => name, "phase" => phase, "errorCategory" => category, "errorKind" => kind, "row" => row})
+      return unless line && UploadProcessFixture.clock_ns < @deadline_ns
+
+      @ownership_failure_write_attempted = true
+      @ownership_failure_write_complete = STDERR.write(line) == line.bytesize
+      nil
+    rescue Exception => diagnostic_error
+      begin
+        @ownership_failure_diagnostic_error ||= diagnostic_error
+      rescue Exception
+        nil
+      end
+      nil
     end
 
     def event(name, extra = {})
@@ -1975,6 +2221,7 @@ module UploadProcessFixture
     end
 
     def one(helper, name, case_root: nil)
+      ownership_failure_phase("entry")
       UploadProcessFixture.assert_domain_reusable!
       raise Failure.new("ownership-probe", "original ownership row reused") if @case_started
       @case_started = true
@@ -2018,6 +2265,7 @@ module UploadProcessFixture
         observation.observe do
           operation_error = nil
           begin
+            ownership_failure_phase("invoke")
             install
             trace.enable
             invoke
@@ -2029,6 +2277,7 @@ module UploadProcessFixture
             # join/restore pass. A native call already in flight still retains
             # its original owner/error, but its wrapper cannot renew effects.
             Thread.handle_interrupt(Exception => :never) do
+              @ownership_failure_phase = "injector-cleanup"
               context[:lock].synchronize do
                 context[:gate][:active] = false
                 @injectors.each(&:close_launch!)
@@ -2045,6 +2294,7 @@ module UploadProcessFixture
                 cleanup_errors << failure
               end
             end
+            @ownership_failure_phase = "hook-restoration"
             hook_errors.concat(@hooks.restore) if @hooks
           end
           raise operation_error if operation_error
@@ -2055,6 +2305,7 @@ module UploadProcessFixture
       ensure
         trace.disable
       end
+      ownership_failure_phase("snapshot")
       actual_traps = trap_state
       registry_inactive = UploadProcessFixture.instance_variable_get(:@cancellation_scope).nil?
       snapshot = observation.snapshot
@@ -2065,6 +2316,7 @@ module UploadProcessFixture
           entry.start_with?("native-process-", "mrk-process-observation-")
         end
       end
+      ownership_failure_phase("row-checks")
       failures = []
       check = ->(label, value) { failures << label unless value }
       check.call("numeric requests were vetoed", @unsafe_signals.empty? && @unsafe_waits.empty?)
@@ -2141,23 +2393,37 @@ module UploadProcessFixture
         "prepublishedInjectors" => @injector_requests.map { |entry| {"enteredBeforeCreator" => entry[:entered],
           "parentBound" => entry[:slot].parent_slot.equal?(entry[:creator]), "sent" => entry[:sent],
           "runDeadlineNs" => entry[:slot].run_deadline_ns, "hardDeadlineNs" => entry[:slot].hard_cleanup_deadline_ns} })
+      failure_row = ownership_failure_row(summary, snapshot, error)
+      ownership_failure_phase("proof-publication")
       raise Failure.new("ownership-probe", "ownership proof exceeds original reporting bound") if JSON.generate(detail).bytesize > OUTPUT_LIMIT
       UploadProcessFixture.atomic_json(proof, detail)
       summary["proofSha256"] = Digest::SHA256.file(proof).hexdigest
       @records << summary
-      raise Failure.new("ownership-probe", JSON.generate(summary)) unless failures.empty?
+      unless failures.empty?
+        ownership_failure_phase("row-rejection")
+        rejection = Failure.new("ownership-probe", JSON.generate(summary))
+        bind_ownership_failure_row(rejection, failure_row)
+        raise rejection
+      end
+      ownership_failure_phase("case-cleanup")
       UploadProcessFixture.remove_fixture_directory(@case_root, root: @directory, layout: :joined_case) unless retained || case_root
       summary
-    rescue Exception
+    rescue Exception => failure
+      ownership_failure_caught(failure)
       UploadProcessFixture.mark_process_domain_failed!(owner: self)
       raise
     ensure
-      trace&.disable
-      if @context
-        @context[:lock].synchronize { @context[:gate][:active] = false }
+      begin
+        trace&.disable
+        if @context
+          @context[:lock].synchronize { @context[:gate][:active] = false }
+        end
+        saved&.each { |key, handler| Signal.trap(key, handler) }
+        environment&.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+      rescue Exception => failure
+        ownership_failure_caught(failure, "restoration")
+        raise
       end
-      saved&.each { |key, handler| Signal.trap(key, handler) }
-      environment&.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
     end
 
     def execute
@@ -2171,7 +2437,13 @@ module UploadProcessFixture
           raise Failure.new("ownership-probe", "original family deadline expired") unless UploadProcessFixture.clock_ns < @deadline_ns
           probe = self.class.new(@directory, @family)
           @case_probes << probe # Never repurpose a late wrapper's receiver.
-          @records << probe.one(helper, name)
+          record = begin
+            probe.one(helper, name)
+          rescue Exception => failure
+            bind_failed_async_call(probe, failure, helper, name)
+            raise
+          end
+          @records << record
         end
       end
       {"kind" => "pass", "family" => @family, "cases" => @records, "retainedFixture" => false}
@@ -2718,7 +2990,7 @@ module UploadProcessFixture
     end
   end
 
-  def self.run_ownership_probe(platform:, root:, parameters:, mode:, deadline_ns: nil)
+  def self.run_ownership_probe(platform:, root:, parameters:, mode:, deadline_ns: nil, ownership_failure_state: nil)
     assert_domain_reusable!
     validate_request!(platform, mode, parameters)
     unless mode.start_with?("ownership-") && (deadline_ns.nil? || deadline_ns.instance_of?(Integer) && deadline_ns > clock_ns)
@@ -2769,7 +3041,20 @@ module UploadProcessFixture
           end
           dispatch = JSON.parse(OwnedChild.bounded_file(File.join(directory, "ownership-dispatch.json")))
           raise Failure.new("ownership-probe", "probe dispatch was not the original CLI") unless dispatch == request.merge("pid" => child["pid"])
-          raise Failure.new("ownership-probe", "probe failed with original exit #{status}") unless status == 0
+          unless status == 0
+            rejection = Failure.new("ownership-probe", "probe failed with original exit #{status}")
+            # No diagnostic is published here. The SAME rejection must survive
+            # the original outer Lifetime, cleanup and policy restoration first.
+            begin
+              if ownership_failure_state.instance_of?(Hash) && mode == "ownership-async"
+                ownership_failure_state.merge!(rejection: rejection, stderr: errors, platform: platform,
+                  mode: mode, deadline_ns: run_ns)
+              end
+            rescue Exception
+              nil # Optional state cannot replace the already selected rejection.
+            end
+            raise rejection
+          end
           result = JSON.parse(output)
           unless result.is_a?(Hash) && result["kind"] == "pass" && result["cases"].is_a?(Array) &&
                  result["cases"].all? { |entry| entry.is_a?(Hash) && entry["failures"] == [] }

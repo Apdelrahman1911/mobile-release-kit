@@ -1103,8 +1103,41 @@ module UploadProcessFixture
     nil
   end
 
+  def report_ownership_failure(state, original, platform:, mode:, callback:)
+    return unless state.instance_of?(Hash) && original.instance_of?(Failure) && state[:rejection].equal?(original)
+    return if state[:report_attempted]
+
+    state[:report_attempted] = true
+    return unless mode.instance_of?(String) && mode == "ownership-async" &&
+      platform.instance_of?(String) && OWNERSHIP_FAILURE_PLATFORMS.include?(platform) &&
+      state[:platform].instance_of?(String) && state[:platform] == platform &&
+      state[:mode].instance_of?(String) && state[:mode] == mode && callback.instance_of?(String) &&
+      callback == "#{ADAPTER_FAILURE_CLASSES.fetch(platform)}#test_process_ownership_async_through_both_real_fixture_callers"
+
+    deadline_ns = state.fetch(:deadline_ns)
+    return unless deadline_ns.instance_of?(Integer) && deadline_ns.positive? && clock_ns < deadline_ns
+
+    value = OwnershipFailureDiagnostic.parse(state.fetch(:stderr), deadline_ns: deadline_ns)
+    return unless value && value["platform"] == platform && value["family"] == "async"
+
+    line = OwnershipFailureDiagnostic.line(value)
+    return unless line && clock_ns < deadline_ns
+
+    state[:write_attempted] = true
+    state[:write_complete] = STDERR.write(line) == line.bytesize
+    nil
+  rescue Exception => diagnostic_error
+    begin
+      state[:diagnostic_error] ||= diagnostic_error if state.instance_of?(Hash)
+    rescue Exception
+      nil
+    end
+    nil
+  end
+
   def run(platform:, root:, parameters:, mode:, observe_signals: false, deadline_ns: nil,
-          primary_failure_state: nil, order_failure_state: nil, setup_failure_state: nil, adapter_failure_state: nil)
+          primary_failure_state: nil, order_failure_state: nil, setup_failure_state: nil, adapter_failure_state: nil,
+          ownership_failure_state: nil)
     assert_domain_reusable!
     validate_request!(platform, mode, parameters)
     validate_signal_observation!(platform, mode, observe_signals)
@@ -1116,14 +1149,14 @@ module UploadProcessFixture
         run(platform: platform, root: root, parameters: parameters, mode: mode,
             observe_signals: true, deadline_ns: deadline_ns, primary_failure_state: primary_failure_state,
             order_failure_state: order_failure_state, setup_failure_state: setup_failure_state,
-            adapter_failure_state: adapter_failure_state)
+            adapter_failure_state: adapter_failure_state, ownership_failure_state: ownership_failure_state)
       end
     end
     if observe_signals && !NativeSignalProbe.current.parent_for?(root, mode)
       raise Failure.new("fixture-input", "native signal observer scope does not match the run")
     end
     return run_ownership_probe(platform: platform, root: root, parameters: parameters, mode: mode,
-                               deadline_ns: deadline_ns) if mode.start_with?("ownership-")
+                               deadline_ns: deadline_ns, ownership_failure_state: ownership_failure_state) if mode.start_with?("ownership-")
     run_ns = [clock_ns + DRIVER_LIMIT * 1_000_000_000, deadline_ns].compact.min
     hard_ns = [run_ns + CLEANUP_LIMIT * 1_000_000_000, deadline_ns].compact.min
     accepted = lifetime(deadline_ns: hard_ns) do |scope|
@@ -4730,24 +4763,39 @@ module UploadProcessFixture
     elsif mode == "ownership-observation"
       ObservationProbe.new(directory).execute
     else
-      OwnershipProbe.new(directory, mode.delete_prefix("ownership-")).execute
+      probe = OwnershipProbe.new(directory, mode.delete_prefix("ownership-"))
+      probe.execute
     end
+  rescue Exception => original
+    begin
+      probe.report_async_failure(original) if mode == "ownership-async" && probe
+    rescue Exception
+      nil
+    end
+    raise
   end
 
   module Contracts
     def with_adapter_failure_diagnostic(platform:, mode:)
       state = {} if UploadProcessFixture.adapter_failure_mode?(platform, mode)
-      yield(state ? {adapter_failure_state: state} : {})
+      ownership_state = {} if mode.instance_of?(String) && mode == "ownership-async" &&
+        platform.instance_of?(String) && UploadProcessFixture::OWNERSHIP_FAILURE_PLATFORMS.include?(platform)
+      optional = state ? {adapter_failure_state: state} : {}
+      optional[:ownership_failure_state] = ownership_state if ownership_state
+      yield(optional)
     rescue Exception => original
       # Only the same post-run Lifetime rejection may report; no new primary.
       begin
         UploadProcessFixture.report_adapter_failure(state, original, platform: platform, mode: mode,
           callback: "#{self.class.name}##{name}") if state
+        UploadProcessFixture.report_ownership_failure(ownership_state, original, platform: platform, mode: mode,
+          callback: "#{self.class.name}##{name}") if ownership_state
       rescue Exception => diagnostic_error
         begin
-          if state.instance_of?(Hash)
-            state[:report_attempted] = true # A failed callback lookup is not retryable.
-            state[:diagnostic_error] ||= diagnostic_error
+          diagnostic_state = ownership_state || state
+          if diagnostic_state.instance_of?(Hash)
+            diagnostic_state[:report_attempted] = true # A failed callback lookup is not retryable.
+            diagnostic_state[:diagnostic_error] ||= diagnostic_error
           end
         rescue Exception
           nil

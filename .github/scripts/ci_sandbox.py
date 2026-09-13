@@ -2091,7 +2091,51 @@ class Session:
         _private_file(self.cleanup_policy, cleanup.encode(), 0o444)
         _private_file(self.write_policy, write_positive.encode(), 0o444)
 
-    def _environment(self, values: dict[str, str]) -> dict[str, str]:
+    def _validate_installed_bundle_input(self, *, deadline: float | None) -> None:
+        """Admit only the frozen positive wheel's original Gemfile/lock pair.
+
+        The fixed parent names must also be protected from subject replacement.
+        These transient file observations are not a new execution role or a
+        persistent receipt; the existing wheel inspection/freeze remain required.
+        """
+        if (type(deadline) not in (int, float) or not math.isfinite(deadline)
+                or not 0 < deadline <= self.deadline):
+            raise SessionError("installed Bundler input requires its original explicit cutoff")
+        _remaining(deadline)
+        wheel = self.work / "wheel-venv"
+        tooling = wheel / "share/mobile-release-kit"
+        directories = ((self.root, 0o755, None), (self.work, 0o755, 0),
+                       (self.source, 0o555, 0), (wheel, 0o555, 0),
+                       (wheel / "share", 0o555, 0), (tooling, 0o555, 0))
+
+        def directory_node(path: Path, mode: int, group: int | None) -> tuple:
+            _remaining(deadline)
+            if _canonical(path) != path:
+                raise SessionError("installed Bundler ancestor has a noncanonical alias")
+            info = path.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
+                    or group is not None and info.st_gid != group
+                    or stat.S_IMODE(info.st_mode) != mode):
+                raise SessionError("installed Bundler ancestor is not the original frozen layout")
+            node = (*_home_node(info), stat.S_IMODE(info.st_mode))
+            _remaining(deadline)
+            return node
+
+        originals = tuple(directory_node(*entry) for entry in directories)
+        for name in ("Gemfile", "Gemfile.lock"):
+            original, source_identity = _native_file(self.source / name, deadline=deadline,
+                uid=self.uid, gid=self.gid, root_owned=True, maximum=64 * 1024)
+            installed, installed_identity = _native_file(tooling / name, deadline=deadline,
+                uid=self.uid, gid=self.gid, root_owned=True, maximum=64 * 1024)
+            if (stat.S_IMODE(source_identity[2]) != 0o444 or stat.S_IMODE(installed_identity[2]) != 0o444
+                    or not original or installed != original):
+                raise SessionError("installed Bundler input is not the frozen original source pair")
+        for entry, original in zip(directories, originals):
+            if directory_node(*entry) != original:
+                raise SessionError("installed Bundler ancestor changed during input admission")
+        _remaining(deadline)
+
+    def _environment(self, values: dict[str, str], *, deadline: float | None = None) -> dict[str, str]:
         if not isinstance(values, dict) or set(values) - _ENV_KEYS:
             raise SessionError("unapproved environment key")
         if any(not isinstance(v, str) or "\0" in v or len(v) > 32768 for v in values.values()):
@@ -2133,16 +2177,21 @@ class Session:
                                   or not _under(Path(result[key]), self.work)):
                 raise SessionError("mutable environment path outside private work")
         for key, wanted in (("PIP_FIND_LINKS", self.inputs / "python"),
-                            ("BUNDLE_CACHE_PATH", self.inputs / "gems"),
-                            ("BUNDLE_GEMFILE", self.source / "Gemfile")):
+                            ("BUNDLE_CACHE_PATH", self.inputs / "gems")):
             if key in result and result[key] != str(wanted):
                 raise SessionError("offline input environment path differs from immutable input")
+        gemfile = result.get("BUNDLE_GEMFILE")
+        installed_gemfile = str(self.work / "wheel-venv/share/mobile-release-kit/Gemfile")
+        if gemfile not in (None, str(self.source / "Gemfile"), installed_gemfile):
+            raise SessionError("offline input environment path differs from immutable input")
         for component in result["PATH"].split(":"):
             p = Path(component)
             if not p.is_absolute() or ".." in p.parts or not any(
                 _under(p, x) for x in (*self.tool_prefixes, self.work, Path("/usr"), Path("/bin"), Path("/sbin"))
             ):
                 raise SessionError("untrusted executable PATH component")
+        if gemfile == installed_gemfile:
+            self._validate_installed_bundle_input(deadline=deadline)
         return result
 
     def _native_deadline(self, deadline: float) -> float:
@@ -3766,7 +3815,7 @@ class Session:
             if (getattr(self, "_native_preparing", None) is not None
                     or any(not state["closed"] for state in getattr(self, "_native_authority", {}).values())):
                 raise SessionError("ordinary launch cannot overlap an unresolved native authority phase")
-            child_env = self._environment(env)
+            child_env = self._environment(env, deadline=bound)
         command, kwargs = self._argv(argv, cpu_seconds, profile=profile)
         try:
             _remaining(bound)

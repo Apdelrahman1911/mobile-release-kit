@@ -1742,6 +1742,7 @@ class NativeUploadValidationTest < Minitest::Test
       assert_native_order_failure_projection
       assert_native_setup_failure_projection
       assert_adapter_failure_projection
+      assert_ownership_failure_projection
       assert_missing_cleanup_omission_evidence
       assert_missing_cleanup_watchdog_lifecycle
 
@@ -3003,7 +3004,7 @@ class NativeUploadValidationTest < Minitest::Test
       2.times do
         assert_same successful, receiver.with_adapter_failure_diagnostic(platform: "ios", mode: "real-deadline") { |optional| handoffs << optional; successful }
       end
-      [["native", "real-deadline"], ["ios", "native-setup-interrupt"], ["ios", "ownership-async"], ["android", "kill-descendant"]].each do |platform, mode|
+      [["native", "real-deadline"], ["ios", "native-setup-interrupt"], ["ios", "ownership-signals"], ["android", "kill-descendant"]].each do |platform, mode|
         assert_same successful, receiver.with_adapter_failure_diagnostic(platform: platform, mode: mode) { |optional| assert_empty optional; successful }
       end
       assert_raises(Minitest::Assertion) do
@@ -3014,6 +3015,434 @@ class NativeUploadValidationTest < Minitest::Test
     assert_empty writes
     assert_equal 3, handoffs.map { |optional| optional.fetch(:adapter_failure_state).object_id }.uniq.length
     assert handoffs.all? { |optional| optional.keys == [:adapter_failure_state] && optional[:adapter_failure_state].empty? }
+  end
+
+  def assert_ownership_failure_projection
+    # Actual projection/caller control flow over source-defined inert objects.
+    # No synthetic observation below is a native receipt or cleanup authority.
+    fixture, probe_class = UploadProcessFixture, UploadProcessFixture::OwnershipProbe
+    diagnostic = UploadProcessFixture::OwnershipFailureDiagnostic
+    prefix = "MRK_OWNERSHIP_ASYNC_FAILURE="
+    callback = "test_process_ownership_async_through_both_real_fixture_callers"
+    classes = {"ios" => "IosUploadValidationTest", "android" => "AndroidUploadValidationTest"}
+    with_stubs = lambda do |bindings, &body|
+      if bindings.empty?
+        body.call
+      else
+        receiver, method, replacement = bindings.first
+        receiver.stub(method, replacement) { with_stubs.call(bindings.drop(1), &body) }
+      end
+    end
+    # Inert delivery seams at pre-primary bookkeeping. They model an exception
+    # arriving there, not a native/signal delivery receipt. Even StandardError
+    # may be a caller interruption, so none may be consumed as logging failure.
+    [Interrupt.new("private-marker"), SystemExit.new(19, "private-marker"), IOError.new("private-marker")].each do |original|
+      probe = probe_class.allocate
+      family = Object.new
+      family.define_singleton_method(:==) { |_other| raise original }
+      probe.instance_variable_set(:@family, family)
+      later, failed_domain = [], []
+      with_stubs.call([
+        [fixture, :assert_domain_reusable!, -> { later << :domain_entry }],
+        [fixture, :mark_process_domain_failed!, ->(**_) { failed_domain << :original_rescue }],
+      ]) do
+        actual = assert_raises(original.class) { probe.one("capture", "async-spawn"); later << :continued }
+        assert_same original, actual
+      end
+      assert_empty later
+      assert_equal [:original_rescue], failed_domain
+      probe.instance_variable_set(:@family, "async")
+      diagnostic.stub(:row, ->(**_) { raise original }) do
+        actual = assert_raises(original.class) do
+          probe.ownership_failure_row({"failures" => ["known cancellation did not finish original ownership"]}, {}, nil)
+          later << :continued
+        end
+        assert_same original, actual
+      end
+      assert_empty later
+    end
+    labels = [
+      ["numeric requests were vetoed", "numeric-route-veto"],
+      ["original handler policy not restored", "handlers-not-restored"],
+      ["lifetime registry remains active", "registry-active"],
+      ["observation hooks not restored", "hooks-not-restored"],
+      ["independent injector cleanup failed", "injector-cleanup"],
+      ["original error object/message replaced", "primary-not-preserved"],
+      ["original injectors not joined", "injectors-not-joined"],
+      ["original injector custody/gate changed", "injector-custody"],
+      ["pending cancellation leaked", "pending-interrupt"],
+      ["cancellation/lost-publication fault not propagated", "cancellation-not-propagated"],
+      ["original injection boundary missing", "injection-boundary-missing"],
+      ["wrong original cancellation signal", "wrong-signal"],
+      ["known cancellation did not finish original ownership", "command-not-finalized"],
+      ["native creator published GO before caller cancellation", "pre-go-barrier-missing"],
+      ["nested cleanup cancellation not exercised", "nested-cancellation-missing"],
+      ["known case left an unresolved reusable domain", "fixture-retained"],
+    ]
+    assert_equal labels.to_h, fixture::OWNERSHIP_FAILURE_LABEL_CODES
+    assert_equal labels.map(&:last), fixture::OWNERSHIP_FAILURE_FAILED_CHECKS
+    assert_equal MobileReleaseKit::NativeUploadProcess::REASONS + ["other"], fixture::OWNERSHIP_FAILURE_ERROR_KINDS.fetch("native-lifecycle-error")
+    assert_equal MobileReleaseKit::NativeProcessSpawn::CODES + ["other"], fixture::OWNERSHIP_FAILURE_ERROR_KINDS.fetch("native-spawn-error")
+    first = Interrupt.new("private-marker")
+    raw_summary = {"failures" => [labels[12].first], "firstExceptionPreserved" => false,
+      "handlersRestored" => true, "pendingInterrupt" => false, "retainedFixture" => true, "private" => "private-marker"}
+    raw_snapshot = {"settled" => false, "unknown" => true, "observerErrors" => [], "private" => "private-marker", "pid" => 999_887_766}
+    row = diagnostic.row(summary: raw_summary, snapshot: raw_snapshot, owner_phase: :reaped, first: first, operation: first)
+    expected = {"schema" => 1, "platform" => "ios", "family" => "async", "helper" => "capture", "case" => "async-spawn",
+      "phase" => "row-rejection", "errorCategory" => "fixture-error", "errorKind" => "ownership-probe", "row" => row}
+    packet = diagnostic.line(expected)
+    assert_equal "#{prefix}#{JSON.generate(expected)}\n", packet
+    assert packet.frozen? && packet.ascii_only?
+    assert_operator packet.bytesize, :<=, 4096
+    assert row.frozen? && row.fetch("failedChecks").frozen? && row.fetch("checks").frozen? && row.fetch("commandChecks").frozen?
+    assert_equal [false, true, "missing", "missing", "missing", false, true], row.fetch("checks").values
+    assert_equal [false, "missing", true, "missing", "missing", "missing", "missing", true], row.fetch("commandChecks").values
+    refute_includes packet, "private-marker"
+    refute_includes packet, "999887766"
+    raw_summary.fetch("failures").clear
+    raw_summary["firstExceptionPreserved"] = true
+    raw_snapshot["settled"] = true
+    raw_snapshot.fetch("observerErrors") << "private-marker"
+    assert_equal ["command-not-finalized"], row.fetch("failedChecks")
+    refute row.fetch("checks").fetch("firstExceptionPreserved")
+    refute row.fetch("commandChecks").fetch("settled")
+    assert row.fetch("commandChecks").fetch("observerErrorsEmpty")
+    labels.each do |label, code|
+      projected = diagnostic.row(summary: {"failures" => [label]}, snapshot: {}, owner_phase: nil, first: nil, operation: nil)
+      value = expected.merge("helper" => "run", "case" => code == "nested-cancellation-missing" ? "repeated" : "async-spawn", "row" => projected)
+      assert_equal [code], projected.fetch("failedChecks")
+      assert_equal ["missing", "none", "none", "none", "none"], projected.values_at(*fixture::OWNERSHIP_FAILURE_ROW_FIELDS.first(5))
+      assert diagnostic.line(value)
+    end
+    assert_raises(KeyError) { diagnostic.row(summary: {"failures" => ["private-marker"]}, snapshot: {}, owner_phase: nil, first: nil, operation: nil) }
+    [[nil, "none", "none"], [first, "interrupt", "none"], [SignalException.new("TERM"), "signal", "none"],
+     [SystemExit.new(19, "private-marker"), "system-exit", "none"], [IOError.new("private-marker"), "io-error", "none"],
+     [fixture::Failure.new("fixture-cleanup", "private-marker"), "fixture-error", "fixture-cleanup"],
+     [fixture::Failure.new("private-marker", "private-marker"), "fixture-error", "other"],
+     [MobileReleaseKit::NativeUploadProcess::LifecycleError.new("deadline"), "native-lifecycle-error", "deadline"],
+     [MobileReleaseKit::NativeProcessSpawn::Error.new("wait"), "native-spawn-error", "wait"],
+     [Errno::ECHILD.new("private-marker"), "os-error", "echild"], [RuntimeError.new("private-marker"), "other", "none"]].each do |error, category, kind|
+      assert_equal [category, kind], diagnostic.error_pair(error)
+    end
+    malformed = [expected.merge("schema" => true), expected.merge("platform" => "native"), expected.merge("family" => "signals"),
+      expected.merge("helper" => "private-marker"), expected.merge("case" => "normal"), expected.merge("phase" => "snapshot"),
+      expected.merge("errorCategory" => "interrupt", "errorKind" => "none"), expected.merge("private" => "private-marker"),
+      expected.merge("row" => row.merge("failedChecks" => [])), expected.merge("row" => row.merge("failedChecks" => ["command-not-finalized"] * 2)),
+      expected.merge("row" => row.merge("checks" => row.fetch("checks").merge("pendingInterrupt" => 0))),
+      expected.merge("row" => row.merge("failedChecks" => ["nested-cancellation-missing"])),
+      expected.merge("case" => "repeated", "row" => row.merge("failedChecks" => ["pre-go-barrier-missing"]))]
+    malformed.each { |value| assert_nil diagnostic.line(value) }
+    fixture.stub(:clock_ns, 1) do
+      assert_equal expected, diagnostic.parse("private chatter\n#{packet}", deadline_ns: 10)
+      [packet * 2, packet.chomp, packet.sub("\n", "\r\n"), packet.sub('"schema":1', '"schema":1,"schema":1'),
+       packet.sub('{', '{ '), "#{prefix}{bad}\n", "#{prefix}#{'x' * 4096}\n", "#{prefix}é\n"].each do |bytes|
+        assert_nil diagnostic.parse(bytes, deadline_ns: 10)
+      end
+      assert_nil diagnostic.parse(packet, deadline_ns: 1)
+    end
+
+    # Run actual one -> execute -> driver-rescue. Directory, proof, observation,
+    # trace and signal endpoints are inert; acquisition veto remains outside.
+    produce = lambda do |helper: "capture", name: "async-spawn", platform: "ios", fault: nil, write_result: :full|
+      now, constructions, current, lookalike = 1, 0, nil, nil
+      events, writes, proofs, rows = [], [], [], []
+      directory = "/inert-ownership-driver"
+      input = {"platform" => platform, "parameters" => {}, "mode" => "ownership-async", "deadlineNs" => 10}
+      late = IOError.new("private-marker")
+      first_error = Interrupt.new("private-marker")
+      snapshot = fixture::OWNERSHIP_FAILURE_COMMAND_CHECKS.reject { |key| key == "observerErrorsEmpty" }.to_h { |key| [key, true] }
+      snapshot.merge!("noProducers" => false, "unknown" => false, "observerErrors" => [])
+      digest = Struct.new(:hexdigest).new("a" * 64)
+      trace = Object.new
+      trace.define_singleton_method(:enable) { events << :trace_enabled }
+      trace.define_singleton_method(:disable) { events << :trace_disabled }
+      observation = Object.new
+      observation.define_singleton_method(:observe) { |&body| body.call }
+      observation.define_singleton_method(:snapshot) do
+        events << :snapshot
+        raise late if fault == :snapshot && current.instance_variable_get(:@target)
+        snapshot.merge("settled" => !current.instance_variable_get(:@target), "unknown" => !!current.instance_variable_get(:@target))
+      end
+      fresh = lambda do
+        probe = probe_class.allocate
+        {directory: directory, family: "async", input: input, deadline_ns: 10, records: []}.each do |key, value|
+          probe.instance_variable_set(:"@#{key}", value)
+        end
+        probe
+      end
+      driver_probe = fresh.call
+      constructor = lambda do |selected_directory, family|
+        raise "inert constructor scope changed" unless selected_directory == directory && family == "async"
+        constructions += 1
+        next driver_probe if constructions == 1
+        raise late if fault == :next_constructor && constructions == 3
+        probe = fresh.call
+        original_one = probe.method(:one)
+        probe.define_singleton_method(:one) do |selected_helper, selected_name|
+          current = self
+          @target = selected_helper == helper && selected_name == name && !%i[success next_constructor next_cutoff].include?(fault)
+          @case_started = true if @target && fault == :entry
+          rows << [selected_helper, selected_name]
+          begin
+            value = original_one.call(selected_helper, selected_name, case_root: directory)
+            now = 10 if fault == :next_cutoff
+            value
+          ensure
+            now = 10 if @target && fault == :before_report
+          end
+        end
+        probe.define_singleton_method(:install) { nil }
+        probe.define_singleton_method(:trap_state) { {"INT" => "DEFAULT", "TERM" => "DEFAULT"} }
+        probe.define_singleton_method(:invoke) do
+          @owner = Struct.new(:phase).new(:reaped)
+          @first, @first_message = first_error, first_error.message
+          @events << {"boundary" => "inert-original-cancellation"}
+          @pre_go_cancellation = @nested_cancelled = true
+          raise(@target && fault == :first_replaced ? Interrupt.new(first_error.message) : first_error)
+        end
+        probe
+      end
+      environment = {}
+      formatter = diagnostic.method(:line)
+      projection = lambda do |value|
+        raise late if fault == :format
+        value = formatter.call(value)
+        now = 10 if fault == :before_write
+        value
+      end
+      sink = lambda do |bytes|
+        events << :write
+        writes << bytes
+        raise write_result if write_result.is_a?(Exception)
+        write_result == :short ? 1 : bytes.bytesize
+      end
+      bindings = [
+        [fixture, :clock_ns, -> { now }], [fixture, :read_json, input],
+        [fixture, :validate_driver_input!, ->(_directory, value, **_) { value }],
+        [fixture::OwnedChild, :write_record, ->(*) { events << :dispatch }], [File, :realpath, ->(path) { path }],
+        [Digest::SHA256, :file, digest], [probe_class, :new, constructor], [fixture::CommandObservation, :new, observation],
+        [TracePoint, :new, trace], [Signal, :trap, ->(*) do
+          events << :restore
+          if current&.instance_variable_get(:@target)
+            raise late if fault == :restoration
+            if fault == :restoration_lookalike
+              original = current.instance_variable_get(:@ownership_failure_caught).first
+              lookalike ||= fixture::Failure.new(original.kind, original.message)
+              raise lookalike
+            end
+          end
+        end],
+        [ENV, :[], ->(key) { environment[key] }], [ENV, :[]=, ->(key, value) { environment[key] = value }],
+        [ENV, :delete, ->(key) { environment.delete(key) }], [ENV, :to_h, {}], [Thread.current, :pending_interrupt?, false],
+        [fixture, :cleanup_unresolved?, false], [fixture, :fixture_entry_names, []],
+        [fixture, :mark_process_domain_failed!, ->(**_) { events << :failed_domain }],
+        [fixture, :atomic_json, ->(_path, value) { events << :proof; raise late if fault == :proof && current.instance_variable_get(:@target); proofs << value }],
+        [diagnostic, :line, projection], [STDERR, :write, sink],
+      ]
+      actual = nil
+      with_stubs.call(bindings) do
+        if fault == :success
+          assert_equal "pass", fixture.ownership_driver(directory, "ownership-async").fetch("kind")
+        else
+          actual = assert_raises(fixture::Failure, IOError) { fixture.ownership_driver(directory, "ownership-async") }
+          driver_probe.report_async_failure(actual) # A failed or short first write cannot authorize retry.
+          driver_probe.report_async_failure(fixture::Failure.new("ownership-probe", actual.message))
+        end
+      end
+      # A real original ensure stops at the replacement trap error. Reflect
+      # that failure honestly; this hash is inert, not the interpreter ENV.
+      assert_equal(%i[restoration restoration_lookalike].include?(fault) ?
+        %w[TMPDIR TMP TEMP].to_h { |key| [key, directory] } : {}, environment)
+      assert_operator writes.length, :<=, 1
+      refute_includes writes.join, "private-marker"
+      if writes.any?
+        assert_operator events.index(:write), :>, events.rindex(:restore) if events.include?(:restore)
+      end
+      {error: actual, writes: writes, row: writes.empty? ? nil : JSON.parse(writes.first.delete_prefix(prefix)),
+       proofs: proofs, rows: rows, late: late, probe: current, driver: driver_probe}
+    end
+    fixture::OWNERSHIP_FAILURE_HELPERS.product(fixture::OWNERSHIP_FAILURE_CASES).each do |helper, name|
+      outcome = produce.call(helper: helper, name: name, platform: helper == "capture" ? "ios" : "android")
+      value = outcome.fetch(:row)
+      assert_equal [helper, name, "row-rejection", "fixture-error", "ownership-probe"], value.values_at("helper", "case", "phase", "errorCategory", "errorKind")
+      assert_equal %w[command-not-finalized fixture-retained], value.fetch("row").fetch("failedChecks")
+      assert_equal %w[interrupt none interrupt none], value.fetch("row").values_at("firstErrorCategory", "firstErrorKind", "operationErrorCategory", "operationErrorKind")
+      assert value.fetch("row").fetch("checks").fetch("firstExceptionPreserved")
+    end
+    replaced = produce.call(fault: :first_replaced).fetch(:row).fetch("row")
+    assert_equal %w[primary-not-preserved command-not-finalized fixture-retained], replaced.fetch("failedChecks")
+    refute replaced.fetch("checks").fetch("firstExceptionPreserved")
+    {entry: "entry", snapshot: "snapshot", proof: "proof-publication", restoration: "restoration"}.each do |fault, phase|
+      outcome = produce.call(fault: fault)
+      value = outcome.fetch(:row)
+      assert_equal [phase, "missing"], value.values_at("phase", "row")
+      assert_same outcome.fetch(:late), outcome.fetch(:error) unless fault == :entry
+    end
+    lookalike = produce.call(fault: :restoration_lookalike)
+    assert_equal ["restoration", "fixture-error", "ownership-probe", "missing"], lookalike.fetch(:row).values_at("phase", "errorCategory", "errorKind", "row")
+    bound = lookalike.fetch(:probe).instance_variable_get(:@ownership_failure_row).first
+    assert_equal bound.message, lookalike.fetch(:error).message
+    refute_same bound, lookalike.fetch(:error)
+    %i[next_constructor next_cutoff success format before_report before_write].each { |fault| assert_empty produce.call(fault: fault).fetch(:writes) }
+    [:short, IOError.new("private-marker"), Interrupt.new("private-marker"), SystemExit.new(19, "private-marker")].each do |write_result|
+      outcome = produce.call(write_result: write_result)
+      assert_equal 1, outcome.fetch(:writes).length
+      assert_equal "ownership-probe", outcome.fetch(:error).kind
+      if write_result.is_a?(Exception)
+        assert_same write_result, outcome.fetch(:probe).instance_variable_get(:@ownership_failure_diagnostic_error)
+      else
+        refute outcome.fetch(:probe).instance_variable_get(:@ownership_failure_write_complete)
+      end
+    end
+
+    # Original parent custody/request/dispatch checks, optional state transfer,
+    # and complete real Lifetime unwind precede the actual Contracts relay.
+    relay = lambda do |platform: "ios", fault: nil, stderr: packet, write_result: :full|
+      now, dispatch, snapshot, state, escaped = 1, nil, nil, nil, nil
+      events, writes, supplied_states = [], [], []
+      directory, mode = "/inert-ownership-parent", "ownership-async"
+      digest = Struct.new(:hexdigest).new("a" * 64)
+      policy = Object.new
+      depth = 0
+      policy.define_singleton_method(:install) { events << :install }
+      policy.define_singleton_method(:cleanup_depth) { depth }
+      policy.define_singleton_method(:cleanup) do |&body|
+        depth += 1
+        begin
+          body.call
+        ensure
+          events << :cleanup
+          depth -= 1
+        end
+      end
+      policy.define_singleton_method(:restore) { |&body| body.call; events << :restored }
+      policy.define_singleton_method(:errors) { [] }
+      policy.define_singleton_method(:replay_custom_pending) { events << :replay }
+      observation = Object.new
+      observation.define_singleton_method(:observe) { |&body| body.call }
+      observation.define_singleton_method(:snapshot) { snapshot }
+      capture = lambda do |argv, seconds:, environment:, root:, deadline:|
+        raise "inert original cutoff changed" unless deadline == Rational(10, 1_000_000_000) && seconds == Rational(9, 1_000_000_000) && root == directory
+        events << :captured
+        dispatch = {"version" => 1, "argv" => argv, "environment" => environment, "cwd" => Dir.pwd,
+          "fixtureSha256" => digest.hexdigest, "deadlineNs" => 10, "pid" => 701}
+        requested = {"executable" => argv.first, "argv" => argv, "environment" => environment, "cwd" => Dir.pwd}
+        snapshot = {"settled" => true, "actualOwnedControlCloses" => true, "actualTaskJoins" => true,
+          "children" => [{"pid" => 701, "finality" => "finalized", "originalWaitObserved" => true, "creatorJoinObserved" => true,
+            "actualStreamEOFs" => true, "actualNativeCloses" => true, "provenance" => {"requested" => requested}}]}
+        snapshot["settled"] = false if fault == :custody
+        requested["cwd"] = "/wrong-inert-request" if fault == :request
+        dispatch["pid"] = 702 if fault == :dispatch
+        ["not-json-success", stderr, 1] # Failed status must remain a rejection without parsing stdout.
+      end
+      receiver = Object.new.extend(fixture::Contracts)
+      receiver.define_singleton_method(:name) { fault == :callback ? "test_other" : callback }
+      replacement = IOError.new("private-marker")
+      formatter = diagnostic.method(:line)
+      projection_count = 0
+      project = lambda do |value|
+        projection_count += 1
+        raise replacement if fault == :format
+        value = formatter.call(value)
+        now = 10 if fault == :before_write && projection_count == 2
+        value
+      end
+      sink = lambda do |bytes|
+        assert_nil fixture.instance_variable_get(:@cancellation_scope)
+        assert_equal :unwound, events.last
+        writes << bytes
+        raise write_result if write_result.is_a?(Exception)
+        write_result == :short ? 1 : bytes.bytesize
+      end
+      saved = %i[@probe_records @unresolved_roots].to_h do |key|
+        [key, [fixture.instance_variable_defined?(key), fixture.instance_variable_get(key)]]
+      end
+      saved.each_key { |key| fixture.instance_variable_set(key, {}) }
+      # Preserve the outer acquisition-veto method without nesting Minitest's
+      # same-name alias. This hook returns data only and is restored by identity.
+      directory_hook = fixture::CaptureObservation::Hooks.new
+      directory_hook.wrap(Dir.singleton_class, :mktmpdir) { |*| directory }
+      bindings = [
+        [fixture, :clock_ns, -> { now }], [fixture::CancellationScope, :new, policy], [Thread.current, :pending_interrupt?, false],
+        [File, :realpath, ->(path) { path }], [fixture::OwnedChild, :directory_identity, :inert_directory],
+        [fixture, :atomic_json, ->(*) { events << :input }], [Digest::SHA256, :file, digest],
+        [fixture, :driver_environment, {}], [fixture::CommandObservation, :new, observation], [fixture, :capture_command, capture],
+        [fixture::OwnedChild, :bounded_file, ->(_path) { JSON.generate(dispatch) }],
+        [fixture, :retain_unknown_domain!, ->(*, **) { events << :retained }], [fixture, :warn, ->(*) { nil }],
+        [receiver, :class, Struct.new(:name).new(classes.fetch(platform))], [diagnostic, :line, project], [STDERR, :write, sink],
+      ]
+      actual = nil
+      with_stubs.call(bindings) do
+        actual = assert_raises(fixture::Failure, IOError) do
+          receiver.with_adapter_failure_diagnostic(platform: platform, mode: mode) do |optional|
+            supplied_states << optional
+            state = optional.fetch(:ownership_failure_state)
+            state.freeze if fault == :state
+            begin
+              fixture.run(platform: platform, root: directory, parameters: {}, mode: mode, deadline_ns: 10, **optional)
+            rescue Exception => original
+              escaped = original
+              raise
+            ensure
+              events << :unwound
+              now = 10 if fault == :before_report
+              state[:rejection] = fixture::Failure.new("ownership-probe", escaped.message) if fault == :same_message
+              raise replacement if fault == :outer_replacement
+            end
+          end
+        end
+        # A later retry request never rereads/rewrites an already attempted marker.
+        fixture.report_ownership_failure(state, actual, platform: platform, mode: mode, callback: "#{classes.fetch(platform)}##{callback}")
+      end
+      assert_equal [:ownership_failure_state], supplied_states.fetch(0).keys
+      assert_nil fixture.instance_variable_get(:@cancellation_scope)
+      assert_operator events.index(:unwound), :>, events.index(:replay)
+      assert_operator writes.length, :<=, 1
+      assert_same(fault == :outer_replacement ? replacement : escaped, actual)
+      {state: state, writes: writes, error: actual, replacement: replacement}
+    ensure
+      saved&.each do |key, (existed, value)|
+        existed ? fixture.instance_variable_set(key, value) : fixture.remove_instance_variable(key)
+      end
+      assert_empty directory_hook.restore if directory_hook
+    end
+    classes.each_key do |platform|
+      bytes = diagnostic.line(expected.merge("platform" => platform))
+      outcome = relay.call(platform: platform, stderr: bytes)
+      assert_equal [bytes], outcome.fetch(:writes)
+      assert_same outcome.fetch(:error), outcome.fetch(:state).fetch(:rejection)
+      assert_equal [10, true], outcome.fetch(:state).values_at(:deadline_ns, :write_complete)
+      assert_equal "ownership-probe", outcome.fetch(:error).kind
+    end
+    %i[custody request dispatch state same_message outer_replacement before_report before_write format callback].each do |fault|
+      outcome = relay.call(fault: fault)
+      assert_empty outcome.fetch(:writes)
+      assert_empty outcome.fetch(:state) if %i[custody request dispatch state].include?(fault)
+    end
+    [packet * 2, packet.sub('"platform":"ios"', '"platform":"android"'), "#{prefix}{bad}\n"].each do |bytes|
+      assert_empty relay.call(stderr: bytes).fetch(:writes)
+    end
+    [:short, IOError.new("private-marker"), Interrupt.new("private-marker")].each do |write_result|
+      outcome = relay.call(write_result: write_result)
+      assert_equal [packet], outcome.fetch(:writes)
+      assert_equal "ownership-probe", outcome.fetch(:error).kind
+      if write_result.is_a?(Exception)
+        assert_same write_result, outcome.fetch(:state).fetch(:diagnostic_error)
+      else
+        refute outcome.fetch(:state).fetch(:write_complete)
+      end
+    end
+    receiver = Object.new.extend(fixture::Contracts)
+    receiver.define_singleton_method(:name) { raise "successful call must not inspect callback" }
+    handoffs, writes = [], []
+    STDERR.stub(:write, ->(bytes) { writes << bytes; bytes.bytesize }) do
+      2.times do
+        assert_equal :success, receiver.with_adapter_failure_diagnostic(platform: "ios", mode: "ownership-async") { |optional| handoffs << optional; :success }
+      end
+    end
+    assert_empty writes
+    assert handoffs.all? { |optional| optional.keys == [:ownership_failure_state] && optional[:ownership_failure_state].empty? }
+    refute_same(*handoffs.map { |optional| optional.fetch(:ownership_failure_state) })
   end
 
   def missing_cleanup_omission_sample

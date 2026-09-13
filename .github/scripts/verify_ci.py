@@ -335,6 +335,49 @@ ADAPTER_FAILURE_SLOW_CHECKS = (
     "handoffPerformed", "delayEntered", "delayGuardPassed", "delayFailed", "delayFinished",
     "originalCleanupCalled", "originalCleanupFinished",
 )
+OWNERSHIP_FAILURE_PREFIX = "MRK_OWNERSHIP_ASYNC_FAILURE="
+OWNERSHIP_FAILURE_CALLBACK = "test_process_ownership_async_through_both_real_fixture_callers"
+OWNERSHIP_FAILURE_FIELDS = (
+    "schema", "platform", "family", "helper", "case", "phase", "errorCategory", "errorKind", "row",
+)
+OWNERSHIP_FAILURE_CASES = ("async-spawn", "async-reap", "cleanup-first-async", "repeated")
+OWNERSHIP_FAILURE_PHASES = (
+    "entry", "invoke", "injector-cleanup", "hook-restoration", "snapshot", "row-checks",
+    "proof-publication", "row-rejection", "case-cleanup", "restoration", "missing",
+)
+OWNERSHIP_FAILURE_OWNER_PHASES = ("unstarted", "acquiring", "reserved", "waiting", "reaped", "unknown", "missing")
+OWNERSHIP_FAILURE_ROW_FIELDS = (
+    "ownerPhase", "firstErrorCategory", "firstErrorKind", "operationErrorCategory", "operationErrorKind",
+    "failedChecks", "checks", "commandChecks",
+)
+OWNERSHIP_FAILURE_CHECKS = (
+    "firstExceptionPreserved", "handlersRestored", "registryInactive", "raisersJoined",
+    "hooksRestored", "pendingInterrupt", "retainedFixture",
+)
+OWNERSHIP_FAILURE_COMMAND_CHECKS = (
+    "settled", "noProducers", "unknown", "nativeAttemptsBound", "actualOwnedControlCloses",
+    "actualTaskJoins", "hooksRestored", "observerErrorsEmpty",
+)
+OWNERSHIP_FAILURE_FAILED_CHECKS = (
+    "numeric-route-veto", "handlers-not-restored", "registry-active", "hooks-not-restored",
+    "injector-cleanup", "primary-not-preserved", "injectors-not-joined", "injector-custody",
+    "pending-interrupt", "cancellation-not-propagated", "injection-boundary-missing", "wrong-signal",
+    "command-not-finalized", "pre-go-barrier-missing", "nested-cancellation-missing", "fixture-retained",
+)
+OWNERSHIP_FAILURE_ERROR_KINDS = {
+    **dict.fromkeys(("none", "interrupt", "signal", "system-exit", "io-error", "other"), frozenset({"none"})),
+    "fixture-error": frozenset({
+        "ownership-probe", "process-ownership", "process-observation", "signal-policy", "fixture-domain",
+        "fixture-input", "fixture-result", "fixture-cleanup", "fixture-observation", "fixture-source",
+        "diagnostic", "driver", "readiness", "control", "other",
+    }),
+    "native-lifecycle-error": frozenset({"cancelled", "deadline", "parent_lost", "protocol", "io", "creation", "lifecycle", "other"}),
+    "native-spawn-error": frozenset({
+        "abi", "runtime", "origin", "symbol", "spec", "launch", "deadline", "state", "io", "fd", "busy", "native",
+        "waitability", "spawn", "wait", "join", "close", "unknown", "other",
+    }),
+    "os-error": frozenset({"echild", "other"}),
+}
 PYTHON_POISON_PARTITIONS = (
     "poison-wait-loss",
     "poison-startup-error",
@@ -1600,6 +1643,55 @@ def adapter_failure(raw: bytes, *, deadline: float | None = None) -> dict | None
             check_clock(deadline)
 
 
+def ownership_failure(raw: bytes, *, deadline: float | None = None) -> dict | None:
+    """Finite original async failure facts; never a replacement native result."""
+    def error_pair(category, kind):
+        return (type(category) is str and category in OWNERSHIP_FAILURE_ERROR_KINDS
+                and type(kind) is str and kind in OWNERSHIP_FAILURE_ERROR_KINDS[category])
+
+    try:
+        data = _fixture_failure_record(raw, OWNERSHIP_FAILURE_PREFIX, 4096, deadline=deadline,
+                                       canonical_fields=OWNERSHIP_FAILURE_FIELDS)
+        if (type(data) is not dict or type(data["schema"]) is not int or data["schema"] != 1
+                or type(data["platform"]) is not str or data["platform"] not in ADAPTER_FAILURE_PLATFORMS
+                or type(data["family"]) is not str or data["family"] != "async"
+                or type(data["helper"]) is not str or data["helper"] not in {"capture", "run"}
+                or type(data["case"]) is not str or data["case"] not in OWNERSHIP_FAILURE_CASES
+                or type(data["phase"]) is not str or data["phase"] not in OWNERSHIP_FAILURE_PHASES
+                or not error_pair(data["errorCategory"], data["errorKind"]) or data["errorCategory"] == "none"):
+            return None
+        row = data["row"]
+        if type(row) is str and row == "missing":
+            return data  # No completed-row facts are fabricated for an early failure.
+        # Only the original generated rejection may carry its completed row;
+        # another escaping exception must use the phase-only missing form.
+        if (data["phase"] != "row-rejection"
+                or (data["errorCategory"], data["errorKind"]) != ("fixture-error", "ownership-probe")
+                or type(row) is not dict or tuple(row) != OWNERSHIP_FAILURE_ROW_FIELDS
+                or type(row["ownerPhase"]) is not str or row["ownerPhase"] not in OWNERSHIP_FAILURE_OWNER_PHASES
+                or not error_pair(row["firstErrorCategory"], row["firstErrorKind"])
+                or not error_pair(row["operationErrorCategory"], row["operationErrorKind"])):
+            return None
+        failed = row["failedChecks"]
+        if (type(failed) is not list or not failed or any(type(name) is not str for name in failed)
+                or failed != [name for name in OWNERSHIP_FAILURE_FAILED_CHECKS if name in failed]
+                or "pre-go-barrier-missing" in failed and data["case"] != "async-spawn"
+                or "nested-cancellation-missing" in failed and (data["helper"], data["case"]) != ("run", "repeated")):
+            return None
+        for key, fields in (("checks", OWNERSHIP_FAILURE_CHECKS), ("commandChecks", OWNERSHIP_FAILURE_COMMAND_CHECKS)):
+            checks = row[key]
+            if (type(checks) is not dict or tuple(checks) != fields
+                    or any(type(value) is not bool and not (type(value) is str and value == "missing")
+                           for value in checks.values())):
+                return None
+        # The failed-check list comes from the original row evaluation, not
+        # recomputation from optional observations (which may disagree).
+        return data
+    finally:
+        if deadline is not None:
+            check_clock(deadline)
+
+
 def _minitest_failed_target(text: str, identifier: str, *, deadline: float | None = None) -> bool:
     # Scan the SAME original bytes under the SAME cutoff. A target beyond the
     # public first16 rows still counts, as does a late duplicate. No receipt.
@@ -1961,6 +2053,13 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                     if (step.id == gate and target in expected
                             and _minitest_failed_target(text, target, deadline=deadline)):
                         value["adapter_failure"] = diagnostic
+                diagnostic = ownership_failure(result.stderr, deadline=deadline)
+                if diagnostic is not None:
+                    gate, class_name = ADAPTER_FAILURE_PLATFORMS[diagnostic["platform"]]
+                    target = class_name + "#" + OWNERSHIP_FAILURE_CALLBACK
+                    if (step.id == gate and target in expected
+                            and _minitest_failed_target(text, target, deadline=deadline)):
+                        value["ownership_failure"] = diagnostic
         except (VerificationError, OSError, UnicodeError):
             if deadline is not None:
                 check_clock(deadline)

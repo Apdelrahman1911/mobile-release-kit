@@ -170,6 +170,14 @@ Ruby-contract checks. It does not inherit proxy/preload hooks, SSH-agent sockets
 GitHub/cloud/Store secrets, signing material or interactive credentials. Synthetic
 signer fixtures are public test data, not authority for live Store operations.
 
+Bundler selects only the immutable source `Gemfile` or the positive installed
+wheel's exact `share/mobile-release-kit/Gemfile`. The wheel selector requires
+the protected root/work/source/installed directory chain and both frozen,
+root-owned `Gemfile`/`Gemfile.lock` files, read with no-follow identity/close
+checks and compared byte-for-byte with source. These finite checks consume the
+original command cutoff. A mutable alternate installation, source fallback,
+missing file or changed input cannot substitute for installed Bundler origin.
+
 ## Identity, filesystem and native isolation
 
 One numeric UID/GID in 60000–64999 is selected once and reserved exclusively for
@@ -766,6 +774,20 @@ original cutoff, never retries, and cannot replace the primary or authorize
 success. The controller requires the matching platform and source-known unique
 adverse callback in that adapter's healthy partition. Native/ownership/kill
 partitions, passing or ambiguous callbacks and malformed records cannot qualify.
+
+The async ownership family has a separate `MRK_OWNERSHIP_ASYNC_FAILURE` projection
+for its four fixed cases through `capture` and `run`. One canonical ASCII line
+is bounded to 4096 bytes including prefix/newline. A frozen original failed row
+can report finite check codes and observed owner/error/finality/restoration facts
+only when its identical rejection survives restoration. Earlier or replacement
+errors carry only finite phase/error data with the row explicitly missing; a
+previous successful case never supplies another call's observations. The parent
+requires original driver custody/request/dispatch, then the same rejection after
+its complete fixture lifetime, before relaying. The controller attributes it only
+to the unique failed source-known async callback in the matching adapter's healthy
+partition. No private messages, paths, process identities or proof contents are
+published. Missing observations remain missing; reporting cannot authorize
+success, cleanup, a retry or a changed deadline, or establish a cause by itself.
 
 The slow-cleanup fixture uses the original two-second run, five-second cleanup
 grace and eight-second capture watchdog. Only an eligible direct original-body
