@@ -110,6 +110,7 @@ class LocalSigningTests(unittest.TestCase):
         # rejected request bypasses their argv adapter so the production byte
         # admission sees the genuinely invalid input before any C is created.
         with signing.local_signing_lease(home=self.home) as lease:
+            retained_source = lease.execution_source()
             with self.context(lease=lease):
                 session = lease.active
                 for argument in ("invalid\x00argument", "unencodable-\ud800"):
@@ -126,9 +127,14 @@ class LocalSigningTests(unittest.TestCase):
                         self.assertFalse(outcome.create_w.attempted or outcome.run_tool.attempted)
                         self.assertIsNone(session.state["inflight"])
                         self.assertFalse(session.unresolved or session.cancellation.lifetime_ledger.fatal)
+                        self.assertFalse(lease._normal_execution_revoked)
+                        retained_source.new_scope()
                         self.assertFalse(signing._names(session.fd) & signing.FENCE_CONTROLS)
                         self.assertEqual(len(self.model.calls), before)
                         self.assertEqual(session.observe(), self.model.preferences)
+            self.assertTrue(session._disposal_complete)
+            self.assertIsNone(lease.active)
+            retained_source.new_scope()
         self.assert_clean()
 
     def test_external_preference_edits_preserved_and_conflict_clears_for_fresh_admission(self):
@@ -167,8 +173,13 @@ class LocalSigningTests(unittest.TestCase):
             if argv[1] == "create-keychain":
                 return model_result(returncode=1)
         self.model.result_policy = result_policy
-        with self.assertRaises(CredentialError):
-            with self.context(): self.fail("native nonzero admitted")
+        with signing.local_signing_lease(home=self.home) as lease:
+            retained_source = lease.execution_source()
+            with self.assertRaises(CredentialError):
+                with self.context(lease=lease): self.fail("native nonzero admitted")
+            self.assertIsNone(lease.active)
+            self.assertFalse(lease._normal_execution_revoked)
+            retained_source.new_scope()
         self.assertEqual(sum(call[1] == "create-keychain" for call in self.model.calls), 1)
         self.assert_clean()
 

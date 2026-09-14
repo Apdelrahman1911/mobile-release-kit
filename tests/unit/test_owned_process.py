@@ -494,6 +494,303 @@ class CommandContractTests(unittest.TestCase):
 
 class CommandSourceOwnerTests(unittest.TestCase):
     """Real task-local locked source; no process, thread or signal mutation."""
+
+    @contextmanager
+    def source_lease(self, *, recovery=False):
+        from mobile_release import local_signing
+
+        custom = lambda _number, _frame: None
+        with tempfile.TemporaryDirectory(prefix="mrk-command-source-") as name, \
+             patch.object(signal, "getsignal", return_value=custom), \
+             patch.object(signal, "signal", side_effect=AssertionError("custom handler changed")), \
+             patch.object(command.native.Acquisition, "_runtime", side_effect=AssertionError("native effect")), \
+             patch.object(command.threading.Thread, "start", side_effect=AssertionError("thread started")):
+            home = Path(name) / "home"; home.mkdir(mode=0o700)
+            with local_signing.local_signing_lease(home=home, recovery=recovery) as lease:
+                yield lease
+
+    def assert_normal_revoked(self, lease, source, selected):
+        from mobile_release import discovery, local_signing
+
+        before = lease.cancellation.lifetime_ledger.verdict()
+        with patch.object(command, "_Outer", side_effect=AssertionError("engine created")):
+            for call in (lease.execution_source, source.new_scope, lease.session,
+                         lambda: discovery._run(lease.home, ["fictional"], execution_source=source),
+                         lambda: owned.run_owned(["fictional"], execution_scope=selected),
+                         lambda: selected._consume(SimpleNamespace(nonce=selected.nonce), None)):
+                with self.assertRaises(local_signing.SigningPending):
+                    call()
+        self.assertTrue(lease._normal_execution_revoked)
+        self.assertFalse(selected._used)
+        self.assertIsNone(selected.outcome.read())
+        self.assertIsNone(lease.cancellation.lifetime_ledger._command)
+        self.assertEqual(lease.cancellation.lifetime_ledger.verdict(), before)
+
+    def test_failure_flags_revoke_active_closed_retained_and_preselected_normal_execution(self):
+        for flag in ("unresolved", "journal_failed"):
+            for closed in (False, True):
+                with self.subTest(flag=flag, closed=closed), self.source_lease() as lease:
+                    session = lease.session()
+                    source = lease.execution_source()
+                    selected = source.new_scope()
+                    setattr(session, flag, True)
+                    if closed:
+                        session.close()  # No prior admission observation may be required.
+                        self.assertIsNone(lease.active)
+                    self.assert_normal_revoked(lease, source, selected)
+                    self.assertFalse(lease.cancellation.lifetime_ledger.fatal)
+                    setattr(session, flag, False)  # Cannot reset the lease's observed latch.
+                    self.assert_normal_revoked(lease, source, selected)
+
+    def test_pending_close_needs_original_disposal_but_never_opened_close_is_healthy(self):
+        from mobile_release.errors import CredentialError
+
+        for disposition in ("never-opened", "pending", "disposed"):
+            with self.subTest(disposition=disposition), self.source_lease() as lease:
+                session = lease.session()
+                source = lease.execution_source()
+                selected = source.new_scope()
+                if disposition != "never-opened":
+                    session.open(create=True)
+                if disposition == "disposed":
+                    # Only native preference observation is modeled. The actual
+                    # owned directory removal/fsync/close path supplies the fact.
+                    with patch.object(session, "observe", return_value={"default": "/fictional/default", "search": []}):
+                        session.cleanup_preparation()
+                    self.assertTrue(session._disposal_complete)
+                session.close()
+                self.assertFalse(session.unresolved or session.journal_failed)
+                self.assertFalse(lease.cancellation.lifetime_ledger.fatal)
+                self.assertIsNone(lease.active)
+                if disposition == "pending":
+                    self.assertFalse(session._disposal_complete)
+                    self.assert_normal_revoked(lease, source, selected)
+                else:
+                    source._check()
+                    self.assertIs(source.new_scope()._source, source)
+                    lease.session().close()
+                    self.assertFalse(lease._normal_execution_revoked)
+                with self.assertRaisesRegex(CredentialError, "session opening cannot be repeated"):
+                    session.open(create=True)
+
+    def test_open_and_disposal_return_loss_cannot_publish_completion_or_permit_reentry(self):
+        from mobile_release import local_signing
+        from mobile_release.errors import CredentialError
+
+        for boundary in ("mkdir", "open", "rmdir", "fsync"):
+            with self.subTest(boundary=boundary), self.source_lease() as lease:
+                session = lease.session()
+                source = lease.execution_source()
+                selected = source.new_scope()
+                modeled, hits = SimpleNamespace(**vars(os)), []
+                if boundary == "mkdir":
+                    def mkdir(name, *args, **kwargs):
+                        os.mkdir(name, *args, **kwargs)
+                        hits.append(name)
+                        self.assertTrue(session._open_attempted)
+                        raise OSError("original mkdir return lost")
+                    modeled.mkdir = mkdir
+                    with patch.object(local_signing, "os", modeled), self.assertRaises(OSError):
+                        session.open(create=True)
+                    self.assertIsNone(session._create_origin)
+                elif boundary == "open":
+                    def opened(*_args, **_kwargs):
+                        # Acquisition-return model: no fabricated FD enters any
+                        # syscall, but the real caller must already be armed.
+                        hits.append("open-return")
+                        self.assertTrue(session._open_attempted)
+                        raise OSError("modeled open return lost")
+                    with patch.object(local_signing, "_open_dir", side_effect=opened), self.assertRaises(OSError):
+                        session.open(create=True)
+                    self.assertIsNone(session.fd)
+                else:
+                    session.open(create=True)
+                    if boundary == "rmdir":
+                        def rmdir(name, *args, **kwargs):
+                            os.rmdir(name, *args, **kwargs)
+                            if name == session.name:
+                                hits.append(name)
+                                raise OSError("original removal return lost")
+                        modeled.rmdir = rmdir
+                    else:
+                        def fsync(fd):
+                            os.fsync(fd)
+                            if fd == lease.fd:
+                                hits.append(fd)
+                                raise OSError("original parent sync return lost")
+                        modeled.fsync = fsync
+                    with patch.object(local_signing, "os", modeled), \
+                         patch.object(session, "observe", return_value={"default": "/fictional/default", "search": []}), \
+                         self.assertRaises(OSError):
+                        session.cleanup_preparation()
+                self.assertEqual(len(hits), 1)
+                self.assertTrue(session._open_attempted)
+                self.assertFalse(session._disposal_complete)
+                session.close()
+                self.assertFalse(lease.cancellation.lifetime_ledger.fatal)
+                self.assert_normal_revoked(lease, source, selected)
+                with self.assertRaisesRegex(CredentialError, "session opening cannot be repeated"):
+                    session.open(create=True)
+
+    def test_failed_close_latches_before_diagnostics_and_attempts_each_independent_slot_once(self):
+        from mobile_release import local_signing
+
+        with self.assertRaises(owned.ProcessError) as final_failure, self.source_lease() as lease:
+            session = lease.session()
+            source = lease.execution_source()
+            selected = source.new_scope()
+            # Isolated descriptor-custody model; neither number reaches the OS.
+            session.native_fd, session.fd = 311, 312
+            closes = []
+            failure = OSError("modeled close return loss")
+            merge = local_signing.preserve_lifetime_error
+            def close(number):
+                closes.append(number)
+                if number == 311:
+                    raise failure
+            def aggregate(*args, **kwargs):
+                if kwargs.get("previous") is failure:
+                    self.assertTrue(lease._normal_execution_revoked)
+                return merge(*args, **kwargs)
+            with patch.object(local_signing, "_close", side_effect=close), \
+                 patch.object(local_signing, "preserve_lifetime_error", side_effect=aggregate):
+                with self.assertRaises(owned.ProcessCleanupError):
+                    session.close()
+                session.close()
+            self.assertEqual(closes, [311, 312])
+            self.assertTrue(lease._normal_execution_revoked)
+            self.assertTrue(lease.cancellation.lifetime_ledger.fatal)
+            self.assertIsNone(lease.active)
+            with patch.object(command, "_Outer", side_effect=AssertionError("engine created")), \
+                 self.assertRaises(owned.ProcessCleanupError):
+                owned.run_owned(["fictional"], execution_scope=selected)
+            self.assertFalse(selected._used)
+        self.assertTrue(final_failure.exception.fatal)
+        self.assertTrue(lease.cancellation.lifetime_ledger.fatal)
+        self.assertIsNone(lease.fd)
+        self.assertIsNone(lease.home_fd)
+        self.assertEqual(lease.cancellation.handler_state, "RESTORED")
+
+    def test_revoked_lease_reentry_precedes_private_material_and_profile_authentication(self):
+        from mobile_release import credentials, local_signing
+
+        with self.source_lease() as lease:
+            session = lease.session()
+            session.unresolved = True
+            session.close()
+            with patch.object(credentials, "_private_path_error", side_effect=AssertionError("private path observed")), \
+                 patch.object(credentials, "_materialize", side_effect=AssertionError("material written")), \
+                 patch.object(credentials, "_authenticated_signing_profile", side_effect=AssertionError("profile authenticated")):
+                with self.assertRaises(local_signing.SigningPending):
+                    with credentials.materialize_build_inputs(
+                        SimpleNamespace(root=lease.home),
+                        values={"MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PATH": "/fictional/input.p12"},
+                        platforms=("ios",), signing_lease=lease,
+                    ):
+                        self.fail("revoked materialization entered")
+                with self.assertRaises(local_signing.SigningPending):
+                    with credentials._temporary_apple_signing_environment(
+                        p12=Path("/fictional/input.p12"), password="fictional", profile=Path("/fictional/input.profile"),
+                        directory=lease.home, lease=lease,
+                    ):
+                        self.fail("revoked signing entered")
+
+    def test_original_profile_conflict_close_revokes_even_without_session_failure_flags(self):
+        from mobile_release import credentials, local_signing
+        from mobile_release.errors import CredentialError
+
+        with self.assertRaises(owned.ProcessError) as final_failure, self.source_lease() as lease:
+            sessions, native_cleanup = [], []
+            def prepare(session, *_args):
+                sessions.append(session)
+                session.intent = {"profile": {"stage": "fictional-stage"}}
+                session.state = {"inflight": None}
+            @contextmanager
+            def conflict(*_args, on_conflict, **_kwargs):
+                on_conflict()
+                raise CredentialError("modeled profile conflict")
+                yield  # pragma: no cover - preserves the actual context protocol.
+            with patch.object(credentials, "_authenticated_signing_profile", return_value=(b"fictional", {"UUID": "fictional"})), \
+                 patch.object(local_signing.SigningSession, "prepare", new=prepare), \
+                 patch.object(local_signing.SigningSession, "cleanup_native", new=lambda session: native_cleanup.append(session)), \
+                 patch.object(local_signing.SigningSession, "finish", side_effect=AssertionError("conflicted session finalized")), \
+                 patch.object(credentials, "_temporary_profile_installation", new=conflict), \
+                 self.assertRaises(owned.ProcessError):
+                with credentials._temporary_apple_signing_environment(
+                    p12=Path("/fictional/input.p12"), password="fictional", profile=Path("/fictional/input.profile"),
+                    directory=lease.home, lease=lease,
+                ):
+                    self.fail("conflicted signing entered")
+            self.assertEqual(len(sessions), 1)
+            self.assertEqual(native_cleanup, sessions)
+            session = sessions[0]
+            self.assertFalse(session.unresolved or session.journal_failed)
+            self.assertTrue(session._open_attempted and session.closed)
+            self.assertFalse(session._disposal_complete)
+            self.assertIsNone(lease.active)
+            self.assertTrue(lease._normal_execution_revoked)
+        self.assertTrue(final_failure.exception.fatal)
+        self.assertTrue(lease.cancellation.lifetime_ledger.fatal)
+        self.assertIsNone(lease.fd)
+        self.assertIsNone(lease.home_fd)
+        self.assertEqual(lease.cancellation.handler_state, "RESTORED")
+
+    def test_settlement_policy_allows_nonzero_and_healthy_inflight_but_revokes_exec_ambiguity(self):
+        # Only caller policy is modeled here; this is not native finality evidence.
+        for returncode in (0, 7, None):
+            with self.subTest(returncode=returncode), self.source_lease() as lease:
+                session = lease.session()
+                source = lease.execution_source()
+                session.state = {"inflight": {"kind": "observe", "phase": "PREPARED"}, "native": {}}
+                for phase in ("PREPARED", "ARMED"):
+                    session.state["inflight"]["phase"] = phase
+                    scope = source.new_scope()
+                    scope._consume(SimpleNamespace(nonce=scope.nonce), None)
+                    self.assertTrue(scope._used)
+                session._command_scope, session._command_binding = source.new_scope(), object()
+                result = SimpleNamespace(returncode=returncode)
+                policy_outcome = SimpleNamespace(execution_unknown=returncode is None, no_target=None,
+                                                 termination="normal-exit", returncode=returncode)
+                def settled(_settlement):
+                    session.state["inflight"] = None
+                with patch.object(session, "_original_outcome", return_value=policy_outcome), \
+                     patch.object(session, "inventory", return_value={}), \
+                     patch.object(session, "_read_fence_pair", return_value={"outcome": "producer-settled"}), \
+                     patch.object(session, "_settle_operation", side_effect=settled), \
+                     patch("mobile_release.local_signing._names", return_value=set()):
+                    if returncode is None:
+                        with self.assertRaises(owned.ProcessOutcomeUnknown) as caught:
+                            session.finish_original_command_if_settled(result=result)
+                        self.assertTrue(caught.exception.dispatched and caught.exception.contained and caught.exception.cleanup_complete)
+                        self.assertFalse(caught.exception.fatal)
+                    else:
+                        self.assertTrue(session.finish_original_command_if_settled(result=result))
+                self.assertFalse(lease.cancellation.lifetime_ledger.fatal)
+                if returncode is None:
+                    self.assert_normal_revoked(lease, source, session._command_scope)
+                else:
+                    self.assertFalse(session.unresolved or session.journal_failed)
+                    source._check()
+                    self.assertFalse(lease._normal_execution_revoked)
+
+    def test_fresh_recovery_still_requires_its_exact_separate_authorization(self):
+        from mobile_release import local_signing
+        from mobile_release.errors import CredentialError
+
+        with self.source_lease(recovery=True) as lease:
+            session = lease.session()
+            for authorization in (None, object()):
+                with self.assertRaises(CredentialError):
+                    lease.execution_source(authorization=authorization)
+            attempt = local_signing._RecoveryAttempt(session, _key=local_signing._RECOVERY_KEY)
+            session._recovery_attempt = attempt
+            source = lease.execution_source(authorization=attempt)
+            self.assertIs(source.new_scope()._source, source)
+            session.journal_failed = True
+            with self.assertRaises(CredentialError):
+                source.new_scope()
+            self.assertFalse(lease._normal_execution_revoked)
+
     def test_source_caller_uses_actual_zero_handler_owner_before_any_native_effect(self):
         from mobile_release import discovery, local_signing
         entries = []

@@ -30,6 +30,135 @@ from unit.local_signing_persistent import PROFILE, UUID, OwnerResolutionRefused,
 class PersistentWorkerRecorderTests(unittest.TestCase):
     """No fork, native wait, process signal or actual descriptor is acquired."""
 
+    def test_prefix_helper_traces_acquisition_through_original_close(self):
+        # Execute the actual nested helper, but replace every outer worker,
+        # account/model and filesystem entry before reaching it. No setUp or
+        # genuine case launch is invoked by this scope-only regression.
+        events, active = [], False
+        model = SimpleNamespace(trace=None)
+        trace = SimpleNamespace()
+
+        def note(operation, *, model_traced=False):
+            self.assertTrue(active, operation + " preceded original Trace installation")
+            self.assertIs(model.trace, trace if model_traced else None)
+            events.append(operation)
+
+        @contextmanager
+        def installed():
+            nonlocal active
+            self.assertFalse(active)
+            active = True
+            events.append("trace-enter")
+            try:
+                yield
+            finally:
+                active = False
+                events.append("trace-exit")
+
+        def result():
+            self.assertFalse(active)
+            events.append("result")
+            return {}
+
+        trace.installed, trace.result = installed, result
+        session = SimpleNamespace(
+            bind_runner=lambda runner: note("bind"),
+            open=lambda *, create: note("session-open"),
+            prepare=lambda content, uuid: note("prepare"),
+            run=lambda argv, *, kind: note("query", model_traced=True),
+            cleanup_native=lambda: note("cleanup-native"),
+            cleanup_profile=lambda: note("cleanup-profile"),
+            finish=lambda: note("finish"),
+        )
+
+        def new_session():
+            note("session")
+            return session
+
+        @contextmanager
+        def lease(*, home):
+            note("lease-open")
+            try:
+                yield SimpleNamespace(session=new_session)
+            finally:
+                note("lease-close")
+
+        class FirstHelperComplete(Exception):
+            pass
+
+        def first_worker(case, name, task, **kwargs):
+            self.assertEqual(name, "query")
+            task()
+            raise FirstHelperComplete  # Stop before JSON reads/cut/recovery.
+
+        test = PersistentSigningTests("test_original_c_prefix_cut_uses_real_fence_and_fresh_recovery")
+        test.root = Path("/inert/prefix-scope")
+        with patch.object(Path, "mkdir"), patch(__name__ + ".initialize"), \
+                patch(__name__ + ".PersistentSigningModel", return_value=model), \
+                patch.object(fixture, "Trace", return_value=trace), \
+                patch.object(fixture.signing, "local_signing_lease", new=lease), \
+                patch.object(fixture, "run_worker", new=first_worker), \
+                self.assertRaises(FirstHelperComplete):
+            test.test_original_c_prefix_cut_uses_real_fence_and_fresh_recovery()
+        self.assertEqual(events, ["trace-enter", "lease-open", "session", "bind", "session-open", "prepare",
+                                  "query", "cleanup-native", "cleanup-profile", "finish", "lease-close",
+                                  "trace-exit", "result"])
+
+    def test_trace_dirfd_provenance_dup_retirement_and_excluded_origins(self):
+        with patch.object(fixture, "ResourceOracle"):
+            trace = fixture.Trace(Path("/inert/case"), "inert-descriptors")
+        calls = []
+        numbers = iter((101, 102, 103, 102, 201, 202, 203, 204, 205))
+
+        def opened(path, flags, **kwargs):
+            calls.append(("open", path, flags, kwargs))
+            return next(numbers)
+
+        def duplicated(fd):
+            calls.append(("dup", fd))
+            return next(numbers)
+
+        def closed(fd):
+            calls.append(("close", fd))
+
+        opening, duplicate, close = (trace.wrapper(name, actual) for name, actual in (
+            ("open", opened), ("dup", duplicated), ("close", closed)))
+
+        def caller(module):
+            namespace = {"__name__": module}
+            exec(compile("def call(operation, *args, **kwargs):\n    return operation(*args, **kwargs)\n",
+                         "<inert-trace-origin>", "exec"), namespace)
+            return namespace["call"]
+
+        production = caller("mobile_release.local_signing")
+        with self.assertRaises(KeyError):
+            production(opening, "state.json", os.O_RDONLY, dir_fd=909)
+        self.assertEqual((calls, trace.events, trace.descriptors), ([], [], {}))
+        home = production(opening, "/inert/case/home", os.O_RDONLY)
+        directory = production(opening, "session", os.O_RDONLY, dir_fd=home)
+        copy = production(duplicate, directory)
+        self.assertEqual(trace.descriptors, {101: "/inert/case/home", 102: "/inert/case/home/session",
+                                             103: "/inert/case/home/session"})
+        production(close, directory)
+        before = len(calls), len(trace.events)
+        with self.assertRaises(KeyError):
+            production(opening, "state.json", os.O_RDONLY, dir_fd=directory)
+        self.assertEqual((len(calls), len(trace.events)), before)
+        descriptor = production(opening, "state.json", os.O_RDONLY, dir_fd=copy)
+        self.assertEqual(descriptor, directory)  # A newly observed open may reuse the retired number.
+        self.assertEqual(trace.descriptors[descriptor], "/inert/case/home/session/state.json")
+        for descriptor in (descriptor, copy, home):
+            production(close, descriptor)
+        self.assertEqual(trace.descriptors, {})
+        recorded = len(trace.events)
+        for module in ("mobile_release._command_process", "mobile_release._native_process",
+                       "mobile_release.owned_process", "unit.inert", "workflow.inert"):
+            excluded = caller(module)
+            descriptor = production(excluded, opening, "/inert/excluded", os.O_RDONLY)
+            production(excluded, close, descriptor)
+            self.assertEqual((len(trace.events), trace.descriptors), (recorded, {}))
+        self.assertFalse(any(event["slot"] == "unmapped-descriptor" for event in trace.events))
+
     @contextmanager
     def recorded_owner(self, *, fault=None):
         events = []
@@ -952,14 +1081,15 @@ class PersistentSigningTests(unittest.TestCase):
     def test_original_c_prefix_cut_uses_real_fence_and_fresh_recovery(self):
         def one_journalled_query(case, trace):
             model = PersistentSigningModel(case)
-            with fixture.signing.local_signing_lease(home=case / "home") as lease:
+            # Observe the original directory acquisitions, not a reconstructed
+            # FD/path map after the session has already been prepared.
+            with trace.installed(), fixture.signing.local_signing_lease(home=case / "home") as lease:
                 session = lease.session()
                 session.bind_runner(model)
                 session.open(create=True)
                 session.prepare(PROFILE, UUID)
                 model.trace = trace
-                with trace.installed():
-                    session.run(["security", "default-keychain", "-d", "user"], kind="observe")
+                session.run(["security", "default-keychain", "-d", "user"], kind="observe")
                 model.trace = None
                 session.cleanup_native()
                 session.cleanup_profile()

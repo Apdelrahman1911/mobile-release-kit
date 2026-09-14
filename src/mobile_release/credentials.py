@@ -1290,7 +1290,7 @@ def _temporary_apple_signing_environment(
 
     lease_context = local_signing_lease(home=home, cancellation=cancellation) if lease is None else nullcontext(lease)
     with lease_context as owner:
-        owner.assert_owner()
+        owner._admit_execution()
         if owner.active is not None:
             raise CredentialError("this account lease already has an active signing context")
         if cancellation is not None and cancellation is not owner.cancellation:
@@ -2123,6 +2123,7 @@ def materialize_build_inputs(
     if signing_lease is not None:
         if cancellation is not None and cancellation is not signing_lease.cancellation:
             raise CredentialError("build material cancellation owner differs from its account lease")
+        signing_lease._admit_execution()
         cancellation = signing_lease.cancellation
     selected = set(platforms)
     for name in PRIVATE_CREDENTIAL_PATH_NAMES & values.keys():

@@ -446,6 +446,7 @@ class SigningLease:
         self._hold_slot = _AccountFDSlot(self)
         self._locked_source: native_process.LockedAccountSource | None = None
         self._recovery_mode: bool | None = None
+        self._normal_execution_revoked = False
         self.home = self.path = None
         self.home_identity = self.identity = None
         self.locked = False
@@ -504,9 +505,18 @@ class SigningLease:
                 raise _pending()
             self._locked_source = native_process._issue_locked_account_source(self)
 
+    def _observe_session_execution(self, session, *, closing: bool = False) -> None:
+        # Original callers have already checked PID/thread ownership. This is
+        # nonthrowing policy observation, not a new cleanup/finality receipt.
+        if (self._recovery_mode is False and session is not None
+                and (session.unresolved or session.journal_failed
+                     or (closing and session._open_attempted and not session._disposal_complete))):
+            self._normal_execution_revoked = True
+
     def _admit_execution(self, authorization=None) -> None:
         self.assert_owner()
         _require(self._locked_source is not None, "account execution source was not admitted")
+        self._observe_session_execution(self.active)
         if self.cancellation.lifetime_ledger.fatal:
             raise ProcessCleanupError("account lifetime is unresolved; end this process before retrying")
         if self._recovery_mode:
@@ -514,6 +524,8 @@ class SigningLease:
             authorization.check(self.active)
         else:
             _require(authorization is None, "normal account work cannot adopt recovery authorization")
+            if self._normal_execution_revoked:
+                raise _pending()
         if self.active is None or not self.active.cleaning:
             self.cancellation.check()
 
@@ -633,6 +645,8 @@ class SigningLease:
 
     def session(self, *, token: str | None = None) -> SigningSession:
         self.assert_owner()
+        if self._recovery_mode is False:
+            self._admit_execution()
         _require(self.active is None, "this lease already has an active signing context")
         self.active = SigningSession(self, token=token)
         return self.active
@@ -687,6 +701,8 @@ class SigningSession:
         self.journal_failed = False
         self.cleaning = False
         self.closed = False
+        self._open_attempted = False
+        self._disposal_complete = False
         self._create_origin: object | None = None
         self._loaded_snapshot: SigningSnapshot | None = None
         self._committed_controls: dict[str, bytes | None] | None = None
@@ -794,7 +810,10 @@ class SigningSession:
 
     def open(self, *, create: bool) -> None:
         self.lease.assert_owner()
+        _require(not self.closed and not self._open_attempted, "session opening cannot be repeated")
         with self.cancellation.deferred():
+            # Even a lost mkdir/open return may have acquired pending state.
+            self._open_attempted = True
             if create:
                 _require(not _names(self.lease.fd), "a pending session already exists")
                 os.mkdir(self.name, mode=0o700, dir_fd=self.lease.fd)
@@ -1378,6 +1397,9 @@ class SigningSession:
         _require(not _names(self.fd), "session is not empty")
         os.rmdir(self.name, dir_fd=self.lease.fd)
         os.fsync(self.lease.fd)
+        # Only this original removal/sync can permit normal lease reuse. A
+        # snapshot reload or later path absence is not completion of this call.
+        self._disposal_complete = True
         self.close()
 
     def close(self) -> None:
@@ -1385,6 +1407,7 @@ class SigningSession:
             self._close_inherited()
             return
         _require(self.lease.owner_thread is threading.current_thread(), "session close owner differs")
+        self.lease._observe_session_execution(self, closing=True)
         observed = preserve_lifetime_error(ProcessError(
             "local signing session descriptor cleanup is unconfirmed; end this process before retrying",
         ), previous=exc_info()[1])
@@ -1397,10 +1420,13 @@ class SigningSession:
                 try:
                     _close(descriptor)
                 except BaseException as error:
+                    if self.lease._recovery_mode is False:
+                        self.lease._normal_execution_revoked = True
                     if first_failure is None:
                         first_failure = error
                     preserve_lifetime_error(observed, previous=error)
                     failed = True
+        self.lease._observe_session_execution(self, closing=True)
         self.closed = True
         if self.pid == os.getpid() and self.lease.active is self:
             self.lease.active = None

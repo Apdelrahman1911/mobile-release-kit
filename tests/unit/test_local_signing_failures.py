@@ -934,7 +934,7 @@ class InertAccountCleanupTests(unittest.TestCase):
                                       unresolved=False, journal_failed=False, cleaning=False,
                                       bind_runner=lambda *_args, **_kwargs: None, open=opened, close=close)
             lease = SimpleNamespace(cancellation=guard, active=None, home=Path("/modeled/home"),
-                                    assert_owner=lambda: None, session=lambda: session)
+                                    assert_owner=lambda: None, _admit_execution=lambda: None, session=lambda: session)
             with patch.object(credentials, "_authenticated_signing_profile", return_value=(CONTENT, {"UUID": UUID})), \
                     self.assertRaises(owned.ProcessError) as caught:
                 with credentials._temporary_apple_signing_environment(

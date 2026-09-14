@@ -148,6 +148,16 @@ establish its exact resources are idle, then recover the **same** remaining
 session from a fresh invocation. A retained lease handle can keep status `busy`
 until that process exits; unresolved controls otherwise remain `pending`.
 
+Settled workers do not make an ambiguous signing operation or failed journal
+safe to reuse. That original normal lease is permanently barred from new work,
+including previously issued sources/scopes, even if the caller catches the
+error or closes the session. Closing an opened but unfinished session also
+revokes normal use, including preserved profile conflicts without a process
+failure. Clean reuse requires the original session's successful disposal and
+directory sync; later path absence or a snapshot reload is not that proof.
+This admission rule does not invent a process-cleanup failure or suppress
+independent cleanup. Recovery still needs a fresh explicitly authorized lease.
+
 **Do not edit/delete journals to obtain clearance.** Corrupt committed controls,
 unknown versions or replaced private namespaces are not interrupted staging.
 Neither normal nor manual recovery can invent their lost authority; retain the
