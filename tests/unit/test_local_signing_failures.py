@@ -513,7 +513,7 @@ raise SystemExit(status)
 
     def test_genuine_nonzero_command_result_cannot_hide_later_independent_fatal_close(self):
         root, home, destination, model = self.case(seed=False)
-        armed, failures = False, []
+        armed, failures, absent_at_close = False, [], []
         def runner(argv, **kwargs):
             nonlocal armed
             result = model(argv, **kwargs)
@@ -524,10 +524,14 @@ raise SystemExit(status)
                 # this error supplies no settlement or cleanup authority.
                 raise owned.ProcessError("fictional completed command rejection", dispatched=True)
             return result
-        with DescriptorFault(root, lambda e: e["name"] == "Provisioning Profiles", armed=False) as fault:
+        with DescriptorFault(root, lambda e: e["name"] == "Provisioning Profiles", armed=False,
+                             on_fault=lambda: absent_at_close.append(not os.path.lexists(destination))) as fault:
             stack, context = self.signing_context(root, home, model, runner=runner)
             with stack, patch.object(credentials, "os", fault.os), self.assertRaises(owned.ProcessError) as caught:
                 with context:
+                    session_path = model.keychain.parent.parent
+                    original_token = session_path.name.removeprefix("session-")
+                    intent = (session_path / "intent.json").read_bytes()
                     armed = fault.armed = True
                     model.result_policy = lambda _argv: model_result(returncode=7, perform_effect=False)
             self.assertEqual(failures, [7])
@@ -535,7 +539,14 @@ raise SystemExit(status)
             fault.assert_observed(self)
             status = signing.signing_status(home=home)
             self.assertEqual(status["status"], "pending")
-            self.assertTrue(destination.exists())
+            self.assertEqual(status["session"], original_token)
+            # This fault is after the independently safe profile unlink, not
+            # the earlier reader-close fault which must retain that profile.
+            self.assertEqual(absent_at_close, [True])
+            self.assertFalse(os.path.lexists(destination))
+            self.assertEqual((session_path / "intent.json").read_bytes(), intent)
+            self.assertFalse(os.path.lexists(session_path / "completed.json"))
+            self.assertTrue(model.keychain.exists())
         model.result_policy = None
         self.fresh_recovery(home, model, token=status["session"])
 

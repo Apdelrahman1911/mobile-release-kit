@@ -23,6 +23,16 @@ from .local_signing_helpers import NativeSigningModel
 from workflow.local_signing_regression_catalog import PREFLIGHT_CANCELLATION_VARIANTS
 
 
+def _materializer_directory(original, private, created, *args, **kwargs):
+    """Route only this fixture's materializer into its real model input root."""
+    if kwargs.get('prefix') != 'mobile-release-build-inputs-':
+        return original(*args, **kwargs)
+    assert not args and set(kwargs) == {'prefix'}, 'materializer allocation contract changed'
+    owner = original(dir=private, **kwargs)
+    created.append(Path(owner.name))
+    return owner
+
+
 class SigningCompositionTests(unittest.TestCase):
     def test_only_enabled_signed_ios_builds_acquire_the_account_lease(self):
         with tempfile.TemporaryDirectory(prefix='mrk-admission-matrix-') as name:
@@ -134,6 +144,8 @@ class SigningCompositionTests(unittest.TestCase):
             original_cleanup = ios_profiles.ScratchLease.cleanup
             original_capture = profile_owner.capture_profile
             original_mkdtemp = tempfile.mkdtemp
+            original_temporary_directory = tempfile.TemporaryDirectory
+            material_directories = []
 
             @contextmanager
             def lease_context():
@@ -311,6 +323,10 @@ class SigningCompositionTests(unittest.TestCase):
                 patches.enter_context(patch.object(preflight_module, 'credential_findings', return_value=[]))
                 patches.enter_context(patch.object(preflight_module, 'effective_identity_findings', return_value=[]))
                 patches.enter_context(patch('mobile_release.credentials._run_private', side_effect=model))
+                patches.enter_context(patch('mobile_release.credentials.tempfile.TemporaryDirectory',
+                                            side_effect=lambda *args, **kwargs: _materializer_directory(
+                                                original_temporary_directory, private, material_directories,
+                                                *args, **kwargs)))
                 # Independent fictional material metadata only. Dedicated early
                 # and late profile calls above still use the real capture owner.
                 patches.enter_context(patch('mobile_release.credentials._authenticated_signing_profile',
@@ -332,6 +348,9 @@ class SigningCompositionTests(unittest.TestCase):
                 self.assertEqual(stages, ['early', 'capture', 'build', 'late', 'capture'])
                 self.assertEqual(returned, ['early', 'late'])
             self.assertTrue(all(not path.exists() for path in scratches))
+            self.assertEqual(len(material_directories), int(cancel_at is None or cancel_at[0] == 'late'))
+            self.assertTrue(all(path.parent == private and not os.path.lexists(path)
+                                for path in material_directories))
             self.assertFalse(list(root.glob('model-bridge-*')))
             self.assertEqual(model.preferences, model.original)
             self.assertEqual(signing.signing_status(home=home)['status'], 'idle')

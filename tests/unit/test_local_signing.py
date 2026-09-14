@@ -220,11 +220,22 @@ class LocalSigningTests(NativeCaseWorkspaceMixin, unittest.TestCase):
             self.destination.write_bytes(self.input.read_bytes()); self.destination.chmod(0o640)
             with self.subTest(replacement=replacement), self.assertRaises(CredentialError):
                 with self.context():
-                    self.destination.unlink()
                     if replacement is not None:
                         source = self.private / "replacement"
                         source.write_bytes(self.input.read_bytes() if replacement == b"same" else replacement)
-                        source.chmod(0o644); source.replace(self.destination)
+                        source.chmod(0o644)
+                        # Allocate while the original is still linked: an
+                        # unlink-first fixture can recycle its inode and fail
+                        # to exercise the intended different-identity conflict.
+                        original, foreign = self.destination.stat(), source.stat()
+                        self.assertNotEqual((original.st_dev, original.st_ino),
+                                            (foreign.st_dev, foreign.st_ino))
+                    self.destination.unlink()
+                    if replacement is not None:
+                        source.replace(self.destination)
+                        installed = self.destination.stat()
+                        self.assertEqual((installed.st_dev, installed.st_ino), (foreign.st_dev, foreign.st_ino))
+                        self.assertNotEqual((installed.st_dev, installed.st_ino), (original.st_dev, original.st_ino))
             self.assertEqual(signing.signing_status(home=self.home)["status"], "pending")
             self.assertEqual(self.recover()["status"], "recovered-with-conflict")
             self.assertEqual(signing.signing_status(home=self.home)["status"], "idle")

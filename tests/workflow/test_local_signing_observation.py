@@ -4,13 +4,17 @@ from __future__ import annotations
 import ast
 import copy
 import hashlib
+import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import MethodType, SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+from mobile_release import _command_process as command
 from mobile_release import local_signing as signing
+from mobile_release.errors import CredentialError
 from unit import local_signing_persistent as persistent
 from workflow import local_signing_bridge as bridge
 from workflow import local_signing_persistent_fixture as fixture
@@ -19,6 +23,169 @@ from workflow import local_signing_semantic_fixture as semantic
 
 
 class ObservationContractTests(unittest.TestCase):
+    @staticmethod
+    def inert_arming_context():
+        """Predicate inputs only: no original worker, lease or receipt is issued."""
+        session = object.__new__(signing.SigningSession)
+        session.lease = SimpleNamespace(home=Path('/fictional-observation/home'))
+        session._recovery_attempt = None
+        session._committed_controls = {'state.json': b'PREPARED'}
+        source = object.__new__(command.AccountExecutionSource)
+        source._lease, source._authorization = session.lease, None
+        source._check = Mock(side_effect=AssertionError('observer reentered source admission'))
+        scope = object.__new__(command.AccountExecutionScope)
+        scope._source, scope.nonce, scope._used = source, b'n' * 16, True
+        binding = object.__new__(command.JournalledCommandBinding)
+        binding._session, binding._scope = session, scope
+        binding._arm = session._arm_original_command
+        binding._arm_attempted, binding._arm_retired = True, False
+        binding.validate_reservation = Mock(side_effect=AssertionError('observer reentered arm admission'))
+        session._command_scope, session._command_binding = scope, binding
+        scope._binding = binding
+        slot = object.__new__(command.CommandOutcomeSlot)
+        slot._scope, slot._nonce, slot._value = scope, scope.nonce, None
+        scope._outcome = slot
+        engine = object.__new__(command._Outer)
+        engine.nonce, engine.slot, engine.scope, engine.binding = scope.nonce, slot, scope, binding
+        slot._engine = engine
+        engine.phase, engine.prepared, engine.sealed = 'PREPARED', {}, False
+        engine.child = SimpleNamespace(wait_state='OWNED', numeric_retired=False)
+        engine.ctx = SimpleNamespace(check=Mock(), launch_retired=False, tasks=(),
+            child_acquisition=SimpleNamespace(child=engine.child, settled=True, cleanup_unknown=False))
+        engine.wire = SimpleNamespace(eof=False, poisoned=False)
+        engine.create_route = SimpleNamespace(attempted=False, retired=False)
+        engine.run_route = SimpleNamespace(attempted=False, retired=False)
+        reservation = object.__new__(command.OriginalCommandReservation)
+        reservation._engine, reservation.nonce = engine, scope.nonce
+        binding._arming_reservation = reservation
+        arming = (signing.SigningSession._arm_original_command.__code__, session, reservation)
+        return session, arming
+
+    def test_original_arm_observation_is_passive_and_rejects_substituted_live_bindings(self):
+        for recovery in (False, True):
+            session, arming = self.inert_arming_context()
+            binding, scope = session._command_binding, session._command_scope
+            engine = scope.outcome._engine
+            if recovery:
+                attempt = object.__new__(signing._RecoveryAttempt)
+                attempt.check = Mock(side_effect=AssertionError('observer reentered recovery admission'))
+                session._recovery_attempt = scope._source._authorization = attempt
+            # A selected AFTER-replace cut deliberately has different published
+            # and committed bytes. No authority recheck or generation advance is
+            # permitted by this data observer.
+            published = {'state.json': b'ARMED'}
+            before = dict(binding.__dict__), dict(scope.__dict__), dict(session._committed_controls)
+            with patch.object(signing, '_control', side_effect=AssertionError('observer read controls')) as controls:
+                result = semantic._observe_original_reservation(session, arming)
+            self.assertEqual(result, dict(beforeGrant=True, originalArmingCallback=True,
+                originalReservationBound=True, createAttempted=False, runAttempted=False))
+            self.assertEqual(before, (binding.__dict__, scope.__dict__, session._committed_controls))
+            self.assertEqual(published, {'state.json': b'ARMED'})
+            controls.assert_not_called()
+            binding.validate_reservation.assert_not_called()
+            scope._source._check.assert_not_called()
+            engine.ctx.check.assert_called_once_with()  # Real prepared_reservation predicate.
+            if recovery:
+                attempt.check.assert_not_called()
+
+            for obj, name, wrong in (
+                (binding, '_session', object()), (binding, '_scope', object()),
+                (scope, '_binding', object()), (scope._source, '_lease', object()),
+                (scope._source, '_authorization', object()),
+                (binding._arming_reservation, '_engine', object()),
+                (scope.outcome, '_scope', object()), (engine, 'slot', object()),
+                (binding._arming_reservation, 'nonce', b'x' * 16),
+                (binding, '_arm_attempted', False), (binding, '_arm_retired', True),
+                (engine.create_route, 'attempted', True), (engine.run_route, 'attempted', True),
+                (binding, '_arm', lambda _reservation: None),
+            ):
+                with self.subTest(recovery=recovery, field=name), patch.object(obj, name, wrong):
+                    with self.assertRaises(AssertionError):
+                        semantic._observe_original_reservation(session, arming)
+            for wrong in (None, (arming[0], object(), arming[2]),
+                          (arming[0], session, object()), (self.inert_arming_context.__code__, session, arming[2])):
+                with self.assertRaises(AssertionError):
+                    semantic._observe_original_reservation(session, wrong)
+
+            # Exercise the actual stack scanner without fabricating a frame.
+            # Its service-thread fallback can observe the session, but cannot
+            # invent an active original arm when called directly from this test.
+            session.pid, session.token, session.identity, session.state = os.getpid(), 'a' * 32, {}, None
+            with tempfile.TemporaryDirectory(prefix='mrk-arm-observation-inert-') as temporary:
+                root = Path(temporary)
+                fixture.initialize(root)
+                session.lease.home = root / 'home'
+                session.path = session.lease.home / signing.LEASE_DIRECTORY / ('session-' + session.token)
+                trace = semantic.SemanticTrace(root, 'inert')
+                trace._fence_session = (session, None, None, os.getpid())
+                with patch.object(semantic, '_observe_original_reservation',
+                                  wraps=semantic._observe_original_reservation) as observed:
+                    with self.assertRaisesRegex(AssertionError, 'callback is not active'):
+                        trace.observe_context({'details': {}})
+                observed.assert_called_once_with(session, None)
+        tree = ast.parse(Path(semantic.__file__).read_text())
+        observer = next(node for node in ast.walk(tree)
+                        if isinstance(node, ast.FunctionDef) and node.name == 'observe_context')
+        self.assertFalse(any(isinstance(node, ast.Attribute) and node.attr == 'validate_reservation'
+                             for node in ast.walk(observer)))
+
+    def test_production_recovery_still_rejects_intermediate_control_generation(self):
+        session, _arming = self.inert_arming_context()
+        session.journal_failed = session.unresolved = False
+        session.fd = None  # The bounded _control seam below must not touch a descriptor.
+        session.cancellation = SimpleNamespace(lifetime_ledger=SimpleNamespace(fatal=False))
+        session.lease.active, session.lease._recovery_mode = session, True
+        session.lease.cancellation, session.lease.assert_owner = session.cancellation, Mock()
+        attempt = object.__new__(signing._RecoveryAttempt)
+        attempt.session, attempt.lease = session, session.lease
+        attempt.pid, attempt.owner_thread = os.getpid(), threading.current_thread()
+        attempt.revoked, attempt.active_query = False, None
+        with patch.object(signing, '_control', side_effect=lambda _fd, name, **_:
+                          {'state.json': b'ARMED'}.get(name)):
+            with self.assertRaisesRegex(CredentialError, 'recovery control generation changed'):
+                attempt.check(session)
+        self.assertEqual(session._committed_controls, {'state.json': b'PREPARED'})
+
+    def test_composition_materializer_routes_only_its_private_directory_and_keeps_real_cleanup(self):
+        from unit.test_local_signing_composition import _materializer_directory
+
+        with tempfile.TemporaryDirectory(prefix='mrk-materializer-route-inert-') as name:
+            root, created = Path(name), []
+            private = root / 'private'
+            private.mkdir(mode=0o700)
+            for fail_body in (False, True):
+                with self.subTest(fail_body=fail_body):
+                    owner = _materializer_directory(tempfile.TemporaryDirectory, private, created,
+                                                    prefix='mobile-release-build-inputs-')
+                    actual = Path(owner.name)
+                    self.assertEqual(actual.parent, private)
+                    self.assertEqual(created[-1], actual)
+                    try:
+                        with owner:
+                            (actual / 'fictional-input').write_bytes(b'fixture')
+                            if fail_body:
+                                raise ValueError('inert body interruption')
+                    except ValueError as error:
+                        self.assertTrue(fail_body)
+                        self.assertEqual(str(error), 'inert body interruption')
+                    self.assertFalse(os.path.lexists(actual))
+            failing = Mock(side_effect=OSError('inert allocation failure'))
+            with self.assertRaisesRegex(OSError, 'allocation failure'):
+                _materializer_directory(failing, private, created, prefix='mobile-release-build-inputs-')
+            failing.assert_called_once_with(dir=private, prefix='mobile-release-build-inputs-')
+            untouched = Mock()
+            with self.assertRaisesRegex(AssertionError, 'allocation contract changed'):
+                _materializer_directory(untouched, private, created,
+                                        prefix='mobile-release-build-inputs-', dir=root)
+            untouched.assert_not_called()
+            ordinary = Mock(wraps=tempfile.TemporaryDirectory)
+            with _materializer_directory(ordinary, private, created,
+                                         prefix='mobile-release-profile-auth-', dir=root) as name:
+                self.assertEqual(Path(name).parent, root)
+            ordinary.assert_called_once_with(prefix='mobile-release-profile-auth-', dir=root)
+            self.assertEqual(len(created), 2)
+            self.assertEqual(list(private.iterdir()), [])
+
     def test_original_snapshot_is_validated_before_acquisition_and_never_renews_the_deadline(self):
         with tempfile.TemporaryDirectory(prefix="mrk-original-input-inert-") as temporary:
             root = Path(temporary)

@@ -22,6 +22,42 @@ from workflow.local_signing_matrix_contract import digest
 from workflow.local_signing_workload import recovery_timeout, worker_timeout
 
 
+def _observe_original_reservation(session, arming):
+    """Observe the live original arm without reentering recovery admission.
+
+    An AFTER-replace cut precedes directory fsync and committed-control advance.
+    Production validates before/after that durable transition; an observer must
+    not demand the completed generation in the middle of the original write.
+    """
+    from mobile_release import _command_process as command
+
+    assert type(session) is signing.SigningSession
+    binding, scope = session._command_binding, session._command_scope
+    assert type(binding) is command.JournalledCommandBinding
+    assert type(scope) is command.AccountExecutionScope
+    assert binding._session is session and binding._scope is scope and scope._binding is binding
+    assert type(scope._source) is command.AccountExecutionSource and scope._source._lease is session.lease
+    assert scope._source._authorization is session._recovery_attempt
+    assert binding._arm_attempted and not binding._arm_retired
+    reservation = binding._arming_reservation
+    assert type(reservation) is command.OriginalCommandReservation
+    engine, slot = reservation._engine, scope.outcome
+    assert type(engine) is command._Outer and type(slot) is command.CommandOutcomeSlot
+    assert engine is slot._engine and engine.slot is slot and slot._scope is scope
+    assert engine.scope is scope and engine.binding is binding and scope._used
+    assert reservation.nonce == scope.nonce == engine.nonce == slot._nonce
+    assert slot.read() is None
+    original = signing.SigningSession._arm_original_command
+    assert getattr(binding._arm, '__self__', None) is session
+    assert getattr(binding._arm, '__func__', None) is original
+    assert (arming is not None and arming[0] is original.__code__
+            and arming[1] is session and arming[2] is reservation), 'original arming callback is not active'
+    assert engine.prepared_reservation()
+    assert not engine.create_route.attempted and not engine.run_route.attempted
+    return dict(beforeGrant=True, originalArmingCallback=True,
+                originalReservationBound=True, createAttempted=False, runAttempted=False)
+
+
 class SemanticTrace(fixture.Trace):
     """Match the actual tuple/one-based ordinal, then assert its live context."""
     def __init__(self, root, name, selector=None, *, expected_sequence=None, after_effect=None):
@@ -36,7 +72,7 @@ class SemanticTrace(fixture.Trace):
         # Observe real stack-owned sessions only. Native-model callbacks arrive
         # on the actual service thread, so they use the session captured by the
         # genuine original _fence_observation_policy call, never a fake record.
-        frame, session, writing, callers = sys._getframe(1), None, None, []
+        frame, session, writing, callers, arming = sys._getframe(1), None, None, [], None
         try:
             for _ in range(64):
                 if frame is None:
@@ -51,6 +87,9 @@ class SemanticTrace(fixture.Trace):
                             session = value
                     if module == "mobile_release.local_signing":
                         callers.append(name)
+                        if frame.f_code is signing.SigningSession._arm_original_command.__code__:
+                            assert arming is None, "nested original arming callback"
+                            arming = (frame.f_code, frame.f_locals.get("self"), frame.f_locals.get("reservation"))
                         if name == "_write":
                             assert writing is None, "nested selected control write"
                             writing = (frame.f_locals["name"], frame.f_locals["data"])
@@ -87,16 +126,7 @@ class SemanticTrace(fixture.Trace):
         result["beforeGrant"] = False
         binding = session._command_binding
         if binding is not None and binding._arming_reservation is not None:
-            from mobile_release._command_process import OriginalCommandReservation
-            reservation = binding._arming_reservation
-            assert type(reservation) is OriginalCommandReservation
-            binding.validate_reservation(reservation)  # Actual original engine checks; does not issue a permit.
-            engine = reservation._engine
-            assert engine is session._command_scope.outcome._engine and engine.prepared_reservation()
-            assert not engine.create_route.attempted and not engine.run_route.attempted
-            assert "_arm_original_command" in callers, "arming callback is not active"
-            result.update(beforeGrant=True, originalArmingCallback=True,
-                          originalReservationBound=True, createAttempted=False, runAttempted=False)
+            result.update(_observe_original_reservation(session, arming))
         if self.expected_sequence is not None:
             assert result["commandSequence"] == self.expected_sequence, "selected original operation sequence changed"
         return result
