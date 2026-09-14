@@ -524,6 +524,47 @@ class SigningAdapterDiagnosticTests(unittest.TestCase):
         context = ("source", contract.ADAPTER_TEST_IDS[0], ((trusted, "tests/unit/test_local_signing_persistent.py"),))
         return context, namespace["fail"]
 
+    def test_progress_contract_is_finite_failure_only_and_dropped_before_prior_details(self):
+        context, task = self.context_and_task()
+        try:
+            task()
+        except ValueError as first:
+            try:
+                task()
+            except ValueError as second:
+                second.__cause__ = first
+                error = sys.exc_info()
+        progress = {"case": "query", "owner": {"stage": "run-owned", "command": 4, "elapsedMs": 321,
+                    "completed": 3, "totalMs": 222, "maxMs": 111},
+                    "service": {"stage": "EOF", "command": 4, "elapsedMs": 320}}
+        with patch.object(contract, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+            project = lambda value: contract.adapter_failure_record(context, "unittest", "error", error,
+                                                                     deadline=20.0, progress=value)
+            self.assertEqual(project(progress)["progress"], progress)
+            unavailable = {"case": "query", "owner": None, "service": None}
+            self.assertEqual(project(unavailable)["progress"], unavailable)
+            invalid = (["PRIVATE"], {**progress, "case": "/PRIVATE/case"}, {**progress, "pid": 123},
+                       {**progress, "owner": None}, {**progress, "service": {**progress["service"], "command": 3}},
+                       {**progress, "service": {**progress["service"], "stage": "PRIVATE"}})
+            for bad in invalid:
+                with self.subTest(bad=bad), self.assertRaises(ValueError):
+                    project(bad)
+            for fields in ({"command": True}, {"elapsedMs": 1.0}, {"completed": 5}, {"totalMs": -1},
+                           {"maxMs": 223}, {"elapsedMs": 1 << 31}, {"stage": "PRIVATE"}, {"argv": "PRIVATE"}):
+                with self.subTest(fields=fields), self.assertRaises(ValueError):
+                    project({**progress, "owner": {**progress["owner"], **fields}})
+            for layer, outcome in (("worker", "error"), ("unittest", "skip"), ("unittest", "unexpected-success")):
+                with self.subTest(layer=layer, outcome=outcome), self.assertRaises(ValueError):
+                    contract.adapter_failure_record(context, layer, outcome, error, deadline=20.0, progress=progress)
+            # Real2048-byte limit: two long prebound root/related locations fit
+            # without the new page data. Progress must go before either one.
+            long_public = "src/mobile_release/" + "nested/" * 110 + "module.py"
+            context = (*context[:2], ((context[2][0][0], long_public),))
+            original = project(None)
+            self.assertIn("related", original)
+            self.assertLessEqual(len(contract.ADAPTER_FAILURE_PREFIX) + len(contract.canonical(original)) + 1, 2048)
+            self.assertEqual(project(progress), original)
+
     def test_projector_uses_only_exact_precomputed_frames_and_never_private_text_or_source_reads(self):
         for foreign in (False, True):
             context, task = self.context_and_task(foreign=foreign)
@@ -921,7 +962,7 @@ class SigningAdapterDiagnosticTests(unittest.TestCase):
         context, task = self.context_and_task()
         class Exited(BaseException):
             pass
-        for mode in ("disabled", "enabled", "writer-error"):
+        for mode in ("disabled", "enabled", "writer-error", "late-failure", "slot-interrupted", "success"):
             with self.subTest(mode=mode):
                 calls, output = [], io.StringIO()
                 sink = SimpleNamespace(write=lambda _text: (_ for _ in ()).throw(OSError("PRIVATE writer error"))) \
@@ -931,6 +972,9 @@ class SigningAdapterDiagnosticTests(unittest.TestCase):
                 native = SimpleNamespace(getpid=lambda: 9, getppid=lambda: 7, getpgrp=lambda: 8,
                     _exit=lambda code: (_ for _ in ()).throw(Exited(code)))
                 def failed_task():
+                    calls.append("task")
+                    if mode == "success":
+                        return "inert result"
                     try:
                         task()
                     except BaseException as primary:
@@ -940,17 +984,29 @@ class SigningAdapterDiagnosticTests(unittest.TestCase):
                     buffer.extend(b"RUN\n")
                     return True
                 with patch.multiple(owner, os=native, receive=receive, send=lambda *_: None,
-                                    remaining=lambda _deadline: 1, CASE_DEADLINE=None, _ADAPTER_WORKER_DIAGNOSTIC=None,
+                                    remaining=lambda cutoff: calls.append(("task-endpoint", cutoff)) or 1,
+                                    CASE_DEADLINE=None, _ADAPTER_WORKER_DIAGNOSTIC=None,
+                                    threading=SimpleNamespace(Lock=lambda: (_ for _ in ()).throw(KeyboardInterrupt()))
+                                        if mode == "slot-interrupted" else owner.threading,
+                                    adapter_progress=lambda stage: calls.append(("progress", stage)),
                                     ADAPTER_DIAGNOSTIC_CONTEXT=None if mode == "disabled" else context), \
-                        patch.object(contract, "time", SimpleNamespace(monotonic=lambda: 10.0)), redirect_stderr(sink), \
+                        patch.object(contract, "time", SimpleNamespace(monotonic=lambda: 21.0 if mode == "late-failure" else 10.0)), \
+                        redirect_stderr(sink), \
                         self.assertRaises(Exited) as caught:
                     owner._worker(handles, 7, 8, Path("/not-created"), "synthetic", failed_task, 20.0,
-                        lambda path, _value: calls.append(("private-write", path.name)))
-                self.assertEqual(caught.exception.args, (owner.WORKER_ERROR,))
-                self.assertEqual(calls.count(("private-write", "synthetic-error.json")), 1)
+                        lambda path, _value: calls.append(("private-write", path.name)), hard=25.0)
+                self.assertEqual(caught.exception.args, (0 if mode == "success" else owner.WORKER_ERROR,))
+                filename = "synthetic.json" if mode == "success" else "synthetic-error.json"
+                self.assertEqual(calls.count(("private-write", filename)), 1)
+                self.assertEqual(calls.count("task"), int(mode != "slot-interrupted"))
+                self.assertTrue(all(call[1] == 20.0 for call in calls if type(call) is tuple and call[0] == "task-endpoint"))
+                stages = [call[1] for call in calls if type(call) is tuple and call[0] == "progress"]
+                self.assertEqual(stages, [] if mode == "slot-interrupted" else
+                                 ["task-entered", "task-returned", "result-write-returned"] if mode == "success" else ["task-entered"])
                 self.assertEqual(calls[-1], "close-all")
                 self.assertNotIn("PRIVATE", output.getvalue())
-                self.assertEqual(output.getvalue().count(contract.ADAPTER_FAILURE_PREFIX), int(mode == "enabled"))
+                self.assertEqual(output.getvalue().count(contract.ADAPTER_FAILURE_PREFIX),
+                                 int(mode in {"enabled", "late-failure", "slot-interrupted"}))
                 if mode == "enabled":
                     record = json.loads(output.getvalue().removeprefix(contract.ADAPTER_FAILURE_PREFIX))
                     self.assertEqual(record["targetResult"], {"returncode": 1, "stderrKind": "empty", "locations": []})

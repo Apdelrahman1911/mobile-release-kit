@@ -39,6 +39,16 @@ ADAPTER_FAILURE_MAX_BYTES = 2048
 ADAPTER_FAILURE_CATEGORIES = (
     "none", "os-error", "assertion-error", "value-error", "type-error", "memory-error", "exception", "base-exception",
 )
+ADAPTER_PROGRESS_MAX = (1 << 31) - 1
+ADAPTER_PROGRESS_CASES = (
+    "healthy", "crash", "deadline", "query", "seed", "inventory",
+    "final-automatic", "final-no-resolution", "final-owner-resolution",
+)
+ADAPTER_PROGRESS_OWNER_STAGES = (
+    "task-entered", "task-returned", "result-write-returned", "recovery-check", "recovery-busy", "recovery-ready",
+    "begin", "run-owned", "target-return", "service-joined", "model-return",
+)
+ADAPTER_PROGRESS_SERVICE_STAGES = ("HELLO", "BEGIN", "EFFECT", "END", "DONE", "EOF")
 ADAPTER_TARGET_FRAME = re.compile(r'  File "([^"\r\n]+)", line ([1-9][0-9]{0,5}), in ([^\r\n]{1,256})\Z')
 ADAPTER_FAILURE_TEST_FILES = (
     "tests/unit/test_local_signing_persistent.py", "tests/unit/local_signing_persistent.py",
@@ -143,8 +153,33 @@ def adapter_target_result(context, returncode, stderr):
     return (returncode, "traceback-frames", tuple(locations)) if locations else unavailable
 
 
+def _adapter_progress_record(value):
+    require(type(value) is dict and set(value) == {"case", "owner", "service"}
+            and type(value["case"]) is str and value["case"] in ADAPTER_PROGRESS_CASES, "adapter progress case")
+    owner, service = value["owner"], value["service"]
+    for record, stages, fields in ((owner, ADAPTER_PROGRESS_OWNER_STAGES,
+                                   {"command", "elapsedMs", "completed", "totalMs", "maxMs"}),
+                                  (service, ADAPTER_PROGRESS_SERVICE_STAGES, {"command", "elapsedMs"})):
+        if record is not None:
+            require(type(record) is dict and set(record) == fields | {"stage"}
+                    and type(record["stage"]) is str and record["stage"] in stages
+                    and all(type(record[key]) is int and 0 <= record[key] <= ADAPTER_PROGRESS_MAX for key in fields),
+                    "adapter progress scalar record")
+    if owner is not None:
+        require(owner["completed"] <= owner["command"] and owner["maxMs"] <= owner["totalMs"]
+                and (owner["completed"] > 0 or owner["maxMs"] == owner["totalMs"] == 0)
+                and (owner["stage"] not in {"begin", "run-owned", "target-return", "service-joined", "model-return"}
+                     or owner["command"] > 0)
+                and (owner["stage"] != "model-return" or owner["completed"] > 0), "adapter progress owner fields")
+    if service is not None:
+        require(owner is not None and service["command"] > 0 and service["command"] == owner["command"],
+                "adapter progress original service generation")
+    return {"case": value["case"], "owner": dict(owner) if owner is not None else None,
+            "service": dict(service) if service is not None else None}
+
+
 def adapter_failure_record(context, layer, outcome, error, *, deadline, command_first=None, command_reserved=0,
-                           case=None, target_result=None):
+                           case=None, target_result=None, progress=None):
     """Actual root and bounded Python links; no message/source/linecache reads."""
     before_deadline(deadline)
     phase, identifier, source_map = _adapter_context(context)
@@ -217,8 +252,13 @@ def adapter_failure_record(context, layer, outcome, error, *, deadline, command_
                 "adapter original target observation fields")
         record["targetResult"] = {"returncode": code, "stderrKind": kind,
                                   "locations": [{"file": filename, "line": line} for filename, line in frames]}
-        if len(ADAPTER_FAILURE_PREFIX) + len(canonical(record)) + 1 > ADAPTER_FAILURE_MAX_BYTES:
-            del record["targetResult"]  # Drop new optional data BEFORE any existing observation.
+    if progress is not None:
+        require(layer == "unittest" and outcome in {"error", "failure", "expected-failure"}, "adapter progress failure layer")
+        record["progress"] = _adapter_progress_record(progress)
+    if "progress" in record and len(ADAPTER_FAILURE_PREFIX) + len(canonical(record)) + 1 > ADAPTER_FAILURE_MAX_BYTES:
+        del record["progress"]  # New progress is discarded BEFORE any prior optional observation.
+    if "targetResult" in record and len(ADAPTER_FAILURE_PREFIX) + len(canonical(record)) + 1 > ADAPTER_FAILURE_MAX_BYTES:
+        del record["targetResult"]
     # Preserve the original root observation before optional related details.
     while record.get("related") and len(ADAPTER_FAILURE_PREFIX) + len(canonical(record)) + 1 > ADAPTER_FAILURE_MAX_BYTES:
         record["related"].pop()
@@ -229,14 +269,14 @@ def adapter_failure_record(context, layer, outcome, error, *, deadline, command_
 
 
 def emit_adapter_failure(context, layer, outcome, error, *, deadline, command_first=None, command_reserved=0,
-                         case=None, target_result=None):
+                         case=None, target_result=None, progress=None):
     """Optional stderr DATA only; a diagnostic error cannot replace its cause."""
     if context is None:
         return None
     try:
         record = adapter_failure_record(context, layer, outcome, error, deadline=deadline,
                                         command_first=command_first, command_reserved=command_reserved,
-                                        case=case, target_result=target_result)
+                                        case=case, target_result=target_result, progress=progress)
         data = ADAPTER_FAILURE_PREFIX + canonical(record).decode("ascii") + "\n"
         require(len(data.encode("ascii")) <= ADAPTER_FAILURE_MAX_BYTES, "adapter diagnostic byte bound")
         before_deadline(deadline)

@@ -7,9 +7,12 @@ import subprocess
 import tempfile
 import unittest
 import zipfile
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from mobile_release._profile_callers import first_primary_context
 from mobile_release.config import load_config
 from mobile_release.credentials import (
     _open_profile_directory,
@@ -65,7 +68,7 @@ class CredentialMetadataTests(unittest.TestCase):
                 def __exit__(self, *_args: object) -> None:
                     return None
 
-            with patch.dict(
+            with first_primary_context(nullcontext(), expose_owner=True) as (_, guard), patch.dict(
                 os.environ, {"MOBILE_RELEASE_IOS_PROFILE_SPECIFIER": ""}, clear=False
             ), patch(
                 "mobile_release.credentials._temporary_apple_signing_environment",
@@ -77,6 +80,8 @@ class CredentialMetadataTests(unittest.TestCase):
                         values=values,
                         platforms=("ios",),
                         prepare_ios_signing=True,
+                        signing_lease=SimpleNamespace(cancellation=guard, active=None,
+                                                      _admit_execution=lambda: None),
                     ):
                         self.fail("signing context unexpectedly entered")
             self.assertEqual(target.read_bytes(), b"original-private-client")

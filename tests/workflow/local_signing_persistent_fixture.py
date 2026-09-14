@@ -739,9 +739,15 @@ def recovery_flow(root: Path, trace: Trace, *, manual="none", expected_preferenc
     # Wait only for production exclusion, never a PID or a guessed wait. This
     # untraced rendezvous is not a reached-cut event or publication receipt.
     assert type(case_owner.CASE_DEADLINE) is float, "recovery requires original case deadline"
+    case_owner.adapter_progress("recovery-check")
+    observed_busy = False
     while signing.signing_status(home=root / "home")["status"] == "busy":
+        if not observed_busy:
+            observed_busy = True
+            case_owner.adapter_progress("recovery-busy")
         case_owner.remaining(case_owner.CASE_DEADLINE)
         time.sleep(min(.002, case_owner.remaining(case_owner.CASE_DEADLINE)))
+    case_owner.adapter_progress("recovery-ready")
     case_owner.remaining(case_owner.CASE_DEADLINE)
     before = snapshot(root)
     unknown = uncertainty(root, before)

@@ -1652,6 +1652,31 @@ def signing_adapter_failure(raw: bytes, scope: SigningAdapterDiagnostic, *, dead
                             and type(location["line"]) is int and 0 < location["line"] < 1_000_000
                             for location in locations))
 
+        def progress_valid(progress):
+            # Independent closed parser: never imports the subject's fixture code.
+            if (type(progress) is not dict or set(progress) != {"case", "owner", "service"}
+                    or type(progress["case"]) is not str or progress["case"] not in {
+                        "healthy", "crash", "deadline", "query", "seed", "inventory",
+                        "final-automatic", "final-no-resolution", "final-owner-resolution"}):
+                return False
+            owner, service = progress["owner"], progress["service"]
+            commands = {"begin", "run-owned", "target-return", "service-joined", "model-return"}
+            for record, stages, fields in ((owner, commands | {"task-entered", "task-returned", "result-write-returned",
+                                            "recovery-check", "recovery-busy", "recovery-ready"},
+                                           {"command", "elapsedMs", "completed", "totalMs", "maxMs"}),
+                                          (service, {"HELLO", "BEGIN", "EFFECT", "END", "DONE", "EOF"},
+                                           {"command", "elapsedMs"})):
+                if record is not None and (type(record) is not dict or set(record) != fields | {"stage"}
+                        or type(record["stage"]) is not str or record["stage"] not in stages
+                        or any(type(record[key]) is not int or not 0 <= record[key] < 1 << 31 for key in fields)):
+                    return False
+            if owner is not None and (owner["completed"] > owner["command"] or owner["maxMs"] > owner["totalMs"]
+                    or not owner["completed"] and (owner["maxMs"] or owner["totalMs"])
+                    or owner["stage"] in commands and not owner["command"]
+                    or owner["stage"] == "model-return" and not owner["completed"]):
+                return False
+            return service is None or (owner is not None and 0 < service["command"] == owner["command"])
+
         observations, layers = [], set()
         for line in raw.splitlines(keepends=True):
             check_clock(deadline)
@@ -1663,7 +1688,7 @@ def signing_adapter_failure(raw: bytes, scope: SigningAdapterDiagnostic, *, dead
                 value = strict_json(line[len(marker):-1].decode("ascii"))
             except (UnicodeError, ValueError, VerificationError, RecursionError):
                 return None
-            if (type(value) is not dict or not required <= set(value) <= required | {"related", "case", "targetResult"}
+            if (type(value) is not dict or not required <= set(value) <= required | {"related", "case", "targetResult", "progress"}
                     or type(value["schema"]) is not int or value["schema"] != 1
                     or value["phase"] != scope.phase or type(value["testId"]) is not str
                     or value["testId"] not in scope.identifiers
@@ -1676,6 +1701,10 @@ def signing_adapter_failure(raw: bytes, scope: SigningAdapterDiagnostic, *, dead
                     or not locations_valid(value["locations"], 4)):
                 return None
             if value["category"] == "none" and value["locations"]:
+                return None
+            if "progress" in value and (value["layer"] != "unittest"
+                    or value["outcome"] not in {"error", "failure", "expected-failure"}
+                    or not progress_valid(value["progress"])):
                 return None
             if "related" in value:
                 related = value["related"]

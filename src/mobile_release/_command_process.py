@@ -1712,7 +1712,8 @@ class _FenceObserver:
                 if self._loss():
                     self._hold_after_retirement()
                     return
-                _pause(ctx.cutoff())
+                if self.wire.out is not None:
+                    _pause(ctx.cutoff())
             while True:
                 ctx.check_tail()
                 frame = self.wire.read()
@@ -2873,7 +2874,9 @@ class _Outer:
             self.ctx.check()
             self._pump()
             _require(self.wire is not None and (not self.wire.eof or predicate()))
-            _pause(self.ctx.run)
+            self.ctx.check()
+            if not predicate():
+                _pause(self.ctx.run)
 
     def body(self, argv: Sequence[str], environ: Mapping[str, str] | None, cwd: Path | None,
              capture: bool, output_limit: int, on_start: Callable[[int], None] | None) -> None:

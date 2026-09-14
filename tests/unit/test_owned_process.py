@@ -417,6 +417,106 @@ class CommandContractTests(unittest.TestCase):
         wire.read.assert_not_called()
         wire.drain_to_eof.assert_called_once_with()
 
+    def test_outer_wait_only_pauses_without_progress_and_rechecks_before_success(self):
+        for ending in ("ready", "delayed", "eof-ready", "eof-incomplete", "cancelled", "expired"):
+            with self.subTest(ending=ending):
+                ctx = self.context()
+                engine = command._Outer.__new__(command._Outer)
+                engine.ctx, engine.wire = ctx, SimpleNamespace(eof=False)
+                state = {"ready": False, "pumps": 0, "now": time.monotonic_ns()}
+                interruption = KeyboardInterrupt()
+                def pump():
+                    state["pumps"] += 1
+                    self.assertLessEqual(state["pumps"], 2)
+                    state["ready"] = ending != "eof-incomplete" and not (
+                        ending == "delayed" and state["pumps"] == 1)
+                    engine.wire.eof = ending.startswith("eof-")
+                    if ending == "cancelled": ctx.primary = interruption
+                    if ending == "expired": state["now"] = ctx.run
+                engine._pump = pump
+                with patch.object(command.time, "monotonic_ns", side_effect=lambda: state["now"]), \
+                     patch.object(command, "_pause") as pause:
+                    if ending == "cancelled":
+                        with self.assertRaises(KeyboardInterrupt) as caught:
+                            engine._until(lambda: state["ready"])
+                        self.assertIs(caught.exception, interruption)
+                    elif ending in ("expired", "eof-incomplete"):
+                        with self.assertRaises(owned.ProcessError):
+                            engine._until(lambda: state["ready"])
+                    else:
+                        engine._until(lambda: state["ready"])
+                    if ending == "delayed": pause.assert_called_once_with(ctx.run)
+                    else: pause.assert_not_called()
+                self.assertEqual(state["pumps"], 2 if ending == "delayed" else 1)
+
+    def test_fence_checkpoint_only_pauses_for_incomplete_send_or_unavailable_ack(self):
+        for ending in ("ready", "partial", "eagain", "delayed-ack", "lost", "expired"):
+            with self.subTest(ending=ending):
+                ctx = self.context("C")
+                wire = self.wire(ctx, diagnostics=True)
+                writer = SimpleNamespace(ctx=ctx, fields={"sequence": 1},
+                    policy=command.FenceObservationPolicy.TRACE_V1,
+                    creation_identity=None, observation_identity_unavailable=False)
+                observer = command._FenceObserver(writer, wire, _key=command._KEY)
+                raw, pauses = bytearray(), []
+                state = {"writes": 0, "reads": 0, "now": time.monotonic_ns()}
+                def ack():
+                    value = observer.outstanding.ack()
+                    raw.extend(bytes((command.Tag.FENCE_ACK,)) + len(value).to_bytes(4, "big") + value)
+                def write(fd, content):
+                    self.assertEqual(fd, wire.writer.number)
+                    self.assertTrue(observer.delivery_possible)
+                    self.assertFalse(observer.acknowledged)
+                    state["writes"] += 1
+                    self.assertLessEqual(state["writes"], 2)
+                    if ending == "partial" and state["writes"] == 1: return 1
+                    if ending == "eagain" and state["writes"] == 1: raise BlockingIOError()
+                    if ending == "lost": wire.eof = True
+                    elif ending == "expired": state["now"] = ctx.cutoff()
+                    elif ending != "delayed-ack": ack()
+                    return len(content)
+                def read(fd, count):
+                    self.assertEqual(fd, wire.reader.number)
+                    state["reads"] += 1
+                    if not raw: raise BlockingIOError()
+                    chunk = bytes(raw[:count]); del raw[:count]
+                    return chunk
+                def pause(cutoff):
+                    self.assertEqual(cutoff, ctx.cutoff())
+                    self.assertFalse(observer.acknowledged)
+                    pauses.append(cutoff)
+                    self.assertEqual(len(pauses), 1)
+                    if ending == "delayed-ack":
+                        self.assertIsNone(wire.out)
+                        self.assertEqual(state["reads"], 1)
+                        ack()
+                    else:
+                        self.assertIn(ending, ("partial", "eagain"))
+                        self.assertIsNotNone(wire.out)
+                        self.assertEqual(state["reads"], 0)
+                with patch.object(command.os, "write", new=write), patch.object(command.os, "read", new=read), \
+                     patch.object(command.time, "monotonic_ns", side_effect=lambda: state["now"]), \
+                     patch.object(command, "_pause", new=pause):
+                    arguments = (command.FenceOperation.PENDING_CREATE, command.FenceEdge.BEFORE,
+                                 command.FenceEventOutcome.PENDING)
+                    if ending == "expired":
+                        with self.assertRaises(owned.ProcessError):
+                            observer.checkpoint(*arguments, written=0, total=100, sync_flags=0)
+                    else:
+                        observer.checkpoint(*arguments, written=0, total=100, sync_flags=0)
+                self.assertEqual(len(pauses), int(ending in ("partial", "eagain", "delayed-ack")))
+                self.assertEqual(state["writes"], 2 if ending in ("partial", "eagain") else 1)
+                self.assertEqual(observer.ordinal, 1)
+                self.assertIs(observer.acknowledged, ending not in ("lost", "expired"))
+                if ending in ("lost", "expired"):
+                    self.assertEqual(state["reads"], 0)
+                    self.assertTrue(observer.retired)
+                    self.assertIsInstance(ctx.primary, owned.ProcessError)
+                else:
+                    self.assertFalse(observer.retired)
+                    self.assertIsNone(ctx.primary)
+                    self.assertEqual(raw, b"")
+
     def test_original_checkpoint_failure_holds_late_ack_until_original_loss_or_cutoff(self):
         cases = (("lost-send", "eof"), ("lost-send", "parent"),
                  ("wrong-ack", "eof"), ("wrong-ack", "parent"),

@@ -271,6 +271,7 @@ class PersistentSigningModel:
         ACK, leaving real target/C lifetimes for their original owners to settle.
         """
         from mobile_release import owned_process
+        from workflow import local_signing_case_owner as case_owner
         from workflow.local_signing_bridge import Channel, Namespace, VERSION, require, remaining, result_policy as policy_contract
         import mobile_release
 
@@ -294,8 +295,10 @@ class PersistentSigningModel:
         cleanup_errors = []
         result = None
         target_result = None
+        progress_command = None
         namespace = Namespace(self.root / ("model-bridge-" + token), create=True)
         try:
+            progress_command = case_owner.adapter_progress("begin")
             # Open before any target creation. Only this original service owns
             # the descriptor once its actual thread starts.
             reader = namespace.open("events.fifo", os.O_RDONLY, deadline)
@@ -303,6 +306,7 @@ class PersistentSigningModel:
             def serve():
                 try:
                     incoming = Channel(reader, deadline, stop=stop, peer_finished=original_target_returned)
+                    case_owner.adapter_progress("HELLO", command=progress_command)  # Existing receive entry, not authentication.
                     hello = incoming.receive()
                     require(type(hello) is dict and type(hello.get("version")) is int
                             and hello == {"version": VERSION, "kind": "HELLO", "token": token}, "wrong target HELLO")
@@ -330,6 +334,7 @@ class PersistentSigningModel:
                                     and value["details"] == {}, "unmodeled Trace request")
                             require(self.trace is not None, "original Trace is required")
                             require(len(active) < 2, "nested model effect bound")
+                            case_owner.adapter_progress("BEGIN", command=progress_command)
                             answer = self.trace.begin(value["operation"], "native", "model", {})
                             active[answer["index"]] = answer
                         elif kind in {"PARTIAL", "END", "CUT"}:
@@ -338,22 +343,28 @@ class PersistentSigningModel:
                                     and event["index"] in active and event == active[event["index"]], "replayed or changed Trace event")
                             event = active[event["index"]]
                             if kind == "PARTIAL":
+                                case_owner.adapter_progress("EFFECT", command=progress_command)
                                 answer = self.trace.partial(event)
                             elif kind == "CUT":
                                 require(set(value) == {"event", "edge"} and value["edge"] == "partial"
                                         and self.trace.partial(event), "unselected target cut")
+                                case_owner.adapter_progress("EFFECT", command=progress_command)
                                 self.trace.cut(event, "partial")  # Never returns or sends an ACK.
                             else:
                                 require(set(value) == {"event", "succeeded", "error"}
                                         and type(value["succeeded"]) is bool
                                         and (value["error"] is None or type(value["error"]) is str), "invalid effect outcome")
+                                case_owner.adapter_progress("END", command=progress_command)
                                 self.trace.end(event, succeeded=value["succeeded"], error=value["error"])
                                 active.pop(event["index"])
                         else:
                             require(value is None and not active, "model ended with incomplete effects")
+                            case_owner.adapter_progress("DONE", command=progress_command)
                         outgoing.send({"version": VERSION, "sequence": sequence, "kind": kind + "-ACK", "value": answer})
                         if kind == "DONE":
                             namespace.close_node("acks.fifo")
+                            # EOF is entry into the existing wait, not proof it completed.
+                            case_owner.adapter_progress("EOF", command=progress_command)
                             incoming.require_eof()
                             state["eof"] = state["done"] = True
                             return
@@ -365,6 +376,7 @@ class PersistentSigningModel:
                     service_finished.set()  # No namespace/FD access may follow this original signal.
 
             service = threading.Thread(target=serve, name="mrk-model-trace", daemon=False)
+            case_owner.adapter_progress("bind-service", command=progress_command, service=service)
             start_attempted = True  # Prearm before native thread creation can be attempted.
             service.start()
             start_confirmed = True
@@ -379,7 +391,9 @@ class PersistentSigningModel:
                 require(options.get("execution_scope") is None and options.get("journal_binding") is None,
                         "source and selected scope are mutually exclusive")
                 options["execution_scope"] = source.new_scope()
+            case_owner.adapter_progress("run-owned", command=progress_command)
             target_result = owned_process.run_owned(command, **options)
+            case_owner.adapter_progress("target-return", command=progress_command)  # Normal return, not success.
             result = target_result
             # A failed target cannot supply a future HELLO. Latch its actual
             # result before joining a service still awaiting its first writer;
@@ -394,6 +408,7 @@ class PersistentSigningModel:
             service.join(timeout=remaining(deadline))
             require(service_finished.is_set() and not service.is_alive(), "original model service join unresolved")
             join_confirmed = True
+            case_owner.adapter_progress("service-joined", command=progress_command, service=service)
             if state["error"] is not None:
                 raise AssertionError("original model observation failed") from state["error"]
             require(not service.is_alive() and state["done"] and state["eof"]
@@ -408,7 +423,6 @@ class PersistentSigningModel:
             primary = error
             if target_result is not None:
                 try:
-                    from workflow import local_signing_case_owner as case_owner
                     case_owner.observe_adapter_target_result(target_result)
                 except BaseException:
                     pass  # Optional data only, after the original failure latch.
@@ -422,6 +436,7 @@ class PersistentSigningModel:
                     service.join(timeout=max(0, deadline - time.monotonic()))
                     require(service_finished.is_set() and not service.is_alive(), "model service original join unresolved")
                     join_confirmed = True
+                    case_owner.adapter_progress("service-joined", command=progress_command, service=service)
                 except BaseException as error:
                     cleanup_errors.append(error)
             if start_attempted and not join_confirmed:
@@ -451,6 +466,7 @@ class PersistentSigningModel:
                 primary.add_note("model cleanup failures: " + ",".join(type(error).__name__ for error in cleanup_errors))
             raise primary
         require(not cleanup_errors and complete and result is not None, "model cleanup unresolved")
+        case_owner.adapter_progress("model-return", command=progress_command)
         return result
 
     def execute_model(self, argv):

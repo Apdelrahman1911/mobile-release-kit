@@ -2474,6 +2474,35 @@ class SigningAdapterControllerTests(unittest.TestCase):
         value.update(changes)
         return b"MRK_SIGNING_ADAPTER_FAILURE=" + rig.contract.canonical(value) + b"\n"
 
+    def test_progress_parser_independently_rejects_private_fields_and_stale_service_generation(self):
+        rig = self.rig()
+        scope = rig.controller.SigningAdapterDiagnostic("source", rig.contract.ADAPTER_TEST_IDS,
+                                                        rig.contract.ADAPTER_FAILURE_TEST_FILES)
+        progress = {"case": "inventory", "owner": {"stage": "run-owned", "command": 4, "elapsedMs": 321,
+                    "completed": 3, "totalMs": 222, "maxMs": 111},
+                    "service": {"stage": "EOF", "command": 4, "elapsedMs": 320}}
+        with patch.object(rig.controller, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+            parse = lambda data: rig.controller.signing_adapter_failure(data, scope, deadline=20.0)
+            self.assertEqual(parse(self.diagnostic(rig, progress=progress))["observations"][0]["progress"], progress)
+            unavailable = {"case": "inventory", "owner": None, "service": None}
+            self.assertEqual(parse(self.diagnostic(rig, progress=unavailable))["observations"][0]["progress"], unavailable)
+            for key, value in (("case", "/PRIVATE/path"), ("case", True), ("owner", None), ("service", [])):
+                self.assertIsNone(parse(self.diagnostic(rig, progress={**progress, key: value})))
+            for role, fields in (("owner", {"completed": True}), ("owner", {"elapsedMs": 1 << 31}),
+                                 ("owner", {"command": 0}), ("owner", {"maxMs": 223}),
+                                 ("owner", {"completed": 0}), ("owner", {"argv": "PRIVATE"}),
+                                 ("service", {"command": True}), ("service", {"command": 3}),
+                                 ("service", {"elapsedMs": 1.0}), ("service", {"stage": "PRIVATE"}),
+                                 ("service", {"pid": 123})):
+                with self.subTest(role=role, fields=fields):
+                    bad = {**progress, role: {**progress[role], **fields}}
+                    self.assertIsNone(parse(self.diagnostic(rig, progress=bad)))
+            self.assertIsNone(parse(self.diagnostic(rig, progress={**progress, "message": "PRIVATE"})))
+            self.assertIsNone(parse(self.diagnostic(rig, layer="worker", progress=progress)))
+            self.assertIsNone(parse(self.diagnostic(rig, outcome="skip", category="none", locations=[], progress=progress)))
+            raw = self.diagnostic(rig, progress=progress)
+            self.assertIsNone(parse(raw.replace(b'"command":4', b'"command":4,"command":4', 1)))
+
     def test_failure_parser_is_closed_bounded_and_cannot_project_private_or_ambiguous_data(self):
         rig = self.rig()
         scope = rig.controller.SigningAdapterDiagnostic("source", rig.contract.ADAPTER_TEST_IDS,

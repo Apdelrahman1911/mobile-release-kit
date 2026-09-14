@@ -30,6 +30,153 @@ from unit.local_signing_persistent import PROFILE, UUID, OwnerResolutionRefused,
 class PersistentWorkerRecorderTests(unittest.TestCase):
     """No fork, native wait, process signal or actual descriptor is acquired."""
 
+    class Page:
+        """Inert mapping; neither this class nor its close acquires a resource."""
+        def __init__(self):
+            self.data = bytearray(4096)
+            self.reads = self.closes = 0
+            self.read_error = self.write_error = self.close_error = None
+        def __getitem__(self, key):
+            self.reads += 1
+            if self.read_error is not None:
+                raise self.read_error
+            return bytes(self.data[key])
+        def __setitem__(self, key, value):
+            if self.write_error is not None:
+                raise self.write_error
+            self.data[key] = value
+        def close(self):
+            self.closes += 1
+            if self.close_error is not None:
+                raise self.close_error
+
+    @contextmanager
+    def progress_page(self):
+        class Thread:
+            pass
+        main, service = Thread(), Thread()
+        state = SimpleNamespace(pid=702, thread=main, now=10.0)
+        context = object()
+        page = owner._AdapterProgress(context, "query", 10.0, 700)
+        page.mapping = self.Page()
+        def snapshot():
+            previous, state.pid = state.pid, 700
+            try:
+                return page.snapshot(702)
+            finally:
+                state.pid = previous
+        with patch.multiple(owner, os=SimpleNamespace(getpid=lambda: state.pid),
+                            threading=SimpleNamespace(Thread=Thread, current_thread=lambda: state.thread,
+                                                      main_thread=lambda: main),
+                            time=SimpleNamespace(monotonic=lambda: state.now),
+                            ADAPTER_DIAGNOSTIC_CONTEXT=context, _ADAPTER_PROGRESS_WRITER=None):
+            page.bind_worker()
+            yield SimpleNamespace(page=page, state=state, main=main, service=service, context=context,
+                                  snapshot=snapshot, hook=owner.adapter_progress)
+
+    def test_progress_exact_writers_original_join_and_command_accounting(self):
+        with self.progress_page() as rig:
+            rig.hook("task-entered")
+            self.assertEqual(rig.hook("begin"), 1)
+            rig.hook("bind-service", command=1, service=rig.service)
+            rig.hook("run-owned", command=1)
+            before = bytes(rig.page.mapping.data)
+            rig.hook("HELLO", command=1)  # Main never writes the service slot.
+            rig.state.pid = 703
+            rig.hook("task-returned")
+            rig.state.pid, rig.state.thread = 702, object()
+            rig.hook("task-returned")
+            rig.hook("HELLO", command=1)
+            self.assertEqual(bytes(rig.page.mapping.data), before)
+            rig.state.thread = rig.service
+            rig.hook("HELLO", command=True)
+            self.assertEqual(bytes(rig.page.mapping.data), before)
+            for stage in ("HELLO", "BEGIN", "EFFECT", "END", "DONE", "EOF"):
+                rig.hook(stage, command=1)
+            service_sequence = rig.page.sequences[1]
+            rig.state.thread = rig.main
+            self.assertIsNone(rig.hook("begin"))  # Service completion alone cannot authorize new binding.
+            rig.hook("target-return", command=1)
+            self.assertEqual(rig.snapshot()["owner"]["completed"], 0)
+            rig.hook("service-joined", command=1, service=object())
+            self.assertFalse(rig.page.joined)
+            rig.hook("service-joined", command=1, service=rig.service)
+            rig.state.now = 11.25
+            rig.hook("model-return", command=1)
+            rig.hook("model-return", command=1)
+            self.assertEqual(rig.snapshot()["owner"], {"stage": "model-return", "elapsedMs": 1250, "command": 1,
+                                                       "completed": 1, "totalMs": 1250, "maxMs": 1250})
+            self.assertEqual(rig.hook("begin"), 2)
+            self.assertIsNone(rig.snapshot()["service"])  # Earlier EOF is stale, never next-command evidence.
+            next_service = type(rig.service)()
+            rig.hook("bind-service", command=2, service=next_service)
+            rig.state.thread = rig.service
+            rig.hook("EOF", command=2)  # Even the current ordinal cannot adopt an earlier Thread object.
+            self.assertEqual(rig.page.sequences[1], service_sequence)
+            rig.state.thread = next_service
+            rig.hook("EOF", command=1)
+            self.assertEqual(rig.page.sequences[1], service_sequence)
+            rig.hook("HELLO", command=2)
+            self.assertGreater(rig.page.sequences[1], service_sequence)
+            self.assertEqual(rig.snapshot()["service"]["command"], 2)
+            rig.state.thread = rig.main
+            with patch.object(owner, "ADAPTER_DIAGNOSTIC_CONTEXT", object()):
+                before = bytes(rig.page.mapping.data)
+                rig.hook("task-returned")
+                self.assertEqual(bytes(rig.page.mapping.data), before)
+
+    def test_progress_single_copy_rejects_torn_wrong_generation_and_overflow(self):
+        with self.progress_page() as rig:
+            rig.hook("begin")
+            baseline = bytes(rig.page.mapping.data)
+            good = rig.page.record.unpack(baseline[:rig.page.record.size])
+            for field, value in ((0, 0), (0, 3), (11, 4), (1, 2), (2, 2), (3, 703), (4, 99),
+                                 (5, 0), (6, 99), (7, 1 << 31), (8, 2), (10, 1)):
+                with self.subTest(field=field, value=value):
+                    changed = list(good)
+                    changed[field] = value
+                    rig.page.mapping.data[:rig.page.record.size] = rig.page.record.pack(*changed)
+                    reads = rig.page.mapping.reads
+                    self.assertIsNone(rig.snapshot()["owner"])
+                    self.assertEqual(rig.page.mapping.reads, reads + 1)
+            rig.page.mapping.data[:] = baseline
+            rig.page.sequences[0] = owner.ADAPTER_PROGRESS_MAX - 1
+            rig.hook("run-owned", command=1)
+            self.assertTrue(rig.page.disabled[0])
+            self.assertIsNone(rig.snapshot()["owner"])
+            final_sequence = rig.page.sequences[0]
+            self.assertIsNone(rig.hook("begin"))
+            self.assertEqual(rig.page.sequences[0], final_sequence)
+        for change in ("elapsed", "completed", "total"):
+            with self.subTest(overflow=change), self.progress_page() as rig:
+                rig.hook("begin")
+                if change == "elapsed":
+                    rig.state.now = 10.0 + (1 << 31)
+                else:
+                    setattr(rig.page, change, 1 << 31)
+                rig.hook("run-owned", command=1)
+                self.assertTrue(rig.page.disabled[0])
+                self.assertIsNone(rig.snapshot()["owner"])
+
+    def test_progress_optional_io_and_normal_cancellation_do_not_become_success(self):
+        for error in (OSError("inert optional IO"), KeyboardInterrupt(), SystemExit(17)):
+            with self.subTest(error=type(error).__name__), self.progress_page() as rig:
+                rig.page.mapping.write_error = error
+                if isinstance(error, Exception):
+                    rig.hook("task-entered")
+                    self.assertTrue(rig.page.disabled[0])
+                else:
+                    with self.assertRaises(type(error)) as caught:
+                        rig.hook("task-entered")
+                    self.assertIs(caught.exception, error)
+                rig.page.mapping.read_error = error
+                if isinstance(error, Exception):
+                    self.assertIsNone(rig.snapshot())
+                else:
+                    with self.assertRaises(type(error)) as caught:
+                        rig.snapshot()
+                    self.assertIs(caught.exception, error)
+
     def test_prefix_helper_traces_acquisition_through_original_close(self):
         # Execute the actual nested helper, but replace every outer worker,
         # account/model and filesystem entry before reaching it. No setUp or
@@ -212,6 +359,101 @@ class PersistentWorkerRecorderTests(unittest.TestCase):
     def invoke(self, rig):
         return owner.run_worker(Path("/inert/case"), "case", rig.task,
                                 timeout=20, deadline=40.0, write_json=rig.record)
+
+    def test_progress_launcher_allocates_inside_lifetime_and_reads_only_after_original_settlement(self):
+        for fault in (None, "deadline", "record", "wait"):
+            with self.subTest(fault=fault), self.recorded_owner(fault=fault) as rig:
+                context = object()
+                events = rig.events
+                class Page(self.Page):
+                    def __getitem__(self, key):
+                        events.append(("progress-read",))
+                        return super().__getitem__(key)
+                page = Page()
+                def allocate(*args):
+                    self.assertEqual(args, (-1, 4096))
+                    events.append(("progress-allocate",))
+                    return page
+                with patch.multiple(owner, ADAPTER_DIAGNOSTIC_CONTEXT=context, ADAPTER_CASE_FAILURE=None,
+                                    ADAPTER_CASE_PROGRESS=None, mmap=SimpleNamespace(mmap=allocate)):
+                    if fault is None:
+                        owner.run_worker(Path("/inert"), "query", rig.task, write_json=rig.record)
+                        self.assertIsNone(owner.adapter_case_progress(context))  # Success emits no progress.
+                    else:
+                        with self.assertRaises((AssertionError, OSError)):
+                            owner.run_worker(Path("/inert"), "query", rig.task, write_json=rig.record)
+                    if fault == "deadline":
+                        self.assertEqual(owner.adapter_case_failure(context), (0, -9, 0, True, True))
+                        self.assertEqual(owner.adapter_case_progress(context), {"case": "query", "owner": None, "service": None})
+                        self.assertIsNone(owner.adapter_case_progress(object()))
+                self.assertEqual(page.reads, int(fault in (None, "deadline")))
+                self.assertEqual(page.closes, 1)
+                self.assertEqual(events[0], ("progress-allocate",))
+                if page.reads:
+                    read = events.index(("progress-read",))
+                    before = events[:read]
+                    self.assertEqual(sum(row[0] == "receive" for row in before), 3)  # ARMED, terminal, original EOF.
+                    self.assertEqual(sum(row[0] == "wait" for row in before), 2)
+                    self.assertTrue(any(row[0] == "absent" for row in before))
+
+    def test_progress_allocation_read_and_once_close_errors_preserve_original_primary(self):
+        for error in (OSError("inert allocation"), KeyboardInterrupt(), SystemExit(9)):
+            with self.subTest(allocation=type(error).__name__), self.recorded_owner() as rig, \
+                    patch.multiple(owner, ADAPTER_DIAGNOSTIC_CONTEXT=object(), ADAPTER_CASE_FAILURE=None,
+                                   ADAPTER_CASE_PROGRESS=None, mmap=SimpleNamespace(mmap=Mock(side_effect=error))):
+                if isinstance(error, Exception):
+                    owner.run_worker(Path("/inert"), "query", rig.task, write_json=rig.record)
+                else:
+                    with self.assertRaises(type(error)) as caught:
+                        owner.run_worker(Path("/inert"), "query", rig.task, write_json=rig.record)
+                    self.assertIs(caught.exception, error)
+                    self.assertFalse(rig.events)  # Interrupted allocation admitted no pipe or fork.
+        for fault in (None, "deadline"):
+            for operation in ("read", "close"):
+                with self.subTest(fault=fault, operation=operation), self.recorded_owner(fault=fault) as rig:
+                    page, retained = self.Page(), []
+                    error = KeyboardInterrupt() if operation == "read" else OSError("inert ambiguous close")
+                    setattr(page, operation + "_error", error)
+                    with patch.multiple(owner, ADAPTER_DIAGNOSTIC_CONTEXT=object(), ADAPTER_CASE_FAILURE=None,
+                                        ADAPTER_CASE_PROGRESS=None, _RETAINED_ADAPTER_PROGRESS=retained,
+                                        mmap=SimpleNamespace(mmap=lambda *_: page)):
+                        expected = AssertionError if fault else KeyboardInterrupt if operation == "read" else BaseExceptionGroup
+                        with self.assertRaises(expected) as caught:
+                            owner.run_worker(Path("/inert"), "query", rig.task, write_json=rig.record)
+                        if fault:
+                            self.assertIn("observed -9", str(caught.exception))
+                            self.assertIn(error, caught.exception._case_cleanup_errors)
+                        elif operation == "read":
+                            self.assertIs(caught.exception, error)
+                        else:
+                            self.assertEqual(caught.exception.exceptions, (error,))
+                        if operation == "close":
+                            self.assertEqual(len(retained), 1)
+                            self.assertIs(retained[0].mapping, page)
+                            retained[0].close([])  # Already claimed, never retried even after failure.
+                        self.assertEqual(page.closes, 1)
+        with self.progress_page() as rig, patch.object(owner, "_RETAINED_ADAPTER_PROGRESS", []) as retained:
+            error, errors = SystemExit(23), []
+            rig.page.mapping.close_error = error
+            rig.page.close(errors)  # W cannot claim the launcher's close.
+            self.assertEqual(rig.page.mapping.closes, 0)
+            rig.state.pid = 700
+            rig.page.close(errors)
+            rig.page.close(errors)
+            self.assertEqual((errors, rig.page.mapping.closes), ([error], 1))
+            self.assertEqual(retained, [rig.page])
+
+    def test_recovery_progress_observes_existing_busy_loop_without_an_extra_query(self):
+        statuses = [{"status": "busy"}, {"status": "busy"}, {"status": "idle"}]
+        with patch.object(fixture.signing, "signing_status", side_effect=statuses) as query, \
+                patch.object(owner, "CASE_DEADLINE", 20.0), patch.object(owner, "remaining", return_value=1.0), \
+                patch.object(owner, "adapter_progress") as progress, \
+                patch.object(fixture, "time", SimpleNamespace(sleep=lambda _seconds: None)), \
+                patch.object(fixture, "snapshot", side_effect=ValueError("inert stop before recovery IO")), \
+                self.assertRaisesRegex(ValueError, "inert stop"):
+            fixture.recovery_flow(Path("/inert"), None)
+        self.assertEqual(query.call_count, 3)
+        self.assertEqual([row.args[0] for row in progress.call_args_list], ["recovery-check", "recovery-busy", "recovery-ready"])
 
     def test_pinned_group_is_retired_before_first_anchor_wait_including_zero(self):
         with self.recorded_owner() as rig:
@@ -488,15 +730,19 @@ class PersistentWorkerRecorderTests(unittest.TestCase):
         model.path = SimpleNamespace(read_bytes=lambda: b'{"actual_state_reload":true}')
         retained = []
         clock = SimpleNamespace(monotonic=lambda: 10.0)
+        def progress(stage, **kwargs):
+            calls.append(("progress", stage, kwargs))
+            return 1 if stage == "begin" else None
         with patch.object(bridge, "Namespace", return_value=namespace), \
                 patch.object(bridge, "Channel", Channel), patch.object(bridge, "time", clock), \
                 patch.object(persistent_model, "threading", SimpleNamespace(Event=Event, Thread=Thread)), \
                 patch.object(persistent_model, "time", clock), \
                 patch.object(persistent_model, "_RETAINED_MODEL_LIFETIMES", retained), \
                 patch.object(owned_process, "run_owned", side_effect=run) as launch, \
+                patch.object(owner, "adapter_progress", side_effect=progress) as progress_hook, \
                 patch.object(owner, "observe_adapter_target_result", create=True) as diagnostic:
             yield SimpleNamespace(model=model, calls=calls, events=events, namespace=namespace,
-                                  retained=retained, launch=launch, diagnostic=diagnostic)
+                                  retained=retained, launch=launch, diagnostic=diagnostic, progress=progress_hook)
 
     def test_actual_target_failure_precedes_join_and_keeps_independent_service_failure(self):
         for code, stderr in ((1, "PRIVATE actual target failure"), (0, "PRIVATE unexpected stderr")):
@@ -516,6 +762,10 @@ class PersistentWorkerRecorderTests(unittest.TestCase):
                     rig.namespace.remove.assert_not_called()
                     rig.namespace.close.assert_called_once()
                     rig.diagnostic.assert_called_once_with(returned)
+                    stages = [call.args[0] for call in rig.progress.call_args_list]
+                    self.assertIn("target-return", stages)
+                    self.assertNotIn("model-return", stages)
+                    rig.launch.assert_called_once()
 
     def test_original_command_exception_never_advertises_a_return_or_loses_its_primary(self):
         first, observation = KeyboardInterrupt(), OSError("PRIVATE independent service failure")
@@ -529,6 +779,9 @@ class PersistentWorkerRecorderTests(unittest.TestCase):
             rig.diagnostic.assert_not_called()
             rig.namespace.remove.assert_not_called()
             self.assertFalse(rig.retained)
+            self.assertNotIn("target-return", [call.args[0] for call in rig.progress.call_args_list])
+            self.assertNotIn("model-return", [call.args[0] for call in rig.progress.call_args_list])
+            rig.launch.assert_called_once()
 
     def test_matching_result_preserves_done_eof_race_and_exact_expected_nonzero_policy(self):
         for code, stderr, capture in ((0, "", True), (7, "fictional selected stderr", True), (7, "", False)):
@@ -556,6 +809,14 @@ class PersistentWorkerRecorderTests(unittest.TestCase):
                     rig.namespace.close.assert_not_called()
                     rig.diagnostic.assert_not_called()
                     self.assertFalse(rig.retained)
+                    self.assertEqual([call.args[0] for call in rig.progress.call_args_list],
+                        ["begin", "bind-service", "run-owned", "target-return", "HELLO", "DONE", "EOF",
+                         "service-joined", "model-return"])
+                    self.assertLess(next(i for i, call in enumerate(rig.calls) if call[:2] == ("progress", "bind-service")),
+                                    rig.calls.index(("start",)))
+                    self.assertLess(rig.calls.index(("remove",)),
+                                    next(i for i, call in enumerate(rig.calls) if call[:2] == ("progress", "model-return")))
+                    rig.launch.assert_called_once()
 
         observation = OSError("PRIVATE actual service EOF failure")
         returned = persistent_model.subprocess.CompletedProcess(["actual-target"], 0, "", "")
@@ -566,6 +827,7 @@ class PersistentWorkerRecorderTests(unittest.TestCase):
             self.assertFalse(hasattr(caught.exception, "_model_cleanup_errors"))  # Already retained as the actual cause.
             rig.namespace.remove.assert_not_called()
             rig.diagnostic.assert_called_once_with(returned)
+            self.assertNotIn("model-return", [call.args[0] for call in rig.progress.call_args_list])
 
 
 class PersistentBridgeRecorderTests(unittest.TestCase):

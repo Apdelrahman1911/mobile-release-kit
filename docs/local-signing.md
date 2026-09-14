@@ -9,6 +9,12 @@ checks or preparation. Concurrent toolkit commands in different projects using
 the same account fail before those operations; they do not queue, take over a
 PID, or borrow another context's installed profile. Retry after the owner exits.
 
+Standalone signed `materialize_build_inputs` calls acquire the same lease before
+private-input inspection or client-file changes and retain it through teardown.
+An explicitly supplied lease is borrowed, not reacquired or released; another
+active signing context is rejected before materialization. This admission does
+not resolve QA-004's separate outer scratch/client-restoration obligations.
+
 Production admission requires macOS, a non-root account with equal real/effective
 UID, its password-database home, and writable local APFS/HFS+ storage. A conflicting
 `HOME`, unsafe directory permissions/links or unsupported native ABI/filesystem

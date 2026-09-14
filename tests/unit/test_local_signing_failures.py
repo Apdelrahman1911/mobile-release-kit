@@ -10,7 +10,7 @@ import stat
 import sys
 import tempfile
 import unittest
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from contextlib import ExitStack, contextmanager, nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -767,8 +767,8 @@ with patch.object(signing,'local_signing_lease',side_effect=lambda **kw: lease(*
 class InertAccountCleanupTests(unittest.TestCase):
     """Actual wrapper exits, modeled acquisition returns; no files or children.
 
-    These tests prove error precedence and original guard routing only. Modeled
-    descriptor values never enter native execution or stand in for a receipt.
+    These tests prove early admission, error precedence and original guard routing
+    only. Modeled descriptors never enter native execution or stand in for a receipt.
     """
 
     @staticmethod
@@ -948,6 +948,298 @@ class InertAccountCleanupTests(unittest.TestCase):
             self.assertTrue(guard.lifetime_ledger.fatal)
             self.assertIs(guard.lifetime_ledger._primary, primary)
             guard.restore()
+
+    def test_materializer_refuses_busy_active_quarantined_and_mismatched_owners_before_material_work(self):
+        from .test_lifetime_evidence import handler_model
+
+        for rejection in ("busy", "active", "quarantined", "mismatched"):
+            with self.subTest(rejection=rejection), handler_model():
+                guard = DefaultCancellation(owned.ProcessCleanupError, "fixed")
+                guard.install(); guard.activate()
+                admissions, platform_reads = [], []
+                primary = signing.SigningBusy("modeled busy") if rejection == "busy" else CredentialError("modeled quarantine")
+                def acquire(_lease, **_kwargs):
+                    raise primary
+                def admit():
+                    admissions.append("admit")
+                    if rejection in {"quarantined", "mismatched"}:
+                        raise primary
+                def platforms():
+                    platform_reads.append("read")
+                    if rejection in {"quarantined", "mismatched"}:
+                        raise AssertionError("platform iterable evaluated before owner refusal")
+                    yield "ios"
+                owner = SimpleNamespace(cancellation=guard, active=object(), _admit_execution=admit,
+                                        close=lambda: self.fail("borrowed lease was closed"))
+                supplied = None if rejection == "busy" else owner
+                given_guard = DefaultCancellation(owned.ProcessCleanupError, "other") if rejection == "mismatched" else guard
+                expected = {"busy": "modeled busy", "active": "already has an active signing context",
+                            "quarantined": "modeled quarantine", "mismatched": "cancellation owner differs"}[rejection]
+                try:
+                    with ExitStack() as stack:
+                        factory = stack.enter_context(patch.object(credentials, "local_signing_lease", wraps=signing.local_signing_lease))
+                        stack.enter_context(patch.object(signing.SigningLease, "acquire", acquire))
+                        sentinels = [stack.enter_context(patch.object(component, name, side_effect=AssertionError("material work before admission")))
+                                     for component, name in ((credentials, "_private_path_error"),
+                                                             (credentials.tempfile, "TemporaryDirectory"),
+                                                             (credentials, "_restore_build_targets"),
+                                                             (credentials, "_materialize"),
+                                                             (credentials, "_temporary_apple_signing_environment"))]
+                        with self.assertRaisesRegex(CredentialError, expected) as caught:
+                            with credentials.materialize_build_inputs(
+                                SimpleNamespace(root=Path("/modeled/project")),
+                                values={"MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PATH": "/modeled/private.p12"},
+                                platforms=platforms(), prepare_ios_signing=True,
+                                signing_lease=supplied, cancellation=given_guard,
+                            ):
+                                self.fail("rejected materializer yielded")
+                        if rejection in {"busy", "quarantined"}:
+                            self.assertIs(caught.exception, primary)
+                        self.assertEqual(admissions, [] if rejection in {"busy", "mismatched"} else ["admit"])
+                        self.assertEqual(platform_reads, [] if rejection in {"quarantined", "mismatched"} else ["read"])
+                        self.assertEqual(factory.call_count, int(rejection == "busy"))
+                        for sentinel in sentinels:
+                            sentinel.assert_not_called()
+                        self.assertFalse(guard.lifetime_ledger.fatal)
+                finally:
+                    guard.restore()
+
+    def test_materializer_routes_one_exact_lease_through_all_cleanup_and_leaves_borrowed_owner_open(self):
+        from .test_lifetime_evidence import handler_model
+
+        cases = (("standalone", ("ios",), True, None),
+                 ("interrupted", ("ios",), True, KeyboardInterrupt("original materializer body")),
+                 ("borrowed", ("ios",), True, None),
+                 ("unsigned", ("ios",), False, None),
+                 ("android", ("android",), True, None))
+        for mode, selected, prepare, primary in cases:
+            with self.subTest(mode=mode), handler_model():
+                guard = DefaultCancellation(owned.ProcessCleanupError, "fixed")
+                guard.install(); guard.activate()
+                events, owners, consumed, yielded = [], [], [], []
+                supplied = signing.SigningLease(guard) if mode == "borrowed" else None
+                if supplied is not None:
+                    owners.append(supplied)
+                @contextmanager
+                def stage(name, value):
+                    events.append(name + "-enter")
+                    try:
+                        yield value
+                    finally:
+                        events.append(name + "-exit")
+                def acquire(owner, **_kwargs):
+                    owners.append(owner)
+                    self.assertIs(owner.cancellation, guard)
+                    events.append("lease-enter")
+                def close(owner):
+                    self.assertIs(owner, owners[0])
+                    events.append("lease-exit")
+                def admit(owner):
+                    self.assertIs(owner, owners[0])
+                    events.append("admit")
+                def scratch(**_kwargs):
+                    events.append("scratch-create")
+                    return stage("scratch", "/modeled/scratch")
+                def signer(**kwargs):
+                    self.assertIs(kwargs["lease"], owners[0])
+                    self.assertIs(kwargs["cancellation"], guard)
+                    self.assertEqual(guard.handler_state, "ACTIVE")
+                    return stage("signing", {"MOBILE_RELEASE_IOS_PROFILE_SPECIFIER": "modeled"})
+                def materialize(_values, _base64_name, _path_name, directory, filename, **_kwargs):
+                    return directory / filename if filename in {"distribution.p12", "profile.mobileprovision"} else None
+                def platforms():
+                    for platform in selected:
+                        consumed.append(platform)
+                        yield platform
+                def body():
+                    with credentials.materialize_build_inputs(
+                        SimpleNamespace(root=Path("/modeled/project"), section=lambda _name: {}),
+                        values={"MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD": "fictional"},
+                        platforms=platforms(), prepare_ios_signing=prepare,
+                        signing_lease=supplied, cancellation=guard,
+                    ) as materialized:
+                        yielded.append(materialized)
+                        if primary is not None:
+                            raise primary
+                try:
+                    with patch.object(credentials, "local_signing_lease", wraps=signing.local_signing_lease) as factory, \
+                            patch.object(signing.SigningLease, "acquire", acquire), \
+                            patch.object(signing.SigningLease, "close", close), \
+                            patch.object(signing.SigningLease, "_admit_execution", admit), \
+                            patch.object(credentials.tempfile, "TemporaryDirectory", side_effect=scratch), \
+                            patch.object(credentials, "_restore_build_targets", side_effect=lambda _backups: stage("targets", None)), \
+                            patch.object(credentials, "_materialize", side_effect=materialize), \
+                            patch.object(credentials, "_temporary_apple_signing_environment", side_effect=signer) as signing_context, \
+                            patch.object(Path, "chmod"):
+                        if primary is None:
+                            body()
+                        else:
+                            with self.assertRaises(KeyboardInterrupt) as caught:
+                                body()
+                            self.assertIs(caught.exception, primary)
+                        signed = prepare and "ios" in selected
+                        owned_lease = signed and supplied is None
+                        self.assertEqual(consumed, list(selected))
+                        self.assertEqual(yielded, [{"MOBILE_RELEASE_IOS_PROFILE_SPECIFIER": "modeled"}] if signed else [{}])
+                        self.assertEqual(factory.call_count, int(owned_lease))
+                        self.assertEqual(signing_context.call_count, int(signed))
+                        self.assertEqual(events.count("admit"), int(signed))
+                        expected = (["signing-exit"] if signed else []) + ["targets-exit", "scratch-exit"]
+                        if owned_lease:
+                            expected.append("lease-exit")
+                            self.assertLess(events.index("lease-enter"), events.index("scratch-create"))
+                            factory.assert_called_once_with(cancellation=guard)
+                        self.assertEqual([event for event in events if event.endswith("-exit")], expected)
+                        self.assertEqual(guard.handler_state, "ACTIVE")
+                        self.assertFalse(guard.lifetime_ledger.fatal)
+                finally:
+                    guard.restore()
+
+
+class InertPkcs12CallerTests(unittest.TestCase):
+    """Actual caller fallback policy, not process/profile/finality qualification.
+
+    Every prerequisite and runner below is inert. No native custody is issued,
+    fictional certificate bytes are never authenticated, and no files are used.
+    """
+
+    @contextmanager
+    def caller(self, site, outcomes):
+        from .test_lifetime_evidence import handler_model
+
+        with handler_model():
+            guard = DefaultCancellation(owned.ProcessCleanupError, "fixed")
+            guard.install(); guard.activate()
+            trace = SimpleNamespace(extractions=[], commands=[], lifecycle=[], guard=guard)
+            results = iter(outcomes)
+            execution_source = object()
+            def run(argv, **kwargs):
+                trace.commands.append(list(argv))
+                if site == "validator":
+                    self.assertIs(kwargs["cancellation"], guard)
+                    self.assertIs(kwargs["execution_source"], execution_source)
+                if argv[:2] == ["openssl", "pkcs12"]:
+                    trace.extractions.append(list(argv))
+                    outcome = next(results, 0)
+                    if isinstance(outcome, BaseException):
+                        raise outcome
+                    return SimpleNamespace(returncode=outcome, stdout="", stderr="")
+                self.assertEqual(argv[0], "security")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            session = SimpleNamespace(
+                fd=311, state={"inflight": None}, intent={"profile": {"stage": "modeled-stage"}},
+                keychain=Path("/modeled/keychain"), unresolved=False, journal_failed=False, cleaning=False,
+                bind_runner=lambda *_args, **_kwargs: None, open=lambda **_kwargs: None,
+                prepare=lambda *_args: None, profile_event=lambda *_args, **_kwargs: None,
+                run=run, activate=lambda: trace.lifecycle.append("activate"),
+                cleanup_native=lambda: trace.lifecycle.append("cleanup-native"),
+                cleanup_profile=lambda: trace.lifecycle.append("cleanup-profile"), finish=lambda: False,
+                close=lambda: trace.lifecycle.append("close"),
+            )  # Modeled FD311 is never passed to an OS or native owner.
+            lease = SimpleNamespace(cancellation=guard, active=None, home=Path("/modeled/home"),
+                                    _admit_execution=lambda: None, session=lambda: session)
+            def invoke():
+                if site == "signing":
+                    with credentials._temporary_apple_signing_environment(
+                        p12=Path("/modeled/input.p12"), password="fictional",
+                        profile=Path("/modeled/input.profile"), directory=Path("/modeled/private"),
+                        lease=lease, cancellation=guard,
+                    ) as updates:
+                        return updates
+                return credentials._validate_apple_signing_material(
+                    SimpleNamespace(root=Path("/modeled/project"), section=lambda _name: {}),
+                    {"MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD": "fictional"},
+                    Path("/modeled/private"), execution_source=execution_source, cancellation=guard,
+                )
+            try:
+                with patch.object(credentials, "_authenticated_signing_profile", return_value=(CONTENT, {"UUID": UUID})), \
+                        patch.object(credentials, "_temporary_profile_installation", side_effect=lambda *_args, **_kwargs: nullcontext()), \
+                        patch.object(credentials, "_materialize", side_effect=lambda _values, _base64, _path, directory, name, **_kw: directory / name), \
+                        patch("mobile_release.ios_profiles.load_authenticated_profile", return_value={}), \
+                        patch("mobile_release.ios._profile_validity"), \
+                        patch.object(credentials, "consume_profile_evidence"), \
+                        patch.object(credentials, "_run_private", side_effect=run), \
+                        patch.object(Path, "exists", return_value=False), \
+                        patch.object(Path, "is_file", return_value=False), patch.object(Path, "chmod"):
+                    # The validator's ordinary file gate stops after P12 calls.
+                    # This tests fallback routing, never fictional cert validity.
+                    yield invoke, trace
+            finally:
+                guard.restore()
+
+    @staticmethod
+    def extraction_roles(commands):
+        return [(next(flag for flag in ("-clcerts", "-nocerts", "-cacerts") if flag in command),
+                 "-legacy" in command) for command in commands]
+
+    def test_both_callers_limit_legacy_to_one_positive_retry_and_preserve_negative_dispatch(self):
+        cases = (("zero", (0,)), ("legacy-success", (7, 0)), ("legacy-failure", (7, 9)),
+                 ("negative-first", (-15,)), ("negative-legacy", (7, -15)))
+        for site in ("signing", "validator"):
+            for mode, outcomes in cases:
+                with self.subTest(site=site, mode=mode), self.caller(site, outcomes) as (invoke, trace):
+                    negative = mode.startswith("negative")
+                    if negative:
+                        with self.assertRaises(owned.ProcessError) as caught:
+                            invoke()
+                        error = caught.exception
+                        self.assertEqual((error.dispatched, error.contained, error.cleanup_complete, error.fatal),
+                                         (True, True, True, False))
+                    elif mode == "legacy-failure" and site == "signing":
+                        with self.assertRaisesRegex(CredentialError, "extract the Apple distribution certificate"):
+                            invoke()
+                    else:
+                        result = invoke()
+                        if site == "signing":
+                            self.assertEqual(result, {"MOBILE_RELEASE_IOS_PROFILE_SPECIFIER": UUID})
+                            self.assertIn("activate", trace.lifecycle)
+                        else:
+                            self.assertEqual([(finding.code, finding.status) for finding in result],
+                                             [("credential-material.apple-p12", credentials.Status.INVALID)])
+                    fallback = mode not in {"zero", "negative-first"}
+                    expected = [("-clcerts", False)] + ([("-clcerts", True)] if fallback else [])
+                    if not negative and not (mode == "legacy-failure" and site == "signing"):
+                        expected += [("-nocerts", False)]
+                        if site == "signing":
+                            expected += [("-cacerts", False)]
+                    else:
+                        self.assertNotIn("activate", trace.lifecycle)
+                        self.assertFalse(any(command[:2] == ["security", "import"] for command in trace.commands))
+                    self.assertEqual(self.extraction_roles(trace.extractions), expected)
+                    if fallback:
+                        self.assertEqual(trace.extractions[1], trace.extractions[0][:2] + ["-legacy"] + trace.extractions[0][2:])
+                    self.assertFalse(trace.guard.lifetime_ledger.fatal)
+                    if site == "signing":
+                        self.assertEqual(trace.lifecycle.count("close"), 1)
+
+    def test_both_callers_propagate_original_outcome_fatality_or_interruption_without_retry(self):
+        errors = (
+            ("unknown", lambda: owned.ProcessOutcomeUnknown("modeled outcome", dispatched=True)),
+            ("fatal", lambda: owned.ProcessError("modeled original custody", dispatched=True,
+                                                contained=False, cleanup_complete=False)),
+            ("interrupt", lambda: KeyboardInterrupt("original P12 interruption")),
+        )
+        for site in ("signing", "validator"):
+            for phase in ("initial", "legacy"):
+                for kind, make_error in errors:
+                    primary = make_error()
+                    outcomes = (primary,) if phase == "initial" else (7, primary)
+                    with self.subTest(site=site, phase=phase, kind=kind), self.caller(site, outcomes) as (invoke, trace):
+                        with self.assertRaises(KeyboardInterrupt if kind == "interrupt" else owned.ProcessError) as caught:
+                            invoke()
+                        if site == "validator" or kind != "fatal":
+                            self.assertIs(caught.exception, primary)
+                        if kind != "interrupt":
+                            self.assertEqual((caught.exception.dispatched, caught.exception.contained,
+                                              caught.exception.cleanup_complete, caught.exception.fatal),
+                                             (True, kind != "fatal", kind != "fatal", kind == "fatal"))
+                        expected = [("-clcerts", False)] + ([("-clcerts", True)] if phase == "legacy" else [])
+                        self.assertEqual(self.extraction_roles(trace.extractions), expected)
+                        self.assertNotIn("activate", trace.lifecycle)
+                        self.assertFalse(any(command[:2] == ["security", "import"] for command in trace.commands))
+                        if site == "signing":
+                            self.assertIs(trace.guard.lifetime_ledger._primary, primary)
+                            self.assertEqual(trace.lifecycle.count("close"), 1)
 
 
 class FatalClassificationTests(unittest.TestCase):

@@ -124,12 +124,14 @@ class SigningAdapterResult(unittest.TestResult):
         self.started.append(identifier)
         self.context = (self.phase, identifier, self.source_map)
         case_owner.ADAPTER_CASE_FAILURE = None
+        case_owner.ADAPTER_CASE_PROGRESS = None
         case_owner.ADAPTER_DIAGNOSTIC_CONTEXT = self.context  # Immutable before any original child fork.
         super().startTest(test)
 
     def stopTest(self, test):
         case_owner.ADAPTER_DIAGNOSTIC_CONTEXT = None
         case_owner.ADAPTER_CASE_FAILURE = None
+        case_owner.ADAPTER_CASE_PROGRESS = None
         super().stopTest(test)
 
     def addSuccess(self, test):
@@ -147,7 +149,8 @@ class SigningAdapterResult(unittest.TestResult):
             self.first_failure = (test.id(), outcome)
             try:
                 contract.emit_adapter_failure(self.context, "unittest", outcome, error, deadline=self.deadline,
-                                               case=case_owner.adapter_case_failure(self.context))
+                                               case=case_owner.adapter_case_failure(self.context),
+                                               progress=case_owner.adapter_case_progress(self.context))
             except BaseException:
                 pass  # No optional observation can change the first original failure.
 

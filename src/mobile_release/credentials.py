@@ -1326,11 +1326,11 @@ def _temporary_apple_signing_environment(
             # Only a fully completed native nonzero allows the legacy-format
             # fallback. An ambiguous command is not automatically reissued.
             if result.returncode < 0:
-                raise ProcessError("Apple extraction was interrupted; it cannot be retried")
+                raise ProcessError("Apple extraction was interrupted; it cannot be retried", dispatched=True)
             if result.returncode > 0:
                 result = session.run(["openssl", "pkcs12", "-legacy", *base[2:]], kind="extract")
             if result.returncode < 0:
-                raise ProcessError("Apple legacy extraction was interrupted; no further extraction is allowed")
+                raise ProcessError("Apple legacy extraction was interrupted; no further extraction is allowed", dispatched=True)
             if result.returncode:
                 raise CredentialError(f"could not {action} for local Apple signing preflight")
 
@@ -1690,7 +1690,7 @@ def _validate_apple_signing_material(
         command = ["openssl", "pkcs12", "-in", str(p12), *arguments]
         result = _run_private(command, environ=env, execution_source=execution_source, cancellation=cancellation)
         if result.returncode < 0:
-            raise ProcessError("Apple extraction was interrupted; it cannot be retried")
+            raise ProcessError("Apple extraction was interrupted; it cannot be retried", dispatched=True)
         if result.returncode > 0:
             result = _run_private(
                 ["openssl", "pkcs12", "-legacy", "-in", str(p12), *arguments],
@@ -1698,7 +1698,7 @@ def _validate_apple_signing_material(
                 execution_source=execution_source, cancellation=cancellation,
             )
         if result.returncode < 0:
-            raise ProcessError("Apple legacy extraction was interrupted; no further extraction is allowed")
+            raise ProcessError("Apple legacy extraction was interrupted; no further extraction is allowed", dispatched=True)
         return result
 
     extract = extract_pkcs12(
@@ -2126,6 +2126,18 @@ def materialize_build_inputs(
         signing_lease._admit_execution()
         cancellation = signing_lease.cancellation
     selected = set(platforms)
+    if prepare_ios_signing and "ios" in selected and signing_lease is None:
+        # Standalone signed callers need the same early account admission as
+        # preflight. Retain its exact guard/lease through all outer cleanup.
+        with local_signing_lease(cancellation=cancellation) as owner:
+            with materialize_build_inputs(
+                config, values=values, platforms=selected, prepare_ios_signing=True,
+                signing_lease=owner, cancellation=owner.cancellation,
+            ) as materialized:
+                yield materialized
+        return
+    if signing_lease is not None and prepare_ios_signing and "ios" in selected and signing_lease.active is not None:
+        raise CredentialError("this account lease already has an active signing context")
     for name in PRIVATE_CREDENTIAL_PATH_NAMES & values.keys():
         if error := _private_path_error(values[name], config.root):
             raise CredentialError(error)
