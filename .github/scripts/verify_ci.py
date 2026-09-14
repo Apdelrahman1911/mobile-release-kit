@@ -271,6 +271,21 @@ ADAPTER_FAILURE_RESULT_KINDS = (
     "fixture-input", "fixture-observation", "fixture-control", "signal-policy", "diagnostic", "control",
     "unexpected", "other", "missing", "invalid",
 )
+# Exact producer-literal projections, not an additional exception category.
+ADAPTER_FAILURE_OWNED_CODES = frozenset({
+    "owned-control-repeat", "owned-control-no-io", "owned-control-close", "owned-runtime-origin",
+    "owned-record-identity", "owned-record-bound", "owned-record-changing", "owned-record-write",
+    "owned-request", "owned-cwd", "owned-acquire-repeat", "owned-deadline-shape", "owned-admission-expired",
+    "owned-creator-admission", "owned-child-missing", "owned-admission-cutoff", "owned-admission-endpoint",
+    "owned-admission-identity", "owned-stdio", "owned-config-bound", "owned-config-write", "owned-creator-return",
+    "owned-creator-join", "owned-creator-settle", "owned-child-publication", "owned-ready-binding",
+    "owned-bootstrap-refused", "owned-grant-repeat", "owned-grant-return", "owned-wait-authority",
+    "owned-numeric-retirement", "owned-wait-receipt", "owned-signal-authority", "owned-signal-cutoff",
+    "owned-control-unknown", "owned-io-unknown", "owned-creator-close", "owned-stream", "owned-stream-cutoff",
+    "owned-attempt-identity", "owned-child-unknown", "owned-cleanup-cutoff", "owned-cleanup-finality",
+    "owned-directory-identity", "owned-record-path", "owned-publish-unavailable", "owned-publish-refused",
+    "owned-publish-return", "owned-publish-unresolved",
+})
 ADAPTER_FAILURE_DRIVER_CODES = {
     "missing": frozenset({"missing"}),
     "none": frozenset({"missing", "none", "invalid"}),
@@ -278,6 +293,7 @@ ADAPTER_FAILURE_DRIVER_CODES = {
     **dict.fromkeys(("contract-error", "io-error", "interrupt", "system-exit", "other"),
                    frozenset({"missing", "invalid", "other"})),
     "fixture-error": frozenset({
+        *ADAPTER_FAILURE_OWNED_CODES,
         "missing", "invalid", "other", "source-size", "mutation-anchor", "capture-contract", "parser-contract",
         "capture-clock-binding", "record-cutoff", "validator-marker", "validator-cutoff", "validator-live",
         "descendant-marker", "descendant-cutoff", "descendant-live", "native-ready", "deliberately-unready",

@@ -863,6 +863,26 @@ and nonincreasing shared first-failure cutoff. Genuine standalone overall
 observation deadlines still cap both work and cleanup. No validation timeout,
 finality requirement or signal/ownership boundary is extended by this distinction.
 
+Fixture coordination records are bounded before I/O and written to exclusive,
+private mode-0600 staging files in their original owned directory. The payload
+must be fully written, flushed and closed before one non-overwriting rename:
+Linux `renameat2(RENAME_NOREPLACE)` or macOS `renameatx_np(RENAME_EXCL)`. This
+preserves single-link identity and prevents readers from observing partial final
+records. Unsupported publication fails closed; there is no ordinary-rename or
+hardlink fallback, collision overwrite, rollback or ambiguous-call retry.
+Required helper bindings are prepared before native failure paths need them.
+
+An active publication frame retains its original directory and payload leases
+before acquisition. An uncertain acquisition, close or native return keeps that
+frame and excludes its namespace and ancestors from same-VM recursive cleanup;
+later file existence or absence cannot repair it. Known-closed staging residue
+instead follows the existing original-producer-finality cleanup. A separate VM's
+original termination receipt does not settle a live frame in the caller's VM.
+Complete record bytes are observations, not process ownership or cleanup authority.
+Adapter diagnostics classify fixed OwnedChild source-literal error pairs under
+`fixture-error`; unlisted pairs remain `other`. No raw exception text or path is
+published, and schema2/schema4 contracts and their bounds remain unchanged.
+
 The separate native signal-observation test may emit one canonical schema-2
 `MRK_NATIVE_SIGNAL_FAILURE` line, bounded to 4096 bytes including prefix/newline.
 It compares already-read original proof operands and preserves finite driver,

@@ -761,7 +761,10 @@ module UploadProcessFixture
     # original canonical/private path must still name a linked directory at
     # every observation; the separate quiescent enumeration remains exact.
     def self.directory_identity(path)
-      stat = UploadProcessFixture.owned_fixture_directory(path)
+      directory_stat_identity(UploadProcessFixture.owned_fixture_directory(path))
+    end
+
+    def self.directory_stat_identity(stat)
       {"dev" => stat.dev, "ino" => stat.ino, "mode" => stat.mode,
        "uid" => stat.uid, "gid" => stat.gid, "rdev" => stat.rdev, "type" => stat.ftype}
     end
@@ -781,14 +784,170 @@ module UploadProcessFixture
       end
     end
 
+    # Admission is lazy, and is prewarmed at helper entry before native work.
+    # A required diagnostic write after native UNKNOWN must reuse this binding,
+    # not re-enter the runtime's new-acquisition/reusable! gate during cleanup.
+    def self.prepare_record_publication!
+      return @record_publication_binding if @record_publication_binding
+
+      info = native_modules.first.admit_runtime!
+      symbol, flag = case info.fetch("family")
+      when "linux-glibc" then ["renameat2", 1] # RENAME_NOREPLACE
+      when "darwin" then ["renameatx_np", 4] # RENAME_EXCL
+      else
+        raise Failure.new("process-ownership", "bootstrap record publication unavailable")
+      end
+      function = Fiddle::Function.new(Fiddle::Handle::DEFAULT[symbol],
+        [Fiddle::TYPE_INT, Fiddle::TYPE_VOIDP, Fiddle::TYPE_INT, Fiddle::TYPE_VOIDP, -Fiddle::TYPE_INT],
+        Fiddle::TYPE_INT, Fiddle::Function::DEFAULT, name: symbol, need_gvl: false)
+      @record_publication_binding ||= [function.freeze, flag].freeze
+    end
+
+    def self.rename_record_exclusively(binding, descriptor, staged, final)
+      function, flag = binding
+      result = function.call(descriptor, staged, descriptor, final, flag)
+      error = Fiddle.last_error # Capture on the original native return, before any other operation.
+      [result, error]
+    end
+
+    def self.assert_record_publication_final!(directory)
+      if UploadProcessFixture.record_publication_unresolved?(directory)
+        raise Failure.new("process-ownership", "bootstrap record publication remains unresolved")
+      end
+      true
+    end
+
+    # The real frame is rooted BEFORE File.open/native effects, including while
+    # Fiddle releases the GVL. Only known original closes/outcomes may release it.
+    # Neither a final marker nor a later closed?/lstat sample repairs UNKNOWN.
+    class RecordPublication
+      attr_reader :directory, :directory_identity, :stage, :final, :leases,
+                  :primary, :cleanup_errors, :rename_state, :rename_errno
+
+      def initialize(directory, identity, final, bytes, binding)
+        @directory = directory.dup.freeze
+        @directory_identity = identity.transform_values { |value| value.is_a?(String) ? value.dup.freeze : value }.freeze
+        @final, @stage = final.dup.freeze, ".mrk-record-#{final}.stage".freeze
+        @bytes, @binding = bytes.freeze, binding
+        @leases = [@directory_lease = ControlLease.new, @stage_lease = ControlLease.new].freeze
+        @primary, @cleanup_errors, @rename_state = nil, [], :not_entered
+        @namespace_known = true
+      end
+
+      def settled?
+        @namespace_known && %i[not_entered returned_success returned_failure].include?(@rename_state) &&
+          @leases.all? { |lease| %i[unattempted closed].include?(lease.state) }
+      end
+
+      def check_directory!
+        unless OwnedChild.directory_identity(@directory) == @directory_identity &&
+               OwnedChild.directory_stat_identity(@directory_lease.io.stat) == @directory_identity
+          raise Failure.new("process-ownership", "bootstrap directory identity changed")
+        end
+      rescue Exception
+        @namespace_known = false
+        raise
+      end
+
+      def check_stage!
+        stat = @stage_lease.io.stat
+        identity = OwnedChild.identity(stat)
+        unless stat.file? && stat.uid == Process.uid && stat.nlink == 1 && (stat.mode & 0o7777) == 0o600 &&
+               (!@stage_identity || identity == @stage_identity) &&
+               OwnedChild.identity(File.lstat(File.join(@directory, @stage))) == identity
+          raise Failure.new("process-ownership", "bootstrap record identity changed")
+        end
+        @stage_identity ||= identity.freeze
+      rescue Exception
+        @namespace_known = false
+        raise
+      end
+
+      def publish
+        @directory_lease.acquire { File.open(@directory, File::RDONLY | File::NOFOLLOW | File::NONBLOCK) }
+        check_directory!
+        io = @stage_lease.acquire do
+          File.open(File.join(@directory, @stage), File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW, 0o600)
+        end
+        check_directory!
+        check_stage!
+        raise Failure.new("process-ownership", "bootstrap record write incomplete") unless io.write(@bytes) == @bytes.bytesize
+        io.flush
+        check_stage!
+        @stage_lease.close_once # The original payload close MUST precede final-name publication.
+        check_directory!
+        Thread.handle_interrupt(Exception => :never) do
+          @rename_state = :in_flight
+          outcome = OwnedChild.rename_record_exclusively(@binding, @directory_lease.io.fileno, @stage, @final)
+          unless outcome.instance_of?(Array) && outcome.length == 2 && outcome.first.instance_of?(Integer)
+            raise Failure.new("process-ownership", "bootstrap record publication return is unknown")
+          end
+          result, @rename_errno = outcome
+          if result == 0
+            @rename_state = :returned_success
+          elsif result == -1 && @rename_errno.instance_of?(Integer) && @rename_errno.between?(1, (1 << 31) - 1)
+            @rename_state = :returned_failure
+            if [Errno::ENOSYS::Errno, Errno::ENOTSUP::Errno, Errno::EOPNOTSUPP::Errno].include?(@rename_errno)
+              raise Failure.new("process-ownership", "bootstrap record publication unavailable")
+            end
+            raise Failure.new("process-ownership", "bootstrap record publication refused")
+          else
+            raise Failure.new("process-ownership", "bootstrap record publication return is unknown")
+          end
+        end
+        check_directory!
+      end
+
+      def execute
+        begin
+          Thread.handle_interrupt(Exception => :never) do
+            begin
+              UploadProcessFixture.retain_process_case!(self)
+              Thread.handle_interrupt(Exception => :immediate) { publish }
+            rescue Exception => error
+              @primary ||= error
+            ensure
+              [@stage_lease, @directory_lease].each do |lease|
+                next unless lease.state == :open # Independent known closes only; no ambiguous retry.
+                begin
+                  lease.close_once
+                rescue Exception => error
+                  @cleanup_errors << error
+                  @primary ||= error
+                end
+              end
+              begin
+                if settled?
+                  UploadProcessFixture.release_record_publication!(self)
+                else
+                  UploadProcessFixture.retain_unknown_domain!(@directory)
+                end
+              rescue Exception => error
+                @cleanup_errors << error
+                @primary ||= error
+              end
+            end
+          end
+        rescue Exception => error
+          @primary ||= error # An interrupt on scope exit cannot replace the original error.
+        end
+        raise @primary if @primary
+        true
+      end
+    end
+
     def self.write_record(path, value)
       bytes = JSON.generate(value)
       raise Failure.new("process-ownership", "bootstrap record exceeds bound") if bytes.bytesize > OUTPUT_LIMIT
-      File.open(path, File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW, 0o600) do |io|
-        count = io.write(bytes)
-        raise Failure.new("process-ownership", "bootstrap record write incomplete") unless count == bytes.bytesize
-        io.flush
+      unless path.instance_of?(String) && path.bytesize.between?(1, 4096) && !path.include?("\0") &&
+             path == File.absolute_path(path) && (name = File.basename(path)).bytesize.between?(1, 237) &&
+             /\A[\x20-\x7e]+\z/.match?(name) && !%w[. ..].include?(name)
+        raise Failure.new("process-ownership", "bootstrap record path is invalid")
       end
+      directory = File.dirname(path)
+      identity = directory_identity(directory)
+      binding = prepare_record_publication!
+      RecordPublication.new(directory, identity, name, bytes, binding).execute
     end
 
     def initialize(root: nil, deadline: nil, hard_deadline: nil, deadline_ns: nil, hard_deadline_ns: nil, parent_slot: nil)
@@ -1321,6 +1480,7 @@ module UploadProcessFixture
         unless self.class.directory_identity(@launch_directory) == @directory_identity
           raise Failure.new("process-ownership", "bootstrap directory identity changed")
         end
+        self.class.assert_record_publication_final!(@launch_directory)
         FileUtils.remove_entry(@launch_directory)
         @launch_removed = true
       end

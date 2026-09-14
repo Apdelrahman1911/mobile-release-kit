@@ -92,6 +92,57 @@ module UploadProcessFixture
     "MobileReleaseKit::NativeProcessSpawn::Error" => "native-spawn-error",
     "IOError" => "io-error", "Interrupt" => "interrupt", "SystemExit" => "system-exit",
   }.freeze
+  ADAPTER_FAILURE_OWNED_CODES = {
+    "control acquisition repeated" => "owned-control-repeat",
+    "control acquisition returned no IO" => "owned-control-no-io",
+    "control close is unknown" => "owned-control-close",
+    "partial command runtime would mix source origins" => "owned-runtime-origin",
+    "bootstrap record identity changed" => "owned-record-identity",
+    "bootstrap record exceeds bound" => "owned-record-bound",
+    "bootstrap record changed during read" => "owned-record-changing",
+    "bootstrap record write incomplete" => "owned-record-write",
+    "unsupported owned-child request" => "owned-request",
+    "owned-child cwd is not a directory" => "owned-cwd",
+    "child acquisition was already attempted" => "owned-acquire-repeat",
+    "invalid owned-child deadline" => "owned-deadline-shape",
+    "owned-child admission deadline expired" => "owned-admission-expired",
+    "owned creator was not admitted" => "owned-creator-admission",
+    "native child was not acquired" => "owned-child-missing",
+    "bootstrap admission deadline expired or cancelled" => "owned-admission-cutoff",
+    "bootstrap admission endpoint is invalid" => "owned-admission-endpoint",
+    "bootstrap admission endpoint changed" => "owned-admission-identity",
+    "unsupported owned-child standard stream" => "owned-stdio",
+    "oversized bootstrap configuration" => "owned-config-bound",
+    "partial bootstrap configuration" => "owned-config-write",
+    "native creator finish return is unknown" => "owned-creator-return",
+    "native creator did not join" => "owned-creator-join",
+    "native creator did not settle" => "owned-creator-settle",
+    "native child publication is unknown" => "owned-child-publication",
+    "bootstrap readiness is not the reserved child" => "owned-ready-binding",
+    "bootstrap refused admission" => "owned-bootstrap-refused",
+    "bootstrap grant repeated" => "owned-grant-repeat",
+    "bootstrap grant return is ambiguous" => "owned-grant-return",
+    "child wait authority is unknown" => "owned-wait-authority",
+    "child numeric routes were not retired" => "owned-numeric-retirement",
+    "child receipt is not its original wait" => "owned-wait-receipt",
+    "child signal authority is not reserved" => "owned-signal-authority",
+    "child signal deadline expired" => "owned-signal-cutoff",
+    "control close remains unknown" => "owned-control-unknown",
+    "native IO remains unknown" => "owned-io-unknown",
+    "creator still owns native close obligations" => "owned-creator-close",
+    "unknown owned stream" => "owned-stream",
+    "owned stream EOF deadline expired" => "owned-stream-cutoff",
+    "bootstrap attempt identity changed" => "owned-attempt-identity",
+    "child ownership remains unknown" => "owned-child-unknown",
+    "child cleanup deadline expired" => "owned-cleanup-cutoff",
+    "child cleanup is not final" => "owned-cleanup-finality",
+    "bootstrap directory identity changed" => "owned-directory-identity",
+    "bootstrap record path is invalid" => "owned-record-path",
+    "bootstrap record publication unavailable" => "owned-publish-unavailable",
+    "bootstrap record publication refused" => "owned-publish-refused",
+    "bootstrap record publication return is unknown" => "owned-publish-return",
+    "bootstrap record publication remains unresolved" => "owned-publish-unresolved",
+  }.freeze
   # Only exact source-literal pairs classify the already persisted driver error.
   # This is not necessarily the earliest exercise/native cause: cleanup may own it.
   ADAPTER_FAILURE_CODES = begin
@@ -132,6 +183,7 @@ module UploadProcessFixture
       "fixture watchdog did not join" => "watchdog-join",
       "fixture injector did not join" => "injector-join",
     }
+    literals.merge!(ADAPTER_FAILURE_OWNED_CODES)
     table = literals.to_h { |message, code| [["UploadProcessFixture::Failure", message].freeze, code] }
     %w[Error LifecycleError ProtocolError].each do |name|
       reasons = name == "ProtocolError" ? %w[protocol] : %w[cancelled deadline parent_lost protocol io creation lifecycle]
@@ -519,6 +571,30 @@ module UploadProcessFixture
     nil
   end
 
+  def release_record_publication!(frame)
+    records = @retained_fixture_cases || {}
+    unless frame.instance_of?(OwnedChild::RecordPublication) && frame.settled? && records[frame.object_id].equal?(frame)
+      raise Failure.new("process-ownership", "bootstrap record publication remains unresolved")
+    end
+    records.delete(frame.object_id) # Only this positively settled original frame.
+    true
+  end
+
+  def record_publication_unresolved?(root)
+    return false unless root.instance_of?(String)
+
+    prefix = root == "/" ? root : "#{root}/"
+    (@retained_fixture_cases || {}).each_value.any? do |frame|
+      next false unless frame.instance_of?(OwnedChild::RecordPublication)
+      # Active and UNKNOWN alike block removal. Do not inspect a mutable enum,
+      # marker name or a similarly tagged Hash to decide whether custody exists.
+      directory = frame.directory
+      canonical = directory.instance_of?(String) && directory.frozen? && directory.start_with?("/") && !directory.include?("\0") &&
+        (directory == "/" || directory.split("/", -1).drop(1).all? { |part| !part.empty? && !%w[. ..].include?(part) })
+      !canonical || directory == root || directory.start_with?(prefix)
+    end
+  end
+
   def mark_process_domain_failed!(owner: nil)
     @process_domain_failed = true
     retain_process_case!(owner) if owner
@@ -668,6 +744,7 @@ module UploadProcessFixture
               unless OwnedChild.directory_identity(directory) == record.fetch("directoryIdentity")
                 raise Failure.new("fixture-cleanup", "observation directory identity changed")
               end
+              OwnedChild.assert_record_publication_final!(directory)
               FileUtils.remove_entry(directory)
               @collector_records.delete(record.object_id)
             elsif directory
@@ -834,6 +911,7 @@ module UploadProcessFixture
   end
 
   def assert_fixture_cleanup!(directory, root:, layout:)
+    OwnedChild.assert_record_publication_final!(directory)
     names = fixture_entry_names(directory)
     case layout
     when :driver
@@ -1016,7 +1094,7 @@ module UploadProcessFixture
   end
 
   def cleanup_unresolved?(root)
-    (@unresolved_roots || {}).key?(root)
+    (@unresolved_roots || {}).key?(root) || record_publication_unresolved?(root)
   end
 
   # EOF is monitored in EVERY phase, not only after fork. Losing the driver
@@ -3563,6 +3641,7 @@ module UploadProcessFixture
       unless copy["path"] == actual_path && copy["label"] == "signal-observed"
         raise Failure.new("signal-observation", "executed helper copy is not bound")
       end
+      OwnedChild.prepare_record_publication!
       probe = new(:helper, mode, root: directory, helper_copy: copy)
       entry = CaptureObservation::Hooks.new
       entry.wrap(helper.singleton_class, :helper_main) do |original, _object, arguments, keywords, block|
@@ -3964,6 +4043,7 @@ module UploadProcessFixture
       if @base_mode == "leader-only"
         insertion = <<~RUBY
           require #{File.realpath(__FILE__).inspect}
+          UploadProcessFixture::OwnedChild.prepare_record_publication! if $PROGRAM_NAME == __FILE__
           MobileReleaseKit::NativeUploadProcess::GroupLease.prepend(Module.new do
             def request(signal)
               if signal == "KILL"
@@ -4387,6 +4467,7 @@ module UploadProcessFixture
       UploadProcessFixture.owned_fixture_directory(directory)
       manifest = manifest!(directory, mode, source_hashes)
       raise Failure.new("fixture-source", "wrong copied helper dispatch") unless File.realpath(helper_path) == manifest["helperCopy"]["path"]
+      OwnedChild.prepare_record_publication!
       observer = new(directory, mode, manifest)
       (@helper_observers ||= []) << observer
       observer.install

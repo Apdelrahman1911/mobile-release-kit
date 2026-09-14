@@ -87,6 +87,7 @@ typedef int (*actions_signature)(posix_spawn_file_actions_t *);
 typedef int (*dup2_signature)(posix_spawn_file_actions_t *, int, int);
 typedef int (*addopen_signature)(posix_spawn_file_actions_t *, int, const char *, int, mode_t);
 typedef int (*addclose_signature)(posix_spawn_file_actions_t *, int);
+typedef int (*exclusive_rename_signature)(int, const char *, int, const char *, unsigned int);
 #define CHECK_SIGNATURE(name, signature) \
     _Static_assert(_Generic(&(name), signature: 1, default: 0), \
                    "unsupported public " #name " prototype")
@@ -100,9 +101,13 @@ CHECK_SIGNATURE(posix_spawn_file_actions_adddup2, dup2_signature);
 CHECK_SIGNATURE(posix_spawn_file_actions_addopen, addopen_signature);
 CHECK_SIGNATURE(posix_spawn_file_actions_addclose, addclose_signature);
 #if defined(__linux__)
+CHECK_SIGNATURE(renameat2, exclusive_rename_signature);
+_Static_assert(RENAME_NOREPLACE == 1, "fixture exclusive-rename flag changed");
 typedef int (*closefrom_signature)(posix_spawn_file_actions_t *, int);
 CHECK_SIGNATURE(posix_spawn_file_actions_addclosefrom_np, closefrom_signature);
 #else
+CHECK_SIGNATURE(renameatx_np, exclusive_rename_signature);
+_Static_assert(RENAME_EXCL == 4, "fixture exclusive-rename flag changed");
 typedef int (*attributes_signature)(posix_spawnattr_t *);
 typedef int (*setflags_signature)(posix_spawnattr_t *, short);
 typedef int (*getflags_signature)(const posix_spawnattr_t *, short *);

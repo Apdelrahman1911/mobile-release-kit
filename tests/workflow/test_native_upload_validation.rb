@@ -960,6 +960,7 @@ class NativeUploadValidationTest < Minitest::Test
   end
 
   def test_partial_pipe_and_pre_entry_faults_close_owned_leases_and_join_actual_tasks
+    assert_native_record_publication
     %w[second-pipe owner-failure readiness-failure watchdog-unavailable watchdog-failure].each do |fault|
       value = process_case("native-setup-#{fault}")
       assert_equal fault == "readiness-failure" ? "readiness" : "setup-fixture-fault", value.fetch("kind")
@@ -1172,7 +1173,8 @@ class NativeUploadValidationTest < Minitest::Test
       owner_class = UploadProcessFixture::OwnedChild
       record = {"version" => 1, "stage" => "configuration", "condition" => "directory_identity", "pid" => 701}
       good = JSON.generate(record)
-      exercise = lambda do |raw, diagnostic: true, read_error: nil, write_result: :full, cleanup_error: nil, expiry: nil|
+      exercise = lambda do |raw, diagnostic: true, read_error: nil, write_result: :full, cleanup_error: nil, expiry: nil,
+                            publication_pending: false|
         now, reads, first = 1, 0, nil
         events, writes, read_observations, report_attempts, removed = Array.new(5) { [] }
         directory = "/inert-mrk-bootstrap"
@@ -1226,6 +1228,14 @@ class NativeUploadValidationTest < Minitest::Test
           raise write_result if write_result.is_a?(Exception)
           write_result == :short ? 1 : line.bytesize
         end
+        publication_error = UploadProcessFixture::Failure.new("process-ownership", "bootstrap record publication remains unresolved")
+        publication_gate = lambda do |path|
+          assert_equal directory, path
+          events << :publication_gate
+          raise publication_error if publication_pending
+          true
+        end
+        owner_class.stub(:assert_record_publication_final!, publication_gate) do
         File.stub(:exist?, ->(path) { path == File.join(directory, "failure.json") }) do
           owner_class.stub(:bounded_file, reader) do
             owner_class.stub(:directory_identity, ->(path) { assert_equal directory, path; :inert_directory }) do
@@ -1257,8 +1267,9 @@ class NativeUploadValidationTest < Minitest::Test
                         assert_nil owner.instance_variable_get(:@bootstrap_failure_snapshot)
                       end
                       now = 10 if expiry == :before_emit
-                      if cleanup_error
-                        assert_same cleanup_error, assert_raises(IOError) { owner.stop }
+                      if cleanup_error || publication_pending
+                        stopping_error = cleanup_error || publication_error
+                        assert_same stopping_error, assert_raises(stopping_error.class) { owner.stop }
                         assert_raises(UploadProcessFixture::Failure) { owner.stop }
                       else
                         assert_equal true, owner.stop
@@ -1269,11 +1280,14 @@ class NativeUploadValidationTest < Minitest::Test
                       assert_equal 10, owner.instance_variable_get(:@bootstrap_failure_cutoff_ns)
                       assert_equal snapshot && expiry != :before_emit ? 1 : 0, writes.length
                       assert_equal [true] * writes.length, report_attempts
-                      assert_equal cleanup_error ? [] : [directory], removed
+                      assert_equal cleanup_error || publication_pending ? [] : [directory], removed
                       assert_includes events, :close_resources
+                      if publication_pending
+                        assert_operator events.index(:close_resources), :<, events.index(:publication_gate)
+                      end
                       unless writes.empty?
                         assert_operator events.index(:close_resources), :<, events.index(:write)
-                        assert_operator events.index(:remove_entry), :<, events.index(:write) unless cleanup_error
+                        assert_operator events.index(:remove_entry), :<, events.index(:write) unless cleanup_error || publication_pending
                       end
                       writes.each do |line|
                         assert_equal "MRK_FIXTURE_BOOTSTRAP_FAILURE=#{JSON.generate({"schema" => 1}.merge(expected))}\n", line
@@ -1290,8 +1304,10 @@ class NativeUploadValidationTest < Minitest::Test
             end
           end
         end
+        end
       end
       exercise.call(good)
+      exercise.call(good, publication_pending: true)
       invalid = ["not-json", "[]", "x" * 1025, " #{good}",
         good.sub('"pid":701', '"pid":701,"pid":701'),
         JSON.generate(record.reject { |key, _| key == "condition" }),
@@ -1758,6 +1774,7 @@ class NativeUploadValidationTest < Minitest::Test
       assert_native_setup_failure_projection
       assert_adapter_parent_cutoff_composition
       assert_original_capture_settlement_projection
+      assert_record_publication_lifecycle
       assert_adapter_failure_projection
       assert_ownership_failure_projection
       assert_native_signal_failure_projection
@@ -3122,6 +3139,380 @@ class NativeUploadValidationTest < Minitest::Test
     end
   end
 
+  # The real publisher/ControlLease bodies run, but every filesystem/native
+  # effect is replaced. IO.allocate has NO descriptor; all used IO methods are
+  # inert singleton methods. Each invocation owns a separate model registry.
+  def with_record_publication_model(directory: "/inert-record-parent/child", name: "ready.json",
+                                    fault: nil, primary: IOError.new("original inert publication"), secondary: nil, state: {})
+    fixture, owner, test = UploadProcessFixture, UploadProcessFixture::OwnedChild, self
+    registry = Object.new.extend(fixture)
+    registry.singleton_class.send(:public, *fixture.private_instance_methods(false))
+    state[:events], state[:open_calls], state[:frames], state[:removed] = [], [], [], []
+    state[:opens] ||= []
+    state[:directory], state[:final], state[:registry] = directory, File.join(directory, name), registry
+    staged = File.join(directory, ".mrk-record-#{name}.stage")
+    state[:stage] = staged
+    binding = Object.new.freeze # Cannot accidentally invoke a real native function.
+    stat_type = Struct.new(:dev, :ino, :mode, :uid, :gid, :rdev, :ftype, :nlink, :size, :mtime, :ctime) do
+      def file? = ftype == "file"
+    end
+    dir_stat = stat_type.new(1, 2, 0o40700, 3, 4, 0, "directory", 2, 0, 0, 0)
+    file_stat = stat_type.new(1, 5, 0o100600, 3, 4, 0, "file", 1, 0, 0, 0)
+    directory_io, stage_io = IO.allocate, IO.allocate
+    state[:ios] = [directory_io, stage_io]
+    [directory_io, stage_io].each_with_index do |io, index|
+      io.define_singleton_method(:stat) { (index.zero? ? dir_stat : file_stat).dup }
+      io.define_singleton_method(:fileno) { 91 + index }
+      io.define_singleton_method(:closed?) { @inert_closed.equal?(true) }
+      io.define_singleton_method(:close) do
+        label = index.zero? ? :directory_close : :stage_close
+        state[:events] << label
+        test.refute @inert_closed, "original close must not be retried"
+        raise primary if fault == label
+        @inert_closed = true
+        raise primary if fault == :"#{label}_after"
+        raise secondary if index.zero? && secondary
+        state[:events] << :"#{label}_returned"
+        nil
+      end
+    end
+    stage_io.define_singleton_method(:write) do |bytes|
+      state[:events] << :write
+      test.refute state[:published]
+      raise primary if fault == :write_before
+      state[:written] = fault == :short_write ? bytes.byteslice(0, bytes.bytesize - 1) : bytes
+      file_stat.size = state[:written].bytesize
+      raise primary if fault == :write_after
+      fault == :short_write ? bytes.bytesize - 1 : bytes.bytesize
+    end
+    stage_io.define_singleton_method(:flush) do
+      state[:events] << :flush
+      test.refute state[:published]
+      raise primary if fault == :flush
+      self
+    end
+    original_retain = fixture.instance_method(:retain_process_case!).bind(registry)
+    original_release = fixture.instance_method(:release_record_publication!).bind(registry)
+    retain = lambda do |frame|
+      state[:events] << :register
+      state[:frames] << frame
+      original_retain.call(frame)
+    end
+    release = lambda do |frame|
+      state[:events] << :release
+      assert frame.settled?
+      original_release.call(frame)
+    end
+    opener = lambda do |path, flags, *mode|
+      assert_equal 1, state[:frames].length # Custody published BEFORE actual open entry.
+      assert registry.record_publication_unresolved?(directory)
+      assert registry.cleanup_unresolved?(File.dirname(directory))
+      refute registry.cleanup_unresolved?(nil)
+      state[:open_calls] << [path, flags, mode]
+      refute state[:published]
+      if path == directory
+        assert_equal File::RDONLY | File::NOFOLLOW | File::NONBLOCK, flags
+        assert_empty mode
+        state[:events] << :directory_open
+        raise primary if fault == :directory_open
+        directory_io
+      else
+        assert_equal staged, path
+        assert_equal File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW, flags
+        assert_equal [0o600], mode
+        state[:opens] << state[:final]
+        state[:events] << :stage_open
+        raise Errno::EEXIST if %i[stage_collision dangling_stage].include?(fault)
+        raise primary if fault == :stage_open_after
+        file_stat.nlink = 2 if fault == :stage_identity
+        stage_io
+      end
+    end
+    rename = lambda do |actual_binding, descriptor, source, destination|
+      assert_same binding, actual_binding
+      assert_equal [91, File.basename(staged), name], [descriptor, source, destination]
+      frame = state[:frames].fetch(0)
+      assert_equal :in_flight, frame.rename_state
+      assert_equal :closed, frame.leases.last.state
+      assert_includes state[:events], :stage_close_returned
+      assert registry.record_publication_unresolved?(directory)
+      state[:events] << :rename
+      case fault
+      when :rename_collision then [-1, Errno::EEXIST::Errno]
+      when :rename_unavailable then [-1, Errno::ENOSYS::Errno]
+      when :bad_return then [1, 0]
+      when :bad_errno then [-1, 0]
+      else
+        state[:published] = state[:written]
+        raise primary if fault == :rename_after
+        [0, 0]
+      end
+    end
+    directory_check = lambda do |path|
+      assert_equal directory, path
+      stat = dir_stat.dup
+      # Entry churn is legitimate; it must not be part of the pinned tuple.
+      stat.nlink += state[:open_calls].length
+      stat.size = stat.mtime = stat.ctime = state[:events].length
+      stat.ino += 1 if fault == :directory_identity && state[:events].include?(:stage_open)
+      stat
+    end
+    bindings = [[fixture, :owned_fixture_directory, directory_check],
+      [fixture, :retain_process_case!, retain], [fixture, :release_record_publication!, release],
+      [fixture, :retain_unknown_domain!, fixture.instance_method(:retain_unknown_domain!).bind(registry)],
+      [fixture, :record_publication_unresolved?, fixture.instance_method(:record_publication_unresolved?).bind(registry)],
+      [owner, :prepare_record_publication!, -> { state[:events] << :prepare; raise primary if fault == :prepare; binding }],
+      [owner, :rename_record_exclusively, rename], [Process, :uid, 3], [File, :open, opener],
+      [File, :lstat, ->(path) { assert_equal staged, path; file_stat.dup }],
+      [File, :unlink, ->(*) { raise "publisher must not unlink" }],
+      [File, :rename, ->(*) { raise "publisher must not use overwriting rename" }],
+      [File, :link, ->(*) { raise "publisher must not publish a second link" }],
+      [FileUtils, :remove_entry, ->(path) { state[:removed] << path }]]
+    with_stubs = lambda do |index = 0, &body|
+      if index == bindings.length
+        body.call
+      else
+        receiver, method, replacement = bindings.fetch(index)
+        receiver.stub(method, replacement) { with_stubs.call(index + 1, &body) }
+      end
+    end
+    with_stubs.call { yield state }
+  end
+
+  def assert_record_publication_lifecycle
+    owner, fixture = UploadProcessFixture::OwnedChild, UploadProcessFixture
+    payload = {"version" => 1, "value" => "complete \u263a record"}
+    with_record_publication_model do |state|
+      assert_equal true, owner.write_record(state[:final], payload)
+      assert_equal JSON.generate(payload), state[:published]
+      assert_equal %i[prepare register directory_open stage_open write flush stage_close stage_close_returned
+                      rename directory_close directory_close_returned release], state[:events]
+      assert_empty state[:registry].instance_variable_get(:@retained_fixture_cases)
+      refute state[:registry].domain_disposal_required?
+      refute state[:registry].cleanup_unresolved?(File.dirname(state[:directory]))
+    end
+    known = {short_write: "bootstrap record write incomplete", rename_collision: "bootstrap record publication refused",
+             rename_unavailable: "bootstrap record publication unavailable"}
+    known.each do |fault, message|
+      with_record_publication_model(fault: fault) do |state|
+        error = assert_raises(fixture::Failure) { owner.write_record(state[:final], payload) }
+        assert_equal message, error.message
+        assert state[:frames].first.settled?
+        assert state[:ios].all?(&:closed?) # Only inert observations, never close authority.
+        assert_empty state[:registry].instance_variable_get(:@retained_fixture_cases)
+        refute state[:registry].domain_disposal_required?
+        refute state[:published]
+      end
+    end
+    %i[write_before write_after flush].each do |fault|
+      original = IOError.new("original modeled write failure")
+      with_record_publication_model(fault: fault, primary: original) do |state|
+        assert_same original, assert_raises(IOError) { owner.write_record(state[:final], payload) }
+        assert state[:frames].first.settled?
+        assert_empty state[:registry].instance_variable_get(:@retained_fixture_cases)
+        refute_includes state[:events], :rename
+      end
+    end
+    unknown = %i[directory_open stage_open_after stage_collision dangling_stage stage_identity directory_identity
+                 stage_close stage_close_after directory_close directory_close_after rename_after bad_return bad_errno]
+    unknown.each do |fault|
+      original = Interrupt.new("original modeled publication interruption")
+      with_record_publication_model(fault: fault, primary: original) do |state|
+        type = %i[stage_collision dangling_stage].include?(fault) ? Errno::EEXIST :
+          %i[stage_identity directory_identity bad_return bad_errno].include?(fault) ? fixture::Failure : Interrupt
+        error = assert_raises(type) { owner.write_record(state[:final], payload) }
+        assert_same original, error if type == Interrupt
+        frame = state[:frames].fetch(0)
+        assert_same frame, state[:registry].instance_variable_get(:@retained_fixture_cases).fetch(frame.object_id)
+        refute frame.settled?
+        assert state[:registry].domain_disposal_required?
+        assert state[:registry].cleanup_unresolved?(File.dirname(state[:directory]))
+        assert state[:registry].cleanup_unresolved?(state[:directory])
+        assert state[:registry].record_publication_unresolved?("/")
+        refute state[:registry].cleanup_unresolved?("#{state[:directory]}-sibling")
+        refute state[:registry].cleanup_unresolved?(nil)
+        assert_raises(fixture::Failure) { state[:registry].assert_domain_reusable! }
+        error = assert_raises(fixture::Failure) { owner.assert_record_publication_final!(File.dirname(state[:directory])) }
+        assert_equal "bootstrap record publication remains unresolved", error.message
+        state[:registry].stub(:fixture_entry_names, ->(*) { raise "guard must precede enumeration" }) do
+          assert_raises(fixture::Failure) do
+            state[:registry].remove_fixture_directory(File.dirname(state[:directory]), root: nil, layout: :joined_case)
+          end
+        end
+        assert_empty state[:removed]
+        assert_equal fault != :directory_open, state[:events].include?(:directory_close)
+        assert_operator state[:events].count(:stage_close), :<=, 1
+        assert_operator state[:events].count(:directory_close), :<=, 1
+        assert_operator state[:events].count(:rename), :<=, 1
+        # A corrupted enum/tag cannot make an actual retained frame invisible.
+        frame.instance_variable_set(:@rename_state, :not_a_real_state)
+        assert state[:registry].record_publication_unresolved?(state[:directory])
+        if fault == :bad_errno
+          [nil, "/owned/../else", "/owned/./child", "/owned//child", "/owned/", "relative", "/owned\0child"].each do |malformed|
+            frame.instance_variable_set(:@directory, malformed&.freeze)
+            assert state[:registry].record_publication_unresolved?("/unrelated-but-unknown"), malformed.inspect
+          end
+        end
+      end
+    end
+    primary, secondary = SystemExit.new(19, "original modeled publication"), IOError.new("independent directory close")
+    with_record_publication_model(fault: :write_before, primary: primary, secondary: secondary) do |state|
+      assert_same primary, assert_raises(SystemExit) { owner.write_record(state[:final], payload) }
+      assert_equal [secondary], state[:frames].first.cleanup_errors
+      assert state[:registry].domain_disposal_required?
+      refute_includes state[:events], :rename
+    end
+    with_record_publication_model(fault: :prepare, primary: primary) do |state|
+      assert_same primary, assert_raises(SystemExit) { owner.write_record(state[:final], payload) }
+      assert_empty state[:frames]
+      assert_empty state[:open_calls]
+    end
+    with_record_publication_model do |state|
+      [nil, "relative.json", "#{state[:directory]}/../bad.json", "#{state[:directory]}/bad\0.json",
+       "#{state[:directory]}/#{'x' * 238}"].each do |path|
+        assert_raises(fixture::Failure) { owner.write_record(path, payload) }
+      end
+      assert_raises(fixture::Failure) { owner.write_record(state[:final], {"x" => "y" * fixture::OUTPUT_LIMIT}) }
+      assert_empty state[:events]
+      fake_owner = {directory: state[:directory], rename_state: :unknown}
+      state[:registry].retain_process_case!(fake_owner)
+      refute state[:registry].record_publication_unresolved?(state[:directory])
+      state[:registry].retain_unknown_domain!(nil)
+      assert state[:registry].cleanup_unresolved?(nil) # Original nil-key semantics remain exact.
+    end
+    assert_record_publication_collector_guard
+  end
+
+  def assert_record_publication_collector_guard
+    fixture, owner = UploadProcessFixture, UploadProcessFixture::OwnedChild
+    directory = "/inert-record-collector/child"
+    scope_type = Struct.new(:cleanup_depth) do
+      def cleanup
+        self.cleanup_depth += 1
+        yield
+      ensure
+        self.cleanup_depth -= 1
+      end
+    end
+    [nil, File.dirname(directory)].product([false, true]).each do |root, pending|
+      registry = Object.new.extend(fixture)
+      registry.singleton_class.send(:public, *fixture.private_instance_methods(false))
+      if pending
+        # An active frame with unattempted IO still excludes namespace disposal.
+        frame = owner::RecordPublication.new("#{directory}/nested", {}, "ready.json", "", Object.new)
+        registry.retain_process_case!(frame)
+      end
+      closes, removed, stops = [], [], []
+      child = Object.new
+      child.define_singleton_method(:stop) { stops << :original_model_stop }
+      child.define_singleton_method(:complete?) { true }
+      child.define_singleton_method(:streams_complete?) { true }
+      scope = fixture::Lifetime.new(scope_type.new(0))
+      # Skip the actual native body. These doubles model ONLY the existing
+      # cleanup gate; no status/EOF returned here is offered as native evidence.
+      scope.define_singleton_method(:active) { ["", "", 0] }
+      lifetime = lambda do |**_, &body|
+        value = body.call(scope)
+        raise scope.primary if scope.primary
+        value
+      end
+      opener = lambda do |path, flags, mode|
+        assert_includes %w[stdout stderr].map { |name| File.join(directory, name) }, path
+        assert_equal [File::WRONLY | File::CREAT | File::EXCL, 0o600], [flags, mode]
+        io = IO.allocate
+        io.define_singleton_method(:close) { closes << path }
+        io
+      end
+      bindings = [[registry, :clock_ns, 1], [fixture, :clock_ns, 1], [registry, :command_lifetime, lifetime],
+        [fixture, :record_publication_unresolved?, fixture.instance_method(:record_publication_unresolved?).bind(registry)],
+        [File, :realpath, directory], [File, :open, opener],
+        [owner, :directory_identity, {}], [owner, :new, child],
+        [FileUtils, :remove_entry, ->(path) { removed << path }]]
+      with_stubs = lambda do |index = 0, &body|
+        if index == bindings.length
+          body.call
+        else
+          receiver, method, replacement = bindings.fetch(index)
+          receiver.stub(method, replacement) { with_stubs.call(index + 1, &body) }
+        end
+      end
+      # Object#stub uses one alias per method: nesting another mktmpdir stub
+      # would destroy the outer acquisition veto's alias during restoration.
+      directory_hook = fixture::CaptureObservation::Hooks.new
+      begin
+        directory_hook.wrap(Dir.singleton_class, :mktmpdir) do |_original, _receiver, arguments, keywords, block|
+          assert_equal ["mrk-process-observation-", root], arguments
+          assert_empty keywords
+          assert_nil block
+          directory # Fixed in-memory namespace; never call the original veto or Dir implementation.
+        end
+        with_stubs.call do
+          if pending
+            error = assert_raises(fixture::Failure) { registry.capture_command(["inert-never-dispatched"], root: root) }
+            assert_equal "bootstrap record publication remains unresolved", error.message
+            assert_empty removed
+            assert registry.cleanup_unresolved?(root)
+          else
+            assert_equal ["", "", 0], registry.capture_command(["inert-never-dispatched"], root: root)
+            assert_equal [directory], removed
+          end
+        end
+      ensure
+        assert_empty directory_hook.restore # Restore the exact pre-existing outer veto, not an alias guess.
+      end
+      assert_equal %w[stdout stderr].map { |name| File.join(directory, name) }, closes
+      assert_equal [:original_model_stop], stops
+    end
+  end
+
+  def assert_native_record_publication
+    owner = UploadProcessFixture::OwnedChild
+    directory = File.realpath(Dir.mktmpdir("record-publication-", @root))
+    identity = owner.directory_identity(directory)
+    payload = {"version" => 1, "value" => "closed complete \u263a bytes"}
+    final = File.join(directory, "ready.json")
+    captured = []
+    original = owner.method(:rename_record_exclusively)
+    observe = lambda do |binding, descriptor, staged, name|
+      frame = UploadProcessFixture.instance_variable_get(:@retained_fixture_cases).values.find do |candidate|
+        candidate.instance_of?(owner::RecordPublication) && candidate.directory == directory
+      end
+      refute_nil frame
+      assert_equal :closed, frame.leases.last.state
+      assert frame.leases.last.io.closed? # Observation only; publisher used original ControlLease return.
+      assert_equal frame.leases.first.io.fileno, descriptor
+      stat = File.lstat(File.join(directory, staged))
+      assert_equal [0o600, 1], [stat.mode & 0o7777, stat.nlink]
+      assert_equal JSON.generate(payload), owner.bounded_file(File.join(directory, staged))
+      assert_raises(Errno::ENOENT) { File.lstat(final) } if captured.empty?
+      captured << owner.identity(stat)
+      original.call(binding, descriptor, staged, name)
+    end
+    owner.stub(:rename_record_exclusively, observe) do
+      assert_equal true, owner.write_record(final, payload)
+      assert_equal captured.first, owner.identity(File.lstat(final))
+      assert_equal JSON.generate(payload), owner.bounded_file(final)
+      refute File.exist?(File.join(directory, ".mrk-record-ready.json.stage"))
+      refused = assert_raises(UploadProcessFixture::Failure) { owner.write_record(final, payload) }
+      assert_equal "bootstrap record publication refused", refused.message
+      assert_equal captured.first, owner.identity(File.lstat(final))
+      assert_equal JSON.generate(payload), owner.bounded_file(final)
+      assert_equal captured.last, owner.identity(File.lstat(File.join(directory, ".mrk-record-ready.json.stage")))
+      refute UploadProcessFixture.record_publication_unresolved?(directory)
+      link = File.join(directory, "dangling.json")
+      File.symlink("absent-target", link)
+      refused = assert_raises(UploadProcessFixture::Failure) { owner.write_record(link, payload) }
+      assert_equal "bootstrap record publication refused", refused.message
+      assert File.lstat(link).symlink?
+      assert_equal "absent-target", File.readlink(link)
+      refute File.exist?(File.join(directory, "absent-target"))
+    end
+    assert_equal identity, owner.directory_identity(directory)
+    owner.assert_record_publication_final!(directory)
+    refute UploadProcessFixture.domain_disposal_required?
+    FileUtils.remove_entry(directory) # No tasks; all original publication IO/renames have settled.
+  end
+
   def assert_adapter_failure_projection
     # Pure operands and the real shared wrapper/Lifetime only. These anonymous
     # receivers model callback names; no adapter test class or native owner runs.
@@ -3235,6 +3626,20 @@ class NativeUploadValidationTest < Minitest::Test
     ].each do |class_name, message, category, code|
       row = project.call(raw.merge("errorClass" => class_name, "error" => message))
       assert_equal [category, code], row.values_at("retainedDriverErrorCategory", "retainedDriverErrorCode")
+      refute_includes JSON.generate(row), "private-marker"
+    end
+    owned_codes = UploadProcessFixture::ADAPTER_FAILURE_OWNED_CODES
+    assert_equal 49, owned_codes.length
+    assert_equal 49, owned_codes.values.uniq.length
+    assert_operator owned_codes.values.map(&:bytesize).max, :<=, 26
+    owned_codes.each do |message, code|
+      row = project.call(raw.merge("errorClass" => "UploadProcessFixture::Failure", "error" => message))
+      assert_equal ["fixture-error", code], row.values_at("retainedDriverErrorCategory", "retainedDriverErrorCode")
+      refute_includes JSON.generate(row), message
+      row = project.call(raw.merge("errorClass" => "IOError", "error" => message))
+      assert_equal ["io-error", "other"], row.values_at("retainedDriverErrorCategory", "retainedDriverErrorCode")
+      row = project.call(raw.merge("errorClass" => "UploadProcessFixture::Failure", "error" => "private-marker #{message}"))
+      assert_equal "other", row.fetch("retainedDriverErrorCode")
       refute_includes JSON.generate(row), "private-marker"
     end
     missing = project.call({})
@@ -4890,7 +5295,7 @@ class NativeUploadValidationTest < Minitest::Test
     # Execute the REAL helper-entry wrapper and observe unwind over inert
     # method/source/proof endpoints. The original native helper never executes.
     helper_return = lambda do |returned: 2, original_error: nil, observer_failure: false, entry_error: nil,
-                              backend_error: nil, backend_handled: false|
+                              backend_error: nil, backend_handled: false, prepare_error: nil|
       test = self
       events, writes, observed_errors, facts_calls = [], [], [], []
       directory = "/inert-native-signal"
@@ -4900,6 +5305,7 @@ class NativeUploadValidationTest < Minitest::Test
       entry.define_singleton_method(:wrap) do |receiver, method, &body|
         test.assert_same MobileReleaseKit::NativeUploadProcess.singleton_class, receiver
         test.assert_equal :helper_main, method
+        events << :entry_wrap
         entry_block = body
       end
       entry.define_singleton_method(:restore) { events << :entry_restore; raise entry_error if entry_error; [] }
@@ -4952,6 +5358,7 @@ class NativeUploadValidationTest < Minitest::Test
       assert_nil previous.first
       bindings = [[fixture, :owned_fixture_directory, directory], [fixture::OwnedChild, :bounded_file, JSON.generate(helper_copy)],
         [File, :realpath, helper_copy.fetch("path")], [probe_class, :new, probe],
+        [fixture::OwnedChild, :prepare_record_publication!, -> { events << :publication_prepare; raise prepare_error if prepare_error; true }],
         [fixture::CaptureObservation::Hooks, :new, entry], [diagnostic, :return_code, normalization],
         [fixture::OwnedChild, :write_record, ->(path, proof) do
           assert_equal "#{directory}/signal-helper-custodian.json", path
@@ -4960,6 +5367,15 @@ class NativeUploadValidationTest < Minitest::Test
           writes << proof
         end]]
       actual = nil
+      if prepare_error
+        with_stubs.call(bindings) do
+          assert_same prepare_error, assert_raises(prepare_error.class) { probe_class.install_helper_observation(directory, modes.first) }
+        end
+        assert_equal [:publication_prepare], events
+        assert_nil entry_block
+        assert_empty writes
+        next
+      end
       with_stubs.call(bindings) do
         probe_class.install_helper_observation(directory, modes.first)
         refute_nil entry_block
@@ -4971,6 +5387,8 @@ class NativeUploadValidationTest < Minitest::Test
           assert_same(body_error || observer_failure ? 1 : returned, actual)
         end
       end
+      assert_operator events.index(:publication_prepare), :<, events.index(:entry_wrap)
+      assert_operator events.index(:entry_wrap), :<, events.index(:original_call)
       assert_equal %i[observer_restore source_validation entry_restore], events.select { |event| %i[observer_restore source_validation entry_restore].include?(event) }
       assert_equal [[0, -701]], request.fetch(:calls) if request && !original_error
       assert_nil probe_class.current
@@ -5000,6 +5418,7 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal ["missing", 2], helper_view.fetch("rows")[1].values_at("returnCode", "observedHelperReturn")
     assert_equal "exit1", helper_view.fetch("nativeOutcomes").fetch("custodian")
     helper_return.call
+    helper_return.call(prepare_error: IOError.new("original publication preparation"))
     helper_return.call(returned: true) # Invalid normalization does not change the original return choice.
     [Interrupt.new("PRIVATE_SIGNAL_TOKEN"), SystemExit.new(19, "PRIVATE_SIGNAL_TOKEN")].each do |original|
       helper_return.call(original_error: original)
@@ -5210,6 +5629,38 @@ class NativeUploadValidationTest < Minitest::Test
     native = MobileReleaseKit::NativeUploadProcess
     assert_equal 8192, evidence::OMISSION_LIMIT
     assert_equal({"custodian" => "containment-custodian-omission.json", "keeper" => "containment-keeper-omission.json"}, evidence::OMISSION_FILES)
+    real_observers = evidence.instance_variable_get(:@helper_observers)
+    [false, true].each do |preparation_fails|
+      sample, events = missing_cleanup_omission_sample, []
+      model_class = Class.new(evidence) # Class-local observer storage, never the live helper registry.
+      observer, original = Object.new, IOError.new("original containment publication preparation")
+      observer.define_singleton_method(:install) { events << :install }
+      prepare = -> { events << :prepare; raise original if preparation_fails; true }
+      construct = ->(*) { events << :construct; observer }
+      UploadProcessFixture.stub(:owned_fixture_directory, ->(*) { events << :directory }) do
+        model_class.stub(:source_hashes, {}) do
+          model_class.stub(:manifest!, sample[:manifest]) do
+            File.stub(:realpath, sample[:manifest].fetch("helperCopy").fetch("path")) do
+              UploadProcessFixture::OwnedChild.stub(:prepare_record_publication!, prepare) do
+                model_class.stub(:new, construct) do
+                  invoke = -> { model_class.observe_helper(sample[:directory], "native-setup-no-cleanup", "inert-helper") }
+                  if preparation_fails
+                    assert_same original, assert_raises(IOError, &invoke)
+                    assert_nil model_class.instance_variable_get(:@helper_observers)
+                    assert_equal %i[directory prepare], events
+                  else
+                    invoke.call
+                    assert_equal [observer], model_class.instance_variable_get(:@helper_observers)
+                    assert_equal %i[directory prepare construct install], events
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+    assert_same real_observers, evidence.instance_variable_get(:@helper_observers)
     make = lambda do |role|
       sample = missing_cleanup_omission_sample
       child_class = Struct.new(:pid, :state, :receipt, :retired) { def numeric_retired? = retired }
@@ -5235,22 +5686,9 @@ class NativeUploadValidationTest < Minitest::Test
         target: role == "custodian" ? group : object, route: "#{role}-group", opens: [], delegated: [], written: nil)
     end
     within = lambda do |rig, &body|
-      writer = Object.new
-      writer.define_singleton_method(:write) do |bytes|
-        raise rig[:failure] if rig[:publication] == :before
-        rig[:written] = rig[:publication] == :short ? bytes.byteslice(0, bytes.bytesize - 1) : bytes
-        raise rig[:failure] if rig[:publication] == :after
-        rig[:publication] == :short ? bytes.bytesize - 1 : bytes.bytesize
-      end
-      writer.define_singleton_method(:flush) { true }
-      open = lambda do |path, flags, mode, &block|
-        rig[:opens] << path
-        assert_equal "#{rig[:directory]}/containment-#{rig[:role]}-omission.json", path
-        assert_equal File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW, flags
-        assert_equal 0o600, mode
-        block.call(writer) # No descriptor or file is created, even on an error.
-      end
-      File.stub(:open, open) do
+      fault = {before: :write_before, short: :short_write, after: :write_after}[rig[:publication]]
+      with_record_publication_model(directory: rig[:directory], name: "containment-#{rig[:role]}-omission.json",
+                                    fault: fault, primary: rig[:failure], state: rig) do
         Process.stub(:pid, rig[:object].pid) do
           clock = lambda do
             rig[:clock_reads] = rig.fetch(:clock_reads, 0) + 1

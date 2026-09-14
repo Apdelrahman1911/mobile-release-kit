@@ -2499,6 +2499,64 @@ class CIControllerContractTests(unittest.TestCase):
                 "handoffPerformed", "delayEntered", "delayGuardPassed", "delayFailed", "delayFinished",
                 "originalCleanupCalled", "originalCleanupFinished",
             )
+            owned_error_codes = {
+                "control acquisition repeated": "owned-control-repeat",
+                "control acquisition returned no IO": "owned-control-no-io",
+                "control close is unknown": "owned-control-close",
+                "partial command runtime would mix source origins": "owned-runtime-origin",
+                "bootstrap record identity changed": "owned-record-identity",
+                "bootstrap record exceeds bound": "owned-record-bound",
+                "bootstrap record changed during read": "owned-record-changing",
+                "bootstrap record write incomplete": "owned-record-write",
+                "unsupported owned-child request": "owned-request",
+                "owned-child cwd is not a directory": "owned-cwd",
+                "child acquisition was already attempted": "owned-acquire-repeat",
+                "invalid owned-child deadline": "owned-deadline-shape",
+                "owned-child admission deadline expired": "owned-admission-expired",
+                "owned creator was not admitted": "owned-creator-admission",
+                "native child was not acquired": "owned-child-missing",
+                "bootstrap admission deadline expired or cancelled": "owned-admission-cutoff",
+                "bootstrap admission endpoint is invalid": "owned-admission-endpoint",
+                "bootstrap admission endpoint changed": "owned-admission-identity",
+                "unsupported owned-child standard stream": "owned-stdio",
+                "oversized bootstrap configuration": "owned-config-bound",
+                "partial bootstrap configuration": "owned-config-write",
+                "native creator finish return is unknown": "owned-creator-return",
+                "native creator did not join": "owned-creator-join",
+                "native creator did not settle": "owned-creator-settle",
+                "native child publication is unknown": "owned-child-publication",
+                "bootstrap readiness is not the reserved child": "owned-ready-binding",
+                "bootstrap refused admission": "owned-bootstrap-refused",
+                "bootstrap grant repeated": "owned-grant-repeat",
+                "bootstrap grant return is ambiguous": "owned-grant-return",
+                "child wait authority is unknown": "owned-wait-authority",
+                "child numeric routes were not retired": "owned-numeric-retirement",
+                "child receipt is not its original wait": "owned-wait-receipt",
+                "child signal authority is not reserved": "owned-signal-authority",
+                "child signal deadline expired": "owned-signal-cutoff",
+                "control close remains unknown": "owned-control-unknown",
+                "native IO remains unknown": "owned-io-unknown",
+                "creator still owns native close obligations": "owned-creator-close",
+                "unknown owned stream": "owned-stream",
+                "owned stream EOF deadline expired": "owned-stream-cutoff",
+                "bootstrap attempt identity changed": "owned-attempt-identity",
+                "child ownership remains unknown": "owned-child-unknown",
+                "child cleanup deadline expired": "owned-cleanup-cutoff",
+                "child cleanup is not final": "owned-cleanup-finality",
+                "bootstrap directory identity changed": "owned-directory-identity",
+                "bootstrap record path is invalid": "owned-record-path",
+                "bootstrap record publication unavailable": "owned-publish-unavailable",
+                "bootstrap record publication refused": "owned-publish-refused",
+                "bootstrap record publication return is unknown": "owned-publish-return",
+                "bootstrap record publication remains unresolved": "owned-publish-unresolved",
+            }
+            owned_codes = frozenset(owned_error_codes.values())
+            self.assertEqual((len(owned_error_codes), len(owned_codes)), (49, 49))
+            self.assertEqual(controller.ADAPTER_FAILURE_OWNED_CODES, owned_codes)
+            self.assertLessEqual(max(map(len, owned_codes)), 26)
+            for category, codes in controller.ADAPTER_FAILURE_DRIVER_CODES.items():
+                self.assertEqual(frozenset(code for code in codes if code.startswith("owned-")),
+                                 owned_codes if category == "fixture-error" else frozenset())
             self.assertEqual(controller.ADAPTER_FAILURE_PREFIX, "MRK_ADAPTER_FAILURE=")
             self.assertEqual(controller.ADAPTER_FAILURE_MODE_CONTRACTS, adapter_contracts)
             self.assertEqual(controller.ADAPTER_FAILURE_PLATFORMS, adapter_platforms)
@@ -2607,6 +2665,19 @@ class CIControllerContractTests(unittest.TestCase):
                 ):
                     record = {**adapter_record, "retainedDriverErrorCategory": category, "retainedDriverErrorCode": code}
                     self.assertEqual(controller.adapter_failure(adapter_bytes(record)), record)
+                # Exact finite source codes add information to the retained
+                # fixture error only. They are not native causes or authority.
+                for code in owned_error_codes.values():
+                    record = {**adapter_record, "retainedDriverErrorCategory": "fixture-error",
+                              "retainedDriverErrorCode": code}
+                    self.assertEqual(controller.adapter_failure(adapter_bytes(record)), record)
+                for category in controller.ADAPTER_FAILURE_DRIVER_CODES:
+                    if category != "fixture-error":
+                        self.assertIsNone(controller.adapter_failure(adapter_bytes({**adapter_record,
+                            "retainedDriverErrorCategory": category, "retainedDriverErrorCode": "owned-record-identity"})))
+                for code in ("owned-record-identity-PRIVATE_MESSAGE", "owned-unmapped"):
+                    self.assertIsNone(controller.adapter_failure(adapter_bytes({**adapter_record,
+                        "retainedDriverErrorCategory": "fixture-error", "retainedDriverErrorCode": code})))
                 for first_cutoff, selected_cutoff in (("before-start", "before-cutoff"),
                                                      ("missing", "invalid"), ("at-or-after-cutoff", "before-start")):
                     record = {**adapter_record, "timingChecks": {**adapter_record["timingChecks"],
@@ -2821,9 +2892,9 @@ class CIControllerContractTests(unittest.TestCase):
             self.assertEqual(ruby_words(ownership_source, "OWNERSHIP_FAILURE_HELPERS"), ("capture", "run"))
             self.assertEqual(ruby_words(ownership_source, "OWNERSHIP_FAILURE_PLATFORMS"), ("ios", "android"))
 
-            def ownership_literal_table(name, *, words=False):
+            def ruby_literal_table(text, name, *, words=False):
                 bodies = controller.re.findall(r"(?ms)^\s*" + name
-                    + r" = \{(.*?)^\s*\}\.(?:transform_values\(&:freeze\)\.)?freeze", ownership_source)
+                    + r" = \{(.*?)^\s*\}\.(?:transform_values\(&:freeze\)\.)?freeze", text)
                 self.assertEqual(len(bodies), 1, name)
                 pattern = (r'"([^"\r\n]+)" => %w\[([A-Za-z0-9_\-\s]*)\]' if words else
                            r'"([^"\r\n]+)" => "([^"\r\n]+)"')
@@ -2831,6 +2902,21 @@ class CIControllerContractTests(unittest.TestCase):
                 self.assertEqual(len(pairs), len(dict(pairs)), name)
                 self.assertEqual("".join(controller.re.sub(pattern + r"\s*,?", "", bodies[0]).split()), "", name)
                 return {key: tuple(value.split()) if words else value for key, value in pairs}
+
+            def ownership_literal_table(name, *, words=False):
+                return ruby_literal_table(ownership_source, name, words=words)
+
+            # Read finite declarations as DATA, never load Ruby/Fiddle/native
+            # helpers. Child-only bootstrap errors become exit125 + a different
+            # finite report; they are not returned adapter error literals.
+            fixture_source = ruby_text("tests/workflow/upload_process_fixture.rb")
+            self.assertEqual(ruby_literal_table(fixture_source, "ADAPTER_FAILURE_OWNED_CODES"), owned_error_codes)
+            owned_bodies = controller.re.findall(
+                r"(?ms)^  class OwnedChild\n(.*?)^    def self\.bootstrap\(directory\)\n", ownership_source)
+            self.assertEqual(len(owned_bodies), 1)
+            owned_literals = controller.re.findall(
+                r'Failure\.new\(\s*"process-ownership",\s*"([^"\\\r\n]+)"\s*\)', owned_bodies[0])
+            self.assertEqual(set(owned_literals), set(owned_error_codes))
 
             self.assertEqual(ownership_literal_table("OWNERSHIP_FAILURE_CASES", words=True),
                              controller.OWNERSHIP_FAILURE_CASES)
@@ -2994,6 +3080,14 @@ class CIControllerContractTests(unittest.TestCase):
                 self.assertFalse(controller._ownership_run_driver_result_valid(
                     {name: run_result[name] for name in run_result_fields}))
                 self.assertFalse(controller._ownership_capture_detail_valid(tuple(capture_detail)))
+                # Ownership schema4 uses the same closed retained-error pair,
+                # without adding detail or admitting it as a native error code.
+                for category in ("fixture-error", "native-lifecycle-error"):
+                    owned_record = {**run_record, "row": {**run_record["row"], "runCleanup": {
+                        **run_cleanup, "driverResult": {**run_result, "retainedDriverErrorCategory": category,
+                            "retainedDriverErrorCode": "owned-publish-return"}}}}
+                    self.assertEqual(controller.ownership_failure(ownership_bytes(owned_record)),
+                                     owned_record if category == "fixture-error" else None)
 
                 def record_with_detail(detail):
                     return {**run_record, "row": {**run_record["row"], "runCleanup": {
