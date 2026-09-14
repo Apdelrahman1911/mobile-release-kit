@@ -24,6 +24,21 @@ from mobile_release.config import load_config
 from .helpers import ios_config, write_project
 from .ios_entitlement_helpers import profile
 from .local_signing_helpers import NativeSigningModel, fictional_signing_profile, model_result
+from .local_signing_algorithm_helpers import profile_algorithm_session
+
+
+SPECIAL_PROFILE_NATIVE_VARIANTS = (
+    ("owned-symlink", False, "symlink"),
+    ("borrowed-fifo", True, "fifo"),
+)
+SPECIAL_PROFILE_DIRECT_VARIANTS = (
+    ("owned-symlink", False, "symlink"),
+    ("owned-fifo", False, "fifo"),
+    ("owned-directory", False, "directory"),
+    ("borrowed-symlink", True, "symlink"),
+    ("borrowed-fifo", True, "fifo"),
+    ("borrowed-directory", True, "directory"),
+)
 
 
 class LocalSigningTests(unittest.TestCase):
@@ -284,38 +299,110 @@ class LocalSigningTests(unittest.TestCase):
         self.assert_clean()
 
     def test_recovery_preserves_special_foreign_replacements_of_borrowed_and_owned_profiles(self):
-        for borrowed in (False, True):
-            for replacement in ('symlink', 'fifo', 'directory'):
-                with self.subTest(borrowed=borrowed, replacement=replacement):
-                    if borrowed:
-                        self.destination.parent.mkdir(parents=True, exist_ok=True)
-                        self.destination.write_bytes(self.input.read_bytes())
-                    def ambiguous(argv, kwargs, result):
-                        if argv[1] == 'default-keychain' and '-s' in argv and argv[-1] == str(self.model.keychain):
-                            stage = self.model.keychain.parent.parent / 'state.pending'
-                            stage.write_bytes(b'fictional interrupted checkpoint')
-                            stage.chmod(0o600)
-                    self.model.after = ambiguous
-                    with self.assertRaises(CredentialError):
-                        with self.context(): self.fail('ambiguous activation admitted')
-                    self.model.after = None
-                    # Retain the old inode until the replacement is allocated;
-                    # filesystem reuse must not masquerade as a same-inode edit.
-                    old = self.private / 'retained-original-profile'
-                    self.destination.replace(old)
-                    if replacement == 'symlink': self.destination.symlink_to(self.input)
-                    elif replacement == 'fifo': os.mkfifo(self.destination, 0o600)
-                    else: self.destination.mkdir(mode=0o700)
-                    before = self.destination.lstat()
-                    result = self.recover()
-                    self.assertEqual(result['status'], 'recovered-with-conflict')
-                    self.assertEqual(self.destination.lstat(), before)
-                    self.assertEqual(self.input.read_bytes(), b'fictional-authenticated-profile')
-                    self.assertEqual(signing.signing_status(home=self.home)['status'], 'idle')
-                    if replacement == 'directory': self.destination.rmdir()
-                    else: self.destination.unlink()
-                    old.unlink()
+        for variant in SPECIAL_PROFILE_NATIVE_VARIANTS:
+            with self.subTest(variant=variant[0]):
+                self.run_native_special_profile_variant(variant)
         self.assert_clean()
+
+    def run_native_special_profile_variant(self, variant):
+        self.assertIn(variant, SPECIAL_PROFILE_NATIVE_VARIANTS)
+        _name, borrowed, replacement = variant
+        if borrowed:
+            self.destination.parent.mkdir(parents=True, exist_ok=True)
+            self.destination.write_bytes(self.input.read_bytes())
+        def ambiguous(argv, kwargs, result):
+            if argv[1] == 'default-keychain' and '-s' in argv and argv[-1] == str(self.model.keychain):
+                stage = self.model.keychain.parent.parent / 'state.pending'
+                stage.write_bytes(b'fictional interrupted checkpoint')
+                stage.chmod(0o600)
+        self.model.after = ambiguous
+        with self.assertRaises(CredentialError):
+            with self.context(): self.fail('ambiguous activation admitted')
+        self.model.after = None
+        # Retain the original inode until the foreign replacement is allocated.
+        old = self.private / 'retained-original-profile'
+        self.destination.replace(old)
+        if replacement == 'symlink': self.destination.symlink_to(self.input)
+        elif replacement == 'fifo': os.mkfifo(self.destination, 0o600)
+        else: self.destination.mkdir(mode=0o700)
+        before = self.destination.lstat()
+        result = self.recover()
+        self.assertEqual(result['status'], 'recovered-with-conflict')
+        self.assertEqual(self.destination.lstat(), before)
+        self.assertEqual(self.input.read_bytes(), b'fictional-authenticated-profile')
+        self.assertEqual(signing.signing_status(home=self.home)['status'], 'idle')
+        with signing.local_signing_lease(home=self.home) as renewed:
+            renewed.assert_owner()
+        if replacement == 'directory': self.destination.rmdir()
+        else: self.destination.unlink()
+        old.unlink()
+        self.assert_clean()
+
+    def test_direct_profile_cleanup_preserves_every_special_foreign_type_without_opening_it(self):
+        self.assertEqual(len(SPECIAL_PROFILE_DIRECT_VARIANTS), 6)
+        for variant in SPECIAL_PROFILE_DIRECT_VARIANTS:
+            with self.subTest(variant=variant[0]):
+                self.run_direct_special_profile_variant(variant)
+
+    def run_direct_special_profile_variant(self, variant):
+        from types import SimpleNamespace
+
+        self.assertIn(variant, SPECIAL_PROFILE_DIRECT_VARIANTS)
+        name, borrowed, replacement = variant
+        root = self.root / ("algorithm-" + name)
+        root.mkdir(mode=0o700)
+        home = root / "home"
+        home.mkdir(mode=0o700)
+        source = root / "untouched-source.profile"
+        content = b"fictional direct profile algorithm bytes"
+        source.write_bytes(content)
+        source.chmod(0o600)
+        destination = home / "Library/MobileDevice/Provisioning Profiles" / (self.uuid + ".mobileprovision")
+        if borrowed:
+            destination.parent.mkdir(mode=0o700, parents=True)
+            destination.write_bytes(content)
+            destination.chmod(0o600)
+        with profile_algorithm_session(home, content, self.uuid) as algorithm:
+            session = algorithm.session
+            self.assertEqual(session.state["profile"]["reused"], borrowed)
+            self.assertEqual(session.state["profile"]["ownedIdentity"] is None, borrowed)
+            original = root / "retained-original.profile"
+            destination.rename(original)
+            if replacement == "symlink":
+                destination.symlink_to(source)
+            elif replacement == "fifo":
+                os.mkfifo(destination, 0o600)
+            else:
+                destination.mkdir(mode=0o700)
+            before = destination.lstat()
+            source_before = source.stat()
+            self.assertNotEqual((before.st_dev, before.st_ino),
+                                (original.stat().st_dev, original.stat().st_ino))
+            attempts = []
+            proxy = SimpleNamespace(**vars(os))
+
+            def opening(path, *args, **kwargs):
+                if str(path) in {destination.name, str(destination)}:
+                    attempts.append(str(path))
+                    raise AssertionError("known foreign profile must not be opened")
+                return os.open(path, *args, **kwargs)
+
+            proxy.open = opening
+            with patch.object(signing, "os", proxy):
+                session.cleanup_profile()
+            self.assertEqual(attempts, [])
+            self.assertEqual(destination.lstat(), before)
+            self.assertEqual(source.stat(), source_before)
+            self.assertEqual(source.read_bytes(), content)
+            self.assertEqual(original.read_bytes(), content)
+            self.assertTrue(session.state["conflict"])
+            self.assertEqual(session.state["profile"]["phase"], "resolved")
+            stored = json.loads((session.path / "state.json").read_bytes())
+            self.assertEqual(stored, session.state)
+            self.assertIn("fixtureAlgorithmData", stored)
+            self.assertNotIn("version", stored)
+            self.assertFalse(algorithm.attempts)
+        self.assertEqual(self.model.calls, [], "direct algorithm used the native model")
 
 
 class NativePathTests(unittest.TestCase):

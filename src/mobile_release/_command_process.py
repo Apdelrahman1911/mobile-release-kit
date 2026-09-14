@@ -1112,10 +1112,28 @@ class _TaskSlot:
         return False
 
 
-def _pause(cutoff: int) -> None:
+def _pause(cutoff: int, *, readers: tuple[native.FDLease, ...] = (),
+           writers: tuple[native.FDLease, ...] = ()) -> None:
+    left = (cutoff - time.monotonic_ns()) / NANOSECOND
+    if left <= 0:
+        return
+    if not readers and not writers:
+        time.sleep(min(POLL, left))
+        return
+    # Readiness is only a hint to repeat the original checked nonblocking IO.
+    # poll owns no descriptor and, unlike select, has no FD_SETSIZE boundary.
+    # Never infer EOF, a complete frame, or producer settlement from its events.
+    readiness = select.poll()
+    masks: dict[int, int] = {}
+    for leases, mask in ((readers, select.POLLIN), (writers, select.POLLOUT)):
+        for lease in leases:
+            descriptor = lease.fileno()
+            masks[descriptor] = masks.get(descriptor, 0) | mask
+    for descriptor, mask in masks.items():
+        readiness.register(descriptor, mask)
     left = (cutoff - time.monotonic_ns()) / NANOSECOND
     if left > 0:
-        time.sleep(min(POLL, left))
+        readiness.poll(int(min(POLL, left) * 1000))
 
 
 class _Wire:
@@ -1305,7 +1323,7 @@ def _flush(wire: _Wire, pump: Callable[[], None], *, normal: bool = True) -> Non
         wire.flush()
         pump()
         if wire.out is not None:
-            _pause(wire.ctx.run if normal else wire.ctx.cutoff())
+            _pause(wire.ctx.run if normal else wire.ctx.cutoff(), writers=(wire.writer,))
     _require(not wire.write_failed)
 
 
@@ -1341,7 +1359,7 @@ def _receive(wire: _Wire, expected: Tag, pump: Callable[[], None], *, normal: bo
             return body
         _require(not wire.eof)
         pump()
-        _pause(wire.ctx.run if normal else wire.ctx.cutoff())
+        _pause(wire.ctx.run if normal else wire.ctx.cutoff(), readers=(wire.reader,))
 
 
 def _spawn(context: _Context, spec: native.SpawnSpec, pump: Callable[[], None]) -> native.Child:
@@ -1713,7 +1731,7 @@ class _FenceObserver:
                     self._hold_after_retirement()
                     return
                 if self.wire.out is not None:
-                    _pause(ctx.cutoff())
+                    _pause(ctx.cutoff(), writers=(self.wire.writer,))
             while True:
                 ctx.check_tail()
                 frame = self.wire.read()
@@ -1723,7 +1741,7 @@ class _FenceObserver:
                     return
                 if self._loss():
                     return
-                _pause(ctx.cutoff())
+                _pause(ctx.cutoff(), readers=(self.wire.reader,))
         except BaseException as error:
             ctx.record(error)
             self.retired = True
@@ -2876,7 +2894,10 @@ class _Outer:
             _require(self.wire is not None and (not self.wire.eof or predicate()))
             self.ctx.check()
             if not predicate():
-                _pause(self.ctx.run)
+                readers = tuple(reader for reader, eof in (
+                    (self.wire.reader, self.wire.eof), *zip(self.readers, self.output_eof))
+                    if not eof and reader.state == "OPEN")
+                _pause(self.ctx.run, readers=readers)
 
     def body(self, argv: Sequence[str], environ: Mapping[str, str] | None, cwd: Path | None,
              capture: bool, output_limit: int, on_start: Callable[[int], None] | None) -> None:

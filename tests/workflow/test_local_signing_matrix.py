@@ -1,6 +1,7 @@
 """Adversarial matrix data contracts and finite-entrypoint admission tests."""
 from __future__ import annotations
 
+import ast
 import copy
 import gzip
 import io
@@ -22,6 +23,8 @@ import mobile_release
 
 from . import local_signing_matrix_contract as contract
 from . import local_signing_persistent_fixture as fixture
+from . import local_signing_semantic_catalog as semantic_catalog
+from . import local_signing_semantic_fixture as semantic_fixture
 from . import run_local_signing_matrix as runner
 from .workflow_harness import load_workflow
 
@@ -59,6 +62,292 @@ class ObservedScan:
         self.closed = True
         if self.close_error:
             raise OSError("injected directory close failure")
+
+
+class SemanticSelectorContractTests(unittest.TestCase):
+    """Inert routing/finality contracts; these do NOT supply native evidence."""
+
+    def test_closed_subset_preserves_semantics_and_global_not_context_filtered_occurrences(self):
+        from collections import Counter
+        self.assertEqual(Counter(case.kind for case in semantic_catalog.CASES.values()), {
+            "seed": 42, "recovery": 50, "focused": 15, "command": 20, "healthy": 1})
+        self.assertFalse(semantic_catalog.definition()["completeRequiredUnion"])
+        self.assertEqual(len(semantic_catalog.SEEDS), 28)
+        for number, occurrence in ((1, 3), (2, 4), (3, 5), (4, 5), (7, 6), (8, 6)):
+            self.assertEqual(semantic_catalog.case(f"R/new/{number:02}").selector.occurrence, occurrence)
+        for identifier in ("R/03", "R/20", "S/final-absent/none"):
+            self.assertEqual(semantic_catalog.case(identifier).expected, "absent")
+        seed = semantic_catalog.case("S/active-build-pending/none")
+        self.assertEqual((seed.expected, seed.resolution, seed.selector.occurrence),
+                         ("refused-unknown-resource", "recovered-with-conflict", 3))
+        for identifier in ("C/caller/02", "R/new/02"):
+            self.assertIs(dict(semantic_catalog.case(identifier).selector.context)["beforeGrant"], True)
+        with self.assertRaisesRegex(AssertionError, "unknown semantic case"):
+            semantic_catalog.case("R/extra-success")
+
+    def test_direct_selector_ignores_global_index_but_rejects_route_and_live_context_drift(self):
+        selector = semantic_catalog.case("R/new/02").selector
+        observed = {"index": 91234, "operation": selector.operation, "slot": selector.slot,
+                    "origin": selector.origin, "phase": selector.phase, "occurrence": selector.occurrence,
+                    "details": {"destination": selector.destination}}
+        self.assertTrue(selector.routes(observed))
+        observed["index"] = 1
+        self.assertTrue(selector.routes(observed))
+        for field, value in (("origin", "model"), ("slot", selector.slot + "-other"),
+                             ("phase", "setup"), ("occurrence", 1)):
+            with self.subTest(field=field):
+                changed = {**observed, field: value}
+                self.assertFalse(selector.routes(changed))
+        self.assertFalse(selector.routes({**observed, "details": {"destination": selector.destination + "-other"}}))
+        context = dict(selector.context)
+        selector.check_context(context)
+        for field, value in (("beforeGrant", 1), ("operationKind", "observe"), ("operationPhase", "SETTLED")):
+            with self.subTest(field=field), self.assertRaises(AssertionError):
+                selector.check_context({**context, field: value})
+        with self.assertRaises(AssertionError):
+            selector.check_context({key: value for key, value in context.items() if key != "beforeGrant"})
+
+    def test_matching_tuple_cannot_skip_a_wrong_context_or_succeed_when_cut_is_missing(self):
+        with tempfile.TemporaryDirectory(prefix="mrk-semantic-selector-inert-") as temporary:
+            root = Path(temporary)
+            fixture.initialize(root)
+            selector = semantic_catalog.case("C/caller/01").selector
+            trace = semantic_fixture.SemanticTrace(root, "inert", selector)
+            slot = root / "home/.mobile-release-signing" / ("session-" + "a" * 32) / "state.pending"
+            wrong = {**dict(selector.context), "operationPhase": "SETTLED", "recoveryAttempt": False}
+            with patch.object(trace, "observe_context", side_effect=AssertionError("wrong phase cannot select")), \
+                    patch.object(trace, "cut", side_effect=AssertionError("must not cut")):
+                trace.begin("replace", slot, selector.origin, {"destination": selector.destination})
+            self.assertEqual(trace.occurrences[(selector.operation, selector.slot, selector.origin, "setup")], 1)
+            self.assertIsNone(trace.selected_event)
+            # Use the actual declared phase in a fresh inert trace. A matching
+            # event is selected once; a later correct context cannot repair it.
+            trace = semantic_fixture.SemanticTrace(root, "inert", selector)
+            trace.phase = selector.phase
+            with patch.object(trace, "observe_context", return_value=wrong), \
+                    self.assertRaisesRegex(AssertionError, "semanticContextMismatch"):
+                trace.begin("replace", slot, selector.origin, {"destination": selector.destination})
+            with patch.object(trace, "observe_context", side_effect=AssertionError("must not retry context")):
+                trace.begin("replace", slot, selector.origin, {"destination": selector.destination})
+            with self.assertRaisesRegex(AssertionError, "selectedSemanticCutNotReached"):
+                trace.result()
+
+    def test_evidence_reader_rejects_linked_replaced_oversized_and_unknown_close_outputs(self):
+        with tempfile.TemporaryDirectory(prefix="mrk-semantic-output-inert-") as temporary:
+            root = Path(temporary)
+            path = root / "step.json"
+            fixture.write_json(path, {"synthetic": True})
+            self.assertEqual(fixture.read_case_json(root, "step"), {"synthetic": True})
+            os.link(path, root / "alias")
+            with self.assertRaisesRegex(AssertionError, "metadata"):
+                fixture.read_case_json(root, "step")
+            (root / "alias").unlink()
+            replacement = root / "replacement.json"
+            fixture.write_json(replacement, {"synthetic": True})
+            real_read, replaced = os.read, []
+            def replace_after_read(descriptor, count):
+                data = real_read(descriptor, count)
+                if not replaced:
+                    replacement.replace(path)
+                    replaced.append(True)
+                return data
+            with patch.object(fixture.os, "read", side_effect=replace_after_read), \
+                    self.assertRaisesRegex(AssertionError, "changed during read"):
+                fixture.read_case_json(root, "step")
+            real_close, closed = os.close, []
+            def lost_close(descriptor):
+                closed.append(descriptor)
+                real_close(descriptor)  # Actual once-close; only its return is injected as lost.
+                raise OSError("inert close return unavailable")
+            with patch.object(fixture.os, "close", side_effect=lost_close), \
+                    self.assertRaisesRegex(AssertionError, "original close is unknown"):
+                fixture.read_case_json(root, "step")
+            self.assertEqual(len(closed), 1)
+            path.unlink()
+            path.symlink_to(root / "missing")
+            with self.assertRaises(AssertionError):
+                fixture.read_case_json(root, "step")
+            with self.assertRaisesRegex(AssertionError, "already exists"):
+                semantic_fixture._new_step(root, "step")
+            path.unlink()
+            path.write_bytes(b"12345")
+            with self.assertRaisesRegex(AssertionError, "byte bound"):
+                fixture.read_fixture_file(path, limit=4)
+
+    def test_output_without_original_return_or_unknown_custody_cannot_discharge_debt(self):
+        with tempfile.TemporaryDirectory(prefix="mrk-semantic-finality-inert-") as temporary:
+            root = Path(temporary)
+            fixture.initialize(root)
+            identity = fixture._directory_identity(root)
+            with patch.dict(fixture._CASE_CUSTODY, {str(root): identity}), \
+                    patch.dict(fixture._CASE_RECOVERY_DEBT, {str(root): identity}):
+                context = fixture.pin_case_context(root)
+                # No actual worker is started: this is an output-only
+                # counterexample, never a native/finality success simulation.
+                with patch.object(fixture, "run_worker", return_value=None), \
+                        self.assertRaisesRegex(AssertionError, "missing original case return"):
+                    semantic_fixture.recovery_step(root, "no-return", token="a" * 32, manual="none",
+                        expected="recovered", context=context, final=True)
+                self.assertEqual(fixture._CASE_RECOVERY_DEBT[str(root)], identity)
+                error = OSError("inert original return unavailable")
+                with patch.object(fixture, "run_worker", side_effect=error), self.assertRaises(OSError) as caught:
+                    semantic_fixture.recovery_step(root, "lost-return", token="a" * 32, manual="none",
+                        expected="recovered", context=context, final=True)
+                self.assertIs(caught.exception, error)
+                self.assertEqual(fixture._CASE_RECOVERY_DEBT[str(root)], identity)
+                fixture._CASE_CUSTODY[str(root)] = None
+                from . import local_signing_case_owner as owner
+                with patch.object(owner, "run_worker", side_effect=AssertionError("must not acquire")), \
+                        self.assertRaisesRegex(AssertionError, "prior case custody remains unknown"):
+                    semantic_fixture.recovery_step(root, "unknown", token="a" * 32, manual="none",
+                        expected="recovered", context=context, final=True)
+                self.assertEqual(fixture._CASE_RECOVERY_DEBT[str(root)], identity)
+
+    def test_final_case_publication_rechecks_original_deadline_after_real_owned_removal(self):
+        with tempfile.TemporaryDirectory(prefix="mrk-semantic-final-cutoff-inert-") as temporary:
+            parent = Path(temporary)
+            clock = [0.0]
+            real_remove = fixture.remove_case
+            removed = []
+            def inert_return(root, name, _task, **_unused):
+                # Only model the trusted call's DATA return for this cutoff
+                # unit contract. Never invoke its task/start a native worker or
+                # accept these observations as platform execution evidence.
+                fixture._CASE_CUSTODY[str(root)] = fixture._directory_identity(root)
+                fixture.write_json(root / (name + ".json"), {"snapshot": {"nativeCalls": [None] * 50, "session": None}})
+                return {"exit": 0, "originalAnchorWait": True, "originalWorkerWait": True,
+                        "originalStatusEOF": True, "groupAbsentBeforeAnchorWait": True,
+                        "deadlineTest": False, "runDeadlineExpired": False}
+            def remove_at_cutoff(root):
+                real_remove(root)  # Actual removal of this inert task-owned directory.
+                removed.append(True)
+                clock[0] = 1.0
+            with patch.dict(fixture._CASE_CUSTODY), patch.dict(fixture._CASE_RECOVERY_DEBT), \
+                    patch.object(fixture, "PHASE_DEADLINE", 1.0), \
+                    patch.object(contract.time, "monotonic", side_effect=lambda: clock[0]), \
+                    patch.object(fixture, "run_worker", side_effect=inert_return), \
+                    patch.object(fixture, "remove_case", side_effect=remove_at_cutoff), \
+                    self.assertRaisesRegex(ValueError, "original matrix cutoff expired"):
+                semantic_fixture.run_case(parent, "H/full-context")
+            self.assertEqual(removed, [True])
+            self.assertFalse((parent / "case").exists())
+
+    def test_focused_manual_refusal_requires_observed_input_and_original_interruption(self):
+        # Inert data-contract validation only: no terminal, signal, account or
+        # original worker is acquired and this is not native branch evidence.
+        def values(mode):
+            event = {"index": 7, "operation": "manual/input", "slot": "tty", "origin": "owner",
+                     "details": {"action": mode}}
+            observation = {"eventIndex": 7, "action": mode}
+            error = fixture.CredentialError("fictional refusal")
+            if mode in {"wrong", "eof"}:
+                event["succeeded"] = True
+                observation["read"] = {"kind": mode, "characters": 6 if mode == "wrong" else 0}
+            else:
+                error = KeyboardInterrupt() if mode == "cancel" else fixture.OwnerResolutionRefused("fictional refusal")
+            return SimpleNamespace(events=[event]), [observation], error
+        fixture.assert_refusal_manual_evidence(SimpleNamespace(events=[]), [], "none",
+                                               fixture.CredentialError("fictional refusal"))
+        for mode in ("wrong", "eof", "cancel", "resolve"):
+            with self.subTest(mode=mode):
+                trace, observations, error = values(mode)
+                fixture.assert_refusal_manual_evidence(trace, observations, mode, error)
+                with self.assertRaisesRegex(AssertionError, "exactly once"):
+                    fixture.assert_refusal_manual_evidence(trace, [], mode, error)
+                observations[0]["eventIndex"] = 8
+                with self.assertRaises(AssertionError):
+                    fixture.assert_refusal_manual_evidence(trace, observations, mode, error)
+                trace, observations, error = values(mode)
+                if mode in {"wrong", "eof"}:
+                    observations[0]["read"]["kind"] = "eof" if mode == "wrong" else "wrong"
+                else:
+                    trace.events[0]["succeeded"] = True
+                with self.assertRaises(AssertionError):
+                    fixture.assert_refusal_manual_evidence(trace, observations, mode, error)
+                trace, observations, error = values(mode)
+                wrong_error = KeyboardInterrupt() if mode in {"wrong", "eof", "resolve"} else fixture.CredentialError("not cancellation")
+                with self.assertRaises(AssertionError):
+                    fixture.assert_refusal_manual_evidence(trace, observations, mode, wrong_error)
+
+
+class WorkloadContractTests(unittest.TestCase):
+    """Closed routing and inert filesystem retention, never native evidence."""
+
+    def test_finite_workloads_match_all_actual_profile_modes_without_admitting_unknowns(self):
+        from collections import Counter
+        from . import local_signing_workload as workload
+        from unit import test_ios_profile_installation as profiles
+        expected_roles = {"minimal-query-seed": 20, "persistent-original": 120, "automatic-recovery": 60,
+                          "manual-recovery": 60, "focused-refusal": 60, "focused-owner": 60,
+                          "bare-home-original": 60, "bare-home-recovery": 60,
+                          "fresh-cli-recovery": 60, "account-native-flow": 120}
+        self.assertEqual(dict(workload.WORKER_SECONDS), expected_roles)
+        observed = []
+        def boundary(_test, mode):
+            observed.append(mode)
+            return {"signalCount": 1, "cleanupAttempts": 1}
+        # Only enumerate the real methods' finite calls with their sole native
+        # boundary replaced before invocation. This runs no profile fixture.
+        with patch.object(profiles.ProfileInstallationSignalTests, "run_boundary", new=boundary), \
+                patch.object(profiles, "run_owned", side_effect=AssertionError("inert routing cannot launch")):
+            for name in (
+                "test_real_pending_signals_during_native_open_fstat_fdopen_and_close_are_owned",
+                "test_original_unmocked_open_and_initial_fstat_interruptions_cannot_leak_files_or_descriptors",
+                "test_actual_caller_handoff_and_repeated_cleanup_signals_do_not_rely_on_generator_gc",
+                "test_successful_native_mutation_is_registered_before_deferred_cancellation",
+                "test_first_signal_at_cleanup_entry_and_before_exit_dispatch_cannot_skip_ownership",
+                "test_handler_restoration_and_partial_installation_cannot_swallow_or_abandon_cancellation",
+                "test_late_setup_and_actual_materialized_body_cancellation_never_execute_following_build_code",
+                "test_cleanup_failure_is_not_masked_by_deferred_cancellation_and_remaining_cleanup_runs",
+            ):
+                getattr(profiles.ProfileInstallationSignalTests(name), name)()
+        self.assertEqual(len(observed), 50)
+        self.assertEqual(set(observed), set(workload.PROFILE_SIGNAL_SECONDS))
+        self.assertEqual(len(set(observed)), len(observed))
+        self.assertEqual(Counter(workload.profile_signal_timeout(mode) for mode in observed), {15: 17, 60: 8, 120: 25})
+        for callback, unknown in ((workload.worker_timeout, "unbounded"),
+                                  (workload.profile_signal_timeout, "standalone-unreviewed"),
+                                  (workload.recovery_timeout, "retry"), (workload.worker_timeout, 20)):
+            with self.assertRaisesRegex(AssertionError, "unknown signing"):
+                callback(unknown)
+        with self.assertRaises(TypeError):
+            workload.WORKER_SECONDS["persistent-original"] = 999
+
+    def test_adapter_methods_keep_fixed_ids_and_route_only_the_two_canonical_cases(self):
+        path = Path(__file__).parents[1] / "unit/test_local_signing_persistent.py"
+        tree = ast.parse(path.read_text())
+        declared = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "PersistentSigningTests")
+        methods = {node.name: node for node in declared.body if isinstance(node, ast.FunctionDef)}
+        self.assertEqual(len(contract.ADAPTER_TEST_IDS), 4)
+        for identifier in contract.ADAPTER_TEST_IDS:
+            self.assertIn(identifier.rsplit(".", 1)[1], methods)
+        for name, identifier in (
+            ("test_original_c_prefix_cut_uses_real_fence_and_fresh_recovery", "C/fence/04"),
+            ("test_genuine_model_inventory_active_build_pending_contrast", "S/active-build-pending/none"),
+        ):
+            calls = [node for node in ast.walk(methods[name]) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)]
+            routes = [node for node in calls if node.func.attr == "semantic_adapter"]
+            self.assertEqual(len(routes), 1)
+            self.assertEqual(ast.literal_eval(routes[0].args[0]), identifier)
+            self.assertFalse({node.func.attr for node in calls} & {"original_inventory", "inventory_original", "recover_final", "seed_case"})
+        self.assertEqual(contract.ADAPTER_PROGRESS_CASES[-2:], ("semantic-main", "semantic-resolution"))
+
+    def test_post_semantic_assertion_failure_retains_its_actual_inert_parent_evidence(self):
+        from unit.test_local_signing_persistent import PersistentSigningTests
+        with tempfile.TemporaryDirectory(prefix="mrk-adapter-retention-inert-") as temporary, \
+                patch.dict(fixture._CASE_CUSTODY, {}, clear=True), patch.dict(fixture._CASE_RECOVERY_DEBT, {}, clear=True):
+            test = PersistentSigningTests("test_original_c_prefix_cut_uses_real_fence_and_fresh_recovery")
+            test.root = Path(temporary) / "adapter"
+            test.root.mkdir(mode=0o700)
+            test._root_identity = fixture._directory_identity(test.root)
+            test._semantic_adapter_complete = False  # Post-result assertions never completed.
+            fixture.write_json(test.root / "preserved.json", {"inert": True})
+            with self.assertRaisesRegex(AssertionError, "adapter assertions incomplete"):
+                test.tearDown()
+            self.assertEqual(fixture.read_case_json(test.root, "preserved"), {"inert": True})
+            self.assertEqual(fixture._directory_identity(test.root), test._root_identity)
+            # Only this test's outer private TemporaryDirectory removes these
+            # inert files. No native work/custody receipt was ever produced.
 
 
 class MatrixContractTests(unittest.TestCase):

@@ -417,12 +417,57 @@ class CommandContractTests(unittest.TestCase):
         wire.read.assert_not_called()
         wire.drain_to_eof.assert_called_once_with()
 
+    def test_pause_waits_only_original_readiness_with_fresh_bounded_time(self):
+        for start, after_registration, expected in ((0, 0, 10), (0, 999_500_000, 0),
+                                                    (0, 1_000_000_000, None),
+                                                    (1_000_000_000, None, None)):
+            with self.subTest(start=start, after_registration=after_registration):
+                reader, writer = _InertLease(4097), _InertLease(4098)
+                watcher = Mock()
+                # Even error/hangup readiness cannot become IO, EOF or finality.
+                watcher.poll.return_value = [(4097, command.select.POLLERR | command.select.POLLHUP)]
+                with patch.object(command.select, "poll", return_value=watcher) as factory, \
+                     patch.object(command.time, "monotonic_ns", side_effect=[start, after_registration]), \
+                     patch.object(command.time, "sleep") as sleep, \
+                     patch.object(command.os, "read") as read, patch.object(command.os, "write") as write, \
+                     patch.object(reader, "fileno", wraps=reader.fileno) as original_fd:
+                    command._pause(1_000_000_000, readers=(reader,), writers=(reader, writer))
+                    sleep.assert_not_called(); read.assert_not_called(); write.assert_not_called()
+                    if after_registration is None:
+                        factory.assert_not_called(); original_fd.assert_not_called()
+                    else:
+                        self.assertEqual(watcher.register.call_args_list, [
+                            unittest.mock.call(4097, command.select.POLLIN | command.select.POLLOUT),
+                            unittest.mock.call(4098, command.select.POLLOUT)])
+                    if expected is None: watcher.poll.assert_not_called()
+                    else: watcher.poll.assert_called_once_with(expected)
+
+        for operation, failure in (("fileno", SystemExit(3)), ("register", OSError("registration")),
+                                   ("poll", KeyboardInterrupt())):
+            with self.subTest(operation=operation):
+                reader, watcher = _InertLease(), Mock()
+                selected = reader if operation == "fileno" else watcher
+                with patch.object(command.select, "poll", return_value=watcher), \
+                     patch.object(command.time, "monotonic_ns", return_value=0), \
+                     patch.object(command.time, "sleep") as sleep, \
+                     patch.object(selected, operation, side_effect=failure):
+                    with self.assertRaises(type(failure)) as caught:
+                        command._pause(1_000_000_000, readers=(reader,))
+                    self.assertIs(caught.exception, failure)
+                    sleep.assert_not_called()
+        with patch.object(command.time, "monotonic_ns", return_value=0), \
+             patch.object(command.time, "sleep") as sleep, patch.object(command.select, "poll") as factory:
+            command._pause(5_000_000)
+            sleep.assert_called_once_with(.005)
+            factory.assert_not_called()
+
     def test_outer_wait_only_pauses_without_progress_and_rechecks_before_success(self):
         for ending in ("ready", "delayed", "eof-ready", "eof-incomplete", "cancelled", "expired"):
             with self.subTest(ending=ending):
                 ctx = self.context()
                 engine = command._Outer.__new__(command._Outer)
-                engine.ctx, engine.wire = ctx, SimpleNamespace(eof=False)
+                engine.ctx, engine.wire = ctx, SimpleNamespace(eof=False, reader=_InertLease())
+                engine.readers, engine.output_eof = [_InertLease(102), _InertLease(103)], [False, True]
                 state = {"ready": False, "pumps": 0, "now": time.monotonic_ns()}
                 interruption = KeyboardInterrupt()
                 def pump():
@@ -445,7 +490,8 @@ class CommandContractTests(unittest.TestCase):
                             engine._until(lambda: state["ready"])
                     else:
                         engine._until(lambda: state["ready"])
-                    if ending == "delayed": pause.assert_called_once_with(ctx.run)
+                    if ending == "delayed":
+                        pause.assert_called_once_with(ctx.run, readers=(engine.wire.reader, engine.readers[0]))
                     else: pause.assert_not_called()
                 self.assertEqual(state["pumps"], 2 if ending == "delayed" else 1)
 
@@ -481,16 +527,18 @@ class CommandContractTests(unittest.TestCase):
                     if not raw: raise BlockingIOError()
                     chunk = bytes(raw[:count]); del raw[:count]
                     return chunk
-                def pause(cutoff):
+                def pause(cutoff, *, readers=(), writers=()):
                     self.assertEqual(cutoff, ctx.cutoff())
                     self.assertFalse(observer.acknowledged)
                     pauses.append(cutoff)
                     self.assertEqual(len(pauses), 1)
                     if ending == "delayed-ack":
+                        self.assertEqual((readers, writers), ((wire.reader,), ()))
                         self.assertIsNone(wire.out)
                         self.assertEqual(state["reads"], 1)
                         ack()
                     else:
+                        self.assertEqual((readers, writers), ((), (wire.writer,)))
                         self.assertIn(ending, ("partial", "eagain"))
                         self.assertIsNotNone(wire.out)
                         self.assertEqual(state["reads"], 0)
@@ -555,7 +603,7 @@ class CommandContractTests(unittest.TestCase):
                     if state["release"] and ending == "eof":
                         return b""  # Only this original read observes EOF.
                     raise BlockingIOError()
-                def pause(_cutoff):
+                def pause(_cutoff, **_readiness):
                     if observer.retired:
                         if wire.eof:
                             self.assertTrue(state["release"] and ending == "eof")
@@ -1027,6 +1075,191 @@ class OwnedProcessTests(unittest.TestCase):
                 "os.environb[b'RAW'].hex(),len(os.environb[b'LARGE']),os.environb[b'EMPTY'].hex()]))")
         result = owned.run_owned(self.command(code) + ["\udcff"], environ=env, cwd=self.root)
         self.assertEqual(json.loads(result.stdout), ["ff", "ff", 9000, ""])
+
+    def _command_case(self, mode, *, suffix="", interruption=None):
+        from workflow import command_bootstrap_fixture
+        root = self.root / (mode + suffix)
+        self.unconfirmed_fixtures.append(root)  # Before any case-owned acquisition.
+        return command_bootstrap_fixture.CommandCase(command, root, mode, interruption=interruption)
+
+    def _release_command_case(self, case):
+        case.release()
+        self.unconfirmed_fixtures.remove(case.root)
+
+    def test_guarded_worker_tail_and_report_loss_preserve_original_outcomes(self):
+        negative = ("body-return", "body-systemexit", "report-format-error",
+                    "reject-zero", "reject-eagain", "reject-error")
+        incomplete = ("reject-partial", "arm-missing", "arm-partial")
+        for mode in (*negative, "reject-full", *incomplete, "post-map-pre-ready"):
+            # An assertion/finality failure leaves its root registered and stops
+            # the batch; there is no healthy continuation after UNKNOWN.
+            case = self._command_case(mode)
+            with case:
+                if mode in negative:
+                    result = owned.run_owned(["/this-fictional-command-does-not-exist"], timeout=5)
+                else:
+                    with self.assertRaises(owned.ProcessError) as raised:
+                        owned.run_owned(["/this-fictional-command-does-not-exist"], timeout=5)
+            case.require_finality()
+            outcome, worker = case.outcome, case.rows["W"]
+            self.assertTrue(outcome.create_w.attempted and outcome.create_w.retired)
+            self.assertTrue(outcome.run_tool.retired)
+            self.assertIn("hello", worker)
+            self.assertEqual(outcome.termination, "signal-wait")
+            self.assertEqual(outcome.returncode, -signal.SIGKILL)
+            self.assertIn("self_raise", worker)
+            self.assertNotIn("self_kill", worker)
+            self.assertNotIn("park", worker)
+            if mode == "post-map-pre-ready":
+                self.assertIn("pre_ready", worker)
+                self.assertNotIn("ready", worker)
+                self.assertFalse(outcome.run_tool.attempted)
+                self.assertEqual(outcome.no_target.kind, "CLOSED_BEFORE_RUN")
+                self.assertEqual(outcome.result_integrity, "complete")
+                self.assertFalse(raised.exception.dispatched)
+            else:
+                self.assertIn("ready", worker)
+                self.assertTrue(outcome.run_tool.attempted)
+                if mode not in {"arm-missing", "arm-partial"}:
+                    self.assertIn("exec_armed", worker)
+                if mode == "reject-full":
+                    self.assertEqual(outcome.no_target.kind, "EXEC_REJECTED")
+                    self.assertEqual(outcome.result_integrity, "complete")
+                    self.assertFalse(raised.exception.dispatched)
+                    self.assertEqual(worker["reject_done"]["attempts"], 1)
+                else:
+                    self.assertIsNone(outcome.no_target)
+                    self.assertTrue(outcome.execution_unknown)
+                    if mode in negative:
+                        self.assertEqual((result.returncode, result.stdout, result.stderr), (-signal.SIGKILL, "", ""))
+                        self.assertEqual(outcome.result_integrity, "complete")
+                    else:
+                        self.assertEqual(outcome.result_integrity, "incomplete")
+                        self.assertTrue(raised.exception.dispatched)
+            if mode.startswith("reject-"):
+                write = worker["reject_write"]
+                self.assertTrue(write["retired"] and write["nonblocking"])
+                self.assertEqual(write["attempt"], 1)
+                self.assertEqual(worker["reject_enter"]["stage"], "exec")
+                self.assertEqual(worker["reject_enter"]["errno"], command.errno.ENOENT)
+                if mode == "reject-full":
+                    self.assertEqual(write["count"], write["size"])
+                elif mode == "reject-partial":
+                    self.assertEqual(write["count"], 3)
+                    self.assertGreater(write["size"], 3)
+                    self.assertNotIn("reject_done", worker)
+                else:
+                    self.assertEqual(write["count"], 0)
+                    self.assertNotIn("reject_done", worker)
+            elif mode in {"body-return", "body-systemexit"}:
+                self.assertIn("body_return", worker)
+                self.assertNotIn("reject_enter", worker)
+                if mode == "body-systemexit":
+                    self.assertEqual(worker["system_exit"]["code"], 127)
+                    self.assertEqual(worker["system_exit"]["returned"], command.HELPER_UNKNOWN)
+            elif mode == "report-format-error":
+                self.assertTrue(worker["format_error"]["retired"])
+                self.assertNotIn("reject_write", worker)
+            elif mode in {"arm-missing", "arm-partial"}:
+                self.assertNotIn("exec_armed", worker)
+                self.assertFalse(case.rows["A"]["worker_result"]["armed"])
+                self.assertIn(mode.replace("-", "_"), worker)
+                if mode == "arm-partial":
+                    self.assertEqual(worker["arm_partial"]["count"], 3)
+                    self.assertGreater(worker["arm_partial"]["size"], 3)
+            self._release_command_case(case)
+
+    def test_worker_self_stop_fallback_and_original_owner_deadline(self):
+        case = self._command_case("first-self-stop")
+        with case:
+            result = owned.run_owned(["/fictional-unreached-command"], timeout=5)
+        pids = case.require_finality()
+        self.assertEqual(result.returncode, -signal.SIGKILL)
+        self.assertTrue(case.outcome.execution_unknown)
+        self.assertEqual(case.rows["W"]["self_raise"]["signal"], int(signal.SIGKILL))
+        self.assertEqual(case.rows["W"]["self_kill"]["self_pid"], pids["W"])
+        self.assertNotIn("park", case.rows["W"])
+        self._release_command_case(case)
+
+        for cancel in (False, True):
+            original = KeyboardInterrupt("fixed original park cancellation") if cancel else None
+            case = self._command_case("both-self-stop", suffix="-cancel" if cancel else "-timeout",
+                                      interruption=original)
+            with case, self.assertRaises(KeyboardInterrupt if cancel else owned.ProcessError) as raised:
+                owned.run_owned(["/fictional-unreached-command"], timeout=2 if not cancel else 5)
+            pids = case.require_finality()
+            self.assertIn("self_raise", case.rows["W"])
+            self.assertEqual(case.rows["W"]["self_kill"]["self_pid"], pids["W"])
+            self.assertIn("park", case.rows["W"])
+            self.assertEqual(case.rows["A"]["owner_wait"]["kind"], "signal")
+            self.assertEqual(case.rows["A"]["owner_wait"]["code"], int(signal.SIGKILL))
+            signals = [case.rows[role]["group_kill"] for role in ("A", "C")
+                       if "group_kill" in case.rows[role]]
+            self.assertTrue(signals)
+            self.assertTrue(all(row["group"] == pids["A"] and not row["retired"]
+                                and row["before_cutoff"] for row in signals))
+            self.assertEqual(case.outcome._engine.ctx.hard - case.outcome._engine.ctx.run, command.CLEANUP_NS)
+            if cancel:
+                self.assertTrue(case.interrupted)
+                self.assertIs(raised.exception, original)
+                self.assertIs(case.outcome._engine.ctx.primary, original)
+            else:
+                self.assertIs(raised.exception, case.outcome._engine.ctx.primary)
+                self.assertEqual(str(raised.exception), command.TIMEOUT)
+            self._release_command_case(case)
+
+    def test_native_target_inherits_exact_signal_policy_and_mask(self):
+        source = Path(__file__).parents[1] / "workflow/command_signal_probe.c"
+        target = self.root / "command-signal-probe"
+        compiler = ["/usr/bin/xcrun", "clang"] if sys.platform == "darwin" else ["/usr/bin/cc"]
+        built = owned.run_owned([*compiler, "-std=c99", "-Wall", "-Wextra", "-Werror", "-O0",
+                                 str(source), "-o", str(target)], timeout=15)
+        self.assertTrue(all_original_commands_final(self.outcomes))
+        self.assertEqual(built.returncode, 0, built.stderr)
+        defaults = [getattr(signal, name) for name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ") if hasattr(signal, name)]
+        selected = list(dict.fromkeys([signal.SIGINT, signal.SIGTERM, signal.SIGCHLD, signal.SIGUSR1, *defaults]))
+        previous = {number: signal.getsignal(number) for number in selected}
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        try:
+            for index, (int_policy, term_policy) in enumerate(((signal.SIG_DFL, signal.SIG_DFL),
+                    (signal.SIG_IGN, signal.SIG_DFL), (signal.SIG_DFL, signal.SIG_IGN))):
+                for number, policy in ((signal.SIGINT, int_policy), (signal.SIGTERM, term_policy),
+                                       (signal.SIGCHLD, signal.SIG_DFL), (signal.SIGUSR1, signal.SIG_IGN)):
+                    signal.signal(number, policy)
+                for number in defaults:
+                    signal.signal(number, signal.SIG_IGN)  # Prove restoration, not an already-default value.
+                signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR2, signal.SIGALRM})
+                expected_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+                case = self._command_case("observe", suffix=f"-signal-{index}")
+                with case:
+                    result = owned.run_owned([str(target)], timeout=5)
+                pids = case.require_finality()
+                self.assertEqual((result.returncode, result.stderr), (0, ""))
+                self.assertEqual(case.outcome.termination, "normal-exit")
+                self.assertFalse(case.outcome.execution_unknown)
+                observed = json.loads(result.stdout)
+                self.assertEqual(observed["pid"], pids["W"])
+                self.assertEqual(observed["nsig"], signal.NSIG)
+                expected_policy = {int(number): 0 for number in defaults}
+                expected_policy.update({int(signal.SIGINT): int(int_policy == signal.SIG_IGN),
+                                        int(signal.SIGTERM): int(term_policy == signal.SIG_IGN),
+                                        int(signal.SIGCHLD): 0, int(signal.SIGUSR1): 1})
+                self.assertEqual(dict(observed["policy"]), expected_policy)
+                mask = observed["mask"]
+                self.assertEqual([row[0] for row in mask], list(range(1, signal.NSIG)))
+                for number, member in mask:
+                    if member == -1:
+                        self.assertNotIn(number, signal.valid_signals())
+                    else:
+                        self.assertEqual(member, int(number in expected_mask))
+                self.assertEqual(signal.pthread_sigmask(signal.SIG_BLOCK, set()), expected_mask)
+                self._release_command_case(case)
+        finally:
+            # Do not reuse an unresolved signal/process owner for another case.
+            if all_original_commands_final(self.outcomes):
+                for number, policy in previous.items():
+                    signal.signal(number, policy)
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
     def test_root_cleanup_can_finish_after_already_delivered_default_cancellation(self):
         guard = DefaultCancellation(owned.ProcessCleanupError, "fixture restoration")

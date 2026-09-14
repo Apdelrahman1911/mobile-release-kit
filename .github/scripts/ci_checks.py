@@ -67,6 +67,7 @@ WHEEL_PATTERNS = (
     "test_local_signing_composition.py", "test_owned_process.py", "test_owned_process_callers.py",
     "test_owned_process_failures.py", "test_local_signing_failures.py", "test_local_signing_profile_identity.py",
     "test_local_signing_persistent.py", "test_local_signing_matrix.py", "test_local_signing_owner_loss.py",
+    "test_command_loader_loss.py", "test_command_fence_failure.py", "test_local_signing_attempts.py", "test_command_account_lifecycle.py",
 )
 NATIVE_PATTERNS = (
     "test_ios_profile_authority.py", "test_ios_profile_trust.py",
@@ -77,6 +78,7 @@ NATIVE_PATTERNS = (
     "test_local_signing_composition.py", "test_owned_process.py", "test_owned_process_callers.py",
     "test_owned_process_failures.py", "test_local_signing_failures.py", "test_local_signing_profile_identity.py",
     "test_local_signing_persistent.py", "test_local_signing_matrix.py", "test_local_signing_owner_loss.py",
+    "test_command_loader_loss.py", "test_command_fence_failure.py", "test_local_signing_attempts.py", "test_command_account_lifecycle.py",
 )
 # Only this source-known class may run with the fixed native trust-service role.
 # A newly added method must not silently enlarge that role's callset.
@@ -146,6 +148,21 @@ PYTHON_POISON_CASES = (
     ("poison-system-exit-restore-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_restore_failure"),
     ("poison-system-exit-cleanup-and-restore-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_cleanup_and_restore_failure"),
     ("poison-signing-launcher-loss", "workflow.test_local_signing_owner_loss.SigningLauncherLossTests.test_real_launcher_death_uses_original_anchor_cleanup_and_requires_domain_disposal"),
+    ("poison-command-preguard-127", "workflow.test_command_loader_loss.CommandLoaderLossTests.test_preguard_normal_127_never_becomes_a_command_result"),
+    ("poison-command-guarded-import", "workflow.test_command_loader_loss.CommandLoaderLossTests.test_guarded_import_failure_requires_original_domain_disposal"),
+    ("poison-command-fence-pending-create-before", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_loss_pending_create_before"),
+    ("poison-command-fence-pending-create-after", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_loss_pending_create_after"),
+    ("poison-command-fence-pending-write-partial", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_loss_pending_write_partial"),
+    ("poison-command-fence-pending-write-after", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_loss_pending_write_after"),
+    ("poison-command-fence-data-fsync-after", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_loss_data_fsync_after"),
+    ("poison-command-fence-pending-close-after", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_loss_pending_close_after"),
+    ("poison-command-fence-final-link-after", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_loss_final_link_after"),
+    ("poison-command-fence-directory-fsync-after", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_loss_directory_fsync_after"),
+    ("poison-command-fence-pending-close-lost-return", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_pending_close_lost_return"),
+    ("poison-command-fence-final-link-lost-return", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_final_link_lost_return"),
+    ("poison-command-fence-foreign-pending-collision", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_foreign_pending_collision"),
+    ("poison-command-prepared-prefix-input-loss", "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests.test_prepared_input_withdrawal_c_loss_fresh_prefix_recovery"),
+    ("poison-command-account-hold-parent-loss", "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests.test_original_hold_survives_true_parent_loss_and_is_absent_from_worker_map"),
 )
 PYTHON_POISON_PARTITIONS = tuple(name for name, _identifier in PYTHON_POISON_CASES)
 PYTHON_POISON_IDS = tuple(identifier for _name, identifier in PYTHON_POISON_CASES)

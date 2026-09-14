@@ -23,6 +23,7 @@ from unittest.mock import Mock, patch
 from workflow import local_signing_bridge as bridge
 from workflow import local_signing_case_owner as owner
 from workflow import local_signing_persistent_fixture as fixture
+from workflow import local_signing_semantic_fixture as semantic
 from unit import local_signing_persistent as persistent_model
 from unit.local_signing_persistent import PROFILE, UUID, OwnerResolutionRefused, PersistentSigningModel, facts, initialize, write_json
 
@@ -178,12 +179,12 @@ class PersistentWorkerRecorderTests(unittest.TestCase):
                     self.assertIs(caught.exception, error)
 
     def test_prefix_helper_traces_acquisition_through_original_close(self):
-        # Execute the actual nested helper, but replace every outer worker,
+        # Execute the actual shared helper, but replace every outer worker,
         # account/model and filesystem entry before reaching it. No setUp or
         # genuine case launch is invoked by this scope-only regression.
         events, active = [], False
-        model = SimpleNamespace(trace=None)
-        trace = SimpleNamespace()
+        model = SimpleNamespace(trace=None, state={"original": {"default": "inert", "search": []}})
+        trace = SimpleNamespace(selector=None)
 
         def note(operation, *, model_traced=False):
             self.assertTrue(active, operation + " preceded original Trace installation")
@@ -230,26 +231,19 @@ class PersistentWorkerRecorderTests(unittest.TestCase):
             finally:
                 note("lease-close")
 
-        class FirstHelperComplete(Exception):
-            pass
-
-        def first_worker(case, name, task, **kwargs):
-            self.assertEqual(name, "query")
-            task()
-            raise FirstHelperComplete  # Stop before JSON reads/cut/recovery.
-
-        test = PersistentSigningTests("test_original_c_prefix_cut_uses_real_fence_and_fresh_recovery")
-        test.root = Path("/inert/prefix-scope")
-        with patch.object(Path, "mkdir"), patch(__name__ + ".initialize"), \
-                patch(__name__ + ".PersistentSigningModel", return_value=model), \
-                patch.object(fixture, "Trace", return_value=trace), \
+        root = Path("/inert/prefix-scope")
+        def postconditions(observed_root, *, expected_preferences):
+            self.assertFalse(active)
+            self.assertEqual(observed_root, root)
+            self.assertIs(expected_preferences, model.state["original"])
+            events.append("postconditions")
+        with patch.object(fixture, "PersistentSigningModel", return_value=model), \
                 patch.object(fixture.signing, "local_signing_lease", new=lease), \
-                patch.object(fixture, "run_worker", new=first_worker), \
-                self.assertRaises(FirstHelperComplete):
-            test.test_original_c_prefix_cut_uses_real_fence_and_fresh_recovery()
+                patch.object(fixture, "assert_positive_postconditions", new=postconditions):
+            semantic.one_journalled_query(root, trace, phase="setup")
         self.assertEqual(events, ["trace-enter", "lease-open", "session", "bind", "session-open", "prepare",
                                   "query", "cleanup-native", "cleanup-profile", "finish", "lease-close",
-                                  "trace-exit", "result"])
+                                  "trace-exit", "postconditions", "result"])
 
     def test_trace_dirfd_provenance_dup_retirement_and_excluded_origins(self):
         with patch.object(fixture, "ResourceOracle"):
@@ -1193,8 +1187,9 @@ class PersistentOracleTests(unittest.TestCase):
             def intermediate(*_args, **_kwargs):
                 write_json(root / "focused-fixture-owner.json", {"result": {"status": "recovered"},
                     "preferences": plan["expectedPreferences"], "manualFixtureAction": True})
-            with patch.object(fixture, "run_worker", side_effect=intermediate):
-                self.assertEqual(fixture.settle_focused_fixture(root, plan), plan["expectedPreferences"])
+            with patch.object(fixture, "run_worker", side_effect=intermediate), \
+                    self.assertRaisesRegex(AssertionError, "missing original case return"):
+                fixture.settle_focused_fixture(root, plan)
             self.assertEqual(fixture._CASE_RECOVERY_DEBT[str(root)], plan["identity"])
             with self.assertRaisesRegex(AssertionError, "recovery debt"):
                 fixture.remove_case(root)
@@ -1293,15 +1288,21 @@ class PersistentSigningTests(unittest.TestCase):
 
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix="mrk-persistent-signing-")).resolve()
+        self._root_identity = fixture._directory_identity(self.root)
+        self._semantic_adapter_complete = None
 
     def tearDown(self):
         # Preserve uncertainty. No destructor, recorded PID, wait-then-signal or
         # guessed process identity is used to authorize cleanup after failure.
+        self.assertEqual(fixture._directory_identity(self.root), self._root_identity,
+                         "original adapter root changed; fixture evidence retained")
         owned = {key: value for key, value in fixture._CASE_CUSTODY.items()
                  if Path(key).is_relative_to(self.root)}
         debt = [key for key in fixture._CASE_RECOVERY_DEBT if Path(key).is_relative_to(self.root)]
         self.assertFalse(debt or any(value is None for value in owned.values()),
                          "original case/C finality unconfirmed; fixture files retained")
+        self.assertIsNot(self._semantic_adapter_complete, False,
+                         "semantic adapter assertions incomplete; fixture evidence retained")
         for key in sorted(owned, key=len, reverse=True):
             fixture.remove_case(Path(key))
         shutil.rmtree(self.root)
@@ -1341,41 +1342,33 @@ class PersistentSigningTests(unittest.TestCase):
         fixture.remove_case(case)
 
     def test_original_c_prefix_cut_uses_real_fence_and_fresh_recovery(self):
-        def one_journalled_query(case, trace):
-            model = PersistentSigningModel(case)
-            # Observe the original directory acquisitions, not a reconstructed
-            # FD/path map after the session has already been prepared.
-            with trace.installed(), fixture.signing.local_signing_lease(home=case / "home") as lease:
-                session = lease.session()
-                session.bind_runner(model)
-                session.open(create=True)
-                session.prepare(PROFILE, UUID)
-                model.trace = trace
-                session.run(["security", "default-keychain", "-d", "user"], kind="observe")
-                model.trace = None
-                session.cleanup_native()
-                session.cleanup_profile()
-                session.finish()
-            return trace.result()
-        healthy = self.root / "query-inventory"
-        healthy.mkdir(mode=0o700)
-        initialize(healthy)
-        fixture.run_worker(healthy, "query", lambda: one_journalled_query(healthy, fixture.Trace(healthy, "query")))
-        inventory = json.loads((healthy / "query.json").read_bytes())
-        event = next(item for item in inventory["events"] if item["operation"] == "command-fence/PENDING_WRITE")
-        fixture.remove_case(healthy)
-        case = self.root / "original-c-cut"
-        case.mkdir(mode=0o700)
-        initialize(case)
-        fixture.require_fresh_recovery(case)
-        fixture.run_worker(case, "seed", lambda: one_journalled_query(case, fixture.Trace(
-            case, "seed", {"event": event, "edge": "partial"})), expect=fixture.CRASH)
-        cut = json.loads((case / "seed-cut.json").read_bytes())
+        evidence = self.semantic_adapter("C/fence/04")
+        self.assertEqual([step["name"] for step in evidence["steps"]], ["seed", "semantic-main"])
+        cut = evidence["steps"][0]["observation"]
+        self.assertEqual(cut["edge"], "partial")
         original = cut["originalCFenceObservation"]
         self.assertTrue(original["originalWorker"] and original["originalReadClosed"])
+        self.assertTrue(0 < original["written"] < original["total"])
         self.assertEqual(bytes.fromhex(original["actualReadHex"]), bytes.fromhex(original["operandHex"])[:original["written"]])
-        self.assertEqual(fixture.recover_final(case)["automatic"], "recovered")
-        fixture.remove_case(case)
+        final = evidence["steps"][1]
+        self.assertEqual((final["manual"], final["expected"], final["observation"]["result"]["status"]),
+                         ("none", "recovered", "recovered"))
+        self.assertTrue(final["observation"]["idleAndRenewedAdmission"])
+        self.assertEqual(evidence["negativeEvidence"], [])
+        self._semantic_adapter_complete = True
+
+    def semantic_adapter(self, identifier):
+        self.assertIn(identifier, {"C/fence/04", "S/active-build-pending/none"})
+        self._semantic_adapter_complete = False
+        value = semantic.run_case(self.root, identifier)
+        stem = "semantic-" + fixture.digest(identifier) + "-complete"
+        self.assertEqual(value, {"caseId": identifier, "status": "semantic-subset-case", "evidence": stem + ".json",
+                                 "caseRemoved": True, "originalWorkersSettled": True})
+        evidence = fixture.read_case_json(self.root, stem)
+        self.assertEqual(evidence["schema"], "mrk-signing-semantic-case-v1")
+        self.assertEqual(evidence["case"], semantic.catalog.case(identifier).record())
+        self.assertFalse((self.root / "case").exists())
+        return evidence
 
     def original_inventory(self):
         inventory_case = self.root / "inventory"
@@ -1392,16 +1385,28 @@ class PersistentSigningTests(unittest.TestCase):
         return inventory
 
     def test_genuine_model_inventory_active_build_pending_contrast(self):
-        inventory = self.original_inventory()
-        # Reproduce the recorded pending-write contrast from the actual new
-        # inventory; do not relabel the historical EEXIST failure without fresh
-        # execution evidence. No pending journal or native outcome is invented.
-        cut_case = self.root / "active-build-pending"
-        cut_case.mkdir(mode=0o700)
-        fixture.require_fresh_recovery(cut_case)
-        fixture.seed_case(cut_case, fixture.seeds(inventory)["active-build-pending"])
-        self.assertEqual(fixture.recover_final(cut_case)["automatic"], "recovered")
-        fixture.remove_case(cut_case)
+        evidence = self.semantic_adapter("S/active-build-pending/none")
+        self.assertEqual([step["name"] for step in evidence["steps"]], ["seed", "semantic-main", "semantic-resolution"])
+        cut = evidence["steps"][0]["observation"]
+        self.assertEqual(cut["selector"]["occurrence"], 3)
+        self.assertTrue(cut["physicalWrite"]["properPrefix"])
+        # Live SETTLED/native-new was not committed: the durable ARMED state
+        # still records the previous DB inode.  A genuine C pair is not native
+        # ownership adoption.  Automatic refusal must survive owner cleanup.
+        durable = cut["snapshot"]["controls"]["state.json"]["value"]
+        live = cut["context"]["liveState"]
+        self.assertEqual((durable["inflight"]["phase"], live["inflight"]["phase"]), ("ARMED", "SETTLED"))
+        self.assertNotEqual(durable["native"][fixture.signing.DB_NAME], live["native"][fixture.signing.DB_NAME])
+        negative, final = evidence["steps"][1:]
+        self.assertEqual((negative["manual"], negative["expected"]), ("none", "refused-unknown-resource"))
+        self.assertIsNotNone(negative["observation"]["refused"])
+        self.assertFalse(negative["observation"]["idleAndRenewedAdmission"])
+        self.assertEqual(len(evidence["negativeEvidence"]), 1)
+        self.assertEqual(fixture.read_case_json(self.root, Path(evidence["negativeEvidence"][0]).stem), negative)
+        self.assertEqual((final["manual"], final["expected"], final["observation"]["result"]["status"]),
+                         ("resolve", "recovered-with-conflict", "recovered-with-conflict"))
+        self.assertTrue(final["observation"]["idleAndRenewedAdmission"])
+        self._semantic_adapter_complete = True
 
     def test_genuine_model_inventory_and_foreign_manual_cases(self):
         inventory = self.original_inventory()

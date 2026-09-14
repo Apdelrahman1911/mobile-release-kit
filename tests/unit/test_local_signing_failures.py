@@ -19,12 +19,22 @@ import mobile_release
 from mobile_release import cancellation, cli, credentials, local_signing as signing, owned_process as owned
 from mobile_release.cancellation import DefaultCancellation, cancellation_owner
 from mobile_release.errors import CredentialError
+from workflow.local_signing_workload import worker_timeout
 from .ios_entitlement_helpers import profile
 from .local_signing_helpers import NativeSigningModel, fictional_signing_profile, model_result
+from .local_signing_algorithm_helpers import refuse_signing_execution
 
 TOKEN = "b" * 32
 UUID = "12345678-1234-1234-1234-1234567890AB"
 CONTENT = b"fictional-authenticated-profile"
+
+FATAL_BODY_NATIVE_VARIANTS = (("public-00", False, False),)
+FATAL_BODY_INERT_VARIANTS = (
+    ("public-01", False, True),
+    ("public-11", True, True),
+    ("public-00", False, False),
+    ("public-10", True, False),
+)
 
 
 class TTY(io.StringIO):
@@ -163,14 +173,18 @@ model=NativeSigningModel(home); model.preferences=supplied['preferences']
 model.keychain=Path(supplied['keychain']) if supplied['keychain'] else None
 lease=signing.local_signing_lease
 with patch.object(signing,'local_signing_lease',side_effect=lambda **kw: lease(**{**kw,'home':home})), patch.object(signing,'run_owned',model):
-    raise SystemExit(cli.main(['local-signing','recover','--session',token,'--confirm',signing.CONFIRMATION]))
+    status=cli.main(['local-signing','recover','--session',token,'--confirm',signing.CONFIRMATION])
+if status in (0, 1):
+    with lease(home=home) as renewed:
+        renewed.assert_owner()
+raise SystemExit(status)
 """
         result = owned.run_owned(
             [sys.executable, "-I", "-S", "-B", "-c", code,
              str(Path(mobile_release.__file__).resolve().parent.parent), str(Path(__file__).parents[1]),
              str(home), json.dumps({"preferences": model.preferences, "keychain": str(model.keychain) if model.keychain else None}), token],
             cwd=self.root, environ={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "HOME": str(home)},
-            capture=True, output_limit=64 * 1024, timeout=15,
+            capture=True, output_limit=64 * 1024, timeout=worker_timeout("fresh-cli-recovery"),
         )
         self.assertEqual(result.returncode, 1 if expected == "recovered-with-conflict" else 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), {"status": expected, "session": token})
@@ -399,24 +413,27 @@ with patch.object(signing,'local_signing_lease',side_effect=lambda **kw: lease(*
                 self.fresh_recovery(home, model, expected="absent")
 
     def test_fatal_body_quarantines_all_further_commands_regardless_of_public_dispatch_flags(self):
-        for dispatched, contained in ((False, True), (True, True), (False, False), (True, False)):
-            with self.subTest(dispatched=dispatched, contained=contained):
-                root, home, destination, model = self.case(seed=False)
-                stack, context = self.signing_context(root, home, model)
-                with stack, self.assertRaises(owned.ProcessError) as caught:
-                    with context:
-                        calls = len(model.calls)
-                        raise owned.ProcessCleanupError("fictional body cleanup", dispatched=dispatched, contained=contained)
-                # Real setup already dispatched under this guard. An ordinary
-                # body's conservative flag cannot erase that recorded fact.
-                self.assert_fatal(caught.exception, dispatched=True, contained=contained)
-                status = signing.signing_status(home=home)
-                self.assertEqual(status["status"], "pending")
-                self.assertTrue(destination.exists())
-                self.assertEqual(len(model.calls), calls)
-                # Independent local descriptor closes still run. Public flags
-                # never authorize a new native cleanup command on a fatal lane.
-                self.fresh_recovery(home, model, token=status["session"])
+        for variant in FATAL_BODY_NATIVE_VARIANTS:
+            with self.subTest(variant=variant[0]):
+                self.run_native_fatal_body_variant(variant)
+
+    def run_native_fatal_body_variant(self, variant):
+        self.assertIn(variant, FATAL_BODY_NATIVE_VARIANTS)
+        _name, dispatched, contained = variant
+        root, home, destination, model = self.case(seed=False)
+        stack, context = self.signing_context(root, home, model)
+        with stack, self.assertRaises(owned.ProcessError) as caught:
+            with context:
+                calls = len(model.calls)
+                raise owned.ProcessCleanupError("fictional body cleanup", dispatched=dispatched, contained=contained)
+        # Real setup already dispatched under this guard. A false public flag
+        # cannot erase it. The complete flag table has a separate inert caller.
+        self.assert_fatal(caught.exception, dispatched=True, contained=contained)
+        status = signing.signing_status(home=home)
+        self.assertEqual(status["status"], "pending")
+        self.assertTrue(destination.exists())
+        self.assertEqual(len(model.calls), calls)
+        self.fresh_recovery(home, model, token=status["session"])
 
     def test_actual_fatal_local_resource_in_body_cannot_finalize_or_release_signing_resources(self):
         root, home, destination, model = self.case(seed=False)
@@ -1126,6 +1143,9 @@ class InertPkcs12CallerTests(unittest.TestCase):
                     return SimpleNamespace(returncode=outcome, stdout="", stderr="")
                 self.assertEqual(argv[0], "security")
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
+            def finish():
+                trace.lifecycle.append("finish")
+                return False
             session = SimpleNamespace(
                 fd=311, state={"inflight": None}, intent={"profile": {"stage": "modeled-stage"}},
                 keychain=Path("/modeled/keychain"), unresolved=False, journal_failed=False, cleaning=False,
@@ -1133,18 +1153,21 @@ class InertPkcs12CallerTests(unittest.TestCase):
                 prepare=lambda *_args: None, profile_event=lambda *_args, **_kwargs: None,
                 run=run, activate=lambda: trace.lifecycle.append("activate"),
                 cleanup_native=lambda: trace.lifecycle.append("cleanup-native"),
-                cleanup_profile=lambda: trace.lifecycle.append("cleanup-profile"), finish=lambda: False,
+                cleanup_profile=lambda: trace.lifecycle.append("cleanup-profile"), finish=finish,
                 close=lambda: trace.lifecycle.append("close"),
             )  # Modeled FD311 is never passed to an OS or native owner.
+            trace.session = session
             lease = SimpleNamespace(cancellation=guard, active=None, home=Path("/modeled/home"),
                                     _admit_execution=lambda: None, session=lambda: session)
-            def invoke():
+            def invoke(body=None):
                 if site == "signing":
                     with credentials._temporary_apple_signing_environment(
                         p12=Path("/modeled/input.p12"), password="fictional",
                         profile=Path("/modeled/input.profile"), directory=Path("/modeled/private"),
                         lease=lease, cancellation=guard,
                     ) as updates:
+                        if body is not None:
+                            body()
                         return updates
                 return credentials._validate_apple_signing_material(
                     SimpleNamespace(root=Path("/modeled/project"), section=lambda _name: {}),
@@ -1171,6 +1194,47 @@ class InertPkcs12CallerTests(unittest.TestCase):
     def extraction_roles(commands):
         return [(next(flag for flag in ("-clcerts", "-nocerts", "-cacerts") if flag in command),
                  "-legacy" in command) for command in commands]
+
+    def test_public_fatal_body_flags_quarantine_the_actual_inert_signing_caller(self):
+        self.assertEqual(len(FATAL_BODY_INERT_VARIANTS), 4)
+        for variant in FATAL_BODY_INERT_VARIANTS:
+            with self.subTest(variant=variant[0]):
+                self.run_inert_fatal_body_variant(variant)
+
+    def run_inert_fatal_body_variant(self, variant):
+        self.assertIn(variant, FATAL_BODY_INERT_VARIANTS)
+        _name, dispatched, contained = variant
+        primary = owned.ProcessCleanupError("fictional body cleanup", dispatched=dispatched, contained=contained)
+        with self.caller("signing", ()) as (invoke, trace), refuse_signing_execution() as attempts:
+            before_cleanup = []
+
+            def body():
+                self.assertEqual(trace.lifecycle, ["activate"])
+                self.assertFalse(trace.guard.lifetime_ledger.fatal)
+                self.assertFalse(trace.session.unresolved)
+                before_cleanup.extend(tuple(command) for command in trace.commands)
+                raise primary
+
+            with self.assertRaises(owned.ProcessError) as caught:
+                invoke(body)
+            # The actual cleanup_signing callback must quarantine before any
+            # native/profile reconciliation, yet still close independently once.
+            self.assertTrue(trace.session.cleaning)
+            self.assertTrue(trace.session.unresolved)
+            self.assertTrue(trace.guard.lifetime_ledger.fatal)
+            self.assertIs(trace.guard.lifetime_ledger._primary, primary)
+            self.assertEqual(trace.guard.handler_state, "ACTIVE")
+            self.assertEqual(trace.lifecycle, ["activate", "close"])
+            self.assertTrue(before_cleanup, "the actual caller never reached its body")
+            self.assertEqual([tuple(command) for command in trace.commands], before_cleanup)
+            self.assertEqual((caught.exception.dispatched, caught.exception.contained,
+                              caught.exception.cleanup_complete, caught.exception.fatal),
+                             (dispatched, contained, False, True))
+            # These are explicitly inert prerequisite returncode values, not
+            # native outcomes. The retained native00 case proves prior dispatch.
+            self.assertEqual((primary.dispatched, primary.contained, primary.cleanup_complete),
+                             (dispatched, contained, False))
+            self.assertEqual(attempts, [])
 
     def test_both_callers_limit_legacy_to_one_positive_retry_and_preserve_negative_dispatch(self):
         cases = (("zero", (0,)), ("legacy-success", (7, 0)), ("legacy-failure", (7, 9)),

@@ -43,6 +43,7 @@ ADAPTER_PROGRESS_MAX = (1 << 31) - 1
 ADAPTER_PROGRESS_CASES = (
     "healthy", "crash", "deadline", "query", "seed", "inventory",
     "final-automatic", "final-no-resolution", "final-owner-resolution",
+    "semantic-main", "semantic-resolution",
 )
 ADAPTER_PROGRESS_OWNER_STAGES = (
     "task-entered", "task-returned", "result-write-returned", "recovery-check", "recovery-busy", "recovery-ready",
@@ -55,6 +56,8 @@ ADAPTER_FAILURE_TEST_FILES = (
     "tests/unit/local_signing_helpers.py", "tests/unit/ios_entitlement_helpers.py",
     "tests/workflow/local_signing_persistent_fixture.py", "tests/workflow/local_signing_case_owner.py",
     "tests/workflow/local_signing_bridge.py", "tests/workflow/local_signing_model_target.py",
+    "tests/workflow/local_signing_semantic_fixture.py", "tests/workflow/local_signing_semantic_catalog.py",
+    "tests/workflow/local_signing_workload.py",
 )
 
 
@@ -336,9 +339,10 @@ def package_manifest(package, *, deadline=None):
 
 
 def definitions_manifest(root, *, deadline=None):
-    # Bind the complete Python test definition, including imported helpers and
-    # this reducer, plus its CI/packaging contracts. No generated cache is a test.
-    paths = (sorted((root / "tests").rglob("*.py"))
+    # Bind Python definitions AND native fixture sources (not merely their
+    # loader). A stale C signal probe may not reuse current-source evidence.
+    # Generated objects/caches are not source definitions.
+    paths = (sorted(path for path in (root / "tests").rglob("*") if path.suffix in {".py", ".c", ".h"})
              + sorted(path for path in (root / ".github/scripts").rglob("*")
                       if path.is_file() and "__pycache__" not in path.parts)
              + [root / ".github/workflows/ci.yml", root / "pyproject.toml"])

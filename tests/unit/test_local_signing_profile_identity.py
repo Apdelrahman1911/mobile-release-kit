@@ -22,14 +22,77 @@ import mobile_release
 from mobile_release import cli, credentials, local_signing as signing
 from mobile_release.errors import CredentialError
 from mobile_release.owned_process import ProcessError, run_owned
+from workflow.local_signing_workload import worker_timeout
 from .ios_entitlement_helpers import profile
 from .local_signing_helpers import NativeSigningModel, fictional_signing_profile
+from .local_signing_algorithm_helpers import profile_algorithm_session, refuse_signing_execution
 from .test_local_signing_failures import DescriptorFault
 
 TOKEN = "e" * 32
 UUID = "44444444-5555-6666-7777-888888888888"
 CONTENT = b"fictional authenticated profile shared by original and equal-byte foreign file"
 OTHER = b"different fictional profile bytes, not authenticated by this session"
+
+# Exact finite variants: direct algorithms do not claim native/recovery evidence.
+PROFILE_OWNER_NATIVE_VARIANTS = (
+    ("owned-after-close-same", False, "after-close", "same"),
+    ("owned-during-read-metadata", False, "during-read", "metadata"),
+    ("borrowed-before-open-same", True, "before-open", "same"),
+    ("borrowed-after-close-metadata", True, "after-close", "metadata"),
+)
+PROFILE_OWNER_DIRECT_VARIANTS = (
+    ("owned-before-open-same", False, "before-open", "same"),
+    ("owned-before-open-different", False, "before-open", "different"),
+    ("owned-before-open-metadata", False, "before-open", "metadata"),
+    ("owned-during-read-same", False, "during-read", "same"),
+    ("owned-during-read-different", False, "during-read", "different"),
+    ("owned-during-read-metadata", False, "during-read", "metadata"),
+    ("owned-after-close-same", False, "after-close", "same"),
+    ("owned-after-close-different", False, "after-close", "different"),
+    ("owned-after-close-metadata", False, "after-close", "metadata"),
+    ("borrowed-before-open-same", True, "before-open", "same"),
+    ("borrowed-before-open-different", True, "before-open", "different"),
+    ("borrowed-before-open-metadata", True, "before-open", "metadata"),
+    ("borrowed-during-read-same", True, "during-read", "same"),
+    ("borrowed-during-read-different", True, "during-read", "different"),
+    ("borrowed-during-read-metadata", True, "during-read", "metadata"),
+    ("borrowed-after-close-same", True, "after-close", "same"),
+    ("borrowed-after-close-different", True, "after-close", "different"),
+    ("borrowed-after-close-metadata", True, "after-close", "metadata"),
+)
+PROFILE_BORROWED_NATIVE_VARIANTS = (
+    ("active-during-read-metadata", False, "during-read", "metadata"),
+    ("active-after-close-same", False, "after-close", "same"),
+    ("terminal-during-read-metadata", True, "during-read", "metadata"),
+    ("terminal-after-close-same", True, "after-close", "same"),
+)
+PROFILE_BORROWED_DIRECT_VARIANTS = (
+    ("active-before-open-same", False, "before-open", "same"),
+    ("active-before-open-different", False, "before-open", "different"),
+    ("active-before-open-remove", False, "before-open", "remove"),
+    ("active-before-open-metadata", False, "before-open", "metadata"),
+    ("active-during-read-same", False, "during-read", "same"),
+    ("active-during-read-different", False, "during-read", "different"),
+    ("active-during-read-remove", False, "during-read", "remove"),
+    ("active-during-read-metadata", False, "during-read", "metadata"),
+    ("active-after-close-same", False, "after-close", "same"),
+    ("active-after-close-different", False, "after-close", "different"),
+    ("active-after-close-remove", False, "after-close", "remove"),
+    ("active-after-close-metadata", False, "after-close", "metadata"),
+    ("terminal-before-open-same", True, "before-open", "same"),
+    ("terminal-before-open-different", True, "before-open", "different"),
+    ("terminal-before-open-remove", True, "before-open", "remove"),
+    ("terminal-before-open-metadata", True, "before-open", "metadata"),
+    ("terminal-during-read-same", True, "during-read", "same"),
+    ("terminal-during-read-different", True, "during-read", "different"),
+    ("terminal-during-read-remove", True, "during-read", "remove"),
+    ("terminal-during-read-metadata", True, "during-read", "metadata"),
+    ("terminal-after-close-same", True, "after-close", "same"),
+    ("terminal-after-close-different", True, "after-close", "different"),
+    ("terminal-after-close-remove", True, "after-close", "remove"),
+    ("terminal-after-close-metadata", True, "after-close", "metadata"),
+)
+
 
 
 def identity(details):
@@ -183,7 +246,7 @@ class ProfileIdentityTests(unittest.TestCase):
         self.root = Path(temporary.name).resolve()
         self.serial = 0
 
-    def case(self, *, borrowed=False):
+    def case(self, *, borrowed=False, native=True):
         self.serial += 1
         root = self.root / str(self.serial)
         root.mkdir(mode=0o700)
@@ -194,7 +257,8 @@ class ProfileIdentityTests(unittest.TestCase):
             destination.parent.mkdir(mode=0o700, parents=True)
             destination.write_bytes(CONTENT)
             destination.chmod(0o600)
-        return SimpleNamespace(root=root, home=home, destination=destination, model=NativeSigningModel(home))
+        return SimpleNamespace(root=root, home=home, destination=destination,
+                               model=NativeSigningModel(home) if native else None)
 
     def seed(self, case, *, stage=False):
         with signing.local_signing_lease(home=case.home) as lease:
@@ -280,14 +344,18 @@ model=NativeSigningModel(home); model.preferences=data['preferences']
 model.keychain=Path(data['keychain']) if data['keychain'] else None
 lease=signing.local_signing_lease
 with patch.object(signing,'local_signing_lease',side_effect=lambda **kw: lease(**{**kw,'home':home})), patch.object(signing,'run_owned',model):
-    raise SystemExit(cli.main(['local-signing','recover','--session',token,'--confirm',signing.CONFIRMATION]))
+    status=cli.main(['local-signing','recover','--session',token,'--confirm',signing.CONFIRMATION])
+if status in (0, 1):
+    with lease(home=home) as renewed:
+        renewed.assert_owner()
+raise SystemExit(status)
 """
         result = run_owned(
             [sys.executable, "-I", "-S", "-B", "-c", code, str(Path(mobile_release.__file__).resolve().parent.parent),
              str(Path(__file__).parents[1]), str(case.home),
              json.dumps({"preferences": case.model.preferences, "keychain": str(case.model.keychain) if case.model.keychain else None}), token],
             cwd=self.root, environ={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "HOME": str(case.home)},
-            capture=True, output_limit=64 * 1024, timeout=20,
+            capture=True, output_limit=64 * 1024, timeout=worker_timeout("fresh-cli-recovery"),
         )
         self.assertEqual(result.returncode, 1 if expected == "recovered-with-conflict" else 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), {"status": expected, "session": token})
@@ -380,47 +448,142 @@ with patch.object(signing,'local_signing_lease',side_effect=lambda **kw: lease(*
                     self.assertFalse(case.destination.exists() or case.stage.exists())
 
     def test_borrowed_active_and_terminal_observations_report_all_conflicts(self):
-        for terminal in (False, True):
-            for boundary in ("before-open", "during-read", "after-close"):
-                for effect in ("same", "different", "remove", "metadata"):
-                    with self.subTest(terminal=terminal, boundary=boundary, effect=effect):
-                        case = self.case(borrowed=True)
-                        self.terminal(case) if terminal else self.seed(case)
-                        seam = ProfileIO(case.destination, boundary, effect)
-                        with patch.object(signing, "os", seam.os):
-                            code, stdout, stderr = self.invoke(case)
-                        seam.assert_preserved(self)
-                        self.assertEqual(code, 1, stderr)
-                        self.assertEqual(json.loads(stdout)["status"], "recovered-with-conflict")
-                        self.assertFalse(stderr)
-                        self.assertEqual(case.model.preferences, case.model.original)
-                        self.assertEqual(signing.signing_status(home=case.home)["status"], "idle")
+        # The complete boundary/effect table is exercised by the direct policy
+        # method below; these four retain the genuine active/terminal caller.
+        for variant in PROFILE_BORROWED_NATIVE_VARIANTS:
+            with self.subTest(variant=variant[0]):
+                self.run_native_borrowed_variant(variant)
+
+    def run_native_borrowed_variant(self, variant):
+        self.assertIn(variant, PROFILE_BORROWED_NATIVE_VARIANTS)
+        _name, terminal, boundary, effect = variant
+        case = self.case(borrowed=True)
+        self.terminal(case) if terminal else self.seed(case)
+        seam = ProfileIO(case.destination, boundary, effect)
+        with patch.object(signing, "os", seam.os):
+            code, stdout, stderr = self.invoke(case)
+        seam.assert_preserved(self)
+        self.assertEqual(code, 1, stderr)
+        self.assertEqual(json.loads(stdout)["status"], "recovered-with-conflict")
+        self.assertFalse(stderr)
+        self.assertEqual(case.model.preferences, case.model.original)
+        self.assertEqual(signing.signing_status(home=case.home)["status"], "idle")
+
+        with signing.local_signing_lease(home=case.home) as renewed:
+            renewed.assert_owner()
+
+    def test_direct_borrowed_active_terminal_policy_preserves_all_real_file_conflicts(self):
+        self.assertEqual(len(PROFILE_BORROWED_DIRECT_VARIANTS), 24)
+        for variant in PROFILE_BORROWED_DIRECT_VARIANTS:
+            with self.subTest(variant=variant[0]):
+                self.run_direct_borrowed_variant(variant)
+
+    def run_direct_borrowed_variant(self, variant):
+        self.assertIn(variant, PROFILE_BORROWED_DIRECT_VARIANTS)
+        _name, terminal, boundary, effect = variant
+        case = self.case(borrowed=True, native=False)
+        with profile_algorithm_session(case.home, CONTENT, UUID) as algorithm:
+            session = algorithm.session
+            self.assertEqual(algorithm.events, ["inspected", "reused"])
+            self.assertTrue(session.state["profile"]["reused"])
+            self.assertIsNone(session.state["profile"]["ownedIdentity"])
+            if terminal:
+                # Real prior algorithm cleanup derives the resolved state; no
+                # completed marker, native result or recovery attempt is made.
+                session.cleanup_profile()
+                self.assertFalse(session.state["conflict"])
+            checkpoint = (session.path / "state.json").read_bytes()
+            revision = session.state["revision"]
+            seam = ProfileIO(case.destination, boundary, effect)
+            with patch.object(signing, "os", seam.os):
+                session.cleanup_profile(terminal=terminal)
+            seam.assert_preserved(self)
+            self.assertTrue(session.state["conflict"])
+            self.assertEqual(session.state["profile"]["phase"], "resolved")
+            actual = (session.path / "state.json").read_bytes()
+            if terminal:
+                self.assertEqual(actual, checkpoint, "terminal algorithm wrote a new checkpoint")
+                self.assertEqual(session.state["revision"], revision)
+            else:
+                stored = json.loads(actual)
+                self.assertEqual(stored, session.state)
+                self.assertEqual(stored["revision"], revision + 1)
+                self.assertIn("fixtureAlgorithmData", stored)
+                self.assertNotIn("version", stored)
+            self.assertFalse(algorithm.attempts)
+            self.assertIsNone(case.model)
 
     def test_full_owner_preserves_conflicted_profiles_without_implicit_outer_retry(self):
-        for borrowed in (False, True):
-            for boundary in ("before-open", "during-read", "after-close"):
-                for effect in ("same", "different", "metadata"):
-                    with self.subTest(borrowed=borrowed, boundary=boundary, effect=effect):
-                        case = self.case(borrowed=borrowed)
-                        seam = ProfileIO(case.destination, boundary, effect, armed=False)
-                        stack, context = self.context(case)
-                        with stack, patch.object(credentials, "os", seam.os), patch.object(signing, "os", seam.os):
-                            with self.assertRaises(CredentialError):
-                                with context:
-                                    seam.stats.clear()
-                                    seam.armed = True
-                                    session, = (case.home / signing.LEASE_DIRECTORY).iterdir()
-                                    original = (session / "intent.json").read_bytes()
-                                    token = session.name.removeprefix("session-")
-                        seam.assert_preserved(self)
-                        session = self.assert_pending(case, token=token)
-                        self.assertEqual((session / "intent.json").read_bytes(), original)
-                        self.assertEqual(case.model.preferences, case.model.original)
-                        self.assertEqual(list((session / "keychain").iterdir()), [])
-                        self.assertFalse(list(case.destination.parent.glob(".mobile-release-profile-*")))
-                        expected = "recovered-with-conflict" if effect in {"same", "different"} else "recovered"
-                        self.fresh_recovery(case, expected=expected, token=token)
-                        self.assertEqual(case.destination.exists(), borrowed or effect in {"same", "different"})
+        for variant in PROFILE_OWNER_NATIVE_VARIANTS:
+            with self.subTest(variant=variant[0]):
+                self.run_native_owner_variant(variant)
+
+    def run_native_owner_variant(self, variant):
+        self.assertIn(variant, PROFILE_OWNER_NATIVE_VARIANTS)
+        _name, borrowed, boundary, effect = variant
+        case = self.case(borrowed=borrowed)
+        seam = ProfileIO(case.destination, boundary, effect, armed=False)
+        stack, context = self.context(case)
+        with stack, patch.object(credentials, "os", seam.os), patch.object(signing, "os", seam.os):
+            with self.assertRaises(CredentialError):
+                with context:
+                    seam.stats.clear()
+                    seam.armed = True
+                    session, = (case.home / signing.LEASE_DIRECTORY).iterdir()
+                    original = (session / "intent.json").read_bytes()
+                    token = session.name.removeprefix("session-")
+        seam.assert_preserved(self)
+        session = self.assert_pending(case, token=token)
+        self.assertEqual((session / "intent.json").read_bytes(), original)
+        self.assertEqual(case.model.preferences, case.model.original)
+        self.assertEqual(list((session / "keychain").iterdir()), [])
+        self.assertFalse(list(case.destination.parent.glob(".mobile-release-profile-*")))
+        expected = "recovered-with-conflict" if effect in {"same", "different"} else "recovered"
+        self.fresh_recovery(case, expected=expected, token=token)
+        self.assertEqual(case.destination.exists(), borrowed or effect in {"same", "different"})
+
+    def test_direct_installer_preserves_all_real_owned_and_borrowed_conflicts(self):
+        self.assertEqual(len(PROFILE_OWNER_DIRECT_VARIANTS), 18)
+        for variant in PROFILE_OWNER_DIRECT_VARIANTS:
+            with self.subTest(variant=variant[0]):
+                self.run_direct_owner_variant(variant)
+
+    def run_direct_owner_variant(self, variant):
+        self.assertIn(variant, PROFILE_OWNER_DIRECT_VARIANTS)
+        _name, borrowed, boundary, effect = variant
+        case = self.case(borrowed=borrowed, native=False)
+        seam = ProfileIO(case.destination, boundary, effect, armed=False)
+        events, conflicts = [], []
+        with refuse_signing_execution() as attempts:
+            with patch.object(credentials, "os", seam.os), patch.object(signing, "os", seam.os), \
+                 self.assertRaises(ProcessError) as caught:
+                with signing.local_signing_lease(home=case.home) as lease:
+                    with self.assertRaises(CredentialError):
+                        with credentials._temporary_profile_installation(
+                            CONTENT, UUID, case.home, cancellation=lease.cancellation,
+                            observer=lambda phase, **_values: events.append(phase),
+                            on_conflict=lambda: conflicts.append(True),
+                        ):
+                            seam.stats.clear()
+                            seam.armed = True
+                    self.assertTrue(conflicts)
+                    self.assertNotIn("resolved", events)
+                    self.assertEqual(events, ["inspected", "reused"] if borrowed else
+                                     ["inspected", "stage-intent", "stage-created", "link-intent", "linked", "stage-removed"])
+            # The caught installer conflict does not repair its original
+            # guard. Its outer owner must preserve the fatal cleanup latch.
+            self.assertTrue(caught.exception.fatal)
+            self.assertFalse(caught.exception.dispatched)
+            self.assertTrue(caught.exception.contained)
+            self.assertFalse(caught.exception.cleanup_complete)
+            self.assertTrue(lease.cancellation.lifetime_ledger.fatal)
+            self.assertEqual(lease.cancellation.handler_state, "RESTORED")
+            self.assertEqual(lease._hold_slot.state, "CLOSED")
+            self.assertIsNone(lease.home_fd)
+            seam.assert_preserved(self)
+            self.assertFalse(list(case.destination.parent.glob(".mobile-release-profile-*")))
+            self.assertFalse(attempts)
+            self.assertIsNone(case.model)
 
     def test_initial_and_real_eexist_admission_bind_the_actual_read_inode(self):
         for raced in (False, True):

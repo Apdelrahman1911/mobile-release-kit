@@ -37,8 +37,9 @@ from unit.local_signing_persistent import (
     PROFILE, UUID, OwnerResolutionRefused, PersistentSigningModel, ResourceOracle, facts, initialize, write_json,
 )
 from workflow.local_signing_matrix_contract import (
-    SHARDS, digest, event_fact, logical_case_id, package_manifest, definitions_manifest, shard_for,
+    SHARDS, digest, event_fact, logical_case_id, package_manifest, definitions_manifest, shard_for, strict_json,
 )
+from workflow.local_signing_workload import recovery_timeout, worker_timeout
 
 CRASH = 73
 WORKER_ERROR = 91
@@ -81,24 +82,78 @@ def run_worker(root: Path, name: str, task, *, timeout: float = 20, expect=0) ->
     return result
 
 
+def read_fixture_file(path: Path, *, limit: int, empty=False):
+    """Bound one actual no-follow inode read; a lost close never means success."""
+    descriptor = None
+    primary = close_error = None
+    try:
+        before = path.lstat()
+        assert stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid(), "invalid fixture evidence inode"
+        assert (0 if empty else 1) <= before.st_size <= limit, "fixture evidence byte bound"
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        expected = Trace._file_state(before)
+        assert Trace._file_state(os.fstat(descriptor)) == expected, "fixture evidence changed before read"
+        content = bytearray()
+        while len(content) <= before.st_size:
+            block = os.read(descriptor, min(65536, before.st_size + 1 - len(content)))
+            if not block:
+                break
+            content.extend(block)
+        assert len(content) == before.st_size, "fixture evidence truncated or grew"
+        assert Trace._file_state(os.fstat(descriptor)) == Trace._file_state(path.lstat()) == expected, \
+            "fixture evidence changed during read"
+    except BaseException as error:
+        primary = error
+    finally:
+        closing, descriptor = descriptor, None
+        if closing is not None:
+            try:
+                os.close(closing)
+            except BaseException as error:
+                close_error = error
+    if primary is not None:
+        if close_error is not None:
+            primary._fixture_read_close_errors = (close_error,)
+            primary.add_note("fixture evidence original close is independently unknown")
+        raise primary
+    if close_error is not None:
+        raise AssertionError("fixture evidence original close is unknown") from close_error
+    return bytes(content), before
+
+
+def read_case_json(root: Path, name: str):
+    assert type(name) is str and re.fullmatch(r"[A-Za-z0-9_-]+", name), "nonliteral case result name"
+    content, details = read_fixture_file(root / (name + ".json"), limit=8 * 1024 * 1024)
+    assert stat.S_IMODE(details.st_mode) == 0o600 and details.st_nlink == 1, "case output metadata differs"
+    return strict_json(content.decode("utf-8"))
+
+
 def snapshot(root: Path) -> dict:
     model = json.loads((root / "observed-native.json").read_bytes())
     lease = root / "home" / signing.LEASE_DIRECTORY
     sessions = sorted(lease.glob("session-*")) if lease.exists() else []
     assert len(sessions) <= 1
-    controls = {}
+    controls, fences = {}, {}
     if sessions:
         for path in sessions[0].iterdir():
-            if path.name in signing.CONTROLS:
-                content = path.read_bytes()
+            if path.name in signing.CONTROLS | signing.FENCE_CONTROLS:
+                content, details = read_fixture_file(path, limit=(signing.FENCE_LIMIT if path.name in signing.FENCE_CONTROLS
+                                                                 else signing.CONTROL_LIMIT), empty=True)
                 try:
                     value = json.loads(content)
                 except ValueError:
                     value = {"incompleteHex": content.hex()}
-                controls[path.name] = {"facts": facts(path), "value": value}
+                observation = {"facts": {"device": details.st_dev, "inode": details.st_ino,
+                    "mode": stat.S_IMODE(details.st_mode), "size": details.st_size,
+                    "sha256": hashlib.sha256(content).hexdigest()}, "value": value}
+                if path.name in signing.FENCE_CONTROLS:
+                    observation["metadata"] = {"uid": details.st_uid, "gid": details.st_gid, "links": details.st_nlink}
+                    fences[path.name] = observation
+                else:
+                    controls[path.name] = observation
     profiles = root / "home/Library/MobileDevice/Provisioning Profiles"
     return {"preferences": model["preferences"], "original": model["original"], "keychain": model["keychain"],
-            "session": sessions[0].name[8:] if sessions else None, "controls": controls,
+            "session": sessions[0].name[8:] if sessions else None, "controls": controls, "fences": fences,
             "nativeDirectory": bool(sessions and (sessions[0] / "keychain").exists()),
             "native": {str(path.relative_to(root)): facts(path) for session in sessions
                        for path in (session / "keychain").glob("*")},
@@ -149,12 +204,19 @@ class Trace:
         self._fence_session = None
         self._fence_event = None
         self._fence_evidence = None
+        self.session_token = None
 
     def normalize(self, value):
         value = str(value).replace(str(self.root), "<ROOT>")
         return re.sub(r"(session-|\.mobile-release-profile-)[0-9a-f]{32}", r"\1<TOKEN>", value)
 
     def begin(self, operation, slot, origin, details):
+        prefix = str(self.root / "home" / signing.LEASE_DIRECTORY) + "/session-"
+        if str(slot).startswith(prefix):
+            token = str(slot)[len(prefix):].split("/", 1)[0]
+            assert re.fullmatch(r"[0-9a-f]{32}", token), "invalid actual session observation"
+            assert self.session_token in {None, token}, "trace changed original signing session"
+            self.session_token = token
         key = (operation, self.normalize(slot), origin, self.phase)
         self.occurrences[key] += 1
         event = {"index": len(self.events) + 1, "operation": operation, "slot": key[1], "origin": origin,
@@ -181,7 +243,7 @@ class Trace:
             self.cut(event, "after")
 
     def cut(self, event, edge):
-        record = {"event": event, "edge": edge, "snapshot": snapshot(self.root)}
+        record = {"event": event, "edge": edge, "snapshot": snapshot(self.root), "sessionToken": self.session_token}
         if event["operation"].startswith("command-fence/"):
             assert self._fence_evidence is not None, "missing actual original-C observation"
             record["originalCFenceObservation"] = self._fence_evidence
@@ -302,7 +364,8 @@ class Trace:
 
     def result(self):
         assert self.target is None, {"selectedCutNotReached": self.target}
-        return {"events": self.events, "lines": sorted(self.lines), "snapshot": snapshot(self.root)}
+        return {"events": self.events, "lines": sorted(self.lines), "snapshot": snapshot(self.root),
+                "sessionToken": self.session_token}
 
     def origin(self, frame):
         while frame is not None:
@@ -452,6 +515,7 @@ def original_flow(root: Path, trace: Trace, *, auto_add=False):
     ResourceOracle(root).assert_sentinels()
     assert not ResourceOracle(root).owned_remaining()
     assert model.state["preferences"] == model.state["original"]
+    assert_positive_postconditions(root, expected_preferences=model.state["original"])
     return trace.result()
 
 
@@ -462,6 +526,66 @@ def assert_pending(root):
             raise AssertionError("pending resources admitted a new signing task")
     except signing.SigningPending:
         pass
+
+
+def assert_positive_postconditions(root, *, expected_preferences):
+    """Actual task assertions, never inferred from a later output file."""
+    observed = snapshot(root)
+    ResourceOracle(root).assert_sentinels()
+    assert observed["preferences"] == expected_preferences, "positive recovery changed expected preferences"
+    assert not observed["ownedRemaining"] and not observed["native"] and not observed["session"] and not observed["fences"], \
+        "positive recovery retained a signing resource"
+    assert signing.signing_status(home=root / "home")["status"] == "idle"
+    with signing.local_signing_lease(home=root / "home"):
+        pass  # Newly acquired and released actual normal admission.
+    return observed
+
+
+def original_session_token(root):
+    """Retained original acquisition data routes public ABS; it grants nothing."""
+    tokens = set()
+    for name in ("seed-cut", "original-cut", "recovery-cut", "inventory", "recovery-inventory"):
+        path = root / (name + ".json")
+        if path.exists():
+            record = read_case_json(root, name)
+            token = record.get("sessionToken")
+            if token is not None:
+                assert type(token) is str and re.fullmatch(r"[0-9a-f]{32}", token)
+                tokens.add(token)
+    assert len(tokens) == 1, "absent recovery requires the retained actual original session token"
+    return tokens.pop()
+
+
+def assert_original_return(result, *, expected=0):
+    """Check DATA only in the immediate continuation of the actual owner call."""
+    assert type(result) is dict and type(result.get("exit")) is int and result["exit"] == expected, \
+        "missing original case return"
+    for name in ("originalAnchorWait", "originalWorkerWait", "originalStatusEOF", "groupAbsentBeforeAnchorWait"):
+        assert result.get(name) is True, "incomplete original case return"
+    assert result.get("deadlineTest") is False and result.get("runDeadlineExpired") is False
+
+
+def pin_case_context(root):
+    from workflow.local_signing_matrix_contract import before_deadline
+    before_deadline(PHASE_DEADLINE)
+    package = Path(signing.__file__).resolve().parent
+    return (_directory_identity(root), PHASE_DEADLINE, package,
+            package_manifest(package, deadline=PHASE_DEADLINE), definitions_manifest(ROOT, deadline=PHASE_DEADLINE))
+
+
+def check_phase_context(context):
+    from workflow.local_signing_matrix_contract import before_deadline
+    _identity, deadline, package, source, definitions = context
+    assert PHASE_DEADLINE == deadline, "original phase endpoint changed"
+    before_deadline(deadline)
+    assert package_manifest(package, deadline=deadline) == source and definitions_manifest(ROOT, deadline=deadline) == definitions, \
+        "case source or definitions changed"
+    before_deadline(deadline)
+
+
+def check_case_context(root, context):
+    assert _directory_identity(root) == context[0], "original case root changed"
+    check_phase_context(context)
 
 
 FOCUSED_OWNER_VARIANTS = frozenset({"profile-inplace-edit", "terminal-profile-reappeared",
@@ -623,10 +747,13 @@ def resolve_focused_fixture(root, model, plan):
     assert facts(root / target) is None
 
 
-def settle_focused_fixture(root, plan):
+def settle_focused_fixture(root, plan, *, report=False):
     # The parent's prior A/W/G and pending debt are checked BEFORE run_worker
     # installs its absorbing UNKNOWN slot; the child inherits that UNKNOWN.
     assert _CASE_CUSTODY.get(str(root)) == _CASE_RECOVERY_DEBT.get(str(root)) == plan["identity"] == _directory_identity(root)
+    context = pin_case_context(root)
+    assert not (root / "focused-fixture-owner.json").exists(), "focused owner output already exists"
+    expected_status = "recovered-with-conflict" if plan["variant"] == "foreign-native-db" else "recovered"
     def task():
         from workflow import local_signing_case_owner as case_owner
         assert _directory_identity(root) == plan["identity"]
@@ -638,21 +765,34 @@ def settle_focused_fixture(root, plan):
         status = signing.signing_status(home=root / "home")
         assert status["status"] == "pending", "focused negative case unexpectedly disappeared"
         trace = Trace(root, "focused-fixture-owner")
+        input_observations = []
         with owner_tty(root, status["session"], model, trace, "fixture/" + plan["variant"],
-                       focused_owner=plan) as (input_stream, output_stream):
+                       focused_owner=plan, input_observations=input_observations) as (input_stream, output_stream):
             result = signing.recover_signing(status["session"], signing.CONFIRMATION, home=root / "home", runner=model,
                 manual=True, input_stream=input_stream, output_stream=output_stream)
-        assert result["status"] in {"recovered", "recovered-with-conflict"}
+        assert result["status"] == expected_status
         assert len(trace.events) == 1 and trace.events[0]["operation"] == "manual/input"
         assert trace.events[0]["details"] == {"action": "fixture/" + plan["variant"]}
         assert trace.events[0]["succeeded"] is True, "genuine fixture-owner callback did not complete"
+        assert input_observations == [{"eventIndex": trace.events[0]["index"], "action": "fixture/" + plan["variant"],
+                                       "read": {"kind": "recheck", "characters": len(status["session"]) + 9}}]
         assert model.state["preferences"] == plan["expectedPreferences"], "manual recovery changed unrelated preferences"
-        return {"result": result, "preferences": model.state["preferences"], "manualFixtureAction": True}
-    run_worker(root, "focused-fixture-owner", task)
-    # Intermediate manual success is not permission to delete the case.
-    assert _CASE_RECOVERY_DEBT.get(str(root)) == plan["identity"]
-    value = json.loads((root / "focused-fixture-owner.json").read_bytes())
-    assert value["manualFixtureAction"] is True and value["preferences"] == plan["expectedPreferences"]
+        after = assert_positive_postconditions(root, expected_preferences=plan["expectedPreferences"])
+        return {"result": result, "preferences": model.state["preferences"], "manualFixtureAction": True,
+                "events": trace.events, "inputObservations": input_observations,
+                "after": after, "idleAndRenewedAdmission": True}
+    original = run_worker(root, "focused-fixture-owner", task, timeout=worker_timeout("focused-owner"))
+    assert_original_return(original)
+    value = read_case_json(root, "focused-fixture-owner")
+    assert value["manualFixtureAction"] is True and value["preferences"] == plan["expectedPreferences"] \
+        and value["result"]["status"] == expected_status and value["idleAndRenewedAdmission"] is True
+    check_case_context(root, context)
+    assert _CASE_CUSTODY.get(str(root)) == _CASE_RECOVERY_DEBT.get(str(root)) == plan["identity"] == _directory_identity(root)
+    # Same fixed child completed all checks AND its actual original owner
+    # returned. No second automatic absent worker, file-based permit or retry.
+    del _CASE_RECOVERY_DEBT[str(root)]
+    if report:
+        return {"preferences": value["preferences"], "original": original, "observation": value}
     return value["preferences"]
 
 
@@ -675,7 +815,8 @@ def _focused_controls(root, token):
 
 
 @contextmanager
-def owner_tty(root, token, model, trace, action, *, focused_owner=None):
+def owner_tty(root, token, model, trace, action, *, focused_owner=None, input_observations=None):
+    assert input_observations is None or type(input_observations) is list and not input_observations
     master, slave = os.openpty()
     tty.setraw(slave)
     attributes = termios.tcgetattr(slave)
@@ -708,6 +849,9 @@ def owner_tty(root, token, model, trace, action, *, focused_owner=None):
         def readline(self, bound):
             assert signing.signing_status(home=root / "home")["status"] == "busy"
             event = trace.begin("manual/input", "tty", "owner", {"action": action})
+            observed = {"eventIndex": event["index"], "action": action}
+            if input_observations is not None:
+                input_observations.append(observed)
             if action == "resolve":
                 model.oracle.resolve_owned(model)
             elif action in {"fixture/" + variant for variant in FOCUSED_OWNER_VARIANTS}:
@@ -723,6 +867,13 @@ def owner_tty(root, token, model, trace, action, *, focused_owner=None):
             response = "wrong\n" if action == "wrong" else f"recheck {token}\n"
             os.write(master, attributes[6][termios.VEOF] if action == "eof" else response.encode())
             actual = read_stream.readline(bound)
+            if input_observations is not None:
+                # Classify the actual bounded PTY read, not the intended input.
+                # Keep this separate from the historical Trace event schema.
+                expected = "" if action == "eof" else response
+                assert actual == expected, "fictional terminal read differs from the selected input"
+                observed["read"] = {"kind": "eof" if actual == "" else "wrong" if actual == "wrong\n" else "recheck",
+                                    "characters": len(actual)}
             trace.end(event, succeeded=True)
             return actual
     try:
@@ -732,7 +883,8 @@ def owner_tty(root, token, model, trace, action, *, focused_owner=None):
         os.close(slave); os.close(master)
 
 
-def recovery_flow(root: Path, trace: Trace, *, manual="none", expected_preferences=None):
+def recovery_flow(root: Path, trace: Trace, *, manual="none", expected_preferences=None,
+                  original_token=None, expected_status=None):
     from workflow import local_signing_case_owner as case_owner
     # An O-loss cut is not C death. Its original command custodian may still
     # finish the independently authorized fence/account tail outside case G.
@@ -750,6 +902,11 @@ def recovery_flow(root: Path, trace: Trace, *, manual="none", expected_preferenc
     case_owner.adapter_progress("recovery-ready")
     case_owner.remaining(case_owner.CASE_DEADLINE)
     before = snapshot(root)
+    token = before["session"] if before["session"] is not None else (
+        original_session_token(root) if original_token is None else original_token)
+    assert type(token) is str and re.fullmatch(r"[0-9a-f]{32}", token), "missing original recovery token"
+    assert original_token in {None, token}, "recovery token differs from original acquisition"
+    trace.session_token = token
     unknown = uncertainty(root, before)
     model = PersistentSigningModel(root, trace=trace, recovery=True)
     trace.phase = "recovery"
@@ -757,14 +914,14 @@ def recovery_flow(root: Path, trace: Trace, *, manual="none", expected_preferenc
     with trace.installed():
         initial = signing.signing_status(home=root / "home")
         try:
-            if initial["status"] == "idle":
-                result = {"status": "absent"}
-            elif manual == "none":
-                result = signing.recover_signing(initial["session"], signing.CONFIRMATION,
+            assert initial["status"] in {"idle", "pending"}
+            assert initial.get("session", token) == token
+            if manual == "none":
+                result = signing.recover_signing(token, signing.CONFIRMATION,
                                                 home=root / "home", runner=model)
             else:
-                with owner_tty(root, initial["session"], model, trace, manual) as (input_stream, output_stream):
-                    result = signing.recover_signing(initial["session"], signing.CONFIRMATION,
+                with owner_tty(root, token, model, trace, manual) as (input_stream, output_stream):
+                    result = signing.recover_signing(token, signing.CONFIRMATION,
                                                     home=root / "home", runner=model, manual=True,
                                                     input_stream=input_stream, output_stream=output_stream)
         except CredentialError as error:
@@ -779,32 +936,44 @@ def recovery_flow(root: Path, trace: Trace, *, manual="none", expected_preferenc
                    "unproven profile stage", "owned profile bytes changed", "private profile stage was replaced")), refused
         assert_pending(root)
         assert all(facts(root / path) == identity for path, identity in unknown.items()), "unknown resource was adopted/deleted"
+        assert before["controls"].get("intent.json") == after["controls"].get("intent.json"), "refusal changed immutable intent"
+        assert expected_status in {None, "refused-unknown-resource"}, "unexpected declared positive recovery refusal"
     else:
         assert result["status"] in {"absent", "recovered", "recovered-with-conflict"}, result
+        assert expected_status in {None, result["status"]}, "recovery status differs from finite case declaration"
+        assert result["session"] == token
+        if initial["status"] == "idle":
+            assert result == {"status": "absent", "session": token}, "public absent recovery was not executed"
         expected_preferences = after["original"] if expected_preferences is None else expected_preferences
-        assert after["preferences"] == expected_preferences, {"expectedPreferences": expected_preferences, "observed": after}
-        assert not after["ownedRemaining"] and not after["native"] and not after["session"], after
-        assert signing.signing_status(home=root / "home")["status"] == "idle"
-        with signing.local_signing_lease(home=root / "home"):
-            pass  # Real renewed account admission, never a synthesized result.
+        assert_positive_postconditions(root, expected_preferences=expected_preferences)
+    if expected_status is not None:
+        manual_events = [event for event in trace.events if event["operation"] == "manual/input"]
+        assert len(manual_events) == (0 if manual == "none" else 1), "declared manual branch was not executed"
+        assert all(event["details"] == {"action": manual} and event.get("succeeded") is True for event in manual_events)
     output = trace.result()
     output.update(initial=initial, before=before, after=after, unknown=unknown, result=result, refused=refused)
+    if expected_status is not None:
+        output["expectedStatus"] = expected_status
+        output["idleAndRenewedAdmission"] = refused is None
     return output
 
 
 def recover_final(root: Path, *, expected_preferences=None) -> dict:
     run_worker(root, "final-automatic", lambda: recovery_flow(
-        root, Trace(root, "final-automatic"), expected_preferences=expected_preferences))
+        root, Trace(root, "final-automatic"), expected_preferences=expected_preferences),
+        timeout=worker_timeout("automatic-recovery"))
     automatic = json.loads((root / "final-automatic.json").read_bytes())
     if automatic["refused"] is None:
         outcome = {"automatic": automatic["result"]["status"], "manual": None}
     else:
         run_worker(root, "final-no-resolution", lambda: recovery_flow(
-            root, Trace(root, "final-no-resolution"), manual="observe", expected_preferences=expected_preferences))
+            root, Trace(root, "final-no-resolution"), manual="observe", expected_preferences=expected_preferences),
+            timeout=worker_timeout("manual-recovery"))
         unresolved = json.loads((root / "final-no-resolution.json").read_bytes())
         assert unresolved["refused"] is not None
         run_worker(root, "final-owner-resolution", lambda: recovery_flow(
-            root, Trace(root, "final-owner-resolution"), manual="resolve", expected_preferences=expected_preferences))
+            root, Trace(root, "final-owner-resolution"), manual="resolve", expected_preferences=expected_preferences),
+            timeout=worker_timeout("manual-recovery"))
         resolved = json.loads((root / "final-owner-resolution.json").read_bytes())
         assert resolved["refused"] is None
         outcome = {"automatic": "refused-unknown-resource", "manual": resolved["result"]["status"]}
@@ -839,7 +1008,8 @@ def remove_case(root: Path):
 
 def inventory_original(root: Path):
     initialize(root)
-    run_worker(root, "inventory", lambda: original_flow(root, Trace(root, "inventory", inventory=True)))
+    run_worker(root, "inventory", lambda: original_flow(root, Trace(root, "inventory", inventory=True)),
+               timeout=worker_timeout("persistent-original"))
     return json.loads((root / "inventory.json").read_bytes())
 
 
@@ -889,7 +1059,7 @@ def seed_case(root, target, *, borrowed=False, auto_add=False, after_effect=None
     initialize(root, borrowed=borrowed)
     require_fresh_recovery(root)
     run_worker(root, "seed", lambda: original_flow(root, Trace(root, "seed", target, after_effect=after_effect),
-                                                 auto_add=auto_add), expect=CRASH)
+                                                 auto_add=auto_add), timeout=worker_timeout("persistent-original"), expect=CRASH)
     return json.loads((root / "seed-cut.json").read_bytes())
 
 
@@ -911,7 +1081,7 @@ def recovery_inventory(root, original):
                 continue  # Explicitly inapplicable: no refused resources, thus no TTY branch.
             group = name + "/" + manual
             run_worker(case, "recovery-inventory", lambda: recovery_flow(
-                case, Trace(case, "recovery-inventory", inventory=True), manual=manual))
+                case, Trace(case, "recovery-inventory", inventory=True), manual=manual), timeout=recovery_timeout(manual))
             result = json.loads((case / "recovery-inventory.json").read_bytes())
             # Identical IO/line traces do not establish semantic equivalence of
             # starting/intermediate authority, resource or inflight state.
@@ -985,11 +1155,13 @@ def replay_shard(root, original, recovery, shard):
         if record["seed"] is None:
             initialize(case)
             require_fresh_recovery(case)
-            run_worker(case, "original", lambda: original_flow(case, Trace(case, "original", record["target"])), expect=CRASH)
+            run_worker(case, "original", lambda: original_flow(case, Trace(case, "original", record["target"])),
+                       timeout=worker_timeout("persistent-original"), expect=CRASH)
         else:
             seed_case(case, record["seed"])
             run_worker(case, "recovery", lambda: recovery_flow(
-                case, Trace(case, "recovery", record["target"]), manual=record["manual"]), expect=CRASH)
+                case, Trace(case, "recovery", record["target"]), manual=record["manual"]),
+                timeout=recovery_timeout(record["manual"]), expect=CRASH)
         outcome = recover_final(case)
         append_evidence(root, record["target"], outcome, case, seed=record["group"], case_id=case_id)
         remove_case(case)
@@ -1017,7 +1189,8 @@ def replay_recovery_group(root, group, record):
             seed_case(case, record["target"])
             target = {"event": event, "edge": edge}
             run_worker(case, "recovery", lambda: recovery_flow(
-                case, Trace(case, "recovery", target), manual=record["manual"]), expect=CRASH)
+                case, Trace(case, "recovery", target), manual=record["manual"]),
+                timeout=recovery_timeout(record["manual"]), expect=CRASH)
             outcome = recover_final(case)
             counts[edge] += 1
             counts[outcome["automatic"]] += 1
@@ -1028,29 +1201,56 @@ def replay_recovery_group(root, group, record):
     return dict(counts)
 
 
+def assert_refusal_manual_evidence(trace, input_observations, manual, error):
+    """Validate observed branch data; this grants no recovery or process custody."""
+    assert manual in {"none", "resolve", "wrong", "eof", "cancel"}
+    events = [event for event in trace.events if event["operation"] == "manual/input"]
+    assert len(events) == len(input_observations) == (0 if manual == "none" else 1), \
+        "declared focused manual branch was not executed exactly once"
+    if manual == "none":
+        assert isinstance(error, CredentialError), "automatic refusal did not retain its actual failure"
+        return
+    event, observation = events[0], input_observations[0]
+    assert event["origin"] == "owner" and event["slot"] == "tty" and event["details"] == {"action": manual}
+    assert observation.get("eventIndex") == event["index"] and observation.get("action") == manual
+    if manual in {"wrong", "eof"}:
+        assert isinstance(error, CredentialError) and event.get("succeeded") is True
+        assert observation.get("read") == {"kind": manual, "characters": 6 if manual == "wrong" else 0}, \
+            "focused refusal lacks its actual wrong/EOF terminal read"
+    else:
+        expected = KeyboardInterrupt if manual == "cancel" else OwnerResolutionRefused
+        assert type(error) is expected, "focused interruption/owner refusal did not retain its original failure"
+        assert event.get("succeeded") is None and "read" not in observation, \
+            "failed focused owner input was falsely completed"
+
+
 def refusal_case(root, *, message, preserved, manual="none", terminal=False, preserve_preferences=False):
+    assert manual in {"none", "resolve", "wrong", "eof", "cancel"}
     before = snapshot(root)
     model = PersistentSigningModel(root, recovery=True)
     trace = Trace(root, "focused-refusal")
     token = before["session"]
+    input_observations, caught = [], None
     try:
         if manual == "none":
             signing.recover_signing(token, signing.CONFIRMATION, home=root / "home", runner=model)
         else:
-            with owner_tty(root, token, model, trace, manual) as (input_stream, output_stream):
+            with owner_tty(root, token, model, trace, manual,
+                           input_observations=input_observations) as (input_stream, output_stream):
                 signing.recover_signing(token, signing.CONFIRMATION, home=root / "home", runner=model, manual=True,
                                         input_stream=input_stream, output_stream=output_stream)
     except CredentialError as error:
         assert message in str(error), str(error)
-        error_text = str(error)
-    except KeyboardInterrupt:
+        caught, error_text = error, str(error)
+    except KeyboardInterrupt as error:
         assert manual == "cancel"
-        error_text = "actual default cancellation"
+        caught, error_text = error, "actual default cancellation"
     except OwnerResolutionRefused as error:
         assert manual == "resolve" and message in str(error)
-        error_text = str(error)
+        caught, error_text = error, str(error)
     else:
         raise AssertionError("unresolved/conflicting resource was accepted")
+    assert_refusal_manual_evidence(trace, input_observations, manual, caught)
     after = snapshot(root)
     for name, original in preserved.items():
         assert facts(root / name) == original, "recovery changed the explicitly unproven resource"
@@ -1064,8 +1264,9 @@ def refusal_case(root, *, message, preserved, manual="none", terminal=False, pre
         assert all(not call["mutation"] for call in after["nativeCalls"][len(before["nativeCalls"]):])
     ResourceOracle(root).assert_sentinels()
     assert_pending(root)
-    return {"before": before, "after": after, "error": error_text, "resourcesPreserved": True,
-            "freshAdmission": "pending"}
+    return {"before": before, "after": after, "error": error_text, "caughtType": type(caught).__name__,
+            "events": trace.events, "inputObservations": input_observations,
+            "resourcesPreserved": True, "freshAdmission": "pending"}
 
 
 def focused_cases(root, inventory):
@@ -1148,7 +1349,8 @@ def focused_cases(root, inventory):
                 receipts["retained-fictional-profile"] = focused_receipt(case, case / "retained-fictional-profile")
 
         if variant in {"foreign-default", "reordered-search", "deleted-search", "foreign-profile"}:
-            run_worker(case, "focused", lambda: recovery_flow(case, Trace(case, "focused"), expected_preferences=expected))
+            run_worker(case, "focused", lambda: recovery_flow(case, Trace(case, "focused"), expected_preferences=expected),
+                       timeout=worker_timeout("automatic-recovery"))
             result = json.loads((case / "focused.json").read_bytes())
             assert result["result"]["status"] == "recovered-with-conflict"
         elif variant == "native-unknown-stage":
@@ -1160,7 +1362,8 @@ def focused_cases(root, inventory):
             for mode, message in (("none", "native transaction identity is unknown"),
                                   ("resolve", "owner cannot identify an intervening replacement/edit")):
                 run_worker(case, "focused-" + mode, lambda: refusal_case(
-                    case, message=message, preserved=preserved, manual=mode, preserve_preferences=True))
+                    case, message=message, preserved=preserved, manual=mode, preserve_preferences=True),
+                    timeout=worker_timeout("focused-refusal"))
                 result[mode] = json.loads((case / ("focused-" + mode + ".json")).read_bytes())
         else:
             preserved = {}
@@ -1180,7 +1383,8 @@ def focused_cases(root, inventory):
                 message = "manual recheck cancelled or incorrect"
                 preserved = ResourceOracle(case).owned_remaining()
             run_worker(case, "focused", lambda: refusal_case(case, message=message, preserved=preserved,
-                                                              manual=manual, terminal=terminal))
+                                                              manual=manual, terminal=terminal),
+                       timeout=worker_timeout("focused-refusal"))
             result = json.loads((case / "focused.json").read_bytes())
         results[variant] = result
         # Preserve the original negative/conflict independently BEFORE owner
@@ -1198,7 +1402,8 @@ def focused_cases(root, inventory):
         case.mkdir(mode=0o700)
         initialize(case, borrowed=variant == "borrowed-profile")
         run_worker(case, "focused-inventory", lambda: original_flow(
-            case, Trace(case, "focused-inventory", inventory=True), auto_add=variant == "auto-add"))
+            case, Trace(case, "focused-inventory", inventory=True), auto_add=variant == "auto-add"),
+            timeout=worker_timeout("persistent-original"))
         alternate = json.loads((case / "focused-inventory.json").read_bytes())
         remove_case(case)
         case.mkdir(mode=0o700)
@@ -1281,7 +1486,8 @@ def main(root: Path, mode: str):
             initialize(case)
             require_fresh_recovery(case)
             target = {"event": event, "edge": edge}
-            run_worker(case, "original", lambda: original_flow(case, Trace(case, "original", target)), expect=CRASH)
+            run_worker(case, "original", lambda: original_flow(case, Trace(case, "original", target)),
+                       timeout=worker_timeout("persistent-original"), expect=CRASH)
             outcome = recover_final(case)
             counts[edge] += 1
             counts[event["operation"]] += 1

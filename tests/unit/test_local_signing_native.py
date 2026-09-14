@@ -16,6 +16,7 @@ from mobile_release import local_signing as signing
 from mobile_release.errors import CredentialError
 from mobile_release.owned_process import run_owned
 from workflow import local_signing_bridge as bridge
+from workflow.local_signing_workload import worker_timeout
 from .local_signing_helpers import completed_case_directory
 
 
@@ -37,7 +38,7 @@ class SigningAccountNativeTests(unittest.TestCase):
                 result = capture(
                     [sys.executable, '-I', '-S', '-B', str(fixture),
                      str(Path(mobile_release.__file__).resolve().parent.parent), str(root), mode],
-                    root, timeout=15,
+                    root, timeout=worker_timeout("account-native-flow"),
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertFalse(result.stderr)
@@ -72,7 +73,7 @@ class SigningAccountNativeTests(unittest.TestCase):
             with self.subTest(mode=mode), completed_case_directory(prefix='mrk-fork-account-') as root:
                 process = capture([sys.executable,'-I','-S','-B',str(fixture),
                                    str(Path(mobile_release.__file__).resolve().parent.parent),str(root),mode],
-                                  root, timeout=12)
+                                  root, timeout=worker_timeout("account-native-flow"))
                 self.assertEqual(process.returncode,0,process.stderr)
                 self.assertFalse(process.stderr)
                 result=json.loads(process.stdout)

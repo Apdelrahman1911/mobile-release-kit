@@ -25,6 +25,7 @@ from mobile_release.credentials import (
 from mobile_release.errors import CredentialError, ValidationError
 from mobile_release.owned_process import ProcessError, run_owned
 from mobile_release.reporting import Status
+from workflow.local_signing_workload import profile_signal_timeout
 
 from .helpers import ios_config, write_project
 from .ios_entitlement_helpers import profile
@@ -510,7 +511,7 @@ class ProfileInstallationSignalTests(unittest.TestCase):
         # native models. The existing outer verification Session remains the
         # final boundary; this inner capture uses actual C/A/W finality rather
         # than communicate(), PID polling or post-wait group cleanup.
-        process = run_owned(command, timeout=15, capture=True, output_limit=64 * 1024,
+        process = run_owned(command, timeout=profile_signal_timeout(mode), capture=True, output_limit=64 * 1024,
                             environ={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C", "LANG": "C"})
         self.assertEqual(process.returncode, 0, process.stderr)
         self.assertFalse(process.stderr)

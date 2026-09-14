@@ -472,8 +472,9 @@ class SigningCrashMatrixTests(unittest.TestCase):
             # Register exact original root identity BEFORE launch. Positive A/W/G
             # alone cannot settle a possibly surviving original C/account tail.
             owner.require_fresh_recovery(root)
+        from workflow.local_signing_workload import worker_timeout
         owner.run_worker(root, "protocol", lambda: crash.main(root, selected),
-                         timeout=20, expect=0 if selected is None else 73)
+                         timeout=worker_timeout("bare-home-original"), expect=0 if selected is None else 73)
         if selected is None:
             return json.loads((root / "protocol.json").read_bytes())
         reached = [json.loads(line) for line in (root / "cuts.jsonl").read_text().splitlines()][-1]
@@ -521,7 +522,8 @@ class SigningCrashMatrixTests(unittest.TestCase):
                 pass  # Genuine renewed admission, never a recorded PID/status shortcut.
             return {"automatic": result["status"], "recoveryAndRenewedAdmission": True}
 
-        owner.run_worker(root, "fresh-recovery", recover, timeout=20)
+        from workflow.local_signing_workload import worker_timeout
+        owner.run_worker(root, "fresh-recovery", recover, timeout=worker_timeout("bare-home-recovery"))
         result = json.loads((root / "fresh-recovery.json").read_bytes())
         self.assertEqual(set(result), {"automatic", "recoveryAndRenewedAdmission"})
         self.assertEqual(result["automatic"], "recovered")
