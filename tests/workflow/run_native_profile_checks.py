@@ -18,7 +18,7 @@ PATTERNS = ("test_ios_profile_authority.py", "test_ios_profile_trust.py", "test_
             "test_local_signing.py", "test_local_signing_recovery.py", "test_local_signing_native.py",
             "test_local_signing_composition.py", "test_owned_process.py", "test_owned_process_callers.py",
             "test_owned_process_failures.py", "test_local_signing_failures.py", "test_local_signing_profile_identity.py",
-            "test_local_signing_persistent.py", "test_local_signing_matrix.py")
+            "test_local_signing_persistent.py", "test_local_signing_matrix.py", "test_local_signing_owner_loss.py")
 PREREQUISITES = (
     ("openssl-version", ("/usr/bin/openssl", "version")),
     ("clang-discovery", ("/usr/bin/xcrun", "--find", "clang")),
@@ -70,6 +70,7 @@ POISON_PARTITIONS = (
     ("poison-system-exit-cleanup-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_cleanup_failure"),
     ("poison-system-exit-restore-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_restore_failure"),
     ("poison-system-exit-cleanup-and-restore-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_cleanup_and_restore_failure"),
+    ("poison-signing-launcher-loss", "workflow.test_local_signing_owner_loss.SigningLauncherLossTests.test_real_launcher_death_uses_original_anchor_cleanup_and_requires_domain_disposal"),
 )
 ISOLATED_PROFILE_PRODUCTS = frozenset({
     "mobile_release", "mobile_release._native_process", "mobile_release._profile_process",
@@ -87,6 +88,11 @@ ISOLATED_NEGATIVE_IMPORTS = (
      frozenset({"unit", "unit.test_default_cancellation", "workflow", "workflow.profile_resource_fixture",
                 "workflow.profile_process_fixture", "workflow.process_fixture"}),
      ISOLATED_PROFILE_PRODUCTS),
+    ("workflow.test_local_signing_owner_loss", ("workflow",),
+     frozenset({"workflow", "workflow.test_local_signing_owner_loss", "workflow.local_signing_launcher_loss_fixture",
+                "workflow.local_signing_case_owner", "workflow.local_signing_matrix_contract",
+                "workflow.profile_process_fixture", "workflow.process_fixture"}),
+     frozenset({"mobile_release", "mobile_release._native_process"})),
 )
 AUTHORITY_UNIT_MODULES = frozenset({
     "unit", "unit.test_ios_profile_authority", "unit.ios_profile_helpers", "unit.ios_entitlement_helpers",

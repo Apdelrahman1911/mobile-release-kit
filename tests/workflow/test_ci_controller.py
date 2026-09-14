@@ -2486,6 +2486,15 @@ class SigningAdapterControllerTests(unittest.TestCase):
             self.assertNotIn("PRIVATE", json.dumps(observed))
             pair = self.diagnostic(rig, layer="worker") + raw
             self.assertEqual([value["layer"] for value in parse(pair)["observations"]], ["worker", "unittest"])
+            related = {"via": ["context"], "category": "os-error", "locations": [{"file": scope.files[0], "line": 9}]}
+            first = {**related, "via": ["command-first"]}
+            case = {"expectedExit": 0, "workerExit": -9, "anchorExit": 0, "terminalParsed": True, "anchorExpired": True}
+            expanded = self.diagnostic(rig, layer="worker", related=[first, related]) + self.diagnostic(rig, case=case)
+            observed = parse(expanded)["observations"]
+            self.assertEqual(observed[0]["related"], [first, related])
+            self.assertEqual(observed[1]["case"], case)
+            unknown = {"expectedExit": 0, "workerExit": None, "anchorExit": None, "terminalParsed": False, "anchorExpired": None}
+            self.assertEqual(parse(self.diagnostic(rig, case=unknown))["observations"][0]["case"], unknown)
             for changes in ({"schema": True}, {"phase": "wheel"}, {"testId": "PRIVATE.foreign"},
                             {"layer": "other"}, {"category": "PrivateException"}, {"outcome": "passed"},
                             {"message": "PRIVATE"}, {"locations": [{"file": "/PRIVATE/test_local_signing_persistent.py", "line": 1}]},
@@ -2495,6 +2504,25 @@ class SigningAdapterControllerTests(unittest.TestCase):
                             {"layer": "worker", "outcome": "skip", "category": "none", "locations": []}):
                 with self.subTest(changes=changes):
                     self.assertIsNone(parse(self.diagnostic(rig, **changes)))
+            for bad in ([], [related] * 2, [related] * 4, [{**related, "via": []}],
+                        [{**related, "via": ["context"] * 8}], [{**related, "via": [True]}],
+                        [{**related, "via": ["PRIVATE"]}], [{**related, "via": ["context", "command-first"]}],
+                        [{**related, "message": "PRIVATE"}], [{**related, "category": "none"}],
+                        [{**related, "locations": [{"file": "/PRIVATE/error.py", "line": 9}]}],
+                        [{**related, "locations": [{"file": scope.files[0], "line": True}]}],
+                        [{**related, "locations": related["locations"] * 3}], [related, first]):
+                with self.subTest(related=bad):
+                    self.assertIsNone(parse(self.diagnostic(rig, layer="worker", related=bad)))
+            self.assertIsNone(parse(self.diagnostic(rig, related=[first])))
+            self.assertIsNone(parse(self.diagnostic(rig, layer="worker", case=case)))
+            for change in ({"expectedExit": True}, {"expectedExit": 0.0}, {"expectedExit": 1},
+                           {"workerExit": True}, {"workerExit": -9.0}, {"workerExit": 256},
+                           {"anchorExit": False}, {"anchorExit": -129}, {"terminalParsed": 1},
+                           {"terminalParsed": False}, {"workerExit": None}, {"anchorExpired": None},
+                           {"anchorExpired": 1}, {"extra": "PRIVATE"}):
+                with self.subTest(case=change):
+                    self.assertIsNone(parse(self.diagnostic(rig, case={**case, **change})))
+            self.assertIsNone(parse(self.diagnostic(rig, case={**unknown, "anchorExpired": False})))
             for malformed in (raw + raw, pair + raw, raw[:-1], b"x" * 65537,
                               b"MRK_SIGNING_ADAPTER_FAILURE=" + b" " * 2048 + b"\n",
                               raw.replace(b'"schema":1', b'"schema":1,"schema":1'),
@@ -2506,7 +2534,13 @@ class SigningAdapterControllerTests(unittest.TestCase):
         for mode in ("failure", "unknown", "parser-error", "expired", "diagnostic-on-zero"):
             with self.subTest(mode=mode):
                 rig = self.rig()
-                rig.capture_changes["source"] = {"stderr": self.diagnostic(rig, layer="worker") + self.diagnostic(rig)}
+                related = [{"via": ["command-first"], "category": "os-error",
+                            "locations": [{"file": "tests/unit/test_local_signing_persistent.py", "line": 31}]}]
+                case = {"expectedExit": 0, "workerExit": None if mode == "unknown" else 91,
+                        "anchorExit": None if mode == "unknown" else 0,
+                        "terminalParsed": mode != "unknown", "anchorExpired": None if mode == "unknown" else False}
+                rig.capture_changes["source"] = {"stderr": self.diagnostic(rig, layer="worker", related=related)
+                                                 + self.diagnostic(rig, case=case)}
                 if mode != "diagnostic-on-zero":
                     rig.capture_changes["source"].update(ok=False, returncode=91)
                 if mode == "unknown":
@@ -2534,6 +2568,8 @@ class SigningAdapterControllerTests(unittest.TestCase):
                 self.assertEqual(row["status"], "FAIL")
                 if mode in {"failure", "unknown"}:
                     self.assertEqual([item["layer"] for item in row["adapter_failure"]["observations"]], ["worker", "unittest"])
+                    self.assertEqual(row["adapter_failure"]["observations"][0]["related"], related)
+                    self.assertEqual(row["adapter_failure"]["observations"][1]["case"], case)
                     if mode == "unknown":
                         self.assertFalse(row["capture"]["domain_finality"])
                         self.assertIn("idle_error", row)

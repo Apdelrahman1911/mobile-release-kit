@@ -43,6 +43,11 @@ _ISOLATED_IMPORT_FIXTURES = (
      frozenset({"unit", "unit.test_default_cancellation", "workflow", "workflow.profile_resource_fixture",
                 "workflow.profile_process_fixture", "workflow.process_fixture"}),
      _PROFILE_PRODUCT_FIXTURES),
+    ("workflow.test_local_signing_owner_loss", ("workflow",),
+     frozenset({"workflow", "workflow.test_local_signing_owner_loss", "workflow.local_signing_launcher_loss_fixture",
+                "workflow.local_signing_case_owner", "workflow.local_signing_matrix_contract",
+                "workflow.profile_process_fixture", "workflow.process_fixture"}),
+     frozenset({"mobile_release", "mobile_release._native_process"})),
 )
 
 

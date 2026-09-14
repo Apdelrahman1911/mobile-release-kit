@@ -534,6 +534,252 @@ class SigningAdapterDiagnosticTests(unittest.TestCase):
                 {"file": "tests/unit/test_local_signing_persistent.py", "line": 2}])
             self.assertNotIn("PRIVATE", contract.canonical(record).decode())
 
+    def test_suppressed_cyclic_links_use_builtin_data_and_share_the_original_frame_budget(self):
+        class PrivateError(Exception):
+            def __getattribute__(self, name):
+                raise AssertionError("exception attributes must not be consulted")
+            def __str__(self):
+                raise AssertionError("exception text must not be formatted")
+        context, _task = self.context_and_task()
+        namespace = {"PrivateError": PrivateError}
+        source = ("def deep(n):\n"
+                  "    if n: return deep(n - 1)\n"
+                  "    raise ValueError('PRIVATE deeply nested error')\n"
+                  "def fail(n):\n"
+                  "    try: deep(n)\n"
+                  "    except ValueError:\n"
+                  "        raise PrivateError('PRIVATE suppressed error') from None\n")
+        exec(compile(source, context[2][0][0], "exec"), namespace)
+        for depth in (1, 100):
+            try:
+                namespace["fail"](depth)
+            except PrivateError:
+                error = sys.exc_info()
+            original = BaseException.__dict__["__context__"].__get__(error[1], BaseException)
+            # Real built-in cyclic links, not a custom graph supplied to the projector.
+            original.__cause__ = error[1]
+            visited = []
+            locations = contract._adapter_locations
+            def counted(frame, source_map, budget, maximum):
+                before = budget[0]
+                result = locations(frame, source_map, budget, maximum)
+                visited.append(before - budget[0])
+                return result
+            with patch.object(contract, "time", SimpleNamespace(monotonic=lambda: 10.0)), \
+                    patch.object(contract, "_adapter_locations", new=counted), \
+                    patch.object(Path, "read_bytes", side_effect=AssertionError("no source reads")), \
+                    patch.object(linecache, "getline", side_effect=AssertionError("no source lines")):
+                first = contract.adapter_command_first(context, original)
+                record = contract.adapter_failure_record(context, "worker", "error", error, deadline=20.0,
+                                                          command_first=first, command_reserved=16)
+            self.assertEqual(record["category"], "exception")
+            self.assertEqual([row["via"] for row in record["related"]], [["command-first"], ["context"]])
+            self.assertLessEqual(sum(visited), 64)
+            if depth == 100:
+                self.assertEqual(sum(visited), 64)
+            self.assertTrue(all(len(row["locations"]) <= 2 for row in record["related"]))
+            self.assertLessEqual(len(contract.ADAPTER_FAILURE_PREFIX) + len(contract.canonical(record)) + 1, 2048)
+            self.assertNotIn("PRIVATE", contract.canonical(record).decode())
+        # Even a long real exception chain contributes no more than three links.
+        chain = [ValueError() for _ in range(12)]
+        for left, right in zip(chain, chain[1:]):
+            left.__context__ = right
+        with patch.object(contract, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+            record = contract.adapter_failure_record(context, "worker", "error", (ValueError, chain[0], None), deadline=20.0)
+        self.assertEqual([row["via"] for row in record["related"]], [["context"] * count for count in (1, 2, 3)])
+
+    def test_original_command_recorder_runs_once_first_and_diagnostic_claim_is_absorbing(self):
+        owner = runner.case_owner
+        context, task = self.context_and_task()
+        try:
+            task()
+        except ValueError as caught:
+            first_error = caught
+        for mode in ("observed", "projection-error", "original-error", "busy", "foreign-pid", "other-role"):
+            with self.subTest(mode=mode):
+                calls, projections = [], []
+                first = OSError("PRIVATE original recorder failure")
+                slot = {"pid": 7, "context": context, "lock": owner.threading.Lock(), "claimed": False, "first": None}
+                command = SimpleNamespace(pid=8 if mode == "foreign-pid" else 7,
+                                          role="C" if mode == "other-role" else "O", primary=None)
+                def actual(instance, error, **kwargs):
+                    calls.append((instance, error, kwargs))
+                    if mode == "original-error":
+                        raise first
+                    if instance.primary is None:
+                        instance.primary = error
+                    return "actual-result"
+                def project(scope, error):
+                    self.assertTrue(slot["claimed"])
+                    self.assertIs(command.primary, error)
+                    projections.append((scope, error))
+                    value = contract.adapter_command_first(scope, error)
+                    if mode == "projection-error":
+                        raise RuntimeError("PRIVATE diagnostic failure")
+                    return value
+                if mode == "busy":
+                    slot["lock"].acquire()
+                try:
+                    with patch.multiple(owner, _ADAPTER_WORKER_DIAGNOSTIC=slot,
+                                        os=SimpleNamespace(getpid=lambda: 7), adapter_command_first=project):
+                        recorded = owner.adapter_command_recorder(actual)
+                        if mode == "original-error":
+                            with self.assertRaises(OSError) as caught:
+                                recorded(command, first_error, unknown=True)
+                            self.assertIs(caught.exception, first)
+                        else:
+                            self.assertEqual(recorded(command, first_error, unknown=True), "actual-result")
+                            self.assertEqual(recorded(command, first_error, unknown=False), "actual-result")
+                            self.assertEqual(recorded(command, TypeError("PRIVATE later error")), "actual-result")
+                finally:
+                    if mode == "busy":
+                        slot["lock"].release()
+                self.assertEqual(calls[0], (command, first_error, {"unknown": True}))
+                self.assertEqual(len(calls), 1 if mode == "original-error" else 3)
+                self.assertEqual(len(projections), int(mode in {"observed", "projection-error"}))
+                self.assertEqual(slot["claimed"], mode in {"observed", "projection-error"})
+                self.assertEqual(slot["first"] is not None, mode == "observed")
+        with patch.object(owner, "_ADAPTER_WORKER_DIAGNOSTIC", None):
+            self.assertIs(owner.adapter_command_recorder(actual), actual)
+
+    def test_worker_reserved_budget_survives_missing_inflight_and_failed_command_projection(self):
+        owner = runner.case_owner
+        context, _task = self.context_and_task()
+        namespace = {}
+        exec(compile("def deep(n):\n    if n: return deep(n - 1)\n    raise ValueError('PRIVATE')\n",
+                     context[2][0][0], "exec"), namespace)
+        try:
+            namespace["deep"](100)
+        except ValueError:
+            error = sys.exc_info()
+        for mode in ("inflight", "failed", "later"):
+            with self.subTest(mode=mode):
+                visits, records = [], []
+                slot = {"context": context, "pid": 7, "lock": owner.threading.Lock(),
+                        "claimed": False, "first": None, "reserved": 16}
+                command = SimpleNamespace(pid=7, role="O", primary=None)
+                locations = contract._adapter_locations
+                def counted(frame, source_map, budget, maximum):
+                    before = budget[0]
+                    result = locations(frame, source_map, budget, maximum)
+                    visits.append(before - budget[0])
+                    return result
+                def root_record():
+                    self.assertIsNone(slot["first"])
+                    records.append(contract.adapter_failure_record(context, "worker", "error", error, deadline=20.0,
+                        command_first=slot["first"], command_reserved=slot["reserved"]))
+                def actual(instance, caught):
+                    instance.primary = caught
+                def project(scope, caught):
+                    value = contract.adapter_command_first(scope, caught)  # Consumes 16 real frames BEFORE failure.
+                    if mode == "inflight":
+                        root_record()  # Same scalar boundary as a concurrent worker failure; no test thread.
+                    if mode == "failed":
+                        raise RuntimeError("PRIVATE after partial diagnostic work")
+                    return value
+                with patch.multiple(owner, _ADAPTER_WORKER_DIAGNOSTIC=slot,
+                                    os=SimpleNamespace(getpid=lambda: 7), adapter_command_first=project), \
+                        patch.object(contract, "_adapter_locations", new=counted), \
+                        patch.object(contract, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+                    recorded = owner.adapter_command_recorder(actual)
+                    if mode == "later":
+                        root_record()  # Unclaimed is not permission to spend the reserved 16 again.
+                    recorded(command, error[1])
+                    if mode == "failed":
+                        root_record()
+                self.assertEqual(sum(visits), 64)
+                self.assertEqual(len(records), 1)
+                self.assertNotIn("related", records[0])
+
+    def test_case_failure_scalars_use_original_terminal_observations_without_new_waits_or_reads(self):
+        owner = runner.case_owner
+        context, _task = self.context_and_task()
+        for terminal in (b"EXPIRED -9\n", b"SETTLED 91\n", None):
+            with self.subTest(terminal=terminal):
+                events, records = [], iter((b"ARMED 42\n", terminal, b""))
+                original = ValueError("PRIVATE missing terminal")
+                class Wait:
+                    pid, status, unknown, retired = 41, None, False, False
+                    def fork(self):
+                        events.append("original-fork")
+                        return self.pid
+                    def wait(self):
+                        events.append("original-wait")
+                        self.retired, self.status = True, 0
+                        return self.status
+                handles = SimpleNamespace(errors=[], pipe=lambda _name: None, get=lambda _name: 10,
+                                          close=lambda _name: None, close_except=lambda: None)
+                def receive(_descriptor, data, _deadline):
+                    record = next(records)
+                    if record is None:
+                        raise original
+                    data.extend(record)
+                    return bool(record)
+                def converted(status):
+                    events.append(("existing-conversion", status))
+                    return 0
+                native = SimpleNamespace(getpid=lambda: 7, getpgrp=lambda: 8,
+                    waitstatus_to_exitcode=converted, killpg=lambda *_: events.append("original-group-stop"))
+                with patch.multiple(owner, os=native, OriginalWait=Wait, Handles=lambda: handles,
+                                    receive=receive, send=lambda *_: None, absent=lambda *_args, **_kwargs: True,
+                                    time=SimpleNamespace(monotonic=lambda: 10.0, sleep=lambda _seconds: None),
+                                    threading=SimpleNamespace(active_count=lambda: 1),
+                                    ADAPTER_DIAGNOSTIC_CONTEXT=context, ADAPTER_CASE_FAILURE=None), \
+                        patch.object(Path, "read_bytes", side_effect=AssertionError("no post-failure reads")):
+                    with self.assertRaises((AssertionError, ValueError)) as caught:
+                        owner.run_worker(Path("/not-created"), "inert", lambda: None, write_json=lambda *_: None)
+                    case = owner.adapter_case_failure(context)
+                    self.assertIsNone(owner.adapter_case_failure((context[0], context[1], context[2])))
+                self.assertEqual(events.count("original-wait"), 1)
+                if terminal is None:
+                    self.assertIs(caught.exception, original)
+                    self.assertEqual(case, (0, None, None, False, None))
+                    self.assertNotIn(("existing-conversion", 0), events)
+                else:
+                    self.assertEqual(case, (0, -9 if terminal.startswith(b"EXPIRED") else 91, 0, True,
+                                            terminal.startswith(b"EXPIRED")))
+                    self.assertEqual(events.count(("existing-conversion", 0)), 1)
+
+    def test_trace_filter_preserves_production_inventory_across_nonproduction_callbacks_and_generator_resumes(self):
+        production = {"__name__": "mobile_release.local_signing"}
+        helper = {"__name__": "inert_helper"}
+        exec(compile("def leaf(value):\n    return value + 1\n"
+                     "def produce(helper):\n    for value in range(3):\n        yield from helper(value, leaf)\n"
+                     "def entry(helper):\n    return list(produce(helper))\n", "<inert-production>", "exec"), production)
+        exec(compile("def helper(value, callback):\n    yield callback(value)\n    yield callback(value + 10)\n"
+                     "def invoke(entry):\n    return entry(helper)\n", "<inert-helper>", "exec"), helper)
+        old_lines, old_nonproduction, new_nonproduction = set(), [], []
+        def old(frame, event, _arg):
+            module = frame.f_globals.get("__name__")
+            if event == "line":
+                if module in fixture.PRODUCTION:
+                    old_lines.add(module + ":" + frame.f_code.co_name + ":" + str(frame.f_lineno))
+                elif module == "inert_helper":
+                    old_nonproduction.append(frame.f_lineno)
+            return old
+        previous = sys.gettrace()
+        try:
+            sys.settrace(old)
+            expected = helper["invoke"](production["entry"])
+        finally:
+            sys.settrace(previous)
+        trace = object.__new__(fixture.Trace)
+        trace.lines, trace.inventory = set(), True
+        actual = fixture.Trace._trace_lines
+        def observed(self, frame, event, arg):
+            if event == "line" and frame.f_globals.get("__name__") == "inert_helper":
+                new_nonproduction.append(frame.f_lineno)
+            return actual(self, frame, event, arg)
+        with patch.object(fixture.Trace, "_trace_lines", new=observed), \
+                patch.object(runner.case_owner, "ADAPTER_DIAGNOSTIC_CONTEXT", None):
+            with trace.installed():
+                value = helper["invoke"](production["entry"])
+        self.assertEqual(value, expected)
+        self.assertIs(sys.gettrace(), previous)
+        self.assertTrue(old_lines and old_nonproduction)
+        self.assertFalse(new_nonproduction)
+        self.assertEqual(trace.lines, old_lines)
+
     def test_actual_result_first_subtest_failure_survives_teardown_skip_and_diagnostic_write_failure(self):
         context, task = self.context_and_task()
         try:
@@ -549,6 +795,7 @@ class SigningAdapterDiagnosticTests(unittest.TestCase):
             with patch.object(contract, "time", SimpleNamespace(monotonic=lambda: 10.0)), redirect_stderr(sink):
                 result.startTest(test)
                 self.assertIs(runner.case_owner.ADAPTER_DIAGNOSTIC_CONTEXT, result.context)
+                runner.case_owner.ADAPTER_CASE_FAILURE = (result.context, (0, None, None, False, None))
                 result.addSubTest(test, test, error)
                 first = result.first_failure
                 result.addError(test, error)  # A later teardown failure must not replace it.
@@ -566,6 +813,8 @@ class SigningAdapterDiagnosticTests(unittest.TestCase):
                 self.assertEqual(len(lines), 1)
                 record = json.loads(lines[0].removeprefix(contract.ADAPTER_FAILURE_PREFIX))
                 self.assertEqual((record["testId"], record["layer"], record["outcome"]), (context[1], "unittest", "error"))
+                self.assertEqual(record["case"], {"expectedExit": 0, "workerExit": None, "anchorExit": None,
+                                                  "terminalParsed": False, "anchorExpired": None})
                 self.assertNotIn("PRIVATE", lines[0])
 
     def test_worker_observation_is_disabled_by_default_and_writer_failure_keeps_exit_and_private_evidence(self):

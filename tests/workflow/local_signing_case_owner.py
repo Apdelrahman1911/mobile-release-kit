@@ -16,12 +16,45 @@ import threading
 import time
 import traceback
 
-from workflow.local_signing_matrix_contract import emit_adapter_failure
+from workflow.local_signing_matrix_contract import adapter_command_first, emit_adapter_failure
 
 WORKER_ERROR = 91
 MAX_RECORD = 4096
 CASE_DEADLINE = None  # Set only in the actual original case worker before RUN.
 ADAPTER_DIAGNOSTIC_CONTEXT = None  # Immutable finite4 context; disabled in every other scope.
+ADAPTER_CASE_FAILURE = None  # Existing scalar observations only, not a custody receipt.
+_ADAPTER_WORKER_DIAGNOSTIC = None
+
+
+def adapter_command_recorder(actual):
+    """Observe the first original O primary AFTER its unchanged recorder."""
+    slot = _ADAPTER_WORKER_DIAGNOSTIC
+    if slot is None:
+        return actual
+
+    def recorded(context, error, **kwargs):
+        result = actual(context, error, **kwargs)  # Exactly once; an original raise propagates unchanged.
+        try:
+            if (os.getpid() != slot["pid"] or context.pid != slot["pid"] or context.role != "O"
+                    or context.primary is not error or not slot["lock"].acquire(blocking=False)):
+                return result
+            try:
+                if slot["claimed"]:
+                    return result
+                slot["claimed"] = True  # Absorbing BEFORE projection; failures cannot rearm it.
+            finally:
+                slot["lock"].release()
+            slot["first"] = adapter_command_first(slot["context"], error)
+        except BaseException:
+            pass  # Optional, bounded in-memory DATA; no IO or failure replacement.
+        return result
+
+    return recorded
+
+
+def adapter_case_failure(context):
+    value = ADAPTER_CASE_FAILURE
+    return value[1] if value is not None and value[0] is context else None
 
 
 def require(condition, message):
@@ -152,7 +185,7 @@ def absent(group, *, route_live):
 
 
 def _worker(handles, parent, group, root, name, task, deadline, write_json):
-    global CASE_DEADLINE
+    global CASE_DEADLINE, _ADAPTER_WORKER_DIAGNOSTIC
     code = WORKER_ERROR
     try:
         handles.close_except(("w-runr", "w-statew"))
@@ -167,14 +200,28 @@ def _worker(handles, parent, group, root, name, task, deadline, write_json):
         require(not handles.errors, "worker setup close failed")
         remaining(deadline)
         CASE_DEADLINE = deadline
+        _ADAPTER_WORKER_DIAGNOSTIC = None
+        if ADAPTER_DIAGNOSTIC_CONTEXT is not None:
+            try:
+                _ADAPTER_WORKER_DIAGNOSTIC = {"context": ADAPTER_DIAGNOSTIC_CONTEXT, "pid": os.getpid(),
+                                            "lock": threading.Lock(), "claimed": False, "first": None,
+                                            "reserved": 16}  # Before task, including callbacks not yet entered.
+            except BaseException:
+                pass  # An unavailable diagnostic slot never prevents the original task.
         value = task()
         remaining(deadline)
         write_json(root / (name + ".json"), value)
         remaining(deadline)
         code = 0
     except BaseException as error:
-        emit_adapter_failure(ADAPTER_DIAGNOSTIC_CONTEXT, "worker", "error",
-                             (type(error), error, error.__traceback__), deadline=deadline)
+        try:
+            emit_adapter_failure(ADAPTER_DIAGNOSTIC_CONTEXT, "worker", "error",
+                                 (type(error), error, BaseException.__dict__["__traceback__"].__get__(error, BaseException)),
+                                 deadline=deadline,
+                                 command_first=_ADAPTER_WORKER_DIAGNOSTIC["first"] if _ADAPTER_WORKER_DIAGNOSTIC else None,
+                                 command_reserved=_ADAPTER_WORKER_DIAGNOSTIC["reserved"] if _ADAPTER_WORKER_DIAGNOSTIC else 0)
+        except BaseException:
+            pass
         try:
             write_json(root / (name + "-error.json"), {"traceback": traceback.format_exc()})
         except BaseException:
@@ -299,6 +346,8 @@ def _anchor(handles, launcher, home_group, root, name, task, run_deadline, hard,
 
 
 def run_worker(root: Path, name: str, task, *, timeout=20, expect=0, deadline=None, write_json):
+    global ADAPTER_CASE_FAILURE
+    ADAPTER_CASE_FAILURE = None
     require(threading.active_count() == 1, "warm launcher must be single threaded")
     require(type(timeout) in (int, float) and not isinstance(timeout, bool) and math.isfinite(timeout) and timeout > 0,
             "bounded timeout required")
@@ -313,7 +362,7 @@ def run_worker(root: Path, name: str, task, *, timeout=20, expect=0, deadline=No
     owner, home_group = os.getpid(), os.getpgrp()
     handles, anchor = Handles(), OriginalWait()
     group_live, armed, settled, eof = True, False, False, False
-    worker_pid = worker_code = None
+    worker_pid = worker_code = anchor_code = None
     observed_expiry = anchor_expired = False
     primary = None
     cleanup_errors = []
@@ -358,7 +407,8 @@ def run_worker(root: Path, name: str, task, *, timeout=20, expect=0, deadline=No
             if not eof:
                 eof = receive(handles.get("a-stater"), data, hard) is False
                 require(not data, "unexpected post-settlement anchor data")
-        require(os.waitstatus_to_exitcode(anchor.status) == 0 and worker_code == expect,
+        anchor_code = os.waitstatus_to_exitcode(anchor.status)  # The existing original conversion, exactly once.
+        require(anchor_code == 0 and worker_code == expect,
                 f"case {name} expected {expect}, observed {worker_code}")
         observed_expiry = observed_expiry or time.monotonic() >= run_deadline
         require((anchor_expired and worker_code == -signal.SIGKILL) if expect == -signal.SIGKILL else
@@ -392,18 +442,29 @@ def run_worker(root: Path, name: str, task, *, timeout=20, expect=0, deadline=No
         cleanup_errors.extend(handles.errors)
         if os.getpid() != owner:
             os._exit(WORKER_ERROR)
-    if primary is not None:
-        primary._case_cleanup_errors = tuple(cleanup_errors)
+    try:
+        if primary is not None:
+            primary._case_cleanup_errors = tuple(cleanup_errors)
+            if cleanup_errors:
+                primary.add_note("independent case cleanup errors: " + ",".join(type(error).__name__ for error in cleanup_errors))
+            raise primary
         if cleanup_errors:
-            primary.add_note("independent case cleanup errors: " + ",".join(type(error).__name__ for error in cleanup_errors))
-        raise primary
-    if cleanup_errors:
-        raise BaseExceptionGroup("original case cleanup is unconfirmed", cleanup_errors)
-    require(anchor.status is not None and not anchor.unknown and not group_live and settled and eof,
-            "original case custody incomplete")
-    remaining(hard)
-    if expect != -signal.SIGKILL:
-        remaining(run_deadline)
+            raise BaseExceptionGroup("original case cleanup is unconfirmed", cleanup_errors)
+        require(anchor.status is not None and not anchor.unknown and not group_live and settled and eof,
+                "original case custody incomplete")
+        remaining(hard)
+        if expect != -signal.SIGKILL:
+            remaining(run_deadline)
+    except BaseException:
+        try:
+            if ADAPTER_DIAGNOSTIC_CONTEXT is not None:
+                # Only original variables after failure/cleanup. No new wait,
+                # census, filesystem read, expiry inference or finality claim.
+                ADAPTER_CASE_FAILURE = (ADAPTER_DIAGNOSTIC_CONTEXT,
+                                       (expect, worker_code, anchor_code, settled, anchor_expired if settled else None))
+        except BaseException:
+            pass
+        raise
     return {"pid": worker_pid, "anchor": anchor.pid, "exit": worker_code,
             "originalAnchorWait": True, "originalWorkerWait": True,
             "originalStatusEOF": True, "groupAbsentBeforeAnchorWait": True,

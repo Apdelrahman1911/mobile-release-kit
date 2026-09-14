@@ -123,11 +123,13 @@ class SigningAdapterResult(unittest.TestResult):
                          and identifier not in self.started, "adapter unexpected or duplicate start")
         self.started.append(identifier)
         self.context = (self.phase, identifier, self.source_map)
+        case_owner.ADAPTER_CASE_FAILURE = None
         case_owner.ADAPTER_DIAGNOSTIC_CONTEXT = self.context  # Immutable before any original child fork.
         super().startTest(test)
 
     def stopTest(self, test):
         case_owner.ADAPTER_DIAGNOSTIC_CONTEXT = None
+        case_owner.ADAPTER_CASE_FAILURE = None
         super().stopTest(test)
 
     def addSuccess(self, test):
@@ -143,7 +145,11 @@ class SigningAdapterResult(unittest.TestResult):
         self.stop()
         if first:
             self.first_failure = (test.id(), outcome)
-            contract.emit_adapter_failure(self.context, "unittest", outcome, error, deadline=self.deadline)
+            try:
+                contract.emit_adapter_failure(self.context, "unittest", outcome, error, deadline=self.deadline,
+                                               case=case_owner.adapter_case_failure(self.context))
+            except BaseException:
+                pass  # No optional observation can change the first original failure.
 
     def addError(self, test, error):
         self.reject(test, "error", error)

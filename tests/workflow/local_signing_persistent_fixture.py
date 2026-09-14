@@ -405,28 +405,37 @@ class Trace:
             return Buffered()
         return opening
 
+    def _trace_lines(self, frame, event, _arg):
+        module = frame.f_globals.get("__name__")
+        if module not in PRODUCTION:
+            return None  # No per-line callbacks for nonproduction call frames.
+        if event == "line":
+            self.lines.add(module + ":" + frame.f_code.co_name + ":" + str(frame.f_lineno))
+        return self._trace_lines
+
     @contextmanager
     def installed(self):
-        def lines(frame, event, arg):
-            if event == "line" and frame.f_globals.get("__name__") in PRODUCTION:
-                self.lines.add(frame.f_globals["__name__"] + ":" + frame.f_code.co_name + ":" + str(frame.f_lineno))
-            return lines
         with ExitStack() as patches:
             from mobile_release import _command_process
+            from workflow import local_signing_case_owner as case_owner
             trace = self
             patches.enter_context(patch.object(signing.SigningSession, "_fence_observation_policy",
                                                 new=lambda session: trace._observe_fence_policy(session)))
             patches.enter_context(patch.object(_command_process, "_fence_trace_checkpoint", new=self._observe_fence))
+            if case_owner.ADAPTER_DIAGNOSTIC_CONTEXT is not None:
+                patches.enter_context(patch.object(_command_process._Context, "record",
+                    new=case_owner.adapter_command_recorder(_command_process._Context.record)))
             for name in IO_OPERATIONS:
                 patches.enter_context(patch.object(os, name, new=self.wrapper(name, getattr(os, name))))
             patches.enter_context(patch.object(os, "fdopen", new=self.fdopen(os.fdopen)))
+            previous_trace = sys.gettrace()
             if self.inventory:
-                sys.settrace(lines)
+                sys.settrace(self._trace_lines)
             try:
                 yield
             finally:
                 if self.inventory:
-                    sys.settrace(None)
+                    sys.settrace(previous_trace)
 
 
 def original_flow(root: Path, trace: Trace, *, auto_add=False):

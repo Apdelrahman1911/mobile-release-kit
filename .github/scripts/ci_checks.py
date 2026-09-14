@@ -66,7 +66,7 @@ WHEEL_PATTERNS = (
     "test_local_signing.py", "test_local_signing_recovery.py", "test_local_signing_native.py",
     "test_local_signing_composition.py", "test_owned_process.py", "test_owned_process_callers.py",
     "test_owned_process_failures.py", "test_local_signing_failures.py", "test_local_signing_profile_identity.py",
-    "test_local_signing_persistent.py", "test_local_signing_matrix.py",
+    "test_local_signing_persistent.py", "test_local_signing_matrix.py", "test_local_signing_owner_loss.py",
 )
 NATIVE_PATTERNS = (
     "test_ios_profile_authority.py", "test_ios_profile_trust.py",
@@ -76,7 +76,7 @@ NATIVE_PATTERNS = (
     "test_local_signing.py", "test_local_signing_recovery.py", "test_local_signing_native.py",
     "test_local_signing_composition.py", "test_owned_process.py", "test_owned_process_callers.py",
     "test_owned_process_failures.py", "test_local_signing_failures.py", "test_local_signing_profile_identity.py",
-    "test_local_signing_persistent.py", "test_local_signing_matrix.py",
+    "test_local_signing_persistent.py", "test_local_signing_matrix.py", "test_local_signing_owner_loss.py",
 )
 # Only this source-known class may run with the fixed native trust-service role.
 # A newly added method must not silently enlarge that role's callset.
@@ -145,6 +145,7 @@ PYTHON_POISON_CASES = (
     ("poison-system-exit-cleanup-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_cleanup_failure"),
     ("poison-system-exit-restore-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_restore_failure"),
     ("poison-system-exit-cleanup-and-restore-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_cleanup_and_restore_failure"),
+    ("poison-signing-launcher-loss", "workflow.test_local_signing_owner_loss.SigningLauncherLossTests.test_real_launcher_death_uses_original_anchor_cleanup_and_requires_domain_disposal"),
 )
 PYTHON_POISON_PARTITIONS = tuple(name for name, _identifier in PYTHON_POISON_CASES)
 PYTHON_POISON_IDS = tuple(identifier for _name, identifier in PYTHON_POISON_CASES)

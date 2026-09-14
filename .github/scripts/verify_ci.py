@@ -587,6 +587,7 @@ PYTHON_POISON_PARTITIONS = (
     "poison-system-exit-cleanup-failure",
     "poison-system-exit-restore-failure",
     "poison-system-exit-cleanup-and-restore-failure",
+    "poison-signing-launcher-loss",
 )
 RUBY_OWNER_POISON_PARTITIONS = (
     ("custodian-preoffer-close", "NativeUploadRoleTest#test_native_custodian_preoffer_close_fault_cannot_claim_settled_failure"),
@@ -1641,6 +1642,16 @@ def signing_adapter_failure(raw: bytes, scope: SigningAdapterDiagnostic, *, dead
                 or scope.phase not in {"source", "wheel"}):
             return None
         marker = b"MRK_SIGNING_ADAPTER_FAILURE="
+        required = {"schema", "phase", "testId", "layer", "outcome", "category", "locations"}
+        categories = {"none", "os-error", "assertion-error", "value-error", "type-error", "memory-error", "exception", "base-exception"}
+
+        def locations_valid(locations, maximum):
+            return (type(locations) is list and len(locations) <= maximum
+                    and all(type(location) is dict and set(location) == {"file", "line"}
+                            and type(location["file"]) is str and location["file"] in scope.files
+                            and type(location["line"]) is int and 0 < location["line"] < 1_000_000
+                            for location in locations))
+
         observations, layers = [], set()
         for line in raw.splitlines(keepends=True):
             check_clock(deadline)
@@ -1652,7 +1663,7 @@ def signing_adapter_failure(raw: bytes, scope: SigningAdapterDiagnostic, *, dead
                 value = strict_json(line[len(marker):-1].decode("ascii"))
             except (UnicodeError, ValueError, VerificationError, RecursionError):
                 return None
-            if (type(value) is not dict or set(value) != {"schema", "phase", "testId", "layer", "outcome", "category", "locations"}
+            if (type(value) is not dict or not required <= set(value) <= required | {"related", "case"}
                     or type(value["schema"]) is not int or value["schema"] != 1
                     or value["phase"] != scope.phase or type(value["testId"]) is not str
                     or value["testId"] not in scope.identifiers
@@ -1660,17 +1671,40 @@ def signing_adapter_failure(raw: bytes, scope: SigningAdapterDiagnostic, *, dead
                     or value["layer"] in layers or type(value["outcome"]) is not str
                     or value["outcome"] not in {"error", "failure", "expected-failure", "unexpected-success", "skip"}
                     or value["layer"] == "worker" and value["outcome"] != "error"
-                    or type(value["category"]) is not str or value["category"] not in {
-                        "none", "os-error", "assertion-error", "value-error", "type-error", "memory-error", "exception", "base-exception"}
+                    or type(value["category"]) is not str or value["category"] not in categories
                     or (value["outcome"] in {"unexpected-success", "skip"}) != (value["category"] == "none")
-                    or type(value["locations"]) is not list or len(value["locations"]) > 4):
+                    or not locations_valid(value["locations"], 4)):
                 return None
             if value["category"] == "none" and value["locations"]:
                 return None
-            for location in value["locations"]:
-                if (type(location) is not dict or set(location) != {"file", "line"}
-                        or type(location["file"]) is not str or location["file"] not in scope.files
-                        or type(location["line"]) is not int or not 0 < location["line"] < 1_000_000):
+            if "related" in value:
+                related = value["related"]
+                if type(related) is not list or not 1 <= len(related) <= 3 or value["category"] == "none":
+                    return None
+                routes = set()
+                for row in related:
+                    if (type(row) is not dict or set(row) != {"via", "category", "locations"}
+                            or type(row["category"]) is not str or row["category"] not in categories - {"none"}
+                            or not locations_valid(row["locations"], 2)
+                            or type(row["via"]) is not list or not 1 <= len(row["via"]) <= 7
+                            or not all(type(link) is str for link in row["via"])):
+                        return None
+                    route = tuple(row["via"])
+                    if (route in routes or (route == ("command-first",)
+                            and (value["layer"] != "worker" or routes))
+                            or route != ("command-first",) and not all(link in {"context", "cause"} for link in route)):
+                        return None
+                    routes.add(route)
+            if "case" in value:
+                case = value["case"]
+                if (value["layer"] != "unittest" or type(case) is not dict
+                        or set(case) != {"expectedExit", "workerExit", "anchorExit", "terminalParsed", "anchorExpired"}
+                        or type(case["expectedExit"]) is not int or case["expectedExit"] not in {0, 73, -9}
+                        or any(status is not None and (type(status) is not int or not -128 <= status <= 255)
+                               for status in (case["workerExit"], case["anchorExit"]))
+                        or type(case["terminalParsed"]) is not bool
+                        or (case["workerExit"] is not None) != case["terminalParsed"]
+                        or (type(case["anchorExpired"]) is not bool if case["terminalParsed"] else case["anchorExpired"] is not None)):
                     return None
             if observations and value["testId"] != observations[0]["testId"]:
                 return None

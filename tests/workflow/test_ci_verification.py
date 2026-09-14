@@ -75,6 +75,7 @@ _PYTHON_POISON_FIXTURES = (
     ("poison-system-exit-cleanup-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_cleanup_failure"),
     ("poison-system-exit-restore-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_restore_failure"),
     ("poison-system-exit-cleanup-and-restore-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_cleanup_and_restore_failure"),
+    ("poison-signing-launcher-loss", "workflow.test_local_signing_owner_loss.SigningLauncherLossTests.test_real_launcher_death_uses_original_anchor_cleanup_and_requires_domain_disposal"),
 )
 HOSTED_GUARD = '''set -euo pipefail
 [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == github-hosted ]]
@@ -4398,7 +4399,7 @@ class CIProductEvidenceContractTests(unittest.TestCase):
             "test_local_signing.py", "test_local_signing_recovery.py", "test_local_signing_native.py",
             "test_local_signing_composition.py", "test_owned_process.py", "test_owned_process_callers.py",
             "test_owned_process_failures.py", "test_local_signing_failures.py", "test_local_signing_profile_identity.py",
-            "test_local_signing_persistent.py", "test_local_signing_matrix.py"))
+            "test_local_signing_persistent.py", "test_local_signing_matrix.py", "test_local_signing_owner_loss.py"))
         self.assertEqual(set(checks.WHEEL_PATTERNS), {
             "test_init_transaction.py", "test_ios_entitlements.py", "test_ios_plist_binary.py",
             "test_native_process.py", "test_profile_process_owner.py", "test_default_cancellation.py",
@@ -4406,7 +4407,7 @@ class CIProductEvidenceContractTests(unittest.TestCase):
             "test_ios_profile_trust.py", "test_local_signing.py", "test_local_signing_recovery.py", "test_local_signing_native.py",
             "test_local_signing_composition.py", "test_owned_process.py", "test_owned_process_callers.py",
             "test_owned_process_failures.py", "test_local_signing_failures.py", "test_local_signing_profile_identity.py",
-            "test_local_signing_persistent.py", "test_local_signing_matrix.py"})
+            "test_local_signing_persistent.py", "test_local_signing_matrix.py", "test_local_signing_owner_loss.py"})
         for invalid in ("unknown", "Authority", "", None, True, []):
             with self.subTest(partition=invalid), self.assertRaisesRegex(checks.CheckError, "NATIVE_PARTITION"):
                 checks.native_partition_ids(ROOT, invalid, deadline=deadline)

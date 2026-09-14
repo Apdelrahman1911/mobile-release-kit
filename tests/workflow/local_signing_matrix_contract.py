@@ -36,6 +36,9 @@ ADAPTER_TEST_IDS = tuple(sorted(
 ))
 ADAPTER_FAILURE_PREFIX = "MRK_SIGNING_ADAPTER_FAILURE="
 ADAPTER_FAILURE_MAX_BYTES = 2048
+ADAPTER_FAILURE_CATEGORIES = (
+    "none", "os-error", "assertion-error", "value-error", "type-error", "memory-error", "exception", "base-exception",
+)
 ADAPTER_FAILURE_TEST_FILES = (
     "tests/unit/test_local_signing_persistent.py", "tests/unit/local_signing_persistent.py",
     "tests/unit/local_signing_helpers.py", "tests/unit/ios_entitlement_helpers.py",
@@ -59,45 +62,128 @@ def before_deadline(deadline):
                 "original matrix cutoff expired")
 
 
-def adapter_failure_record(context, layer, outcome, error, *, deadline):
-    """Bounded projection of actual frames; no message/source/linecache reads."""
-    before_deadline(deadline)
+def _adapter_context(context):
     phase, identifier, source_map = context  # Immutable, prepared BEFORE dispatch.
-    require(phase in {"source", "wheel"} and identifier in ADAPTER_TEST_IDS
-            and layer in {"worker", "unittest"}
-            and outcome in {"error", "failure", "expected-failure", "unexpected-success", "skip"},
-            "adapter diagnostic context")
+    require(phase in {"source", "wheel"} and identifier in ADAPTER_TEST_IDS, "adapter diagnostic context")
     require(type(context) is tuple and type(source_map) is tuple and 0 < len(source_map) <= 512
             and all(type(pair) is tuple and len(pair) == 2 and type(pair[0]) is str and type(pair[1]) is str
                     and (pair[1] in ADAPTER_FAILURE_TEST_FILES or re.fullmatch(
                         r"src/mobile_release/(?:[A-Za-z_][A-Za-z0-9_]*/)*[A-Za-z_][A-Za-z0-9_]*\.py", pair[1]))
                     for pair in source_map), "adapter diagnostic filename map")
+    return phase, identifier, source_map
+
+
+def _adapter_category(exception):
+    return next((name for kind, name in (
+        (OSError, "os-error"), (AssertionError, "assertion-error"), (ValueError, "value-error"),
+        (TypeError, "type-error"), (MemoryError, "memory-error"), (Exception, "exception"),
+        (BaseException, "base-exception")) if issubclass(type(exception), kind)), "base-exception")
+
+
+def _adapter_locations(frame, source_map, budget, maximum):
+    locations = []
+    while type(frame) is types.TracebackType and budget[0] > 0:
+        budget[0] -= 1  # Shared raw-frame visits, including unallowlisted frames.
+        filename, line = frame.tb_frame.f_code.co_filename, frame.tb_lineno
+        public = next((relative for actual, relative in source_map if filename == actual), None)
+        if public is not None and type(line) is int and 0 < line < 1_000_000:
+            locations.append({"file": public, "line": line})
+            locations = locations[-maximum:]
+        frame = frame.tb_next
+    return locations
+
+
+def _adapter_exception_data(exception, name):
+    # Bypass subclass attributes/properties. These are Python's actual links,
+    # not a claim that a related exception was the first or underlying cause.
+    return BaseException.__dict__[name].__get__(exception, BaseException)
+
+
+def adapter_command_first(context, exception):
+    """Small in-memory-only observation; never retain an exception/context."""
+    _phase, _identifier, source_map = _adapter_context(context)
+    require(isinstance(exception, BaseException), "adapter original command exception")
+    budget = [16]  # Leave at least 48 of the shared 64 visits for the later root.
+    locations = _adapter_locations(_adapter_exception_data(exception, "__traceback__"), source_map, budget, 2)
+    return (_adapter_category(exception), tuple((row["file"], row["line"]) for row in locations), 16 - budget[0])
+
+
+def adapter_failure_record(context, layer, outcome, error, *, deadline, command_first=None, command_reserved=0, case=None):
+    """Actual root and bounded Python links; no message/source/linecache reads."""
+    before_deadline(deadline)
+    phase, identifier, source_map = _adapter_context(context)
+    require(layer in {"worker", "unittest"}
+            and outcome in {"error", "failure", "expected-failure", "unexpected-success", "skip"},
+            "adapter diagnostic context")
+    require(type(command_reserved) is int and command_reserved in {0, 16}
+            and (layer == "worker" or command_reserved == 0), "adapter original command reserved budget")
+    # The original worker reserves 16 BEFORE task execution, not when a row
+    # becomes visible. Missing/in-flight/failed/later callbacks cannot renew it.
+    budget, related = [64 - command_reserved], []
+    if command_first is not None:
+        require(layer == "worker" and command_reserved == 16 and type(command_first) is tuple and len(command_first) == 3,
+                "adapter original command observation")
+        category, frames, visited = command_first
+        require(category in ADAPTER_FAILURE_CATEGORIES[1:] and type(frames) is tuple and len(frames) <= 2
+                and type(visited) is int and 0 <= visited <= 16
+                and all(type(row) is tuple and len(row) == 2 and type(row[0]) is str
+                        and row[0] in {public for _actual, public in source_map}
+                        and type(row[1]) is int and 0 < row[1] < 1_000_000 for row in frames),
+                "adapter original command observation fields")
+        related.append({"via": ["command-first"], "category": category,
+                        "locations": [{"file": filename, "line": line} for filename, line in frames]})
     category, locations = "none", []
     if error is not None:
+        require(type(error) is tuple and len(error) == 3 and isinstance(error[1], BaseException),
+                "adapter actual exception tuple")
         exception = error[1]
-        category = next((name for kind, name in (
-            (OSError, "os-error"), (AssertionError, "assertion-error"), (ValueError, "value-error"),
-            (TypeError, "type-error"), (MemoryError, "memory-error"), (Exception, "exception"),
-            (BaseException, "base-exception")) if isinstance(exception, kind)), "base-exception")
-        frame, visited = error[2], 0
-        while type(frame) is types.TracebackType and visited < 64:
-            filename, line = frame.tb_frame.f_code.co_filename, frame.tb_lineno
-            public = next((relative for actual, relative in source_map if filename == actual), None)
-            if public is not None and type(line) is int and 0 < line < 1_000_000:
-                locations.append({"file": public, "line": line})
-                locations = locations[-4:]
-            frame, visited = frame.tb_next, visited + 1
+        category = _adapter_category(exception)
+        locations = _adapter_locations(error[2], source_map, budget, 4)
+        pending, seen = [(exception, ())], {id(exception)}
+        while pending and len(related) < 3:
+            current, route = pending.pop(0)
+            for name in ("cause", "context"):
+                linked = _adapter_exception_data(current, "__" + name + "__")
+                if linked is None or id(linked) in seen:
+                    continue
+                if len(seen) == 8:
+                    break
+                seen.add(id(linked))
+                via = (*route, name)
+                related.append({"via": list(via), "category": _adapter_category(linked),
+                    "locations": _adapter_locations(_adapter_exception_data(linked, "__traceback__"), source_map, budget, 2)})
+                pending.append((linked, via))
+                if len(related) == 3:
+                    break
+    record = {"schema": 1, "phase": phase, "testId": identifier, "layer": layer,
+              "outcome": outcome, "category": category, "locations": locations}
+    if related:
+        record["related"] = related
+    if case is not None:
+        require(layer == "unittest" and type(case) is tuple and len(case) == 5, "adapter case observation")
+        expected, worker, anchor, parsed, expired = case
+        require(type(expected) is int and expected in {0, 73, -9}
+                and all(value is None or type(value) is int and -128 <= value <= 255 for value in (worker, anchor))
+                and type(parsed) is bool and (worker is not None) == parsed
+                and (type(expired) is bool if parsed else expired is None), "adapter case observation fields")
+        record["case"] = {"expectedExit": expected, "workerExit": worker, "anchorExit": anchor,
+                          "terminalParsed": parsed, "anchorExpired": expired}
+    # Preserve the original root observation before optional related details.
+    while record.get("related") and len(ADAPTER_FAILURE_PREFIX) + len(canonical(record)) + 1 > ADAPTER_FAILURE_MAX_BYTES:
+        record["related"].pop()
+        if not record["related"]:
+            del record["related"]
     before_deadline(deadline)
-    return {"schema": 1, "phase": phase, "testId": identifier, "layer": layer,
-            "outcome": outcome, "category": category, "locations": locations}
+    return record
 
 
-def emit_adapter_failure(context, layer, outcome, error, *, deadline):
+def emit_adapter_failure(context, layer, outcome, error, *, deadline, command_first=None, command_reserved=0, case=None):
     """Optional stderr DATA only; a diagnostic error cannot replace its cause."""
     if context is None:
         return None
     try:
-        record = adapter_failure_record(context, layer, outcome, error, deadline=deadline)
+        record = adapter_failure_record(context, layer, outcome, error, deadline=deadline,
+                                        command_first=command_first, command_reserved=command_reserved, case=case)
         data = ADAPTER_FAILURE_PREFIX + canonical(record).decode("ascii") + "\n"
         require(len(data.encode("ascii")) <= ADAPTER_FAILURE_MAX_BYTES, "adapter diagnostic byte bound")
         before_deadline(deadline)
