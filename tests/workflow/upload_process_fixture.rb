@@ -3746,6 +3746,13 @@ module UploadProcessFixture
   # executable receives the COMPLETE real argv/environment/cwd; only its program
   # body is the credential-free worker. No caller interpreter file is modified.
   class AdapterDriver < NativeSetupDriver
+    OUTPUT_SOURCE_MODES = %w[inherited delayed-start late-record leader-only kill-descendant].freeze
+    CUSTODIAN_SOURCE_MAP = [
+      [:null_stdin, :read, :null], [:null_stdout, :write, :null], [:null_stderr, :write, :null],
+      [:control_read, :read, :pipe], [:status_write, :write, :pipe], [:stdin_read, :read, :pipe],
+      [:stdout_write, :write, :pipe], [:stderr_write, :write, :pipe],
+    ].map(&:freeze).freeze
+
     class Observation < NativeSetupDriver::Observation
       def install
         super
@@ -4025,6 +4032,8 @@ module UploadProcessFixture
       @parameters = parameters.transform_keys(&:to_sym).merge(environment: {})
       @timeout_objects = []
       @readiness_stage = "not-entered"
+      @output_source_attempted = false
+      @output_source_snapshot = nil
       @observed.merge!("blockedDataWaits" => 0, "legacyRecordUsedForOwnership" => false,
         "adapterCallObserved" => false, "captureEntered" => false, "stdinClosedAfterReady" => false,
         "descendantLiveBeforeRelease" => false, "inheritedPipeBlockObserved" => false)
@@ -4214,6 +4223,8 @@ module UploadProcessFixture
                started + (ADAPTER_COMPLETION_LIMIT + ADAPTER_PUBLICATION_LIMIT) * 1_000_000_000 < cutoff
           raise Failure.new("setup-fixture-fault", "adapter preparation missed original entry budget")
         end
+      when :custodian_attempt
+        snapshot_output_sources!(object) if OUTPUT_SOURCE_MODES.include?(@base_mode)
       when :custodian_published
         publish_owner("launched")
       when :ready_before_stdin_close
@@ -4222,6 +4233,87 @@ module UploadProcessFixture
       when :stdin_close_returned
         @observed["stdinClosedAfterReady"] = true
       end
+    end
+
+    def output_source_error
+      Failure.new("fixture-source", "adapter output source identity was not bound")
+    end
+
+    # Resolve the actual original source map, never its serialized role labels.
+    # This part also runs at READY, after normal creator settlement/source closes.
+    def output_source_binding!(acquisition)
+      spawn = MobileReleaseKit::NativeProcessSpawn
+      session = @observation&.session
+      binding = @observation&.custodian_source_binding
+      unless session.instance_of?(MobileReleaseKit::NativeUploadValidation.const_get(:CaptureSession, false)) &&
+             session.equal?(@native_frame) && acquisition.instance_of?(spawn::Acquisition) &&
+             session.acquisition.equal?(acquisition) && binding.instance_of?(Array) && binding.frozen? &&
+             binding.length == 2 && binding.first.equal?(acquisition)
+        raise output_source_error
+      end
+      spec, resources = binding.last, acquisition.resources
+      unless spec.instance_of?(spawn::SpawnSpec) && spec.frozen? && resources.instance_of?(Hash) && session.leases.equal?(resources)
+        raise output_source_error
+      end
+      sources = spec.fd_sources
+      unless sources.instance_of?(Array) && sources.frozen? && sources.length == CUSTODIAN_SOURCE_MAP.length &&
+             sources.zip(CUSTODIAN_SOURCE_MAP).all? { |lease, (role, access, kind)|
+               lease.instance_of?(spawn::IOLease) && lease.equal?(resources[role]) &&
+                 lease.role == role && lease.access == access && lease.kind == kind
+             }
+        raise output_source_error
+      end
+      [session, resources, binding, sources]
+    end
+
+    def snapshot_output_sources!(acquisition)
+      raise output_source_error if @output_source_attempted
+      @output_source_attempted = true # BEFORE validation/fstat; partial failure is never retryable.
+      session, resources, binding, sources = output_source_binding!(acquisition)
+      creator, capture = session.creator_slot, session.capture_slot
+      task_class = MobileReleaseKit::NativeUploadProcess::TaskSlot
+      unless creator.instance_of?(task_class) && capture.instance_of?(task_class) &&
+             acquisition.owner_slot.equal?(creator) && creator.thread.equal?(Thread.current) &&
+             creator.caller.instance_of?(Thread) && creator.caller.equal?(capture.thread) &&
+             creator.parent_slot.equal?(capture) && creator.joined?.equal?(false) &&
+             acquisition.child.nil? && session.custodian_child.nil? && acquisition.child_attempted?.equal?(false)
+        raise output_source_error
+      end
+      creator.check_creation! # Original launch/cancellation/deadline authority, never a new allowance.
+      writers = sources.last(2)
+      readers = %i[stdout_read stderr_read].map { |role| resources[role] }
+      ios = writers.map(&:io)
+      unless readers.all? { |lease| lease.instance_of?(MobileReleaseKit::NativeProcessSpawn::IOLease) } &&
+             writers.each_with_index.all? { |lease, index| lease.state == :open && ios[index].is_a?(IO) && !ios[index].closed? } &&
+             !writers.first.equal?(writers.last) && !ios.first.equal?(ios.last) &&
+             writers.none? { |lease| readers.any? { |reader| lease.equal?(reader) || lease.io.equal?(reader.io) } }
+        raise output_source_error
+      end
+      sampled = writers.zip(ios).map do |lease, io|
+        stat = io.stat # Exactly this original writer endpoint, once, before its original close.
+        raise output_source_error unless stat.pipe?
+        identity = OwnedChild.identity(stat).transform_values { |value| value.instance_of?(String) ? value.dup.freeze : value }.freeze
+        [lease, io, identity].freeze
+      end.freeze
+      creator.check_creation!
+      # Freeze only new containers/metadata. Original custody objects MUST stay
+      # mutable for their real create, close, join and finality transitions.
+      @output_source_snapshot = {session: session, acquisition: acquisition, resources: resources,
+        binding: binding, sources: sources, writers: sampled}.freeze
+    end
+
+    def output_source_identities!(session)
+      snapshot = @output_source_snapshot
+      raise output_source_error unless snapshot.instance_of?(Hash) && snapshot.frozen? && snapshot[:session].equal?(session)
+      original, resources, binding, sources = output_source_binding!(snapshot[:acquisition])
+      unless original.equal?(session) && snapshot[:resources].equal?(resources) &&
+             snapshot[:binding].equal?(binding) && snapshot[:sources].equal?(sources) &&
+             snapshot[:writers].each_with_index.all? { |(lease, io, _identity), index|
+               sources[index + 6].equal?(lease) && lease.io.equal?(io)
+             }
+        raise output_source_error
+      end
+      snapshot[:writers].map(&:last) # No stat/reopen of normally closed writers at READY.
     end
 
     def run_remaining_ns
@@ -4312,13 +4404,13 @@ module UploadProcessFixture
           raise Failure.new("readiness", "descendant was not the actual original fork")
         end
         @descendant = {"pid" => fork.fetch("child"), "group" => fork.fetch("group")}
+        stdout_identity, stderr_identity = output_source_identities!(session)
         child_expected = {"kind" => "child-ready", "pid" => @descendant.fetch("pid"), "group" => @descendant.fetch("group"),
-          "sid" => marker.fetch("sid"), "stdout" => OwnedChild.identity(session.leases.fetch(:stdout_read).io.stat),
-          "stderr" => OwnedChild.identity(session.leases.fetch(:stderr_read).io.stat)}
+          "sid" => marker.fetch("sid"), "stdout" => stdout_identity, "stderr" => stderr_identity}
         @readiness_stage = "descendant-live"
         live_marker!(child, child_expected, "descendant")
         @observed["descendantProof"] = {"forkReturn" => fork, "readyRecord" => child,
-          "stdoutReaderIdentity" => child_expected.fetch("stdout"), "stderrReaderIdentity" => child_expected.fetch("stderr")}
+          "stdoutWriterIdentity" => child_expected.fetch("stdout"), "stderrWriterIdentity" => child_expected.fetch("stderr")}
         @observed["descendantLiveBeforeRelease"] = true
         @readiness_stage = "inherited-pipes"
         observe_inherited_block!
@@ -5609,8 +5701,8 @@ module UploadProcessFixture
       assert_equal fork.fetch("child"), child.fetch("pid")
       assert_equal fork.fetch("group"), child.fetch("group")
       assert_equal value.fetch("nativeObservation").fetch("custodian").fetch("pid"), child.fetch("sid")
-      assert_equal proof.fetch("stdoutReaderIdentity"), child.fetch("stdout")
-      assert_equal proof.fetch("stderrReaderIdentity"), child.fetch("stderr")
+      assert_equal proof.fetch("stdoutWriterIdentity"), child.fetch("stdout")
+      assert_equal proof.fetch("stderrWriterIdentity"), child.fetch("stderr")
       ["stdout", "stderr"].each { |role| assert_equal "fifo", child.fetch(role).fetch("type") }
       assert_operator value.fetch("validatorReleasedNs"), :<, value.fetch("commitQueuedNs")
       assert_operator value.fetch("commitQueuedNs"), :<, value.fetch("nativeRunDeadlineNs")

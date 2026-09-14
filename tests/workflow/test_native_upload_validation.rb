@@ -4205,8 +4205,194 @@ class NativeUploadValidationTest < Minitest::Test
     assert_adapter_readiness_stage_choreography
   end
 
+  # Exact native Ruby types, but no native initialization, registered
+  # acquisition, Thread, descriptor or filesystem operation. IO.allocate has
+  # no FD; every used IO method is an inert singleton seam. The surrounding
+  # selector's acquisition veto remains active throughout this model.
+  def adapter_output_source_model(mode: "leader-only")
+    fixture, spawn, native = UploadProcessFixture, MobileReleaseKit::NativeProcessSpawn, MobileReleaseKit::NativeUploadValidation
+    rig = {reads: [], closed: [], stat_errors: {}, admission_errors: {}, admissions: 0, modeled_creates: 0}
+    task = lambda do
+      value = MobileReleaseKit::NativeUploadProcess::TaskSlot.allocate
+      {lock: Mutex.new, thread: Thread.current, caller: Thread.current, joined: false, parent_slot: nil}.each do |name, item|
+        value.instance_variable_set(:"@#{name}", item)
+      end
+      value
+    end
+    capture, creator = task.call, task.call
+    creator.instance_variable_set(:@parent_slot, capture)
+    creator.define_singleton_method(:check_creation!) do
+      rig[:admissions] += 1
+      error = rig[:admission_errors][rig[:admissions]]
+      raise error if error
+      true
+    end
+    resources, ios, stats = {}, {}, {}
+    acquisition = spawn::Acquisition.allocate
+    {lock: Mutex.new, resources: resources, owner_slot: creator, child: nil, child_attempted: false}.each do |name, item|
+      acquisition.instance_variable_set(:"@#{name}", item)
+    end
+    roles = %i[null_stdin null_stdout null_stderr control_read status_write stdin_read stdout_write stderr_write]
+    accesses = %i[read write write read write read write write]
+    stat_class = Struct.new(:dev, :ino, :mode, :uid, :gid, :rdev, :ftype, :nlink) do
+      def pipe? = ftype == "fifo"
+    end
+    (roles + %i[stdout_read stderr_read]).each_with_index do |role, index|
+      io = IO.allocate
+      stats[role] = stat_class.new(1, 101 + index, 0o10600, 3, 4, 0, "fifo".dup, 1)
+      io.define_singleton_method(:closed?) { rig[:closed].include?(role) }
+      io.define_singleton_method(:stat) do
+        raise "inert opposite reader is not a descendant writer" if %i[stdout_read stderr_read].include?(role)
+        raise "inert writer resampled after modeled close" if rig[:closed].include?(role)
+        rig[:reads] << role
+        raise rig[:stat_errors][role] if rig[:stat_errors][role]
+        stats.fetch(role)
+      end
+      lease = spawn::IOLease.allocate
+      {lock: Mutex.new, acquisition: acquisition, role: role, access: accesses[index] || :read,
+       kind: index < 3 ? :null : :pipe, state: :open, io: io}.each do |name, item|
+        lease.instance_variable_set(:"@#{name}", item)
+      end
+      resources[role], ios[role] = lease, io
+    end
+    spec = spawn::SpawnSpec.new(executable: "/inert-adapter", argv: ["/inert-adapter"], env: {},
+      fd_sources: roles.map { |role| resources.fetch(role) }) # Pure constructor; no native entry.
+    session = native.const_get(:CaptureSession, false).allocate
+    {capture_slot: capture, creator_slot: creator, acquisition: acquisition, leases: resources,
+     custodian_child: nil, ready: nil, reserved: nil}.each { |name, item| session.instance_variable_set(:"@#{name}", item) }
+    driver = fixture::AdapterDriver.new(@root, "ios", mode, {}, deadline_ns: 40_000_000_000)
+    observation = fixture::AdapterDriver::Observation.new(driver, native: native, root: @root)
+    observation.instance_variable_set(:@session, session)
+    driver.instance_variable_set(:@observation, observation)
+    observation.event(:execute_enter, session)
+    observation.remember_custodian_sources(acquisition, spec)
+    rig.merge!(driver: driver, observation: observation, session: session, capture: capture, creator: creator,
+      acquisition: acquisition, event_acquisition: acquisition, resources: resources, spec: spec, ios: ios, stats: stats)
+    rig[:invoke] = lambda do
+      observation.event(:custodian_attempt, rig.fetch(:event_acquisition)) # Actual existing event routing/snapshot body.
+      rig[:modeled_creates] += 1 # Only a downstream-call counter, NEVER a native creation/settlement receipt.
+    end
+    rig
+  end
+
+  def assert_adapter_output_source_binding
+    fixture, spawn = UploadProcessFixture, MobileReleaseKit::NativeProcessSpawn
+    writers = %i[stdout_write stderr_write]
+    rig = adapter_output_source_model
+    binding = rig[:observation].custodian_source_binding
+    rig[:observation].remember_custodian_sources(Object.new, Object.new)
+    assert_same binding, rig[:observation].custodian_source_binding # First observed original map cannot be replaced.
+    rig[:invoke].call
+    snapshot = rig[:driver].instance_variable_get(:@output_source_snapshot)
+    assert_equal [writers, 2, 1], rig.values_at(:reads, :admissions, :modeled_creates)
+    assert_same rig[:session], snapshot.fetch(:session)
+    assert_same rig[:acquisition], snapshot.fetch(:acquisition)
+    assert_same rig[:spec].fd_sources, snapshot.fetch(:sources)
+    assert_same binding, snapshot.fetch(:binding)
+    assert snapshot.frozen?
+    assert snapshot.fetch(:writers).frozen?
+    snapshot.fetch(:writers).zip(writers).each do |entry, role|
+      lease, io, identity = entry
+      assert entry.frozen?
+      assert_same rig[:resources][role], lease
+      assert_same rig[:ios][role], io
+      assert_equal fixture::OwnedChild.identity(rig[:stats][role]), identity
+      assert identity.frozen?
+      assert identity.fetch("type").frozen?
+      refute_same rig[:stats][role].ftype, identity.fetch("type")
+      rig[:stats][role].ino += 10
+      rig[:stats][role].ftype.replace("changed-model-stat")
+      assert_equal "fifo", identity.fetch("type")
+      refute_equal rig[:stats][role].ino, identity.fetch("ino")
+    end
+    [rig[:session], rig[:acquisition], rig[:capture], rig[:creator], rig[:resources], *rig[:resources].values, *rig[:ios].values].each do |original|
+      refute original.frozen?, "snapshot must not freeze native lifecycle custody"
+    end
+    error = assert_raises(fixture::Failure) { rig[:invoke].call }
+    assert_equal ["fixture-source", "adapter output source identity was not bound"], [error.kind, error.message]
+    assert_same snapshot, rig[:driver].instance_variable_get(:@output_source_snapshot)
+    assert_equal [writers, 2, 1], rig.values_at(:reads, :admissions, :modeled_creates)
+
+    change_sources = lambda do |model, &edit|
+      sources = model[:spec].fd_sources.dup
+      edit.call(sources)
+      spec = spawn::SpawnSpec.allocate # Model malformed maps that the real constructor would already reject.
+      spec.instance_variable_set(:@fd_sources, sources.freeze)
+      spec.freeze
+      model[:observation].instance_variable_set(:@custodian_source_binding, [model[:acquisition], spec].freeze)
+    end
+    mutations = {
+      absent_binding: ->(m) { m[:observation].instance_variable_set(:@custodian_source_binding, nil) },
+      missing_writer: ->(m) { m[:resources].delete(:stderr_write) },
+      foreign_lease: ->(m) { m[:resources][:stdout_write] = m[:resources][:stdout_write].dup },
+      foreign_acquisition: ->(m) { m[:event_acquisition] = spawn::Acquisition.allocate },
+      wrong_session: ->(m) { m[:driver].instance_variable_set(:@native_frame, Object.new) },
+      resource_copy: ->(m) { m[:session].instance_variable_set(:@leases, m[:resources].dup) },
+      swapped_sources: ->(m) { change_sources.call(m) { |sources| sources[6], sources[7] = sources[7], sources[6] } },
+      reader_source: ->(m) { change_sources.call(m) { |sources| sources[6] = m[:resources][:stdout_read] } },
+      wrong_role: ->(m) { m[:resources][:stdout_write].instance_variable_set(:@role, :stderr_write) },
+      wrong_access: ->(m) { m[:resources][:stdout_write].instance_variable_set(:@access, :read) },
+      wrong_kind: ->(m) { m[:resources][:stdout_write].instance_variable_set(:@kind, :null) },
+      closed_writer: ->(m) { m[:resources][:stdout_write].instance_variable_set(:@state, :closed) },
+      closed_io: ->(m) { m[:closed] << :stderr_write },
+      missing_io: ->(m) { m[:resources][:stdout_write].instance_variable_set(:@io, nil) },
+      shared_writer_io: ->(m) { m[:resources][:stderr_write].instance_variable_set(:@io, m[:ios][:stdout_write]) },
+      reader_io: ->(m) { m[:resources][:stdout_write].instance_variable_set(:@io, m[:ios][:stdout_read]) },
+      joined_creator: ->(m) { m[:creator].instance_variable_set(:@joined, true) },
+      child_attempted: ->(m) { m[:acquisition].instance_variable_set(:@child_attempted, true) },
+      child_present: ->(m) { m[:acquisition].instance_variable_set(:@child, Object.new) },
+      wrong_owner: ->(m) { m[:acquisition].instance_variable_set(:@owner_slot, m[:capture]) },
+      wrong_thread: ->(m) { m[:creator].instance_variable_set(:@thread, nil) },
+      wrong_caller: ->(m) { m[:creator].instance_variable_set(:@caller, Object.new) },
+    }
+    mutations.each do |label, mutate|
+      model = adapter_output_source_model
+      mutate.call(model)
+      error = assert_raises(fixture::Failure, label.to_s) { model[:invoke].call }
+      assert_equal ["fixture-source", "adapter output source identity was not bound"], [error.kind, error.message], label.to_s
+      assert_equal true, model[:driver].instance_variable_get(:@output_source_attempted)
+      assert_nil model[:driver].instance_variable_get(:@output_source_snapshot)
+      assert_empty model[:reads]
+      assert_equal 0, model[:modeled_creates]
+      assert_raises(fixture::Failure) { model[:invoke].call }
+      assert_empty model[:reads] # Rejected original opportunity never becomes a later producer.
+      assert_equal 0, model[:modeled_creates]
+    end
+    [[:stat, 1, IOError.new("original second fstat")], [:stat, 1, Interrupt.new("original fstat cancellation")],
+     [:admission, 1, MobileReleaseKit::NativeUploadProcess::LifecycleError.new("deadline")],
+     [:admission, 2, MobileReleaseKit::NativeUploadProcess::LifecycleError.new("deadline")],
+     [:admission, 2, SystemExit.new(23, "original admission exit")]].each do |boundary, admissions, original|
+      model = adapter_output_source_model
+      if boundary == :stat
+        model[:stat_errors][:stderr_write] = original
+      else
+        model[:admission_errors][admissions] = original
+      end
+      reads = boundary == :admission && admissions == 1 ? [] : writers
+      assert_same original, assert_raises(original.class) { model[:invoke].call }
+      assert_equal [reads, admissions, 0], model.values_at(:reads, :admissions, :modeled_creates)
+      assert_nil model[:driver].instance_variable_get(:@output_source_snapshot) # First fstat alone never authorizes READY.
+      assert_raises(fixture::Failure) { model[:invoke].call }
+      assert_equal [reads, admissions, 0], model.values_at(:reads, :admissions, :modeled_creates)
+    end
+    model = adapter_output_source_model
+    model[:stats][:stderr_write].ftype.replace("file")
+    error = assert_raises(fixture::Failure) { model[:invoke].call }
+    assert_equal ["fixture-source", "adapter output source identity was not bound"], [error.kind, error.message]
+    assert_equal [writers, 1, 0], model.values_at(:reads, :admissions, :modeled_creates)
+    assert_nil model[:driver].instance_variable_get(:@output_source_snapshot)
+    %w[real-deadline immediate-deadline no-deadline kill-startup unready real-deadline-slow-cleanup].each do |mode|
+      model = adapter_output_source_model(mode: mode)
+      model[:invoke].call
+      assert_equal [[], 0, 1], model.values_at(:reads, :admissions, :modeled_creates)
+      assert_equal false, model[:driver].instance_variable_get(:@output_source_attempted)
+      assert_nil model[:driver].instance_variable_get(:@output_source_snapshot)
+    end
+  end
+
   def assert_adapter_readiness_stage_choreography
     fixture = UploadProcessFixture
+    assert_adapter_output_source_binding
     full = [["record:leader-ready.json", "validator-marker"], ["live:validator", "validator-live"],
       ["record:adapter-dispatch.json", "dispatch"], ["admission", "control-admission"],
       ["record:fork-return.json", "descendant-fork"], ["record:child-ready.json", "descendant-marker"],
@@ -4216,24 +4402,44 @@ class NativeUploadValidationTest < Minitest::Test
     # every process/file/clock operation below it is inert, not a native receipt.
     readiness_cutoff = 50 + fixture::ADAPTER_READINESS_LIMIT * 1_000_000_000
     exercise = lambda do |mode: "leader-only", stop: nil, error: nil, ready: true,
-                         initial_now: 100, advance_at: nil, advanced_now: nil|
+                         initial_now: 100, advance_at: nil, advanced_now: nil, source_fault: nil, child_mismatch: false|
       now = initial_now
-      driver = fixture::AdapterDriver.new(@root, "ios", mode, {}, deadline_ns: 40_000_000_000)
+      model = adapter_output_source_model(mode: mode)
+      driver, session = model.values_at(:driver, :session)
+      model[:invoke].call # Original writer facts exist BEFORE their modeled normal close.
+      %i[stdout_write stderr_write].each do |role|
+        model[:closed] << role
+        model[:resources][role].instance_variable_set(:@state, :closed)
+      end
+      model[:creator].instance_variable_set(:@joined, true)
+      model[:acquisition].instance_variable_set(:@child_attempted, true)
+      session.instance_variable_set(:@custodian_child, Struct.new(:pid).new(201))
+      session.instance_variable_set(:@ready, ready ? {"validator_pid" => 203, "group_id" => 202} : nil)
+      session.instance_variable_set(:@reserved, {})
+      case source_fault
+      when :absent
+        driver.instance_variable_set(:@output_source_snapshot, nil)
+      when :binding
+        model[:observation].instance_variable_set(:@custodian_source_binding, [model[:acquisition], model[:spec].dup.freeze].freeze)
+      when :resource_copy
+        session.instance_variable_set(:@leases, model[:resources].dup)
+      when :writer_io
+        model[:resources][:stdout_write].instance_variable_set(:@io, model[:ios][:stdout_read])
+      end
       marker = {"kind" => mode == "kill-startup" ? "startup-wait" : "leader-ready", "pid" => 203, "group" => 202, "sid" => 201}
       fork = {"parent" => 203, "child" => 204, "group" => 202}
-      stat = Struct.new(:dev, :ino, :mode, :uid, :gid, :rdev, :ftype, :nlink).new(1, 2, 0o10600, 3, 4, 0, "fifo", 1)
-      lease = Struct.new(:io).new(Struct.new(:stat).new(stat))
-      session = Struct.new(:ready, :reserved, :custodian_child, :leases).new(
-        ready ? {"validator_pid" => 203, "group_id" => 202} : nil, {}, Struct.new(:pid).new(201),
-        {stdout_read: lease, stderr_read: lease})
       dispatch = {"version" => 1, "pid" => 203, "group" => 202, "sid" => 201,
         "argv" => ["inert-adapter"], "environment" => {}, "cwd" => "inert-cwd", "sourceSha256" => "f" * 64}
-      {observation: Struct.new(:session).new(session), native_started_ns: 50, readiness_deadline_ns: readiness_cutoff,
+      {native_started_ns: 50, readiness_deadline_ns: readiness_cutoff,
         expected_argv: dispatch["argv"], expected_environment: dispatch["environment"], tooling: dispatch["cwd"],
         fake_source_sha: dispatch["sourceSha256"]}.each { |name, value| driver.instance_variable_set(:"@#{name}", value) }
       records = {"leader-ready.json" => marker, "startup-wait.json" => marker, "fork-return.json" => fork,
         "adapter-dispatch.json" => dispatch, "child-ready.json" => marker.merge("kind" => "child-ready", "pid" => 204,
-          "stdout" => fixture::OwnedChild.identity(stat), "stderr" => fixture::OwnedChild.identity(stat))}
+          "stdout" => fixture::OwnedChild.identity(model[:stats][:stdout_write]),
+          "stderr" => fixture::OwnedChild.identity(model[:stats][:stderr_write]))}
+      if child_mismatch
+        records["child-ready.json"]["stdout"] = fixture::OwnedChild.identity(model[:stats][:stdout_read])
+      end
       events, returned, escaped, published = [], nil, nil, Object.new
       note = lambda do |name|
         events << [name, driver.instance_variable_get(:@readiness_stage)]
@@ -4244,29 +4450,67 @@ class NativeUploadValidationTest < Minitest::Test
       control.define_singleton_method(:admitted!) { note.call("admission") }
       driver.instance_variable_set(:@control, control)
       driver.define_singleton_method(:wait_record) { |name| note.call("record:#{name}"); records.fetch(name) }
-      verify_marker = ->(marker_value, expected, label) { note.call("live:#{label}"); assert_equal expected, marker_value; true }
-      driver.define_singleton_method(:live_marker!) { |value, expected, label| verify_marker.call(value, expected, label) }
+      original_live = driver.method(:live_marker!)
+      driver.define_singleton_method(:live_marker!) { |value, expected, label| note.call("live:#{label}"); original_live.call(value, expected, label) }
+      model[:liveness] = []
+      observe = lambda do |pid, group, seconds:, parent_slot:, run_deadline_ns:|
+        assert_includes [203, 204], pid
+        assert_equal 202, group
+        assert_same model[:capture], parent_slot
+        assert_equal readiness_cutoff, run_deadline_ns
+        assert_operator seconds, :>, 0
+        model[:liveness] << pid
+        true
+      end
       driver.define_singleton_method(:observe_inherited_block!) { note.call("pipes") }
       driver.define_singleton_method(:publish_owner) { |phase| note.call("owner:#{phase}"); published }
       driver.define_singleton_method(:wait_for_driver_loss) { note.call("driver-loss") }
       write = ->(path, value) { note.call("release"); assert_equal File.join(@root, "release-validator.json"), path; assert_equal fork, value; true }
       fixture.stub(:clock_ns, -> { now }) do
-        fixture::OwnedChild.stub(:write_record, write) do
-          begin
-            returned = driver.ready!
-          rescue Exception => original
-            escaped = original
+        fixture.stub(:ready?, observe) do
+          fixture::OwnedChild.stub(:write_record, write) do
+            begin
+              returned = driver.ready!
+            rescue Exception => original
+              escaped = original
+            end
           end
         end
       end
-      [driver, events, returned, escaped, published]
+      [driver, events, returned, escaped, published, model]
     end
-    driver, events, returned, escaped, published = exercise.call
+    driver, events, returned, escaped, published, model = exercise.call
     assert_nil escaped
     assert_equal full, events
     assert_same published, returned
     assert_equal "ready-return", driver.instance_variable_get(:@readiness_stage)
     assert_equal 50.fdiv(1_000_000_000), driver.observed.fetch("readinessSeconds")
+    assert_equal [203, 204], model[:liveness]
+    assert_equal %i[stdout_write stderr_write], model[:reads] # No closed-writer resample or opposite-reader stat.
+    proof = driver.observed.fetch("descendantProof")
+    %w[stdout stderr].each do |stream|
+      identity = proof.fetch("#{stream}WriterIdentity")
+      assert_equal fixture::OwnedChild.identity(model[:stats][:"#{stream}_write"]), identity
+      refute_equal fixture::OwnedChild.identity(model[:stats][:"#{stream}_read"]), identity
+    end
+    refute_equal proof.fetch("stdoutWriterIdentity"), proof.fetch("stderrWriterIdentity")
+    %i[absent binding resource_copy writer_io].each do |source_fault|
+      driver, events, returned, escaped, _, model = exercise.call(source_fault: source_fault)
+      assert_instance_of fixture::Failure, escaped
+      assert_equal ["fixture-source", "adapter output source identity was not bound"], [escaped.kind, escaped.message]
+      assert_nil returned
+      assert_equal full.take(6), events
+      assert_equal [203], model[:liveness] # Reject BEFORE descendant observation or release.
+      assert_equal %i[stdout_write stderr_write], model[:reads]
+      refute driver.observed.key?("descendantProof")
+    end
+    driver, events, returned, escaped, _, model = exercise.call(child_mismatch: true)
+    assert_instance_of fixture::Failure, escaped
+    assert_equal ["readiness", "descendant record is not bound"], [escaped.kind, escaped.message]
+    assert_nil returned
+    assert_equal full.take(7), events
+    assert_equal [203], model[:liveness] # The REAL live_marker! equality guard vetoes the observer.
+    refute driver.observed.key?("descendantProof")
     [IOError.new("marker"), Interrupt.new("observation"), StandardError.new("dispatch"), SystemExit.new(23)].each_with_index do |error, index|
       driver, events, returned, escaped = exercise.call(stop: full[index].first, error: error)
       assert_same error, escaped

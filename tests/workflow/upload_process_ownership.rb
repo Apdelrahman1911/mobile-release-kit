@@ -14,7 +14,7 @@ module UploadProcessFixture
     class << self
       attr_accessor :current
     end
-    attr_reader :session, :events, :custodian_spec, :source_origins
+    attr_reader :session, :events, :custodian_spec, :source_origins, :custodian_source_binding
 
     class Hooks
       def initialize
@@ -69,6 +69,7 @@ module UploadProcessFixture
       @creator_gate_entered = false
       @actual_joins, @actual_closes, @actual_eofs, @actual_waits = [], [], [], []
       @session = @custodian_spec = @snapshot = nil
+      @custodian_source_binding = nil
       @entered = @finished = @hooks_restored = false
       @real_install_attempted = false
     end
@@ -98,6 +99,12 @@ module UploadProcessFixture
     # Subclasses inject test faults at real methods, never through production
     # callbacks or fabricated Open3 streams/waiters.
     def on_event(_name, _object); end
+
+    # Actual source objects from the original create call, not its JSON role
+    # labels. Only this small container is frozen; native custody stays mutable.
+    def remember_custodian_sources(acquisition, spec)
+      @custodian_source_binding ||= [acquisition, spec].freeze
+    end
 
     def install
       @real_install_attempted = true # Monotonic, BEFORE actual hook/source/native effects.
@@ -186,6 +193,7 @@ module UploadProcessFixture
         observer.instance_variable_get(:@attempts) << acquisition
         tracked = observer.session && observer.session.acquisition.equal?(acquisition)
         if tracked
+          observer.remember_custodian_sources(acquisition, spec)
           observer.instance_variable_set(:@custodian_spec,
             {"executable" => spec.executable, "argv" => spec.argv.dup,
              "environment" => spec.env.dup, "creatorCwd" => Dir.pwd,
