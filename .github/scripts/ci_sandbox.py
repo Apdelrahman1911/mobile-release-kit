@@ -46,6 +46,7 @@ _PYTHON_FULL_WORK_TMPFS = (("tmp", 640 * MiB), *((name, 16 * MiB) for name in (
     "home", "config", "cache", "gem-cache", "bundle-config", "bundle-home", "checks")))
 _PYTHON_FULL_PRIVATE_TMPFS = (("/run", 16 * MiB), ("/tmp", 128 * MiB), ("/dev/shm", 16 * MiB))
 _USERNS_PATH = Path("/proc/sys/user/max_user_namespaces")
+_COMPATIBILITY_ROLES = ("python312", "python313", "python314")
 _NATIVE_PHASES = ("source", "wheel")
 _NATIVE_PROFILES = frozenset("native-authority-" + phase for phase in _NATIVE_PHASES)
 _NATIVE_LEAVES = ("home", "tmp", "config", "cache", "probes")
@@ -557,7 +558,7 @@ _DIAGNOSTIC_OPERATIONS = frozenset({"process-groups-linux", "kernel-groups-libra
                                     "mac-original-credentials", "cleanup-batch",
                                     "network-tcp4", "network-udp4", "network-tcp6", "network-udp6"})
 _TOOL_DIAGNOSTIC_ROLES = frozenset({"python", "ruby", "sudo", "true", "sandbox-exec", "ps",
-                                    "compiler", "linker", "signature-tool", "unspecified"})
+                                    "compiler", "linker", "signature-tool", "unspecified", *_COMPATIBILITY_ROLES})
 
 
 def _observer_error_fields(value: object) -> dict | None:
@@ -904,6 +905,49 @@ def _canonical(value: str | Path) -> Path:
     return p
 
 
+def _runtime_prefix_roles(platform: str, python: Path, python_prefix: Path, ruby: Path,
+                          tool_prefixes: tuple[Path, ...],
+                          compatibility_runtimes: tuple[tuple[Path, Path], ...]) -> tuple[tuple[str, Path], ...]:
+    """Pure closed-role reconciliation; canonical metadata belongs to admission.
+
+    Normal QA007 CI supplies all three additional minors. The empty shape keeps
+    the existing bounded owner controls usable; it cannot omit CLI/catalog gates.
+    Actual minor identities are checked by owned isolated interpreter captures,
+    never inferred from a pathname or an out-of-owner discovery subprocess.
+    """
+    if (platform not in {"linux", "darwin"} or type(tool_prefixes) is not tuple
+            or type(compatibility_runtimes) is not tuple or len(compatibility_runtimes) not in (0, 3)
+            or any(type(row) is not tuple or len(row) != 2 for row in compatibility_runtimes)):
+        raise SessionError("selected provider prefix roles are incomplete or ambiguous")
+    paths = (python, python_prefix, ruby, *tool_prefixes,
+             *(path for row in compatibility_runtimes for path in row))
+    if any(not isinstance(path, Path) or not path.is_absolute() or ".." in path.parts
+           or path == Path("/") or len(str(path)) > 4096
+           or any(not 32 <= ord(c) < 127 for c in str(path)) for path in paths):
+        raise SessionError("selected provider path shape is unsupported")
+    if (python.parent.name != "bin" or ruby.parent.name != "bin" or not _under(python, python_prefix)
+            or any(executable.parent.name != "bin" or executable.parent.parent != prefix
+                   for executable, prefix in compatibility_runtimes)):
+        raise SessionError("selected executable does not have its exact provider prefix")
+    ruby_prefix = ruby.parent.parent
+    extras = tuple((role, pair[1]) for role, pair in zip(_COMPATIBILITY_ROLES, compatibility_runtimes))
+    selected = (python_prefix, ruby_prefix, *(prefix for _, prefix in extras))
+    if len(set(tool_prefixes)) != len(tool_prefixes) or any(prefix not in tool_prefixes for prefix in selected):
+        raise SessionError("selected provider prefix roles are incomplete or ambiguous")
+    remaining = tuple(prefix for prefix in tool_prefixes if prefix not in selected)
+    if len(remaining) != (1 if platform == "linux" else 0):
+        raise SessionError("selected provider prefix roles are incomplete or ambiguous")
+    roles = (("python", python_prefix), ("ruby", ruby_prefix))
+    if platform == "linux":
+        roles += (("jdk", remaining[0]),)
+    roles += extras
+    roots = tuple(prefix for _, prefix in roles)
+    if (len(roots) != len(tool_prefixes) or any(_under(a, b) or _under(b, a)
+            for index, a in enumerate(roots) for b in roots[index + 1:])):
+        raise SessionError("selected provider prefix roles overlap")
+    return roles
+
+
 def _private_file(path: Path, data: bytes, mode: int = 0o600, *, root_owned: bool = False) -> None:
     if type(root_owned) is not bool:
         raise SessionError("invalid fixed controller-file ownership option")
@@ -1216,6 +1260,55 @@ def _admit_executable(path: Path, uid: int, gid: int, *, root_owned: bool = Fals
         failure._ci_observation = {"tool": note}
         raise failure
     return note
+
+
+def _linux_native_process_toolchain(uid: int, gid: int, *, deadline: float) -> dict:
+    """Read-only binding of the one distribution ABI-fixture compiler.
+
+    Compilation/version observation belongs to ordinary Session captures, with
+    fixed /usr/bin:/bin PATH. No package installation, command lookup, provider
+    permission mutation or execution occurs here.
+    """
+    _remaining(deadline)
+    if sys.platform != "linux" or os.geteuid() != 0 or os.uname().machine != "x86_64":
+        raise SessionError("ABI fixture compiler requires the supported hosted Linux owner")
+    compiler = Path("/usr/bin/x86_64-linux-gnu-gcc-13")
+    for parent in reversed(compiler.parents):
+        _remaining(deadline)
+        _canonical(parent)
+        info = parent.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise SessionError("fixed distribution compiler ancestry is writable or unowned")
+    _canonical(compiler)
+    before = compiler.lstat()
+    # Validate the SAME metadata used as the opened-file baseline. A discarded
+    # earlier stat admission cannot authorize adopting a different later node.
+    if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or not before.st_mode & 0o111
+            or before.st_mode & (0o022 | stat.S_ISUID | stat.S_ISGID)):
+        raise SessionError("fixed distribution compiler permission/identity contract failed")
+    identity = lambda value: (_home_node(value), value.st_mode, value.st_size,
+                              value.st_nlink, value.st_mtime_ns, value.st_ctime_ns)
+    if not 0 < before.st_size <= 16 * MiB:
+        raise SessionError("fixed distribution compiler size is unsupported")
+    total, digest = 0, hashlib.sha256()
+    with compiler.open("rb") as stream:
+        if identity(os.fstat(stream.fileno())) != identity(before):
+            raise SessionError("fixed distribution compiler opened a different node")
+        while chunk := stream.read(65536):
+            _remaining(deadline)
+            total += len(chunk)
+            if total > before.st_size:
+                raise SessionError("fixed distribution compiler changed during binding")
+            digest.update(chunk)
+        if identity(os.fstat(stream.fileno())) != identity(before):
+            raise SessionError("fixed distribution compiler changed during read")
+    _remaining(deadline)
+    if total != before.st_size or identity(compiler.lstat()) != identity(before):
+        raise SessionError("fixed distribution compiler lost its original binding")
+    _canonical(compiler)
+    _remaining(deadline)
+    return {"gcc": compiler, "evidence": {"gcc_sha256": digest.hexdigest(),
+            "provider": "ubuntu-24.04-distribution", "compiler_family": "gcc-13"}}
 
 
 def _small_command(argv: list[str], seconds: float = 10.0,
@@ -1799,7 +1892,8 @@ class Session:
 
     def __init__(self, platform: str, root: str | Path, *, python: str | Path,
                  ruby: str | Path, runner_home: str | Path, runner_temp: str | Path,
-                 tool_prefixes: tuple[str | Path, ...] | list[str | Path], deadline: float):
+                 tool_prefixes: tuple[str | Path, ...] | list[str | Path], deadline: float,
+                 compatibility_runtimes: tuple[tuple[str | Path, str | Path], ...] = ()):
         if platform not in {"linux", "darwin"} or sys.platform != platform or os.geteuid() != 0:
             raise SessionError("requires root controller on the selected disposable hosted VM")
         if not isinstance(deadline, (int, float)) or not 0 < deadline - time.monotonic() <= 3300:
@@ -1812,6 +1906,16 @@ class Session:
         self.python, self.ruby = _canonical(python), _canonical(ruby)
         self.runner_home, self.runner_temp = _canonical(runner_home), _canonical(runner_temp)
         self.tool_prefixes = tuple(_canonical(p) for p in tool_prefixes)
+        if (type(compatibility_runtimes) is not tuple or len(compatibility_runtimes) not in (0, 3)
+                or any(type(pair) is not tuple or len(pair) != 2 for pair in compatibility_runtimes)):
+            raise SessionError("three fixed compatibility runtime pairs are required")
+        self.compatibility_runtimes = tuple((_canonical(executable), _canonical(prefix))
+                                           for executable, prefix in compatibility_runtimes)
+        if self.compatibility_runtimes:
+            # Bind the complete expanded scope before reservations, HOME or any
+            # provider effects. The old empty shape has no compatibility gates.
+            _runtime_prefix_roles(platform, self.python, _canonical(sys.base_prefix), self.ruby,
+                                  self.tool_prefixes, self.compatibility_runtimes)
         self.source, self.inputs = self.root / "source", self.root / "inputs"
         self.work, self.control, self.bootstrap = (self.root / n for n in ("work", "control", "bootstrap"))
         self.uid = self.gid = 60000 + secrets.randbelow(5000)  # One selection; never retry/adopt.
@@ -1823,6 +1927,7 @@ class Session:
         self.persisted_bytes = self._run_number = 0
         self.admission_results: list[dict[str, object]] = []
         self.process_observer: Path | None = None
+        self._native_process_toolchain_binding: dict | None = None
         self._home_state: dict | None = None
         self._userns_state: dict | None = None
         self._native_authority: dict[str, dict] = {}
@@ -1898,6 +2003,16 @@ class Session:
     def fail(self, reason: str) -> None:
         """Latch a controller parser/provenance failure; there is no reset API."""
         self._fail(reason)
+
+    @property
+    def native_process_toolchain(self) -> dict:
+        """Successful original admission only; callers cannot mutate custody."""
+        self._guard()
+        if not self.admitted or self._native_process_toolchain_binding is None:
+            raise SessionError("native process toolchain has no successful admission")
+        self.ensure_idle()
+        tools = self._native_process_toolchain_binding
+        return {**tools, "evidence": dict(tools["evidence"])}
 
     def _interrupted(self, signum: int, _frame) -> None:
         if signum == signal.SIGALRM:
@@ -1976,7 +2091,51 @@ class Session:
         _private_file(self.cleanup_policy, cleanup.encode(), 0o444)
         _private_file(self.write_policy, write_positive.encode(), 0o444)
 
-    def _environment(self, values: dict[str, str]) -> dict[str, str]:
+    def _validate_installed_bundle_input(self, *, deadline: float | None) -> None:
+        """Admit only the frozen positive wheel's original Gemfile/lock pair.
+
+        The fixed parent names must also be protected from subject replacement.
+        These transient file observations are not a new execution role or a
+        persistent receipt; the existing wheel inspection/freeze remain required.
+        """
+        if (type(deadline) not in (int, float) or not math.isfinite(deadline)
+                or not 0 < deadline <= self.deadline):
+            raise SessionError("installed Bundler input requires its original explicit cutoff")
+        _remaining(deadline)
+        wheel = self.work / "wheel-venv"
+        tooling = wheel / "share/mobile-release-kit"
+        directories = ((self.root, 0o755, None), (self.work, 0o755, 0),
+                       (self.source, 0o555, 0), (wheel, 0o555, 0),
+                       (wheel / "share", 0o555, 0), (tooling, 0o555, 0))
+
+        def directory_node(path: Path, mode: int, group: int | None) -> tuple:
+            _remaining(deadline)
+            if _canonical(path) != path:
+                raise SessionError("installed Bundler ancestor has a noncanonical alias")
+            info = path.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
+                    or group is not None and info.st_gid != group
+                    or stat.S_IMODE(info.st_mode) != mode):
+                raise SessionError("installed Bundler ancestor is not the original frozen layout")
+            node = (*_home_node(info), stat.S_IMODE(info.st_mode))
+            _remaining(deadline)
+            return node
+
+        originals = tuple(directory_node(*entry) for entry in directories)
+        for name in ("Gemfile", "Gemfile.lock"):
+            original, source_identity = _native_file(self.source / name, deadline=deadline,
+                uid=self.uid, gid=self.gid, root_owned=True, maximum=64 * 1024)
+            installed, installed_identity = _native_file(tooling / name, deadline=deadline,
+                uid=self.uid, gid=self.gid, root_owned=True, maximum=64 * 1024)
+            if (stat.S_IMODE(source_identity[2]) != 0o444 or stat.S_IMODE(installed_identity[2]) != 0o444
+                    or not original or installed != original):
+                raise SessionError("installed Bundler input is not the frozen original source pair")
+        for entry, original in zip(directories, originals):
+            if directory_node(*entry) != original:
+                raise SessionError("installed Bundler ancestor changed during input admission")
+        _remaining(deadline)
+
+    def _environment(self, values: dict[str, str], *, deadline: float | None = None) -> dict[str, str]:
         if not isinstance(values, dict) or set(values) - _ENV_KEYS:
             raise SessionError("unapproved environment key")
         if any(not isinstance(v, str) or "\0" in v or len(v) > 32768 for v in values.values()):
@@ -2018,16 +2177,21 @@ class Session:
                                   or not _under(Path(result[key]), self.work)):
                 raise SessionError("mutable environment path outside private work")
         for key, wanted in (("PIP_FIND_LINKS", self.inputs / "python"),
-                            ("BUNDLE_CACHE_PATH", self.inputs / "gems"),
-                            ("BUNDLE_GEMFILE", self.source / "Gemfile")):
+                            ("BUNDLE_CACHE_PATH", self.inputs / "gems")):
             if key in result and result[key] != str(wanted):
                 raise SessionError("offline input environment path differs from immutable input")
+        gemfile = result.get("BUNDLE_GEMFILE")
+        installed_gemfile = str(self.work / "wheel-venv/share/mobile-release-kit/Gemfile")
+        if gemfile not in (None, str(self.source / "Gemfile"), installed_gemfile):
+            raise SessionError("offline input environment path differs from immutable input")
         for component in result["PATH"].split(":"):
             p = Path(component)
             if not p.is_absolute() or ".." in p.parts or not any(
                 _under(p, x) for x in (*self.tool_prefixes, self.work, Path("/usr"), Path("/bin"), Path("/sbin"))
             ):
                 raise SessionError("untrusted executable PATH component")
+        if gemfile == installed_gemfile:
+            self._validate_installed_bundle_input(deadline=deadline)
         return result
 
     def _native_deadline(self, deadline: float) -> float:
@@ -3552,8 +3716,19 @@ class Session:
         self._headroom()
         _remaining(cutoff)
 
-    def _cleanup(self, *, deadline: float | None = None) -> list[str]:
+    def _cleanup(self, *, deadline: float | None = None, observe_disposal: bool = False) -> list[str]:
+        if (type(observe_disposal) is not bool or observe_disposal
+                and (self.platform != "darwin" or not getattr(self, "_admitting", False))):
+            raise SessionError("retained-domain observation requires fixed Darwin admission")
         errors = []
+        note = None
+        if observe_disposal:
+            # Only the original admission capture requests this note. These
+            # are observations of the existing root censuses, not receipts
+            # from the numerical helper and never authority for a signal.
+            note = {"name": "retained-domain-disposal", "ok": False,
+                    "saw_reserved_process": False, "empty_census": False}
+            self.admission_results.append(note)
         if self.platform == "darwin":
             try:
                 # Root observes only; kernel-authorized signalling stays in U.
@@ -3565,7 +3740,12 @@ class Session:
                 kind = "TERM"
                 while True:
                     targets = sorted(_domain("darwin", self.uid, deadline=cutoff))
+                    if note is not None:
+                        note["saw_reserved_process"] |= bool(targets)
                     if not targets:
+                        _remaining(cutoff)
+                        if note is not None:
+                            note["empty_census"] = True
                         break  # Actual root census, not a helper receipt.
                     if len(targets) > 4096:
                         raise SessionError("numerical cleanup batch exceeds fixed bound")
@@ -3584,11 +3764,13 @@ class Session:
                 if getattr(self, "_admitting", False):
                     self.admission_results.append({"name": "cleanup-exception", "ok": False,
                                                    "exceptions": _exception_notes(exc)})
+        if note is not None:
+            note["ok"] = not errors and note["empty_census"]
         return errors
 
     def run(self, argv: list[str], *, cwd: str | Path, env: dict[str, str], seconds: float,
             output_limit: int = 8 * MiB, cpu_seconds: int = 180, profile: str = "ordinary",
-            absolute_deadline: float | None = None) -> CapturedRun:
+            absolute_deadline: float | None = None, dispose_retained_domain: bool = False) -> CapturedRun:
         self._guard()
         if not self.admitted:
             raise SessionError("native admission has not completed")
@@ -3599,7 +3781,7 @@ class Session:
         try:
             return self._run(argv, cwd=cwd, env=env, seconds=seconds,
                              output_limit=output_limit, cpu_seconds=cpu_seconds, latch=True, profile=profile,
-                             absolute_deadline=absolute_deadline)
+                             absolute_deadline=absolute_deadline, dispose_retained_domain=dispose_retained_domain)
         except BaseException:
             if type(profile) is str and profile in _NATIVE_PROFILES:
                 self._fail("native authority invocation failed before a complete capture")
@@ -3612,8 +3794,21 @@ class Session:
     def _run(self, argv: list[str], *, cwd: str | Path, env: dict[str, str], seconds: float,
              output_limit: int = 8 * MiB, cpu_seconds: int = 180, latch: bool,
              cancel_after: float | None = None, profile: str = "ordinary",
-             absolute_deadline: float | None = None) -> CapturedRun:
+             absolute_deadline: float | None = None, dispose_retained_domain: bool = False) -> CapturedRun:
         self._guard()
+        if type(dispose_retained_domain) is not bool:
+            raise SessionError("retained-domain disposal requires an exact boolean")
+        if dispose_retained_domain:
+            public = latch is True and self.admitted and not self._admitting
+            admission = (latch is False and self._admitting and not self.admitted
+                         and type(argv) is list and all(type(arg) is str for arg in argv)
+                         and argv == [str(self.python), "-I", "-S", "-B", str(self.entry),
+                                      "--fixture", "retained-domain"]
+                         and cwd == self.work and env == {} and seconds == 10
+                         and output_limit == 1024 and cpu_seconds == 180 and absolute_deadline is None)
+            if (type(profile) is not str or profile != "ordinary" or cancel_after is not None
+                    or not (public or admission)):
+                raise SessionError("retained-domain disposal is outside its fixed ordinary capture role")
         bound = self.deadline
         if absolute_deadline is not None:
             if (type(absolute_deadline) not in (int, float) or not math.isfinite(absolute_deadline)
@@ -3651,7 +3846,7 @@ class Session:
             if (getattr(self, "_native_preparing", None) is not None
                     or any(not state["closed"] for state in getattr(self, "_native_authority", {}).values())):
                 raise SessionError("ordinary launch cannot overlap an unresolved native authority phase")
-            child_env = self._environment(env)
+            child_env = self._environment(env, deadline=bound)
         command, kwargs = self._argv(argv, cpu_seconds, profile=profile)
         try:
             _remaining(bound)
@@ -3716,6 +3911,22 @@ class Session:
                     self._fail(message)
             else:
                 errors.append(message)
+
+        def cleanup_once(endpoint: float) -> None:
+            nonlocal cleanup_done
+            if cleanup_done:
+                return
+            cleanup_done = True  # An after-effect exception cannot authorize a retry.
+            before = len(errors)
+            try:
+                options = {"deadline": endpoint}
+                if dispose_retained_domain and not latch and self.platform == "darwin":
+                    options["observe_disposal"] = True
+                errors.extend(self._cleanup(**options))
+            except BaseException as exc:
+                errors.append(f"reserved-domain cleanup {type(exc).__name__}")
+            if len(errors) != before and failure is None:
+                fail("reserved-domain disposal failed")
 
         try:
             sel = selectors.DefaultSelector()
@@ -3808,8 +4019,7 @@ class Session:
                         child.kill()
                         kill_sent = True
                     if code is not None and not cleanup_done:
-                        errors.extend(self._cleanup(deadline=min(bound, stop_at + 8)))
-                        cleanup_done = True
+                        cleanup_once(min(bound, stop_at + 8))
                     if now - stop_at >= 8:
                         if not all(eof):
                             errors.append("stream EOF unavailable at bounded cleanup cutoff")
@@ -3884,8 +4094,11 @@ class Session:
                         self._native_abort_stamp(abort, "wall_wait")
                 except BaseException as exc:
                     errors.append(f"original child wait {type(exc).__name__}")
-                if failure is not None and not cleanup_done:
-                    errors.extend(self._cleanup(deadline=final_cutoff))
+                if failure is not None or (dispose_retained_domain and waited and code == 0 and all(eof)):
+                    # Fixed intentional-UNKNOWN singleton success needs outer
+                    # disposal too. Keep the ORIGINAL success cutoff even if
+                    # this cleanup fails; no fresh failure tail is earned.
+                    cleanup_once(final_cutoff)
                 for stream in (child.stdout, child.stderr):
                     try:
                         stream.close()
@@ -3966,6 +4179,7 @@ class Session:
             roles = [("python", self.python, {}),
                      ("sudo", Path("/usr/bin/sudo"), {"root_owned": True, "non_set_id": False}),
                      ("true", Path("/usr/bin/true"), {"root_owned": True})]
+            roles += [(role, pair[0], {}) for role, pair in zip(_COMPATIBILITY_ROLES, self.compatibility_runtimes)]
             if self.platform == "darwin":
                 # Only root's census executes this original system ps.  Record
                 # actual image metadata without presuming why sandboxed exec failed.
@@ -3983,6 +4197,11 @@ class Session:
                         tools[role] = observation["tool"]
                     raise
             tools_note["ok"] = True
+            if self.platform == "linux" and self.compatibility_runtimes:
+                self._native_process_toolchain_binding = _linux_native_process_toolchain(
+                    self.uid, self.gid, deadline=self.deadline)
+                self.admission_results.append({"name": "native-process-toolchain", "ok": True,
+                                               **self._native_process_toolchain_binding["evidence"]})
             os.chown(self.work, self.uid, self.gid)
             for name in ("home", "tmp", "config", "cache"):
                 p = self.work / name
@@ -4002,8 +4221,9 @@ class Session:
             # those subcontrol facts and revoke this attempt's aggregate claim.
             self.admitted = False
             self.process_observer = None
+            self._native_process_toolchain_binding = None
             for row in self.admission_results:
-                if row["name"] == "process-observer":
+                if row["name"] in {"process-observer", "native-process-toolchain"}:
                     row["ok"] = False
             self.admission_results.append({"name": "native-admission-failure", "ok": False,
                                            "exceptions": _exception_notes(exc)})
@@ -4159,13 +4379,8 @@ class Session:
             raise SessionError("provider preparation requires the native root owner")
         self.ensure_idle()
         _remaining(self.deadline)
-        python_prefix = _canonical(sys.base_prefix)
-        ruby_prefix = self.ruby.parent.parent
-        remaining = [p for p in self.tool_prefixes if p not in {python_prefix, ruby_prefix}]
-        if (python_prefix not in self.tool_prefixes or ruby_prefix not in self.tool_prefixes
-                or not _under(self.python, python_prefix) or len(remaining) != 1):
-            raise SessionError("selected provider prefix roles are incomplete or ambiguous")
-        prefixes = (("python", python_prefix), ("ruby", ruby_prefix), ("jdk", remaining[0]))
+        prefixes = _runtime_prefix_roles(self.platform, self.python, _canonical(sys.base_prefix), self.ruby,
+                                        self.tool_prefixes, self.compatibility_runtimes)
         # Only this root admission method loads the immutable provider-only
         # source. The one-file copied bootstrap and every child role stay intact.
         report = {"name": "provider-runtime-permissions", "ok": False}
@@ -4595,6 +4810,7 @@ class Session:
         self.ensure_idle()
         _remaining(self.deadline)
         self.process_observer = frozen  # No caller-selected or pre-admission path.
+        self._native_process_toolchain_binding = {**tools, "evidence": dict(tools["evidence"])}
         self.admission_results.append({"name": "process-observer", "ok": True,
                                        "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
                                        "binary_sha256": hashlib.sha256(binary).hexdigest(),
@@ -4813,6 +5029,7 @@ class Session:
                 if not basic:
                     raise SessionError(f"collector admission case failed: {name}")
                 capture_note["ok"] = True
+            self._retained_domain_preflight()
             self._owner_loss_preflight()
         except BaseException as exc:
             failures.append(exc)
@@ -4824,6 +5041,32 @@ class Session:
                     failures.append(exc)
         if failures:
             raise BaseExceptionGroup("native admission and owned listener cleanup failed", failures)
+
+    def _retained_domain_preflight(self) -> None:
+        """Original rc0/EOF with intentional retained custody needs disposal.
+
+        The Darwin note observes the same cleanup censuses; no extra lookup or
+        child-provided receipt can make an empty/vacuous control pass.
+        """
+        first = len(self.admission_results)
+        result = self._run([str(self.python), "-I", "-S", "-B", str(self.entry),
+                            "--fixture", "retained-domain"], cwd=self.work, env={},
+                           seconds=10, output_limit=1024, latch=False, dispose_retained_domain=True)
+        observations = self.admission_results[first:]
+        note = self._note_capture("retained-domain", result)
+        if not result.ok or result.stdout != b"MRK_RETAINED_DOMAIN_READY\n" or result.stderr:
+            raise SessionError("retained-domain original capture/disposal control failed")
+        if self.platform == "darwin":
+            if (len(observations) != 1 or type(observations[0]) is not dict
+                    or set(observations[0]) != {"name", "ok", "saw_reserved_process", "empty_census"}
+                    or observations[0]["name"] != "retained-domain-disposal"
+                    or any(observations[0][field] is not True
+                           for field in ("ok", "saw_reserved_process", "empty_census"))):
+                raise SessionError("retained-domain control did not observe genuine original disposal")
+        elif observations:
+            raise SessionError("namespace disposal control gained an unrequested census observation")
+        self.ensure_idle()
+        note["ok"] = True
 
     def _trusted_entry(self, policy: Path, tail: list[str]) -> list[str]:
         return [str(self.python), "-I", "-S", "-B", str(self.entry), "--enter", self.platform,
@@ -5291,7 +5534,9 @@ def _ready_line(stream, seconds: float, *, deadline: float | None = None) -> byt
     if deadline is not None:
         _remaining(deadline)
         cutoff = min(cutoff, deadline)
-    with selectors.DefaultSelector() as sel:
+    sel, result, errors = None, None, []
+    try:
+        sel = selectors.DefaultSelector()
         sel.register(stream, selectors.EVENT_READ)
         while time.monotonic() < cutoff:
             if not sel.select(min(0.1, max(0, cutoff - time.monotonic()))):
@@ -5303,10 +5548,25 @@ def _ready_line(stream, seconds: float, *, deadline: float | None = None) -> byt
             if b"\n" in data:
                 if deadline is not None:
                     _remaining(cutoff)
-                return bytes(data)
+                result = bytes(data)
+                break
             if len(data) == 256:
                 raise SessionError("owned control line exceeds bound")
-    raise SessionError("owned control readiness deadline")
+        else:
+            raise SessionError("owned control readiness deadline")
+    except BaseException as exc:
+        errors.append(exc)
+    if sel is not None:
+        try:
+            sel.close()  # Exactly once; a close exception cannot replace the read error.
+        except BaseException as exc:
+            errors.append(exc)
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise BaseExceptionGroup("owned control readiness and selector cleanup failed", errors)
+    _remaining(cutoff)
+    return result
 
 
 def _signal_subject(target: int) -> None:
@@ -6041,6 +6301,55 @@ def _cleanup_numeric(uid: int, gid: int, kind: str, targets: list[int], deadline
 
 
 def _fixture(name: str) -> int:
+    if name == "retained-domain-leaf":
+        marker = b"MRK_RETAINED_LEAF_READY\n"
+        if os.write(1, marker) != len(marker):
+            raise SessionError("retained-domain leaf readiness write was incomplete")
+        os.close(1)  # This private readiness pipe is not the outer capture pipe.
+        time.sleep(30)  # Finite retained lifetime, never readiness evidence.
+        return 0
+    if name == "retained-domain":
+        started = time.monotonic()
+        ready_cutoff, cleanup_cutoff = started + 5, started + 7
+        child, reader_close_attempted, errors = None, False, []
+        try:
+            _remaining(ready_cutoff)
+            child = subprocess.Popen([sys.executable, "-I", "-S", "-B", str(Path(__file__).resolve()),
+                                      "--fixture", "retained-domain-leaf"],
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                     close_fds=True, start_new_session=True, bufsize=0)
+            if _ready_line(child.stdout, 5, deadline=ready_cutoff) != b"MRK_RETAINED_LEAF_READY\n":
+                raise SessionError("retained-domain leaf did not publish exact readiness")
+            if child.poll() is not None:
+                raise SessionError("retained-domain leaf exited before parent release")
+            reader_close_attempted = True
+            child.stdout.close()
+            _remaining(ready_cutoff)
+            print("MRK_RETAINED_DOMAIN_READY", flush=True)
+            _remaining(ready_cutoff)
+        except BaseException as exc:
+            errors.append(exc)
+        if not errors:
+            # Deliberately leave this child for the independently authorized
+            # enclosing domain. This rc0 is not an original child wait receipt.
+            return 0
+        if child is not None:
+            try:
+                if child.poll() is None:
+                    child.kill()  # Original Popen only, never a discovered PID.
+            except BaseException as exc:
+                errors.append(exc)
+            try:
+                child.wait(timeout=max(0.0, min(2, cleanup_cutoff - time.monotonic())))
+            except BaseException as exc:
+                errors.append(exc)
+            if not reader_close_attempted:
+                reader_close_attempted = True
+                try:
+                    child.stdout.close()
+                except BaseException as exc:
+                    errors.append(exc)
+        raise BaseExceptionGroup("retained-domain readiness/original-child cleanup failed", errors)
     if name in {"positive", "nonzero"}:
         print("PASS", flush=True)
         return 7 if name == "nonzero" else 0

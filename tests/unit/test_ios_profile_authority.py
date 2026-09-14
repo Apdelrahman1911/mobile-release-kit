@@ -142,9 +142,15 @@ class NativeProfileAuthorityTests(unittest.TestCase):
         cls.outer_payload = plistlib.dumps(outer)
         cls.signed = signed_cms(cls.root, cls.outer_payload, "outer")
 
-    def verify_in_new_directory(self, raw):
+    def verify_in_new_directory(self, raw, *, deadline=None):
         with tempfile.TemporaryDirectory(prefix="mrk-native-cms-") as directory:
-            return verify_cms(raw, Path(directory))
+            if deadline is None:
+                # Keep the direct, two-argument verification entry point covered.
+                return verify_cms(raw, Path(directory))
+            deadline.check()
+            # An absolute cutoff is forwarded, not a fresh native time budget.
+            # Truncating to integer nanoseconds cannot extend the shared clock.
+            return verify_cms(raw, Path(directory), deadline_ns=int(deadline.expires_at * 1_000_000_000))
 
     def test_real_production_policy_accepts_apple_public_issuer_not_test_or_macos_purpose(self):
         certificates = public_certificates()
@@ -179,7 +185,7 @@ class NativeProfileAuthorityTests(unittest.TestCase):
         # Keep REAL native crypto, both parsers, and complete DER/plist correlation.
         def crypto(raw, *, deadline):
             deadline.check()
-            return self.verify_in_new_directory(raw)
+            return self.verify_in_new_directory(raw, deadline=deadline)
         with patch("mobile_release.ios_profiles.authenticate_cms", side_effect=crypto), patch("mobile_release.ios_profile_auth.verify_profile_signer") as policy:
             decoded = decode_authenticated_profile(self.signed)
         self.assertEqual(decoded["Entitlements"], profile()["Entitlements"])
@@ -193,7 +199,7 @@ class NativeProfileAuthorityTests(unittest.TestCase):
         for inner in (self.inner_payload, original["DER-Encoded-Profile"].replace(b"com.example.reader", b"com.example.forged", 1)):
             changed = signed_cms(self.root, plistlib.dumps({**original, "DER-Encoded-Profile": inner}), "bad-inner-" + hashlib.sha256(inner).hexdigest()[:12])
             def crypto(raw, *, deadline):
-                return self.verify_in_new_directory(raw)
+                return self.verify_in_new_directory(raw, deadline=deadline)
             with patch("mobile_release.ios_profiles.authenticate_cms", side_effect=crypto), patch("mobile_release.ios_profile_auth.verify_profile_signer") as policy:
                 with self.assertRaises(ValidationError):
                     decode_authenticated_profile(changed)

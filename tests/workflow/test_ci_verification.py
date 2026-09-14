@@ -34,6 +34,48 @@ from .workflow_harness import evaluate_condition, load_workflow, simulate_steps
 
 ROOT = Path(__file__).resolve().parents[2]
 CI = ROOT / ".github/workflows/ci.yml"
+_PYTHON_POISON_FIXTURES = (
+    ("poison-wait-loss", "unit.test_native_process.NativeProcessLifecycleTests.test_native_consumed_wait_result_loss_never_retries_numeric_custody"),
+    ("poison-startup-error", "unit.test_native_process.NativeProcessLifecycleTests.test_native_error_startup_is_unknown_not_a_wait_receipt"),
+    ("poison-full-zero", "workflow.test_profile_processes.ProfileProcessTests.test_unknown_malformed_c_full_zero_retains_scratch"),
+    ("poison-full-failure", "workflow.test_profile_processes.ProfileProcessTests.test_unknown_malformed_c_full_failure_retains_scratch"),
+    ("poison-marker-parent-death", "workflow.test_profile_processes.ProfileProcessTests.test_unknown_marker_parent_death_requires_domain_disposal"),
+    ("poison-committed-parent-death", "workflow.test_profile_processes.ProfileProcessTests.test_unknown_committed_parent_death_requires_domain_disposal"),
+    ("poison-orphan", "workflow.test_profile_processes.ProfileProcessTests.test_killed_ancestor_cannot_strand_independent_native_worker_group"),
+    ("poison-payload-writer-close-failure", "workflow.test_profile_processes.ProfileGroupCleanupTests.test_unknown_payload_writer_close_failure_retains_scratch"),
+    ("poison-payload-reader-close-failure", "workflow.test_profile_processes.ProfileGroupCleanupTests.test_unknown_payload_reader_close_failure_retains_scratch"),
+    ("poison-payload-reader-close-unresolved", "workflow.test_profile_processes.ProfileGroupCleanupTests.test_unknown_payload_reader_close_unresolved_retains_scratch"),
+    ("poison-read-restored-int", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_read_restored_int"),
+    ("poison-source-restored-int", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_source_restored_int"),
+    ("poison-capture-restored-int", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_capture_restored_int"),
+    ("poison-read-restored-term-fatal", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_read_restored_term_fatal"),
+    ("poison-source-restored-term-fatal", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_source_restored_term_fatal"),
+    ("poison-capture-restored-term-fatal", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_capture_restored_term_fatal"),
+    ("poison-capture-control-close-failure", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_capture_control_close_failure"),
+    ("poison-capture-status-close-failure", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_capture_status_close_failure"),
+    ("poison-capture-payload-close-failure", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_capture_payload_close_failure"),
+    ("poison-capture-payload-close-unresolved", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_capture_payload_close_unresolved"),
+    ("poison-source-control-close-failure", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_source_control_close_failure"),
+    ("poison-source-status-close-failure", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_source_status_close_failure"),
+    ("poison-source-payload-close-failure", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_source_payload_close_failure"),
+    ("poison-source-payload-close-unresolved", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_source_payload_close_unresolved"),
+    ("poison-source-scratch-cleanup-failure", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_source_scratch_cleanup_failure"),
+    ("poison-source-scratch-cleanup-unresolved", "unit.test_default_cancellation.ProfileResourceSignalTests.test_unknown_source_scratch_cleanup_unresolved"),
+    ("poison-read-raw-close-before-completion", "unit.test_default_cancellation.ProfileResourceIOTests.test_unknown_read_raw_close_before_completion"),
+    ("poison-read-raw-close-after-completion", "unit.test_default_cancellation.ProfileResourceIOTests.test_unknown_read_raw_close_after_completion"),
+    ("poison-source-raw-close-before-completion", "unit.test_default_cancellation.ProfileResourceIOTests.test_unknown_source_raw_close_before_completion"),
+    ("poison-source-raw-close-after-completion", "unit.test_default_cancellation.ProfileResourceIOTests.test_unknown_source_raw_close_after_completion"),
+    ("poison-unpublished-scratch", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_attempted_unpublished_scratch_acquisition_retains_unknown_across_unwind_and_gc"),
+    ("poison-directory-replacement", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_directory_replacement"),
+    ("poison-symlink-replacement", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_symlink_replacement"),
+    ("poison-unexpected-child", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_unexpected_child"),
+    ("poison-keyboard-interrupt-cleanup-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_keyboard_interrupt_cleanup_failure"),
+    ("poison-keyboard-interrupt-restore-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_keyboard_interrupt_restore_failure"),
+    ("poison-keyboard-interrupt-cleanup-and-restore-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_keyboard_interrupt_cleanup_and_restore_failure"),
+    ("poison-system-exit-cleanup-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_cleanup_failure"),
+    ("poison-system-exit-restore-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_restore_failure"),
+    ("poison-system-exit-cleanup-and-restore-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_cleanup_and_restore_failure"),
+)
 HOSTED_GUARD = '''set -euo pipefail
 [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == github-hosted ]]
 '''
@@ -83,7 +125,9 @@ def fixture_paths(controller):
     # roots are synthetic; no files beneath those paths are created or opened.
     return controller.Paths(source=ROOT, work=Path("/fixture/work"), inputs=Path("/fixture/inputs"),
                             python=Path("/fixture/python/bin/python"), ruby=Path("/fixture/ruby/bin/ruby"),
-                            java_home=Path("/fixture/jdk21"))
+                            java_home=Path("/fixture/jdk21"), compatibility_runtimes=tuple(
+                                (Path(f"/fixture/python{line}/bin/python"), Path(f"/fixture/python{line}"))
+                                for line in ("312", "313", "314")))
 
 
 def coordinator_shell(platform: str) -> str:
@@ -93,10 +137,12 @@ def coordinator_shell(platform: str) -> str:
     return '''set -euo pipefail
 ruby_executable="$(command -v ruby)"
 [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]]
+[[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]]
 sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin PYTHONSAFEPATH=1 \\
   "$MRK_PYTHON" -I -B .github/scripts/verify_ci.py \\
   --platform PLATFORM --source "$GITHUB_WORKSPACE" \\
   --python "$MRK_PYTHON" --ruby "$ruby_executable" \\
+  --python-312 "$MRK_PYTHON_312" --python-313 "$MRK_PYTHON_313" --python-314 "$MRK_PYTHON_314" \\
   --runner-home "$HOME" --runner-temp "$RUNNER_TEMP" \\
   --commit "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \\
   --run-attempt "$GITHUB_RUN_ATTEMPT" --image "$ImageOS/$ImageVersion" \\
@@ -138,7 +184,7 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                     self.assertNotIn(forbidden, job)
                 self.assertEqual(job.get("permissions", workflow["permissions"]), {"contents": "read"})
                 steps = job["steps"]
-                self.assertEqual(len(steps), 6 if platform == "linux" else 5)
+                self.assertEqual(len(steps), 9 if platform == "linux" else 8)
                 for step in steps:
                     self.assertNotIn("if", step)
                     self.assertNotIn("continue-on-error", step)
@@ -155,22 +201,32 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                 self.assertEqual(set(steps[2]), {"name", "id", "uses", "with"})
                 self.assertEqual(steps[2]["uses"], "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97")
                 self.assertEqual(steps[2]["with"], {"python-version": "3.11"})
-                self.assertEqual(steps[3]["uses"], "ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b")
-                self.assertEqual(set(steps[3]), {"name", "uses", "with"})
-                self.assertEqual(steps[3]["with"], {
+                for index, line in enumerate(("312", "313", "314"), start=3):
+                    self.assertEqual(set(steps[index]), {"name", "id", "uses", "with"})
+                    self.assertEqual(steps[index]["id"], "python" + line)
+                    self.assertEqual(steps[index]["uses"], steps[2]["uses"])
+                    self.assertEqual(steps[index]["with"], {"python-version": "3." + line[1:]})
+                self.assertEqual(steps[6]["uses"], "ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b")
+                self.assertEqual(set(steps[6]), {"name", "uses", "with"})
+                self.assertEqual(steps[6]["with"], {
                     "ruby-version": "3.3.12", "bundler": "none", "bundler-cache": False,
                 })
-                for step in steps[1:4]:
+                for step in steps[1:7]:
                     self.assertNotIn("run", step)
                     self.assertNotIn("env", step)
                 if platform == "linux":
-                    self.assertEqual(set(steps[4]), {"name", "shell", "run"})
-                    self.assertEqual(steps[4]["shell"], "bash")
-                    self.assertEqual(steps[4]["run"], LINUX_TOOL_SETUP)
-                    self.assertNotIn("env", steps[4])
+                    self.assertEqual(set(steps[7]), {"name", "shell", "run"})
+                    self.assertEqual(steps[7]["shell"], "bash")
+                    self.assertEqual(steps[7]["run"], LINUX_TOOL_SETUP)
+                    self.assertNotIn("env", steps[7])
                 owner = steps[-1]
                 self.assertEqual(set(owner), {"name", "shell", "env", "run"})
-                self.assertEqual(owner["env"], {"MRK_PYTHON": "${{ steps.python.outputs.python-path }}"})
+                self.assertEqual(owner["env"], {
+                    "MRK_PYTHON": "${{ steps.python.outputs.python-path }}",
+                    "MRK_PYTHON_312": "${{ steps.python312.outputs.python-path }}",
+                    "MRK_PYTHON_313": "${{ steps.python313.outputs.python-path }}",
+                    "MRK_PYTHON_314": "${{ steps.python314.outputs.python-path }}",
+                })
                 self.assertEqual(owner["shell"], "bash")
                 self.assertEqual(owner["run"], coordinator_shell(platform))
 
@@ -266,6 +322,8 @@ sudo() {
 '''
         env = {
             "PATH": "/usr/bin:/bin", "MRK_PYTHON": "/fixture/python/bin/python",
+            "MRK_PYTHON_312": "/fixture/python312/bin/python", "MRK_PYTHON_313": "/fixture/python313/bin/python",
+            "MRK_PYTHON_314": "/fixture/python314/bin/python",
             "FIXTURE_RUBY": "/fixture/ruby/bin/ruby", "GITHUB_WORKSPACE": "/fixture/source with spaces",
             "HOME": "/fixture/runner home", "RUNNER_TEMP": "/fixture/runner temp",
             "GITHUB_SHA": "1" * 40, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
@@ -280,6 +338,8 @@ sudo() {
                 "-n", "env", "-i", "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "PYTHONSAFEPATH=1",
                 env["MRK_PYTHON"], "-I", "-B", ".github/scripts/verify_ci.py", "--platform", platform,
                 "--source", env["GITHUB_WORKSPACE"], "--python", env["MRK_PYTHON"], "--ruby", env["FIXTURE_RUBY"],
+                "--python-312", env["MRK_PYTHON_312"], "--python-313", env["MRK_PYTHON_313"],
+                "--python-314", env["MRK_PYTHON_314"],
                 "--runner-home", env["HOME"], "--runner-temp", env["RUNNER_TEMP"],
                 "--commit", env["GITHUB_SHA"], "--run-id", env["GITHUB_RUN_ID"],
                 "--run-attempt", env["GITHUB_RUN_ATTEMPT"], "--image", "fixture-image/20260909.1",
@@ -294,7 +354,7 @@ sudo() {
                                             capture_output=True, timeout=5)
                     self.assertEqual(result.returncode, status, result.stderr)
                     self.assertEqual(result.stdout.decode().split("\0"), [*expected, ""])
-            for key in ("MRK_PYTHON", "FIXTURE_RUBY"):
+            for key in ("MRK_PYTHON", "FIXTURE_RUBY", "MRK_PYTHON_312", "MRK_PYTHON_313", "MRK_PYTHON_314"):
                 with self.subTest(platform=platform, relative_runtime=key):
                     result = subprocess.run(["bash", "--noprofile", "--norc", "-c", fixture + body],
                                             env={**env, "FIXTURE_STATUS": "0", key: "relative-runtime"},
@@ -321,16 +381,22 @@ class CIControllerContractTests(unittest.TestCase):
         """Only data and fake calls: no Session, product import or native work."""
         controller = controller_module()
         paths = fixture_paths(controller)
-        authority = ci_module("ci_checks").NATIVE_AUTHORITY_IDS
+        checks = ci_module("ci_checks")
+        authority = checks.NATIVE_AUTHORITY_IDS
         ordinary = ("unit.synthetic.OrdinaryTests.test_first", "unit.synthetic.OrdinaryTests.test_second")
+        poison = {name: (identifier,) for name, identifier in zip(checks.PYTHON_POISON_PARTITIONS, checks.PYTHON_POISON_IDS)}
         inventories = {"authority": authority, "ordinary": ordinary,
-                       "all": tuple(sorted(authority + ordinary))}
-        step = next(item for item in controller.catalog(paths, "macos", deadline=2500.0)
-                    if item.id == "native-profile-" + phase)
+                       **poison, "all": tuple(sorted(authority + ordinary + checks.PYTHON_POISON_IDS))}
+        python = paths.source_python if phase == "source" else paths.wheel_python
+        step = controller.Step("native-profile-" + phase,
+            argv=(str(python), "-I", "-B", str(ROOT / "tests/workflow/run_native_profile_checks.py"),
+                  *(("--installed-wheel",) if phase == "wheel" else ())), cwd=paths.work,
+            env=tuple(sorted(controller.native_phase_environment(paths, "macos", phase).items())), seconds=900, parser="native")
         rig = SimpleNamespace(controller=controller, paths=paths, step=step, now=100.0,
                               inventories=inventories, events=[], captures=[], changes={},
                               prepare_error=None, idle_error=None, run_error=None,
-                              prepare_advance=100.0, run_advance=50.0)
+                              prepare_advance=100.0, run_advance=1.0, parsed=[], phase=phase,
+                              idle_failure_after=None)
 
         def identities(source, partition, *, deadline):
             self.assertEqual(source, ROOT)
@@ -344,7 +410,8 @@ class CIControllerContractTests(unittest.TestCase):
 
         def idle(*, deadline):
             rig.events.append(("idle", deadline))
-            if rig.idle_error is not None and rig.captures:
+            if (rig.idle_error is not None and rig.captures
+                    and (rig.idle_failure_after is None or len(rig.captures) >= rig.idle_failure_after)):
                 raise rig.idle_error
 
         def prepare(selected, *, deadline):
@@ -354,17 +421,37 @@ class CIControllerContractTests(unittest.TestCase):
                 raise rig.prepare_error
 
         def run(argv, **options):
-            partition = "authority" if "--authority" in argv else "ordinary"
+            partition = ("authority" if "--authority" in argv else "ordinary" if "--ordinary" in argv else
+                         next((name for name in controller.PYTHON_POISON_PARTITIONS if f"--{name}-{phase}" in argv), "healthy"))
             rig.events.append(("run", argv, options))
             if rig.run_error is not None:
                 raise rig.run_error
             ids = rig.inventories[partition]
             text = "".join(f"{name.rsplit('.', 1)[1]} ({name}) ... ok\n" for name in ids)
             text += f"\nRan {len(ids)} tests in 0.01s\n\nOK\n"
+            stdout = b""
+            if partition in controller.PYTHON_POISON_PARTITIONS:
+                package = (paths.work / "source-build/src/mobile_release" if phase == "source" else
+                           paths.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
+                prefix = str(paths.python.parent.parent)
+                metadata = {"schema": "mrk-native-python-runtime-v1", "phase": phase, "implementation": "cpython",
+                    "version": [3, 11, 1], "executable": str(python), "base_prefix": prefix, "base_exec_prefix": prefix,
+                    "prefix": prefix, "exec_prefix": prefix, "isolated": True, "package_root": str(package),
+                    "origins": {"mobile_release": str(package / "__init__.py"),
+                                "mobile_release._native_process": str(package / "_native_process.py")}}
+                stdout = (controller.NATIVE_PYTHON_RUNTIME_PREFIX + json.dumps(metadata) + "\n").encode()
+            elif partition == "healthy":
+                detail = {"failure_callbacks": []}
+                if phase == "source":
+                    detail["storage_profile"] = {"name": "linux-python-full-v1", "logical_file_bytes": 4296015872,
+                        "file_data_bytes": 956301312, "tmpfs_mounts": 11, "write_controls": 11,
+                        "readonly_errno": 30, "capacity_errno": 28, "capacity_bytes": 16777216, "max_user_namespaces": 0}
+                stdout = ("MRK_CHECK_RESULT=" + json.dumps({"check": rig.step.id, "ok": True,
+                    "tests": [{"id": identifier, "outcome": "ok"} for identifier in ids], "details": detail}) + "\n").encode()
             values = dict(ok=True, returncode=0, waited=True, stdout_eof=True, stderr_eof=True,
-                          domain_finality=True, primary_error=None, cleanup_errors=(), stdout=b"",
+                          domain_finality=True, primary_error=None, cleanup_errors=(), stdout=stdout,
                           stderr=text.encode(), duration=rig.run_advance, timed_out=False,
-                          cancelled=False, persisted=(0, len(text)))
+                          cancelled=False, persisted=(len(stdout), len(text)))
             capture = SimpleNamespace(**{**values, **rig.changes.get(partition, {})})
             rig.captures.append(capture)
             rig.now += rig.run_advance
@@ -374,31 +461,171 @@ class CIControllerContractTests(unittest.TestCase):
         rig.session = SimpleNamespace(ensure_idle=idle, prepare_native_authority=prepare, run=run)
         return rig
 
+    def _python_gate_fixture(self, phase="source", *, deadline=2500.0):
+        rig = self._native_gate_fixture(phase)
+        controller, paths = rig.controller, rig.paths
+        healthy = rig.inventories["ordinary"]
+        poison = {name: rig.inventories[name] for name in controller.PYTHON_POISON_PARTITIONS}
+        rig.inventories = {"healthy": healthy, **poison,
+            "all": tuple(sorted(healthy + tuple(identifier for ids in poison.values() for identifier in ids)))}
+        name = "python-full" if phase == "source" else "python-wheel"
+        python = paths.source_python if phase == "source" else paths.wheel_python
+        rig.step = controller.Step(name, argv=(str(python), "-I", "-B", str(paths.checks), "--check", name,
+            "--source-root", str(ROOT), "--work-root", str(paths.work / "checks"), "--deadline", repr(deadline)),
+            cwd=paths.work, env=tuple(sorted(controller.native_phase_environment(paths, "linux", phase).items())),
+            seconds=900, parser="check")
+
+        def identities(source, selection, partition, *, deadline):
+            self.assertEqual(source, ROOT)
+            self.assertEqual(selection, "full" if phase == "source" else "wheel")
+            rig.events.append(("inventory", partition, deadline))
+            return rig.inventories[partition]
+
+        rig.checks.python_capture_ids = identities
+        rig.checks.linux_allowed_skips = frozenset
+        return rig
+
     def _perform_native_fixture(self, rig, *, step=None, platform="macos", deadline=2500.0):
+        original_parser = rig.controller.parse_capture
+
+        def parse(part, captured, *args, **kwargs):
+            rig.parsed.append(captured)
+            return original_parser(part, captured, *args, **kwargs)
+
         with patch.object(rig.controller.time, "monotonic", side_effect=lambda: rig.now), \
-                patch.object(rig.controller, "check_capacity"):
+                patch.object(rig.controller, "check_capacity"), patch.object(rig.controller, "parse_capture", side_effect=parse):
             return rig.controller.perform_step(step or rig.step, rig.paths, rig.session, rig.checks,
                                                {}, platform, deadline=deadline)
 
-    def test_native_gate_keeps_two_real_capture_records_and_one_source_wheel_cutoff(self):
+    def test_original_capture_reason_codes_are_finite_bounded_and_never_authorize_finality(self):
+        controller = controller_module()
+        private = "PRIVATE_DIAGNOSTIC_CANARY"
+        stdout = ("reserved-domain disposal failed\n" + private + "\n").encode()
+        stderr = ("reserved identity census OSError\n" + private + "\n").encode()
+        fields = dict(ok=True, returncode=0, waited=True, stdout_eof=True, stderr_eof=True,
+            domain_finality=True, timed_out=False, cancelled=False, primary_error=None, cleanup_errors=(),
+            stdout=stdout, stderr=stderr, persisted=(len(stdout), len(stderr)), duration=0.01)
+        original = SimpleNamespace(**fields)
+        observed = controller.capture_observations(original)
+        self.assertIsNone(observed["primary_error_code"])  # Child text cannot supply owner reasons.
+        self.assertEqual(observed["cleanup_error_codes"], [])
+        self.assertEqual((observed["cleanup_error_count"], observed["cleanup_error_codes_omitted"]), (0, 0))
+        controller.require_original_finality(original)
+
+        known = (
+            ("command exited 7", "COMMAND_EXIT"), ("command exited -9", "COMMAND_EXIT"),
+            ("command/original aggregate deadline expired", "TIMEOUT"),
+            ("command cancellation", "CANCELLATION"), ("late controller cancellation", "CANCELLATION"),
+            ("finality exceeded original command cutoff", "FINALITY_TIMEOUT"),
+            ("per-stream or whole-attempt persisted-output limit", "OUTPUT_LIMIT"),
+            ("subject per-process RSS limit exceeded", "RSS_LIMIT"),
+            ("native original-parent observation identity mismatch", "ORIGINAL_IDENTITY"),
+            ("native terminal status disagrees with original wait", "ORIGINAL_WAIT_STATUS"),
+            ("original wait or complete stream EOF missing", "WAIT_OR_EOF"),
+            ("stream EOF unavailable at bounded cleanup cutoff", "STREAM_EOF"),
+            ("late capture/cleanup/finality error", "FINALIZATION"),
+            ("capture persisted length differs from returned bytes", "CAPTURE_LENGTH"),
+            ("reserved identity did not reach finality", "DOMAIN_FINALITY"),
+            ("reserved-domain disposal failed", "RETAINED_DOMAIN_DISPOSAL"),
+            ("collection OSError", "COLLECTION"), ("collection " + private, "COLLECTION"),
+            ("numerical cleanup ExceptionGroup", "NUMERICAL_CLEANUP"),
+            ("reserved-domain cleanup KeyboardInterrupt", "RETAINED_DOMAIN_CLEANUP"),
+            ("original child stop OSError", "ORIGINAL_STOP"),
+            ("original child wait TimeoutError", "ORIGINAL_WAIT"),
+            ("stream close OSError", "STREAM_CLOSE"), ("selector close OSError", "SELECTOR_CLOSE"),
+            ("capture fsync OSError", "CAPTURE_FSYNC"), ("capture persist OSError", "CAPTURE_PERSIST"),
+            ("capture close OSError", "CAPTURE_CLOSE"), ("reserved identity census OSError", "DOMAIN_CENSUS"),
+        )
+        for reason, code in known:
+            for primary in (True, False):
+                with self.subTest(reason=reason, primary=primary):
+                    original = SimpleNamespace(**{**fields, "primary_error": reason if primary else None,
+                        "cleanup_errors": () if primary else (reason,)})
+                    before = dict(vars(original))
+                    observed = controller.capture_observations(original)
+                    self.assertEqual(observed["primary_error_code"], code if primary else None)
+                    self.assertEqual(observed["cleanup_error_codes"], [] if primary else [code])
+                    self.assertEqual(observed["cleanup_error_count"], 0 if primary else 1)
+                    self.assertEqual(observed["cleanup_error_codes_omitted"], 0)
+                    reported = controller.failure_details(original)
+                    for key, value in observed.items():
+                        self.assertEqual(reported[key], value)
+                    self.assertNotIn(reason, json.dumps(reported))
+                    self.assertNotIn(private, json.dumps(reported))
+                    with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                        controller.require_original_finality(original)
+                    self.assertEqual(vars(original), before)
+
+        class Unformattable:
+            def __str__(self):
+                raise AssertionError("diagnostics cannot format an arbitrary reason")
+
+        unknown = (private + " /private/secret pid=4242", "collection OSError: " + private,
+            "collection OSError\n" + private, "collection \u03bbError", "collection " + "A" * 81,
+            "command exited +7", "command exited 07", "command exited 12345678901",
+            "command exited 7 /private/secret", "reserved-domain disposal failed " + private,
+            "reserved identity census ", "x" * 65536, b"collection OSError", None, True, Unformattable())
+        for index, reason in enumerate(unknown):
+            with self.subTest(unclassified=index):
+                original = SimpleNamespace(**{**fields, "primary_error": reason, "cleanup_errors": (reason,)})
+                observed = controller.capture_observations(original)
+                self.assertEqual(observed["primary_error_code"], None if reason is None else "UNCLASSIFIED")
+                self.assertEqual(observed["cleanup_error_codes"], ["UNCLASSIFIED"])
+                for hidden in (private, "/private/", "4242", "OSError", "\u03bbError"):
+                    self.assertNotIn(hidden, json.dumps(observed))
+                with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                    controller.require_original_finality(original)
+
+        self.assertEqual(controller.CAPTURE_ERROR_CODE_LIMIT, 32)
+        for count in (0, 1, 32, 33, 80):
+            with self.subTest(cleanup_count=count):
+                reasons = tuple("stream close OSError" if index % 2 else private for index in range(count))
+                original = SimpleNamespace(**{**fields, "primary_error": "reserved-domain disposal failed",
+                    "cleanup_errors": reasons})
+                with patch.object(controller, "_capture_error_code", wraps=controller._capture_error_code) as classify:
+                    observed = controller.capture_observations(original)
+                self.assertEqual([call.args[0] for call in classify.call_args_list],
+                    [*reasons[:32], original.primary_error])
+                self.assertEqual(observed["cleanup_error_codes"],
+                    ["STREAM_CLOSE" if index % 2 else "UNCLASSIFIED" for index in range(min(count, 32))])
+                self.assertEqual((observed["cleanup_error_count"], observed["cleanup_error_codes_omitted"]),
+                    (count, max(0, count - 32)))
+                self.assertLess(len(json.dumps(observed)), 4096)
+                self.assertNotIn(private, json.dumps(observed))
+                observed["primary_error_code"] = None
+                observed["cleanup_error_codes"].clear()  # Publication cannot alter the original evidence.
+                self.assertEqual(original.cleanup_errors, reasons)
+                self.assertEqual(original.primary_error, "reserved-domain disposal failed")
+                with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                    controller.require_original_finality(original)
+
+    def test_native_gate_keeps_every_original_capture_record_and_one_source_wheel_cutoff(self):
         for phase, original_deadline, cutoff in (("source", 2500.0, 1000.0), ("wheel", 800.0, 800.0)):
             with self.subTest(phase=phase):
                 rig = self._native_gate_fixture(phase)
+                parts = ("authority", "ordinary", *rig.controller.PYTHON_POISON_PARTITIONS)
                 result = self._perform_native_fixture(rig, deadline=original_deadline)
                 self.assertTrue(result.ok, result)
                 self.assertEqual(result.details["stage"], "complete")
                 self.assertEqual(result.details["completed"], list(rig.inventories["all"]))
-                self.assertEqual(result.details["tests"], 7)
+                self.assertEqual(result.details["tests"], len(rig.inventories["all"]))
                 self.assertNotIn("returncode", result.details)  # No invented aggregate capture.
                 records = result.details["partitions"]
-                self.assertEqual([row["status"] for row in records], ["PASS", "PASS"])
+                self.assertEqual([row["partition"] for row in records], list(parts))
+                self.assertEqual([row["status"] for row in records], ["PASS"] * len(parts))
                 calls = [event for event in rig.events if event[0] == "run"]
-                self.assertEqual(len(calls), 2)
+                self.assertEqual(len(calls), len(parts))
                 python = rig.paths.source_python if phase == "source" else rig.paths.wheel_python
                 entry = str(ROOT / "tests/workflow/run_native_profile_checks.py")
                 tail = [] if phase == "source" else ["--installed-wheel"]
                 self.assertEqual(calls[0][1], [str(python), "-I", "-S", "-B", entry, "--authority", *tail])
                 self.assertEqual(calls[1][1], [str(python), "-I", "-B", entry, "--ordinary", *tail])
+                for index, partition in enumerate(rig.controller.PYTHON_POISON_PARTITIONS, 2):
+                    self.assertEqual(calls[index][1], [str(python), "-I", "-S", "-B", entry, f"--{partition}-{phase}"])
+                    self.assertEqual(calls[index][2]["profile"], "ordinary")
+                    self.assertEqual(calls[index][2]["cwd"], rig.paths.work)
+                    self.assertEqual(calls[index][2]["env"], dict(rig.step.env))
+                    self.assertEqual(records[index]["runtime"]["phase"], phase)
                 self.assertEqual(calls[0][2]["env"], {})
                 self.assertEqual(calls[0][2]["cwd"], rig.paths.work / ("native-authority-" + phase))
                 self.assertEqual(calls[0][2]["profile"], "native-authority-" + phase)
@@ -406,6 +633,7 @@ class CIControllerContractTests(unittest.TestCase):
                 self.assertEqual(calls[1][2]["cwd"], rig.paths.work)
                 self.assertEqual(calls[1][2]["profile"], "ordinary")
                 for index, (_, _, options) in enumerate(calls):
+                    self.assertIs(options["dispose_retained_domain"], parts[index] in dict(_PYTHON_POISON_FIXTURES))
                     self.assertEqual(options["absolute_deadline"], cutoff)
                     self.assertEqual(options["seconds"], 900)
                     self.assertEqual(options["cpu_seconds"], 180)
@@ -413,6 +641,7 @@ class CIControllerContractTests(unittest.TestCase):
                     self.assertEqual(records[index]["capture"],
                                      rig.controller.capture_observations(rig.captures[index]))
                     self.assertEqual(records[index]["completed"], list(rig.inventories[records[index]["partition"]]))
+                    self.assertIs(rig.parsed[index], rig.captures[index])
                 self.assertEqual([event for event in rig.events if event[0] == "prepare"], [("prepare", phase, cutoff)])
                 package = (rig.paths.work / "source-build/src/mobile_release" if phase == "source"
                            else rig.paths.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
@@ -431,7 +660,7 @@ class CIControllerContractTests(unittest.TestCase):
                 self.assertEqual(rig.events, [])
         self.assertEqual(self._perform_native_fixture(rig, platform="linux").error, "NATIVE_GATE_CONTRACT")
         self.assertEqual(rig.events, [])
-        for mutation in ("missing", "duplicate", "overlap", "expanded-authority"):
+        for mutation in ("missing", "duplicate", "overlap", "expanded-authority", "pooled-poison", "missing-poison"):
             with self.subTest(mutation=mutation):
                 rig = self._native_gate_fixture()
                 if mutation == "missing":
@@ -440,17 +669,24 @@ class CIControllerContractTests(unittest.TestCase):
                     rig.inventories["ordinary"] *= 2
                 elif mutation == "overlap":
                     rig.inventories["ordinary"] += rig.inventories["authority"][:1]
-                else:
+                elif mutation == "expanded-authority":
                     rig.inventories["authority"] += rig.inventories["ordinary"][:1]
+                elif mutation == "pooled-poison":
+                    rig.inventories["poison-wait-loss"] += rig.inventories["poison-startup-error"]
+                else:
+                    rig.inventories["poison-startup-error"] = ()
                 result = self._perform_native_fixture(rig)
                 self.assertEqual(result.error, "NATIVE_PARTITION_UNION")
                 self.assertFalse(any(event[0] in {"package", "prepare", "run"} for event in rig.events))
-                self.assertEqual([row["status"] for row in result.details["partitions"]], ["UNEXECUTED"] * 2)
+                self.assertEqual([row["status"] for row in result.details["partitions"]],
+                                 ["UNEXECUTED"] * (2 + len(controller.PYTHON_POISON_PARTITIONS)))
 
     def test_native_gate_failure_preserves_original_capture_and_never_runs_later_partition(self):
         failure = OSError("synthetic private failure; must not be published")
+        parts = ("authority", "ordinary", *controller_module().PYTHON_POISON_PARTITIONS)
         for mode in ("preparation", "launch", "exit", "wait", "stdout-eof", "stderr-eof", "finality",
-                     "timeout", "cancel", "primary", "cleanup", "parser", "idle", "diagnostic", "ordinary"):
+                     "timeout", "cancel", "primary", "cleanup", "parser", "idle", "diagnostic", "ordinary",
+                     *parts[2:], "poison-origin"):
             with self.subTest(mode=mode):
                 rig = self._native_gate_fixture()
                 fields = {"exit": {"returncode": 1}, "wait": {"waited": False},
@@ -469,6 +705,10 @@ class CIControllerContractTests(unittest.TestCase):
                     rig.idle_error = failure
                 elif mode == "ordinary":
                     rig.changes["ordinary"] = {"returncode": 1}
+                elif mode in parts[2:]:
+                    rig.changes[mode] = {"returncode": 1}
+                elif mode == "poison-origin":
+                    rig.changes["poison-wait-loss"] = {"stdout": b"foreign metadata\n"}
                 else:
                     rig.changes["authority"] = fields[mode]
                 with contextlib.ExitStack() as stack:
@@ -478,11 +718,12 @@ class CIControllerContractTests(unittest.TestCase):
                 self.assertFalse(result.ok)
                 self.assertNotIn(str(failure), json.dumps(result.details))
                 records = result.details["partitions"]
-                expected_count = 0 if mode in {"preparation", "launch"} else 2 if mode == "ordinary" else 1
+                failed_index = parts.index(mode) if mode in parts else 2 if mode == "poison-origin" else 0
+                expected_count = 0 if mode in {"preparation", "launch"} else failed_index + 1
                 self.assertEqual(len(rig.captures), expected_count)
-                self.assertEqual(records[1]["status"], "FAIL" if mode == "ordinary" else "UNEXECUTED")
-                if mode == "ordinary":
-                    self.assertEqual(records[0]["status"], "PASS")
+                for index, row in enumerate(records):
+                    self.assertEqual(row["status"], "UNEXECUTED" if mode == "preparation" or index > failed_index
+                                     else "FAIL" if index == failed_index else "PASS")
                 if mode == "preparation":
                     self.assertEqual(records[0]["status"], "UNEXECUTED")
                 for index, capture in enumerate(rig.captures):
@@ -493,16 +734,17 @@ class CIControllerContractTests(unittest.TestCase):
                     self.assertIn("idle_error", records[0])
                     self.assertIn("diagnostic_error", records[0])
 
-    def test_native_gate_deadline_covers_preparation_both_captures_and_final_reconciliation(self):
-        for mode in ("preparation", "authority", "ordinary", "union"):
+    def test_native_gate_deadline_covers_preparation_every_original_and_final_reconciliation(self):
+        parts = ("authority", "ordinary", *controller_module().PYTHON_POISON_PARTITIONS)
+        for mode in ("preparation", *parts, "union"):
             with self.subTest(mode=mode):
                 rig = self._native_gate_fixture()
                 if mode == "preparation":
                     rig.prepare_advance = 900.0
-                elif mode == "authority":
-                    rig.run_advance = 800.0
-                elif mode == "ordinary":
-                    rig.run_advance = 400.0
+                elif mode in parts:
+                    # One original cutoff: preparation has already consumed
+                    # 100s. Expire during this exact original, not a renewed one.
+                    rig.run_advance = 801.0 / (parts.index(mode) + 1)
                 reconciliations = []
 
                 def late_sorted(values, *args, **kwargs):
@@ -519,77 +761,194 @@ class CIControllerContractTests(unittest.TestCase):
                     result = self._perform_native_fixture(rig)
                 self.assertFalse(result.ok)
                 self.assertEqual(result.error, "AGGREGATE_DEADLINE")
-                self.assertEqual(len(rig.captures), {"preparation": 0, "authority": 1, "ordinary": 2, "union": 2}[mode])
+                self.assertEqual(len(rig.captures), 0 if mode == "preparation" else len(parts) if mode == "union"
+                                 else parts.index(mode) + 1)
                 records = result.details["partitions"]
                 if mode == "preparation":
-                    self.assertEqual([row["status"] for row in records], ["UNEXECUTED"] * 2)
+                    self.assertEqual([row["status"] for row in records], ["UNEXECUTED"] * len(parts))
                 elif mode == "authority":
                     self.assertEqual(records[1]["status"], "UNEXECUTED")
                 elif mode == "union":
-                    self.assertEqual([row["status"] for row in records], ["PASS"] * 2)
+                    self.assertEqual([row["status"] for row in records], ["PASS"] * len(parts))
                     self.assertEqual(len(reconciliations), 2)
                 for index, capture in enumerate(rig.captures):
                     self.assertEqual(records[index]["capture"]["persisted"], list(capture.persisted))
 
     def test_fixed_linux_python_storage_profile_is_selected_only_for_full_discovery(self):
-        controller = controller_module()
-        paths = fixture_paths(controller)
-        launched = []
+        profiles = []
+        for phase, original_deadline, cutoff in (("source", 2500.0, 1000.0), ("wheel", 800.0, 800.0)):
+            with self.subTest(phase=phase):
+                rig = self._python_gate_fixture(phase, deadline=original_deadline)
+                parts = ("healthy", *rig.controller.PYTHON_POISON_PARTITIONS)
+                result = self._perform_native_fixture(rig, platform="linux", deadline=original_deadline)
+                self.assertTrue(result.ok, result)
+                rows = result.details["partitions"]
+                self.assertEqual([row["partition"] for row in rows], list(parts))
+                self.assertEqual([row["status"] for row in rows], ["PASS"] * len(parts))
+                self.assertEqual(result.details["completed"], list(rig.inventories["all"]))
+                self.assertEqual(result.details["tests"], len(rig.inventories["all"]))
+                self.assertNotIn("returncode", result.details)
+                calls = [event for event in rig.events if event[0] == "run"]
+                self.assertEqual(len(calls), len(parts))
+                self.assertEqual(calls[0][1], list(rig.step.argv))
+                self.assertEqual(calls[0][1][-2:], ["--deadline", repr(original_deadline)])
+                python = rig.paths.source_python if phase == "source" else rig.paths.wheel_python
+                entry = str(ROOT / "tests/workflow/run_native_profile_checks.py")
+                for index, (_, argv, options) in enumerate(calls):
+                    profiles.append(options["profile"])
+                    self.assertIs(options["dispose_retained_domain"], parts[index] in dict(_PYTHON_POISON_FIXTURES))
+                    self.assertEqual(options["profile"], "python-full" if index == 0 and phase == "source" else "ordinary")
+                    self.assertEqual(options["cpu_seconds"], 300 if index == 0 and phase == "source" else 180)
+                    self.assertEqual(options["seconds"], 900)
+                    self.assertEqual(options["absolute_deadline"], cutoff)
+                    self.assertEqual(options["output_limit"], 8 * 1024**2)
+                    self.assertEqual(options["cwd"], rig.paths.work)
+                    self.assertEqual(options["env"], dict(rig.step.env))
+                    self.assertIs(rig.parsed[index], rig.captures[index])
+                    self.assertEqual(rows[index]["capture"], rig.controller.capture_observations(rig.captures[index]))
+                    if index:
+                        self.assertEqual(argv, [str(python), "-I", "-S", "-B", entry,
+                                               f"--{rows[index]['partition']}-{phase}"])
+                        self.assertEqual(rows[index]["tests"], 1)
+                        self.assertEqual(rows[index]["runtime"]["phase"], phase)
+                self.assertEqual("storage_profile" in rows[0]["summary"]["details"], phase == "source")
+                self.assertFalse(any(event[0] == "prepare" for event in rig.events))
+                self.assertTrue(all(event[-1] == cutoff for event in rig.events if event[0] != "run"))
+                positions = [index for index, event in enumerate(rig.events) if event[0] == "run"]
+                for index, position in enumerate(positions):
+                    self.assertEqual(rig.events[position - 1], ("idle", cutoff))
+                    end = positions[index + 1] if index + 1 < len(positions) else len(rig.events)
+                    self.assertIn(("idle", cutoff), rig.events[position + 1:end])
+        self.assertEqual(profiles.count("python-full"), 1)
 
-        def run(argv, **kwargs):
-            launched.append((argv, kwargs))
-            return SimpleNamespace(ok=True)
+    def test_python_gate_rejects_contract_partition_and_singleton_origin_drift(self):
+        for phase in ("source", "wheel"):
+            for fault in ("argv", "profile-shape", "healthy-omission", "duplicate", "pooled", "missing", "origin"):
+                with self.subTest(phase=phase, fault=fault):
+                    rig = self._python_gate_fixture(phase)
+                    parts = ("healthy", *rig.controller.PYTHON_POISON_PARTITIONS)
+                    step = rig.step
+                    if fault == "argv":
+                        step = dataclasses.replace(step, argv=(*step.argv[:-1], "1000.0"))
+                    elif fault == "profile-shape":
+                        step = dataclasses.replace(step, seconds=899)
+                    elif fault == "healthy-omission":
+                        rig.inventories["healthy"] = rig.inventories["healthy"][:-1]
+                    elif fault == "duplicate":
+                        rig.inventories["healthy"] *= 2
+                    elif fault == "pooled":
+                        rig.inventories["poison-wait-loss"] += rig.inventories["poison-startup-error"]
+                    elif fault == "missing":
+                        rig.inventories["poison-startup-error"] = ()
+                    else:
+                        original_run = rig.session.run
 
-        session = SimpleNamespace(ensure_idle=lambda: None, run=run)
-        with patch.object(controller, "check_clock"), patch.object(controller, "check_capacity"), \
-                patch.object(controller, "parse_capture", return_value=controller.CheckResult(True)):
-            for platform in ("linux", "macos"):
-                for step in controller.catalog(paths, platform, deadline=1000.0):
-                    # Native authority has a distinct two-capture contract;
-                    # the focused tests below cover that path independently.
-                    if step.kind != "command" or step.parser == "native":
-                        continue
-                    result = controller.perform_step(step, paths, session, None, {}, platform, deadline=1000.0)
-                    self.assertTrue(result.ok)
-                    argv, options = launched[-1]
-                    expected = "python-full" if platform == "linux" and step.id == "python-full" else "ordinary"
-                    self.assertEqual(options["profile"], expected)
-                    self.assertEqual(argv, list(step.argv))
-                    self.assertEqual(options["cwd"], step.cwd)
-                    self.assertEqual(options["env"], dict(step.env))
-                    self.assertEqual(options["seconds"], step.seconds)
-        self.assertEqual(sum(options["profile"] == "python-full" for _, options in launched), 1)
+                        def run(argv, **options):
+                            value = original_run(argv, **options)
+                            if "--poison-wait-loss-" + phase in argv:
+                                record = json.loads(value.stdout.decode().split("=", 1)[1])
+                                record["package_root"] = "/foreign/source/mobile_release"
+                                value.stdout = (rig.controller.NATIVE_PYTHON_RUNTIME_PREFIX + json.dumps(record) + "\n").encode()
+                            return value
+
+                        rig.session.run = run
+                    result = self._perform_native_fixture(rig, step=step, platform="linux")
+                    self.assertFalse(result.ok)
+                    self.assertEqual(len(rig.captures), 2 if fault == "origin" else 0)
+                    if fault == "origin":
+                        self.assertEqual(result.error, "NATIVE_PYTHON_RUNTIME_ORIGIN")
+                        self.assertEqual([row["status"] for row in result.details["partitions"]],
+                                         ["PASS", "FAIL", *(["UNEXECUTED"] * (len(parts) - 2))])
+                    else:
+                        self.assertEqual(result.error, "PYTHON_GATE_CONTRACT" if fault in {"argv", "profile-shape"} else "PYTHON_CAPTURE_UNION")
+                        self.assertEqual([row["status"] for row in result.details["partitions"]], ["UNEXECUTED"] * len(parts))
+
+    def test_python_gate_stops_after_each_failed_original_and_keeps_one_cutoff(self):
+        parts = ("healthy", *controller_module().PYTHON_POISON_PARTITIONS)
+        for phase in ("source", "wheel"):
+            for failed, partition in enumerate(parts):
+                for fault in ("exit", "wait", "stdout", "stderr", "domain", "timeout", "cancel", "cleanup", "idle", "deadline"):
+                    with self.subTest(phase=phase, partition=partition, fault=fault):
+                        rig = self._python_gate_fixture(phase)
+                        fields = {"exit": {"returncode": 1}, "wait": {"waited": False},
+                                  "stdout": {"stdout_eof": False}, "stderr": {"stderr_eof": False},
+                                  "domain": {"domain_finality": False}, "timeout": {"timed_out": True},
+                                  "cancel": {"cancelled": True}, "cleanup": {"cleanup_errors": ("CLOSE",)}}
+                        if fault == "idle":
+                            rig.idle_error, rig.idle_failure_after = OSError("PRIVATE_IDLE_ERROR"), failed + 1
+                        elif fault == "deadline":
+                            rig.run_advance = 901.0 / (failed + 1)
+                        else:
+                            rig.changes[partition] = fields[fault]
+                        result = self._perform_native_fixture(rig, platform="linux")
+                        self.assertFalse(result.ok)
+                        self.assertEqual(len(rig.captures), failed + 1)
+                        rows = result.details["partitions"]
+                        self.assertEqual([row["status"] for row in rows],
+                            ["PASS"] * failed + ["FAIL"] + ["UNEXECUTED"] * (len(parts) - failed - 1))
+                        self.assertNotIn("PRIVATE_IDLE_ERROR", json.dumps(result.details))
+                        for index, capture in enumerate(rig.captures):
+                            for field, value in rig.controller.capture_observations(capture).items():
+                                self.assertEqual(rows[index]["capture"][field], value)
+                        self.assertTrue(all(event[2]["absolute_deadline"] == 1000.0
+                                            for event in rig.events if event[0] == "run"))
+                        if fault == "deadline":
+                            self.assertEqual(result.error, "AGGREGATE_DEADLINE")
+
+        for phase in ("source", "wheel"):
+            with self.subTest(phase=phase, expiry="final-union"):
+                rig = self._python_gate_fixture(phase)
+                reconciliations = []
+
+                def late_sorted(values, *args, **kwargs):
+                    result = sorted(values, *args, **kwargs)
+                    if type(values) is list and tuple(result) == rig.inventories["all"]:
+                        reconciliations.append(True)
+                        if len(reconciliations) == 2:
+                            rig.now = 1000.0
+                    return result
+
+                with patch.object(rig.controller, "sorted", create=True, side_effect=late_sorted):
+                    result = self._perform_native_fixture(rig, platform="linux")
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error, "AGGREGATE_DEADLINE")
+                self.assertEqual(len(reconciliations), 2)
+                self.assertEqual(len(rig.captures), len(parts))
+                self.assertEqual([row["status"] for row in result.details["partitions"]], ["PASS"] * len(parts))
+                self.assertEqual(result.details["tests"], len(rig.inventories["all"]))
 
     def test_python_failure_callbacks_are_source_bound_and_keep_private_errors_out(self):
         controller = controller_module()
+        self.enterContext(patch.object(controller.time, "monotonic", return_value=999.0))
         paths = fixture_paths(controller)
         identifier = "unit.synthetic.FailureContract.test_second"
         private = "synthetic-private-message-and-filename-not-for-publication"
         observed = []
 
-        def expected(source, selection, *, deadline):
-            observed.append((source, selection, deadline))
+        def expected(source, selection, partition, *, deadline):
+            observed.append((source, selection, partition, deadline))
             return (identifier,)
 
-        checks = SimpleNamespace(expected_python_ids=expected)
+        checks = SimpleNamespace(python_capture_ids=expected)
         step = controller.Step("python-full", parser="check")
         callback = {"id": identifier, "outcome": "error", "category": "os-error", "errno": 27}
 
-        def capture(callbacks, *, check="python-full", ok=False):
+        def capture(callbacks, *, check="python-full", ok=False, stderr=b""):
             report = {"check": check, "ok": ok,
                       "tests": [{"id": identifier, "outcome": "error"}],
                       "details": {"error": "TEST_OUTCOME_COUNT", "failure_callbacks": callbacks,
                                   "raw_exception": private}}
             raw = ("MRK_CHECK_RESULT=" + json.dumps(report) + "\n").encode()
-            return SimpleNamespace(returncode=1, waited=True, stdout_eof=True, stderr_eof=True,
+            return SimpleNamespace(ok=ok, returncode=1, waited=True, stdout_eof=True, stderr_eof=True,
                                    domain_finality=True, timed_out=False, cancelled=False,
-                                   stdout=raw, stderr=b"", persisted=(len(raw), 0), duration=0.1, cleanup_errors=())
+                                   stdout=raw, stderr=stderr, persisted=(len(raw), len(stderr)), duration=0.1,
+                                   primary_error="command exited 1", cleanup_errors=())
 
         value = controller.failure_details(capture([callback]), step, paths, checks=checks, deadline=1000.0)
         self.assertEqual(value["failure_callbacks"], [callback])
         self.assertEqual(value["helper_error"], "TEST_OUTCOME_COUNT")
         self.assertEqual(value["returncode"], 1)
-        self.assertEqual(observed, [(ROOT, "full", 1000.0)])
+        self.assertEqual(observed, [(ROOT, "full", "healthy", 1000.0)])
         self.assertNotIn(private, json.dumps(value))
         valid = [callback, {**callback, "errno": None},
                  {**callback, "outcome": "failure", "category": "assertion-error", "errno": None},
@@ -614,13 +973,292 @@ class CIControllerContractTests(unittest.TestCase):
         for changes in ({"check": "python-wheel"}, {"ok": True}):
             value = controller.failure_details(capture([callback], **changes), step, paths, checks=checks)
             self.assertNotIn("failure_callbacks", value)
-        with patch.object(checks, "expected_python_ids", side_effect=OSError(private)), \
+
+        diagnostic = {"schema": 1, "mode": "partial-write-failure", "returncode": 1,
+                      "category": "assertion-error", "locations": [
+                          {"file": "tests/workflow/profile_process_fixture.py", "line": 1199}]}
+
+        def encode(record):
+            return (controller.PROFILE_FIXTURE_FAILURE_PREFIX + json.dumps(record) + "\n").encode()
+
+        marker = encode(diagnostic)
+        # A valid-looking marker attached to an unrelated known failure is not
+        # a source-bound profile observation and cannot enter the report.
+        self.assertNotIn("profile_fixture_failure", controller.failure_details(
+            capture([callback], stderr=marker), step, paths, checks=checks, deadline=1000.0))
+        identifier = controller.PROFILE_FIXTURE_FAILURE_ID
+        callback = {"id": identifier, "outcome": "failure", "category": "assertion-error", "errno": None}
+        value = controller.failure_details(capture([callback], stderr=marker), step, paths,
+                                           checks=checks, deadline=1000.0)
+        self.assertEqual(value["profile_fixture_failure"], diagnostic)
+        self.assertEqual(controller.profile_fixture_failure(marker[:-1]), diagnostic)
+        self.assertEqual(value["returncode"], 1)
+        with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+            controller.parse_capture(step, capture([callback], stderr=marker), paths, "linux", checks)
+        wheel = controller.Step("python-wheel", parser="check")
+        self.assertEqual(controller.failure_details(capture([callback], check="python-wheel", stderr=marker),
+            wheel, paths, checks=checks, deadline=1000.0)["profile_fixture_failure"], diagnostic)
+
+        process_class = "workflow.test_profile_processes.ProfileProcessTests."
+        group_class = "workflow.test_profile_processes.ProfileGroupCleanupTests."
+        callback_modes = {
+            process_class + "test_group_ownership_is_established_before_spawn_and_never_kills_someone_elses_group": (
+                "before-admit-cancel", "before-run-cancel",
+            ),
+            process_class + "test_success_and_custom_handlers_still_reap_live_descendants_and_keep_capabilities_out": (
+                "success", "custom-handler",
+            ),
+            process_class + "test_timeout_observes_a_real_orphaned_pipe_before_cleanup": ("pipe-timeout",),
+            process_class + "test_cancellation_during_spawn_registration_and_active_native_work_is_contained": (
+                "spawn-return-cancel", "payload-register-cancel", "cancel", "completion-cancel", "completion-interrupt",
+            ),
+            process_class + "test_parent_capture_deadline_still_overrides_a_complete_success_frame": ("committed-timeout",),
+            process_class + "test_failure_overflow_and_io_failure_reject_partial_content_without_leaking_workers": (
+                "failure", "read-failure", "partial-write-failure", "overflow", "partial-marker",
+                "extra-frame", "concatenated-frame",
+            ),
+            process_class + "test_unknown_malformed_c_full_zero_retains_scratch": ("full-zero",),
+            process_class + "test_unknown_malformed_c_full_failure_retains_scratch": ("full-failure",),
+            process_class + "test_unknown_marker_parent_death_requires_domain_disposal": ("marker-parent-death",),
+            process_class + "test_unknown_committed_parent_death_requires_domain_disposal": ("committed-parent-death",),
+            process_class + "test_killed_ancestor_cannot_strand_independent_native_worker_group": ("orphan",),
+            process_class + "test_independent_supervisor_deadline_and_backpressure_kill_native_workers_without_inheriting_payload": (
+                "supervisor-timeout", "backpressure",
+            ),
+            process_class + "test_commit_follows_actual_payload_eof_and_withheld_commit_cannot_deadlock_writer_close": (
+                "commit-after-eof", "withhold-commit", "short-write",
+            ),
+            group_class + "test_actual_zombie_is_observed_before_its_owning_keeper_consumes_the_wait": ("zombie",),
+            group_class + "test_unknown_payload_writer_close_failure_retains_scratch": ("payload-writer-close-failure",),
+            group_class + "test_unknown_payload_reader_close_failure_retains_scratch": ("payload-reader-close-failure",),
+            group_class + "test_unknown_payload_reader_close_unresolved_retains_scratch": ("payload-reader-close-unresolved",),
+        }
+        self.assertEqual(controller.PROFILE_FIXTURE_FAILURE_CALLBACK_MODES, callback_modes)
+        all_modes = [mode for modes in callback_modes.values() for mode in modes]
+        self.assertEqual((len(callback_modes), len(all_modes), len(set(all_modes))), (17, 32, 32))
+        self.assertEqual(controller.PROFILE_FIXTURE_FAILURE_MODES, frozenset(all_modes))
+        supervisor_id = (process_class
+                         + "test_independent_supervisor_deadline_and_backpressure_kill_native_workers_without_inheriting_payload")
+        pipe_id = process_class + "test_timeout_observes_a_real_orphaned_pipe_before_cleanup"
+        # All callbacks are source-known here: wrong-pair rejection must come
+        # from their mode binding, not from an unrelated unknown-ID veto.
+        with patch.object(checks, "python_capture_ids", return_value=tuple(callback_modes)):
+            for owner, modes in callback_modes.items():
+                for mode in modes:
+                    record = {**diagnostic, "mode": mode}
+                    for claimed in callback_modes:
+                        row = {**callback, "id": claimed}
+                        value = controller.failure_details(capture([row], stderr=encode(record)), step, paths,
+                                                           checks=checks, deadline=1000.0)
+                        if claimed == owner:
+                            self.assertEqual(value["profile_fixture_failure"], record)
+                        else:
+                            self.assertNotIn("profile_fixture_failure", value)
+                        self.assertEqual(value["returncode"], 1)
+            # Repeated failing subtests legitimately retain the same parent ID.
+            self.assertEqual(controller.failure_details(capture([callback, callback], stderr=marker),
+                step, paths, checks=checks, deadline=1000.0)["profile_fixture_failure"], diagnostic)
+
+        # The native lane must bind the SAME original partition inventory and
+        # validated tests-phase record, not just accept a global mode name.
+        native_checks = SimpleNamespace(native_partition_ids=lambda *_, **__: tuple(callback_modes))
+        native_steps = (
+            controller.Step("native-profile-source", parser="native"),
+            controller.Step("native-profile-wheel", parser="native"),
+        )
+        def native_capture(records, *, phase="tests", stderr=marker):
+            result = capture([], stderr=stderr)
+            envelope = {"schema": 1, "phase": phase, "records": records}
+            result.stdout = (controller.NATIVE_DIAGNOSTIC_PREFIX + json.dumps(envelope) + "\n").encode()
+            result.persisted = (len(result.stdout), len(stderr))
+            return result
+
+        with patch.object(native_checks, "native_partition_ids", return_value=tuple(callback_modes)) as inventory:
+            for native_step in native_steps:
+                for owner, modes in callback_modes.items():
+                    for mode in modes:
+                        record = {**diagnostic, "mode": mode}
+                        row = {**callback, "id": owner, "returncode": None}
+                        value = controller.failure_details(native_capture([row], stderr=encode(record)),
+                            native_step, paths, checks=native_checks, deadline=1000.0)
+                        self.assertEqual(value["profile_fixture_failure"], record)
+                        self.assertEqual(value["native_diagnostic"]["records"], [row])
+                        self.assertEqual(value["returncode"], 1)
+                        inventory.assert_called_with(ROOT, native_step.native_partition, deadline=1000.0)
+                        wrong_owner = next(name for name in callback_modes if name != owner)
+                        self.assertNotIn("profile_fixture_failure", controller.failure_details(
+                            native_capture([{**row, "id": wrong_owner}], stderr=encode(record)),
+                            native_step, paths, checks=native_checks, deadline=1000.0))
+
+            poison_callbacks = [(partition, owner) for partition, owner in _PYTHON_POISON_FIXTURES
+                                if owner in callback_modes]
+            self.assertEqual(len(poison_callbacks), 8)
+            for partition, owner in poison_callbacks:
+                mode, = callback_modes[owner]
+                record = {**diagnostic, "mode": mode}
+                row = {**callback, "id": owner, "returncode": None}
+                for gate in ("python-full", "python-wheel"):
+                    poison_step = controller.Step(gate, parser="native", native_partition=partition)
+                    with patch.object(native_checks, "native_partition_ids", return_value=(owner,)) as poison_inventory:
+                        value = controller.failure_details(native_capture([row], stderr=encode(record)),
+                            poison_step, paths, checks=native_checks, deadline=1000.0)
+                    self.assertEqual(value["profile_fixture_failure"], record)
+                    poison_inventory.assert_called_once_with(ROOT, partition, deadline=1000.0)
+
+            native_step = native_steps[0]
+            native_row = {**callback, "returncode": None}
+            self.assertEqual(controller.failure_details(native_capture([native_row] * 2), native_step, paths,
+                checks=native_checks, deadline=1000.0)["profile_fixture_failure"], diagnostic)
+            for outcome, category in (("error", "exception"), ("failure", "assertion-error")):
+                self.assertEqual(controller.failure_details(
+                    native_capture([{**native_row, "outcome": outcome, "category": category}]), native_step, paths,
+                    checks=native_checks, deadline=1000.0)["profile_fixture_failure"], diagnostic)
+            for records, phase in (
+                ([], "tests"),
+                ([native_row], "prerequisite"),
+                ([{**native_row, "id": "system-code", "outcome": "error"}], "prerequisite"),
+                ([{**native_row, "id": "setUpClass (" + identifier.rsplit(".", 1)[0] + ")"}], "tests"),
+                ([{**native_row, "id": private}], "tests"),
+                ([{**native_row, "outcome": "expected-failure"}], "tests"),
+                *(([{**native_row, "outcome": outcome, "category": "none"}], "tests")
+                  for outcome in ("skip", "unexpected-success")),
+            ):
+                value = controller.failure_details(native_capture(records, phase=phase), native_step, paths,
+                                                   checks=native_checks, deadline=1000.0)
+                self.assertNotIn("profile_fixture_failure", value)
+                self.assertNotIn(private, json.dumps(value))
+            for wrong_step in (
+                controller.Step("other", parser="native"),
+                controller.Step("python-full", parser="native", native_partition="healthy"),
+                controller.Step("python-wheel", parser="native", native_partition="all"),
+                controller.Step("python-full", parser="check", native_partition="poison-full-zero"),
+            ):
+                self.assertNotIn("profile_fixture_failure", controller.failure_details(native_capture([native_row]),
+                    wrong_step, paths, checks=native_checks, deadline=1000.0))
+            with patch.object(native_checks, "native_partition_ids", return_value=(private,)):
+                self.assertNotIn("profile_fixture_failure", controller.failure_details(native_capture([native_row]),
+                    native_step, paths, checks=native_checks, deadline=1000.0))
+            with patch.object(native_checks, "native_partition_ids", side_effect=OSError(private)):
+                value = controller.failure_details(native_capture([native_row]), native_step, paths,
+                                                   checks=native_checks, deadline=1000.0)
+                self.assertTrue(value["native_diagnostics_unavailable"])
+                self.assertNotIn("profile_fixture_failure", value)
+                self.assertNotIn(private, json.dumps(value))
+            expired = [False]
+            def expired_native_inventory(*_args, **_kwargs):
+                expired[0] = True
+                raise OSError(private)
+            with patch.object(native_checks, "native_partition_ids", side_effect=expired_native_inventory), \
+                    patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                    self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                controller.failure_details(native_capture([native_row]), native_step, paths,
+                                           checks=native_checks, deadline=1000.0)
+            for interruption in (KeyboardInterrupt(private), SystemExit(7)):
+                for failed_capture, failed_step, source_checks in (
+                    (capture([callback], stderr=marker), step, checks),
+                    (native_capture([native_row]), native_step, native_checks),
+                ):
+                    with patch.object(controller, "strict_json", side_effect=interruption), \
+                            self.assertRaises(type(interruption)) as raised:
+                        controller.failure_details(failed_capture, failed_step, paths, checks=source_checks, deadline=1000.0)
+                    self.assertIs(raised.exception, interruption)
+            with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                controller.parse_capture(native_step, native_capture([native_row]), paths, "macos", native_checks)
+
+        # Exercise the actual verbosity-2 transport boundary: startTest leaves
+        # its progress line open while the real fixture publishes its record.
+        # An empty emitter sink and a separately fabricated parser input cannot
+        # detect a marker accidentally appended to that unfinished progress line.
+        from . import profile_process_fixture as fixture
+        self.assertEqual(fixture._DRIVER_FAILURE_MODES, frozenset(all_modes))
+        inner_error = AssertionError(private)
+        inner_stderr = ("Traceback (most recent call last):\n"
+                        f'  File "/{private}/tests/workflow/profile_process_fixture.py", line 1199, in driver\n'
+                        f"AssertionError: {private}\n").encode("ascii")
+
+        for identifier, mode in ((controller.PROFILE_FIXTURE_FAILURE_ID, "partial-write-failure"),
+                                 (supervisor_id, "supervisor-timeout"), (supervisor_id, "backpressure"),
+                                 (pipe_id, "pipe-timeout")):
+            with self.subTest(real_emitter_mode=mode):
+                stream = io.StringIO()
+                callback = {**callback, "id": identifier}
+                record = {**diagnostic, "mode": mode}
+
+                def emit_then_fail():
+                    fixture._report_driver_failure(mode, 1, inner_stderr)
+                    raise inner_error
+
+                with patch.object(fixture.sys, "stderr", stream):
+                    inner_result = unittest.TextTestRunner(stream=stream, verbosity=2, failfast=True).run(
+                        unittest.FunctionTestCase(emit_then_fail))
+                self.assertEqual((inner_result.testsRun, len(inner_result.failures), len(inner_result.errors)), (1, 1, 0))
+                self.assertFalse(inner_result.wasSuccessful())
+                transported = stream.getvalue().encode("ascii")
+                self.assertIn(b" ... \n" + controller.PROFILE_FIXTURE_FAILURE_PREFIX.encode("ascii"), transported)
+                transported_capture = capture([callback], stderr=transported)
+                value = controller.failure_details(transported_capture, step, paths, checks=checks, deadline=1000.0)
+                self.assertEqual(value["profile_fixture_failure"], record)
+                self.assertEqual(value["returncode"], 1)
+                self.assertNotIn(private, json.dumps(value))
+                self.assertEqual(controller.failure_details(capture([callback], check="python-wheel", stderr=transported),
+                    wheel, paths, checks=checks, deadline=1000.0)["profile_fixture_failure"], record)
+                with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                    controller.parse_capture(step, transported_capture, paths, "linux", checks)
+                # Removing the delimiter recreates the former progress-line bug.
+                misframed = transported.replace(b"\n" + controller.PROFILE_FIXTURE_FAILURE_PREFIX.encode("ascii"),
+                                                controller.PROFILE_FIXTURE_FAILURE_PREFIX.encode("ascii"), 1)
+                self.assertNotIn("profile_fixture_failure", controller.failure_details(
+                    capture([callback], stderr=misframed), step, paths, checks=checks, deadline=1000.0))
+        identifier = controller.PROFILE_FIXTURE_FAILURE_ID
+        callback = {**callback, "id": identifier}
+        for callbacks, changes in (([], {}), ([callback], {"ok": True}),
+                                   ([callback], {"check": "python-wheel"}),
+                                   ([{**callback, "outcome": "expected-failure"}], {}),
+                                   *(([{**callback, "outcome": outcome, "category": "none"}], {})
+                                     for outcome in ("skip", "unexpected-success"))):
+            self.assertNotIn("profile_fixture_failure", controller.failure_details(
+                capture(callbacks, stderr=marker, **changes), step, paths, checks=checks, deadline=1000.0))
+        for wrong_step in (controller.Step("python-full", parser="exit"), controller.Step("other", parser="check")):
+            self.assertNotIn("profile_fixture_failure", controller.failure_details(
+                capture([callback], stderr=marker), wrong_step, paths, checks=checks, deadline=1000.0))
+        invalid_records = [
+            {**diagnostic, "private": private}, {**diagnostic, "schema": True},
+            {**diagnostic, "mode": private}, {**diagnostic, "category": private},
+            *({**diagnostic, "returncode": value} for value in (True, 0, 256, -256, "1")),
+            {**diagnostic, "locations": diagnostic["locations"] * 5},
+            {**diagnostic, "locations": [{"file": "src/../" + private, "line": 1}]},
+            *({**diagnostic, "locations": [{"file": diagnostic["locations"][0]["file"], "line": line}]}
+              for line in (True, 0, 1000000)),
+        ]
+        malformed_marker = controller.PROFILE_FIXTURE_FAILURE_PREFIX.encode() + b"not-json\n"
+        malformed = [*(encode(record) for record in invalid_records), marker + marker,
+                     marker + malformed_marker, malformed_marker + marker,
+                     marker.replace(b'"schema": 1', b'"schema": 1,"schema": 1'),
+                     controller.PROFILE_FIXTURE_FAILURE_PREFIX.encode() + b"x" * 2048 + b"\n",
+                     controller.PROFILE_FIXTURE_FAILURE_PREFIX.encode() + b"\xff\n"]
+        for raw in malformed:
+            value = controller.failure_details(capture([callback], stderr=raw), step, paths,
+                                               checks=checks, deadline=1000.0)
+            self.assertNotIn("profile_fixture_failure", value)
+            self.assertEqual(value["returncode"], 1)
+            self.assertNotIn(private, json.dumps(value))
+        # The shared bounded reader must check the original clock even when
+        # optional parsing fails after it has consumed the captured record.
+        expired = [False]
+        def expired_parse(_text):
+            expired[0] = True
+            raise ValueError(private)
+        with patch.object(controller, "strict_json", side_effect=expired_parse), \
+                patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0):
+            with self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                controller.profile_fixture_failure(marker, deadline=1000.0)
+        with patch.object(checks, "python_capture_ids", side_effect=OSError(private)), \
                 patch.object(controller.time, "monotonic", return_value=999.0):
             value = controller.failure_details(capture([callback]), step, paths, checks=checks, deadline=1000.0)
             self.assertTrue(value["python_diagnostics_unavailable"])
             self.assertEqual(value["returncode"], 1)
             self.assertNotIn(private, json.dumps(value))
-        with patch.object(checks, "expected_python_ids", side_effect=OSError(private)), \
+        with patch.object(checks, "python_capture_ids", side_effect=OSError(private)), \
                 patch.object(controller.time, "monotonic", return_value=1000.0):
             with self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
                 controller.failure_details(capture([callback]), step, paths, checks=checks, deadline=1000.0)
@@ -630,7 +1268,7 @@ class CIControllerContractTests(unittest.TestCase):
         paths = fixture_paths(controller)
         identifier = "unit.synthetic.StorageContract.test_one"
         step = controller.Step("python-full", parser="check")
-        checks = SimpleNamespace(expected_python_ids=lambda *_: (identifier,), linux_allowed_skips=frozenset)
+        checks = SimpleNamespace(python_capture_ids=lambda *_, **__: (identifier,), linux_allowed_skips=frozenset)
         profile = {"name": "linux-python-full-v1", "logical_file_bytes": 4296015872,
                    "file_data_bytes": 956301312, "tmpfs_mounts": 11, "write_controls": 11,
                    "readonly_errno": 30, "capacity_errno": 28, "capacity_bytes": 16777216,
@@ -684,27 +1322,37 @@ class CIControllerContractTests(unittest.TestCase):
         controller = controller_module()
         before = ("source-copy", "source-environment", "source-dependencies", "bundler", "bundle-install",
                   "editable-install", "source-freeze", "source-pip-check", "bundle-check")
-        ruby = ("ruby-support", "ruby-native-capture", "ruby-native-signal-observation",
+        ruby = ("ruby-support", "ruby-native-spawn", "ruby-native-owner", "ruby-native-capture", "ruby-native-signal-observation",
                 "ruby-play_store", "ruby-play_lanes", "ruby-apple_store",
                 "ruby-apple_lanes", "ruby-apple_production", "ruby-apple_production_lane", "ruby-apple_asset_upload",
                 "ruby-ios_upload_validation", "ruby-android_upload_validation", "ruby-workflow-yaml", "ruby-supply-wif")
         wheel = ("wheel-copy", "wheel-build", "wheel-inspect", "wheel-environment", "wheel-pip", "wheel-install",
-                 "wheel-freeze", "wheel-pip-check", "wheel-smoke", "wheel-consumer")
+                 "wheel-freeze", "wheel-pip-check")
+        compatibility_source = ("python-compat-312-source", "python-compat-313-source", "python-compat-314-source")
+        compatibility_wheel = ("python-compat-312-wheel", "python-compat-313-wheel", "python-compat-314-wheel")
         expected = {
-            "linux": (*before, "python-full", *ruby, "fastfile", "actionlint", "jdk-signers", *wheel,
-                      "python-wheel", "source-integrity"),
-            "macos": (*before, "native-tools", "ruby-native-capture",
+            "linux": (*before, "native-process-abi-source", *compatibility_source, "python-full", *ruby,
+                      "ruby-packaged-capture-source", "fastfile", "actionlint", "jdk-signers", *wheel,
+                      "native-process-abi-wheel", *compatibility_wheel, "wheel-smoke", "wheel-consumer",
+                      "ruby-packaged-capture-wheel", "python-wheel", "source-integrity"),
+            "macos": (*before, "native-tools", "native-process-abi-source", *compatibility_source,
+                      "ruby-ios_upload_validation", "ruby-native-spawn", "ruby-native-owner", "ruby-native-capture",
                       "ruby-native-signal-observation",
-                      "ruby-ios_upload_validation", "ruby-android_upload_validation", "native-profile-source", *wheel,
-                      "native-profile-wheel", "source-integrity"),
+                      "ruby-android_upload_validation", "ruby-packaged-capture-source",
+                      "native-profile-source", *wheel, "native-process-abi-wheel", *compatibility_wheel,
+                      "wheel-smoke", "wheel-consumer", "ruby-packaged-capture-wheel", "native-profile-wheel", "source-integrity"),
         }
         for platform in expected:
             steps = controller.catalog(fixture_paths(controller), platform, deadline=1000.0)
             with self.subTest(platform=platform):
                 self.assertEqual(tuple(step.id for step in steps), expected[platform])
                 self.assertEqual(controller.required_gate_ids(platform), expected[platform])
+                self.assertEqual(len(steps), 51 if platform == "linux" else 39)
                 if platform == "macos":
                     ids = tuple(step.id for step in steps)
+                    for prerequisite in ("native-tools", "native-process-abi-source", *compatibility_source):
+                        self.assertLess(ids.index(prerequisite), ids.index("ruby-ios_upload_validation"))
+                    self.assertLess(ids.index("ruby-ios_upload_validation"), ids.index("ruby-native-spawn"))
                     for gate in ("ruby-native-capture", "ruby-native-signal-observation",
                                  "ruby-ios_upload_validation", "ruby-android_upload_validation"):
                         self.assertLess(ids.index("native-tools"), ids.index(gate))
@@ -844,15 +1492,25 @@ class CIControllerContractTests(unittest.TestCase):
         def capture(text, **changes):
             values = dict(ok=True, returncode=0, waited=True, stdout_eof=True, stderr_eof=True,
                           domain_finality=True, primary_error=None, cleanup_errors=(), stdout=text.encode(),
-                          stderr=b"", duration=0.03, timed_out=False, cancelled=False,
-                          persisted=(len(text), 0))
-            return SimpleNamespace(**{**values, **changes})
+                          stderr=b"", duration=0.03, timed_out=False, cancelled=False)
+            values.update(changes)
+            values.setdefault("persisted", (len(values["stdout"]), len(values["stderr"])))
+            return SimpleNamespace(**values)
 
         with patch.object(controller, "ruby_expected_ids", return_value=expected):
             for transcript in (clean, noisy):
                 actual = controller.parse_capture(step, capture(transcript + footer), paths, "linux", None)
                 self.assertEqual(actual.details["completed"], list(expected))
                 self.assertEqual(actual.details["assertions"], 5)
+                completed, structure = controller.minitest_records(transcript + footer, expected)
+                self.assertEqual(completed, list(expected))
+                self.assertEqual(structure["reasons"], [])
+                self.assertEqual(structure["start_records"], [
+                    {"ordinal": index + 1, "id": identifier, "terminal": "success"}
+                    for index, identifier in enumerate(expected)])
+                self.assertEqual(structure["adverse_records"], [])
+                self.assertEqual(structure["start_records_omitted"], 0)
+                self.assertEqual(structure["adverse_records_omitted"], 0)
             cases = (
                 expected[0] + " = missing terminal\n" + second + footer,
                 first + expected[1] + " = missing terminal\n" + footer,
@@ -877,6 +1535,2525 @@ class CIControllerContractTests(unittest.TestCase):
             self.assertNotIn("PRIVATE_UNKNOWN", json.dumps(diagnostic))
             self.assertNotIn("test_secret", json.dumps(diagnostic))
             self.assertEqual(diagnostic["minitest_observations"], [[2, 5, 0, 0, 0]])
+
+            interrupted = (expected[0] + " = PRIVATE_MESSAGE\n0.01 s = F\n"
+                           + expected[1] + " = unfinished\n")
+            stdout_locations = "/PRIVATE_ROOT/fastlane/native_upload_process.rb:70: PRIVATE_MESSAGE\n"
+            stderr_locations = ("/PRIVATE_ROOT/tests/workflow/test_native_upload_process.rb:31: PRIVATE_MESSAGE\n"
+                                "/PRIVATE_ROOT/fastlane/private_unknown.rb:99: PRIVATE_MESSAGE\n"
+                                "/PRIVATE_ROOT/tests/workflow/private_unknown.rb:99: PRIVATE_MESSAGE\n")
+            # Stderr lookalikes cannot supply stdout's missing footer or names.
+            stderr_text = clean + footer + expected[0] + ":\n" + stderr_locations
+            partial = capture(interrupted + stdout_locations, stderr=stderr_text.encode())
+            with self.assertRaisesRegex(controller.VerificationError, "MINITEST_RESULT_MISSING"):
+                controller.parse_capture(step, partial, paths, "macos", None)
+            diagnostic = controller.failure_details(partial, step, paths)
+            interrupted_rows = [
+                {"ordinal": 1, "id": expected[0], "terminal": "failure"},
+                {"ordinal": 2, "id": expected[1], "terminal": "missing"},
+            ]
+            self.assertEqual(diagnostic["minitest_structure"], {
+                "reasons": ["footer-count", "missing-ids", "terminal-count", "terminal-status"],
+                "expected_count": 2, "started_count": 2, "completed_count": 0,
+                "missing_ids": list(expected), "duplicate_ids": [], "unknown_count": 0,
+                "start_records": interrupted_rows, "adverse_records": interrupted_rows,
+                "start_records_omitted": 0, "adverse_records_omitted": 0,
+            })
+            self.assertEqual(diagnostic["ruby_locations"], [
+                ("fastlane/native_upload_process.rb", 70),
+                ("tests/workflow/test_native_upload_process.rb", 31),
+            ])
+            self.assertEqual(diagnostic["failed_tests"], [])
+            self.assertEqual(diagnostic["minitest_observations"], [])
+            for private in ("PRIVATE_ROOT", "PRIVATE_MESSAGE", "private_unknown"):
+                self.assertNotIn(private, json.dumps(diagnostic))
+            with self.assertRaisesRegex(controller.VerificationError, "MINITEST_COMPLETION_INVENTORY"):
+                controller.parse_capture(step, capture(first + footer, stderr=second.encode()), paths, "macos", None)
+
+            for terminal, classification, reason in (
+                ("0.01 s = .\n", "success", None),
+                ("0.01 s = F\n", "failure", "terminal-status"),
+                ("0.01 s = E\n", "error", "terminal-status"),
+                ("0.01 s = S\n", "skip", "terminal-status"),
+                ("0.01 s = ?\n", "missing", "terminal-count"),
+                ("0.01 s = .\n0.01 s = .\n", "ambiguous", "terminal-count"),
+            ):
+                with self.subTest(classification=classification):
+                    completed, structure = controller.minitest_records(
+                        expected[0] + " = " + terminal + second + footer, expected)
+                    row = {"ordinal": 1, "id": expected[0], "terminal": classification}
+                    self.assertEqual(structure["start_records"], [
+                        row, {"ordinal": 2, "id": expected[1], "terminal": "success"}])
+                    self.assertEqual(structure["adverse_records"], [] if reason is None else [row])
+                    self.assertEqual(completed, list(expected) if reason is None else [expected[1]])
+                    self.assertEqual(structure["reasons"], [] if reason is None else ["missing-ids", reason])
+
+            _, duplicate = controller.minitest_records(first + first + footer, expected)
+            self.assertEqual(duplicate["start_records"], [
+                {"ordinal": ordinal, "id": expected[0], "terminal": "success"} for ordinal in (1, 2)])
+            self.assertEqual(duplicate["adverse_records"], [])
+            self.assertEqual(duplicate["reasons"], ["duplicate-id", "missing-ids"])
+            completed, after_footer = controller.minitest_records(clean + footer + first, expected)
+            after_row = {"ordinal": 3, "id": expected[0], "terminal": "after-footer"}
+            self.assertEqual(after_footer["start_records"], [
+                {"ordinal": index + 1, "id": identifier, "terminal": "success"}
+                for index, identifier in enumerate(expected)] + [after_row])
+            self.assertEqual(after_footer["adverse_records"], [after_row])
+            self.assertEqual(completed, list(expected))
+            self.assertEqual(after_footer["reasons"], ["duplicate-id", "record-after-footer", "record-count"])
+
+            private_start = "PRIVATE_UNKNOWN#test_secret = 0.01 s = F\n"
+            _, unknown = controller.minitest_records(first + private_start + second + footer, expected)
+            self.assertEqual(unknown["start_records"], [
+                {"ordinal": 1, "id": expected[0], "terminal": "success"},
+                {"ordinal": 3, "id": expected[1], "terminal": "success"},
+            ])
+            self.assertEqual(unknown["adverse_records"], [])
+            self.assertEqual(unknown["unknown_count"], 1)
+            self.assertEqual(unknown["reasons"], ["record-count", "terminal-status", "unknown-id"])
+            self.assertNotIn("PRIVATE_UNKNOWN", json.dumps(unknown))
+            self.assertNotIn("test_secret", json.dumps(unknown))
+
+            many = tuple(f"SyntheticTests#test_{index:02d}" for index in range(35))
+            many_text = ("".join(identifier + " = 0.01 s = .\n" for identifier in many[:16])
+                         + private_start + "".join(identifier + " = 0.01 s = F\n" for identifier in many[16:]))
+            completed, bounded = controller.minitest_records(many_text, many)
+            self.assertEqual(completed, list(many[:16]))
+            self.assertEqual(bounded["start_records"], [
+                {"ordinal": index + 1, "id": identifier, "terminal": "success"}
+                for index, identifier in enumerate(many[:16])])
+            self.assertEqual(bounded["adverse_records"], [
+                {"ordinal": index + 18, "id": identifier, "terminal": "failure"}
+                for index, identifier in enumerate(many[16:32])])
+            self.assertEqual(bounded["start_records_omitted"], 19)
+            self.assertEqual(bounded["adverse_records_omitted"], 3)
+            self.assertEqual(bounded["started_count"], 36)
+            self.assertEqual(bounded["unknown_count"], 1)
+            self.assertNotIn("PRIVATE_UNKNOWN", json.dumps(bounded))
+            self.assertNotIn("test_secret", json.dumps(bounded))
+
+            stdout_rows = [("fastlane/native_upload_process.rb", line) for line in range(60, 30, -1)]
+            stderr_rows = [("fastlane/native_process_spawn.rb", line) for line in range(20, 0, -1)] + stdout_rows[-1:]
+
+            def location_text(rows):
+                return "".join(f"/PRIVATE_ROOT/{name}:{line}: PRIVATE_MESSAGE\n" for name, line in rows)
+
+            diagnostic = controller.failure_details(capture(interrupted + location_text(stdout_rows),
+                stderr=(location_text(stderr_rows) + stderr_locations).encode()), step, paths)
+            self.assertEqual(diagnostic["ruby_locations"], sorted(set(stdout_rows + stderr_rows))[:32])
+            for private in ("PRIVATE_ROOT", "PRIVATE_MESSAGE", "private_unknown"):
+                self.assertNotIn(private, json.dumps(diagnostic))
+
+            # An inner bootstrap refusal is observed only in the three fixture
+            # suites and an adverse capture. The record never supplies receipts.
+            bootstrap = {"schema": 1, "stage": "configuration", "condition": "directory_identity"}
+            def bootstrap_bytes(record):
+                return (controller.FIXTURE_BOOTSTRAP_FAILURE_PREFIX + json.dumps(record) + "\n").encode()
+            marker = bootstrap_bytes(bootstrap)
+            self.assertEqual(controller.fixture_bootstrap_failure(marker[:-1]), bootstrap)
+            with patch.object(controller, "ruby_capture_ids", return_value=expected):
+                for gate in ("ruby-native-capture", "ruby-ios_upload_validation", "ruby-android_upload_validation"):
+                    native_step = controller.Step(gate, parser="minitest", expected_tests=2)
+                    failed_capture = capture(interrupted, stderr=marker, ok=False, returncode=1)
+                    detail = controller.failure_details(failed_capture, native_step, paths)
+                    self.assertEqual(detail["fixture_bootstrap_failure"], bootstrap)
+                    self.assertEqual(detail["returncode"], 1)
+                    with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                        controller.parse_capture(native_step, failed_capture, paths, "macos", None)
+                    self.assertNotIn("fixture_bootstrap_failure", controller.failure_details(
+                        capture(clean + footer, stderr=marker), native_step, paths))
+                # A semantic failure after a genuine rc0 still remains adverse.
+                self.assertEqual(controller.failure_details(capture(interrupted, stderr=marker),
+                    native_step, paths)["fixture_bootstrap_failure"], bootstrap)
+                self.assertNotIn("fixture_bootstrap_failure", controller.failure_details(
+                    failed_capture, step, paths))
+                invalid_bootstraps = [
+                    {**bootstrap, "pid": 123}, {**bootstrap, "private": "PRIVATE_ROOT"},
+                    {**bootstrap, "schema": True}, {**bootstrap, "schema": 2},
+                    {**bootstrap, "stage": "PRIVATE_ROOT"}, {**bootstrap, "stage": []},
+                    {**bootstrap, "condition": "PRIVATE_MESSAGE"},
+                    {**bootstrap, "condition": "fifo_open"}, {**bootstrap, "condition": False},
+                ]
+                invalid_markers = [*(bootstrap_bytes(record) for record in invalid_bootstraps), marker + marker,
+                    marker.replace(b'"schema": 1', b'"schema": 1,"schema": 1'),
+                    controller.FIXTURE_BOOTSTRAP_FAILURE_PREFIX.encode() + b"x" * 256 + b"\n",
+                    controller.FIXTURE_BOOTSTRAP_FAILURE_PREFIX.encode() + b"\xff\n"]
+                for raw in invalid_markers:
+                    detail = controller.failure_details(capture(interrupted, stderr=raw, ok=False, returncode=1),
+                                                        native_step, paths)
+                    self.assertNotIn("fixture_bootstrap_failure", detail)
+                    self.assertEqual(detail["returncode"], 1)
+                    self.assertNotIn("PRIVATE_ROOT", json.dumps(detail))
+                    self.assertNotIn("PRIVATE_MESSAGE", json.dumps(detail))
+                with patch.object(controller.time, "monotonic", return_value=100.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(failed_capture, native_step, paths, deadline=100.0)
+
+            target = "NativeUploadValidationTest#test_raw_collector_keeps_actual_failed_transcripts_status_and_first_error"
+            ruby_ids = tuple(sorted((*expected, target)))
+            isolated_step = controller.Step("ruby-native-capture", parser="minitest", expected_tests=3,
+                                            native_partition="healthy")
+            isolated_record = {"schema": 1, "stage": "capture-contract", "category": "assertion-error"}
+            isolated_checkpoints = (
+                "capture-primary", "capture-retained-files", "capture-retained-lifetime", "capture-retained-streams",
+                "capture-record-read", "capture-record-status", "capture-record-flags", "capture-dispatch-contract",
+                "capture-dispatch-environment", "capture-source-identities", "capture-stream-identities",
+                "capture-child-receipt", "capture-creator", "capture-lifetime-endpoints", "capture-provenance",
+                "capture-bootstrap-header", "capture-bootstrap-request", "capture-bootstrap-sources", "capture-bootstrap-directory",
+                "capture-bootstrap-dispatch", "capture-bootstrap-descriptors", "capture-bootstrap-configuration",
+                "capture-bootstrap-ready", "capture-bootstrap-grant", "capture-bootstrap-exec",
+                "capture-bootstrap-directory-finality", "capture-error-contract", "capture-readiness", "capture-transcript",
+                "capture-termination",
+            )
+            isolated_stages = (
+                "cli-admission", "request-contract", "source-bindings", "deadline-bound", "collector-execution",
+                "capture-contract", "cleanup-contract", "reporting-contract", "custody-contract", "final-recheck",
+                "proof-publication", *isolated_checkpoints,
+            )
+            isolated_categories = (
+                "assertion-error", "fixture-error", "native-lifecycle-error", "io-error", "os-error", "interrupt",
+                "system-exit", "json-parser-error", "key-error", "no-method-error", "type-error", "argument-error", "runtime-error",
+                "standard-error", "exception", "unknown",
+            )
+            self.assertEqual(controller.ISOLATED_COLLECTOR_FAILURE_STAGES, isolated_stages)
+            self.assertEqual(controller.ISOLATED_COLLECTOR_FAILURE_CATEGORIES, isolated_categories)
+            self.assertEqual((len(isolated_stages), len(set(isolated_stages)),
+                              len(isolated_categories), len(set(isolated_categories))), (41, 41, 16, 16))
+            def isolated_bytes(record):
+                return (controller.ISOLATED_COLLECTOR_FAILURE_PREFIX
+                        + json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
+            isolated_marker = isolated_bytes(isolated_record)
+            target_failure = target + " = PRIVATE_MESSAGE\n0.01 s = F\n"
+            failed_footer = "\n3 runs, 5 assertions, 1 failures, 0 errors, 0 skips\n"
+            isolated_stdout = clean + target_failure + failed_footer
+            # Both inventory seams remain inert, including wrong-gate checks.
+            # No Ruby source read, fixture entry or native operation occurs here.
+            with patch.object(controller, "ruby_expected_ids", return_value=ruby_ids), \
+                    patch.object(controller, "ruby_capture_ids", return_value=ruby_ids), \
+                    patch.object(controller.time, "monotonic", return_value=999.0):
+                for terminal in ("F", "E"):
+                    transcript = isolated_stdout if terminal == "F" else isolated_stdout.replace(
+                        "0.01 s = F", "0.01 s = E").replace("1 failures, 0 errors", "0 failures, 1 errors")
+                    failed_capture = capture(transcript, stderr=isolated_marker, ok=False, returncode=1)
+                    with patch.object(controller, "minitest_records", wraps=controller.minitest_records) as scans:
+                        detail = controller.failure_details(failed_capture, isolated_step, paths, deadline=1000.0)
+                    self.assertEqual([call.args for call in scans.call_args_list],
+                                     [(transcript, ruby_ids), (transcript, (target,))])
+                    self.assertEqual([call.kwargs for call in scans.call_args_list], [{"deadline": 1000.0}] * 2)
+                    self.assertEqual(detail["isolated_collector_failure"], isolated_record)
+                    self.assertEqual(detail["returncode"], 1)
+                    self.assertEqual(detail["minitest_structure"]["expected_count"], len(ruby_ids))
+                    self.assertEqual(detail["minitest_structure"]["unknown_count"], 0)
+                    self.assertNotIn("PRIVATE_MESSAGE", json.dumps(detail))
+                    with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                        controller.parse_capture(isolated_step, failed_capture, paths, "macos", None)
+
+                # Finite refinements keep the SAME schema/cap/adverse target.
+                # Class precedence belongs to the Ruby producer; these two
+                # independent enums need no redundant Cartesian matrix.
+                refinements = [{**isolated_record, "stage": stage, "category": "standard-error"}
+                               for stage in isolated_checkpoints]
+                refinements += [{**isolated_record, "stage": "capture-record-read", "category": category}
+                                for category in isolated_categories[7:13]]
+                for record in refinements:
+                    raw = isolated_bytes(record)
+                    self.assertLessEqual(len(raw), 256)
+                    detail = controller.failure_details(capture(isolated_stdout, stderr=raw, ok=False, returncode=1),
+                                                        isolated_step, paths, deadline=1000.0)
+                    self.assertEqual(detail["isolated_collector_failure"], record)
+                    self.assertEqual(detail["returncode"], 1)
+
+                # Actual F/E structure remains adverse even after a genuine rc0;
+                # a marker alone cannot relabel a clean successful callback.
+                self.assertEqual(controller.failure_details(capture(isolated_stdout, stderr=isolated_marker),
+                    isolated_step, paths)["isolated_collector_failure"], isolated_record)
+                success_stdout = isolated_stdout.replace("0.01 s = F", "0.01 s = .").replace("1 failures", "0 failures")
+                self.assertNotIn("isolated_collector_failure", controller.failure_details(
+                    capture(success_stdout, stderr=isolated_marker), isolated_step, paths))
+                self.assertTrue(controller.parse_capture(isolated_step, capture(success_stdout, stderr=isolated_marker),
+                                                         paths, "macos", None).ok)
+                self.assertNotIn("isolated_collector_failure", controller.failure_details(
+                    capture(isolated_stdout + isolated_marker.decode("ascii"), ok=False, returncode=1),
+                    isolated_step, paths))
+                for transcript in (
+                    clean + failed_footer,
+                    clean + target + ":\n" + failed_footer,
+                    clean + target + " = unfinished\n" + failed_footer,
+                    isolated_stdout.replace("0.01 s = F", "0.01 s = S"),
+                    isolated_stdout.replace("0.01 s = F", "0.01 s = .\n0.01 s = F"),
+                    clean + target_failure * 2 + failed_footer,
+                    clean + failed_footer + target_failure,
+                    success_stdout.replace(first, first.replace("0.01 s = .", "0.01 s = F")),
+                ):
+                    self.assertNotIn("isolated_collector_failure", controller.failure_details(
+                        capture(transcript, stderr=isolated_marker, ok=False, returncode=1), isolated_step, paths))
+                with patch.object(controller, "ruby_capture_ids", return_value=expected):
+                    self.assertNotIn("isolated_collector_failure", controller.failure_details(
+                        capture(isolated_stdout, stderr=isolated_marker, ok=False, returncode=1), isolated_step, paths))
+                for wrong_step in (
+                    dataclasses.replace(isolated_step, id="ruby-native-owner"),
+                    dataclasses.replace(isolated_step, id="ruby-play_store"),
+                    dataclasses.replace(isolated_step, native_partition="all"),
+                    dataclasses.replace(isolated_step, native_partition="native-setup-no-cleanup"),
+                    dataclasses.replace(isolated_step, parser="exit"),
+                ):
+                    self.assertNotIn("isolated_collector_failure", controller.failure_details(
+                        capture(isolated_stdout, stderr=isolated_marker, ok=False, returncode=1), wrong_step, paths))
+
+                # Global first16 projections are not the target's complete
+                # history. Reuse the full original scan, not truncated lists.
+                many_ids = tuple(f"SyntheticTests#test_{index:02d}" for index in range(17))
+                many_stdout = "".join(name + " = 0.01 s = .\n" for name in many_ids)
+                with patch.object(controller, "ruby_capture_ids", return_value=tuple(sorted((*many_ids, target)))):
+                    detail = controller.failure_details(capture(many_stdout + target_failure,
+                        stderr=isolated_marker, ok=False, returncode=1), isolated_step, paths)
+                    self.assertGreater(detail["minitest_structure"]["start_records_omitted"], 0)
+                    self.assertEqual(detail["isolated_collector_failure"], isolated_record)
+                    self.assertNotIn("isolated_collector_failure", controller.failure_details(
+                        capture(target_failure + many_stdout + target_failure, stderr=isolated_marker,
+                                ok=False, returncode=1), isolated_step, paths))
+
+                invalid_isolated = [
+                    {key: value for key, value in isolated_record.items() if key != "category"},
+                    {**isolated_record, "private": "PRIVATE_ROOT"}, {**isolated_record, "pid": 123},
+                    *({**isolated_record, "schema": value} for value in (True, 1.0, 2, "1")),
+                    *({**isolated_record, "stage": value} for value in ([], "PRIVATE_ROOT", "configuration")),
+                    *({**isolated_record, "category": value} for value in (False, "PRIVATE_MESSAGE", "none")),
+                    {key: isolated_record[key] for key in ("category", "schema", "stage")},
+                ]
+                prefix = controller.ISOLATED_COLLECTOR_FAILURE_PREFIX.encode("ascii")
+                malformed_marker = prefix + b"not-json\n"
+                invalid_markers = [*(isolated_bytes(record) for record in invalid_isolated),
+                    isolated_marker * 2, isolated_marker + malformed_marker, malformed_marker + isolated_marker,
+                    isolated_marker.replace(b'"schema":1', b'"schema":1,"schema":1'),
+                    isolated_marker.replace(b'"schema":1', b'"schema": 1'),
+                    isolated_marker.replace(b"capture-contract", br"capture\u002dcontract"),
+                    prefix + b"x" * 256 + b"\n", prefix + b"\xff\n", isolated_marker[:-1],
+                    isolated_marker[:-1] + b"\r\n", b"progress " + isolated_marker,
+                ]
+                for raw in invalid_markers:
+                    detail = controller.failure_details(capture(isolated_stdout, stderr=raw, ok=False, returncode=1),
+                                                        isolated_step, paths, deadline=1000.0)
+                    self.assertNotIn("isolated_collector_failure", detail)
+                    self.assertEqual(detail["returncode"], 1)
+                    for private in ("PRIVATE_ROOT", "PRIVATE_MESSAGE"):
+                        self.assertNotIn(private, json.dumps(detail))
+
+                # Optional malformed parsing, target scanning and cancellation
+                # cannot absorb or renew the original aggregate cutoff.
+                expired = [False]
+                def expired_isolated_parse(_text):
+                    expired[0] = True
+                    raise ValueError("PRIVATE_MESSAGE")
+                with patch.object(controller, "strict_json", side_effect=expired_isolated_parse), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(capture(isolated_stdout, stderr=isolated_marker, ok=False, returncode=1),
+                                               isolated_step, paths, deadline=1000.0)
+                expired[0] = False
+                original_scan = controller.minitest_records
+                def expire_target_scan(text, identifiers, *, deadline):
+                    if identifiers == (target,):
+                        expired[0] = True
+                    return original_scan(text, identifiers, deadline=deadline)
+                with patch.object(controller, "minitest_records", side_effect=expire_target_scan), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(capture(isolated_stdout, stderr=isolated_marker, ok=False, returncode=1),
+                                               isolated_step, paths, deadline=1000.0)
+                for interruption in (KeyboardInterrupt("PRIVATE_MESSAGE"), SystemExit(7)):
+                    with patch.object(controller, "strict_json", side_effect=interruption), \
+                            self.assertRaises(type(interruption)) as raised:
+                        controller.failure_details(capture(isolated_stdout, stderr=isolated_marker, ok=False, returncode=1),
+                                                   isolated_step, paths, deadline=1000.0)
+                    self.assertIs(raised.exception, interruption)
+
+            primary_class = "NativeUploadValidationTest#"
+            primary_modes = {
+                primary_class + "test_unexpected_pre_entry_failures_preserve_original_through_real_cleanup": tuple(
+                    f"native-proof-{boundary}-{kind}-{secondary}"
+                    for boundary in ("publication", "readiness", "watchdog")
+                    for kind in ("standard", "io", "interrupt", "system-exit")
+                    for secondary in ("none", "close")
+                ),
+                primary_class + "test_unexpected_primary_outlives_late_teardown_and_lookalike_diagnostics": (
+                    "native-proof-late-cleanup", "native-proof-lookalike",
+                ),
+                primary_class + "test_first_close_requires_the_actual_intentional_error_not_redacted_lookalike": (
+                    "native-proof-entered-io",
+                ),
+                primary_class + "test_nested_lifetime_preserves_pre_grant_ioerror_without_native_acquisition": (
+                    "native-proof-frame-io", "native-proof-frame-io-close",
+                ),
+            }
+            predicates = ("case", "proof-failures", "proof-status", "result-kind", "driver-status")
+            proof_labels = (
+                "actual failed native result", "one real injection/final boundary", "framePublishedBeforeFault",
+                "outerPrimarySameObject", "nestedPrimarySameObject", "taskPrimarySameObject", "originalMessagePreserved",
+                "originalStatusPreserved", "originalNotIntentional", "actualTaskJoins", "actualDescriptorsClosed",
+                "secondary identity", "ownedDescriptorsClosed", "watchdogJoined", "tasksJoined", "injectorsJoined",
+                "handlersRestored", "registryInactive", "no pending cancellation", "unchanged IOError redaction",
+                "actual non-IOError return", "native cleanup without fixture fallback", "actual capture finality", "first-close boundary",
+            )
+            io_modes = {f"native-proof-{boundary}-io-{secondary}"
+                        for boundary in ("publication", "readiness", "watchdog") for secondary in ("none", "close")}
+            io_modes.update(("native-proof-entered-io", "native-proof-frame-io", "native-proof-frame-io-close"))
+            all_primary_modes = [mode for modes in primary_modes.values() for mode in modes]
+            self.assertEqual(controller.NATIVE_PRIMARY_FAILURE_CALLBACK_MODES, primary_modes)
+            self.assertEqual((len(primary_modes), len(all_primary_modes), len(set(all_primary_modes))), (4, 29, 29))
+            self.assertEqual(controller.NATIVE_PRIMARY_FAILURE_MODES, frozenset(all_primary_modes))
+            self.assertEqual(controller.NATIVE_PRIMARY_IO_MODES, frozenset(io_modes))
+            self.assertEqual(controller.NATIVE_PRIMARY_FAILURE_PREDICATES, predicates)
+            self.assertEqual(controller.NATIVE_PRIMARY_PROOF_FAILURES, proof_labels)
+
+            def primary_bytes(record):
+                return (controller.NATIVE_PRIMARY_FAILURE_PREFIX
+                        + json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
+
+            primary_ids = tuple(sorted((*expected, *primary_modes)))
+            primary_step = controller.Step("ruby-native-capture", parser="minitest", expected_tests=len(primary_ids),
+                                           native_partition="healthy")
+            primary_target = next(iter(primary_modes))
+            primary_record = {"schema": 1, "mode": "native-proof-publication-standard-none",
+                              "failedPredicates": ["proof-failures"], "proofFailures": ["actual capture finality"]}
+            primary_marker = primary_bytes(primary_record)
+            primary_target_failure = primary_target + " = PRIVATE_MESSAGE\n0.01 s = F\n"
+            primary_footer = "\n6 runs, 9 assertions, 1 failures, 0 errors, 0 skips\n"
+            primary_stdout = clean + primary_target_failure + primary_footer
+            with patch.object(controller, "ruby_expected_ids", return_value=primary_ids), \
+                    patch.object(controller, "ruby_capture_ids", return_value=primary_ids), \
+                    patch.object(controller.time, "monotonic", return_value=999.0):
+                for owner, modes in primary_modes.items():
+                    for mode in modes:
+                        # The two branch labels are mutually exclusive; the
+                        # actual mode admits at most23 ordered proof failures.
+                        excluded = "actual non-IOError return" if mode in io_modes else "unchanged IOError redaction"
+                        labels = [label for label in proof_labels if label != excluded]
+                        record = {"schema": 1, "mode": mode, "failedPredicates": list(predicates), "proofFailures": labels}
+                        raw = primary_bytes(record)
+                        self.assertEqual(len(labels), 23)
+                        self.assertLessEqual(len(raw), 2048)
+                        transcript = clean + owner + " = 0.01 s = F\n" + primary_footer
+                        detail = controller.failure_details(capture(transcript, stderr=raw, ok=False, returncode=1),
+                                                            primary_step, paths, deadline=1000.0)
+                        self.assertEqual(detail["native_primary_failure"], record)
+                        self.assertEqual(detail["returncode"], 1)
+                        other = next(name for name in primary_modes if name != owner)
+                        wrong_pair = clean + owner + " = 0.01 s = .\n" + other + " = 0.01 s = F\n" + primary_footer
+                        self.assertNotIn("native_primary_failure", controller.failure_details(
+                            capture(wrong_pair, stderr=raw, ok=False, returncode=1), primary_step, paths, deadline=1000.0))
+                        self.assertIsNone(controller.native_primary_failure(primary_bytes({**record,
+                            "proofFailures": [excluded]}), deadline=1000.0))
+
+                for terminal in ("F", "E"):
+                    transcript = primary_stdout.replace("0.01 s = F", "0.01 s = " + terminal)
+                    failed_capture = capture(transcript, stderr=primary_marker, ok=False, returncode=1)
+                    with patch.object(controller, "minitest_records", wraps=controller.minitest_records) as scans:
+                        detail = controller.failure_details(failed_capture, primary_step, paths, deadline=1000.0)
+                    self.assertEqual([call.args for call in scans.call_args_list],
+                                     [(transcript, primary_ids), (transcript, (primary_target,))])
+                    self.assertEqual([call.kwargs for call in scans.call_args_list], [{"deadline": 1000.0}] * 2)
+                    self.assertEqual(detail["native_primary_failure"], primary_record)
+                    self.assertEqual(detail["returncode"], 1)
+                    self.assertNotIn("PRIVATE_MESSAGE", json.dumps(detail))
+                    with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                        controller.parse_capture(primary_step, failed_capture, paths, "macos", None)
+
+                # These are two different original comparisons, not a numeric
+                # status copied into one ambiguous or interchangeable field.
+                for predicate in ("case", "proof-status", "result-kind", "driver-status"):
+                    record = {**primary_record, "failedPredicates": [predicate], "proofFailures": []}
+                    self.assertEqual(controller.native_primary_failure(primary_bytes(record), deadline=1000.0), record)
+                self.assertEqual(controller.failure_details(capture(primary_stdout, stderr=primary_marker),
+                    primary_step, paths)["native_primary_failure"], primary_record)
+                primary_clean = "".join(name + " = 0.01 s = .\n" for name in primary_ids)
+                primary_success = primary_clean + primary_footer.replace("1 failures", "0 failures")
+                self.assertNotIn("native_primary_failure", controller.failure_details(
+                    capture(primary_success, stderr=primary_marker), primary_step, paths))
+                self.assertTrue(controller.parse_capture(primary_step, capture(primary_success, stderr=primary_marker),
+                                                         paths, "macos", None).ok)
+                self.assertNotIn("native_primary_failure", controller.failure_details(
+                    capture(primary_stdout + primary_marker.decode("ascii"), ok=False, returncode=1), primary_step, paths))
+                for transcript in (
+                    clean + primary_footer,
+                    clean + primary_target + ":\n" + primary_footer,
+                    clean + primary_target + " = unfinished\n" + primary_footer,
+                    primary_stdout.replace("0.01 s = F", "0.01 s = S"),
+                    primary_stdout.replace("0.01 s = F", "0.01 s = .\n0.01 s = F"),
+                    clean + primary_target_failure * 2 + primary_footer,
+                    clean + primary_footer + primary_target_failure,
+                ):
+                    self.assertNotIn("native_primary_failure", controller.failure_details(
+                        capture(transcript, stderr=primary_marker, ok=False, returncode=1), primary_step, paths))
+                with patch.object(controller, "ruby_capture_ids", return_value=expected):
+                    self.assertNotIn("native_primary_failure", controller.failure_details(
+                        capture(primary_stdout, stderr=primary_marker, ok=False, returncode=1), primary_step, paths))
+                for wrong_step in (
+                    dataclasses.replace(primary_step, id="ruby-native-owner"),
+                    dataclasses.replace(primary_step, id="ruby-play_store"),
+                    dataclasses.replace(primary_step, id="ruby-ios_upload_validation"),
+                    dataclasses.replace(primary_step, native_partition="all"),
+                    dataclasses.replace(primary_step, native_partition="native-setup-no-cleanup"),
+                    dataclasses.replace(primary_step, parser="exit"),
+                ):
+                    self.assertNotIn("native_primary_failure", controller.failure_details(
+                        capture(primary_stdout, stderr=primary_marker, ok=False, returncode=1), wrong_step, paths))
+
+                with patch.object(controller, "ruby_capture_ids", return_value=tuple(sorted((*many_ids, primary_target)))):
+                    detail = controller.failure_details(capture(many_stdout + primary_target_failure,
+                        stderr=primary_marker, ok=False, returncode=1), primary_step, paths)
+                    self.assertGreater(detail["minitest_structure"]["start_records_omitted"], 0)
+                    self.assertEqual(detail["native_primary_failure"], primary_record)
+                    self.assertEqual(detail["minitest_observations"], [])  # No footer is not finality.
+                    self.assertNotIn("native_primary_failure", controller.failure_details(
+                        capture(primary_target_failure + many_stdout + primary_target_failure, stderr=primary_marker,
+                                ok=False, returncode=1), primary_step, paths))
+
+                invalid_primary = [
+                    {key: value for key, value in primary_record.items() if key != "proofFailures"},
+                    {**primary_record, "private": "PRIVATE_ROOT"}, {**primary_record, "pid": 123},
+                    *({**primary_record, "schema": value} for value in (True, 1.0, 2, "1")),
+                    *({**primary_record, "mode": value} for value in ([], False, "PRIVATE_MODE", "native-proof-readiness-io-other")),
+                    *({**primary_record, "failedPredicates": value} for value in (
+                        [], None, "proof-failures", [True], ["PRIVATE_PREDICATE"], ["proof-failures"] * 2,
+                        ["driver-status", "proof-failures"], list(predicates) + ["case"], ["proof-status"],
+                    )),
+                    *({**primary_record, "proofFailures": value} for value in (
+                        None, "actual capture finality", [], [True], ["PRIVATE_FAILURE"],
+                        ["actual capture finality"] * 2, ["first-close boundary", "actual capture finality"],
+                        list(proof_labels), ["unchanged IOError redaction"],
+                    )),
+                    {key: primary_record[key] for key in ("mode", "schema", "failedPredicates", "proofFailures")},
+                ]
+                prefix = controller.NATIVE_PRIMARY_FAILURE_PREFIX.encode("ascii")
+                malformed_marker = prefix + b"not-json\n"
+                invalid_markers = [*(primary_bytes(record) for record in invalid_primary),
+                    primary_marker * 2, primary_marker + malformed_marker, malformed_marker + primary_marker,
+                    primary_marker.replace(b'"schema":1', b'"schema":1,"schema":1'),
+                    primary_marker.replace(b'"schema":1', b'"schema": 1'),
+                    primary_marker.replace(b"native-proof", br"native\u002dproof"),
+                    prefix + b"x" * 2048 + b"\n", prefix + b"\xff\n", primary_marker[:-1],
+                    primary_marker[:-1] + b"\r\n", b"progress " + primary_marker,
+                ]
+                for raw in invalid_markers:
+                    detail = controller.failure_details(capture(primary_stdout, stderr=raw, ok=False, returncode=1),
+                                                        primary_step, paths, deadline=1000.0)
+                    self.assertNotIn("native_primary_failure", detail)
+                    self.assertEqual(detail["returncode"], 1)
+                    self.assertNotIn("PRIVATE_", json.dumps(detail))
+
+                expired = [False]
+                def expired_primary_parse(_text):
+                    expired[0] = True
+                    raise ValueError("PRIVATE_MESSAGE")
+                with patch.object(controller, "strict_json", side_effect=expired_primary_parse), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(capture(primary_stdout, stderr=primary_marker, ok=False, returncode=1),
+                                               primary_step, paths, deadline=1000.0)
+                expired[0] = False
+                original_scan = controller.minitest_records
+                def expire_primary_scan(text, identifiers, *, deadline):
+                    if identifiers == (primary_target,):
+                        expired[0] = True
+                    return original_scan(text, identifiers, deadline=deadline)
+                with patch.object(controller, "minitest_records", side_effect=expire_primary_scan), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(capture(primary_stdout, stderr=primary_marker, ok=False, returncode=1),
+                                               primary_step, paths, deadline=1000.0)
+                for interruption in (KeyboardInterrupt("PRIVATE_MESSAGE"), SystemExit(7)):
+                    with patch.object(controller, "strict_json", side_effect=interruption), \
+                            self.assertRaises(type(interruption)) as raised:
+                        controller.failure_details(capture(primary_stdout, stderr=primary_marker, ok=False, returncode=1),
+                                                   primary_step, paths, deadline=1000.0)
+                    self.assertIs(raised.exception, interruption)
+
+            order_modes = {
+                primary_class + "test_native_task_error_precedes_later_caller_cancellation_at_the_original_latch": (
+                    "native-order-task-before-caller-interrupt", "native-order-task-before-caller-system-exit",
+                ),
+                primary_class + "test_native_caller_cancellation_precedes_later_task_ioerror_at_the_original_latch": (
+                    "native-order-caller-before-task-interrupt", "native-order-caller-before-task-system-exit",
+                ),
+                primary_class + "test_native_cleanup_error_precedes_later_caller_interrupt_and_retains_unknown": (
+                    "native-order-cleanup-before-caller-interrupt",
+                ),
+                primary_class + "test_native_cleanup_error_precedes_later_caller_system_exit_and_retains_unknown": (
+                    "native-order-cleanup-before-caller-system-exit",
+                ),
+            }
+            order_predicates = (
+                "proof-version", "proof-kind", "case", "source-binding", "proof-failures", "proof-status", "expected-unknown",
+                "original-accepted", "result-kind", "driver-status",
+            )
+            order_common = (
+                "original failed fixture result", "same first object through original boundaries", "unchanged original first message/status",
+                "unchanged original caller message/status", "no original upload acceptance", "original shared creator/capture latch",
+                "actual first and later latch returns", "actual latch released later fault", "actual caller delivery and rescue",
+                "actual original stdin close", "actual capture/creator joins", "actual original native closes", "actual original native EOFs",
+                "actual original C wait", "no fixture fallback or pending cancellation", "ownedDescriptorsClosed", "watchdogJoined",
+                "injectorsJoined", "handlersRestored", "registryInactive", "no fixture cleanup errors", "observation restored",
+                "unchanged original sources",
+            )
+            order_cleanup = ("actual clean body then original cleanup fault", "unknown original task/session retained",
+                             "real pre-tail native success not finality")
+            order_body = ("actual body error recorded", "actual settled native cancellation")
+            cleanup_modes = ("native-order-cleanup-before-caller-interrupt", "native-order-cleanup-before-caller-system-exit")
+            all_order_modes = [mode for modes in order_modes.values() for mode in modes]
+            self.assertEqual(controller.NATIVE_ORDER_FAILURE_PREFIX, "MRK_NATIVE_ORDER_FAILURE=")
+            self.assertEqual(controller.NATIVE_ORDER_FAILURE_CALLBACK_MODES, order_modes)
+            self.assertEqual((len(order_modes), len(all_order_modes), len(set(all_order_modes))), (4, 6, 6))
+            self.assertEqual(controller.NATIVE_ORDER_FAILURE_MODES, frozenset(all_order_modes))
+            self.assertEqual(controller.NATIVE_ORDER_CLEANUP_MODES, frozenset(cleanup_modes))
+            self.assertEqual(controller.NATIVE_ORDER_FAILURE_PREDICATES, order_predicates)
+            self.assertEqual(controller.NATIVE_ORDER_PROOF_FAILURES, order_common + order_cleanup + order_body)
+            self.assertEqual((len(order_predicates), len(order_common), len(order_cleanup), len(order_body)), (10, 23, 3, 2))
+
+            def order_bytes(record):
+                return (controller.NATIVE_ORDER_FAILURE_PREFIX
+                        + json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
+
+            def order_transcript(identifier, terminal="F"):
+                return (identifier + " = PRIVATE_MESSAGE\n0.01 s = " + terminal + "\n\n1 runs, 5 assertions, "
+                        + f"{int(terminal == 'F')} failures, {int(terminal == 'E')} errors, {int(terminal == 'S')} skips\n")
+
+            order_ids = tuple(sorted(order_modes))
+            order_inventories = {
+                "healthy": tuple(sorted(name for name, modes in order_modes.items() if modes[0] not in cleanup_modes)),
+                **{mode: (name,) for name, modes in order_modes.items() for mode in modes if mode in cleanup_modes},
+            }
+            def order_inventory(_source, _gate, partition, *, deadline):
+                return order_inventories.get(partition, ())
+
+            order_target = next(iter(order_modes))
+            order_record = {"schema": 1, "mode": "native-order-task-before-caller-interrupt",
+                            "failedPredicates": ["proof-failures"], "proofFailures": ["actual settled native cancellation"]}
+            order_marker = order_bytes(order_record)
+            order_step = controller.Step("ruby-native-capture", parser="minitest", expected_tests=1, native_partition="healthy")
+            order_stdout = order_transcript(order_target)
+            # Both source seams are inert, including deliberately wrong gates
+            # and partitions. No Ruby, fixture, catalog or native import occurs.
+            with patch.object(controller, "ruby_expected_ids", return_value=order_ids), \
+                    patch.object(controller, "ruby_capture_ids", side_effect=order_inventory) as inventory, \
+                    patch.object(controller.time, "monotonic", return_value=999.0):
+                for owner, modes in order_modes.items():
+                    for mode in modes:
+                        cleanup = mode in cleanup_modes
+                        partition = mode if cleanup else "healthy"
+                        selected_step = dataclasses.replace(order_step, native_partition=partition)
+                        labels = order_common + (order_cleanup if cleanup else order_body)
+                        record = {"schema": 1, "mode": mode, "failedPredicates": list(order_predicates), "proofFailures": list(labels)}
+                        raw = order_bytes(record)
+                        self.assertEqual(len(labels), 26 if cleanup else 25)
+                        self.assertLessEqual(len(raw), 2048)
+                        for terminal in ("F", "E"):
+                            transcript = order_transcript(owner, terminal)
+                            failed_capture = capture(transcript, stderr=raw, ok=False, returncode=1)
+                            with patch.object(controller, "minitest_records", wraps=controller.minitest_records) as scans:
+                                detail = controller.failure_details(failed_capture, selected_step, paths, deadline=1000.0)
+                            inventory.assert_called_with(ROOT, "ruby-native-capture", partition, deadline=1000.0)
+                            self.assertEqual([call.args for call in scans.call_args_list],
+                                             [(transcript, order_inventories[partition]), (transcript, (owner,))])
+                            self.assertEqual([call.kwargs for call in scans.call_args_list], [{"deadline": 1000.0}] * 2)
+                            self.assertEqual(detail["native_order_failure"], record)
+                            self.assertEqual(detail["returncode"], 1)
+                            self.assertNotIn("PRIVATE_MESSAGE", json.dumps(detail))
+                        with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                            controller.parse_capture(selected_step, failed_capture, paths, "macos", None)
+                        rc_zero = capture(transcript, stderr=raw)
+                        self.assertEqual(controller.failure_details(rc_zero, selected_step, paths, deadline=1000.0)["native_order_failure"], record)
+                        with self.assertRaisesRegex(controller.VerificationError, "MINITEST_RESULT_REJECTED"):
+                            controller.parse_capture(selected_step, rc_zero, paths, "macos", None, deadline=1000.0)
+                        opposite = order_body if cleanup else order_cleanup
+                        self.assertIsNone(controller.native_order_failure(order_bytes({**record, "proofFailures": list(opposite)})))
+                        # Make every ID source-known: these vetoes must arise
+                        # from the actual callback/partition pair, not discovery.
+                        with patch.object(controller, "ruby_capture_ids", return_value=order_ids):
+                            wrong_owner = next(name for name in order_modes if name != owner)
+                            self.assertNotIn("native_order_failure", controller.failure_details(
+                                capture(order_transcript(wrong_owner), stderr=raw, ok=False, returncode=1), selected_step, paths))
+                            for wrong_partition in ("healthy", *cleanup_modes, "all", "native-setup-no-cleanup"):
+                                if wrong_partition != partition:
+                                    self.assertNotIn("native_order_failure", controller.failure_details(
+                                        capture(transcript, stderr=raw, ok=False, returncode=1),
+                                        dataclasses.replace(selected_step, native_partition=wrong_partition), paths))
+
+                # Reuse the original canonical reader's existing malformed
+                # JSON/framing/duplicate/byte-limit matrix, binding its options.
+                with patch.object(controller, "_fixture_failure_record", wraps=controller._fixture_failure_record) as strict:
+                    self.assertEqual(controller.native_order_failure(order_marker, deadline=1000.0), order_record)
+                strict.assert_called_once_with(order_marker, "MRK_NATIVE_ORDER_FAILURE=", 2048, deadline=1000.0,
+                                               canonical_fields=("schema", "mode", "failedPredicates", "proofFailures"))
+                for predicate in order_predicates:
+                    if predicate != "proof-failures":
+                        record = {**order_record, "failedPredicates": [predicate], "proofFailures": []}
+                        self.assertEqual(controller.native_order_failure(order_bytes(record)), record)
+                invalid_order = [
+                    {key: value for key, value in order_record.items() if key != "proofFailures"},
+                    {**order_record, "category": "PRIVATE_CATEGORY"},
+                    *({**order_record, "schema": value} for value in (True, 1.0, 2, "1")),
+                    *({**order_record, "mode": value} for value in ([], False, "native-order-task-before-caller-other")),
+                    *({**order_record, "failedPredicates": value} for value in (
+                        [], None, [True], ["PRIVATE_PREDICATE"], ["proof-failures"] * 2,
+                        ["driver-status", "proof-failures"], list(order_predicates) + ["case"], ["proof-status"],
+                    )),
+                    *({**order_record, "proofFailures": value} for value in (
+                        None, [], [True], ["PRIVATE_FAILURE"], ["actual body error recorded"] * 2,
+                        ["actual settled native cancellation", "original failed fixture result"],
+                        list(order_common + order_cleanup + order_body),
+                    )),
+                ]
+                for record in invalid_order:
+                    detail = controller.failure_details(capture(order_stdout, stderr=order_bytes(record), ok=False, returncode=1),
+                                                        order_step, paths, deadline=1000.0)
+                    self.assertNotIn("native_order_failure", detail)
+                    self.assertEqual(detail["returncode"], 1)
+                    self.assertNotIn("PRIVATE_", json.dumps(detail))
+
+                for transcript in (
+                    "", order_target + ":\n", order_target + " = unfinished\n",
+                    order_transcript(order_target, "."), order_transcript(order_target, "S"),
+                    order_stdout.replace("0.01 s = F", "0.01 s = .\n0.01 s = F"),
+                    order_stdout + order_stdout, "0 runs, 5 assertions, 0 failures, 0 errors, 0 skips\n" + order_stdout,
+                ):
+                    self.assertNotIn("native_order_failure", controller.failure_details(
+                        capture(transcript, stderr=order_marker, ok=False, returncode=1), order_step, paths))
+                self.assertNotIn("native_order_failure", controller.failure_details(
+                    capture(order_stdout + order_marker.decode("ascii"), ok=False, returncode=1), order_step, paths))
+                with patch.object(controller, "ruby_capture_ids", return_value=expected):
+                    self.assertNotIn("native_order_failure", controller.failure_details(
+                        capture(order_stdout, stderr=order_marker, ok=False, returncode=1), order_step, paths))
+                for wrong_step in (
+                    dataclasses.replace(order_step, id="ruby-native-owner"),
+                    dataclasses.replace(order_step, id="ruby-play_store"),
+                    dataclasses.replace(order_step, parser="exit"),
+                ):
+                    self.assertNotIn("native_order_failure", controller.failure_details(
+                        capture(order_stdout, stderr=order_marker, ok=False, returncode=1), wrong_step, paths))
+                with patch.object(controller, "ruby_capture_ids", return_value=tuple(sorted((*many_ids, order_target)))):
+                    detail = controller.failure_details(capture(many_stdout + order_stdout, stderr=order_marker,
+                        ok=False, returncode=1), order_step, paths)
+                    self.assertGreater(detail["minitest_structure"]["start_records_omitted"], 0)
+                    self.assertEqual(detail["native_order_failure"], order_record)
+                    early_target = order_target + " = 0.01 s = F\n"
+                    self.assertNotIn("native_order_failure", controller.failure_details(
+                        capture(early_target + many_stdout + order_stdout, stderr=order_marker,
+                                ok=False, returncode=1), order_step, paths))
+
+                expired = [False]
+                def expired_order_parse(_text):
+                    expired[0] = True
+                    raise ValueError("PRIVATE_MESSAGE")
+                with patch.object(controller, "strict_json", side_effect=expired_order_parse), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(capture(order_stdout, stderr=order_marker, ok=False, returncode=1),
+                                               order_step, paths, deadline=1000.0)
+                expired[0] = False
+                original_scan = controller.minitest_records
+                def expire_order_scan(text, identifiers, *, deadline):
+                    if identifiers == (order_target,):
+                        expired[0] = True
+                    return original_scan(text, identifiers, deadline=deadline)
+                with patch.object(controller, "minitest_records", side_effect=expire_order_scan), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(capture(order_stdout, stderr=order_marker, ok=False, returncode=1),
+                                               order_step, paths, deadline=1000.0)
+                for interruption in (KeyboardInterrupt("PRIVATE_MESSAGE"), SystemExit(7)):
+                    with patch.object(controller, "strict_json", side_effect=interruption), \
+                            self.assertRaises(type(interruption)) as raised:
+                        controller.failure_details(capture(order_stdout, stderr=order_marker, ok=False, returncode=1),
+                                                   order_step, paths, deadline=1000.0)
+                    self.assertIs(raised.exception, interruption)
+
+            setup_target = ("NativeUploadValidationTest#"
+                            "test_cancellation_or_io_error_at_first_setup_step_cleans_up_the_real_child")
+            setup_modes = ("native-setup-interrupt", "native-setup-system-exit", "native-setup-io-error")
+            setup_fields = ("schema", "mode", "failedPredicates", "resultKind", "driverExitStatus",
+                            "errorCategory", "nativeErrorCategory", "resultChecks", "nativeChecks",
+                            "settlementChecks", "nativeOutcomes")
+            setup_kinds = ("pass", "fixture-cleanup", "readiness", "setup-fixture-fault", "process-observation",
+                           "process-ownership", "fixture-result", "unexpected", "other", "missing", "invalid")
+            setup_categories = ("none", "fixture-error", "contract-error", "native-lifecycle-error", "io-error",
+                                "interrupt", "system-exit", "other", "missing", "invalid")
+            setup_result_checks = (
+                "ready", "firstCloseEntered", "originalCloseCompleted", "nativeOriginalErrorPreserved",
+                "watchdogStarted", "watchdogIntervened", "fallbackUsed", "deadBeforeFallback",
+                "ownedDescriptorsClosed", "watchdogJoined", "tasksJoined", "injectorsJoined",
+                "handlersRestored", "registryInactive", "pendingInterrupt", "cleanupErrorsEmpty",
+            )
+            setup_native_checks = (
+                "finalized", "noProducers", "settled", "unknown", "hooksRestored", "observerErrorsEmpty",
+                "productionFinality", "retainedUnknown", "statusValid", "statusDecodedEOF", "cleanupErrorsEmpty",
+                "originalWaitObserved", "tasksJoined", "leasesClosed", "allActualEOFObserved",
+                "captureSettled", "captureFinished", "captureJoined", "captureActualJoinObserved",
+                "creatorSettled", "creatorFinished", "creatorJoined", "creatorActualJoinObserved",
+                "stdoutEOF", "stdoutActualEOFObserved", "stderrEOF", "stderrActualEOFObserved",
+                "statusEOF", "statusActualEOFObserved", "groupAbsent",
+            )
+            setup_settlement_checks = (
+                "taskCleanupComplete", "creationSettled", "custodianWaitBroken", "acquisitionUnknown",
+            )
+            self.assertEqual(controller.NATIVE_SETUP_FAILURE_PREFIX, "MRK_NATIVE_SETUP_FAILURE=")
+            self.assertEqual(controller.NATIVE_SETUP_FAILURE_CALLBACK_MODES, {setup_target: setup_modes})
+            self.assertEqual(controller.NATIVE_SETUP_FAILURE_MODES, frozenset(setup_modes))
+            self.assertEqual(controller.NATIVE_SETUP_FAILURE_FIELDS, setup_fields)
+            self.assertEqual(controller.NATIVE_SETUP_FAILURE_PREDICATES, ("result-kind", "driver-status"))
+            self.assertEqual(controller.NATIVE_SETUP_RESULT_KINDS, setup_kinds)
+            self.assertEqual(controller.NATIVE_SETUP_ERROR_CATEGORIES, setup_categories)
+            self.assertEqual(controller.NATIVE_SETUP_RESULT_CHECKS, setup_result_checks)
+            self.assertEqual(controller.NATIVE_SETUP_NATIVE_CHECKS, setup_native_checks)
+            self.assertEqual(controller.NATIVE_SETUP_SETTLEMENT_CHECKS, setup_settlement_checks)
+            self.assertIs(controller.NATIVE_SETUP_NATIVE_CHECKS, controller.ADAPTER_FAILURE_NATIVE_CHECKS)
+
+            def setup_bytes(record):
+                return (controller.NATIVE_SETUP_FAILURE_PREFIX
+                        + json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
+
+            setup_record = {
+                "schema": 2, "mode": setup_modes[0], "failedPredicates": ["result-kind", "driver-status"],
+                "resultKind": "fixture-cleanup", "driverExitStatus": 1,
+                "errorCategory": "interrupt", "nativeErrorCategory": "io-error",
+                "resultChecks": {name: (True, False, "missing", "invalid")[index % 4]
+                                 for index, name in enumerate(setup_result_checks)},
+                "nativeChecks": {name: (False, "missing", "invalid", True)[index % 4]
+                                 for index, name in enumerate(setup_native_checks)},
+                "settlementChecks": dict(zip(setup_settlement_checks, (True, False, "missing", "invalid"))),
+                "nativeOutcomes": {"custodian": "exit2", "keeper": "exit1", "validator": "signal",
+                                   "finalOutcome": "failed", "finalCleanup": "unknown", "groupState": "unknown",
+                                   "captureState": "attempted", "creatorState": "attempted"},
+            }
+            setup_marker = setup_bytes(setup_record)
+            setup_ids = tuple(sorted((*expected, setup_target)))
+            setup_step = controller.Step("ruby-native-capture", parser="minitest", expected_tests=3,
+                                         native_partition="healthy")
+            setup_target_failure = setup_target + " = PRIVATE_MESSAGE\n0.01 s = F\n"
+            setup_stdout = clean + setup_target_failure + failed_footer
+            # Both discovery entrypoints stay mocked, including every wrong
+            # gate/partition case: this closure reads no Ruby fixture source.
+            with patch.object(controller, "ruby_expected_ids", return_value=setup_ids), \
+                    patch.object(controller, "ruby_capture_ids", return_value=setup_ids), \
+                    patch.object(controller.time, "monotonic", return_value=999.0):
+                with patch.object(controller, "_fixture_failure_record", wraps=controller._fixture_failure_record) as strict, \
+                        patch.object(controller, "_native_result_projection_valid",
+                                     wraps=controller._native_result_projection_valid) as native_grammar:
+                    self.assertEqual(controller.native_setup_failure(setup_marker, deadline=1000.0), setup_record)
+                strict.assert_called_once_with(setup_marker, "MRK_NATIVE_SETUP_FAILURE=", 2048, deadline=1000.0,
+                                               canonical_fields=setup_fields)
+                native_grammar.assert_called_once_with(setup_record["nativeChecks"], setup_record["nativeOutcomes"])
+                for mode in setup_modes:
+                    for terminal in ("F", "E"):
+                        record = {**setup_record, "mode": mode}
+                        raw = setup_bytes(record)
+                        self.assertLessEqual(len(raw), 2048)
+                        transcript = setup_stdout.replace("0.01 s = F", "0.01 s = " + terminal)
+                        failed_capture = capture(transcript, stderr=raw, ok=False, returncode=1)
+                        with patch.object(controller, "minitest_records", wraps=controller.minitest_records) as scans:
+                            detail = controller.failure_details(failed_capture, setup_step, paths, deadline=1000.0)
+                        self.assertEqual([call.args for call in scans.call_args_list],
+                                         [(transcript, setup_ids), (transcript, (setup_target,))])
+                        self.assertEqual([call.kwargs for call in scans.call_args_list], [{"deadline": 1000.0}] * 2)
+                        self.assertEqual(detail["native_setup_failure"], record)
+                        self.assertEqual(detail["returncode"], 1)
+                        self.assertNotIn("PRIVATE_MESSAGE", json.dumps(detail))
+                with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                    controller.parse_capture(setup_step, failed_capture, paths, "macos", None)
+                rc_zero = capture(setup_stdout, stderr=setup_marker)
+                self.assertEqual(controller.failure_details(rc_zero, setup_step, paths)["native_setup_failure"], setup_record)
+                with self.assertRaisesRegex(controller.VerificationError, "MINITEST_RESULT_REJECTED"):
+                    controller.parse_capture(setup_step, rc_zero, paths, "macos", None)
+
+                # The two original operands determine the exact ordered
+                # failures; the finite projections are independent observations.
+                for kind in setup_kinds:
+                    record = {**setup_record, "resultKind": kind,
+                              "failedPredicates": ["driver-status"] if kind == "pass" else ["result-kind", "driver-status"]}
+                    self.assertEqual(controller.native_setup_failure(setup_bytes(record)), record)
+                for status in (0, 255):
+                    record = {**setup_record, "driverExitStatus": status,
+                              "failedPredicates": ["result-kind"] if status == 0 else ["result-kind", "driver-status"]}
+                    self.assertEqual(controller.native_setup_failure(setup_bytes(record)), record)
+                for key in ("errorCategory", "nativeErrorCategory"):
+                    for category in setup_categories:
+                        record = {**setup_record, key: category}
+                        self.assertEqual(controller.native_setup_failure(setup_bytes(record)), record)
+                for check_value in (True, False, "missing", "invalid"):
+                    record = {**setup_record,
+                              "resultChecks": dict.fromkeys(setup_result_checks, check_value),
+                              "nativeChecks": dict.fromkeys(setup_native_checks, check_value),
+                              "settlementChecks": dict.fromkeys(setup_settlement_checks, check_value)}
+                    self.assertEqual(controller.native_setup_failure(setup_bytes(record)), record)
+
+                # All native enums are exercised by the shared adapter grammar
+                # below; here bind the setup wire's full finite size and source.
+                setup_maximum = {**setup_record, "mode": max(setup_modes, key=len),
+                    "resultKind": max(setup_kinds, key=len), "driverExitStatus": 255,
+                    "errorCategory": max(setup_categories, key=len), "nativeErrorCategory": max(setup_categories, key=len),
+                    "resultChecks": dict.fromkeys(setup_result_checks, "missing"),
+                    "nativeChecks": dict.fromkeys(setup_native_checks, "missing"),
+                    "settlementChecks": dict.fromkeys(setup_settlement_checks, "missing"),
+                    "nativeOutcomes": {"custodian": "not-attempted", "keeper": "not-attempted", "validator": "not-attempted",
+                                       "finalOutcome": "rejected", "finalCleanup": "confirmed", "groupState": "not-created",
+                                       "captureState": "not-constructed", "creatorState": "not-constructed"}}
+                maximum_marker = setup_bytes(setup_maximum)
+                self.assertEqual(tuple(setup_maximum), setup_fields)
+                self.assertTrue(all(len(value) == max(map(len, controller.ADAPTER_FAILURE_NATIVE_OUTCOMES[name]))
+                                    for name, value in setup_maximum["nativeOutcomes"].items()))
+                self.assertEqual(len(maximum_marker), 2002)
+                self.assertEqual(2048 - len(maximum_marker), 46)
+                self.assertEqual(controller.native_setup_failure(maximum_marker), setup_maximum)
+                self.assertEqual(controller.failure_details(capture(setup_stdout, stderr=maximum_marker, ok=False, returncode=1),
+                    setup_step, paths)["native_setup_failure"], setup_maximum)
+
+                # IOError redaction deliberately changes the external object;
+                # its false identity flag must neither invent a predicate nor
+                # repair the original failed kind/status or native settlement.
+                io_record = {**setup_record, "mode": "native-setup-io-error", "errorCategory": "fixture-error",
+                    "nativeErrorCategory": "contract-error",
+                    "resultChecks": {**setup_record["resultChecks"], "nativeOriginalErrorPreserved": False},
+                    "nativeChecks": {**setup_record["nativeChecks"], "settled": False, "finalized": False, "unknown": True}}
+                io_capture = capture(setup_stdout, stderr=setup_bytes(io_record), ok=False, returncode=1)
+                self.assertEqual(controller.failure_details(io_capture, setup_step, paths)["native_setup_failure"], io_record)
+                with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                    controller.parse_capture(setup_step, io_capture, paths, "macos", None)
+
+                success_stdout = setup_stdout.replace("0.01 s = F", "0.01 s = .").replace("1 failures", "0 failures")
+                self.assertNotIn("native_setup_failure", controller.failure_details(
+                    capture(success_stdout, stderr=setup_marker), setup_step, paths))
+                self.assertTrue(controller.parse_capture(setup_step, capture(success_stdout, stderr=setup_marker),
+                                                         paths, "macos", None).ok)
+                for transcript in (
+                    clean + failed_footer, clean + setup_target + ":\n" + failed_footer,
+                    clean + setup_target + " = unfinished\n" + failed_footer,
+                    setup_stdout.replace("0.01 s = F", "0.01 s = S"),
+                    setup_stdout.replace("0.01 s = F", "0.01 s = .\n0.01 s = F"),
+                    clean + setup_target_failure * 2 + failed_footer,
+                    clean + failed_footer + setup_target_failure,
+                    success_stdout.replace(first, first.replace("0.01 s = .", "0.01 s = F")),
+                ):
+                    self.assertNotIn("native_setup_failure", controller.failure_details(
+                        capture(transcript, stderr=setup_marker, ok=False, returncode=1), setup_step, paths))
+                self.assertNotIn("native_setup_failure", controller.failure_details(
+                    capture(setup_stdout + setup_marker.decode("ascii"), ok=False, returncode=1), setup_step, paths))
+                with patch.object(controller, "ruby_capture_ids", return_value=expected):
+                    self.assertNotIn("native_setup_failure", controller.failure_details(
+                        capture(setup_stdout, stderr=setup_marker, ok=False, returncode=1), setup_step, paths))
+                for wrong_step in (
+                    dataclasses.replace(setup_step, id="ruby-native-owner"),
+                    dataclasses.replace(setup_step, id="ruby-play_store"),
+                    dataclasses.replace(setup_step, id="ruby-ios_upload_validation"),
+                    dataclasses.replace(setup_step, id="ruby-android_upload_validation"),
+                    dataclasses.replace(setup_step, native_partition="all"),
+                    dataclasses.replace(setup_step, native_partition="native-setup-no-cleanup"),
+                    dataclasses.replace(setup_step, parser="exit"),
+                ):
+                    self.assertNotIn("native_setup_failure", controller.failure_details(
+                        capture(setup_stdout, stderr=setup_marker, ok=False, returncode=1), wrong_step, paths))
+                with patch.object(controller, "ruby_capture_ids", return_value=tuple(sorted((*many_ids, setup_target)))):
+                    detail = controller.failure_details(capture(many_stdout + setup_target_failure, stderr=setup_marker,
+                        ok=False, returncode=1), setup_step, paths)
+                    self.assertGreater(detail["minitest_structure"]["start_records_omitted"], 0)
+                    self.assertEqual(detail["native_setup_failure"], setup_record)
+                    self.assertNotIn("native_setup_failure", controller.failure_details(
+                        capture(setup_target_failure + many_stdout + setup_target_failure, stderr=setup_marker,
+                                ok=False, returncode=1), setup_step, paths))
+
+                invalid_setup = [
+                    *({key: value for key, value in setup_record.items() if key != absent} for absent in setup_fields),
+                    {**setup_record, "private": "PRIVATE_ROOT"}, {**setup_record, "pid": 123},
+                    {key: setup_record[key] for key in reversed(setup_fields)},
+                    *({**setup_record, "schema": value} for value in (True, 2.0, 1, "2")),
+                    *({**setup_record, "mode": value} for value in ([], False, "PRIVATE_MODE", "native-setup-no-cleanup")),
+                    *({**setup_record, "resultKind": value} for value in (None, True, 0, [], "PRIVATE_KIND")),
+                    *({**setup_record, "driverExitStatus": value} for value in (None, True, False, 1.0, "1", -1, 256)),
+                    *({**setup_record, key: value} for key in ("errorCategory", "nativeErrorCategory")
+                      for value in (None, True, [], "PRIVATE_CLASS")),
+                    *({**setup_record, "failedPredicates": value} for value in (
+                        [], None, "result-kind", [True], ["PRIVATE_PREDICATE"], ["result-kind"] * 2,
+                        ["driver-status", "result-kind"], ["result-kind"], ["driver-status"],
+                    )),
+                    {**setup_record, "resultKind": "pass", "driverExitStatus": 0, "failedPredicates": []},
+                    {**setup_record, "resultKind": "pass", "driverExitStatus": 0},
+                    {**setup_record, "resultKind": "pass"}, {**setup_record, "driverExitStatus": 0},
+                ]
+                legacy_setup = {key: value for key, value in setup_record.items()
+                                if key not in ("settlementChecks", "nativeOutcomes")}
+                legacy_setup.update(schema=1, nativeChecks={name: setup_record["nativeChecks"][name]
+                                                           for name in setup_native_checks[:5]})
+                invalid_setup.append(legacy_setup)
+                for key in ("resultChecks", "nativeChecks", "settlementChecks"):
+                    checks = setup_record[key]
+                    invalid_setup.extend({**setup_record, key: value} for value in (
+                        None, [], True, {}, {**checks, "PRIVATE_CHECK": False},
+                        {name: value for name, value in checks.items() if name != next(iter(checks))},
+                        {name: checks[name] for name in reversed(checks)},
+                        *({**checks, name: 0} for name in checks),
+                        *({**checks, next(iter(checks)): value} for value in (1, None, [], {}, "false", "PRIVATE_VALUE")),
+                    ))
+                outcomes = setup_record["nativeOutcomes"]
+                invalid_setup.extend({**setup_record, "nativeOutcomes": value} for value in (
+                    None, [], True, {}, {**outcomes, "PRIVATE_OUTCOME": "missing"},
+                    {name: value for name, value in outcomes.items() if name != "custodian"},
+                    {name: outcomes[name] for name in reversed(outcomes)},
+                    *({**outcomes, name: "exit0" if name in ("captureState", "creatorState") else "attempted"}
+                      for name in outcomes),
+                    *({**outcomes, "custodian": value} for value in (None, True, 0, [], {}, "PRIVATE_VALUE")),
+                ))
+                prefix = controller.NATIVE_SETUP_FAILURE_PREFIX.encode("ascii")
+                malformed_marker = prefix + b"not-json\n"
+                invalid_setup_markers = [*(setup_bytes(record) for record in invalid_setup),
+                    setup_marker * 2, setup_marker + malformed_marker, malformed_marker + setup_marker,
+                    setup_marker.replace(b'"schema":2', b'"schema":2,"schema":2'),
+                    setup_marker.replace(b'"ready":true', b'"ready":true,"ready":true'),
+                    setup_marker.replace(b'"finalized":false', b'"finalized":false,"finalized":false'),
+                    setup_marker.replace(b'"taskCleanupComplete":true', b'"taskCleanupComplete":true,"taskCleanupComplete":true'),
+                    setup_marker.replace(b'"custodian":"exit2"', b'"custodian":"exit2","custodian":"exit2"'),
+                    setup_marker.replace(b'"schema":2', b'"schema": 2'),
+                    setup_marker.replace(b"native-setup", br"native\u002dsetup"),
+                    prefix + b"x" * 2048 + b"\n", prefix + b"\xff\n", setup_marker[:-1],
+                    setup_marker[:-1] + b"\r\n", b"progress " + setup_marker,
+                ]
+                for raw in invalid_setup_markers:
+                    detail = controller.failure_details(capture(setup_stdout, stderr=raw, ok=False, returncode=1),
+                                                        setup_step, paths, deadline=1000.0)
+                    self.assertNotIn("native_setup_failure", detail)
+                    self.assertEqual(detail["returncode"], 1)
+                    self.assertNotIn("PRIVATE_", json.dumps(detail))
+
+                expired = [False]
+                def expired_setup_parse(_text):
+                    expired[0] = True
+                    raise ValueError("PRIVATE_MESSAGE")
+                with patch.object(controller, "strict_json", side_effect=expired_setup_parse), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(capture(setup_stdout, stderr=setup_marker, ok=False, returncode=1),
+                                               setup_step, paths, deadline=1000.0)
+                expired[0] = False
+                original_scan = controller.minitest_records
+                def expire_setup_scan(text, identifiers, *, deadline):
+                    if identifiers == (setup_target,):
+                        expired[0] = True
+                    return original_scan(text, identifiers, deadline=deadline)
+                with patch.object(controller, "minitest_records", side_effect=expire_setup_scan), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(capture(setup_stdout, stderr=setup_marker, ok=False, returncode=1),
+                                               setup_step, paths, deadline=1000.0)
+                for interruption in (KeyboardInterrupt("PRIVATE_MESSAGE"), SystemExit(7)):
+                    with patch.object(controller, "strict_json", side_effect=interruption), \
+                            self.assertRaises(type(interruption)) as raised:
+                        controller.failure_details(capture(setup_stdout, stderr=setup_marker, ok=False, returncode=1),
+                                                   setup_step, paths, deadline=1000.0)
+                    self.assertIs(raised.exception, interruption)
+
+            adapter_contracts = {
+                "real-deadline": ("test_deadline_terminates_validator_without_authorizing_upload", "pass"),
+                "inherited": ("test_deadline_terminates_inherited_pipe_children_after_validator_parent_exits", "pass"),
+                "delayed-start": ("test_descendant_boundary_survives_delayed_start_and_late_parent_record", "pass"),
+                "late-record": ("test_descendant_boundary_survives_delayed_start_and_late_parent_record", "pass"),
+                "unready": ("test_unready_fixture_fails_distinctly_and_stops_before_any_late_pid_record", "readiness"),
+                "leader-only": ("test_fixture_detects_leader_only_cleanup_and_missing_deadline", "descendant-alive"),
+                "no-deadline": ("test_fixture_detects_leader_only_cleanup_and_missing_deadline", "capture-watchdog"),
+                "immediate-deadline": ("test_fixture_rejects_an_immediate_timeout_even_when_the_leader_is_killed", "elapsed-bound"),
+                "real-deadline-slow-cleanup": ("test_slow_cleanup_cannot_supply_a_positive_deadline_wait", "pass"),
+                "immediate-deadline-slow-cleanup": ("test_slow_cleanup_cannot_supply_a_positive_deadline_wait", "elapsed-bound"),
+            }
+            adapter_platforms = {
+                "ios": ("ruby-ios_upload_validation", "IosUploadValidationTest"),
+                "android": ("ruby-android_upload_validation", "AndroidUploadValidationTest"),
+            }
+            adapter_fields = (
+                "schema", "platform", "mode", "expectedKind", "failedPredicates", "resultKind", "driverExitStatus",
+                "retainedDriverErrorCategory", "retainedDriverErrorCode", "adapterErrorCategory",
+                "resultChecks", "nativeChecks", "timingChecks", "nativeOutcomes", "slowChecks", "captureDetail", "readinessStage",
+            )
+            adapter_readiness_stages = (
+                "not-entered", "native-ready", "startup-marker", "validator-marker", "validator-live", "dispatch",
+                "control-admission", "startup-driver-loss", "descendant-fork", "descendant-marker", "descendant-live",
+                "inherited-pipes", "descendant-driver-loss", "validator-release", "owner-publication", "ready-return",
+            )
+            adapter_result_checks = (
+                "ready", "stdinClosedAfterReady", "deadlinePrimarySameObject", "deadlineResultSameObject",
+                "watchdogStarted", "watchdogIntervened", "fallbackUsed", "deadBeforeFallback", "nativeFinalityBeforeFallback",
+                "adapterRejected", "adapterCallObserved", "captureEntered", "descendantLiveBeforeRelease",
+                "inheritedPipeBlockObserved", "validatorReapedAfterRelease", "commitAfterDataEOF", "ownedDescriptorsClosed",
+                "watchdogJoined", "tasksJoined", "injectorsJoined", "handlersRestored", "registryInactive",
+                "pendingInterrupt", "cleanupErrorsEmpty",
+            )
+            adapter_native_checks = (
+                "finalized", "noProducers", "settled", "unknown", "hooksRestored", "observerErrorsEmpty",
+                "productionFinality", "retainedUnknown", "statusValid", "statusDecodedEOF", "cleanupErrorsEmpty",
+                "originalWaitObserved", "tasksJoined", "leasesClosed", "allActualEOFObserved",
+                "captureSettled", "captureFinished", "captureJoined", "captureActualJoinObserved",
+                "creatorSettled", "creatorFinished", "creatorJoined", "creatorActualJoinObserved",
+                "stdoutEOF", "stdoutActualEOFObserved", "stderrEOF", "stderrActualEOFObserved",
+                "statusEOF", "statusActualEOFObserved", "groupAbsent",
+            )
+            adapter_timing_checks = (
+                "runSpanMatchesMode", "firstTimeoutCutoff", "selectedTimeoutCutoff", "blockedDataWaitsPositive",
+                "firstBlockedDataWithinRun", "captureWithinLimit", "slowCleanupAtLeastFour", "captureCoversSlowCleanup",
+                "slowCleanupWithinOriginalCutoff",
+            )
+            adapter_native_outcomes = {
+                **dict.fromkeys(("custodian", "keeper", "validator"), (
+                    "missing", "invalid", "not-attempted", "unknown", "exit0", "exit1", "exit2", "other-exit", "signal",
+                )),
+                "finalOutcome": ("missing", "invalid", "ok", "rejected", "failed"),
+                "finalCleanup": ("missing", "invalid", "confirmed", "unknown"),
+                "groupState": ("missing", "invalid", "not-created", "retired", "unknown"),
+                **dict.fromkeys(("captureState", "creatorState"), (
+                    "missing", "invalid", "unpublished", "not-constructed", "not-started", "attempted",
+                )),
+            }
+            adapter_slow_checks = (
+                "handoffPerformed", "delayEntered", "delayGuardPassed", "delayFailed", "delayFinished",
+                "originalCleanupCalled", "originalCleanupFinished",
+            )
+            owned_error_codes = {
+                "control acquisition repeated": "owned-control-repeat",
+                "control acquisition returned no IO": "owned-control-no-io",
+                "control close is unknown": "owned-control-close",
+                "partial command runtime would mix source origins": "owned-runtime-origin",
+                "bootstrap record identity changed": "owned-record-identity",
+                "bootstrap record exceeds bound": "owned-record-bound",
+                "bootstrap record changed during read": "owned-record-changing",
+                "bootstrap record write incomplete": "owned-record-write",
+                "unsupported owned-child request": "owned-request",
+                "owned-child cwd is not a directory": "owned-cwd",
+                "child acquisition was already attempted": "owned-acquire-repeat",
+                "invalid owned-child deadline": "owned-deadline-shape",
+                "owned-child admission deadline expired": "owned-admission-expired",
+                "owned creator was not admitted": "owned-creator-admission",
+                "native child was not acquired": "owned-child-missing",
+                "bootstrap admission deadline expired or cancelled": "owned-admission-cutoff",
+                "bootstrap admission endpoint is invalid": "owned-admission-endpoint",
+                "bootstrap admission endpoint changed": "owned-admission-identity",
+                "unsupported owned-child standard stream": "owned-stdio",
+                "oversized bootstrap configuration": "owned-config-bound",
+                "partial bootstrap configuration": "owned-config-write",
+                "native creator finish return is unknown": "owned-creator-return",
+                "native creator did not join": "owned-creator-join",
+                "native creator did not settle": "owned-creator-settle",
+                "native child publication is unknown": "owned-child-publication",
+                "bootstrap readiness is not the reserved child": "owned-ready-binding",
+                "bootstrap refused admission": "owned-bootstrap-refused",
+                "bootstrap grant repeated": "owned-grant-repeat",
+                "bootstrap grant return is ambiguous": "owned-grant-return",
+                "child wait authority is unknown": "owned-wait-authority",
+                "child numeric routes were not retired": "owned-numeric-retirement",
+                "child receipt is not its original wait": "owned-wait-receipt",
+                "child signal authority is not reserved": "owned-signal-authority",
+                "child signal deadline expired": "owned-signal-cutoff",
+                "control close remains unknown": "owned-control-unknown",
+                "native IO remains unknown": "owned-io-unknown",
+                "creator still owns native close obligations": "owned-creator-close",
+                "unknown owned stream": "owned-stream",
+                "owned stream EOF deadline expired": "owned-stream-cutoff",
+                "bootstrap attempt identity changed": "owned-attempt-identity",
+                "child ownership remains unknown": "owned-child-unknown",
+                "child cleanup deadline expired": "owned-cleanup-cutoff",
+                "child cleanup is not final": "owned-cleanup-finality",
+                "bootstrap directory identity changed": "owned-directory-identity",
+                "bootstrap record path is invalid": "owned-record-path",
+                "bootstrap record publication unavailable": "owned-publish-unavailable",
+                "bootstrap record publication refused": "owned-publish-refused",
+                "bootstrap record publication return is unknown": "owned-publish-return",
+                "bootstrap record publication remains unresolved": "owned-publish-unresolved",
+            }
+            owned_codes = frozenset(owned_error_codes.values())
+            self.assertEqual((len(owned_error_codes), len(owned_codes)), (49, 49))
+            self.assertEqual(controller.ADAPTER_FAILURE_OWNED_CODES, owned_codes)
+            self.assertLessEqual(max(map(len, owned_codes)), 26)
+            adapter_entry_error_codes = {
+                "adapter preparation missed original entry budget": "adapter-entry-budget",
+                "adapter entry original session or clocks changed": "adapter-entry-binding",
+                "adapter entry missed original one-second window": "adapter-entry-window",
+                "adapter entry lacks original completion reserve": "adapter-entry-reserve",
+            }
+            entry_codes = frozenset(adapter_entry_error_codes.values())
+            self.assertEqual((len(adapter_entry_error_codes), len(entry_codes)), (4, 4))
+            for category, codes in controller.ADAPTER_FAILURE_DRIVER_CODES.items():
+                self.assertEqual(frozenset(code for code in codes if code.startswith("owned-")),
+                                 owned_codes if category == "fixture-error" else frozenset())
+                self.assertEqual(frozenset(code for code in codes if code.startswith("adapter-entry-")),
+                                 entry_codes if category == "fixture-error" else frozenset())
+            self.assertEqual(controller.ADAPTER_FAILURE_PREFIX, "MRK_ADAPTER_FAILURE=")
+            self.assertEqual(controller.ADAPTER_FAILURE_MODE_CONTRACTS, adapter_contracts)
+            self.assertEqual(controller.ADAPTER_FAILURE_PLATFORMS, adapter_platforms)
+            self.assertEqual(controller.ADAPTER_FAILURE_FIELDS, adapter_fields)
+            self.assertEqual(controller.ADAPTER_READINESS_STAGES, adapter_readiness_stages)
+            self.assertEqual(controller.ADAPTER_FAILURE_RESULT_CHECKS, adapter_result_checks)
+            self.assertEqual(controller.ADAPTER_FAILURE_NATIVE_CHECKS, adapter_native_checks)
+            self.assertEqual(controller.ADAPTER_FAILURE_TIMING_CHECKS, adapter_timing_checks)
+            self.assertEqual(tuple(controller.ADAPTER_FAILURE_NATIVE_OUTCOMES), tuple(adapter_native_outcomes))
+            self.assertEqual(controller.ADAPTER_FAILURE_NATIVE_OUTCOMES,
+                             {name: frozenset(values) for name, values in adapter_native_outcomes.items()})
+            self.assertEqual(controller.ADAPTER_FAILURE_SLOW_CHECKS, adapter_slow_checks)
+
+            def adapter_bytes(record):
+                return ("MRK_ADAPTER_FAILURE="
+                        + json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
+
+            adapter_capture_detail = ["contract-error", "01mx" * 6, "1bamx01mx", "01mx", "m01",
+                                      ["native-lifecycle-error", "deadline"]]
+            adapter_record = {
+                "schema": 3, "platform": "ios", "mode": "real-deadline", "expectedKind": "pass",
+                "failedPredicates": ["result-kind", "driver-status"], "resultKind": "fixture-cleanup", "driverExitStatus": 1,
+                "retainedDriverErrorCategory": "native-lifecycle-error", "retainedDriverErrorCode": "native-deadline",
+                "adapterErrorCategory": "contract-error",
+                "resultChecks": {name: (True, False, "missing", "invalid")[index % 4]
+                                 for index, name in enumerate(adapter_result_checks)},
+                "nativeChecks": {name: (False, "missing", "invalid", True)[index % 4]
+                                 for index, name in enumerate(adapter_native_checks)},
+                "timingChecks": dict(zip(adapter_timing_checks,
+                    (True, "before-cutoff", "at-or-after-cutoff", True, False, True, "missing", "missing", "missing"))),
+                "nativeOutcomes": dict(zip(adapter_native_outcomes,
+                    ("exit2", "exit2", "signal", "failed", "unknown", "retired", "attempted", "attempted"))),
+                "slowChecks": dict.fromkeys(adapter_slow_checks, "missing"),
+                "captureDetail": adapter_capture_detail,
+                "readinessStage": "validator-live",
+            }
+            adapter_marker = adapter_bytes(adapter_record)
+            adapter_target = "IosUploadValidationTest#" + adapter_contracts["real-deadline"][0]
+            adapter_ids = tuple(sorted((*expected, adapter_target)))
+            adapter_step = controller.Step("ruby-ios_upload_validation", parser="minitest", expected_tests=3,
+                                           native_partition="healthy")
+            adapter_target_failure = adapter_target + " = PRIVATE_MESSAGE\n0.01 s = F\n"
+            adapter_stdout = clean + adapter_target_failure + failed_footer
+            # Use source-known adapter identities, but keep both discovery
+            # functions inert. No Ruby source or actual adapter is loaded here.
+            with patch.object(controller, "ruby_expected_ids", return_value=adapter_ids), \
+                    patch.object(controller, "ruby_capture_ids", return_value=adapter_ids), \
+                    patch.object(controller.time, "monotonic", return_value=999.0):
+                with patch.object(controller, "_fixture_failure_record", wraps=controller._fixture_failure_record) as strict, \
+                        patch.object(controller, "_ownership_capture_detail_valid",
+                                     wraps=controller._ownership_capture_detail_valid) as shared_detail:
+                    self.assertEqual(controller.adapter_failure(adapter_marker, deadline=1000.0), adapter_record)
+                strict.assert_called_once_with(adapter_marker, "MRK_ADAPTER_FAILURE=", 4096, deadline=1000.0,
+                                               canonical_fields=adapter_fields)
+                shared_detail.assert_called_once_with(adapter_capture_detail)
+                # Representative ordinary, slow and negative-control cases
+                # prove platform routing and mode-specific status, not a matrix
+                # of every flag crossed with every callback.
+                examples = (
+                    adapter_record,
+                    {**adapter_record, "platform": "android", "mode": "immediate-deadline-slow-cleanup",
+                     "expectedKind": "elapsed-bound", "failedPredicates": ["result-kind"],
+                     "timingChecks": {**adapter_record["timingChecks"], "slowCleanupAtLeastFour": True,
+                                      "captureCoversSlowCleanup": True, "slowCleanupWithinOriginalCutoff": False},
+                     "slowChecks": dict(zip(adapter_slow_checks, (False, True, True, True, False, True, True)))},
+                    {**adapter_record, "mode": "no-deadline", "expectedKind": "capture-watchdog",
+                     "resultKind": "capture-watchdog", "driverExitStatus": 0, "failedPredicates": ["driver-status"]},
+                )
+                for index, record in enumerate(examples):
+                    gate, class_name = adapter_platforms[record["platform"]]
+                    target = class_name + "#" + adapter_contracts[record["mode"]][0]
+                    ids = tuple(sorted((*expected, target)))
+                    selected_step = dataclasses.replace(adapter_step, id=gate)
+                    terminal = "E" if index == 1 else "F"
+                    transcript = clean + target + " = PRIVATE_MESSAGE\n0.01 s = " + terminal + "\n" + failed_footer
+                    raw = adapter_bytes(record)
+                    self.assertLessEqual(len(raw), 4096)
+                    with patch.object(controller, "ruby_capture_ids", return_value=ids), \
+                            patch.object(controller, "minitest_records", wraps=controller.minitest_records) as scans:
+                        detail = controller.failure_details(capture(transcript, stderr=raw, ok=False, returncode=1),
+                                                            selected_step, paths, deadline=1000.0)
+                    self.assertEqual([call.args for call in scans.call_args_list], [(transcript, ids), (transcript, (target,))])
+                    self.assertEqual([call.kwargs for call in scans.call_args_list], [{"deadline": 1000.0}] * 2)
+                    self.assertEqual(detail["adapter_failure"], record)
+                    self.assertEqual(detail["returncode"], 1)
+                    self.assertNotIn("PRIVATE_", json.dumps(detail))
+                    all_pass = {**record, "resultKind": record["expectedKind"],
+                                "driverExitStatus": 0 if record["expectedKind"] == "pass" else 1, "failedPredicates": []}
+                    self.assertIsNone(controller.adapter_failure(adapter_bytes(all_pass)))
+                    self.assertIsNone(controller.adapter_failure(adapter_bytes({**all_pass, "failedPredicates": record["failedPredicates"]})))
+
+                failed_capture = capture(adapter_stdout, stderr=adapter_marker, ok=False, returncode=1)
+                with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                    controller.parse_capture(adapter_step, failed_capture, paths, "linux", None)
+                rc_zero = capture(adapter_stdout, stderr=adapter_marker)
+                self.assertEqual(controller.failure_details(rc_zero, adapter_step, paths)["adapter_failure"], adapter_record)
+                with self.assertRaisesRegex(controller.VerificationError, "MINITEST_RESULT_REJECTED"):
+                    controller.parse_capture(adapter_step, rc_zero, paths, "macos", None)
+                success_stdout = adapter_stdout.replace("0.01 s = F", "0.01 s = .").replace("1 failures", "0 failures")
+                self.assertNotIn("adapter_failure", controller.failure_details(
+                    capture(success_stdout, stderr=adapter_marker), adapter_step, paths))
+                self.assertTrue(controller.parse_capture(adapter_step, capture(success_stdout, stderr=adapter_marker),
+                                                         paths, "linux", None).ok)
+
+                # Class/message sentinels need not match: a missing message
+                # coexists with a recognized class, and nil class + String
+                # message is category=none/code=invalid, never a known cause.
+                for category, code in (
+                    ("missing", "missing"), ("none", "missing"), ("none", "none"), ("none", "invalid"),
+                    ("invalid", "missing"), ("invalid", "invalid"), ("fixture-error", "missing"),
+                    ("fixture-error", "invalid"), ("fixture-error", "elapsed-bound"), ("native-lifecycle-error", "other"),
+                    ("native-error", "native-deadline"), ("native-protocol-error", "native-protocol"),
+                    ("native-spawn-error", "spawn-waitability"), ("io-error", "other"), ("other", "other"),
+                ):
+                    record = {**adapter_record, "retainedDriverErrorCategory": category, "retainedDriverErrorCode": code}
+                    self.assertEqual(controller.adapter_failure(adapter_bytes(record)), record)
+                # Exact finite source codes add information to the retained
+                # fixture error only. They are not native causes or authority.
+                for code in owned_error_codes.values():
+                    record = {**adapter_record, "retainedDriverErrorCategory": "fixture-error",
+                              "retainedDriverErrorCode": code}
+                    self.assertEqual(controller.adapter_failure(adapter_bytes(record)), record)
+                for category in controller.ADAPTER_FAILURE_DRIVER_CODES:
+                    if category != "fixture-error":
+                        self.assertIsNone(controller.adapter_failure(adapter_bytes({**adapter_record,
+                            "retainedDriverErrorCategory": category, "retainedDriverErrorCode": "owned-record-identity"})))
+                for code in ("owned-record-identity-PRIVATE_MESSAGE", "owned-unmapped"):
+                    self.assertIsNone(controller.adapter_failure(adapter_bytes({**adapter_record,
+                        "retainedDriverErrorCategory": "fixture-error", "retainedDriverErrorCode": code})))
+                # The three split guards and historical compound guard remain
+                # exact fixture-error codes, not prefix matches or native causes.
+                for code in (*adapter_entry_error_codes.values(), "adapter-entry-unlisted",
+                             "adapter-entry-window-PRIVATE_MESSAGE"):
+                    for category in controller.ADAPTER_FAILURE_DRIVER_CODES:
+                        record = {**adapter_record, "resultKind": "setup-fixture-fault",
+                                  "retainedDriverErrorCategory": category, "retainedDriverErrorCode": code}
+                        self.assertEqual(controller.adapter_failure(adapter_bytes(record)),
+                                         record if category == "fixture-error" and code in entry_codes else None)
+                for first_cutoff, selected_cutoff in (("before-start", "before-cutoff"),
+                                                     ("missing", "invalid"), ("at-or-after-cutoff", "before-start")):
+                    record = {**adapter_record, "timingChecks": {**adapter_record["timingChecks"],
+                              "firstTimeoutCutoff": first_cutoff, "selectedTimeoutCutoff": selected_cutoff,
+                              "slowCleanupAtLeastFour": False, "captureCoversSlowCleanup": "invalid"}}
+                    self.assertEqual(controller.adapter_failure(adapter_bytes(record)), record)
+
+                # One vector per finite enum position covers every domain without
+                # crossing outcomes with every mode/flag. Contradictory snapshot
+                # facts stay visible; they neither repair UNKNOWN nor authorize
+                # success. Missing and invalid are never coerced into false.
+                for index in range(max(map(len, adapter_native_outcomes.values()))):
+                    record = {**adapter_record, "nativeOutcomes": {
+                        name: values[index % len(values)] for name, values in adapter_native_outcomes.items()}}
+                    self.assertEqual(controller.adapter_failure(adapter_bytes(record)), record)
+                for value in (True, False, "missing", "invalid"):
+                    record = {**adapter_record,
+                        "nativeChecks": dict.fromkeys(adapter_native_checks, value),
+                        "timingChecks": {**adapter_record["timingChecks"], "slowCleanupWithinOriginalCutoff": value},
+                        "slowChecks": dict.fromkeys(adapter_slow_checks, value)}
+                    self.assertEqual(controller.adapter_failure(adapter_bytes(record)), record)
+                # The finite last-entered location is diagnostic, not a READY
+                # receipt or a consistency gate for independently sampled facts.
+                for stage in (*adapter_readiness_stages, "missing", "invalid"):
+                    record = {**adapter_record, "readinessStage": stage}
+                    self.assertEqual(controller.adapter_failure(adapter_bytes(record)), record)
+                # Reuse the existing compact grammar rather than duplicating
+                # its exhaustive alphabet/primary controls below. Missing and
+                # malformed original operands remain finite, not fabricated clean.
+                for sentinel, code in (("missing", "m"), ("invalid", "x")):
+                    record = {**adapter_record, "captureDetail": [sentinel, code * 24, code * 9,
+                              code * 4, code * 3, [sentinel, sentinel]], "readinessStage": sentinel}
+                    self.assertEqual(controller.adapter_failure(adapter_bytes(record)), record)
+
+                # Maximize every independent finite field (and the dependent
+                # mode/kind and retained-error pairs). The schema3 additions
+                # must fit the existing complete-line 4096-byte cap.
+                longest_mode = max(adapter_contracts, key=lambda mode: len(mode) + len(adapter_contracts[mode][1]))
+                error_category, error_code = max(
+                    ((category, code) for category, codes in controller.ADAPTER_FAILURE_DRIVER_CODES.items() for code in codes),
+                    key=lambda pair: len(pair[0]) + len(pair[1]))
+                adapter_maximum_primary = max(
+                    ([category, code] for category, codes in controller.OWNERSHIP_CAPTURE_PRIMARY_ERROR_KINDS.items()
+                     for code in codes), key=lambda pair: len(json.dumps(pair, separators=(",", ":"))))
+                maximum_record = {**adapter_record,
+                    "platform": "android", "mode": longest_mode, "expectedKind": adapter_contracts[longest_mode][1],
+                    "resultKind": max((kind for kind in controller.ADAPTER_FAILURE_RESULT_KINDS
+                                       if kind != adapter_contracts[longest_mode][1]), key=len),
+                    "driverExitStatus": 255, "retainedDriverErrorCategory": error_category,
+                    "retainedDriverErrorCode": error_code,
+                    "adapterErrorCategory": max(controller.ADAPTER_FAILURE_DRIVER_CODES, key=len),
+                    "resultChecks": dict.fromkeys(adapter_result_checks, "missing"),
+                    "nativeChecks": dict.fromkeys(adapter_native_checks, "missing"),
+                    "timingChecks": {name: "at-or-after-cutoff" if name in ("firstTimeoutCutoff", "selectedTimeoutCutoff")
+                                     else "missing" for name in adapter_timing_checks},
+                    "nativeOutcomes": {name: max(values, key=len) for name, values in adapter_native_outcomes.items()},
+                    "slowChecks": dict.fromkeys(adapter_slow_checks, "missing"),
+                    "captureDetail": [max(controller.ADAPTER_FAILURE_DRIVER_CODES, key=len), "m" * 24,
+                                      "maa" + "m" * 6, "m" * 4, "m" * 3, adapter_maximum_primary],
+                    "readinessStage": max((*adapter_readiness_stages, "missing", "invalid"), key=len)}
+                maximum_marker = adapter_bytes(maximum_record)
+                self.assertGreater(len(maximum_marker), 2048)
+                self.assertLessEqual(len(maximum_marker), 4096)
+                self.assertEqual(controller.adapter_failure(maximum_marker), maximum_record)
+                for code in adapter_entry_error_codes.values():
+                    record = {**maximum_record, "retainedDriverErrorCategory": "fixture-error",
+                              "retainedDriverErrorCode": code}
+                    self.assertLessEqual(len(adapter_bytes(record)), len(maximum_marker))
+                    self.assertEqual(controller.adapter_failure(adapter_bytes(record)), record)
+                # Padding is not canonical. At exactly 4096 bytes the bounded
+                # reader may inspect JSON; at 4097 it must reject BEFORE parsing.
+                # Both sizes count the prefix and the final LF, not just JSON.
+                at_limit = maximum_marker[:-1] + b" " * (4096 - len(maximum_marker)) + b"\n"
+                oversized = at_limit[:-1] + b" \n"
+                self.assertEqual((len(at_limit), len(oversized)), (4096, 4097))
+                with patch.object(controller, "strict_json", wraps=controller.strict_json) as decode:
+                    self.assertIsNone(controller.adapter_failure(at_limit))
+                decode.assert_called_once()
+                with patch.object(controller, "strict_json", side_effect=AssertionError("oversized adapter JSON was parsed")) as decode:
+                    self.assertIsNone(controller.adapter_failure(oversized))
+                decode.assert_not_called()
+
+                for transcript in (
+                    clean + failed_footer, clean + adapter_target + ":\n" + failed_footer,
+                    clean + adapter_target + " = unfinished\n" + failed_footer,
+                    adapter_stdout.replace("0.01 s = F", "0.01 s = S"),
+                    adapter_stdout.replace("0.01 s = F", "0.01 s = .\n0.01 s = F"),
+                    clean + adapter_target_failure * 2 + failed_footer,
+                    clean + failed_footer + adapter_target_failure,
+                ):
+                    self.assertNotIn("adapter_failure", controller.failure_details(
+                        capture(transcript, stderr=adapter_marker, ok=False, returncode=1), adapter_step, paths))
+                self.assertNotIn("adapter_failure", controller.failure_details(
+                    capture(adapter_stdout + adapter_marker.decode("ascii"), ok=False, returncode=1), adapter_step, paths))
+                wrong_platform = adapter_bytes({**adapter_record, "platform": "android"})
+                self.assertNotIn("adapter_failure", controller.failure_details(
+                    capture(adapter_stdout, stderr=wrong_platform, ok=False, returncode=1), adapter_step, paths))
+                wrong_target = "IosUploadValidationTest#" + adapter_contracts["inherited"][0]
+                with patch.object(controller, "ruby_capture_ids", return_value=(*adapter_ids, wrong_target)):
+                    self.assertNotIn("adapter_failure", controller.failure_details(capture(adapter_stdout,
+                        stderr=adapter_bytes({**adapter_record, "mode": "inherited"}), ok=False, returncode=1),
+                        adapter_step, paths))
+                with patch.object(controller, "ruby_capture_ids", return_value=expected):
+                    self.assertNotIn("adapter_failure", controller.failure_details(failed_capture, adapter_step, paths))
+                for wrong_step in (
+                    dataclasses.replace(adapter_step, id="ruby-native-capture"),
+                    dataclasses.replace(adapter_step, id="ruby-native-owner"),
+                    dataclasses.replace(adapter_step, id="ruby-play_store"),
+                    dataclasses.replace(adapter_step, id="ruby-android_upload_validation"),
+                    dataclasses.replace(adapter_step, native_partition="all"),
+                    dataclasses.replace(adapter_step, native_partition="ownership-unknown-capture-reap"),
+                    dataclasses.replace(adapter_step, native_partition="kill-startup"),
+                    dataclasses.replace(adapter_step, parser="exit"),
+                ):
+                    self.assertNotIn("adapter_failure", controller.failure_details(failed_capture, wrong_step, paths))
+                with patch.object(controller, "ruby_capture_ids", return_value=tuple(sorted((*many_ids, adapter_target)))):
+                    detail = controller.failure_details(capture(many_stdout + adapter_target_failure, stderr=adapter_marker,
+                        ok=False, returncode=1), adapter_step, paths)
+                    self.assertGreater(detail["minitest_structure"]["start_records_omitted"], 0)
+                    self.assertEqual(detail["adapter_failure"], adapter_record)
+                    self.assertNotIn("adapter_failure", controller.failure_details(capture(
+                        adapter_target_failure + many_stdout + adapter_target_failure,
+                        stderr=adapter_marker, ok=False, returncode=1), adapter_step, paths))
+
+                invalid_adapter = [
+                    {key: value for key, value in adapter_record.items() if key != "expectedKind"},
+                    {**adapter_record, "private": "PRIVATE_ROOT"}, {key: adapter_record[key] for key in reversed(adapter_fields)},
+                    *({**adapter_record, "schema": value} for value in (True, 1, 2, 3.0, "3", 4)),
+                    # Original schema2 records stay historical: no invented
+                    # new operands or compatibility promotion in this parser.
+                    {key: (2 if key == "schema" else value) for key, value in adapter_record.items()
+                     if key not in ("captureDetail", "readinessStage")},
+                    *({key: value for key, value in adapter_record.items() if key != field}
+                      for field in ("captureDetail", "readinessStage")),
+                    *({**adapter_record, "readinessStage": value}
+                      for value in (None, False, 0, [], {}, "", "validator_live", "PRIVATE_STAGE", "ready-return\n")),
+                    *({**adapter_record, "captureDetail": value} for value in (
+                        None, "missing", {}, [], adapter_capture_detail[:-1], adapter_capture_detail + ["PRIVATE_VALUE"],
+                        ["PRIVATE_CLASS", *adapter_capture_detail[1:]],
+                        [*adapter_capture_detail[:3], "01m", *adapter_capture_detail[4:]],
+                        [*adapter_capture_detail[:4], "m0a", adapter_capture_detail[5]],
+                        [*adapter_capture_detail[:5], ["native-lifecycle-error", "waitability"]],
+                    )),
+                    {**adapter_record, "platform": "PRIVATE_PLATFORM"},
+                    {**adapter_record, "mode": "native-setup-interrupt"}, {**adapter_record, "expectedKind": "readiness"},
+                    {**adapter_record, "resultKind": "PRIVATE_KIND"}, {**adapter_record, "resultKind": None},
+                    *({**adapter_record, "driverExitStatus": value} for value in (True, 1.0, -1, 256)),
+                    {**adapter_record, "retainedDriverErrorCategory": []}, {**adapter_record, "adapterErrorCategory": "PRIVATE_CLASS"},
+                    {**adapter_record, "retainedDriverErrorCode": None}, {**adapter_record, "retainedDriverErrorCode": "PRIVATE_MESSAGE"},
+                    *({**adapter_record, "failedPredicates": value} for value in
+                      ([], ["driver-status", "result-kind"], ["result-kind"], ["result-kind", "driver-status", "driver-status"])),
+                ]
+                invalid_adapter.extend({**adapter_record, "retainedDriverErrorCategory": category, "retainedDriverErrorCode": code}
+                    for category, code in (("missing", "invalid"), ("none", "other"), ("invalid", "none"),
+                        ("native-protocol-error", "native-deadline"), ("fixture-error", "native-lifecycle"),
+                        ("native-spawn-error", "elapsed-bound"), ("other", "native-unknown"), ("io-error", "none")))
+                for group in ("resultChecks", "nativeChecks", "timingChecks", "nativeOutcomes", "slowChecks"):
+                    group_checks = adapter_record[group]
+                    invalid_adapter.extend({**adapter_record, group: value} for value in (
+                        None, [], {name: value for name, value in group_checks.items() if name != next(iter(group_checks))},
+                        {**group_checks, "PRIVATE_CHECK": True}, {name: group_checks[name] for name in reversed(group_checks)},
+                        {**group_checks, next(iter(group_checks)): 0},
+                    ))
+                invalid_adapter.extend({**adapter_record, "timingChecks": {**adapter_record["timingChecks"], key: value}}
+                    for key, value in (("firstTimeoutCutoff", True), ("selectedTimeoutCutoff", "PRIVATE_TIME"),
+                        ("captureWithinLimit", 0.5), ("captureWithinLimit", float("nan")),
+                        ("slowCleanupAtLeastFour", float("inf")), ("captureCoversSlowCleanup", None),
+                        ("slowCleanupWithinOriginalCutoff", 0)))
+                invalid_adapter.extend({**adapter_record, "nativeOutcomes": {**adapter_record["nativeOutcomes"], key: value}}
+                    for key, value in (("custodian", "reaped"), ("keeper", "not_attempted"), ("validator", "exit3"),
+                        ("finalOutcome", "confirmed"), ("finalCleanup", "failed"), ("groupState", "not_created"),
+                        ("captureState", "not_constructed"), ("creatorState", "exit0"),
+                        ("custodian", True), ("custodian", None), ("custodian", []), ("custodian", "PRIVATE_OUTCOME")))
+                invalid_adapter.extend({**adapter_record, "slowChecks": {**adapter_record["slowChecks"], "delayFailed": value}}
+                    for value in (0, None, "PRIVATE_DELAY"))
+                # Common framing is already exhaustively covered above. These
+                # new-shape cases prove this decoder actually uses that reader.
+                invalid_markers = [*(adapter_bytes(record) for record in invalid_adapter),
+                    adapter_marker * 2, adapter_marker.replace(b'"schema":3', b'"schema":3,"schema":3'),
+                    adapter_marker.replace(b'"ready":true', b'"ready":true,"ready":true'),
+                    adapter_marker.replace(b'"custodian":"exit2"', b'"custodian":"exit2","custodian":"exit2"'),
+                    adapter_marker.replace(b'"delayFailed":"missing"', b'"delayFailed":"missing","delayFailed":"missing"'),
+                    adapter_marker.replace(b'"captureDetail":', b'"captureDetail":[],"captureDetail":'),
+                    adapter_marker.replace(b'"readinessStage":', b'"readinessStage":"missing","readinessStage":'),
+                    adapter_marker.replace(b'"schema":3', b'"schema": 3'), adapter_marker[:-1], oversized,
+                ]
+                for raw in invalid_markers:
+                    detail = controller.failure_details(capture(adapter_stdout, stderr=raw, ok=False, returncode=1),
+                                                        adapter_step, paths, deadline=1000.0)
+                    self.assertNotIn("adapter_failure", detail)
+                    self.assertEqual(detail["returncode"], 1)
+                    self.assertNotIn("PRIVATE_", json.dumps(detail))
+
+                expired = [False]
+                def expired_adapter_parse(_text):
+                    expired[0] = True
+                    raise ValueError("PRIVATE_MESSAGE")
+                with patch.object(controller, "strict_json", side_effect=expired_adapter_parse), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(failed_capture, adapter_step, paths, deadline=1000.0)
+                expired[0] = False
+                original_scan = controller.minitest_records
+                def expire_adapter_scan(text, identifiers, *, deadline):
+                    if identifiers == (adapter_target,):
+                        expired[0] = True
+                    return original_scan(text, identifiers, deadline=deadline)
+                with patch.object(controller, "minitest_records", side_effect=expire_adapter_scan), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(failed_capture, adapter_step, paths, deadline=1000.0)
+                for interruption in (KeyboardInterrupt("PRIVATE_MESSAGE"), SystemExit(7)):
+                    with patch.object(controller, "strict_json", side_effect=interruption), \
+                            self.assertRaises(type(interruption)) as raised:
+                        controller.failure_details(failed_capture, adapter_step, paths, deadline=1000.0)
+                    self.assertIs(raised.exception, interruption)
+
+            # Plain source constants bind this parser to the real Ruby wire.
+            # These fixed bounded DATA reads do not load Ruby or a native module.
+            def ruby_text(relative):
+                with (ROOT / relative).open("rb") as source:
+                    raw = source.read(1_048_577)
+                self.assertLessEqual(len(raw), 1_048_576)
+                return raw.decode("utf-8", "strict")
+
+            def ruby_words(text, name):
+                matches = controller.re.findall(r"\b" + name + r" = %w\[([A-Za-z0-9_\-\s]*)\]\s*\.freeze", text)
+                self.assertEqual(len(matches), 1, name)
+                return tuple(matches[0].split())
+
+            ownership_source = ruby_text("tests/workflow/upload_process_ownership.rb")
+            self.assertIn('OWNERSHIP_FAILURE_PREFIX = "MRK_OWNERSHIP_FAILURE="', ownership_source)
+            self.assertEqual(controller.OWNERSHIP_FAILURE_PREFIX, "MRK_OWNERSHIP_FAILURE=")
+            for suffix in ("FIELDS", "ROW_FIELDS", "PHASES", "OWNER_PHASES",
+                           "CHECKS", "COMMAND_CHECKS", "FAILED_CHECKS"):
+                name = "OWNERSHIP_FAILURE_" + suffix
+                self.assertEqual(ruby_words(ownership_source, name), getattr(controller, name))
+            for suffix in ("CLEANUP_FIELDS", "DIRECTORY_STATES", "STATUS_FIELDS", "RESULT_SOURCES", "CHECKS",
+                           "NATIVE_PROOF_FIELDS", "OWNER_FINALITIES", "ERROR_STAGES", "ERROR_FIELDS", "RESULT_FIELDS",
+                           "EXTENDED_RESULT_FIELDS"):
+                name = "OWNERSHIP_RUN_" + suffix
+                self.assertEqual(ruby_words(ownership_source, name), getattr(controller, name))
+            for suffix in ("DETAIL_FIELDS", "PROTOCOL_FIELDS"):
+                name = "OWNERSHIP_CAPTURE_" + suffix
+                self.assertEqual(ruby_words(ownership_source, name), getattr(controller, name))
+            capture_detail_fields = ("adapterErrorCategory", "resultChecks", "timingChecks", "settlementChecks", "protocolContext", "primary")
+            self.assertEqual(controller.OWNERSHIP_CAPTURE_DETAIL_FIELDS, capture_detail_fields)
+            self.assertEqual(controller.OWNERSHIP_CAPTURE_PROTOCOL_FIELDS, ("hello", "reserved", "ready"))
+            self.assertEqual((len(adapter_result_checks), len(adapter_timing_checks),
+                              len(controller.NATIVE_SETUP_SETTLEMENT_CHECKS)), (24, 9, 4))
+            self.assertEqual(ruby_words(ownership_source, "SETTLEMENT_CHECKS"), controller.NATIVE_SETUP_SETTLEMENT_CHECKS)
+            self.assertEqual(ruby_words(ownership_source, "OWNERSHIP_FAILURE_HELPERS"), ("capture", "run"))
+            self.assertEqual(ruby_words(ownership_source, "OWNERSHIP_FAILURE_PLATFORMS"), ("ios", "android"))
+
+            def ruby_literal_pairs(body, name, *, words=False):
+                pattern = (r'"([^"\r\n]+)" => %w\[([A-Za-z0-9_\-\s]*)\]' if words else
+                           r'"([^"\r\n]+)" => "([^"\r\n]+)"')
+                pairs = controller.re.findall(pattern, body)
+                self.assertEqual(len(pairs), len(dict(pairs)), name)
+                self.assertEqual("".join(controller.re.sub(pattern + r"\s*,?", "", body).split()), "", name)
+                return {key: tuple(value.split()) if words else value for key, value in pairs}
+
+            def ruby_literal_table(text, name, *, words=False):
+                bodies = controller.re.findall(r"(?ms)^\s*" + name
+                    + r" = \{(.*?)^\s*\}\.(?:transform_values\(&:freeze\)\.)?freeze", text)
+                self.assertEqual(len(bodies), 1, name)
+                return ruby_literal_pairs(bodies[0], name, words=words)
+
+            def ownership_literal_table(name, *, words=False):
+                return ruby_literal_table(ownership_source, name, words=words)
+
+            # Read finite declarations as DATA, never load Ruby/Fiddle/native
+            # helpers. Child-only bootstrap errors become exit125 + a different
+            # finite report; they are not returned adapter error literals.
+            fixture_source = ruby_text("tests/workflow/upload_process_fixture.rb")
+            self.assertEqual(ruby_words(fixture_source, "ADAPTER_FAILURE_FIELDS"), adapter_fields)
+            self.assertEqual(ruby_words(fixture_source, "ADAPTER_READINESS_STAGES"), adapter_readiness_stages)
+            self.assertEqual(ruby_literal_table(fixture_source, "ADAPTER_FAILURE_OWNED_CODES"), owned_error_codes)
+            driver_literal_bodies = controller.re.findall(
+                r"(?ms)^  ADAPTER_FAILURE_CODES = begin\n    literals = \{\n(.*?)^    \}\n"
+                r"    literals\.merge!\(ADAPTER_FAILURE_OWNED_CODES\)\n", fixture_source)
+            self.assertEqual(len(driver_literal_bodies), 1)
+            driver_literals = ruby_literal_pairs(driver_literal_bodies[0], "ADAPTER_FAILURE_CODES")
+            self.assertEqual({message: code for message, code in driver_literals.items()
+                              if code.startswith("adapter-entry-")}, adapter_entry_error_codes)
+            self.assertEqual(controller.ADAPTER_FAILURE_DRIVER_CODES["fixture-error"],
+                             frozenset({"missing", "invalid", "other", *owned_codes, *driver_literals.values()}))
+            owned_bodies = controller.re.findall(
+                r"(?ms)^  class OwnedChild\n(.*?)^    def self\.bootstrap\(directory\)\n", ownership_source)
+            self.assertEqual(len(owned_bodies), 1)
+            owned_literals = controller.re.findall(
+                r'Failure\.new\(\s*"process-ownership",\s*"([^"\\\r\n]+)"\s*\)', owned_bodies[0])
+            self.assertEqual(set(owned_literals), set(owned_error_codes))
+
+            self.assertEqual(ownership_literal_table("OWNERSHIP_FAILURE_CASES", words=True),
+                             controller.OWNERSHIP_FAILURE_CASES)
+            self.assertEqual(tuple(controller.OWNERSHIP_FAILURE_CASES), ("async", "signals", "policies"))
+            self.assertEqual(tuple(map(len, controller.OWNERSHIP_FAILURE_CASES.values())), (4, 16, 10))
+            self.assertEqual(ownership_literal_table("OWNERSHIP_FAILURE_CALLBACKS"), controller.OWNERSHIP_FAILURE_CALLBACKS)
+            self.assertEqual(controller.OWNERSHIP_FAILURE_CALLBACKS, {family:
+                f"test_process_ownership_{family}_through_both_real_fixture_callers"
+                for family in ("async", "signals", "policies")})
+            run_fields = ("directoryState", "driverStatus", "resultSource", "checks", "nativeProof", "cleanupErrors", "driverResult")
+            run_checks = (
+                "driverComplete", "dispatchRequested", "recoveryEntered", "recoveryFilesComplete", "dispatchMatched",
+                "ownerValidated", "nativeFinal", "knownDead", "deathAttempted", "deathCompleted", "directoryIdentityMatched",
+                "layoutAccepted", "removalAttempted", "removalCompleted",
+            )
+            run_proof_fields = ("versionOne", "ownerFinality", "custodianMatches", "keeperMatches", "validatorMatches",
+                                "groupMatches", "noProducersMatch")
+            run_result_fields = ("resultKind", "retainedDriverErrorCategory", "retainedDriverErrorCode", "nativeChecks", "nativeOutcomes")
+            run_extended_result_fields = (*run_result_fields, "captureDetail")
+            run_stages = ("child-stop", "transcript-out-close", "transcript-err-close", "held-writer-close",
+                          "native-recovery", "death-observation", "directory-removal", "missing")
+            run_conditions = {
+                "recovery-dispatch-mismatch": "fixture-cleanup",
+                "owner-shape": "fixture-result", "owner-unbound": "fixture-result",
+                "owner-duplicate": "fixture-result", "owner-graph": "fixture-result",
+                "driver-identity-changed": "fixture-cleanup", "directory-not-canonical": "fixture-cleanup",
+                "directory-not-private": "fixture-cleanup", "enumeration-before-identity": "fixture-cleanup",
+                "enumeration-open-identity": "fixture-cleanup", "enumeration-listing": "fixture-cleanup",
+                "enumeration-after-identity": "fixture-cleanup", "enumeration-io": "fixture-cleanup",
+                "observer-scratch": "fixture-cleanup", "observer-output": "process-observation",
+                "observer-metadata": "process-observation", "death-cutoff": "fixture-cleanup",
+            }
+            self.assertEqual(controller.OWNERSHIP_RUN_CLEANUP_FIELDS, run_fields)
+            self.assertEqual(controller.OWNERSHIP_RUN_DIRECTORY_STATES,
+                             ("unattempted", "acquiring", "published", "canonical", "missing"))
+            self.assertEqual(controller.OWNERSHIP_RUN_STATUS_FIELDS, ("kind", "code"))
+            self.assertEqual(controller.OWNERSHIP_RUN_RESULT_SOURCES, ("ordinary", "recovered", "missing"))
+            self.assertEqual(controller.OWNERSHIP_RUN_CHECKS, run_checks)
+            self.assertEqual(controller.OWNERSHIP_RUN_NATIVE_PROOF_FIELDS, run_proof_fields)
+            self.assertEqual(controller.OWNERSHIP_RUN_OWNER_FINALITIES,
+                             ("active", "finalized", "no-producers", "unknown", "missing", "invalid"))
+            self.assertEqual(controller.OWNERSHIP_RUN_ERROR_STAGES, run_stages)
+            self.assertEqual(controller.OWNERSHIP_RUN_ERROR_FIELDS, ("stage", "errorCategory", "errorKind", "condition"))
+            self.assertEqual(controller.OWNERSHIP_RUN_RESULT_FIELDS, run_result_fields)
+            self.assertEqual(controller.OWNERSHIP_RUN_EXTENDED_RESULT_FIELDS, run_extended_result_fields)
+            self.assertEqual(ownership_literal_table("OWNERSHIP_RUN_CONDITIONS"), run_conditions)
+            self.assertEqual(controller.OWNERSHIP_RUN_CONDITIONS, run_conditions)
+            labels = ownership_literal_table("OWNERSHIP_FAILURE_LABEL_CODES")
+            self.assertEqual(tuple(labels.values()), controller.OWNERSHIP_FAILURE_FAILED_CHECKS[:-1])
+            self.assertEqual(len(labels), 23)
+            self.assertEqual(controller.OWNERSHIP_FAILURE_FAILED_CHECKS[-1], "other-failed-check")
+            kind_body = controller.re.findall(
+                r"(?ms)^\s*OWNERSHIP_FAILURE_ERROR_KINDS = \{(.*?)^\s*\}\.transform_values\(&:freeze\)\.freeze",
+                ownership_source)
+            self.assertEqual(len(kind_body), 1)
+            kind_rows = controller.re.findall(r'"([a-z-]+)" => %w\[([A-Za-z0-9_\-\s]*)\]', kind_body[0])
+            self.assertEqual(len(kind_rows), len(controller.OWNERSHIP_FAILURE_ERROR_KINDS))
+            self.assertEqual({category: frozenset(kinds.split()) for category, kinds in kind_rows},
+                             controller.OWNERSHIP_FAILURE_ERROR_KINDS)
+            primary_extras = {"contract-error": ("none",), "missing": ("missing",), "invalid": ("invalid",)}
+            self.assertEqual(ownership_literal_table("OWNERSHIP_CAPTURE_PRIMARY_EXTRA_KINDS", words=True), primary_extras)
+            self.assertEqual(controller.OWNERSHIP_CAPTURE_PRIMARY_EXTRA_KINDS,
+                             {category: frozenset(codes) for category, codes in primary_extras.items()})
+            self.assertEqual(controller.OWNERSHIP_CAPTURE_PRIMARY_ERROR_KINDS,
+                             {**controller.OWNERSHIP_FAILURE_ERROR_KINDS, **controller.OWNERSHIP_CAPTURE_PRIMARY_EXTRA_KINDS})
+            self.assertFalse(set(primary_extras) & controller.OWNERSHIP_FAILURE_ERROR_KINDS.keys())
+            for relative, name, category in (
+                ("fastlane/native_upload_process.rb", "REASONS", "native-lifecycle-error"),
+                ("fastlane/native_process_spawn.rb", "CODES", "native-spawn-error"),
+            ):
+                self.assertEqual(set(ruby_words(ruby_text(relative), name)) | {"other"},
+                                 controller.OWNERSHIP_FAILURE_ERROR_KINDS[category])
+
+            run_result = {name: adapter_record[name] for name in run_result_fields}
+            run_result.update(resultKind="pass", retainedDriverErrorCategory="none", retainedDriverErrorCode="none")
+            capture_detail = ["contract-error", "01mx" * 6, "1bamx01mx", "01mx", "m01", ["native-lifecycle-error", "deadline"]]
+            run_result["captureDetail"] = capture_detail
+            run_cleanup = {
+                "directoryState": "canonical", "driverStatus": {"kind": "exit", "code": 0}, "resultSource": "recovered",
+                "checks": dict(zip(run_checks, (True, True, True, True, True, True, False, False,
+                                                False, False, "missing", "missing", False, False))),
+                "nativeProof": dict(zip(run_proof_fields, (True, "finalized", True, False, "missing", True, False))),
+                # Occurrences, not exception identities: an identical retained
+                # error may escape two original cleanup calls without deduping.
+                "cleanupErrors": [["native-recovery", "fixture-error", "fixture-result", "owner-shape"],
+                                  ["native-recovery", "fixture-error", "fixture-result", "owner-shape"]],
+                "driverResult": run_result,
+            }
+            ownership_row = {
+                "ownerPhase": "unknown", "firstErrorCategory": "interrupt", "firstErrorKind": "none",
+                "operationErrorCategory": "interrupt", "operationErrorKind": "none",
+                "failedChecks": ["numeric-route-veto", "command-not-finalized"],
+                "checks": {name: (True, False, "missing")[index % 3]
+                           for index, name in enumerate(controller.OWNERSHIP_FAILURE_CHECKS)},
+                "commandChecks": {name: ("missing", True, False)[index % 3]
+                                  for index, name in enumerate(controller.OWNERSHIP_FAILURE_COMMAND_CHECKS)},
+                "runCleanup": "missing",
+            }
+            ownership_record = {
+                "schema": 4, "platform": "ios", "family": "async", "helper": "capture", "case": "async-spawn",
+                "phase": "row-rejection", "errorCategory": "fixture-error", "errorKind": "ownership-probe",
+                "row": ownership_row,
+            }
+
+            def ownership_bytes(record):
+                return ("MRK_OWNERSHIP_FAILURE="
+                        + json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
+
+            # Independent finite model of the original one() branches. The
+            # cancellation cases cannot lend their check labels to policies.
+            policy_code_cases = {
+                "normal-command-not-finalized": ("normal", "ignored-INT", "ignored-TERM"),
+                "policy-not-fail-closed": ("custom-INT", "custom-TERM", "custom-pending-INT", "partial-install",
+                                          "changed-handler", "finalize-report", "finalize-drain"),
+                "policy-native-creation": ("custom-INT", "custom-TERM", "custom-pending-INT", "partial-install"),
+                "custom-pending-lost": ("custom-pending-INT",),
+                "partial-install-not-exercised": ("partial-install",),
+                "finalization-cleanup": ("finalize-report", "finalize-drain"),
+                "finalization-outer-lifetime": ("finalize-report", "finalize-drain"),
+            }
+            cancellation_codes = {"cancellation-not-propagated", "injection-boundary-missing", "wrong-signal",
+                                  "command-not-finalized"}
+
+            def ownership_case_codes(family, helper, case):
+                allowed = {"numeric-route-veto", "handlers-not-restored", "registry-active", "hooks-not-restored",
+                    "injector-cleanup", "primary-not-preserved", "injectors-not-joined", "injector-custody",
+                    "pending-interrupt", "fixture-retained", "other-failed-check"}
+                if family in {"async", "signals"}:
+                    allowed.update(cancellation_codes)
+                    if case in {"async-spawn", "INT-spawn", "TERM-spawn"}:
+                        allowed.add("pre-go-barrier-missing")
+                    if (family, helper, case) == ("async", "run", "repeated"):
+                        allowed.add("nested-cancellation-missing")
+                else:
+                    allowed.update(code for code, cases in policy_code_cases.items() if case in cases)
+                return [code for code in controller.OWNERSHIP_FAILURE_FAILED_CHECKS if code in allowed]
+
+            ownership_marker = ownership_bytes(ownership_record)
+            ownership_target = "IosUploadValidationTest#" + controller.OWNERSHIP_FAILURE_CALLBACKS["async"]
+            ownership_ids = tuple(sorted((*expected, ownership_target)))
+            ownership_step = controller.Step("ruby-ios_upload_validation", parser="minitest", expected_tests=3,
+                                             native_partition="healthy")
+            ownership_failed = ownership_target + " = PRIVATE_MESSAGE\n0.01 s = E\n"
+            ownership_footer = "\n3 runs, 5 assertions, 0 failures, 1 errors, 0 skips\n"
+            ownership_stdout = clean + ownership_failed + ownership_footer
+            with patch.object(controller, "ruby_capture_ids", return_value=ownership_ids), \
+                    patch.object(controller.time, "monotonic", return_value=999.0):
+                with patch.object(controller, "_fixture_failure_record", wraps=controller._fixture_failure_record) as strict:
+                    self.assertEqual(controller.ownership_failure(ownership_marker, deadline=1000.0), ownership_record)
+                strict.assert_called_once_with(ownership_marker, "MRK_OWNERSHIP_FAILURE=", 4096,
+                                               deadline=1000.0, canonical_fields=controller.OWNERSHIP_FAILURE_FIELDS)
+                run_record = {**ownership_record, "helper": "run", "case": "async-reap", "row": {
+                    **ownership_row, "ownerPhase": "reaped", "failedChecks": ["fixture-retained"], "runCleanup": run_cleanup}}
+                run_marker = ownership_bytes(run_record)
+                # Both envelopes reuse detail outside the common five-field
+                # parser; ownership schema4 does not acquire readinessStage.
+                self.assertTrue(controller._adapter_result_projection_valid(
+                    {name: run_result[name] for name in run_result_fields}))
+                self.assertFalse(controller._adapter_result_projection_valid(run_result))
+                self.assertEqual(controller.adapter_failure(adapter_bytes(adapter_record)), adapter_record)
+                self.assertFalse(controller._ownership_run_driver_result_valid(
+                    {name: run_result[name] for name in run_result_fields}))
+                self.assertFalse(controller._ownership_capture_detail_valid(tuple(capture_detail)))
+                # Ownership schema4 uses the same closed retained-error pair,
+                # without adding detail or admitting it as a native error code.
+                for category in ("fixture-error", "native-lifecycle-error"):
+                    owned_record = {**run_record, "row": {**run_record["row"], "runCleanup": {
+                        **run_cleanup, "driverResult": {**run_result, "retainedDriverErrorCategory": category,
+                            "retainedDriverErrorCode": "owned-publish-return"}}}}
+                    self.assertEqual(controller.ownership_failure(ownership_bytes(owned_record)),
+                                     owned_record if category == "fixture-error" else None)
+                for code in (*adapter_entry_error_codes.values(), "adapter-entry-unlisted",
+                             "adapter-entry-window-PRIVATE_MESSAGE"):
+                    for category in ("fixture-error", "native-lifecycle-error"):
+                        entry_record = {**run_record, "row": {**run_record["row"], "runCleanup": {
+                            **run_cleanup, "driverResult": {**run_result, "resultKind": "setup-fixture-fault",
+                                "retainedDriverErrorCategory": category, "retainedDriverErrorCode": code}}}}
+                        self.assertEqual(controller.ownership_failure(ownership_bytes(entry_record)),
+                                         entry_record if category == "fixture-error" and code in entry_codes else None)
+
+                def record_with_detail(detail):
+                    return {**run_record, "row": {**run_record["row"], "runCleanup": {
+                        **run_cleanup, "driverResult": {**run_result, "captureDetail": detail}}}}
+
+                # Rotate/broadcast finite values, not a Cartesian matrix. Typed
+                # protocol presence can disagree with original ready/finality;
+                # the diagnostic preserves both, never repairs the failed case.
+                for index, cutoff in enumerate("sbamx"):
+                    code = "01mx"[index % 4]
+                    detail = [capture_detail[0], code * 24, code + cutoff * 2 + code * 6,
+                              code * 4, code * 3, capture_detail[5]]
+                    record = record_with_detail(detail)
+                    self.assertEqual(controller.ownership_failure(ownership_bytes(record)), record)
+                for category in controller.ADAPTER_FAILURE_DRIVER_CODES:
+                    record = record_with_detail([category, *capture_detail[1:]])
+                    self.assertEqual(controller.ownership_failure(ownership_bytes(record)), record)
+                for category, codes in controller.OWNERSHIP_CAPTURE_PRIMARY_ERROR_KINDS.items():
+                    for code in codes:
+                        record = record_with_detail([*capture_detail[:5], [category, code]])
+                        self.assertEqual(controller.ownership_failure(ownership_bytes(record)), record)
+                        if category in primary_extras:
+                            # Additional capture-only sentinels/categories cannot
+                            # broaden the independent outer ownership error grammar.
+                            self.assertIsNone(controller.ownership_failure(ownership_bytes({**ownership_record,
+                                "phase": "restoration", "errorCategory": category, "errorKind": code, "row": "missing"})))
+                # Inner pass/status0 is not adapter_failure eligibility. The
+                # original outer failed ownership callback remains mandatory.
+                with patch.object(controller, "adapter_failure", side_effect=AssertionError("borrowed adapter rejection gate")):
+                    self.assertEqual(controller.ownership_failure(run_marker, deadline=1000.0), run_record)
+                run_detail = controller.failure_details(capture(ownership_stdout, stderr=run_marker, ok=False, returncode=1),
+                                                        ownership_step, paths, deadline=1000.0)
+                self.assertEqual(run_detail["ownership_failure"], run_record)
+                self.assertEqual(len(run_detail["ownership_failure"]["row"]["runCleanup"]["cleanupErrors"]), 2)
+                self.assertNotIn("adapter_failure", run_detail)
+                run_success = ownership_stdout.replace("0.01 s = E", "0.01 s = .").replace("1 errors", "0 errors")
+                self.assertNotIn("ownership_failure", controller.failure_details(
+                    capture(run_success, stderr=run_marker), ownership_step, paths))
+                self.assertTrue(controller.parse_capture(ownership_step, capture(run_success, stderr=run_marker),
+                                                         paths, "linux", None).ok)
+                for status in ({"kind": "missing", "code": "missing"}, {"kind": "exit", "code": 0},
+                               {"kind": "exit", "code": 255}, {"kind": "signal", "code": 1}, {"kind": "signal", "code": 255}):
+                    record = {**run_record, "row": {**run_record["row"], "runCleanup": {**run_cleanup, "driverStatus": status}}}
+                    self.assertEqual(controller.ownership_failure(ownership_bytes(record)), record)
+                # Broadcast finite values instead of a redundant Cartesian
+                # matrix; failed-snapshot contradictions remain observations.
+                for index, owner in enumerate(controller.OWNERSHIP_RUN_OWNER_FINALITIES):
+                    value = (True, False, "missing")[index % 3]
+                    projection = {**run_cleanup,
+                        "directoryState": controller.OWNERSHIP_RUN_DIRECTORY_STATES[index % 5],
+                        "resultSource": controller.OWNERSHIP_RUN_RESULT_SOURCES[index % 3],
+                        "checks": dict.fromkeys(run_checks, value),
+                        "nativeProof": {name: owner if name == "ownerFinality" else value for name in run_proof_fields}}
+                    record = {**run_record, "row": {**run_record["row"], "runCleanup": projection}}
+                    self.assertEqual(controller.ownership_failure(ownership_bytes(record)), record)
+                for condition, kind in run_conditions.items():
+                    projection = {**run_cleanup, "cleanupErrors": [["native-recovery", "fixture-error", kind, condition]]}
+                    record = {**run_record, "row": {**run_record["row"], "runCleanup": projection}}
+                    self.assertEqual(controller.ownership_failure(ownership_bytes(record)), record)
+                for errors in ([], [[stage, "native-spawn-error", "unknown", "other"] for stage in run_stages[:7]],
+                               [["missing", "os-error", "echild", "missing"]]):
+                    record = {**run_record, "row": {**run_record["row"], "runCleanup": {**run_cleanup, "cleanupErrors": errors}}}
+                    self.assertEqual(controller.ownership_failure(ownership_bytes(record)), record)
+                for result in ("missing", "invalid", *({**run_result, "nativeChecks": dict.fromkeys(adapter_native_checks, value)}
+                                                     for value in (True, False, "missing", "invalid"))):
+                    record = {**run_record, "row": {**run_record["row"], "runCleanup": {**run_cleanup, "driverResult": result}}}
+                    self.assertEqual(controller.ownership_failure(ownership_bytes(record)), record)
+                # Every source-defined helper/case routes only to its actual
+                # platform/family callback, never a neighboring healthy family.
+                for platform, (gate, class_name) in adapter_platforms.items():
+                    for family, cases in controller.OWNERSHIP_FAILURE_CASES.items():
+                        target = class_name + "#" + controller.OWNERSHIP_FAILURE_CALLBACKS[family]
+                        for helper in ("capture", "run"):
+                            for case in cases:
+                                record = {**ownership_record, "platform": platform, "family": family,
+                                    "helper": helper, "case": case,
+                                    "row": {**ownership_row, "failedChecks": ownership_case_codes(family, helper, case),
+                                            "runCleanup": run_cleanup if helper == "run" else "missing"}}
+                                transcript = clean + target + " = 0.01 s = F\n" + failed_footer
+                                with patch.object(controller, "ruby_capture_ids", return_value=tuple(sorted((*expected, target)))):
+                                    detail = controller.failure_details(capture(transcript, stderr=ownership_bytes(record),
+                                        ok=False, returncode=1), dataclasses.replace(ownership_step, id=gate), paths,
+                                        deadline=1000.0)
+                                self.assertEqual(detail["ownership_failure"], record)
+                                self.assertEqual(detail["returncode"], 1)
+                                self.assertNotIn("PRIVATE_", json.dumps(detail))
+                for family, cases in controller.OWNERSHIP_FAILURE_CASES.items():
+                    for helper in ("capture", "run"):
+                        for case in cases:
+                            record = {**ownership_record, "family": family, "helper": helper, "case": case}
+                            allowed = ownership_case_codes(family, helper, case)
+                            for code in controller.OWNERSHIP_FAILURE_FAILED_CHECKS:
+                                if code not in allowed:
+                                    self.assertIsNone(controller.ownership_failure(ownership_bytes({**record,
+                                        "row": {**ownership_row, "failedChecks": [code]}})), (family, helper, case, code))
+                            # A literal adverse sentinel is valid, but it never
+                            # claims which check ran or creates a success result.
+                            sentinel = {**record, "row": {**ownership_row, "failedChecks": ["other-failed-check"]}}
+                            self.assertEqual(controller.ownership_failure(ownership_bytes(sentinel)), sentinel)
+                    callbacks = tuple("IosUploadValidationTest#" + name for name in controller.OWNERSHIP_FAILURE_CALLBACKS.values())
+                    target = "IosUploadValidationTest#" + controller.OWNERSHIP_FAILURE_CALLBACKS[family]
+                    for other_family, other_cases in controller.OWNERSHIP_FAILURE_CASES.items():
+                        if other_family == family:
+                            continue
+                        record = {**ownership_record, "family": other_family, "case": other_cases[0],
+                                  "row": {**ownership_row, "failedChecks": ["other-failed-check"]}}
+                        with patch.object(controller, "ruby_capture_ids", return_value=tuple(sorted((*expected, *callbacks)))):
+                            self.assertNotIn("ownership_failure", controller.failure_details(capture(
+                                clean + target + " = 0.01 s = E\n" + ownership_footer,
+                                stderr=ownership_bytes(record), ok=False, returncode=1), ownership_step, paths))
+                for phase in controller.OWNERSHIP_FAILURE_PHASES:
+                    record = {**ownership_record, "phase": phase, "row": "missing"}
+                    self.assertEqual(controller.ownership_failure(ownership_bytes(record)), record)
+                for category, kind in (("native-lifecycle-error", "parent_lost"), ("native-spawn-error", "waitability"),
+                                       ("os-error", "echild"), ("signal", "none"), ("other", "none")):
+                    fallback = {**ownership_record, "phase": "restoration", "errorCategory": category,
+                                "errorKind": kind, "row": "missing"}
+                    self.assertEqual(controller.ownership_failure(ownership_bytes(fallback)), fallback)
+                    record = {**ownership_record, "row": {**ownership_row,
+                        "firstErrorCategory": "none", "firstErrorKind": "none",
+                        "operationErrorCategory": category, "operationErrorKind": kind}}
+                    self.assertEqual(controller.ownership_failure(ownership_bytes(record)), record)
+                    # A different actually escaping exception cannot borrow
+                    # the completed row belonging to the ownership-probe rejection.
+                    self.assertIsNone(controller.ownership_failure(ownership_bytes(
+                        {**ownership_record, "errorCategory": category, "errorKind": kind})))
+                for value in (True, False, "missing"):
+                    record = {**ownership_record, "row": {**ownership_row, "ownerPhase": "missing",
+                        "checks": dict.fromkeys(controller.OWNERSHIP_FAILURE_CHECKS, value),
+                        "commandChecks": dict.fromkeys(controller.OWNERSHIP_FAILURE_COMMAND_CHECKS, value)}}
+                    # Even contradictory projection facts do not recompute or
+                    # erase the actual original nonempty failed-check list.
+                    self.assertEqual(controller.ownership_failure(ownership_bytes(record)), record)
+
+                failed_capture = capture(ownership_stdout, stderr=ownership_marker, ok=False, returncode=1)
+                with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                    controller.parse_capture(ownership_step, failed_capture, paths, "linux", None)
+                zero_capture = capture(ownership_stdout, stderr=ownership_marker)
+                self.assertEqual(controller.failure_details(zero_capture, ownership_step, paths)["ownership_failure"],
+                                 ownership_record)
+                with self.assertRaisesRegex(controller.VerificationError, "MINITEST_RESULT_REJECTED"):
+                    controller.parse_capture(ownership_step, zero_capture, paths, "macos", None)
+                success_stdout = ownership_stdout.replace("0.01 s = E", "0.01 s = .").replace("1 errors", "0 errors")
+                successful = capture(success_stdout, stderr=ownership_marker)
+                self.assertNotIn("ownership_failure", controller.failure_details(successful, ownership_step, paths))
+                self.assertTrue(controller.parse_capture(ownership_step, successful, paths, "linux", None).ok)
+                # A marker neither creates a missing callback nor heals its
+                # duplicate/ambiguous/skipped terminal or wrong healthy scope.
+                for transcript in (
+                    clean + ownership_footer, clean + ownership_target + ":\n" + ownership_footer,
+                    clean + ownership_target + " = unfinished\n" + ownership_footer,
+                    ownership_stdout.replace("0.01 s = E", "0.01 s = S"),
+                    ownership_stdout.replace("0.01 s = E", "0.01 s = .\n0.01 s = E"),
+                    clean + ownership_failed * 2 + ownership_footer,
+                    clean + ownership_footer + ownership_failed,
+                ):
+                    self.assertNotIn("ownership_failure", controller.failure_details(
+                        capture(transcript, stderr=ownership_marker, ok=False, returncode=1), ownership_step, paths))
+                self.assertNotIn("ownership_failure", controller.failure_details(capture(
+                    ownership_stdout + ownership_marker.decode("ascii"), ok=False, returncode=1), ownership_step, paths))
+                self.assertNotIn("ownership_failure", controller.failure_details(capture(ownership_stdout,
+                    stderr=ownership_bytes({**ownership_record, "platform": "android"}), ok=False, returncode=1),
+                    ownership_step, paths))
+                with patch.object(controller, "ruby_capture_ids", return_value=expected):
+                    self.assertNotIn("ownership_failure", controller.failure_details(failed_capture, ownership_step, paths))
+                for wrong_step in (
+                    dataclasses.replace(ownership_step, id="ruby-native-owner"),
+                    dataclasses.replace(ownership_step, id="ruby-native-capture"),
+                    dataclasses.replace(ownership_step, id="ruby-android_upload_validation"),
+                    dataclasses.replace(ownership_step, native_partition="all"),
+                    dataclasses.replace(ownership_step, native_partition="ownership-unknown-capture-reap"),
+                    dataclasses.replace(ownership_step, parser="exit"),
+                ):
+                    self.assertNotIn("ownership_failure", controller.failure_details(failed_capture, wrong_step, paths))
+                with patch.object(controller, "ruby_capture_ids", return_value=tuple(sorted((*many_ids, ownership_target)))):
+                    detail = controller.failure_details(capture(many_stdout + ownership_failed, stderr=ownership_marker,
+                        ok=False, returncode=1), ownership_step, paths)
+                    self.assertGreater(detail["minitest_structure"]["start_records_omitted"], 0)
+                    self.assertEqual(detail["ownership_failure"], ownership_record)
+                    self.assertNotIn("ownership_failure", controller.failure_details(capture(
+                        ownership_failed + many_stdout + ownership_failed, stderr=ownership_marker,
+                        ok=False, returncode=1), ownership_step, paths))
+
+                invalid_ownership = [
+                    {key: value for key, value in ownership_record.items() if key != "row"},
+                    {**ownership_record, "private": "PRIVATE_VALUE"},
+                    {key: ownership_record[key] for key in reversed(ownership_record)},
+                    *({**ownership_record, "schema": value} for value in (True, 4.0, "4", 3, 2, 1)),
+                    *({**ownership_record, key: value} for key, value in (
+                        ("platform", "PRIVATE_PLATFORM"), ("family", "signals"), ("helper", "PRIVATE_HELPER"),
+                        ("family", "unknown"), ("family", "setup"), ("family", "observation"), ("family", False),
+                        ("case", "unknown-reap"), ("phase", "PRIVATE_PHASE"), ("phase", "restoration"),
+                        ("errorCategory", None), ("errorKind", "PRIVATE_KIND"), ("row", None), ("row", False),
+                    )),
+                    {**ownership_record, "errorCategory": "none", "errorKind": "none"},
+                    {**ownership_record, "errorCategory": "native-spawn-error", "errorKind": "parent_lost"},
+                    {**ownership_record, "errorCategory": "os-error", "errorKind": "none"},
+                ]
+                invalid_rows = [
+                    {}, {key: value for key, value in ownership_row.items() if key != "ownerPhase"},
+                    {**ownership_row, "private": "PRIVATE_ROW"}, {key: ownership_row[key] for key in reversed(ownership_row)},
+                    {**ownership_row, "ownerPhase": "PRIVATE_PHASE"}, {**ownership_row, "ownerPhase": False},
+                    {**ownership_row, "firstErrorCategory": "missing"}, {**ownership_row, "firstErrorKind": "PRIVATE_KIND"},
+                    {**ownership_row, "operationErrorCategory": "os-error"},
+                    *({**ownership_row, "failedChecks": value} for value in
+                      ([], ["PRIVATE_CHECK"], [True], ["numeric-route-veto", "numeric-route-veto"],
+                       list(reversed(ownership_row["failedChecks"])), ["nested-cancellation-missing"])),
+                ]
+                for group in ("checks", "commandChecks"):
+                    original = ownership_row[group]
+                    invalid_rows.extend({**ownership_row, group: value} for value in (
+                        None, [], {key: value for key, value in original.items() if key != next(iter(original))},
+                        {**original, "PRIVATE_CHECK": True}, {key: original[key] for key in reversed(original)},
+                        *({**original, next(iter(original)): value} for value in (None, 0, 1.0, "invalid", "PRIVATE_VALUE")),
+                    ))
+                invalid_ownership.extend({**ownership_record, "row": row} for row in invalid_rows)
+                invalid_ownership.append({**ownership_record, "case": "async-reap",
+                    "row": {**ownership_row, "failedChecks": ["pre-go-barrier-missing"]}})
+                invalid_run_cleanup = [None, False, "invalid", {},
+                    *({key: value for key, value in run_cleanup.items() if key != field} for field in run_fields),
+                    {**run_cleanup, "private": "PRIVATE_PATH"}, {key: run_cleanup[key] for key in reversed(run_cleanup)},
+                    *({**run_cleanup, key: value} for key, value in (
+                        ("directoryState", "PRIVATE_DIRECTORY"), ("directoryState", False),
+                        ("resultSource", "PRIVATE_SOURCE"), ("resultSource", None),
+                        ("cleanupErrors", None), ("cleanupErrors", {}),
+                        ("cleanupErrors", run_cleanup["cleanupErrors"] * 4),
+                        ("driverResult", None), ("driverResult", False), ("driverResult", "PRIVATE_RESULT"),
+                        ("driverResult", adapter_record),
+                    )),
+                ]
+                for status in (None, [], {}, {"code": 0, "kind": "exit"}, {"kind": "exit", "code": 0, "pid": 123},
+                               {"kind": "missing", "code": 0}, {"kind": "exit", "code": "missing"},
+                               {"kind": "signal", "code": 0}, {"kind": "signal", "code": -1},
+                               *({"kind": "exit", "code": value} for value in (True, 0.0, None, -1, 256, "0")),
+                               {"kind": False, "code": 0}, {"kind": "PRIVATE_STATUS", "code": 0}):
+                    invalid_run_cleanup.append({**run_cleanup, "driverStatus": status})
+                for group in ("checks", "nativeProof"):
+                    original = run_cleanup[group]
+                    invalid_run_cleanup.extend({**run_cleanup, group: value} for value in (
+                        None, [], {key: value for key, value in original.items() if key != next(iter(original))},
+                        {**original, "PRIVATE_FIELD": True}, {key: original[key] for key in reversed(original)},
+                        *({**original, next(iter(original)): value} for value in (None, 0, 1.0, "invalid", "PRIVATE_VALUE")),
+                    ))
+                invalid_run_cleanup.extend({**run_cleanup, "nativeProof": {**run_cleanup["nativeProof"], "ownerFinality": value}}
+                                           for value in (True, None, "other", "no_producers", "PRIVATE_FINALITY"))
+                valid_error = ["native-recovery", "fixture-error", "fixture-result", "owner-shape"]
+                invalid_errors = [None, False, {}, [], valid_error[:-1], valid_error + ["PRIVATE_MESSAGE"],
+                    *([*valid_error[:index], value, *valid_error[index + 1:]] for index, value in (
+                        (0, "PRIVATE_STAGE"), (0, False), (1, "PRIVATE_CATEGORY"), (1, None),
+                        (2, "PRIVATE_KIND"), (2, False), (3, "PRIVATE_MESSAGE"), (3, None),
+                    )),
+                    ["missing", "none", "none", "other"], ["missing", "io-error", "none", "owner-shape"],
+                    ["missing", "native-spawn-error", "parent_lost", "other"],
+                    *(["native-recovery", "fixture-error",
+                       "fixture-cleanup" if kind == "fixture-result" else "fixture-result", condition]
+                      for condition, kind in run_conditions.items()),
+                ]
+                invalid_run_cleanup.extend({**run_cleanup, "cleanupErrors": [error]} for error in invalid_errors)
+                invalid_results = [
+                    *({key: value for key, value in run_result.items() if key != field} for field in run_extended_result_fields),
+                    {**run_result, "private": "PRIVATE_RECORD"}, {key: run_result[key] for key in reversed(run_result)},
+                    *({**run_result, key: value} for key, value in (
+                        ("resultKind", "PRIVATE_KIND"), ("resultKind", False),
+                        ("retainedDriverErrorCategory", None), ("retainedDriverErrorCode", "PRIVATE_CODE"),
+                    )),
+                    {**run_result, "retainedDriverErrorCategory": "native-spawn-error", "retainedDriverErrorCode": "native-deadline"},
+                ]
+                invalid_details = [None, False, "missing", "invalid", {}, [], capture_detail[:-1],
+                    capture_detail + ["PRIVATE_VALUE"], list(reversed(capture_detail))]
+                for index, invalid_values in (
+                    (0, (None, False, 0, [], {}, "PRIVATE_CATEGORY")),
+                    (5, (None, False, "missing", {}, [], ["none"], ["none", "none", "PRIVATE_VALUE"],
+                         ["missing", "none"], ["invalid", "missing"], ["contract-error", "deadline"],
+                         ["native-spawn-error", "parent_lost"], ["native-lifecycle-error", "waitability"],
+                         ["fixture-error", "PRIVATE_KIND"], ["PRIVATE_CATEGORY", "none"],
+                         [True, "none"], ["none", False])),
+                ):
+                    invalid_details.extend([*capture_detail[:index], value, *capture_detail[index + 1:]]
+                                           for value in invalid_values)
+                for index, length in ((1, 24), (2, 9), (3, 4), (4, 3)):
+                    original = capture_detail[index]
+                    invalid_details.extend([*capture_detail[:index], value, *capture_detail[index + 1:]] for value in (
+                        None, False, 0, 1.0, [], {}, "", original[:-1], original + "m",
+                        original + "\n", original + "\r\n", "m" * (length - 1) + "\u03bc",
+                        "m" * (length - 1) + "\uff10", "m" * (length - 1) + "\0",
+                    ))
+                    # At each position use a code from the WRONG domain. Timing
+                    # offsets1/2 reject bool codes; other positions reject cutoff
+                    # codes. No off-by-one alphabet shift can remain unnoticed.
+                    for offset in range(length):
+                        wrong = "0" if index == 2 and offset in (1, 2) else "a"
+                        value = original[:offset] + wrong + original[offset + 1:]
+                        invalid_details.append([*capture_detail[:index], value, *capture_detail[index + 1:]])
+                self.assertFalse(controller._ownership_capture_detail_valid(
+                    [*capture_detail[:5], tuple(capture_detail[5])]))
+                invalid_results.extend({**run_result, "captureDetail": detail} for detail in invalid_details)
+                for group in ("nativeChecks", "nativeOutcomes"):
+                    original = run_result[group]
+                    invalid_results.extend({**run_result, group: value} for value in (
+                        None, [], {key: value for key, value in original.items() if key != next(iter(original))},
+                        {**original, "PRIVATE_FIELD": "missing"}, {key: original[key] for key in reversed(original)},
+                        {**original, next(iter(original)): 0}, {**original, next(iter(original)): "PRIVATE_VALUE"},
+                    ))
+                invalid_run_cleanup.extend({**run_cleanup, "driverResult": result} for result in invalid_results)
+                invalid_ownership.extend({**run_record, "row": {**run_record["row"], "runCleanup": projection}}
+                                         for projection in invalid_run_cleanup)
+                invalid_ownership.extend((
+                    {**run_record, "helper": "capture"},
+                    {**run_record, "row": {**run_record["row"], "operationErrorCategory": "none", "operationErrorKind": "none"}},
+                    {**run_record, "phase": "restoration"},
+                    {**run_record, "errorCategory": "interrupt", "errorKind": "none"},
+                ))
+                invalid_markers = [*(ownership_bytes(record) for record in invalid_ownership),
+                    ownership_marker * 2,
+                    ownership_marker.replace(b'"schema":4', b'"schema":4,"schema":4'),
+                    ownership_marker.replace(b'"ownerPhase":"unknown"', b'"ownerPhase":"unknown","ownerPhase":"unknown"'),
+                    ownership_marker.replace(b'"firstExceptionPreserved":true', b'"firstExceptionPreserved":true,"firstExceptionPreserved":true'),
+                    ownership_marker.replace(b'"schema":4', b'"schema": 4'),
+                    run_marker.replace(b'"driverStatus":', b'"driverStatus":null,"driverStatus":'),
+                    run_marker.replace(b'"nativeFinal":false', b'"nativeFinal":false,"nativeFinal":false'),
+                    run_marker.replace(b'"resultKind":"pass"', b'"resultKind":"pass","resultKind":"pass"'),
+                    run_marker.replace(b'"captureDetail":', b'"captureDetail":[],"captureDetail":'),
+                    run_marker.replace(b'"01mx"', br'"01m\u0078"'),
+                    ownership_marker.replace(b'"async"', br'"\u0061sync"'),
+                    ownership_marker[:-1], ownership_marker[:-1] + b"\r\n",
+                    b"MRK_OWNERSHIP_FAILURE=\xff\n", b"progress " + ownership_marker,
+                    ownership_marker.replace(b"MRK_OWNERSHIP_FAILURE=", b"MRK_OWNERSHIP_ASYNC_FAILURE="),
+                    ownership_bytes({**ownership_record, "schema": 1}).replace(
+                        b"MRK_OWNERSHIP_FAILURE=", b"MRK_OWNERSHIP_ASYNC_FAILURE="),
+                ]
+                for raw in invalid_markers:
+                    detail = controller.failure_details(capture(ownership_stdout, stderr=raw, ok=False, returncode=1),
+                                                        ownership_step, paths, deadline=1000.0)
+                    self.assertNotIn("ownership_failure", detail)
+                    self.assertEqual(detail["returncode"], 1)
+                    self.assertNotIn("PRIVATE_", json.dumps(detail))
+                # Enumerate the finite family/case/helper domain with every
+                # applicable code and each field's longest allowed encoding.
+                # This is a complete-line bound, including prefix and LF; an
+                # impossible mixture of all24 codes is not a valid maximum.
+                driver_category, driver_code = max(
+                    ((category, code) for category, values in controller.ADAPTER_FAILURE_DRIVER_CODES.items() for code in values),
+                    key=lambda pair: len(pair[0]) + len(pair[1]))
+                primary_pairs = [[category, code]
+                    for category, codes in controller.OWNERSHIP_CAPTURE_PRIMARY_ERROR_KINDS.items() for code in codes]
+                maximum_primary = max(primary_pairs, key=lambda item: len(json.dumps(item, separators=(",", ":"))))
+                self.assertEqual(maximum_primary, ["native-lifecycle-error", "parent_lost"])
+                self.assertEqual(len(json.dumps(maximum_primary, separators=(",", ":"))), 40)
+                maximum_capture_detail = [max(controller.ADAPTER_FAILURE_DRIVER_CODES, key=len),
+                    "m" * 24, "maa" + "m" * 6, "m" * 4, "m" * 3, maximum_primary]
+                self.assertEqual(len(json.dumps(maximum_capture_detail, separators=(",", ":"))), 119)
+                self.assertEqual(len(',"captureDetail":'), 17)
+                maximum_run_result = {
+                    "resultKind": max(controller.ADAPTER_FAILURE_RESULT_KINDS, key=len),
+                    "retainedDriverErrorCategory": driver_category, "retainedDriverErrorCode": driver_code,
+                    "nativeChecks": dict.fromkeys(adapter_native_checks, "missing"),
+                    "nativeOutcomes": {name: max(values, key=len) for name, values in adapter_native_outcomes.items()},
+                    "captureDetail": maximum_capture_detail,
+                }
+                error_tuples = [[max(run_stages, key=len), category, kind, condition]
+                    for category, kinds in controller.OWNERSHIP_FAILURE_ERROR_KINDS.items() if category != "none"
+                    for kind in kinds for condition in ("other", "missing", *run_conditions)
+                    if condition in ("other", "missing") or category == "fixture-error" and kind == run_conditions[condition]]
+                maximum_error = max(error_tuples, key=lambda item: len(json.dumps(item, separators=(",", ":"))))
+                self.assertEqual(maximum_error,
+                    ["transcript-out-close", "fixture-error", "fixture-cleanup", "enumeration-before-identity"])
+                self.assertEqual(len(json.dumps(maximum_error, separators=(",", ":"))), 88)
+                self.assertEqual(len(json.dumps(maximum_run_result, separators=(",", ":"))), 1375)
+                maximum_run_cleanup = {
+                    "directoryState": max(controller.OWNERSHIP_RUN_DIRECTORY_STATES, key=len),
+                    "driverStatus": {"kind": "missing", "code": "missing"},
+                    "resultSource": max(controller.OWNERSHIP_RUN_RESULT_SOURCES, key=len),
+                    "checks": dict.fromkeys(run_checks, "missing"),
+                    "nativeProof": {name: max(controller.OWNERSHIP_RUN_OWNER_FINALITIES, key=len) if name == "ownerFinality"
+                                    else "missing" for name in run_proof_fields},
+                    "cleanupErrors": [maximum_error] * 7, "driverResult": maximum_run_result,
+                }
+                self.assertEqual(len(json.dumps(maximum_run_cleanup, separators=(",", ":"))), 2757)
+                maximum_records = [{**ownership_record, "platform": "android", "family": family,
+                    "helper": helper, "case": case, "row": {
+                        **ownership_row, "ownerPhase": "unstarted",
+                        "firstErrorCategory": "native-lifecycle-error", "firstErrorKind": "parent_lost",
+                        "operationErrorCategory": "native-lifecycle-error", "operationErrorKind": "parent_lost",
+                        "failedChecks": ownership_case_codes(family, helper, case),
+                        "checks": dict.fromkeys(controller.OWNERSHIP_FAILURE_CHECKS, "missing"),
+                        "commandChecks": dict.fromkeys(controller.OWNERSHIP_FAILURE_COMMAND_CHECKS, "missing"),
+                        "runCleanup": maximum_run_cleanup if helper == "run" else "missing",
+                    }} for family, cases in controller.OWNERSHIP_FAILURE_CASES.items()
+                    for helper in ("capture", "run") for case in cases]
+                maximum_record = max(maximum_records, key=lambda record: len(ownership_bytes(record)))
+                self.assertEqual([maximum_record[key] for key in ("family", "helper", "case")],
+                                 ["async", "run", "repeated"])
+                self.assertEqual(len(ownership_bytes(maximum_record)), 3983)
+                self.assertLessEqual(len(ownership_bytes(maximum_record)), 4096)
+                self.assertEqual(controller.ownership_failure(ownership_bytes(maximum_record)), maximum_record)
+                for code in adapter_entry_error_codes.values():
+                    record = {**maximum_record, "row": {**maximum_record["row"], "runCleanup": {
+                        **maximum_run_cleanup, "driverResult": {**maximum_run_result,
+                            "retainedDriverErrorCategory": "fixture-error", "retainedDriverErrorCode": code}}}}
+                    self.assertLessEqual(len(ownership_bytes(record)), 3983)
+                    self.assertEqual(controller.ownership_failure(ownership_bytes(record)), record)
+                largest_missing = {**maximum_record, "family": "signals", "helper": "capture",
+                    "case": "install-published-TERM", "phase": "proof-publication",
+                    "errorCategory": "native-lifecycle-error", "errorKind": "parent_lost", "row": "missing"}
+                self.assertEqual(len(ownership_bytes(largest_missing)), 237)
+                self.assertEqual(controller.ownership_failure(ownership_bytes(largest_missing)), largest_missing)
+                oversized = ownership_marker[:-1] + b" " * (4097 - len(ownership_marker)) + b"\n"
+                self.assertEqual(len(oversized), 4097)
+                with patch.object(controller, "strict_json", side_effect=AssertionError("oversized ownership JSON was parsed")) as decode:
+                    self.assertIsNone(controller.ownership_failure(oversized))
+                decode.assert_not_called()
+
+                expired = [False]
+                def expired_ownership_parse(_text):
+                    expired[0] = True
+                    raise ValueError("PRIVATE_MESSAGE")
+                with patch.object(controller, "strict_json", side_effect=expired_ownership_parse), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(failed_capture, ownership_step, paths, deadline=1000.0)
+                expired[0] = False
+                original_scan = controller.minitest_records
+                def expire_ownership_scan(text, identifiers, *, deadline):
+                    if identifiers == (ownership_target,):
+                        expired[0] = True
+                    return original_scan(text, identifiers, deadline=deadline)
+                with patch.object(controller, "minitest_records", side_effect=expire_ownership_scan), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(failed_capture, ownership_step, paths, deadline=1000.0)
+                for interruption in (KeyboardInterrupt("PRIVATE_MESSAGE"), SystemExit(7)):
+                    with patch.object(controller, "strict_json", side_effect=interruption), \
+                            self.assertRaises(type(interruption)) as raised:
+                        controller.failure_details(failed_capture, ownership_step, paths, deadline=1000.0)
+                    self.assertIs(raised.exception, interruption)
+
+            # One additional literal DATA file, not the native observation test
+            # class or any Ruby execution. Masks must mean the same on both sides.
+            signal_source = ruby_text("tests/workflow/upload_process_fixture.rb")
+            for suffix in ("FIELDS", "MODES", "GUARD_FIELDS", "RESULT_FIELDS", "ROW_FIELDS", "ROLES",
+                           "STATES", "FAILURES_STATES", "IDENTITY_FIELDS", "CHECK_FIELDS", "STAGES",
+                           "CATEGORIES", "ROUTES", "REFUSALS", "SIGNALS", "ERRNOS", "NATIVE_OUTCOME_FIELDS"):
+                name = "NATIVE_SIGNAL_FAILURE_" + suffix
+                self.assertEqual(ruby_words(signal_source, name), getattr(controller, name))
+            self.assertEqual(controller.NATIVE_SIGNAL_FAILURE_PREFIX, "MRK_NATIVE_SIGNAL_FAILURE=")
+            self.assertEqual(controller.NATIVE_SIGNAL_FAILURE_MAX_BYTES, 4096)
+            self.assertEqual(controller.NATIVE_SIGNAL_FAILURE_MAX_REQUESTS, 64)
+            self.assertEqual(controller.NATIVE_SIGNAL_FAILURE_MAX_ERROR_CODE, 360)
+            signal_target = controller.NATIVE_SIGNAL_FAILURE_CALLBACK
+            self.assertEqual(signal_target,
+                "NativeSignalObservationTest#test_native_first_close_and_post_reap_signals_with_safe_veto_controls")
+            for name, value in (("PREFIX", controller.NATIVE_SIGNAL_FAILURE_PREFIX), ("CALLBACK", signal_target)):
+                self.assertIn(f'NATIVE_SIGNAL_FAILURE_{name} = "{value}"', signal_source)
+            self.assertIn("NATIVE_SIGNAL_FAILURE_MAX_BYTES = 4096", signal_source)
+            self.assertIn("NATIVE_SIGNAL_FAILURE_MAX_REQUESTS = 64", signal_source)
+            self.assertIn("NATIVE_SIGNAL_FAILURE_MAX_ERROR_CODE = 360", signal_source)
+            self.assertEqual(controller.NATIVE_SIGNAL_FAILURE_RESULT_KINDS,
+                             (*ruby_words(signal_source, "ADAPTER_FAILURE_KINDS"), "other", "missing"))
+
+            def signal_literal_pairs(name):
+                bodies = controller.re.findall(r"(?ms)^\s*" + name + r" = \{(.*?)^\s*\}\.freeze", signal_source)
+                self.assertEqual(len(bodies), 1, name)
+                pattern = r'"([^"\r\n]+)" => "([^"\r\n]+)"'
+                pairs = controller.re.findall(pattern, bodies[0])
+                self.assertEqual(len(pairs), len(dict(pairs)))
+                residue = controller.re.sub(pattern + r"\s*,?", "", bodies[0])
+                self.assertEqual("".join(residue.split()), "")
+                return dict(pairs)
+
+            labels = signal_literal_pairs("NATIVE_SIGNAL_FAILURE_LABEL_CODES")
+            self.assertEqual(tuple(labels.values()), controller.NATIVE_SIGNAL_FAILURE_CHECK_CODES)
+            self.assertEqual(len(set(labels.values())), 50)
+            self.assertEqual(signal_literal_pairs("NATIVE_SIGNAL_FAILURE_STAGE_PREFIXES"), dict(zip(
+                controller.NATIVE_SIGNAL_FAILURE_STAGES,
+                ("request observation:", "signal syscall:", "observation body:", "observation finalization:",
+                 "driver proof:", "helper proof:", "parent proof publication:", "hook:", "hook:entry:"))))
+            classes = ("Interrupt", "SignalException", "SystemExit", "UploadProcessFixture::Failure",
+                "MobileReleaseKit::ContractError", "MobileReleaseKit::NativeUploadProcess::Error",
+                "MobileReleaseKit::NativeUploadProcess::LifecycleError", "MobileReleaseKit::NativeUploadProcess::ProtocolError",
+                "MobileReleaseKit::NativeProcessSpawn::Error", "IOError", "SystemCallError", "JSON::ParserError", "KeyError",
+                "NoMethodError", "TypeError", "ArgumentError", "RuntimeError", "StandardError", "Exception")
+            class_categories = dict(zip(classes, controller.NATIVE_SIGNAL_FAILURE_CATEGORIES[:-1]))
+            signal_errnos = ("ECHILD", "ESRCH", "EINTR", "EBADF", "EINVAL", "EIO", "EPERM", "EACCES", "EAGAIN", "ENOMEM",
+                            "EMFILE", "ENFILE", "ENOENT", "EPIPE")
+            class_categories.update(("Errno::" + name, "os-error") for name in signal_errnos)
+            self.assertEqual(signal_literal_pairs("NATIVE_SIGNAL_FAILURE_CLASS_CATEGORIES"), class_categories)
+            self.assertEqual(controller.NATIVE_SIGNAL_FAILURE_SIGNALS, ("0", "KILL", "INT", "other"))
+            self.assertEqual(controller.NATIVE_SIGNAL_FAILURE_ERRNOS, (*signal_errnos, "other"))
+            self.assertEqual(controller.NATIVE_SIGNAL_FAILURE_NATIVE_OUTCOME_FIELDS,
+                             ("custodian", "finalOutcome", "finalCleanup", "groupState"))
+            self.assertEqual(len(controller.NATIVE_SIGNAL_FAILURE_ROUTES)
+                             * len(controller.NATIVE_SIGNAL_FAILURE_SIGNALS)
+                             * len(controller.NATIVE_SIGNAL_FAILURE_ERRNOS), 360)
+            self.assertEqual(tuple(len(getattr(controller, "NATIVE_SIGNAL_FAILURE_" + name))
+                                   for name in ("CHECK_CODES", "STAGES", "CATEGORIES", "ROUTES", "REFUSALS")),
+                             (50, 9, 20, 6, 9))
+
+            def signal_row(role, state="present"):
+                identity_na = {"helperRoleMatches", "helperCopyMatches"} if role == "driver" else set()
+                check_na = ({"originalWaitBound", "creatorJoined", "taskJoinsObserved"} if role == "driver" else
+                            {"actualOriginalPrimary", "actualCustodianReceiptBound", "actualNativeDescriptorsClosed"})
+                return {"role": role, "state": state, "mode": "missing",
+                    "identities": {name: "not-applicable" if name in identity_na else "missing"
+                                   for name in controller.NATIVE_SIGNAL_FAILURE_IDENTITY_FIELDS},
+                    "returnCode": "missing",
+                    "checks": {name: "not-applicable" if name in check_na else "missing"
+                               for name in controller.NATIVE_SIGNAL_FAILURE_CHECK_FIELDS},
+                    "failuresState": "missing", "failedCheckMask": 0, "causeMasks": [0] * 9,
+                    "refusalMasks": [0] * 6, "unknownFailure": False,
+                    "observedHelperReturn": "not-applicable" if role == "driver" else "missing",
+                    "backendErrorCodes": "missing"}
+
+            signal_record = {"schema": 2, "mode": "native-setup-interrupt",
+                "guard": {name: name != "failuresEmpty" for name in controller.NATIVE_SIGNAL_FAILURE_GUARD_FIELDS},
+                "result": {"kind": "pass", "mode": "native-setup-interrupt", "driverExitStatus": 1},
+                "rows": [signal_row(role) for role in controller.NATIVE_SIGNAL_FAILURE_ROLES],
+                "nativeOutcomes": {"custodian": "exit1", "finalOutcome": "failed",
+                                   "finalCleanup": "confirmed", "groupState": "retired"}}
+            signal_record["rows"][0].update(failuresState="nonempty", failedCheckMask=1 << 20,
+                causeMasks=[0, 0, 0, 0, (1 << 3) | (1 << 19), 0, 0, 0, 0],
+                refusalMasks=[(1 << 1) | (1 << 2), 0, 0, 0, 0, 0], unknownFailure=True)
+            signal_record["rows"][0]["checks"]["hooksRestored"] = True
+            # The original helper return can survive an aggregate observation
+            # failure while helper_facts remains absent and the wrapper exits 1.
+            signal_record["rows"][1].update(observedHelperReturn=2, backendErrorCodes=[7, 0, 18, 7, 360])
+
+            def signal_bytes(record):
+                return (controller.NATIVE_SIGNAL_FAILURE_PREFIX
+                        + json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
+
+            def signal_with_row(index, row):
+                return {**signal_record, "rows": [row if i == index else value
+                                                  for i, value in enumerate(signal_record["rows"])]}
+
+            signal_marker = signal_bytes(signal_record)
+            signal_step = controller.Step("ruby-native-signal-observation", parser="minitest", expected_tests=1)
+            signal_failed = signal_target + " = PRIVATE_MESSAGE\n0.01 s = E\n"
+            signal_footer = "\nFinished in 0.03s.\n1 runs, 606 assertions, 0 failures, 1 errors, 0 skips\n"
+            signal_stdout = signal_failed + signal_footer
+            with patch.object(controller, "ruby_expected_ids", return_value=(signal_target,)), \
+                    patch.object(controller, "ruby_capture_ids", return_value=(signal_target,)), \
+                    patch.object(controller.time, "monotonic", return_value=999.0):
+                with patch.object(controller, "_fixture_failure_record", wraps=controller._fixture_failure_record) as strict:
+                    self.assertEqual(controller.native_signal_failure(signal_marker, deadline=1000.0), signal_record)
+                strict.assert_called_once_with(signal_marker, "MRK_NATIVE_SIGNAL_FAILURE=", 4096,
+                                               deadline=1000.0, canonical_fields=controller.NATIVE_SIGNAL_FAILURE_FIELDS)
+                for mode in controller.NATIVE_SIGNAL_FAILURE_MODES:
+                    record = {**signal_record, "mode": mode}
+                    for terminal in ("E", "F"):
+                        transcript = signal_stdout if terminal == "E" else signal_stdout.replace(
+                            "0.01 s = E", "0.01 s = F").replace("0 failures, 1 errors", "1 failures, 0 errors")
+                        original = capture(transcript, stderr=signal_bytes(record), ok=False, returncode=1)
+                        detail = controller.failure_details(original, signal_step, paths, deadline=1000.0)
+                        self.assertEqual(detail["signal_failure"], record)
+                        self.assertEqual(detail["returncode"], 1)
+                        self.assertEqual(detail["persisted"], list(original.persisted))
+                        self.assertNotIn("PRIVATE_", json.dumps(detail))
+                # Each original comparison alone can explain the rejection.
+                # Missing helpers/empty labels or contradictory facts are not
+                # promoted to a new acceptance rule or silently normalized.
+                for name in controller.NATIVE_SIGNAL_FAILURE_GUARD_FIELDS:
+                    for adverse in (False, "missing"):
+                        record = {**signal_record, "guard": dict.fromkeys(controller.NATIVE_SIGNAL_FAILURE_GUARD_FIELDS, True)}
+                        record["guard"][name] = adverse
+                        self.assertEqual(controller.native_signal_failure(signal_bytes(record)), record)
+                for index, role in enumerate(controller.NATIVE_SIGNAL_FAILURE_ROLES):
+                    for state in controller.NATIVE_SIGNAL_FAILURE_STATES:
+                        record = signal_with_row(index, signal_row(role, state))
+                        self.assertEqual(controller.native_signal_failure(signal_bytes(record)), record)
+                    for failure_state, unknown, bits in (("empty", False, 0), ("missing", False, 0),
+                                                        ("invalid", True, 0), ("nonempty", True, 0),
+                                                        ("nonempty", False, 1)):
+                        row = signal_row(role)
+                        row.update(failuresState=failure_state, unknownFailure=unknown, failedCheckMask=bits)
+                        record = signal_with_row(index, row)
+                        self.assertEqual(controller.native_signal_failure(signal_bytes(record)), record)
+                    # Preserve request chronology, repetition and non-error
+                    # slots even without labels; zero is not a success receipt.
+                    for codes in ("missing", "invalid", [], [0, 1, 360], [7, 0, 18, 7, 360], [0] * 64, [360] * 64):
+                        row = {**signal_row(role), "backendErrorCodes": codes}
+                        record = signal_with_row(index, row)
+                        self.assertEqual(controller.native_signal_failure(signal_bytes(record)), record)
+                    if role != "driver":
+                        for observed_return in (0, 1, 2, 255, "missing"):
+                            row = {**signal_row(role), "observedHelperReturn": observed_return}
+                            record = signal_with_row(index, row)
+                            self.assertEqual(controller.native_signal_failure(signal_bytes(record)), record)
+                for name in controller.NATIVE_SIGNAL_FAILURE_NATIVE_OUTCOME_FIELDS:
+                    for outcome in controller.ADAPTER_FAILURE_NATIVE_OUTCOMES[name]:
+                        record = {**signal_record, "nativeOutcomes": {**signal_record["nativeOutcomes"], name: outcome}}
+                        self.assertEqual(controller.native_signal_failure(signal_bytes(record)), record)
+                # Exact complete worst-case format bound, including prefix/LF,
+                # longest actual kind and all 64 maximum-width codes per row.
+                longest_mode = max(controller.NATIVE_SIGNAL_FAILURE_MODES, key=len)
+                maximum = {**signal_record, "mode": longest_mode,
+                    "guard": dict.fromkeys(controller.NATIVE_SIGNAL_FAILURE_GUARD_FIELDS, "missing"),
+                    "result": {"kind": max(controller.NATIVE_SIGNAL_FAILURE_RESULT_KINDS, key=len),
+                               "mode": longest_mode, "driverExitStatus": "missing"},
+                    "rows": [signal_row(role) for role in controller.NATIVE_SIGNAL_FAILURE_ROLES],
+                    "nativeOutcomes": {"custodian": "not-attempted", "finalOutcome": "rejected",
+                                       "finalCleanup": "confirmed", "groupState": "not-created"}}
+                for row in maximum["rows"]:
+                    row.update(mode=longest_mode, failuresState="nonempty", failedCheckMask=(1 << 50) - 1,
+                               causeMasks=[(1 << 20) - 1] * 9, refusalMasks=[511] * 6, backendErrorCodes=[360] * 64)
+                compact_json = lambda value: json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+                self.assertEqual(len(controller.NATIVE_SIGNAL_FAILURE_PREFIX.encode("ascii")), 26)
+                self.assertEqual(len(compact_json(maximum["guard"])), 193)
+                self.assertEqual([len(compact_json(row)) for row in maximum["rows"]], [1051, 1033, 1030])
+                self.assertEqual(len(compact_json(maximum["nativeOutcomes"])), 109)
+                self.assertTrue(all(len(value) == max(map(len, controller.ADAPTER_FAILURE_NATIVE_OUTCOMES[name]))
+                                    for name, value in maximum["nativeOutcomes"].items()))
+                self.assertEqual(len(signal_bytes(maximum)), 3641)
+                self.assertEqual(controller.NATIVE_SIGNAL_FAILURE_MAX_BYTES - len(signal_bytes(maximum)), 455)
+                self.assertLessEqual(len(signal_bytes(maximum)), controller.NATIVE_SIGNAL_FAILURE_MAX_BYTES)
+                self.assertEqual(controller.native_signal_failure(signal_bytes(maximum)), maximum)
+
+                failed_capture = capture(signal_stdout, stderr=signal_marker, ok=False, returncode=1)
+                with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                    controller.parse_capture(signal_step, failed_capture, paths, "linux", None)
+                zero_capture = capture(signal_stdout, stderr=signal_marker)
+                self.assertEqual(controller.failure_details(zero_capture, signal_step, paths)["signal_failure"], signal_record)
+                with self.assertRaisesRegex(controller.VerificationError, "MINITEST_RESULT_REJECTED"):
+                    controller.parse_capture(signal_step, zero_capture, paths, "macos", None)
+                success_stdout = signal_stdout.replace("0.01 s = E", "0.01 s = .").replace("1 errors", "0 errors")
+                successful = capture(success_stdout, stderr=signal_marker)
+                self.assertNotIn("signal_failure", controller.failure_details(successful, signal_step, paths))
+                self.assertTrue(controller.parse_capture(signal_step, successful, paths, "linux", None).ok)
+                for transcript in (signal_footer, signal_target + ":\n" + signal_footer,
+                    signal_target + " = unfinished\n" + signal_footer,
+                    signal_stdout.replace("0.01 s = E", "0.01 s = S"),
+                    signal_stdout.replace("0.01 s = E", "0.01 s = .\n0.01 s = E"),
+                    signal_failed * 2 + signal_footer, signal_footer + signal_failed):
+                    self.assertNotIn("signal_failure", controller.failure_details(
+                        capture(transcript, stderr=signal_marker, ok=False, returncode=1), signal_step, paths))
+                self.assertNotIn("signal_failure", controller.failure_details(capture(
+                    signal_stdout + signal_marker.decode("ascii"), ok=False, returncode=1), signal_step, paths))
+                with patch.object(controller, "ruby_expected_ids", return_value=expected):
+                    self.assertNotIn("signal_failure", controller.failure_details(failed_capture, signal_step, paths))
+                for wrong_step in (dataclasses.replace(signal_step, id="ruby-native-capture"),
+                    dataclasses.replace(signal_step, id="ruby-native-owner"),
+                    dataclasses.replace(signal_step, native_partition="healthy"),
+                    dataclasses.replace(signal_step, native_partition="native-setup-interrupt"),
+                    dataclasses.replace(signal_step, parser="exit")):
+                    self.assertNotIn("signal_failure", controller.failure_details(failed_capture, wrong_step, paths))
+
+                invalid_signal = [
+                    {**signal_record, "guard": dict.fromkeys(controller.NATIVE_SIGNAL_FAILURE_GUARD_FIELDS, True)},
+                    *({**signal_record, "schema": value} for value in (True, 2.0, "2", 1, 3)),
+                    *({**signal_record, "mode": value} for value in (None, "missing", "PRIVATE_MODE")),
+                    *({**signal_record, "rows": value} for value in (None, [], signal_record["rows"][:2],
+                        signal_record["rows"] + [signal_record["rows"][0]], list(reversed(signal_record["rows"])))),
+                ]
+                # Every ordered container is closed; every row has fixed-role
+                # applicability, and no bool can become an integer mask/status.
+                containers = [(signal_record, lambda value: value),
+                    (signal_record["guard"], lambda value: {**signal_record, "guard": value}),
+                    (signal_record["result"], lambda value: {**signal_record, "result": value}),
+                    (signal_record["nativeOutcomes"], lambda value: {**signal_record, "nativeOutcomes": value})]
+                for index, row in enumerate(signal_record["rows"]):
+                    containers.append((row, lambda value, index=index: signal_with_row(index, value)))
+                    for group in ("identities", "checks"):
+                        containers.append((row[group], lambda value, index=index, row=row, group=group:
+                                           signal_with_row(index, {**row, group: value})))
+                for original, replace in containers:
+                    invalid_signal.extend(replace(value) for value in (None, [],
+                        {key: value for key, value in original.items() if key != next(iter(original))},
+                        {**original, "PRIVATE_FIELD": "PRIVATE_VALUE"},
+                        {key: original[key] for key in reversed(original)}))
+                invalid_signal.extend({**signal_record, "guard": {**signal_record["guard"], "caseMatches": value}}
+                                      for value in (None, 0, 1.0, "invalid", "not-applicable", "PRIVATE_VALUE"))
+                invalid_signal.extend({**signal_record, "result": {**signal_record["result"], key: value}}
+                    for key, value in (("kind", "invalid"), ("kind", "PRIVATE_KIND"), ("mode", "invalid"),
+                                       *(("driverExitStatus", value) for value in (True, 1.0, -1, 256, "invalid"))))
+                invalid_signal.extend({**signal_record, "nativeOutcomes": {**signal_record["nativeOutcomes"], key: value}}
+                    for key in controller.NATIVE_SIGNAL_FAILURE_NATIVE_OUTCOME_FIELDS
+                    for value in (None, True, 1, "PRIVATE_OUTCOME", "other"))
+                for index, row in enumerate(signal_record["rows"]):
+                    for key, values in (("role", ("PRIVATE_ROLE", None)), ("state", ("PRIVATE_STATE", None)),
+                        ("mode", ("PRIVATE_MODE", None)), ("returnCode", (True, 1.0, -1, 256, "invalid")),
+                        ("observedHelperReturn", (None, True, 2.0, -1, 256, "invalid", "PRIVATE_RETURN",
+                                                 "missing" if index == 0 else "not-applicable",
+                                                 2 if index == 0 else "2")),
+                        ("backendErrorCodes", (None, True, 0, {}, "not-applicable", "PRIVATE_REQUEST",
+                            [0] * 65, [360] * 65, *([value] for value in (True, 1.0, -1, 361, "7", None, {}, [])))),
+                        ("failuresState", ("PRIVATE_FAILURES", None)), ("unknownFailure", (0, 1, "false")),
+                        ("failedCheckMask", (True, 1.0, -1, 1 << 50)),
+                        ("causeMasks", (None, [0] * 8, [0] * 10, *([value] * 9 for value in (True, 1.0, -1, 1 << 20)))),
+                        ("refusalMasks", (None, [0] * 5, [0] * 7, *([value] * 6 for value in (True, 1.0, -1, 512))))):
+                        invalid_signal.extend(signal_with_row(index, {**row, key: value}) for value in values)
+                    for group in ("identities", "checks"):
+                        for key, current in row[group].items():
+                            wrong = "missing" if current == "not-applicable" else "not-applicable"
+                            invalid_signal.append(signal_with_row(index, {**row, group: {**row[group], key: wrong}}))
+                        invalid_signal.append(signal_with_row(index,
+                            {**row, group: {**row[group], "hooksRestored" if group == "checks" else "kindMatches": 1}}))
+                    for state in ("missing", "invalid"):
+                        missing = signal_row(row["role"], state)
+                        for key, value in (("mode", "other"), ("returnCode", 0), ("failuresState", "empty"),
+                                           ("failedCheckMask", 1), ("unknownFailure", True),
+                                           ("backendErrorCodes", []), ("backendErrorCodes", "invalid"),
+                                           ("observedHelperReturn", "missing" if index == 0 else 2),
+                                           ("checks", {**missing["checks"], "hooksRestored": False})):
+                            invalid_signal.append(signal_with_row(index, {**missing, key: value}))
+                    for failure_state, unknown, bits in (("empty", False, 1), ("empty", True, 0),
+                        ("missing", False, 1), ("missing", True, 0), ("invalid", False, 0),
+                        ("invalid", True, 1), ("nonempty", False, 0)):
+                        missing = signal_row(row["role"])
+                        missing.update(failuresState=failure_state, unknownFailure=unknown, failedCheckMask=bits)
+                        invalid_signal.append(signal_with_row(index, missing))
+                    for absent in ("observedHelperReturn", "backendErrorCodes"):
+                        invalid_signal.append(signal_with_row(index, {key: value for key, value in row.items() if key != absent}))
+                historical_signal = {key: value for key, value in signal_record.items() if key != "nativeOutcomes"}
+                historical_signal["rows"] = [{key: value for key, value in row.items()
+                                               if key not in {"observedHelperReturn", "backendErrorCodes"}}
+                                              for row in signal_record["rows"]]
+                # The current decoder never promotes an old shape (or a
+                # mixed old/new shape) into evidence for this source.
+                invalid_signal.extend({**historical_signal, "schema": schema} for schema in (1, 2))
+                invalid_markers = [*(signal_bytes(record) for record in invalid_signal), signal_marker * 2,
+                    signal_marker.replace(b'"schema":2', b'"schema":2,"schema":2'),
+                    signal_marker.replace(b'"caseMatches":true', b'"caseMatches":true,"caseMatches":true'),
+                    signal_marker.replace(b'"failedCheckMask":1048576', b'"failedCheckMask":1048576,"failedCheckMask":1048576'),
+                    signal_marker.replace(b'"schema":2', b'"schema": 2'),
+                    signal_marker.replace(b'"native-setup-interrupt"', br'"\u006eative-setup-interrupt"'),
+                    signal_marker[:-1], signal_marker[:-1] + b"\r\n",
+                    b"MRK_NATIVE_SIGNAL_FAILURE=\xff\n", b"progress " + signal_marker]
+                for raw in invalid_markers:
+                    detail = controller.failure_details(capture(signal_stdout, stderr=raw, ok=False, returncode=1),
+                                                        signal_step, paths, deadline=1000.0)
+                    self.assertNotIn("signal_failure", detail)
+                    self.assertEqual(detail["returncode"], 1)
+                    self.assertNotIn("PRIVATE_", json.dumps(detail))
+                oversized = signal_marker[:-1] + b" " * (4097 - len(signal_marker)) + b"\n"
+                self.assertEqual(len(oversized), 4097)
+                with patch.object(controller, "strict_json", side_effect=AssertionError("oversized signal JSON was parsed")) as decode:
+                    self.assertIsNone(controller.native_signal_failure(oversized))
+                decode.assert_not_called()
+                expired = [False]
+                def expired_signal_parse(_text):
+                    expired[0] = True
+                    raise ValueError("PRIVATE_MESSAGE")
+                with patch.object(controller, "strict_json", side_effect=expired_signal_parse), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(failed_capture, signal_step, paths, deadline=1000.0)
+                expired[0] = False
+                original_scan = controller.minitest_records
+                def expire_signal_scan(text, identifiers, *, deadline):
+                    if identifiers == (signal_target,):
+                        expired[0] = True
+                    return original_scan(text, identifiers, deadline=deadline)
+                # Initial source inventory differs; expire specifically during
+                # the later singleton target rescan, not the first parse.
+                with patch.object(controller, "ruby_expected_ids", return_value=(*expected, signal_target)), \
+                        patch.object(controller, "minitest_records", side_effect=expire_signal_scan), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 1000.0 if expired[0] else 999.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(failed_capture, signal_step, paths, deadline=1000.0)
+                for interruption in (KeyboardInterrupt("PRIVATE_MESSAGE"), SystemExit(7)):
+                    with patch.object(controller, "strict_json", side_effect=interruption), \
+                            self.assertRaises(type(interruption)) as raised:
+                        controller.failure_details(failed_capture, signal_step, paths, deadline=1000.0)
+                    self.assertIs(raised.exception, interruption)
+
             for field, value in (("returncode", False), ("waited", False), ("stdout_eof", False),
                                  ("stderr_eof", False), ("domain_finality", False),
                                  ("primary_error", "fixture"), ("cleanup_errors", ("fixture",))):
@@ -885,6 +4062,30 @@ class CIControllerContractTests(unittest.TestCase):
             with patch.object(controller.time, "monotonic", return_value=100.0):
                 with self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
                     controller.failure_details(capture(clean + footer), step, paths, deadline=100.0)
+            original_finditer = controller.re.finditer
+            location_pattern = r"((?:tests/workflow|fastlane)/[A-Za-z0-9_]+\.rb):([1-9][0-9]{0,5})"
+            for expiry in ("during", "after"):
+                expired = [False]
+
+                def expiring_locations(pattern, text):
+                    matches = original_finditer(pattern, text)
+                    if pattern != location_pattern or text != stderr_locations:
+                        yield from matches
+                        return
+                    for match in matches:
+                        if expiry == "during":
+                            expired[0] = True
+                        yield match
+                        if expiry == "during":
+                            self.fail("expired location scan continued")
+                    expired[0] = True
+
+                with self.subTest(expiry=expiry), \
+                        patch.object(controller.re, "finditer", side_effect=expiring_locations), \
+                        patch.object(controller.time, "monotonic", side_effect=lambda: 100.0 if expired[0] else 99.0), \
+                        self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.failure_details(capture(clean + footer, stderr=stderr_locations.encode()),
+                                               step, paths, deadline=100.0)
 
     def test_native_failure_diagnostics_are_source_bound_and_cannot_authorize_success(self):
         controller = controller_module()
@@ -996,18 +4197,176 @@ class CIControllerContractTests(unittest.TestCase):
 
 
 class CIProductEvidenceContractTests(unittest.TestCase):
+    def test_fixed_poison_partitions_preserve_full_wheel_and_authority_disjoint_union(self):
+        checks = ci_module("ci_checks")
+        poison = tuple(identifier for _name, identifier in _PYTHON_POISON_FIXTURES)
+        parts = tuple(name for name, _identifier in _PYTHON_POISON_FIXTURES)
+        self.assertEqual(checks.PYTHON_POISON_CASES, _PYTHON_POISON_FIXTURES)
+        self.assertEqual(checks.PYTHON_POISON_IDS, poison)
+        self.assertEqual(checks.PYTHON_POISON_PARTITIONS, parts)
+        self.assertEqual(controller_module().PYTHON_POISON_PARTITIONS, parts)
+        self.assertEqual(len(set(parts)), len(parts))
+        self.assertEqual(len(set(poison)), len(poison))
+        healthy = ("unit.synthetic.Contracts.test_first", "unit.synthetic.Contracts.test_second")
+        complete = tuple(sorted(healthy + poison))
+        for selection in ("full", "wheel"):
+            with patch.object(checks, "expected_python_ids", return_value=complete) as source:
+                self.assertEqual(checks.python_capture_ids(ROOT, selection, "all", deadline=42.0), complete)
+                self.assertEqual(checks.python_capture_ids(ROOT, selection, "healthy", deadline=42.0), healthy)
+                selected = [checks.python_capture_ids(ROOT, selection, name, deadline=42.0) for name in parts]
+                self.assertEqual(selected, [(identifier,) for identifier in poison])
+                self.assertEqual(tuple(sorted(healthy + tuple(identifier for ids in selected for identifier in ids))), complete)
+                self.assertTrue(all(call.args == (ROOT, selection) and call.kwargs == {"deadline": 42.0}
+                                    for call in source.call_args_list))
+                for invalid in ("ordinary", "authority", "all-poison", poison[0], None, True, []):
+                    with self.assertRaises(checks.CheckError):
+                        checks.python_capture_ids(ROOT, selection, invalid)
+        authority = checks.NATIVE_AUTHORITY_IDS
+        with patch.object(checks, "expected_python_ids", return_value=tuple(sorted(authority + complete))):
+            self.assertEqual(checks.native_partition_ids(ROOT, "authority"), authority)
+            self.assertEqual(checks.native_partition_ids(ROOT, "ordinary"), healthy)
+            self.assertEqual(tuple(checks.native_partition_ids(ROOT, part) for part in parts),
+                             tuple((identifier,) for identifier in poison))
+        for changed in (healthy, tuple(sorted(healthy + poison[:1])), tuple(sorted(complete + poison[:1])),
+                        tuple(reversed(complete)), poison, list(complete)):
+            with patch.object(checks, "expected_python_ids", return_value=changed), self.assertRaises(checks.CheckError):
+                checks.python_capture_ids(ROOT, "full", "healthy")
+        for missing in poison:
+            incomplete = tuple(identifier for identifier in complete if identifier != missing)
+            for selection in ("full", "wheel", "native"):
+                inventory = tuple(sorted(authority + incomplete)) if selection == "native" else incomplete
+                with self.subTest(selection=selection, missing=missing), \
+                        patch.object(checks, "expected_python_ids", return_value=inventory), \
+                        self.assertRaisesRegex(checks.CheckError, "PYTHON_POISON_INVENTORY"):
+                    if selection == "native":
+                        checks.native_partition_ids(ROOT, "ordinary")
+                    else:
+                        checks.python_capture_ids(ROOT, selection, "healthy")
+        for selection in ("native", "all", None, True, []):
+            with self.assertRaises(checks.CheckError):
+                checks.python_capture_ids(ROOT, selection, "healthy")
+
+    def test_python_healthy_discovery_withholds_only_poison_and_stops_on_actual_adverse_callbacks(self):
+        checks = ci_module("ci_checks")
+        poison = checks.PYTHON_POISON_IDS
+        healthy = tuple(f"unit.synthetic.HealthyContracts.test_{name}" for name in ("first", "subject", "third"))
+        complete = tuple(sorted(healthy + poison))
+        for selection in ("full", "wheel"):
+            for outcome in ("success", "allowed-skip", "error", "failure", "skip", "subtest", "expected-failure", "unexpected-success",
+                            "missing-poison", "duplicate-discovery"):
+                with self.subTest(selection=selection, outcome=outcome):
+                    events, observations, retained = [], [], []
+
+                    class Fixture(unittest.TestCase):
+                        def __init__(self, identifier):
+                            super().__init__("runTest")
+                            self.identifier = identifier
+
+                        def id(self):
+                            return self.identifier
+
+                        def runTest(self):
+                            events.append(self.identifier)
+                            if self.identifier in poison:
+                                raise AssertionError("a poison fixture must never execute in the healthy capture")
+                            if self.identifier != healthy[1]:
+                                return
+                            if outcome in {"error", "expected-failure"}:
+                                raise OSError(5, "PRIVATE_FAKE_FAILURE")
+                            if outcome == "failure":
+                                self.fail("PRIVATE_FAKE_FAILURE")
+                            if outcome in {"skip", "allowed-skip"}:
+                                self.skipTest("PRIVATE_FAKE_SKIP")
+                            if outcome == "subtest":
+                                for _ in range(3):
+                                    with self.subTest():
+                                        raise OSError(5, "PRIVATE_FAKE_SUBTEST")
+
+                    class ExpectedFixture(Fixture):
+                        @unittest.expectedFailure
+                        def runTest(self):
+                            super().runTest()
+
+                    class RetainingRunner(unittest.TextTestRunner):
+                        def _makeResult(self):
+                            result = super()._makeResult()
+                            retained.append(result)
+                            return result
+
+                    loaded = [Fixture(healthy[0]),
+                              (ExpectedFixture if outcome in {"expected-failure", "unexpected-success"} else Fixture)(healthy[1]),
+                              Fixture(healthy[2]), *(Fixture(identifier) for identifier in poison)]
+                    if outcome == "missing-poison":
+                        loaded.pop()
+                    elif outcome == "duplicate-discovery":
+                        loaded.append(Fixture(poison[0]))
+                    suite = unittest.TestSuite(loaded)
+                    framework = SimpleNamespace(TestSuite=unittest.TestSuite, TextTestResult=unittest.TextTestResult,
+                        TextTestRunner=RetainingRunner,
+                        TestLoader=lambda: SimpleNamespace(errors=[], discover=lambda *_args, **_kwargs: suite))
+                    with patch.object(checks, "unittest", framework), \
+                            patch.object(checks, "expected_python_ids", return_value=complete), \
+                            patch.object(checks, "WHEEL_PATTERNS", ("test_fixed_fixture.py",)), \
+                            patch.object(checks, "LINUX_MACOS_SKIPS", frozenset({healthy[1]}) if outcome == "allowed-skip" else frozenset()), \
+                            patch.object(checks, "_remaining", return_value=10.0), \
+                            patch.object(checks, "_python_full_profile", return_value={"fixture": "admitted"}), \
+                            patch.object(checks, "inspect_installed_wheel", return_value=None) as installed, \
+                            patch.object(checks, "sys", SimpleNamespace(platform="linux", stderr=io.StringIO())), \
+                            patch.object(checks, "os", SimpleNamespace(environ={"MOBILE_RELEASE_REQUIRE_RUBY_CONTRACTS": "1"})):
+                        if outcome in {"success", "allowed-skip"}:
+                            detail = checks.run_python_tests(ROOT, selection, 1000.0, observations, work_root=Path("/fixture/checks"))
+                            self.assertEqual(detail["executed"], 3)
+                            self.assertEqual(detail["failure_callbacks"], [])
+                            self.assertEqual(detail["skipped"], int(outcome == "allowed-skip"))
+                            self.assertEqual(events, list(healthy))
+                            self.assertEqual(installed.call_count, 2 if selection == "wheel" else 0)
+                        else:
+                            with self.assertRaises(checks.CheckError) as raised:
+                                checks.run_python_tests(ROOT, selection, 1000.0, observations, work_root=Path("/fixture/checks"))
+                            if outcome in {"missing-poison", "duplicate-discovery"}:
+                                self.assertEqual(events, [])
+                                self.assertEqual(str(raised.exception), "TEST_LOADED_INVENTORY")
+                            else:
+                                self.assertEqual(events, list(healthy[:2]))
+                                self.assertEqual(len(raised.exception.failure_callbacks), 1)
+                                self.assertTrue(retained[0].failfast)
+                                self.assertTrue(retained[0].shouldStop)
+                                # A caller clearing unittest's ordinary stop
+                                # flag still cannot start another test body.
+                                retained[0].failfast = retained[0].shouldStop = False
+                                with self.assertRaisesRegex(checks.CheckError, "TEST_CONTINUED_AFTER_FAILURE"):
+                                    retained[0].startTest(Fixture(healthy[2]))
+                                self.assertTrue(retained[0].shouldStop)
+                    self.assertFalse(set(events) & set(poison))
+
     def test_native_partition_authority_is_exact_and_cannot_silently_expand(self):
         checks = ci_module("ci_checks")
         deadline = time.monotonic() + 30.0
         complete = checks.expected_python_ids(ROOT, "native", deadline=deadline)
         authority = checks.native_partition_ids(ROOT, "authority", deadline=deadline)
         ordinary = checks.native_partition_ids(ROOT, "ordinary", deadline=deadline)
+        poison = tuple(identifier for name, _identifier in _PYTHON_POISON_FIXTURES
+                       for identifier in checks.native_partition_ids(ROOT, name, deadline=deadline))
         self.assertEqual(authority, checks.NATIVE_AUTHORITY_IDS)
         self.assertEqual(len(authority), 5)
         self.assertTrue(ordinary)
         self.assertFalse(set(authority) & set(ordinary))
-        self.assertEqual(tuple(sorted(authority + ordinary)), complete)
+        self.assertEqual(tuple(sorted(authority + ordinary + poison)), complete)
+        self.assertEqual(set(poison), {identifier for _name, identifier in _PYTHON_POISON_FIXTURES})
+        self.assertEqual(len(set(authority + ordinary + poison)), len(complete))
         self.assertEqual(checks.native_partition_ids(ROOT, "all", deadline=deadline), complete)
+        for prefix in ("unit.test_native_process.", "unit.test_profile_process_owner.", "unit.test_inspection_budget."):
+            self.assertTrue(any(identifier.startswith(prefix) for identifier in ordinary))
+            self.assertFalse(any(identifier.startswith(prefix) for identifier in authority))
+        self.assertEqual(checks.NATIVE_PATTERNS, (
+            "test_ios_profile_authority.py", "test_ios_profile_trust.py", "test_ios_profile_installation.py",
+            "test_default_cancellation.py", "test_profile_processes.py", "test_macho_native.py",
+            "test_native_process.py", "test_profile_process_owner.py", "test_inspection_budget.py"))
+        self.assertEqual(set(checks.WHEEL_PATTERNS), {
+            "test_init_transaction.py", "test_ios_entitlements.py", "test_ios_plist_binary.py",
+            "test_native_process.py", "test_profile_process_owner.py", "test_default_cancellation.py",
+            "test_profile_processes.py", "test_inspection_budget.py", "test_ios_profile_installation.py",
+            "test_ios_profile_trust.py"})
         for invalid in ("unknown", "Authority", "", None, True, []):
             with self.subTest(partition=invalid), self.assertRaisesRegex(checks.CheckError, "NATIVE_PARTITION"):
                 checks.native_partition_ids(ROOT, invalid, deadline=deadline)
@@ -1019,6 +4378,25 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                     patch.object(checks, "expected_python_ids", return_value=changed), \
                     self.assertRaises(checks.CheckError):
                 checks.native_partition_ids(ROOT, "authority", deadline=deadline)
+
+    def test_native_compatibility_selectors_are_exact_ordinary_three_and_no_child_one(self):
+        checks = ci_module("ci_checks")
+        expected = tuple(sorted("unit.test_native_process.NativeProcessCompatibilityTests." + name for name in (
+            "test_native_public_api_atomic_duplication", "test_native_helper_and_validator_fd_maps",
+            "test_native_exact_terminal_wait_receipts")))
+        self.assertEqual(checks.native_compatibility_ids(ROOT), expected)
+        public = ("unit.test_native_process.NativeProcessCompatibilityTests.test_native_public_api_atomic_duplication",)
+        self.assertEqual(checks.native_compatibility_ids(ROOT, public_only=True), public)
+        self.assertTrue(set(expected) <= set(checks.native_partition_ids(ROOT, "ordinary")))
+        self.assertFalse(set(expected) & set(checks.NATIVE_AUTHORITY_IDS))
+        for changed in (expected[:2], expected + expected[:1], tuple(sorted(expected + (
+                "unit.test_native_process.NativeProcessCompatibilityTests.test_unreviewed",)))):
+            with patch.object(checks, "native_partition_ids", return_value=changed), self.assertRaisesRegex(
+                    checks.CheckError, "NATIVE_COMPATIBILITY_INVENTORY"):
+                checks.native_compatibility_ids(ROOT)
+        for invalid in (None, 0, 1, "public", [], {}):
+            with self.assertRaisesRegex(checks.CheckError, "NATIVE_COMPATIBILITY_SELECTION"):
+                checks.native_compatibility_ids(ROOT, public_only=invalid)
 
     def test_native_package_inspection_requires_complete_bytes_and_immutable_ordinary_nodes(self):
         checks = ci_module("ci_checks")
@@ -1225,7 +4603,10 @@ class CIProductEvidenceContractTests(unittest.TestCase):
 
     def test_expected_wheel_test_inventory_is_static_and_rejects_omissions_and_duplicate_methods(self):
         checks = ci_module("ci_checks")
-        names = ("test_init_transaction.py", "test_ios_entitlements.py", "test_ios_plist_binary.py")
+        names = ("test_init_transaction.py", "test_ios_entitlements.py", "test_ios_plist_binary.py",
+                 "test_native_process.py", "test_profile_process_owner.py", "test_default_cancellation.py",
+                 "test_profile_processes.py", "test_inspection_budget.py", "test_ios_profile_installation.py",
+                 "test_ios_profile_trust.py")
         with tempfile.TemporaryDirectory(prefix="mrk-ci-ast-") as temporary:
             source = Path(temporary)
             directory = source / "tests/unit"

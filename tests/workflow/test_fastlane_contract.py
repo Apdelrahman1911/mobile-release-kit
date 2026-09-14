@@ -118,13 +118,18 @@ class FastlaneContractTests(unittest.TestCase):
         self.assertNotIn("create_app_store_version_release_request", lane)
 
     def test_store_dependencies_and_transitives_are_locked(self) -> None:
-        self.assertIn('ruby "~> 3.3.0"', GEMFILE)
+        self.assertIn('ruby "3.3.12"', GEMFILE)
         self.assertIn('gem "fastlane", "= 2.235.0"', GEMFILE)
+        self.assertIn('gem "fiddle", "= 1.1.2", require: false', GEMFILE)
         self.assertIn('gem "google-apis-androidpublisher_v3", "= 0.106.0"', GEMFILE)
         self.assertIn("fastlane (= 2.235.0)", LOCKFILE)
+        self.assertIn("fiddle (= 1.1.2)", LOCKFILE)
+        self.assertIn("fiddle (1.1.2) sha256=59bd18c38e65cdc36863ab68e3ffd78658b8f025d1d080b218de94370420a074", LOCKFILE)
         self.assertIn("google-apis-androidpublisher_v3 (= 0.106.0)", LOCKFILE)
         self.assertIn("CHECKSUMS", LOCKFILE)
         self.assertRegex(LOCKFILE, r"(?m)^  ruby$")
+        self.assertIn("RUBY VERSION\n  ruby 3.3.12\n", LOCKFILE)
+        self.assertTrue(LOCKFILE.endswith("BUNDLED WITH\n  4.0.16\n"))
 
 
 if __name__ == "__main__":

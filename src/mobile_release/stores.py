@@ -77,7 +77,18 @@ RUNTIME_ENVIRONMENT_NAMES = {
 
 
 def _runtime_environment(source: Mapping[str, str]) -> dict[str, str]:
-    return {name: source[name] for name in RUNTIME_ENVIRONMENT_NAMES if source.get(name)}
+    environment = {
+        name: source[name] for name in RUNTIME_ENVIRONMENT_NAMES if source.get(name)
+    }
+    # Explicit bundle locations remain supported, but local/global Bundler
+    # settings must not install, switch versions or rewrite the pinned lock.
+    environment.update(
+        BUNDLER_VERSION="4.0.16",
+        BUNDLE_IGNORE_CONFIG="1",
+        BUNDLE_AUTO_INSTALL="false",
+        BUNDLE_FROZEN="true",
+    )
+    return environment
 
 
 def _repository_path(config: ReleaseConfig, value: str | Path, label: str) -> Path:
@@ -278,7 +289,7 @@ def _require_fastlane_bundle(tooling_root: Path) -> None:
     )
     if shutil.which("ruby") is None:
         raise StoreOperationError(
-            "Pinned Store tooling requires Ruby 3.3.x. Install Ruby 3.3 and Bundler; "
+            "Pinned Store tooling requires Ruby 3.3.12 and Bundler 4.0.16; "
             "dependencies are never installed automatically."
         )
 
@@ -298,15 +309,18 @@ def _require_fastlane_bundle(tooling_root: Path) -> None:
             return None
 
     ruby = run(["ruby", "-e", "print RUBY_VERSION"])
-    if ruby is None or ruby.returncode or not re.fullmatch(r"3\.3\.\d+", ruby.stdout.strip()):
+    if ruby is None or ruby.returncode or ruby.stdout.strip() != "3.3.12":
         raise StoreOperationError(
-            "Pinned Store tooling requires Ruby 3.3.x. Select Ruby 3.3 before running "
+            "Pinned Store tooling requires Ruby 3.3.12. Select that exact version before running "
             "online preflight or a Store lane."
         )
     bundler = run(["bundle", "--version"])
-    if bundler is None or bundler.returncode:
+    # Pinned Bundler 4's --version prints the bare version; its help command
+    # alone adds the human-readable "Bundler version" prefix.
+    if (bundler is None or bundler.returncode
+            or bundler.stdout.strip() != "4.0.16"):
         raise StoreOperationError(
-            "Bundler is unavailable for the pinned Store tooling. Install Bundler under Ruby 3.3; "
+            "Bundler 4.0.16 is unavailable for the pinned Store tooling. Install it under Ruby 3.3.12; "
             "dependencies are never installed automatically."
         )
     completed = run(["bundle", "check"])
@@ -317,9 +331,36 @@ def _require_fastlane_bundle(tooling_root: Path) -> None:
         )
         raise StoreOperationError(
             "Pinned Fastlane dependencies from Gemfile.lock are unavailable. "
-            f"Run `{command}` with Ruby 3.3, then rerun preflight; dependencies are never "
+            f"Run `{command}` with Ruby 3.3.12 and Bundler 4.0.16, then rerun preflight; dependencies are never "
             "installed automatically."
         )
+    # The isolated helpers intentionally disable gems; the outer capture runs
+    # under the locked bundle. Admit BOTH actual loaded Fiddle origins, rather
+    # than treating one version string as proof of the other runtime.
+    primitive = str(tooling_root / "fastlane/native_process_spawn.rb")
+    marker = "MRK_RUNTIME_3.3.12_FIDDLE_1.1.2"
+    probe = (
+        "require ARGV.fetch(0); "
+        "MobileReleaseKit::NativeProcessSpawn.admit_runtime!; "
+        f"STDOUT.write({json.dumps(marker)})"
+    )
+    commands = (
+        [
+            "ruby", "--disable=rubyopt,gems,did_you_mean,error_highlight,syntax_suggest,rjit,yjit",
+            "--external-encoding=UTF-8", "--internal-encoding=UTF-8",
+            "-e", probe, "--", primitive,
+        ],
+        ["bundle", "exec", "ruby", "-e", probe, "--", primitive],
+    )
+    for command in commands:
+        runtime = run(command)
+        if (runtime is None or runtime.returncode or runtime.stdout != marker
+                or runtime.stderr):
+            raise StoreOperationError(
+                "Pinned Ruby 3.3.12/Fiddle 1.1.2 native-validation tooling is unavailable "
+                "or its loaded origin is not the pinned distribution. Install the complete "
+                "reviewed Ruby and locked bundle; dependencies are never installed automatically."
+            )
 
 
 def _run_store_lane(

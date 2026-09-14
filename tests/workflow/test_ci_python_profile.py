@@ -2,8 +2,9 @@
 
 Only reviewed helper definitions are loaded lazily. Every project filesystem,
 resource, clock and process seam is replaced with the private in-memory fixture.
-The only executed test suite inside these tests has three locally defined inert
-methods; discovery never imports product tests, helpers or native entry points.
+The only executed test bodies are locally defined inert methods. Synthetic
+discovery also carries fixed singleton-ID stand-ins that must never execute;
+discovery never imports product tests, helpers or native entry points.
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ import stat
 import sys
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -333,7 +334,7 @@ def _profile_details():
             "capacity_bytes": 16 * 1024**2, "max_user_namespaces": 0}
 
 
-def _inert_suite(events, *, outcome="os-error", callback_count=1):
+def _inert_suite(events, singleton_ids, *, outcome="os-error", callback_count=1):
     class Fixture(unittest.TestCase):
         def test_01_ok(self):
             events.append("first")
@@ -369,7 +370,26 @@ def _inert_suite(events, *, outcome="os-error", callback_count=1):
         names = names[:1]
     suite = unittest.TestSuite(Fixture(name) for name in names)
     expected = tuple(sorted(test.id() for test in suite))
-    return suite, expected
+
+    class Singleton(unittest.TestCase):
+        def __init__(self, identifier):
+            super().__init__("runTest")
+            self.identifier = identifier
+
+        def id(self):
+            return self.identifier
+
+        def run(self, result=None):
+            events.append("unexpected-singleton")
+            raise AssertionError("singleton stand-in must never execute in the healthy suite")
+
+        def runTest(self):
+            self.run()
+
+    # IDs are data only: never import or load the actual singleton fixtures.
+    suite.addTests(Singleton(identifier) for identifier in singleton_ids)
+    complete = tuple(sorted(test.id() for test in suite))
+    return suite, expected, complete
 
 
 class CIPythonProfileTests(unittest.TestCase):
@@ -553,7 +573,7 @@ class CIPythonProfileTests(unittest.TestCase):
             with self.subTest(selection=selection, platform=platform):
                 fixture, events = _Profile(), []
                 fixture.platform = platform
-                suite, expected = _inert_suite(events, outcome="success")
+                suite, expected, complete = _inert_suite(events, self.module.PYTHON_POISON_IDS, outcome="success")
                 discovered = []
 
                 def inventory(source, chosen, *, deadline):
@@ -561,7 +581,7 @@ class CIPythonProfileTests(unittest.TestCase):
                     self.assertEqual(len(fixture.created), 12 if selection == "full" else 0)
                     self.assertEqual(fixture.fds, {})
                     discovered.append("inventory")
-                    return expected
+                    return complete
 
                 def discover(path, *, pattern):
                     self.assertEqual(path, str(fixture.source / "tests"))
@@ -588,13 +608,13 @@ class CIPythonProfileTests(unittest.TestCase):
                 else:
                     self.assertNotIn("storage_profile", details)
                     self.assertEqual(fixture.events, [])
-                    wheel.assert_called_once_with(fixture.source, deadline=10.0)
+                    self.assertEqual(wheel.call_args_list, [call(fixture.source, deadline=10.0)] * 2)
                     self.assertEqual(discovered, ["inventory", *self.module.WHEEL_PATTERNS])
 
     def test_actual_failfast_subtest_metadata_survives_main_and_controller_without_private_data(self):
         fixture, events = _Profile(), []
-        suite, expected = _inert_suite(events)
-        inventory = Mock(return_value=expected)
+        suite, expected, complete = _inert_suite(events, self.module.PYTHON_POISON_IDS)
+        inventory = Mock(return_value=complete)
         loader = SimpleNamespace(errors=[], discover=Mock(return_value=suite))
         with _pure(self.module, fixture, expected_python_ids=inventory) as framework:
             framework.TestLoader = lambda: loader
@@ -624,13 +644,13 @@ class CIPythonProfileTests(unittest.TestCase):
             primary_error="command exited 1", ok=False)
         step = controller.Step("python-full", parser="check")
         paths = SimpleNamespace(source=fixture.source)
-        checks = SimpleNamespace(expected_python_ids=Mock(return_value=expected))
+        checks = SimpleNamespace(python_capture_ids=Mock(return_value=expected))
         with patch.multiple(controller, os=SimpleNamespace(), subprocess=SimpleNamespace(),
                             time=SimpleNamespace(monotonic=lambda: fixture.now)):
             public = controller.failure_details(result, step, paths, checks=checks, deadline=10.0, platform="linux")
             with self.assertRaises(controller.VerificationError):
                 controller.parse_capture(step, result, paths, "linux", checks)
-        checks.expected_python_ids.assert_called_once_with(fixture.source, "full", deadline=10.0)
+        checks.python_capture_ids.assert_called_once_with(fixture.source, "full", "healthy", deadline=10.0)
         self.assertEqual(public["failure_callbacks"], [callback])
         self.assertEqual(public["storage_profile"], _profile_details())
         self.assertEqual(public["returncode"], 1)
@@ -663,11 +683,12 @@ class CIPythonProfileTests(unittest.TestCase):
         for case in ("bounded", "unexpected-skip", "assertion", "late-deadline"):
             with self.subTest(case=case):
                 fixture, events = _Profile(), []
-                suite, expected = _inert_suite(events, outcome="skip" if case == "unexpected-skip" else
-                                               "failure" if case == "assertion" else "os-error",
-                                               callback_count=20 if case == "bounded" else 1)
+                suite, expected, complete = _inert_suite(
+                    events, self.module.PYTHON_POISON_IDS,
+                    outcome="skip" if case == "unexpected-skip" else "failure" if case == "assertion" else "os-error",
+                    callback_count=20 if case == "bounded" else 1)
                 observations = []
-                with _pure(self.module, fixture, expected_python_ids=Mock(return_value=expected)) as framework:
+                with _pure(self.module, fixture, expected_python_ids=Mock(return_value=complete)) as framework:
                     framework.TestLoader = lambda: SimpleNamespace(errors=[], discover=Mock(return_value=suite))
                     if case == "late-deadline":
                         original_runner = framework.TextTestRunner
@@ -683,6 +704,7 @@ class CIPythonProfileTests(unittest.TestCase):
                         self.module.run_python_tests(fixture.source, "full", 10.0, observations,
                                                       work_root=fixture.checks)
                 expected_outcome = "skip" if case == "unexpected-skip" else "failure" if case == "assertion" else "error"
+                self.assertEqual(events, [] if case == "bounded" else ["first", "second"])
                 self.assertEqual(observations[-1]["outcome"], expected_outcome)
                 self.assertTrue(all(set(row) == {"id", "outcome"} for row in observations))
                 self.assertEqual(len(raised.exception.failure_callbacks), 16 if case == "bounded" else 1)
@@ -695,7 +717,7 @@ class CIPythonProfileTests(unittest.TestCase):
         # Execute the actual in-memory profile and inert success suite first,
         # then expire the original clock at main's independent final check.
         fixture, events = _Profile(), []
-        suite, expected = _inert_suite(events, outcome="success")
+        suite, expected, complete = _inert_suite(events, self.module.PYTHON_POISON_IDS, outcome="success")
         actual_runner = self.module.run_python_tests
 
         def expire_after_actual_runner(*args, **kwargs):
@@ -703,7 +725,7 @@ class CIPythonProfileTests(unittest.TestCase):
             fixture.now = 10.0
             return result
 
-        with _pure(self.module, fixture, expected_python_ids=Mock(return_value=expected),
+        with _pure(self.module, fixture, expected_python_ids=Mock(return_value=complete),
                    run_python_tests=expire_after_actual_runner) as framework:
             framework.TestLoader = lambda: SimpleNamespace(errors=[], discover=Mock(return_value=suite))
             status = self.module.main(["--check", "python-full", "--source-root", str(fixture.source),

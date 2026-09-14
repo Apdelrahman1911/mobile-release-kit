@@ -1,13 +1,11 @@
-"""Fixed-code issuer worker and independent lifetime supervisor. No Store access.
+"""Fixed-code issuer worker inside the profile owner's reserved group.
 
-The supervisor never invokes native crypto itself. Its child and OpenSSL inherit
-its owned group, so a killed outer Store validator cannot strand native work.
+No Store access. The separate custodian/keeper boundary owns descendant cleanup;
+this worker performs the unchanged signature and production-purpose trust gates.
 """
 from __future__ import annotations
 
 import os
-import selectors
-import signal
 import stat
 import subprocess
 import sys
@@ -16,12 +14,14 @@ from pathlib import Path
 
 from .errors import ValidationError
 from .ios_profiles import (
-    COMPLETION_MARKER, MAX_PROFILE_BYTES, completion_frame, profile_environment, read_profile_bytes, worker_command,
+    MAX_PROFILE_BYTES, profile_environment, read_profile_bytes,
 )
 from .ios_profile_trust import MAX_CERTIFICATE_BYTES, MAX_CERTIFICATES, pem_certificates, require, verify_profile_signer
 
-SUPERVISOR_SECONDS = 25
 OPENSSL_SECONDS = 20
+NANOSECOND = 1_000_000_000
+TIME_LIMIT = (1 << 63) - 1
+TIMEOUT = "Apple profile authentication timed out; no decode-only fallback is permitted"
 OID_DATA = b"\x2a\x86\x48\x86\xf7\x0d\x01\x07\x01"
 OID_SIGNED_DATA = OID_DATA[:-1] + b"\x02"
 STRONG_DIGESTS = frozenset(b"\x60\x86\x48\x01\x65\x03\x04\x02" + bytes([index]) for index in (1, 2, 3))
@@ -103,7 +103,19 @@ def cms_payload_and_certificates(raw: bytes) -> tuple[bytes, tuple[bytes, ...]]:
     return content(payloads[0]), certificates
 
 
-def verify_cms(raw: bytes, directory: Path) -> bytes:
+def _remaining(deadline_ns: int) -> float:
+    remaining = deadline_ns - time.monotonic_ns()
+    if remaining <= 0:
+        raise ValidationError(TIMEOUT)
+    return remaining / NANOSECOND
+
+
+def verify_cms(raw: bytes, directory: Path, *, deadline_ns: int | None = None) -> bytes:
+    now = time.monotonic_ns()
+    require(deadline_ns is None or type(deadline_ns) is int and 0 < deadline_ns <= TIME_LIMIT)
+    cutoff = min(now + OPENSSL_SECONDS * NANOSECOND,
+                 deadline_ns if deadline_ns is not None else TIME_LIMIT)
+    _remaining(cutoff)
     payload, certificates = cms_payload_and_certificates(raw)
     source, output, signer_file = (directory / name for name in ("verify-input.der", "native-content.bin", "native-signer.pem"))
     require(not any(path.exists() or path.is_symlink() for path in (source, output, signer_file)))
@@ -112,89 +124,46 @@ def verify_cms(raw: bytes, directory: Path) -> bytes:
         handle.write(raw)
     # -noverify disables ONLY certificate trust here. Signature verification is
     # mandatory; actual production-purpose issuer trust is a separate next gate.
-    result = subprocess.run(
-        ["/usr/bin/openssl", "cms", "-verify", "-binary", "-inform", "DER", "-noverify",
-         "-in", str(source), "-out", str(output), "-signer", str(signer_file)],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        env=profile_environment(directory), timeout=OPENSSL_SECONDS, check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["/usr/bin/openssl", "cms", "-verify", "-binary", "-inform", "DER", "-noverify",
+             "-in", str(source), "-out", str(output), "-signer", str(signer_file)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=profile_environment(directory), timeout=_remaining(cutoff), check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise ValidationError(TIMEOUT) from None
+    _remaining(cutoff)
     require(result.returncode == 0)
     require(read_profile_bytes(source) == raw and read_profile_bytes(output) == payload)
     signers = pem_certificates(read_profile_bytes(signer_file, maximum=MAX_CERTIFICATE_BYTES * 2))
     require(len(signers) == 1 and signers[0] in certificates)
+    _remaining(cutoff)
     verify_profile_signer(signers[0], certificates)
+    _remaining(cutoff)
     return payload
-
-
-def _require_lifetime(parent_pid: int, expires: float) -> None:
-    require(os.getppid() == parent_pid and time.monotonic() < expires)
-
-
-def supervise(directory: Path, parent_pid: int) -> int:
-    # Establish ownership before spawn or any input read. Calling this directly
-    # inside somebody else's process group must NOT authorize killing that group.
-    leader = os.getpid()
-    if os.getpgrp() != leader or parent_pid <= 1:
-        return 1
-    expires = time.monotonic() + SUPERVISOR_SECONDS
-    process = None
-    try:
-        _require_lifetime(parent_pid, expires)
-        process = subprocess.Popen(
-            worker_command("--worker", directory), stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            env=profile_environment(directory),  # No new session/group: native descendants stay owned.
-        )
-        while process.poll() is None:
-            _require_lifetime(parent_pid, expires)
-            time.sleep(0.05)
-        _require_lifetime(parent_pid, expires)
-        require(process.returncode == 0)
-        payload = read_profile_bytes(directory / "verified-content.bin")
-        _require_lifetime(parent_pid, expires)
-        descriptor = sys.stdout.fileno()
-        os.set_blocking(descriptor, False)
-        frame = completion_frame(payload)
-        with selectors.DefaultSelector() as selector:
-            selector.register(descriptor, selectors.EVENT_WRITE)
-            # Separate the payload from the terminal success commit point. Every
-            # authorization/lifetime check precedes completion of that marker;
-            # once fully emitted, only unconditional cleanup remains.
-            for part in (frame[:-len(COMPLETION_MARKER)], COMPLETION_MARKER):
-                view = memoryview(part)
-                while view:
-                    _require_lifetime(parent_pid, expires)
-                    for _, _ in selector.select(0.05):
-                        _require_lifetime(parent_pid, expires)
-                        try:
-                            count = os.write(descriptor, view[:64 * 1024])
-                        except BlockingIOError:
-                            continue
-                        require(count > 0)
-                        view = view[count:]
-        return 0
-    finally:
-        # Never delegate success cleanup solely to a parent which could die at
-        # the handoff. The supervisor retains group ownership even after a fully
-        # committed result and intentionally terminates itself with descendants.
-        os.killpg(leader, signal.SIGKILL)
 
 
 def main(argv: list[str] | None = None) -> int:
     arguments = sys.argv[1:] if argv is None else argv
     try:
-        require(len(arguments) in (2, 3))
-        mode, name = arguments[:2]
+        require(len(arguments) == 3)
+        mode, name, deadline_text = arguments
+        require(mode == "--worker" and sys.platform == "darwin")
+        require(type(deadline_text) is str and deadline_text.isascii()
+                and deadline_text.isdecimal() and len(deadline_text) <= 19)
+        deadline_ns = int(deadline_text)
+        require(0 < deadline_ns <= TIME_LIMIT and str(deadline_ns) == deadline_text)
+        _remaining(deadline_ns)
         directory = Path(name)
         require(directory.is_absolute() and not directory.is_symlink() and directory.is_dir())
         require(stat.S_IMODE(directory.stat().st_mode) == 0o700)
         os.umask(0o077)
-        if mode == "--supervise" and len(arguments) == 3:
-            return supervise(directory, int(arguments[2]))
-        require(mode == "--worker" and len(arguments) == 2 and sys.platform == "darwin")
-        payload = verify_cms(read_profile_bytes(directory / "cms.der"), directory)
+        payload = verify_cms(read_profile_bytes(directory / "cms.der"), directory, deadline_ns=deadline_ns)
+        _remaining(deadline_ns)
         with (directory / "verified-content.bin").open("xb") as handle:
             handle.write(payload)
+        _remaining(deadline_ns)
         return 0
     except (ValidationError, OSError, ValueError, subprocess.SubprocessError):
         # Nothing from native tools, profile values, paths or exceptions goes to logs.

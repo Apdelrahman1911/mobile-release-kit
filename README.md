@@ -59,6 +59,33 @@ validation still inspects the signed output, but does not provision those extra 
 
 Desktop distribution, non-Gradle Android builds, non-Xcode Apple builds, certificate creation, account/IAM provisioning, and automatic public rollout are intentionally outside this repository.
 
+### Native validation prerequisites
+
+Store tooling requires exact Ruby **3.3.12**, Fiddle **1.1.2** and Bundler
+**4.0.16** with the pinned bundle. Capture never installs a missing runtime or
+dependency. Python's package requirement remains `>=3.11`; native capture also
+requires the admitted CPython/POSIX facilities and platform ABI. A package version
+range is not evidence that every interpreter or native platform was verified.
+
+Native validation requires exclusive ownership of each original child's wait
+status **before creation and through final accounting**. Callers must not use a
+catch-all/background reaper for those children or change their waitability.
+Read-only native SIGCHLD admission rejects `SIG_IGN` and `SA_NOCLDWAIT`; it does
+not change the caller's signal policy or detect every later outside reaper.
+The fixed Store-lane entry and profile API, not arbitrary embedded Fastlane
+plugins or shared reaper integrations, define the supported capture boundary.
+
+The QA-007 process-ownership contract requires a still-reserved group identity,
+real child waits, stream EOFs and settled cleanup before accepting a result.
+Proved finalized failure can permit cleanup of unchanged owned resources; it
+cannot turn failed validation into success.
+An ambiguous creation, wait, close or task join fails closed; it does not authorize
+a numeric PID/group retry or deletion of potentially live private scratch.
+Preserve exact owned residues, end the affected process and establish finality
+before retrying; never remove another task's files. See
+[security](SECURITY.md#native-validation-process-ownership)
+and [profile authority](docs/ios-profile-authority.md#isolation-deadlines-and-installation).
+
 ## Quick start
 
 Install and pin one released version. Never consume `main`:
@@ -237,12 +264,18 @@ offline inputs and admits an isolated test identity on each disposable
 GitHub-hosted VM before running the required product checks.
 macOS source and wheel checks separate the fixed Apple trust-authority tests
 from ordinary native tests without dropping coverage or renewing gate deadlines.
+Controls that intentionally retain UNKNOWN need fixed isolated captures, not
+continued mixed discovery. An expected negative result does not authorize reuse
+or scratch deletion before genuine owning-domain disposal; see the
+[test-isolation contract](docs/verification.md#intentional-unknown-test-isolation).
 
 **Do not run full test discovery, native/process suites or the CI controller on
-a shared VPS, developer login session or self-hosted runner.** The separate
-QA-007 production process-group lifetime defect remains open; credential-free
-tests are not automatically safe process tests. Local work is limited to static
-inspection and explicitly reviewed pure/contract checks. See
+a shared VPS, developer login session or self-hosted runner.** The QA-007
+production process-ownership change requires its own reviewed source and genuine
+Linux/macOS source/installed verification; earlier fixture results do not prove
+that correction. Credential-free tests are not automatically safe process tests.
+Local work is limited to static inspection and explicitly reviewed pure/contract
+checks. See
 [repository verification](docs/verification.md) for the execution boundary,
 required coverage, evidence and current limitations. Never dispatch a release
 workflow or use real Store/signing credentials to test this repository.

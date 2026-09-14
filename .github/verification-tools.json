@@ -20,8 +20,9 @@
     "url": "https://rubygems.org/downloads/bundler-4.0.16.gem",
     "version": "4.0.16"
   },
-  "gemfile_lock_sha256": "c49efc491e6ecaf86c3213ee51cfa55a2893d2249b9eb6b26ba9748c34f43bb1",
-  "locked_gem_count": 98,
+  "fiddle": "1.1.2",
+  "gemfile_lock_sha256": "c356137cf43cedf1d9434fe6d8e87caacb87ca48058d8e41520509bda3b86f22",
+  "locked_gem_count": 99,
   "python": "3.11",
   "ruby": "3.3.12",
   "schema": 1,

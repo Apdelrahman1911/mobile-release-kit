@@ -226,33 +226,167 @@ class ProcessObserverContractTests(unittest.TestCase):
         from . import profile_process_fixture as profile
         class NoSpawn(Exception):
             pass
-        for module in (fixture, profile):
-            with self.subTest(module=module.__name__), \
-                 patch.object(profile, "command", return_value=["fixed-fixture", "driver"]), \
-                 patch.object(module, "observer_environment", return_value={fixture.OBSERVER_VARIABLE: self.selected}), \
-                 patch.dict(fixture.os.environ, {"PATH": "/usr/bin", "DYLD_INSERT_LIBRARIES": "fictional-canary",
-                                                 "TMPDIR": "/foreign", "TMP": "/foreign", "TEMP": "/foreign"}, clear=True), \
-                 patch.object(module.subprocess, "Popen", side_effect=NoSpawn) as spawn:
+        root = Path("/unused")
+        selector = {fixture.OBSERVER_VARIABLE: self.selected}
+        with patch.dict(fixture.os.environ, {"PATH": "/usr/bin", "DYLD_INSERT_LIBRARIES": "fictional-canary",
+                                             "PYTHONPATH": "fictional-canary", "PYTHONHOME": "fictional-canary",
+                                             fixture.OBSERVER_VARIABLE: "/untrusted/replacement",
+                                             "TMPDIR": "/foreign", "TMP": "/foreign", "TEMP": "/foreign"}, clear=True):
+            with self.subTest(driver="generic"), \
+                 patch.object(fixture, "observer_environment", return_value=selector) as observer, \
+                 patch.object(fixture.subprocess, "Popen", side_effect=NoSpawn) as spawn:
                 with self.assertRaises(NoSpawn):
-                    module.run_case(Path("/unused"), "success")
-                expected = {"PATH", fixture.OBSERVER_VARIABLE} | ({"PYTHONPATH"} if module is fixture else {"TMPDIR", "TMP", "TEMP"})
-                self.assertEqual(set(spawn.call_args.kwargs["env"]), expected)
-                self.assertEqual(spawn.call_args.kwargs["env"][fixture.OBSERVER_VARIABLE], self.selected)
-                if module is profile:
-                    self.assertEqual(spawn.call_args.kwargs["env"], {"PATH": "/usr/bin", fixture.OBSERVER_VARIABLE: self.selected,
-                                                                   "TMPDIR": "/unused", "TMP": "/unused", "TEMP": "/unused"})
+                    fixture.run_case(root, "success")
+                observer.assert_called_once_with()
+                source = Path(fixture.__file__).resolve()
+                spawn.assert_called_once_with(
+                    [fixture.sys.executable, "-P", str(source), "driver", str(root), "success", "0"],
+                    env={"PATH": "/usr/bin", "PYTHONPATH": str(source.parents[2] / "src"), **selector},
+                    stdout=fixture.subprocess.PIPE, stderr=fixture.subprocess.PIPE, start_new_session=True)
+            # Intercept construction, not just Popen: the real driver checks
+            # native child waitability before launching. No workspace is made.
+            argv = ["fixed-fixture", "driver"]
+            with self.subTest(driver="profile"), \
+                 patch.object(profile, "observer_environment", return_value=selector) as observer, \
+                 patch.object(profile, "command", return_value=argv) as command, \
+                 patch.object(profile.FixtureDriver, "__init__", side_effect=AssertionError("real driver construction forbidden")) as init, \
+                 patch.object(profile, "FixtureDriver", side_effect=NoSpawn) as driver:
+                with self.assertRaises(NoSpawn):
+                    profile.run_case(SimpleNamespace(path=root), "success")
+                observer.assert_called_once_with()
+                command.assert_called_once_with("driver", root, root, "success")
+                driver.assert_called_once_with(argv, env={"PATH": "/usr/bin", **selector,
+                                                         "TMPDIR": "/unused", "TMP": "/unused", "TEMP": "/unused"})
+                init.assert_not_called()
+                fixture.subprocess.Popen.assert_not_called()
 
-    def test_native_zombie_probe_keeps_original_handle_unreaped_until_production_cleanup(self):
-        # Static regression guard only. Native behavior is still required in CI.
-        source = Path(__file__).with_name("test_profile_processes.py").read_text()
-        tree = ast.parse(source)
-        method = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
-                      and node.name == "test_actual_zombie_group_is_reaped_and_absent_after_cleanup")
-        calls = [node for node in ast.walk(method) if isinstance(node, ast.Call)]
-        observation = next(node.lineno for node in calls if isinstance(node.func, ast.Name) and node.func.id == "process_state")
-        cleanup = next(node.lineno for node in calls if isinstance(node.func, ast.Attribute) and node.func.attr == "_reap_profile_group")
-        self.assertLess(observation, cleanup)
-        for call in calls:
-            if (isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name)
-                    and call.func.value.id == "process" and call.func.attr in {"poll", "wait"}):
-                self.assertGreater(call.lineno, cleanup)
+    def test_native_zombie_probe_precedes_the_owning_keepers_original_wait(self):
+        # Static source-chain regression guard only; native CI must still prove
+        # the behavior. Never import/construct the owner or execute its fixture.
+        def definition(scope, name):
+            matches = [node for node in scope.body if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name == name]
+            self.assertEqual(len(matches), 1, name)
+            return matches[0]
+
+        def shape(scope, kind, source, field=None):
+            expected = ast.parse(source).body[0]
+            if isinstance(expected, ast.Expr):
+                expected = expected.value
+            matches = []
+            for node in ast.walk(scope):
+                if isinstance(node, kind):
+                    value = getattr(node, field) if field else node
+                    if isinstance(value, ast.AST) and ast.dump(value) == ast.dump(expected):
+                        matches.append(node)
+            self.assertEqual(len(matches), 1, source)
+            return matches[0]
+
+        def ordered(*nodes):
+            # Call only within one function/file, never across source trees.
+            for earlier, later in zip(nodes, nodes[1:]):
+                self.assertLess(earlier.lineno, later.lineno)
+
+        def body(node):
+            # ast.walk(If) also visits its else: evidence must be in the
+            # selected branch, not merely somewhere under the condition.
+            return ast.Module(body=node.body, type_ignores=[])
+
+        workflow = ast.parse(Path(__file__).with_name("test_profile_processes.py").read_text())
+        bindings = definition(ast.parse(Path(__file__).with_name("profile_process_fixture.py").read_text()), "ProfileBindings")
+        owner = ast.parse((Path(__file__).resolve().parents[2] / "src/mobile_release/_profile_process.py").read_text())
+        case = definition(definition(workflow, "ProfileGroupCleanupTests"),
+                          "test_actual_zombie_is_observed_before_its_owning_keeper_consumes_the_wait")
+        shape(case, ast.Assign, 'result = run_case(workspace, "zombie")')
+        shape(case, ast.Call, 'self.assertEqual(result["result"], "success")')
+        shape(case, ast.Call, 'self.assertTrue(result["zombieObserved"] and result["deadBeforeFallback"] and result["scratchRemoved"])')
+
+        observe, tick = definition(bindings, "observe"), definition(bindings, "tick")
+        published = shape(observe, ast.If, 'event == "child_published"', "test")
+        evidence = shape(body(published), ast.Assign, 'child, acquisition = evidence["child"], evidence["acquisition"]')
+        identity = shape(body(published), ast.Assert, 'acquisition.child is child and acquisition.settled', "test")
+        unreaped = shape(body(published), ast.Assert, 'child.receipt is None and not child.numeric_retired', "test")
+        validator = shape(body(published), ast.If, 'child_role == "validator"', "test")
+        publication = shape(body(validator), ast.Call,
+                            'record(self.root / "validator-published", json.dumps({"pid": child.pid, "group": os.getpgrp()}))')
+        ordered(evidence, identity, unreaped, publication)
+
+        outer_only = shape(tick, ast.If, 'self.role != "outer" or self._observing', "test")
+        self.assertEqual(len(outer_only.body), 1)
+        self.assertIsInstance(outer_only.body[0], ast.Return)
+        probe = shape(tick, ast.If, 'self.mode == "zombie" and (self.root / "validator-published").exists() and not self.zombie_observed', "test")
+        published_pid = shape(body(probe), ast.Assign, 'publication = json.loads((self.root / "validator-published").read_text())')
+        observation = shape(body(probe), ast.Assign, 'state = process_state(publication["pid"], group=publication["group"], deadline=limit)')
+        not_absent = shape(body(probe), ast.Assert, 'state != "absent"', "test")
+        zombie = shape(body(probe), ast.If, 'state == "zombie"', "test")
+        observed = shape(body(zombie), ast.Assign, 'self.zombie_observed = True')
+        witness = shape(body(zombie), ast.Call, 'self.log("actual_validator_zombie", validator_pid=publication["pid"])')
+        release = shape(tick, ast.Call, 'record(self.root / "zombie-observed", "actual unreaped zombie")')
+        self.assertIn(release, tuple(ast.walk(body(zombie))))
+        ordered(published_pid, observation, not_absent, zombie, observed, witness, release)
+
+        gate = shape(observe, ast.If, 'role == "keeper" and event == "child_published" and self.mode == "zombie"', "test")
+        gate_loop = shape(body(gate), ast.While,
+                          'not (self.root / "zombie-observed").exists() and time.monotonic_ns() < self.run_deadline_ns', "test")
+        required_observation = shape(body(gate), ast.Assert, '(self.root / "zombie-observed").exists()', "test")
+        ordered(publication, gate_loop, required_observation)
+
+        spawn = definition(owner, "_spawn")
+        joined = shape(spawn, ast.If, 'granted and task.join_once(context.run)', "test")
+        actual_child = shape(body(joined), ast.Assign, 'child = task.acquisition.child')
+        event = shape(body(joined), ast.Call,
+                      '_role_event(context.role, "child_published", child=child, acquisition=task.acquisition, child_role=child_role)')
+        returned = shape(body(joined), ast.Return, 'child', "value")
+        ordered(actual_child, event, returned)
+        work = definition(definition(owner, "_Keeper"), "work")
+        creation = shape(work, ast.Call, '_spawn', "func")
+        self.assertEqual(ast.dump(creation.args[4]), ast.dump(ast.Constant(value="validator")))
+        self.assertTrue(any(isinstance(node, ast.Assign) and node.value is creation
+                            and ast.dump(node.targets[0]) == ast.dump(ast.parse('self.validator = None').body[0].targets[0])
+                            for node in work.body))
+        wait = shape(work, ast.Call, '_wait_child', "func")
+        self.assertEqual(ast.dump(wait.args[1]), ast.dump(ast.parse('self.validator', mode="eval").body))
+        self.assertEqual(ast.dump(wait.args[4]), ast.dump(ast.Constant(value="validator_reaped")))
+        self.assertTrue(any(isinstance(node, ast.Assign) and node.value is wait
+                            and ast.dump(node.targets[0]) == ast.dump(ast.parse('self.receipt = None').body[0].targets[0])
+                            for node in work.body))
+        ordered(creation, wait)
+
+        wait_child = definition(owner, "_wait_child")
+        retired = shape(wait_child, ast.Call, 'child.retire_numeric()')
+        consumed = shape(wait_child, ast.Assign, 'receipt = child.poll_wait()')
+        has_receipt = shape(wait_child, ast.If, 'receipt is not None', "test")
+        reported = shape(body(has_receipt), ast.Call, '_role_event(context.role, event, receipt=receipt)')
+        returned = shape(body(has_receipt), ast.Return, 'receipt', "value")
+        ordered(retired, consumed, reported, returned)
+
+        patches = definition(bindings, "_enter_patches")
+        captured = shape(patches, ast.Assign, 'original_wait, original_join = native.Child.poll_wait, owner.threading.Thread.join')
+        wrapper = definition(patches, "poll_wait")
+        call = shape(wrapper, ast.Call, 'original_wait', "func")
+        original_return = shape(wrapper, ast.Assign, 'receipt = original_wait(child)')
+        self.assertIs(original_return.value, call)
+        self.assertIn(original_return, wrapper.body)
+        retirement = shape(wrapper, ast.Assert, 'child.numeric_retired and child.wait_state in {"OWNED", "POLLABLE"}', "test")
+        real_receipt = shape(wrapper, ast.If, 'receipt is not None', "test")
+        saved = shape(body(real_receipt), ast.Assign, 'self.wait_witnesses[id(child)] = receipt')
+        witnessed = shape(body(real_receipt), ast.Call, 'self.log("original_wait_return", receipt=_receipt(receipt))')
+        returned = shape(wrapper, ast.Return, 'receipt', "value")
+        ordered(retirement, original_return, saved, witnessed, returned)
+        installed = shape(patches, ast.Call, 'self._install_patch(patch.object(obj, name, implementation))')
+        install_loop = next(node for node in patches.body if isinstance(node, ast.For) and installed in ast.walk(node))
+        shape(install_loop.iter, ast.Tuple, '(native.Child, "poll_wait", poll_wait)')
+        shape(install_loop.iter, ast.Tuple, '(owner, "_role_event", self.observe)')
+        ordered(captured, wrapper, installed)
+        reaped = shape(observe, ast.If, 'event in {"validator_reaped", "keeper_reaped", "custodian_reaped"}', "test")
+        shape(body(reaped), ast.Assign, 'child, receipt = self.child_for(child_role), evidence["receipt"]')
+        shape(body(reaped), ast.Assert, 'child.receipt is receipt and child.wait_state == "REAPED" and child.numeric_retired', "test")
+        shape(body(reaped), ast.Assert, 'self.wait_witnesses.get(id(child)) is receipt', "test")
+
+        # Observation/publication may not steal a wait. The wrapper permits
+        # exactly the captured original above, not an extra consuming API.
+        consuming = {"poll_wait", "waitpid", "waitid", "wait", "poll", "communicate", "_wait_child"}
+        for scope in (tick, observe, spawn, wrapper):
+            for node in ast.walk(scope):
+                if isinstance(node, ast.Call):
+                    name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", None)
+                    self.assertNotIn(name, consuming, scope.name)

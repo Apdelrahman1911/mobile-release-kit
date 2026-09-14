@@ -48,6 +48,8 @@ from mobile_release.provenance import sha256_file, write_evidence
 from mobile_release.reporting import FAILING_STATUSES, Finding, Report, Status
 from mobile_release.stores import (
     StoreRequest,
+    _require_fastlane_bundle,
+    _runtime_environment,
     _store_environment,
     _validate_online_readback,
     execute_store_operation,
@@ -154,6 +156,14 @@ class CliBuildTests(unittest.TestCase):
             "fastlane/release_support.rb",
             data_files["share/mobile-release-kit/fastlane"],
         )
+        helpers = ("fastlane/native_process_spawn.rb", "fastlane/native_upload_process.rb")
+        for helper in helpers:
+            self.assertIn(helper, data_files["share/mobile-release-kit/fastlane"])
+            self.assertIn(helper, REQUIRED_TOOLING_FILES)
+        for module in ("_native_process.py", "_profile_process.py"):
+            self.assertTrue((repository / "src/mobile_release" / module).is_file())
+        self.assertEqual(pyproject["project"]["requires-python"], ">=3.11")
+        self.assertEqual(pyproject["project"]["dependencies"], [])
         self.assertIn(
             "templates/workflows/*.yml",
             data_files["share/mobile-release-kit/templates/workflows"],
@@ -175,10 +185,46 @@ class CliBuildTests(unittest.TestCase):
                 resolve_tooling_root(environ={}, candidates=(installed,)),
                 installed.resolve(),
             )
-            (installed / "templates/workflows/mobile-preflight.yml").unlink()
-            self.assertIsNone(
-                resolve_tooling_root(environ={}, candidates=(installed,))
-            )
+            for missing in (*helpers, "templates/workflows/mobile-preflight.yml"):
+                with self.subTest(missing=missing):
+                    target = installed / missing
+                    original = target.read_bytes()
+                    target.unlink()
+                    self.assertIsNone(resolve_tooling_root(environ={}, candidates=(installed,)))
+                    self.assertIsNone(resolve_tooling_root(
+                        environ={"MOBILE_RELEASE_TOOLING_ROOT": str(installed)},
+                        candidates=(repository,),
+                    ))
+                    target.write_bytes(original)
+
+    def test_automatic_tooling_resolution_never_borrows_another_installation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            prefix = root / "prefix"
+            installed = prefix / "share/mobile-release-kit"
+            source = root / "checkout"
+            wheel_module = prefix / "lib/python3.11/site-packages/mobile_release/tooling.py"
+            source_module = source / "src/mobile_release/tooling.py"
+            decoy = wheel_module.parents[2]
+            for location in (installed, source, decoy):
+                for relative in REQUIRED_TOOLING_FILES:
+                    path = location / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b"fictional installed asset\n")
+            for module in (wheel_module, source_module):
+                module.parent.mkdir(parents=True, exist_ok=True)
+                module.write_bytes(b"fictional module origin\n")
+            for helper in ("fastlane/native_process_spawn.rb", "fastlane/native_upload_process.rb"):
+                for module, selected in ((wheel_module, installed), (source_module, source)):
+                    with self.subTest(module=module, helper=helper), patch(
+                        "mobile_release.tooling.__file__", str(module)
+                    ), patch("mobile_release.tooling.sysconfig.get_path", return_value=str(prefix)):
+                        self.assertEqual(resolve_tooling_root(environ={}), selected)
+                        target = selected / helper
+                        content = target.read_bytes()
+                        target.unlink()
+                        self.assertIsNone(resolve_tooling_root(environ={}))
+                        target.write_bytes(content)
 
     def test_module_entrypoint_ignores_cwd_shadowing_in_safe_path_mode(self) -> None:
         repository = Path(__file__).resolve().parents[2]
@@ -1005,14 +1051,23 @@ class CliBuildTests(unittest.TestCase):
 
             def fake_store_run(argv: list[str], **kwargs: object) -> object:
                 nonlocal captured_cwd
+                self.assertEqual(kwargs["env"]["BUNDLER_VERSION"], "4.0.16")
+                self.assertEqual(kwargs["env"]["BUNDLE_IGNORE_CONFIG"], "1")
+                self.assertEqual(kwargs["env"]["BUNDLE_AUTO_INSTALL"], "false")
+                self.assertEqual(kwargs["env"]["BUNDLE_FROZEN"], "true")
+                self.assertEqual(kwargs["env"]["BUNDLE_PATH"], "/fictional/pinned-bundle")
                 if argv[:2] == ["ruby", "-e"]:
                     return subprocess.CompletedProcess(argv, 0, stdout="3.3.12", stderr="")
                 if argv == ["bundle", "--version"]:
                     return subprocess.CompletedProcess(
-                        argv, 0, stdout="Bundler version 4.0.16", stderr=""
+                        argv, 0, stdout="4.0.16", stderr=""
                     )
                 if argv == ["bundle", "check"]:
                     return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+                if argv[-1] == str(tooling / "fastlane/native_process_spawn.rb"):
+                    return subprocess.CompletedProcess(
+                        argv, 0, stdout="MRK_RUNTIME_3.3.12_FIDDLE_1.1.2", stderr=""
+                    )
                 captured.extend(argv)
                 captured_environment.update(kwargs["env"])
                 captured_cwd = Path(kwargs["cwd"])
@@ -1033,6 +1088,11 @@ class CliBuildTests(unittest.TestCase):
                 {
                     **workflow_environment(),
                     "MOBILE_RELEASE_TOOLING_ROOT": str(tooling),
+                    "BUNDLE_PATH": "/fictional/pinned-bundle",
+                    "BUNDLER_VERSION": "99.0.0",
+                    "BUNDLE_IGNORE_CONFIG": "0",
+                    "BUNDLE_AUTO_INSTALL": "true",
+                    "BUNDLE_FROZEN": "false",
                     "MOBILE_RELEASE_ANDROID_AAB_PATH": str(aab),
                     "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD": "must-not-leak",
                     "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64": "must-not-leak",
@@ -1158,7 +1218,7 @@ class CliBuildTests(unittest.TestCase):
                 if argv[:2] == ["ruby", "-e"]:
                     return subprocess.CompletedProcess(argv, 0, stdout="3.3.12", stderr="")
                 if argv == ["bundle", "--version"]:
-                    return subprocess.CompletedProcess(argv, 0, stdout="Bundler 4.0.16", stderr="")
+                    return subprocess.CompletedProcess(argv, 0, stdout="4.0.16", stderr="")
                 return subprocess.CompletedProcess(argv, 1, stdout="", stderr="missing")
 
             with patch.dict(
@@ -1177,6 +1237,147 @@ class CliBuildTests(unittest.TestCase):
                     )
             self.assertEqual(run.call_args_list[-1].args[0], ["bundle", "check"])
             self.assertEqual(run.call_count, 3)
+
+    def test_store_runtime_controls_preserve_explicit_paths_and_ignore_foreign_config(self) -> None:
+        supplied = {
+            "BUNDLE_PATH": "/fictional/pinned-bundle",
+            "BUNDLE_APP_CONFIG": "/fictional/bundle-config",
+            "BUNDLE_DEPLOYMENT": "true",
+            "BUNDLE_WITHOUT": "test",
+            "BUNDLER_VERSION": "99.0.0",
+            "BUNDLE_IGNORE_CONFIG": "0",
+            "BUNDLE_AUTO_INSTALL": "true",
+            "BUNDLE_FROZEN": "false",
+            "RUBYOPT": "-r/fictional/untrusted",
+            "RUBYLIB": "/fictional/untrusted",
+            "BUNDLE_GEMFILE": "/fictional/untrusted/Gemfile",
+            "BUNDLE_DISABLE_CHECKSUM_VALIDATION": "true",
+        }
+        original = dict(supplied)
+        actual = _runtime_environment(supplied)
+        self.assertEqual(supplied, original)
+        self.assertEqual(actual, {
+            "BUNDLE_PATH": supplied["BUNDLE_PATH"],
+            "BUNDLE_APP_CONFIG": supplied["BUNDLE_APP_CONFIG"],
+            "BUNDLE_DEPLOYMENT": "true", "BUNDLE_WITHOUT": "test",
+            "BUNDLER_VERSION": "4.0.16", "BUNDLE_IGNORE_CONFIG": "1",
+            "BUNDLE_AUTO_INSTALL": "false", "BUNDLE_FROZEN": "true",
+        })
+
+    def test_store_runtime_controls_reach_the_online_lane_without_inheriting_preloads(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = load_config(write_project(root / "application", android_config()))
+            tooling = root / "tooling"
+            for relative in REQUIRED_TOOLING_FILES:
+                path = tooling / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"fictional pinned tooling\n")
+            calls = []
+
+            def fake_lane(argv, **kwargs):
+                calls.append(argv)
+                environment = kwargs["env"]
+                self.assertEqual(environment["BUNDLE_GEMFILE"], str(tooling / "Gemfile"))
+                self.assertEqual(environment["BUNDLE_PATH"], "/fictional/pinned-bundle")
+                self.assertEqual(environment["BUNDLER_VERSION"], "4.0.16")
+                self.assertEqual(environment["BUNDLE_IGNORE_CONFIG"], "1")
+                self.assertEqual(environment["BUNDLE_AUTO_INSTALL"], "false")
+                self.assertEqual(environment["BUNDLE_FROZEN"], "true")
+                self.assertNotIn("RUBYOPT", environment)
+                self.assertNotIn("RUBYLIB", environment)
+                Path(environment["MOBILE_RELEASE_PREFLIGHT_READBACK_PATH"]).write_text(json.dumps({
+                    "schemaVersion": 1, "platform": "android", "appIdentity": "com.example.reader",
+                    "buildNumber": 42, "buildUnused": True,
+                    "requiredTracks": ["internal", "closed-testing"],
+                    "closedTesterAssignmentVerified": True, "observedAt": "2026-01-01T00:00:00Z",
+                }), encoding="utf-8")
+                return subprocess.CompletedProcess(argv, 0)
+
+            with patch.dict(os.environ, {
+                "BUNDLE_PATH": "/fictional/pinned-bundle", "BUNDLER_VERSION": "99.0.0",
+                "BUNDLE_IGNORE_CONFIG": "0", "BUNDLE_AUTO_INSTALL": "true", "BUNDLE_FROZEN": "false",
+                "RUBYOPT": "-r/fictional/foreign", "RUBYLIB": "/fictional/foreign",
+            }, clear=True), patch("mobile_release.stores.resolve_tooling_root", return_value=tooling), patch(
+                "mobile_release.stores._require_fastlane_bundle"
+            ), patch("mobile_release.stores.subprocess.run", side_effect=fake_lane):
+                findings = online_preflight_findings(
+                    config=config, release=config.release_version(), platforms=("android",)
+                )
+            self.assertEqual(findings[-1].status, Status.PASS)
+            self.assertEqual(calls, [["bundle", "exec", "ruby", str(tooling / "fastlane/run_lane.rb"),
+                                      "android_online_preflight"]])
+
+    def test_store_runtime_admission_rejects_wrong_pins_and_unconfirmed_fiddle_before_lane(self) -> None:
+        marker = "MRK_RUNTIME_3.3.12_FIDDLE_1.1.2"
+        expected_outputs = ("3.3.12", "4.0.16", "", marker, marker)
+        cases = (
+            ("pinned-runtime", None, "", 0, "", ""),
+            ("older-ruby", 0, "3.3.11", 0, "", "Ruby 3.3.12"),
+            ("other-ruby", 0, "3.4.0", 0, "", "Ruby 3.3.12"),
+            ("missing-ruby", 0, "", 1, "", "Ruby 3.3.12"),
+            ("wrong-bundler", 1, "4.0.17", 0, "", "Bundler 4.0.16"),
+            ("legacy-bundler-output", 1, "Bundler version 4.0.16", 0, "", "Bundler 4.0.16"),
+            ("simulated-bundler-output", 1, "4.0.16 (simulating Bundler 4.0.17)", 0, "", "Bundler 4.0.16"),
+            ("appended-bundler-output", 1, "4.0.16\nunexpected", 0, "", "Bundler 4.0.16"),
+            ("missing-bundler", 1, "", 1, "", "Bundler 4.0.16"),
+            ("missing-bundle", 2, "", 1, "", "Pinned Fastlane dependencies"),
+            ("wrong-default-fiddle", 3, "MRK_RUNTIME_3.3.12_FIDDLE_1.1.3", 0, "", "loaded origin"),
+            ("missing-default-fiddle", 3, "", 1, "", "loaded origin"),
+            ("wrong-bundle-fiddle", 4, "wrong origin", 0, "", "loaded origin"),
+            ("missing-helper", 4, "", 1, "", "loaded origin"),
+            ("unconfirmed-runtime", 4, marker, 0, "fictional private diagnostic", "loaded origin"),
+        )
+        tooling = Path("/fictional/pinned-tooling")
+        for label, failed, output, code, stderr, diagnostic in cases:
+            calls = []
+
+            def fake(argv, **kwargs):
+                index = len(calls)
+                calls.append(argv)
+                self.assertEqual(kwargs["env"]["BUNDLE_PATH"], "/fictional/pinned-bundle")
+                self.assertEqual(kwargs["env"]["BUNDLE_GEMFILE"], str(tooling / "Gemfile"))
+                self.assertEqual(kwargs["env"]["BUNDLER_VERSION"], "4.0.16")
+                self.assertEqual(kwargs["env"]["BUNDLE_IGNORE_CONFIG"], "1")
+                self.assertEqual(kwargs["env"]["BUNDLE_AUTO_INSTALL"], "false")
+                self.assertEqual(kwargs["env"]["BUNDLE_FROZEN"], "true")
+                self.assertNotIn("BUNDLE_SIMULATE_VERSION", kwargs["env"])
+                if index == failed:
+                    return subprocess.CompletedProcess(argv, code, stdout=output, stderr=stderr)
+                return subprocess.CompletedProcess(argv, 0, stdout=expected_outputs[index], stderr="")
+
+            with self.subTest(label=label), patch.dict(os.environ, {
+                "BUNDLE_PATH": "/fictional/pinned-bundle", "BUNDLE_AUTO_INSTALL": "true",
+                "BUNDLER_VERSION": "99.0.0", "BUNDLE_IGNORE_CONFIG": "0", "BUNDLE_FROZEN": "false",
+                "BUNDLE_SIMULATE_VERSION": "4.0.17",
+            }, clear=True), patch("mobile_release.stores.shutil.which", return_value="/fictional/ruby"), patch(
+                "mobile_release.stores.subprocess.run", side_effect=fake
+            ), patch.object(subprocess, "Popen", side_effect=AssertionError("unexpected real admission process")) as popen:
+                if failed is None:
+                    _require_fastlane_bundle(tooling)
+                else:
+                    with self.assertRaisesRegex(StoreOperationError, diagnostic) as raised:
+                        _require_fastlane_bundle(tooling)
+                    self.assertNotIn("fictional private diagnostic", str(raised.exception))
+                expected_calls = 5 if failed is None else failed + 1
+                self.assertEqual(len(calls), expected_calls)
+                self.assertEqual(calls[:3], [["ruby", "-e", "print RUBY_VERSION"],
+                                            ["bundle", "--version"], ["bundle", "check"]][:expected_calls])
+                self.assertFalse(any("install" in call for call in calls))
+                if expected_calls >= 4:
+                    self.assertIn("--disable=rubyopt,gems,did_you_mean,error_highlight,syntax_suggest,rjit,yjit", calls[3])
+                    self.assertEqual(calls[3][-1], str(tooling / "fastlane/native_process_spawn.rb"))
+                if expected_calls == 5:
+                    self.assertEqual(calls[4][:3], ["bundle", "exec", "ruby"])
+                    self.assertEqual(calls[4][-1], calls[3][-1])
+                popen.assert_not_called()
+        with patch("mobile_release.stores.shutil.which", return_value=None), patch(
+            "mobile_release.stores.subprocess.run"
+        ) as run, patch.object(subprocess, "Popen", side_effect=AssertionError("unexpected real admission process")) as popen:
+            with self.assertRaisesRegex(StoreOperationError, "Ruby 3.3.12"):
+                _require_fastlane_bundle(tooling)
+            run.assert_not_called()
+            popen.assert_not_called()
 
     def test_offline_build_reports_private_dependency_token_gate_before_gradle(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

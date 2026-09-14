@@ -2,16 +2,18 @@
 
 ## Scope and current status
 
-This documents the smaller QA-006 verification candidate: fixed checks inside
-fresh, disposable GitHub-hosted Linux and macOS job VMs. The selected architecture
-does not constitute implementation acceptance or a passing native run. Confirm
-the final reviewed source and actual Actions results before claiming delivery.
+This documents fixed checks inside fresh, disposable GitHub-hosted Linux and
+macOS job VMs, including the separate QA-007 production process-ownership
+requirements. A documented contract or selected architecture is not implementation
+acceptance or a passing native run. Bind the final reviewed source, complete
+inventories and actual Actions results before claiming delivery.
 
-QA-006 corrects Ruby descendant **test-fixture** readiness and makes required
-verification safe and reliable. Its fixtures must distinguish startup, genuine
-readiness, a reaped leader, live pipe-holding descendants, and cleanup failure.
-It does not fix **QA-007**, the separate production native process-group lifetime
-authority finding. VM disposal cannot prove that the library cleaned its workers.
+The QA-006 Ruby descendant **test-fixture** readiness boundary remains required:
+fixtures distinguish startup, genuine readiness, a reaped leader, live
+pipe-holding descendants and cleanup failure. That fixture correction does not
+itself prove the QA-007 production native process-group lifetime correction.
+New owner/protocol/ABI regressions need their own source and installed evidence;
+historical gate/method totals and VM disposal cannot prove library cleanup.
 
 Do not run the native/process suites or the CI controller on a shared VPS,
 developer login session, or self-hosted runner. Root access is not authorization
@@ -23,9 +25,17 @@ not executable instructions or evidence for this replacement.
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) is the entry point for
 pull requests, pushes to `main`, and manual **verification-only** dispatches.
 PRs, main pushes and the default manual `verification_target: full` select both
-`ubuntu-24.04` and `macos-26`, Python 3.11, Ruby 3.3.12, and pinned
-third-party Actions. Checkout does not persist Git credentials. Project package
-installation is not performed by the setup Actions or directly as the runner.
+`ubuntu-24.04` and `macos-26`, primary Python 3.11, exact Ruby 3.3.12/Fiddle 1.1.2,
+Bundler 4.0.16, and pinned third-party Actions. Checkout does not persist Git
+credentials. Project package installation is not performed by the setup Actions
+or directly as the runner.
+
+The workflow also supplies three distinct setup outputs for fixed CPython 3.12,
+3.13 and 3.14 compatibility controls. The controller remains bound to its original
+3.11 output; later ambient PATH or `pythonLocation` cannot select it. Internal
+`--python-312`, `--python-313` and `--python-314` inputs bind those exact selected
+executables, not arbitrary alternative interpreter routes. A setup step is not
+native admission or a compatibility pass.
 
 Before dispatch, verify repository/organization runner policy: no self-hosted
 runner may match these labels. The first-step `runner.environment` assertion is
@@ -99,6 +109,28 @@ recheck; no provider nodes are created afterwards. No ACL is rewritten or remove
 Existing executable/runtime checks and read-only mounts remain mandatory;
 permission preparation is not a substitute for native controls.
 
+The normal compatibility path has the exact ordered Linux provider roles
+`python`, `ruby`, `jdk`, `python312`, `python313`, `python314`. Each selected Python
+executable must resolve directly inside its narrow installation `bin`; broad
+HOME/toolcache/framework ancestors cannot stand in for that prefix. Missing,
+swapped, overlapping or extra roots reject. All selected roots are inventoried
+before any permission change under the original aggregate cutoff and existing
+ACL/identity/size bounds; no unselected runtime is repaired. macOS admits only
+the corresponding exact selected runtime prefixes, without a new ancestor-
+metadata, HOME, network or Mach exception. The legacy three-role shape remains
+only for bounded owner-contract controls, not a way to omit required CI versions.
+
+The macOS provider inventory may record protected absent optional
+`Frameworks/Tk.framework/PrivateHeaders` and `Frameworks/Tcl.framework/PrivateHeaders`
+aliases, at most once each per selected Python role (two per role, eight total).
+Only those exact following-stat ENOENTs can enter a finite, read-only two-pass proof of
+ordinary protected parents, an internal raw link layout, stable metadata and a
+genuinely absent final leaf. Every extra inspection consumes the same original budget
+and deadline, without renewal between aliases. Unproven layouts still fail; existing
+targets retain all permission checks. This does not repair a provider, claim Tk/Tcl
+functionality, or replace native
+verification, and assumes the admitted trusted-provider/sandbox boundary.
+
 On the disposable macOS VM, the selected Ruby may be beneath runner HOME with
 mode `0750`. The owner pins that exact directory and may add only other-search
 (`0750` to `0751`), not read/list/write permission or group membership. The
@@ -137,6 +169,14 @@ paths, disabled ambient Git/pip/Bundler configuration, offline flags and require
 Ruby-contract checks. It does not inherit proxy/preload hooks, SSH-agent sockets,
 GitHub/cloud/Store secrets, signing material or interactive credentials. Synthetic
 signer fixtures are public test data, not authority for live Store operations.
+
+Bundler selects only the immutable source `Gemfile` or the positive installed
+wheel's exact `share/mobile-release-kit/Gemfile`. The wheel selector requires
+the protected root/work/source/installed directory chain and both frozen,
+root-owned `Gemfile`/`Gemfile.lock` files, read with no-follow identity/close
+checks and compared byte-for-byte with source. These finite checks consume the
+original command cutoff. A mutable alternate installation, source fallback,
+missing file or changed input cannot substitute for installed Bundler origin.
 
 ## Identity, filesystem and native isolation
 
@@ -190,8 +230,9 @@ unchanged and cannot acquire this grant by applying a second sandbox policy.
 
 The same collision-admitted numeric identity executes precisely the five existing
 `NativeProfileAuthorityTests` methods after `openssl-version` then `system-code`.
-The remaining 72 native methods run separately under ordinary policy after
-`clang-discovery` then `dsymutil-discovery`. Authority runs first, ordinary second.
+All remaining source-derived native methods run separately under ordinary policy
+after `clang-discovery` then `dsymutil-discovery`. Authority runs first, ordinary
+second.
 OpenSSL is checked before its authority consumers; compiler tools are checked
 before their ordinary consumers. Routing is fixed before execution, never selected
 as a fallback after failure.
@@ -203,19 +244,23 @@ source/wheel logical gate. Standalone `all` retains the original four-command
 order in both source and installed-wheel forms: `openssl-version`,
 `clang-discovery`, `dsymutil-discovery`, then `system-code`.
 
-Source and installed-wheel gates each require two genuine successful captures,
-their exact nonempty/disjoint/complete method union, and no skips. Each original
-capture retains its own wait, EOF, exit, finality, cleanup and persisted-output facts;
-there is no manufactured combined process result. Failure retains completed and
-unexecuted partition information and never authorizes a later launch. A prerequisite
-failure stops before that partition's inventory, product imports or tests; earlier
-authority success cannot satisfy a failed logical gate.
+Source and installed-wheel gates each require the original authority capture,
+the healthy ordinary capture and every selected fixed intentional-UNKNOWN
+singleton under ordinary policy. Their exact disjoint method union must be
+complete, with no skips; the [isolation contract](#intentional-unknown-test-isolation)
+and source catalog determine the parts, not a historical capture count.
+Each original capture retains its own wait, EOF, exit, domain finality/disposal,
+cleanup and persisted-output facts; there is no manufactured combined process
+result. Failure retains completed and unexecuted partition information and never
+authorizes a later launch. A prerequisite failure stops before that partition's
+inventory, product imports or tests; earlier authority success cannot satisfy a
+failed logical gate.
 
 Authority entry uses the selected Python with `-I -S -B`, explicit immutable
 package specifications, fixed test helpers and fresh exclusive scratch. No
 site/.pth startup, ambient configuration or prior writable work is admitted.
 Parent inspection compares every selected package module/resource with the
-source, including installed-wheel bytes and immutable modes. The unchanged
+source, including installed-wheel bytes and immutable modes. The fixed
 profile worker uses the same selected package. Its parent directory may be
 listed for Python's package finder, but sibling file/module bytes remain denied;
 listing a directory is not a site-packages subtree read grant.
@@ -323,9 +368,9 @@ limits are 8 MiB per ordinary stream, 16 MiB for selected installer streams, and
 256 MiB persisted per attempt. A 4 GiB + 512 MiB disk reserve is maintained.
 
 Each logical native source/wheel gate fixes `min(aggregate_deadline, start+900)`
-before package inspection or role preparation. Both subcaptures, preparation,
-parsers, process finality and final union reconciliation use that same absolute
-cutoff; the second capture does not receive a new900-second budget. Exhausting
+before package inspection or role preparation. All original part captures,
+preparation, parsers, process finality and final union reconciliation use that
+same absolute cutoff; no later part receives a new 900-second budget. Exhausting
 the aggregate/explicit endpoint fails immediately, without a renewed grace
 period. Original-handle cleanup still runs; uncertain finality cannot pass.
 
@@ -385,14 +430,18 @@ inventory; it does not waive the product behaviors that inventory was meant to t
 
 | Platform | Required gate families |
 |---|---|
-| Linux | Offline source installation; full Python discovery; all listed Ruby suites, including native/iOS/Android descendant regressions; Fastfile validation; first-party/template actionlint; real JDK signer checks; wheel build/inspection/install/smoke/consumer and selected installed-wheel Python checks; source integrity. |
-| macOS | Offline source installation; exact Xcode 26.3/native tools; the three upload-process Ruby suites and separate native signal-observation proof; source native-profile gate; wheel build/inspection/install/smoke/consumer; installed-wheel native-profile gate; source integrity. |
+| Linux | Offline source installation; ABI/runtime compatibility gates; full Python discovery; all listed Ruby suites, including native/iOS/Android descendant regressions and actual packaged capture; Fastfile validation; first-party/template actionlint; real JDK signer checks; wheel build/inspection/install/smoke/consumer and selected installed-wheel Python checks; source integrity. |
+| macOS | Offline source installation; exact Xcode 26.3/native tools; ABI/runtime compatibility gates; all fixed Ruby primitive/helper/capture/adapter suites and separate native signal-observation proof; source native-profile gate; wheel build/inspection/install/smoke/consumer, including actual installed Ruby capture; installed-wheel native-profile gate; source integrity. |
 
-The four macOS Ruby gates depend on ordinary admission, including the admitted
+The macOS Ruby gates depend on ordinary admission, including the admitted
 process observer, but not profile-authority admission, so run before the source
-native-profile gate. All 27 gates remain required; any failure stops later gates.
+native-profile gate. The source catalog selects **51 Linux gates and 39 macOS
+gates**; these are required inventory counts, not completed or passing runs.
+Every selected gate remains required and any failure stops later gates. Recompute
+inventories when source changes; historical native totals cannot stand in for
+the complete current source-derived method identities and outcomes.
 
-The original 13-method native suite and both 26-method adapters run without the
+The native capture suite and both platform adapter suites run without the
 separate signal-proof instrumentation. An additional fixed Ruby invocation on
 both platforms observes the three real first-close outcomes and post-reap
 teardown adversary. Its actual production signal observations and fixture
@@ -447,11 +496,361 @@ files/Apple roots, module and Ruby bootstrap help, and a real consumer's
 preview/apply/recover behavior outside the checkout. Source imports cannot stand
 in for installed-wheel evidence. Build artifacts are consumed only after finality.
 
+The new runtime inventory includes `fastlane/native_process_spawn.rb`,
+`fastlane/native_upload_process.rb`, `mobile_release/_native_process.py` and
+`mobile_release/_profile_process.py`, in addition to the existing outer capture
+and profile entry points. Required tooling lists, wheel members, proof-copy inputs
+and incomplete-install checks must agree. Reading a bootstrap string, loading a
+copied source layout or checking `--help` is not the installed Ruby proof: an
+actual bounded capture must load the installed helpers from outside the checkout,
+with original wait/EOF/finality and complete successful outcomes.
+Origin observations measure the outer loaded methods and genuine fixed custodian
+spawn; keeper selection is bound transitively by that custodian's reviewed source.
+They are not independent child-local origin measurements.
+Missing-helper controls must use a separate actual installation of the same
+checked wheel, leaving the frozen positive installation untouched. Default
+tooling resolution must reject an incomplete selected origin rather than borrow
+a checkout-like decoy or another release; an explicitly selected complete tooling
+root remains supported. Removal of negative-fixture files requires their original
+producer/capture finality, not a guessed successful install.
+
 Python discovery is compared with source-derived exact method identities and
 terminal outcomes. Linux's explicit macOS-only skip set remains **skipped**, not
 passed; those native behaviors require the real macOS gate. Unexpected skips,
 empty/incomplete discovery, expected failures and missing outcomes fail. Ruby
 and native parsers require complete successful method records and exact totals.
+
+### Intentional-UNKNOWN test isolation
+
+Some native-process and real-resource controls deliberately leave product custody
+UNKNOWN. Each selected control requires its own fixed singleton **original
+Session capture**, separate from the healthy complement. This applies to the
+approved Python full/wheel/native selections and the Ruby owner, native capture
+and platform adapter gates. The [fixed catalog](../.github/scripts/verify_ci.py)
+and literal runner inventories define the exact IDs and order. Their disjoint
+union must cover each approved selection exactly once; a global method total
+does not authorize expanding an installed-wheel selection or pooling negatives.
+
+Python singletons retain separate finite primitive, profile and default/resource
+family import closures, with exact selected source or actual installed-wheel
+origins. The primitive runner does not gain workflow imports from another family.
+There is no generic caller-supplied method selector or broad workflow import grant.
+
+All parts retain one fixed gate endpoint: 900 seconds for the affected Python
+gates, 120 for the Ruby owner, 310 for native capture and 300 for each adapter,
+always clamped to the original 3300-second job endpoint. Native capture additionally
+caps its healthy 17-test partition at 180 seconds and each of its four fixed singletons
+at 30 seconds, including preparation, capture, result parsing and finality. Each
+singleton keeps its original 15-second driver and 5-second cleanup limits; another 10 seconds
+is bounded outer framework/startup/result/finality headroom, not a native deadline
+extension. Setup and final-union bookkeeping share a separate 10 seconds. Every
+phase cutoff is fixed before its work; unused partition time cannot be donated,
+and setup time is deducted from the union allowance. These are finite scheduling
+ceilings, not guarantees of a passing run. Other gates retain their shared-cutoff
+behavior. The macOS authority capture and 2+2 prerequisite routing remain unchanged.
+These splits add no logical gates, jobs, builds, permission profiles or observers.
+
+On macOS the fixed iOS adapter gate runs immediately after the same native-tools,
+source ABI and compatibility prerequisites, before the other Ruby native gates.
+The remaining native gates keep their relative order; Linux order, all 51 Linux
+and 39 macOS gates, and every required partition remain unchanged. Earlier failure
+does not waive the still-unexecuted native gates.
+
+The synthetic adapter process controls use a separate fixed timing profile:
+10 seconds for complete readiness (the existing five-second startup allowance,
+two independently bounded two-second liveness observations and one second for
+markers/delay/publication), 12 seconds for the original startup-inclusive native
+RUN, the unchanged five-second cleanup grace, an 18-second capture watchdog
+with its original 19-second join boundary, and a 20-second no-deadline mutant RUN.
+The adapter driver has 31 seconds:
+five for preparation, the maximum original completion window of 25 seconds
+(mutant RUN20 + cleanup5), and one for result/publication. None is restarted at
+READY; the real timeout still needs positive actual data blocking, and the
+premature control must execute after actual READY/stdin close but before RUN.
+Generic native/setup driver15, worker30, adapter gate300 and aggregate3300 remain
+unchanged. Setup, observation and all six fixed UNKNOWN singleton ownership modes
+retain their original 60s profile. Production adapter `MAX_SECONDS` stays3600.
+
+The independent capture timer C starts before the native initializer's original
+time T. Admission at the original capture task's pre-acquisition entry requires
+`C <= T <= now < C+1s` and `T+26s < E`, where E is the original validated driver
+RUN endpoint, also capped by any supplied outer deadline. Thus ordinary native
+hard `T+17s < C+18s` watchdog, and mutant hard `T+25s` leaves more than the whole
+one-second publication reserve before E. For an uncapped driver, T must be less
+than five seconds after original driver start. Missing those bounds fails the
+control through original task/caller cleanup; no initializer-return shortcut
+may strand a constructed task, renew a deadline or invent finality.
+
+One readiness cutoff `min(T+10s, original RUN)` covers markers, both liveness
+observations, actual inherited-pipe blocking, release and complete owner
+publication. Early `ready=true` is not complete readiness. Nested collectors
+receive an absolute RUN-only cap and retain their original parent custody and
+bounded cleanup; later STATUS/omission observations still use original RUN.
+Hard-loss adapter proofs additionally bind the original parent writer-acquisition
+and driver-kill times to the existing equal C/K RUN/hard reports, requiring
+`T <= writer acquired <= driver kill < T+10s`. This closes late owner-publication
+acceptance without a new observer or receipt; the shared native-setup hard-loss
+branch is unchanged. Deliberate-unready must reach its actual startup marker and
+the exact deliberate rejection. Late readiness, unactivated mutants, missing
+waits/EOFs, retained UNKNOWN and exhausted gate budgets remain failures, regardless
+of how much cleanup time elapsed. The fixed limits are not guarantees that all
+cases' worst-case durations fit a gate or that an arbitrarily stalled host passes.
+
+Only the source-pinned healthy `ownership-async`, `ownership-signals` and
+`ownership-policies` families use a fixed 60s admission/work window plus a 37s tail:
+existing driver31 + cleanup5 + outer publication/bookkeeping1, for 97s total.
+From one original monotonic sample S, before any lifetime, directory, observation
+or child acquisition, fix `F=min(S+97s, P)` for an optional validated parent P
+(otherwise `F=S+97s`) and `A=F−37s`. An unusable `A<=now` rejects before effects;
+a supplied parent cap never creates a new 60s interval. Input/CLI and every row
+must retain the identical F and derived A, including after input rereads. The
+healthy child admits only an integer future F no later than `now+97s` with
+`A>now`; other ownership modes retain their 60s input bound.
+
+New-row admission checks run in the family loop, before row setup and at the
+actual invoke endpoint after setup/traps/hooks. The last original sample R must
+satisfy `R<A`; equality fails. That same R fixes the immutable nested overall cap
+`H=min(R+36s, F−1s)`, without resampling or renewal. Inherited `run` keeps its
+original 31s work and 5s cleanup maxima clipped by H; `capture` keeps seconds2 and
+its existing RUN+5 bound, also capped by H. Delayed delegation does not earn a
+fresh full cleanup grace; stale H rejects through original admission before
+acquisition. A stops new rows only: active callbacks, injectors, restoration,
+finality and reporting retain F and their original owner cutoffs. A row admitted
+before A may finish afterward, but successful proof, return and publication must
+still precede F, including after the parent Lifetime completes. Deadline checks
+cannot replace an already selected failure during unwind or optional reporting.
+
+Every healthy family still requires the complete original
+`%w[capture run].product(CASES[family])` tuple and order: async 8, signals 32 and
+policies 20 rows. Expiry with rows remaining fails; no skip, truncation or
+reordering can pass. Setup/observation tuples and UNKNOWN singleton routing stay
+unchanged. Native/readiness/entry/watchdog/cleanup limits are not extended. The
+adapter's one original 300s gate cutoff still covers the healthy partition and
+nine singleton partitions under the 3300s job endpoint. These independent ceilings
+are not a performance guarantee or a promise that all maxima sum to fit the gate;
+aggregate exhaustion remains failure.
+
+Only the trusted controller's literal Python/Ruby poison partitions request
+`dispose_retained_domain=True` on their ordinary Session captures. The option is
+an exact boolean, validated before preparation or acquisition; child output and
+expected-negative assertions cannot grant it. Healthy complements, native
+authority/control, `python-full`, generic captures, ABI, compatibility and
+packaged-Ruby gates keep False/default. An unexpected healthy residual still
+fails rather than receiving success-path disposal. The sole private exception
+is the exact fixed retained-domain admission invocation, not an arbitrary fixture.
+
+After the original direct-child wait and both collected stream EOFs, an eligible
+success-shaped capture disposes its retained domain **before** its immutable
+result is returned. macOS reuses the bounded reserved-UID TERM/KILL helper: root
+only observes, while the kernel rechecks signaling authority in the unprivileged
+identity. Linux keeps its existing disposable PID namespace. Disposal uses the
+original command/gate/job cutoff and gains no new failure-tail allowance. Its
+cleanup attempt is fenced before invocation, including exceptional after-effects;
+all independent owned closes and persisted-byte accounting still run. Cleanup
+errors remain failures even if the subsequent mandatory final census is empty.
+
+Hosted admission includes a fixed rc0 retained-child control with a genuine
+bounded private-pipe READY; its 30-second synthetic hold is not readiness evidence.
+The child does not inherit the outer capture streams. macOS additionally requires
+this capture's existing cleanup censuses to observe a nonempty reserved domain
+and then complete emptiness; a helper acknowledgement or stale note cannot pass.
+Linux must not claim a nonempty post-parent census when namespace disposal already
+removed the child. Original wait, both EOFs and genuine outer finality remain
+mandatory. Source inspection or inert doubles do not establish this native proof.
+
+Public capture observations retain a finite `primary_error_code`, at most 32
+ordered `cleanup_error_codes`, the full cleanup count and an omitted-code count.
+Unknown reasons become `UNCLASSIFIED`; raw messages, exception-name suffixes,
+paths, PIDs and child output are not copied into these codes. They diagnose the
+original capture only and cannot authorize success or reconstruct an unobserved
+census outcome. Actual capture/finality checks remain authoritative.
+
+Before any next part, the existing Session must establish the preceding original
+capture's actual wait, stream EOFs, domain finality/disposal and `ensure_idle`.
+Each part retains its own result and byte accounting. Success and failure parsers
+both use that part's exact IDs; missing, duplicate, failed or unexecuted parts
+cannot pass or be replaced with a merged process result. Unexpected failure or
+UNKNOWN in a healthy row stops further work. Adverse-state and retained-custody
+guards run at every case/setup entry, before any temporary-directory or native
+acquisition; ordinary mixed discovery cannot bypass them.
+
+An expected UNKNOWN assertion is **not** confirmed product cleanup. Required
+custody records and any remaining scratch stay retained through probe/interpreter
+exit until genuine outer-domain disposal. A nested driver's wait/EOF or descendant
+cleanup cannot supply a missing original native receipt or prove every child joined.
+Keep the real FD-close/reuse, original exception-identity, scratch-identity and
+descendant-finality assertions; isolation does not replace those oracles.
+Within the affected fixture, only permitted bounded cleanup of already-owned
+resources and sanitized reporting remain after UNKNOWN: no fresh observer,
+producer or workspace, numeric retry, registry reset or speculative recursive
+removal. The existing Session's independently authorized disposal remains
+mandatory; it does not retrospectively turn UNKNOWN into a product finality receipt.
+
+Known-timely ordinary timeout, backpressure, rejection and I/O-fault fixtures must
+still prove settled cleanup; accepting UNKNOWN instead would hide a failure.
+Hard-loss controls must distinguish actual descendant cleanup from fixture EOF
+fallback using already-admitted, source-bound evidence, without a new observer
+after UNKNOWN. The missing original outer receipt remains disposal-required.
+
+The fixed QA-007 catalog additions are:
+
+| Gates | Required scope |
+|---|---|
+| `native-process-abi-source`, `native-process-abi-wheel` | Original public-header/compiler evidence, actual per-phase runtime declarations and no-child native API controls before that phase's process tests; each logical gate is bounded to 300 seconds. |
+| `python-compat-312-source`, `python-compat-313-source`, `python-compat-314-source`, and matching `-wheel` gates | Six ordinary-policy gates with genuine captures of actual selected runtimes, package origins, atomic FD/native APIs, exact pre-exec maps and real child waits; each complete gate is bounded to 120 seconds. |
+| `ruby-native-spawn`, `ruby-native-owner` | Complete source-derived primitive and owner/protocol regression identities, in addition to the existing capture/adapter suites. |
+| `ruby-packaged-capture-source`, `ruby-packaged-capture-wheel` | Real source/installed capture and adapter finality; the wheel gate also owns the separate same-wheel missing-helper installation. Each logical gate has one 300-second cutoff, including preparation and finality. |
+
+All use the original 3300-second aggregate deadline. Compatibility gates do not
+rerun the whole project matrix, rebuild the wheel or install dependencies for
+three more interpreters. Their isolated package-only loader must use the same
+already-checked source or actual installed `py3-none-any` wheel bytes, with real
+module origins; changing `sys.prefix` or copying a source tree is not installation.
+They do not replace the required macOS native source/wheel selections or change
+their independent authority/ordinary routing and singleton isolation.
+
+The test-only public-header reporter uses only the admitted distribution
+`/usr/bin/x86_64-linux-gnu-gcc-13` on the hosted Linux x86_64 profile, or the exact
+already-admitted macOS clang/linker/SDK binding. Linux compiler captures use
+literal `/usr/bin:/bin`, not work/venv/Bundler binaries or injected compiler search
+paths. Missing tools fail; there is no PATH compiler discovery, installation,
+runtime C extension or unconfined root build. Compiler version, build, reporter,
+runtime declarations and native controls retain separate original ordinary
+captures with real wait/EOF/domain finality. Reusing the original frozen header
+record across phases/minors requires unchanged source/compiler/configuration;
+each actual runtime declaration and native control still executes.
+
+### QA-007 runtime and lifecycle evidence
+
+The production contract is described in [SECURITY](../SECURITY.md#native-validation-process-ownership)
+and [profile authority](ios-profile-authority.md#isolation-deadlines-and-installation).
+Its admission/control matrix is additional required coverage, not a replacement
+for existing native, upload, entitlement, recovery or fixture tests:
+
+- Admit exact Ruby 3.3.12/Fiddle 1.1.2 in the outer Store integration **and** fixed
+  helper, checking actual loaded origins rather than version text alone. Resolve
+  the required public native APIs without runtime installation,
+  private runtime symbols or a permissive fallback. Python metadata remains
+  `>=3.11`; real bounded compatibility controls for CPython 3.11, 3.12, 3.13 and
+  3.14 are required. An unavailable line, unsupported ABI or mocked result is not
+  a compatibility pass. Additional provider preparation needs its own reviewed
+  admission; a version declaration does not grant new paths or permissions.
+- Compare the actual supported little-endian LP64 Linux-glibc/Darwin x86_64 and
+  arm64/aarch64 public headers, scalar sizes, layouts, constants and signatures.
+  Linux requires public closefrom file actions; Darwin requires public
+  `POSIX_SPAWN_CLOEXEC_DEFAULT`. Reject missing facilities and unknown ABI before
+  acquisition. Do not silently treat musl, another interpreter or Windows as an
+  admitted native platform. A header/declaration match on one runner is not a
+  native pass for another ABI or interpreter build.
+- Exercise the real Ruby **variadic** Fiddle `fcntl` call for
+  `F_DUPFD_CLOEXEC` (Linux 1030, Darwin 67), minimum descriptor 8, with a private
+  Function per creator. Require actual atomic flags, unchanged original source
+  and concurrent independent-instance behavior. Missing variadic support,
+  `EINVAL`, lost return publication and a non-atomic fallback mutant must reject;
+  post-hoc `F_SETFD` cannot repair the required acquisition boundary.
+- Prove read-only SIGCHLD inspection preserves nonreaping caller policy and
+  rejects `SIG_IGN`/`SA_NOCLDWAIT` before creation. Keep exclusive exact-child
+  waiting and continuing waitability through native startup/publication. An
+  earlier policy snapshot is not proof against arbitrary later status theft.
+- Prove all inherited non-protocol descriptors close before interpreter startup,
+  including deliberately inheritable sentinels and colliding low descriptors.
+  Helpers receive exactly the 0–7 map; validators receive only 0–2. Original
+  foreign descriptors and flags remain unchanged. Endpoint metadata alone is not
+  pipe-pair proof: owned pipe creation and the exact handoff map must establish
+  topology. Resource publication, native buffers, acquisition records, source
+  leases and creators need real settlement; no import-time acquisition, blanket
+  FD sweep or runtime finalizer may hide it.
+  Immutable spawn specifications do not freeze the owner's mutable acquisition,
+  publication, wait or retirement records. The real Fiddle/CDLL call must release
+  the GVL/GIL so its deadline owner can run; a thread wrapper around a blocking
+  language constructor is not that evidence.
+- Observe custodian/keeper/validator creation and the keeper's move out of its
+  still-reserved target group. No numeric group request may occur after group
+  retirement or the first consuming keeper wait. No direct numeric route may
+  survive its child's first consuming poll. Ruby `nil` or Python `(0, 0)` must be
+  a genuine return, never an empty slot; `ECHILD`, wrong/lost wait publication and
+  ambiguous startup are UNKNOWN. Decisive mutants must be vetoed before a
+  stale-identity syscall, not demonstrated by signaling an unrelated process.
+  Ruby retains a positively observed one-way keeper move, bound to that original
+  child object: an exited but unreaped keeper may disappear from live SID/PGID
+  lookup while still reserving its original group number. Cleanup must not lose
+  that prior observation, but neither it nor RELEASED proves group absence.
+  Original lease, receipt, first-wait, retirement and deadline guards still apply;
+  only the actual group operation can establish absence. Cover both an already
+  absent group and a present group requiring the single allowed KILL request.
+  Python also accepts the original bound keeper HELLO when its actual session
+  is still C but it has already moved into C's group during pre-RUN cleanup.
+  This is cleanup-only admission: preserve the first failure/cutoff, or latch
+  lifecycle failure if none exists, without publishing RESERVED/READY/RUN.
+  The original group reservation still needs its own actual absence and all
+  original receipts/EOFs/closes/joins. Exercise delayed HELLO consumption after
+  the actual move by withholding only C's original channel dispatch, while
+  genuine CANCEL writes continue. Require C-local observed-move-before-HELLO
+  order, not an assumed ordering between separate processes' diagnostic logs.
+- Withhold COMMIT until **real EOF**: descendant cleanup and the Python payload
+  write/close must progress first, and unused Ruby writer copies must already
+  close. Permanent withholding fails at the original cutoff. Exercise pre-RUN
+  no-attempt, real pre-READY child exit, ordinary rejection, unknown publication,
+  partial/duplicate/extra terminal fields and close/join failure without invented
+  statuses, absence or success-only phases. A never-started creator needs positive
+  closed-launch/empty-effect proof; an attempted but unpublished task is not
+  absent, and neither case permits a fabricated join.
+  The closed v1 protocol permits a bounded 128 KiB configuration, at most 1 KiB
+  per later frame and 16 frames per direction, with fixed fields/edges/phases.
+  Validator stdout/stderr never supply control authority.
+  For Python control retirement, force partial payload rejection to send a real
+  late CANCEL while the custodian retains its original reader. Require
+  `QUIESCING`, irreversible grant retirement, actual clean control EOF and reader
+  closure before a confirmed FINAL; neither the notification nor an enqueued
+  cancellation proves completion. Preserve partial-write uncertainty and the
+  original cutoff.
+  Ruby custodian-to-keeper control retires irreversibly after the original valid
+  RELEASED, even before status EOF. Pending bytes keep their attempted/written/
+  partial history but cannot flush again; retirement never invents a RELEASE
+  grant. A genuine original control-write EPIPE can be an operation failure with
+  independently proved cleanup, not proof of unknown child custody by itself.
+  Partial or lost publication, earlier write failures, unrelated exceptions and
+  failed closes remain adverse; all terminal/EOF/original-wait/group/close/join
+  requirements still apply. Exercise both terminal-before-write and
+  broken-pipe-before-terminal orderings without new grants or retries.
+- Exercise success, rejection, timeout, independent stdout/stderr overflow,
+  dead validator with live pipe holders, closed pipes with live work, setup
+  failure, cancellation and parent loss. Keep Ruby's maximum 3600 seconds and
+  independent 64 KiB stream bounds with one five-second first-failure grace;
+  Python's 30/25/20/3-second caps remain clamped to the existing inspection
+  endpoint. No late return, repeated signal, READY or EOF starts a new allowance.
+- Require genuine V/K/C wait receipts, group absence before retirement, real
+  data/status EOFs, every owned close, joined tasks and final latches before
+  accepting the FINAL offer. Retain the first actual caller cancellation object
+  (`Interrupt`/`KeyboardInterrupt` or `SystemExit`) separately from sanitized
+  operational and cleanup failures; automatic task exception reporting must not
+  leak private data. Include cancellation in the return/close/publication tail,
+  not only during normal capture.
+  Distinguish positively settled lifecycle failure from UNKNOWN. Only genuine
+  custodian/keeper exits `0` (settled normal/rejection) or `2` (settled lifecycle
+  failure) can support finality; exit `1`, other codes and signals cannot. A failed
+  FINAL needs actual custodian exit `2` and all finality proof, not just a nonzero
+  exit. Custodian/keeper post-offer error, cancellation, deadline or close
+  uncertainty must veto that helper's confirmed-finality outcome. Final outer
+  caller cancellation still vetoes acceptance after physically settled cleanup.
+  These private helper outcomes do not change the validator's public application
+  exit codes or turn rejection into success.
+- Prove explicit mode-0700 scratch ownership and unchanged identity before
+  removal. NO_PRODUCERS needs actual closed no-acquisition proof; FINALIZED needs
+  complete real accounting. Unknown creation/wait/close/join retains required
+  scratch/native/FD/task custody through exceptions, garbage collection and outer
+  unwind and prevents silent same-process reuse. A native stall exceeding its
+  cutoff cannot be relabeled joined or safe for deletion; native `settled` is not
+  a task join or producer-finality receipt.
+
+These controls require applicable native source and installed paths on the
+admitted Linux/macOS platforms. Pure parser/state tests, a copied helper tree,
+protocol flags or disposal of the verification VM do not substitute for real
+runtime/ABI/process observations. The final catalog must reconcile every new
+method identity, partition and outcome without changing the five-method authority
+partition, 2+2 prerequisites or shared 900-second native logical-gate cutoff.
+Every required healthy/singleton capture needs its own genuine finality/disposal;
+no control is claimed passed merely because it is listed here.
 
 ## Evidence, local work and remaining limitations
 
@@ -481,6 +880,197 @@ body logging is allowed; a later method's terminal cannot complete a missing
 record. Unknown/duplicate identities, ambiguous terminals, adverse outcomes and
 footer/count mismatches fail. Failure observations contain only finite structural
 reasons/counts and bounded source-known missing/duplicate IDs, never raw body logs.
+
+The native first-close cancellation test may additionally report one schema-2
+`MRK_NATIVE_SETUP_FAILURE` observation for its three fixed setup modes, only when
+the original result-kind/driver-status rejection survives the complete fixture
+lifetime. Closed categories and true/false/missing/invalid checks retain the
+already-read result without publishing private messages, paths or identities.
+The complete line remains bounded to 2048 bytes including prefix and newline.
+It reuses the ordinary adapter's 30 native checks and eight finite outcomes,
+plus four original-return settlement checks: task cleanup completion, creation
+settlement, the original custodian-wait failure latch, and acquisition UNKNOWN.
+These distinguish unresolved cleanup categories; they neither establish every
+underlying cause nor replace the original waits, EOFs, joins or finality decision.
+Missing is distinct from false. An ordinary optional-read error is invalid;
+caller cancellation is not swallowed as optional diagnostic data. The existing
+fixture cleanup-error flag is separate from native session cleanup errors.
+For the synthetic IOError mode, a sanitized `ContractError` and a false external
+original-object flag are expected: the fixture separately checks the original
+session primary. Those two fields alone are not a failure diagnosis. Historical
+schema-1 records do not acquire the added observations retrospectively.
+Reporting uses the same original cutoff and never changes rejection or cleanup
+authority. The controller binds it to the exact failing source-known callback in
+the healthy partition; successful or duplicate callbacks cannot qualify.
+
+The ten ordinary adapter fixture modes may similarly emit one canonical schema-3
+`MRK_ADAPTER_FAILURE` line, at most 4096 bytes including prefix and newline, only
+for the same escaping original result-kind/driver-status rejection after fixture
+cleanup. Its closed projection
+distinguishes the expected operands, retained driver Lifetime error category/code,
+cleanup/native checks, finite helper outcomes, original wait/join/close/EOF
+conjunctions, and first-versus-selected timeout relations; it publishes
+no raw error, timestamp, process identity or private capture. The retained driver
+error is not necessarily the earliest exercise failure. Native and slow-cleanup
+fields come from the original immutable observation, with missing distinct from
+false; later completion cannot repair an UNKNOWN return. Reporting keeps the
+original cutoff, never retries, and cannot replace the primary or authorize
+success. The controller requires the matching platform and source-known unique
+adverse callback in that adapter's healthy partition. Native/ownership/kill
+partitions, passing or ambiguous callbacks and malformed records cannot qualify.
+
+Standalone adapter schema3 also reuses the finite `captureDetail` tuple described
+below and adds `readinessStage`, sampled once in the original capture-return
+snapshot. The stage names the last entered readiness boundary, not its completion
+or a protocol, wait or finality receipt. Missing and invalid stages remain distinct;
+later driver progress cannot update that detached observation. These fields add no
+process query or cleanup authority. Historical schema2 records retain their original
+missing information; they are not upgraded or accepted by the schema3 parser.
+
+The healthy ownership families have a separate schema-4 `MRK_OWNERSHIP_FAILURE`
+projection for their fixed async (4), signals (16), and policies (10) cases
+through `capture` and `run`. Family, case, and callback must match the closed
+catalog; unknown/setup/observation contracts are not admitted by this projection.
+One canonical ASCII line is bounded to 4096 bytes including prefix/newline.
+A frozen original failed row
+can report finite check codes and observed owner/error/finality/restoration facts
+only when its identical rejection survives restoration. Earlier or replacement
+errors carry only finite phase/error data with the row explicitly missing; a
+previous successful case never supplies another call's observations. The parent
+requires original driver custody/request/dispatch, then the same rejection after
+its complete fixture lifetime, before relaying. The controller attributes it only
+to the unique failed source-known family callback in the matching adapter's healthy
+partition. No private messages, paths, process identities or proof contents are
+published. Unknown failed labels remain adverse through `other-failed-check`,
+never an empty success. Missing observations remain missing. Failures outside an
+actual row invocation, including family setup/cutoff and the later CLI output,
+cannot borrow a previous successful row. Reporting cannot authorize success,
+cleanup, a retry or a changed deadline, or establish a cause by itself.
+
+For `run` only, an optional `runCleanup` projection distinguishes the original
+driver receipt/recovery, nested native-finality proof, bounded role-death
+observation, directory checks and removal. It uses already-read facts and the
+original ordered cleanup-error occurrences, including repeated occurrences of
+the same error. Unevaluated facts remain missing; a settled command does not
+prove nested native finality or successful directory removal. The selected
+original result may be success-shaped while a later cleanup veto retains the
+fixture. Projection occurs only after the complete run and ownership-probe
+unwind, bound to the identical escaping operation error and row rejection.
+Capture, stale, successful or replacement-error state cannot supply it. Closed
+codes disclose no raw proof, path, identity or error message. Diagnostic
+bookkeeping cannot skip cleanup, change retention or replace the primary error;
+the complete line still has the same 4096-byte bound without truncation.
+
+The ownership `driverResult.captureDetail` tuple retains, in order, the
+adapter error category, the existing 24 result checks, nine timing relations,
+four settlement operands, HELLO/RESERVED/READY presence, and the original native
+primary's finite category/code pair. Check vectors use `0`/`1`/`m`/`x` for
+false/true/missing/invalid. The two timeout-relation positions instead use
+`s`/`b`/`a` for before-start/before-cutoff/at-or-after-cutoff, with `m`/`x` retained.
+Protocol positions distinguish explicit nil (`0`), exact Hash presence (`1`),
+missing (`m`) and invalid (`x`): a Hash is not a validated protocol receipt.
+The primary is sampled once at the original capture-return snapshot boundary,
+not inferred from the public redacted exception or reread during later cleanup.
+Absent, unreadable and genuinely nil primary observations remain distinct.
+Optional ordinary read failures cannot change operation success; cancellation
+still preserves the original selected error. The complete legal maximum is
+3983 bytes for the ownership envelope, below the unchanged 4096-byte cap.
+Standalone adapter schema3 reuses the tuple under its own failure contract;
+native-signal schema2 remains separate. These observations do
+not establish a historical initiating cause or grant cleanup authority.
+
+Adapter readiness observers inherit their actual capture task's RUN bound via
+`parent_slot`; they do not pass that RUN bound as a second, overall deadline.
+Execution and accepted readiness still end at RUN, while nested cleanup retains
+only its existing bounded grace, capped by the original parent's hard endpoint
+and nonincreasing shared first-failure cutoff. Genuine standalone overall
+observation deadlines still cap both work and cleanup. No validation timeout,
+finality requirement or signal/ownership boundary is extended by this distinction.
+
+Fixture coordination records are bounded before I/O and written to exclusive,
+private mode-0600 staging files in their original owned directory. The payload
+must be fully written, flushed and closed before one non-overwriting rename:
+Linux `renameat2(RENAME_NOREPLACE)` or macOS `renameatx_np(RENAME_EXCL)`. This
+preserves single-link identity and prevents readers from observing partial final
+records. Unsupported publication fails closed; there is no ordinary-rename or
+hardlink fallback, collision overwrite, rollback or ambiguous-call retry.
+Required helper bindings are prepared before native failure paths need them.
+
+An active publication frame retains its original directory and payload leases
+before acquisition. An uncertain acquisition, close or native return keeps that
+frame and excludes its namespace and ancestors from same-VM recursive cleanup;
+later file existence or absence cannot repair it. Known-closed staging residue
+instead follows the existing original-producer-finality cleanup. A separate VM's
+original termination receipt does not settle a live frame in the caller's VM.
+Complete record bytes are observations, not process ownership or cleanup authority.
+Adapter diagnostics classify fixed OwnedChild source-literal error pairs under
+`fixture-error`; unlisted pairs remain `other`. No raw exception text or path is
+published; adapter schema3 and ownership schema4 retain their existing bounds.
+
+The retained `fixture-error` codes split the original pre-acquisition adapter
+entry guard in precedence order: `adapter-entry-binding` for a wrong session,
+nonpositive/noninteger C/T/E/now or failed `C<=T<=now` ordering;
+`adapter-entry-window` for `now>=C+1s`; then `adapter-entry-reserve` for
+`T+26s>=E`. Each remains `setup-fixture-fault` through original task/caller
+cleanup. The legacy `adapter-entry-budget` code stays parseable but does not
+identify which historical conjunct failed. These finite codes add no timestamps,
+raw errors, schema fields or authority; both envelopes keep the 4096-byte bound.
+
+The separate native signal-observation test may emit one canonical schema-2
+`MRK_NATIVE_SIGNAL_FAILURE` line, bounded to 4096 bytes including prefix/newline.
+It compares already-read original proof operands and preserves finite driver,
+custodian and keeper failure codes, error-category and refusal masks. Missing
+helper rows stay missing; unknown adverse labels never become an empty success.
+The diagnostic also retains each original request's position using at most 64
+finite `backendErrorCodes` per row. Zero means no recorded backend error, not
+successful signalling; positive codes distinguish fixed route, signal and errno
+classes, with an explicit unknown class. No raw request or target is exported.
+`observedHelperReturn` reports the already-assigned original helper return after
+observer/entry-hook unwind, independently of the observer's enforced failure
+exit. It neither fills missing helper proofs nor changes acceptance. Four
+`nativeOutcomes` describe the already-recorded custodian receipt and FINAL
+outcome/cleanup/group state, not fresh observations. The complete maximum is
+3641 bytes without truncation; historical schema-1 evidence remains historical.
+These are diagnostic comparisons, not claims that all short-circuited guard
+expressions executed. The same original proof rejection must survive complete
+fixture cleanup, observer restoration and parent-proof publication before the
+outer caller can report, under the original cutoff. No new proof/process read
+or private value is published. The controller requires the unique failing
+source-known signal callback in its nonpartitioned gate; success-shaped,
+malformed, duplicate or wrong-scope records cannot qualify or alter acceptance.
+
+The signal observer distinguishes a correctly admitted but unsuccessful backend
+operation from an instrumentation failure. An original custodian-group signal0
+`Errno::EPERM` remains the exact exception delivered to production, with no
+successful result or observed absence; it cannot by itself make the observer
+replace a genuinely settled failed helper's return2 with exit1. Only the exact
+exception from that request's saved backend qualifies, after every ownership,
+source, target and lifetime guard. The existing genuine backend ESRCH path uses
+the same request-local origin discrimination; unrelated instrumentation errors
+remain failures. Each native case still requires a genuine successful reserved-
+group KILL, actual later absence and complete original helper/outer finality.
+Finite backend-error codes remain in successful per-case summaries. Neither a
+permission error nor a recovered cleanup establishes the kernel's initial cause.
+
+The adapter slow-cleanup fixture uses the same fixed startup-inclusive 12-second
+RUN, unchanged five-second cleanup grace and 18-second capture watchdog. Only an
+eligible direct original-body
+observation can hand the already-selected timeout object into the existing run
+ensure; nested writes and entered cleanup cannot consume that one-shot. A body
+that reaches ensure naturally needs no handoff. The four-second delay never
+renews the cutoff or substitutes for actual blocked
+waiting. Original cleanup is called once even if the delay guard or sleep fails;
+a separate fixture failure latch rejects that failure even when the earlier
+timeout remains primary and native cleanup settles. Duration alone cannot prove
+the delay succeeded. Immediate-timeout controls must still reject premature
+decisions despite slow cleanup.
+
+The shared adapter's silent-observer timeout test uses its existing two-second
+startup-inclusive fixture budget, rather than racing native bootstrap within
+50ms. It still requires the exact observation-deadline error and an actual child
+with original wait, creator join, both EOFs and closes. GO/exec-attempt records do
+not substitute for finality or prove successful target execution. No production
+timeout, cleanup grace or gate allocation is extended by this test correction.
 
 Native source/wheel failures can identify the actual failing fixed prerequisite
 (`openssl-version`, `clang-discovery`, `dsymutil-discovery`, or `system-code`) or

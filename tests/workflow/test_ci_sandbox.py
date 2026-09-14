@@ -56,6 +56,8 @@ def session_double(module, platform="linux"):
     session.python = Path("/fixture-tools/python/bin/python")
     session.ruby = Path("/fixture-tools/ruby/bin/ruby")
     session.tool_prefixes = (session.python.parent.parent, session.ruby.parent.parent)
+    session.compatibility_runtimes = ()
+    session._native_process_toolchain_binding = None
     session.runner_home = Path("/home/runner")
     session.runner_temp = Path("/home/runner/work/_temp")
     session.ruby_prefix = session.ruby.parent.parent
@@ -259,6 +261,7 @@ class _Collection:
         self.selector_error = None
         self.terminate_exits = True
         self.cleanup_diagnostics = []
+        self.cleanup_action = None
         self.domain_calls, self.final_domain = 0, {}
         self.cancel_at = self.final_time = None
         self.cancel_on_finality = False
@@ -363,9 +366,12 @@ class _Collection:
         if fd - 100 in self.fd_close_errors:
             raise OSError("synthetic capture close")
 
-    def cleanup(self, *, deadline=None):
+    def cleanup(self, *, deadline=None, observe_disposal=False):
         self.events.append(("cleanup",))
         self.events.append(("cleanup-deadline", deadline))
+        self.events.append(("cleanup-observe", observe_disposal))
+        if self.cleanup_action is not None:
+            self.cleanup_action(deadline=deadline, observe_disposal=observe_disposal)
         return list(self.cleanup_diagnostics)
 
     @contextmanager
@@ -398,9 +404,11 @@ class _Collection:
             stack.enter_context(patch.object(self.session, "_argv", return_value=(["/synthetic/entry"], {})))
             yield
 
-    def collect(self, *, seconds=1.0, output_limit=64, latch=True, absolute_deadline=None):
+    def collect(self, *, seconds=1.0, output_limit=64, latch=True, absolute_deadline=None,
+                dispose_retained_domain=False):
         with self.scope():
-            kwargs = dict(cwd=self.session.work, env={}, seconds=seconds, output_limit=output_limit)
+            kwargs = dict(cwd=self.session.work, env={}, seconds=seconds, output_limit=output_limit,
+                          dispose_retained_domain=dispose_retained_domain)
             if absolute_deadline is not None:
                 kwargs["absolute_deadline"] = absolute_deadline
             if latch:
@@ -931,6 +939,196 @@ class CISandboxPureTests(unittest.TestCase):
         for values in invalid:
             with self.subTest(values=values), self.assertRaises(self.module.SessionError):
                 session._environment(values)
+
+        # Compose the real producer/consumer. Only inert controller definitions
+        # are loaded; no workflow, product, packaging or native entry is called.
+        from .test_ci_verification import controller_module
+        controller = controller_module()
+        for platform, controller_platform in (("linux", "linux"), ("darwin", "macos")):
+            session = session_double(self.module, platform)
+            paths = controller.Paths(session.source, session.work, session.inputs, session.python, session.ruby)
+            wheel = session.work / "wheel-venv"
+            tooling = wheel / "share/mobile-release-kit"
+            directories = (session.root, session.work, session.source, wheel, wheel / "share", tooling)
+            nodes = {path: dict(st_dev=7, st_ino=81 + index, st_uid=0, st_gid=19 if index == 0 else 0,
+                               st_mode=stat.S_IFDIR | (0o755 if index < 2 else 0o555))
+                     for index, path in enumerate(directories)}
+            files = {root / name: [raw, (7 + index, 501 + index, stat.S_IFREG | 0o444, 0, 0, 1,
+                                       len(raw), 11 + index, 21 + index)]
+                     for index, (root, name, raw) in enumerate(
+                         (root, name, raw) for name, raw in (("Gemfile", b"# inert original Gemfile\n"),
+                                                           ("Gemfile.lock", b"inert original lock\n"))
+                         for root in (session.source, tooling))}
+            expected_files = list(files)
+            clock = SimpleNamespace(now=1.0)
+
+            def file_input(path, *, deadline, uid, gid, root_owned, maximum):
+                self.assertEqual((deadline, uid, gid, root_owned, maximum),
+                                 (20.0, session.uid, session.gid, True, 64 * 1024))
+                self.assertIn(path, files)
+                return tuple(files[path])
+
+            def directory_stat(path):
+                self.assertIn(path, nodes)  # No real path, observer or new inventory.
+                return SimpleNamespace(**nodes[path])
+
+            reads = Mock(side_effect=file_input)
+            canonical = Mock(side_effect=lambda path: path)
+            with patch.multiple(self.module, os=SimpleNamespace(), subprocess=SimpleNamespace(),
+                    socket=SimpleNamespace(), signal=SimpleNamespace(), _canonical=canonical, _native_file=reads,
+                    time=SimpleNamespace(monotonic=lambda: clock.now)), \
+                 patch.object(Path, "lstat", autospec=True, side_effect=directory_stat) as inspected, \
+                 patch.object(Path, "open", side_effect=AssertionError("no real input FD may open")), \
+                 patch.object(Path, "resolve", side_effect=AssertionError("no real path may resolve")):
+                for phase in ("source", "wheel"):
+                    with self.subTest(bundle_environment=(platform, phase)):
+                        reads.reset_mock()
+                        inspected.reset_mock()
+                        env = controller.native_phase_environment(paths, controller_platform, phase, ruby=True)
+                        actual = session._environment(env, deadline=20.0) if phase == "wheel" else session._environment(env)
+                        self.assertTrue(env.items() <= actual.items())
+                        self.assertEqual([call.args[0] for call in reads.call_args_list],
+                                         expected_files if phase == "wheel" else [])
+                        self.assertEqual([call.args[0] for call in inspected.call_args_list],
+                                         list(directories) * 2 if phase == "wheel" else [])
+                        self.assertEqual(actual["BUNDLE_FROZEN"], "1")
+                        self.assertEqual(actual["PIP_NO_INDEX"], "1")
+                env = controller.native_phase_environment(paths, controller_platform, "wheel", ruby=True)
+                for cutoff in (None, True, False, 0, -1, "20.0", float("nan"), float("inf"), 100.001, 1.0):
+                    with self.subTest(bundle_cutoff=(platform, repr(cutoff))):
+                        reads.reset_mock()
+                        inspected.reset_mock()
+                        canonical.reset_mock()
+                        expected_error = self.module.DeadlineExpired if cutoff == 1.0 and type(cutoff) is float else self.module.SessionError
+                        with self.assertRaises(expected_error):
+                            session._environment(env, deadline=cutoff)
+                        reads.assert_not_called()
+                        inspected.assert_not_called()
+                        canonical.assert_not_called()
+                for selector in (str(session.work / "Gemfile"), str(tooling) + "/./Gemfile",
+                                 str(session.work / "ruby-negative/share/mobile-release-kit/Gemfile"),
+                                 str(tooling / ".." / "Gemfile"), "/foreign/Gemfile"):
+                    with self.subTest(bundle_selector=(platform, selector)):
+                        reads.reset_mock()
+                        with self.assertRaises(self.module.SessionError):
+                            session._environment(env | {"BUNDLE_GEMFILE": selector}, deadline=20.0)
+                        reads.assert_not_called()
+                for path in directories:
+                    changes = [("st_uid", session.uid), ("st_mode", stat.S_IFDIR | 0o777),
+                               ("st_mode", stat.S_IFLNK | 0o555)]
+                    if path != session.root:
+                        changes.append(("st_gid", session.gid))
+                    for field, value in changes:
+                        with self.subTest(bundle_ancestor=(platform, path.name, field, value)):
+                            original = nodes[path][field]
+                            nodes[path][field] = value
+                            reads.reset_mock()
+                            try:
+                                with self.assertRaises(self.module.SessionError):
+                                    session._environment(env, deadline=20.0)
+                                reads.assert_not_called()
+                            finally:
+                                nodes[path][field] = original
+                canonical.side_effect = lambda path: Path("/foreign") if path == wheel else path
+                with self.assertRaises(self.module.SessionError):
+                    session._environment(env, deadline=20.0)
+                canonical.side_effect = lambda path: path
+                for field, value in (("st_ino", nodes[wheel]["st_ino"] + 1), ("st_mode", stat.S_IFDIR | 0o755)):
+                    original = nodes[wheel][field]
+
+                    def replaced_after_read(path, **kwargs):
+                        result = file_input(path, **kwargs)
+                        if path == expected_files[-1]:
+                            nodes[wheel][field] = value
+                        return result
+
+                    reads.side_effect = replaced_after_read
+                    try:
+                        with self.subTest(bundle_ancestor_changed=(platform, field)), self.assertRaises(self.module.SessionError):
+                            session._environment(env, deadline=20.0)
+                    finally:
+                        nodes[wheel][field] = original
+                        reads.side_effect = file_input
+                for path in files:
+                    raw, identity = files[path]
+                    try:
+                        # _native_file permits some root-writable modes; this
+                        # caller must additionally enforce the actual freeze.
+                        files[path][1] = (*identity[:2], stat.S_IFREG | 0o644, *identity[3:])
+                        with self.subTest(bundle_unfrozen_file=(platform, path)), self.assertRaises(self.module.SessionError):
+                            session._environment(env, deadline=20.0)
+                    finally:
+                        files[path] = [raw, identity]
+                for name in ("Gemfile", "Gemfile.lock"):
+                    original = files[tooling / name][0]
+                    files[tooling / name][0] = b"different installed bytes\n"
+                    try:
+                        with self.subTest(bundle_pair_changed=(platform, name)), self.assertRaises(self.module.SessionError):
+                            session._environment(env, deadline=20.0)
+                    finally:
+                        files[tooling / name][0] = original
+                empty_pair = (session.source / "Gemfile.lock", tooling / "Gemfile.lock")
+                original_pair = [files[path] for path in empty_pair]
+                for path in empty_pair:
+                    identity = files[path][1]
+                    files[path] = [b"", (*identity[:6], 0, *identity[7:])]
+                try:
+                    with self.assertRaises(self.module.SessionError):
+                        session._environment(env, deadline=20.0)
+                finally:
+                    for path, original in zip(empty_pair, original_pair):
+                        files[path] = original
+                # Existing _native_file tests cover real no-follow/single-link/
+                # oversized/read+close mechanics. Here preserve their original
+                # failure without retry, fallback or accepting partial pairs.
+                failures = (FileNotFoundError("synthetic missing installed input"),
+                    BaseExceptionGroup("synthetic input read/close failure", [OSError("read"), OSError("close")]),
+                    BaseExceptionGroup("synthetic expired input close", [self.module.DeadlineExpired("original cutoff")]))
+                for failure in failures:
+                    reads.reset_mock()
+
+                    def failed_installed_input(path, **kwargs):
+                        if path == expected_files[1]:
+                            raise failure
+                        return file_input(path, **kwargs)
+
+                    reads.side_effect = failed_installed_input
+                    with self.subTest(bundle_input_failure=(platform, type(failure).__name__)), \
+                         self.assertRaises(type(failure)) as caught:
+                        session._environment(env, deadline=20.0)
+                    self.assertIs(caught.exception, failure)
+                    self.assertEqual([call.args[0] for call in reads.call_args_list], expected_files[:2])
+                reads.side_effect = file_input
+
+            # Original _run -> _environment forwarding, not a direct helper-only
+            # test. The existing collector models every possible process/FD
+            # effect; rejected preparation must not enter even those doubles.
+            for failure in (None, self.module.DeadlineExpired("original wheel cutoff"),
+                            BaseExceptionGroup("synthetic wheel input failure", [OSError("close")])):
+                rig = _Collection(self.module, session_double(self.module, platform))
+                if platform == "darwin" and failure is None:
+                    # The original fake child has one explicit credential row;
+                    # missing fixtures must still veto every native observation.
+                    rig.snapshot_rows = {(rig.child.pid, rig.child.pid):
+                        ((rig.session.uid,) * 3, (rig.session.gid,) * 3, 65536)}
+                with rig.scope(), patch.object(rig.session, "_validate_installed_bundle_input", side_effect=failure) as check:
+                    arguments = dict(cwd=rig.session.work, env=env, seconds=900, output_limit=64, absolute_deadline=0.5)
+                    if failure is None:
+                        result = rig.session.run([str(rig.session.python), "--synthetic"], **arguments)
+                        self.assertTrue(result.ok)
+                        self.assertEqual([event for event in rig.events if event[0] == "root-snapshot"],
+                                         [("root-snapshot", 0.5, rig.child)] if platform == "darwin" else [])
+                    else:
+                        with self.assertRaises(type(failure)) as caught:
+                            rig.session.run([str(rig.session.python), "--synthetic"], **arguments)
+                        self.assertIs(caught.exception, failure)
+                        rig.session._argv.assert_not_called()
+                        self.assertEqual(rig.opened, [])
+                        self.assertFalse(any(event[0] in {"popen", "root-snapshot"} for event in rig.events))
+                        self.assertIsNone(rig.session._active)
+                        self.assertFalse(rig.session._busy)
+                    check.assert_called_once_with(deadline=0.5)
+                    self.assertEqual(rig.session.deadline, 100.0)
 
     def test_linux_namespace_setup_precedes_numeric_drop_without_popen_demotion(self):
         session = session_double(self.module)
@@ -7323,6 +7521,387 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertFalse(result.finality)
                 self.assertLessEqual(rig.select_calls, 512)
 
+    def test_retained_domain_disposal_requires_explicit_role_and_original_finality(self):
+        for platform in ("linux", "darwin"):
+            for case in ("healthy-residual", "disposed", "residual", "census-error", "cleanup-error",
+                         "no-wait", "no-eof", "late-cancel"):
+                with self.subTest(retained_domain=(platform, case)):
+                    session = session_double(self.module, platform)
+                    rig = _Collection(self.module, session)
+                    rig.snapshot_rows = {(rig.child.pid, rig.child.pid): ((session.uid,) * 3, (session.gid,) * 3, 65536)}
+                    rig.final_domain = {4242}
+
+                    def dispose(**_options):
+                        rig.final_domain = (OSError("synthetic census unavailable") if case == "census-error"
+                                            else {4242} if case == "residual" else {})
+
+                    rig.cleanup_action = dispose
+                    if case == "cleanup-error":
+                        rig.cleanup_diagnostics = ["numerical cleanup OSError"]
+                    elif case == "no-wait":
+                        rig.unreapable = True
+                    elif case == "no-eof":
+                        rig.hold = {0}
+                    elif case == "late-cancel":
+                        rig.cancel_on_finality = True
+                    result = rig.collect(seconds=0.2, dispose_retained_domain=case != "healthy-residual")
+                    self.assertEqual(result.ok, case == "disposed", result)
+                    self.assertEqual(rig.events.count(("cleanup",)), int(case != "healthy-residual"))
+                    if case != "healthy-residual":
+                        cleanup = rig.events.index(("cleanup",))
+                        if case == "no-wait":
+                            self.assertFalse(result.waited or result.finality)
+                            self.assertIs(session._active, rig.child)
+                            self.assertEqual(rig.domain_calls, 1)  # No invented post-wait census.
+                        else:
+                            final = max(i for i, event in enumerate(rig.events) if event[0] == "domain")
+                            self.assertLess(cleanup, final)
+                        if case not in {"no-wait", "no-eof"}:
+                            self.assertLess(rig.events.index(("unregister-eof", 0)), cleanup)
+                            self.assertLess(rig.events.index(("unregister-eof", 1)), cleanup)
+                            self.assertLess(next(i for i, e in enumerate(rig.events) if e[0] == "wait-original"), cleanup)
+                    if case == "disposed":
+                        self.assertTrue(result.waited and result.stdout_eof and result.stderr_eof and result.finality)
+                        self.assertEqual(result.cleanup_errors, ())
+                        with self.assertRaises(dataclasses.FrozenInstanceError):
+                            result.domain_finality = False
+                    else:
+                        self.assertIsNotNone(result.primary_error)
+                        self.assertIsNotNone(session.failure)
+                    if case == "healthy-residual":
+                        self.assertIn("reserved identity did not reach finality", result.cleanup_errors)
+                    elif case == "census-error":
+                        self.assertIn("reserved identity census OSError", result.cleanup_errors)
+                    elif case == "cleanup-error":
+                        self.assertTrue(result.finality)  # Later empty census cannot erase this error.
+                        self.assertEqual(result.primary_error, "reserved-domain disposal failed")
+
+    def test_retained_domain_cleanup_exceptions_are_once_and_cannot_skip_owned_closes(self):
+        for exitcode in (0, 7):
+            for after_effect in (False, True):
+                for error_type in (OSError, KeyboardInterrupt):
+                    with self.subTest(cleanup_once=(exitcode, after_effect, error_type.__name__)):
+                        rig = _Collection(self.module)
+                        rig.exitcode = exitcode
+                        if exitcode:
+                            rig.exit_at = 0.0
+                        rig.final_domain = {4242}
+                        original = error_type("synthetic cleanup exception")
+
+                        def dispose(**_options):
+                            if after_effect:
+                                rig.final_domain = {}
+                            raise original
+
+                        rig.cleanup_action = dispose
+                        result = rig.collect(dispose_retained_domain=True)
+                        self.assertFalse(result.ok)
+                        self.assertEqual(result.primary_error,
+                                         "command exited 7" if exitcode else "reserved-domain disposal failed")
+                        self.assertEqual(rig.session.failure, result.primary_error)
+                        self.assertIn("reserved-domain cleanup " + error_type.__name__, result.cleanup_errors)
+                        self.assertEqual(rig.events.count(("cleanup",)), 1)
+                        self.assertEqual(result.domain_finality, after_effect)
+                        self.assertTrue(result.waited and result.stdout_eof and result.stderr_eof)
+                        self.assertEqual(result.persisted, (5, 0))
+                        self.assertEqual(rig.session.persisted_bytes, 5)
+                        for event in (("stream-close", 0), ("stream-close", 1), ("selector-close",),
+                                      ("capture-fsync", 100), ("capture-fsync", 101),
+                                      ("capture-fstat", 100), ("capture-fstat", 101),
+                                      ("capture-close", 100), ("capture-close", 101)):
+                            self.assertIn(event, rig.events)
+                        self.assertEqual(rig.session.cleanup_errors, list(result.cleanup_errors))
+
+    def test_retained_domain_disposal_never_renews_the_original_success_cutoff(self):
+        for mode in ("relative", "absolute", "aggregate", "equality", "cleanup-failure"):
+            with self.subTest(disposal_cutoff=mode):
+                rig = _Collection(self.module)
+                if mode == "aggregate":
+                    rig.session.deadline = 0.5
+                observed = []
+
+                def dispose(*, deadline, observe_disposal):
+                    observed.append(deadline)
+                    self.assertFalse(observe_disposal)
+                    if mode in {"equality", "cleanup-failure"}:
+                        rig.now = deadline
+                        if mode == "cleanup-failure":
+                            raise OSError("synthetic cleanup reached the old cutoff")
+
+                rig.cleanup_action = dispose
+                result = rig.collect(seconds=0.2 if mode == "relative" else 10,
+                                     absolute_deadline=None if mode == "aggregate" else 0.5,
+                                     dispose_retained_domain=True)
+                self.assertEqual(len(observed), 1)
+                if mode == "relative":
+                    self.assertLess(observed[0], 0.5)
+                    self.assertGreaterEqual(observed[0], 0.2)
+                else:
+                    self.assertEqual(observed[0], 0.5)
+                final = [e for e in rig.events if e[0] == "domain-deadline"][-1]
+                self.assertEqual(final[2], observed[0])
+                self.assertEqual(result.ok, mode not in {"equality", "cleanup-failure"}, result)
+                if mode == "cleanup-failure":
+                    self.assertEqual(result.primary_error, "reserved-domain disposal failed")
+                    self.assertIn("reserved-domain cleanup OSError", result.cleanup_errors)
+                    self.assertFalse(result.finality)
+                self.assertEqual(rig.session.deadline, 0.5 if mode == "aggregate" else 100.0)
+
+    def test_retained_domain_role_validation_precedes_all_preparation(self):
+        cases = ("valid-public", "valid-private", "integer", "none", "text", "native-authority",
+                 "native-control", "python-full", "cancel", "unadmitted", "admitting-public",
+                 "private-outside-admission", "private-admitted", "private-argv", "private-cwd",
+                 "private-env", "private-seconds", "private-output", "private-cpu", "private-deadline")
+        for case in cases:
+            with self.subTest(disposal_role=case):
+                rig = _Collection(self.module)
+                session = rig.session
+                private = case == "valid-private" or case.startswith("private-")
+                argv = [str(session.python), "--synthetic"]
+                options = dict(cwd=session.work, env={}, seconds=10, output_limit=1024,
+                               cpu_seconds=180, latch=not private, dispose_retained_domain=True)
+                if private:
+                    session.admitted, session._admitting = False, True
+                    argv = [str(session.python), "-I", "-S", "-B", str(session.entry), "--fixture", "retained-domain"]
+                if case in {"integer", "none", "text"}:
+                    options["dispose_retained_domain"] = {"integer": 1, "none": None, "text": "true"}[case]
+                elif case in {"native-authority", "native-control", "python-full"}:
+                    options["profile"] = "native-authority-source" if case == "native-authority" else case
+                elif case == "cancel":
+                    options["cancel_after"] = 0.1
+                elif case == "unadmitted":
+                    session.admitted = False
+                elif case == "admitting-public":
+                    session._admitting = True
+                elif case == "private-outside-admission":
+                    session._admitting = False
+                elif case == "private-admitted":
+                    session.admitted = True
+                elif case == "private-argv":
+                    argv[-1] = "held-pipe"
+                elif case == "private-cwd":
+                    options["cwd"] = session.source
+                elif case == "private-env":
+                    options["env"] = {"UNEXPECTED": "value"}
+                elif case == "private-seconds":
+                    options["seconds"] = 11
+                elif case == "private-output":
+                    options["output_limit"] = 1025
+                elif case == "private-cpu":
+                    options["cpu_seconds"] = 181
+                elif case == "private-deadline":
+                    options["absolute_deadline"] = 50.0
+                with rig.scope():
+                    if case.startswith("valid-"):
+                        result = session._run(argv, **options)
+                        self.assertTrue(result.ok, result)
+                        self.assertEqual(rig.events.count(("cleanup",)), 1)
+                    else:
+                        with patch.object(self.module, "_canonical", side_effect=AssertionError("no path preparation")) as canonical:
+                            with self.assertRaises(self.module.SessionError):
+                                session._run(argv, **options)
+                            canonical.assert_not_called()
+                            session._argv.assert_not_called()
+                        self.assertEqual(rig.opened, [])
+                        self.assertFalse(any(e[0] in {"popen", "cleanup"} for e in rig.events))
+
+    def test_retained_domain_admission_requires_fresh_nonvacuous_original_census(self):
+        for platform in ("linux", "darwin"):
+            cases = ("valid", "failed-capture", "missing-marker", "stderr", "idle-error")
+            cases += ("missing", "stale", "duplicate", "empty", "not-empty", "failed-note", "integer-note", "extra") if platform == "darwin" else ("unexpected-note",)
+            for case in cases:
+                with self.subTest(retained_admission=(platform, case)):
+                    session = session_double(self.module, platform)
+                    session.admitted, session._admitting = False, True
+                    observation = {"name": "retained-domain-disposal", "ok": True,
+                                   "saw_reserved_process": True, "empty_census": True}
+                    session.admission_results.append(dict(observation))  # Earlier successful note is never enough.
+                    changes = ({"domain_finality": False} if case == "failed-capture" else
+                               {"stdout": b""} if case == "missing-marker" else
+                               {"stderr": b"unexpected"} if case == "stderr" else {})
+                    result = self.module.CapturedRun(b"MRK_RETAINED_DOMAIN_READY\n", b"", 0, True, True, True,
+                                                     True, False, False, 0.1, None, (), (26, 0))
+                    result = dataclasses.replace(result, **changes)
+
+                    def run(*_args, **_options):
+                        if platform == "darwin" and case not in {"missing", "stale"} or case == "unexpected-note":
+                            value = dict(observation)
+                            if case == "empty":
+                                value["saw_reserved_process"] = False
+                            elif case == "not-empty":
+                                value["empty_census"] = False
+                            elif case == "failed-note":
+                                value["ok"] = False
+                            elif case == "integer-note":
+                                value["ok"] = 1
+                            elif case == "extra":
+                                value["unexpected"] = True
+                            session.admission_results.append(value)
+                            if case == "duplicate":
+                                session.admission_results.append(dict(value))
+                        return result
+
+                    idle_error = OSError("synthetic idle failure") if case == "idle-error" else None
+                    with patch.object(session, "_run", side_effect=run) as captured, \
+                            patch.object(session, "ensure_idle", side_effect=idle_error) as idle:
+                        if case == "valid":
+                            session._retained_domain_preflight()
+                        else:
+                            with self.assertRaises((self.module.SessionError, OSError)):
+                                session._retained_domain_preflight()
+                        captured.assert_called_once_with(
+                            [str(session.python), "-I", "-S", "-B", str(session.entry), "--fixture", "retained-domain"],
+                            cwd=session.work, env={}, seconds=10, output_limit=1024, latch=False,
+                            dispose_retained_domain=True)
+                        self.assertEqual(idle.call_count, int(case in {"valid", "idle-error"}))
+                    note = session.admission_results[-1]
+                    self.assertEqual(note["name"], "retained-domain")
+                    self.assertEqual(note["ok"], case == "valid")
+                    self.assertEqual(note["domain_finality"], result.domain_finality)
+
+        # Exercise the actual _run -> cleanup request -> capture -> preflight
+        # chain with entirely synthetic observations and original child handles.
+        session = session_double(self.module, "darwin")
+        session.admitted, session._admitting = False, True
+        rig = _Collection(self.module, session, stdout=(b"MRK_RETAINED_DOMAIN_READY\n",))
+        rig.snapshot_rows = {(rig.child.pid, rig.child.pid): ((session.uid,) * 3, (session.gid,) * 3, 65536)}
+
+        def observe(*, deadline, observe_disposal):
+            self.assertTrue(observe_disposal)
+            self.assertLessEqual(deadline, session.deadline)
+            session.admission_results.append({"name": "retained-domain-disposal", "ok": True,
+                                              "saw_reserved_process": True, "empty_census": True})
+
+        rig.cleanup_action = observe
+        with rig.scope():
+            session._retained_domain_preflight()
+        self.assertEqual(rig.events.count(("cleanup",)), 1)
+        self.assertTrue(session.admission_results[-1]["ok"])
+
+    def test_retained_domain_fixture_uses_actual_ready_protocol_and_only_original_cleanup(self):
+        for case in ("success", "creation", "readiness", "wrong-ready", "already-exited",
+                     "reader-close", "readiness-expired", "independent-cleanup"):
+            with self.subTest(retained_fixture=case):
+                now = [10.0]
+                original = OSError("synthetic original failure")
+                close_error = OSError("synthetic reader close failure")
+                kill_error, wait_error = KeyboardInterrupt("synthetic kill"), OSError("synthetic wait")
+                reader = SimpleNamespace(close=Mock(side_effect=close_error if case in {"reader-close", "independent-cleanup"} else None))
+                child = SimpleNamespace(stdout=reader, poll=Mock(return_value=0 if case == "already-exited" else None),
+                                        kill=Mock(side_effect=kill_error if case == "independent-cleanup" else None),
+                                        wait=Mock(side_effect=wait_error if case == "independent-cleanup" else None))
+                popen = Mock(side_effect=original if case == "creation" else None, return_value=child)
+
+                def ready(stream, seconds, *, deadline):
+                    self.assertIs(stream, reader)
+                    self.assertEqual((seconds, deadline), (5, 15.0))
+                    if case in {"readiness", "independent-cleanup"}:
+                        raise original
+                    if case == "readiness-expired":
+                        now[0] = deadline
+                    return b"incorrect\n" if case == "wrong-ready" else b"MRK_RETAINED_LEAF_READY\n"
+
+                with patch.multiple(self.module, _ready_line=ready,
+                                    subprocess=SimpleNamespace(Popen=popen, PIPE=-1, DEVNULL=-3),
+                                    os=SimpleNamespace(), signal=SimpleNamespace(),
+                                    time=SimpleNamespace(monotonic=lambda: now[0])), redirect_stdout(io.StringIO()) as output:
+                    if case == "success":
+                        self.assertEqual(self.module._fixture("retained-domain"), 0)
+                    else:
+                        with self.assertRaises(BaseExceptionGroup) as caught:
+                            self.module._fixture("retained-domain")
+                popen.assert_called_once()
+                self.assertEqual(popen.call_args.args[0][-2:], ["--fixture", "retained-domain-leaf"])
+                self.assertEqual(popen.call_args.kwargs, {"stdin": -3, "stdout": -1, "stderr": -3,
+                                                         "close_fds": True, "start_new_session": True, "bufsize": 0})
+                if case == "success":
+                    self.assertEqual(output.getvalue(), "MRK_RETAINED_DOMAIN_READY\n")
+                    reader.close.assert_called_once_with()
+                    child.kill.assert_not_called()
+                    child.wait.assert_not_called()  # This is deliberate retained custody, not a fake join.
+                elif case == "creation":
+                    self.assertIs(caught.exception.exceptions[0], original)
+                    reader.close.assert_not_called()
+                    child.kill.assert_not_called()
+                    child.wait.assert_not_called()
+                else:
+                    reader.close.assert_called_once_with()  # No close retry after a possible after-effect.
+                    self.assertEqual(child.kill.call_count, int(case != "already-exited"))
+                    child.wait.assert_called_once_with(timeout=2)
+                    self.assertEqual(output.getvalue(), "")
+                    if case == "independent-cleanup":
+                        self.assertEqual(caught.exception.exceptions, (original, kill_error, wait_error, close_error))
+                    elif case == "readiness":
+                        self.assertIs(caught.exception.exceptions[0], original)
+                    elif case == "reader-close":
+                        self.assertIs(caught.exception.exceptions[0], close_error)
+
+        marker = b"MRK_RETAINED_LEAF_READY\n"
+        for case in ("success", "short-write", "close-error"):
+            write = Mock(return_value=0 if case == "short-write" else len(marker))
+            close = Mock(side_effect=OSError("synthetic leaf close") if case == "close-error" else None)
+            sleep = Mock()
+            with patch.multiple(self.module, os=SimpleNamespace(write=write, close=close),
+                                time=SimpleNamespace(sleep=sleep), subprocess=SimpleNamespace()):
+                if case == "success":
+                    self.assertEqual(self.module._fixture("retained-domain-leaf"), 0)
+                else:
+                    with self.assertRaises((self.module.SessionError, OSError)):
+                        self.module._fixture("retained-domain-leaf")
+            write.assert_called_once_with(1, marker)
+            self.assertEqual(close.call_count, int(case != "short-write"))
+            if case == "success":
+                close.assert_called_once_with(1)
+                sleep.assert_called_once_with(30)
+            else:
+                sleep.assert_not_called()
+
+        # The real reader must preserve the readiness error when its original
+        # selector also fails to close. Never fall back to native selectors/FDs.
+        for case in ("success", "register", "read", "deadline", "close"):
+            now = [10.0]
+            original, close_error = OSError("synthetic ready read/register"), OSError("synthetic selector close")
+            reader = SimpleNamespace(fileno=lambda: 77, close=Mock())
+            child = SimpleNamespace(stdout=reader, poll=Mock(return_value=None), kill=Mock(), wait=Mock())
+
+            def select(_timeout):
+                if case == "deadline":
+                    now[0] = 15.0
+                    return []
+                return [object()]
+
+            selector = SimpleNamespace(register=Mock(side_effect=original if case == "register" else None),
+                select=select, close=Mock(side_effect=None if case == "success" else close_error))
+            read = Mock(side_effect=original if case == "read" else None, return_value=marker)
+            with patch.multiple(self.module, selectors=SimpleNamespace(DefaultSelector=lambda: selector, EVENT_READ=1),
+                                os=SimpleNamespace(read=read), signal=SimpleNamespace(),
+                                subprocess=SimpleNamespace(Popen=Mock(return_value=child), PIPE=-1, DEVNULL=-3),
+                                time=SimpleNamespace(monotonic=lambda: now[0])), redirect_stdout(io.StringIO()):
+                if case == "success":
+                    self.assertEqual(self.module._fixture("retained-domain"), 0)
+                else:
+                    with self.assertRaises(BaseExceptionGroup) as caught:
+                        self.module._fixture("retained-domain")
+            selector.close.assert_called_once_with()
+            reader.close.assert_called_once_with()
+            if case == "success":
+                child.kill.assert_not_called()
+                child.wait.assert_not_called()
+            else:
+                child.kill.assert_called_once_with()
+                child.wait.assert_called_once_with(timeout=2)
+                first = caught.exception.exceptions[0]
+                if case == "close":
+                    self.assertIs(first, close_error)
+                else:
+                    self.assertIsInstance(first, BaseExceptionGroup)
+                    self.assertIs(first.exceptions[1], close_error)
+                    if case == "deadline":
+                        self.assertIsInstance(first.exceptions[0], self.module.SessionError)
+                        self.assertEqual(str(first.exceptions[0]), "owned control readiness deadline")
+                    else:
+                        self.assertIs(first.exceptions[0], original)
+
     def test_original_timeout_cancellation_and_late_events_latch_failure(self):
         for case in ("aggregate", "relative-timeout", "cancel", "late-timeout", "late-cancel"):
             with self.subTest(case=case):
@@ -7824,9 +8403,14 @@ class CISandboxPureTests(unittest.TestCase):
             ("empty", 100.0, None), ("bad-ack", 100.0, None), ("ack-at-cutoff", 100.0, None),
             ("unknown-census", 100.0, None), ("oversized", 100.0, None),
             ("helper-wait-error", 100.0, None), ("enclosing-expired", 100.0, 10.0),
+            ("observe-sequence", 100.0, 11.5), ("observe-empty", 100.0, None),
+            ("observe-unknown-census", 100.0, None), ("observe-enclosing-expired", 100.0, 10.0),
         ):
             with self.subTest(root_cleanup=(case, aggregate, enclosing)):
                 session = session_double(self.module, "darwin")
+                observe = case.startswith("observe-")
+                case = case.removeprefix("observe-")
+                session._admitting = observe
                 session.deadline = aggregate
                 clock = SimpleNamespace(now=10.0)
                 cutoff = min(aggregate, 14.0, enclosing if enclosing is not None else aggregate)
@@ -7862,12 +8446,22 @@ class CISandboxPureTests(unittest.TestCase):
                     clock.now += seconds
 
                 with patch.multiple(self.module, _domain=census, _small_command=batch,
-                                    os=SimpleNamespace(kill=root_kill), subprocess=SimpleNamespace(),
+                                    os=SimpleNamespace(kill=root_kill, path=SimpleNamespace(basename=os.path.basename)),
+                                    subprocess=SimpleNamespace(),
                                     signal=SimpleNamespace(),
                                     time=SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep)):
-                    errors = session._cleanup(deadline=enclosing)
+                    errors = session._cleanup(deadline=enclosing, observe_disposal=observe)
                 root_kill.assert_not_called()
                 self.assertEqual(errors == [], case in {"sequence", "empty"}, errors)
+                if observe:
+                    self.assertEqual(session.admission_results[0], {
+                        "name": "retained-domain-disposal", "ok": case in {"sequence", "empty"},
+                        "saw_reserved_process": case not in {"empty", "enclosing-expired"},
+                        "empty_census": case in {"sequence", "empty"}})
+                    if errors:
+                        self.assertEqual(session.admission_results[1]["name"], "cleanup-exception")
+                        self.assertFalse(session.admission_results[1]["ok"])
+                        self.assertTrue(session.admission_results[1]["exceptions"])
                 if case == "sequence":
                     self.assertEqual(censuses, [{4242, 4343}, {4343}, set()])
                     self.assertEqual(len(batches), 2)
@@ -7886,6 +8480,16 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertEqual(sleeps, [])  # Receipt alone never proves an empty domain.
                 elif case == "helper-wait-error":
                     self.assertEqual(errors, ["numerical cleanup ExceptionGroup"])
+
+        for platform, admitting, observation in (("linux", True, True), ("darwin", False, True),
+                                                ("darwin", True, 1), ("darwin", True, None)):
+            session = session_double(self.module, platform)
+            session._admitting = admitting
+            with patch.object(self.module, "_domain", side_effect=AssertionError("unadmitted observation")) as census:
+                with self.assertRaises(self.module.SessionError):
+                    session._cleanup(observe_disposal=observation)
+                census.assert_not_called()
+            self.assertEqual(session.admission_results, [])
 
         cases = ("TERM", "KILL", "esrch", "eperm", "unknown-errno", "initial-expiry", "between-targets-expiry",
                  "after-last-expiry", "wrong-platform", "uid-range", "bool-uid", "gid-mismatch", "root-euid",
@@ -9856,16 +10460,219 @@ class CISandboxPureTests(unittest.TestCase):
                 if case == "all-close-errors":
                     self.assertTrue(all(error in captured_cleanup for error in close_errors.values()))
 
+    def test_closed_compatibility_prefix_roles_reject_ambiguity_before_effects(self):
+        python, ruby = Path("/providers/python/bin/python"), Path("/providers/ruby/bin/ruby")
+        jdk = Path("/providers/jdk")
+        pairs = tuple((Path(f"/providers/python{minor}/bin/python"), Path(f"/providers/python{minor}"))
+                      for minor in (312, 313, 314))
+        selected = (python.parent.parent, ruby.parent.parent, jdk, *(prefix for _, prefix in pairs))
+        expected = tuple(zip(("python", "ruby", "jdk", "python312", "python313", "python314"), selected))
+        forbidden = Mock(side_effect=AssertionError("role reconciliation must be pure"))
+        with patch.object(self.module, "os", SimpleNamespace()), \
+             patch.object(self.module, "_canonical", forbidden), \
+             patch.object(Path, "stat", forbidden), patch.object(Path, "resolve", forbidden), \
+             patch.object(Path, "open", forbidden):
+            self.assertEqual(self.module._runtime_prefix_roles(
+                "linux", python, selected[0], ruby, selected, pairs), expected)
+            mac = selected[:2] + selected[3:]
+            self.assertEqual(self.module._runtime_prefix_roles(
+                "darwin", python, selected[0], ruby, mac, pairs), expected[:2] + expected[3:])
+            for platform, roots in (("linux", selected[:3]), ("darwin", selected[:2])):
+                self.assertEqual(self.module._runtime_prefix_roles(
+                    platform, python, selected[0], ruby, roots, ()), expected[:len(roots)])
+            invalid = (
+                ("platform", "win32", selected, pairs),
+                ("prefix-list", "linux", list(selected), pairs),
+                ("pair-list", "linux", selected, list(pairs)),
+                ("missing-minor", "linux", selected, pairs[:2]),
+                ("duplicate-role-root", "linux", selected, (pairs[0], pairs[0], pairs[2])),
+                ("missing-provider", "linux", selected[:-1], pairs),
+                ("duplicate-prefix", "linux", selected + (selected[0],), pairs),
+                ("unselected-root", "linux", selected + (Path("/providers/unselected"),), pairs),
+                ("relative", "linux", selected, ((Path("relative/bin/python"), pairs[0][1]), *pairs[1:])),
+                ("wrong-bin", "linux", selected, ((pairs[0][1] / "sbin/python", pairs[0][1]), *pairs[1:])),
+                ("wrong-prefix", "linux", selected, ((pairs[0][0], pairs[1][1]), *pairs[1:])),
+                ("ancestor", "linux", (selected[0], selected[1], Path("/providers"), *selected[3:]), pairs),
+                ("mac-extra-jdk", "darwin", selected, pairs),
+            )
+            for label, platform, roots, runtimes in invalid:
+                with self.subTest(closed_roles=label), self.assertRaises(self.module.SessionError):
+                    self.module._runtime_prefix_roles(platform, python, selected[0], ruby, roots, runtimes)
+        forbidden.assert_not_called()
+
+    def test_native_toolchain_binding_requires_current_admission_and_real_idle(self):
+        cases = ("linux", "darwin", "not-admitted", "no-binding", "failed", "closed", "expired",
+                 "busy", "active", "pending", "live-domain", "unknown-domain", "headroom")
+        for case in cases:
+            with self.subTest(toolchain_custody=case):
+                session = session_double(self.module, "darwin" if case == "darwin" else "linux")
+                binding = {"gcc": Path("/usr/bin/x86_64-linux-gnu-gcc-13"), "evidence": {"gcc_sha256": "a" * 64}}
+                if case == "darwin":
+                    binding = {"clang": Path("/Applications/fixture/clang"), "linker": Path("/Applications/fixture/ld"),
+                               "sdk": Path("/Applications/fixture/sdk"), "toolchain": Path("/Applications/fixture/toolchain"),
+                               "evidence": {"clang_sha256": "b" * 64}}
+                session._native_process_toolchain_binding = None if case == "no-binding" else binding
+                session.admitted = case != "not-admitted"
+                session.closed, session._busy = case == "closed", case == "busy"
+                session._active = object() if case == "active" else None
+                session._direct_producer_pending = case == "pending"
+                if case == "failed":
+                    session.fail("earlier recorded failure")
+                original = OSError(errno.EIO, "synthetic idle-observation refusal")
+                domain = Mock(return_value={22} if case == "live-domain" else set(),
+                              side_effect=original if case == "unknown-domain" else None)
+                headroom = Mock(side_effect=original if case == "headroom" else None)
+                with patch.multiple(self.module, os=SimpleNamespace(), _domain=domain,
+                                    time=SimpleNamespace(monotonic=lambda: 100.0 if case == "expired" else 0.0)), \
+                     patch.object(session, "_headroom", headroom):
+                    if case in {"linux", "darwin"}:
+                        observed = session.native_process_toolchain
+                        self.assertEqual(observed, binding)
+                        self.assertIsNot(observed, binding)
+                        self.assertIsNot(observed["evidence"], binding["evidence"])
+                        observed["evidence"].clear()
+                        observed.clear()
+                        self.assertEqual(session.native_process_toolchain, binding)
+                        self.assertTrue(session.domain_finality)
+                    else:
+                        with self.assertRaises((self.module.SessionError, OSError)):
+                            session.native_process_toolchain
+                if case in {"not-admitted", "no-binding", "failed", "closed", "expired", "busy", "active", "pending"}:
+                    domain.assert_not_called()
+                else:
+                    self.assertTrue(domain.called)
+                    self.assertEqual(domain.call_args.args, (session.platform, session.uid))
+
+    def test_fixed_linux_compiler_binding_is_read_only_bounded_and_drift_sensitive(self):
+        compiler = Path("/usr/bin/x86_64-linux-gnu-gcc-13")
+        original_data = b"synthetic compiler image, never executable\n"
+        cases = ("valid", "platform", "not-root", "architecture", "parent-write", "parent-owner", "parent-type",
+                 "missing", "alias", "tool-write", "tool-setid", "named-owner", "named-no-execute", "named-type",
+                 "size", "opened-other", "short-read", "long-read",
+                 "read-error", "close-error", "read-drift", "name-drift", "late-close")
+        for case in cases:
+            with self.subTest(distribution_compiler_binding=case):
+                clock, events, streams = SimpleNamespace(now=0.0), [], []
+                original = OSError(errno.EIO, "synthetic compiler observation failure")
+                state = SimpleNamespace(st_dev=7, st_ino=99, st_mode=stat.S_IFREG | 0o555,
+                    st_uid=0, st_gid=0, st_nlink=1, st_size=len(original_data), st_mtime_ns=3, st_ctime_ns=4)
+                if case == "tool-write":
+                    state.st_mode |= 0o020
+                elif case == "tool-setid":
+                    state.st_mode |= stat.S_ISUID
+                elif case == "named-owner":
+                    state.st_uid = 60001
+                elif case == "named-no-execute":
+                    state.st_mode = stat.S_IFREG | 0o444
+                elif case == "named-type":
+                    state.st_mode = stat.S_IFIFO | 0o555
+                elif case == "size":
+                    state.st_size = 16 * self.module.MiB + 1
+                named, pinned = 0, 0
+
+                def metadata(path, *, for_lstat):
+                    nonlocal named
+                    self.assertIn(path, (compiler, *compiler.parents))
+                    events.append(("lstat" if for_lstat else "stat", path))
+                    if path == compiler:
+                        if case == "missing":
+                            raise FileNotFoundError(errno.ENOENT, "synthetic absent compiler")
+                        value = SimpleNamespace(**vars(state))
+                        if for_lstat:
+                            named += 1
+                            if case == "name-drift" and named > 1:
+                                value.st_ino += 1
+                        return value
+                    value = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
+                    if path == Path("/usr/bin"):
+                        if case == "parent-write":
+                            value.st_mode |= 0o020
+                        elif case == "parent-owner":
+                            value.st_uid = 1001
+                        elif case == "parent-type":
+                            value.st_mode = stat.S_IFLNK | 0o755
+                    return value
+
+                def canonical(path):
+                    self.assertIn(path, (compiler, *compiler.parents))
+                    if case == "alias" and path == compiler:
+                        raise self.module.SessionError("synthetic compiler alias")
+                    return path
+
+                def fstat(fd):
+                    nonlocal pinned
+                    self.assertEqual(fd, 611)
+                    pinned += 1
+                    value = SimpleNamespace(**vars(state))
+                    if case == "opened-other" or case == "read-drift" and pinned > 1:
+                        value.st_ino += 1
+                    return value
+
+                class MemoryCompiler(io.BytesIO):
+                    def fileno(self):
+                        return 611  # Fake API key, never a real descriptor.
+
+                    def read(self, size=-1):
+                        if size != 65536:
+                            raise AssertionError("compiler binding read bound changed")
+                        if case == "read-error":
+                            raise original
+                        return super().read(size)
+
+                    def close(self):
+                        events.append(("close", compiler))
+                        super().close()
+                        if case == "close-error":
+                            raise original
+                        if case == "late-close":
+                            clock.now = 10.0
+
+                def opened(path, mode):
+                    self.assertEqual((path, mode), (compiler, "rb"))
+                    data = original_data[:-1] if case == "short-read" else original_data + b"x" if case == "long-read" else original_data
+                    stream = MemoryCompiler(data)
+                    streams.append(stream)
+                    events.append(("open", compiler))
+                    return stream
+
+                with patch.multiple(self.module, os=SimpleNamespace(geteuid=lambda: 1001 if case == "not-root" else 0,
+                                        uname=lambda: SimpleNamespace(machine="arm64" if case == "architecture" else "x86_64"),
+                                        fstat=fstat), sys=SimpleNamespace(platform="darwin" if case == "platform" else "linux"),
+                                    subprocess=SimpleNamespace(), time=SimpleNamespace(monotonic=lambda: clock.now), _canonical=canonical), \
+                     patch.object(Path, "lstat", lambda path: metadata(path, for_lstat=True)), \
+                     patch.object(Path, "stat", side_effect=AssertionError("a separate stat must not authorize a later digest baseline")), \
+                     patch.object(Path, "resolve", side_effect=AssertionError("no real path resolution")), \
+                     patch.object(Path, "open", opened):
+                    if case == "valid":
+                        result = self.module._linux_native_process_toolchain(60001, 60001, deadline=10.0)
+                        self.assertEqual(result, {"gcc": compiler, "evidence": {
+                            "gcc_sha256": hashlib.sha256(original_data).hexdigest(),
+                            "provider": "ubuntu-24.04-distribution", "compiler_family": "gcc-13"}})
+                    else:
+                        with self.assertRaises((self.module.SessionError, OSError)) as caught:
+                            self.module._linux_native_process_toolchain(60001, 60001, deadline=10.0)
+                        if case in {"read-error", "close-error"}:
+                            self.assertIs(caught.exception, original)
+                self.assertTrue(all(stream.closed for stream in streams))
+                self.assertEqual(events.count(("close", compiler)), len(streams))
+                self.assertLessEqual(len(streams), 1)
+
     def test_linux_provider_wrapper_keeps_collision_writer_import_and_partial_preparation_gates(self):
         cases = ("valid", "nss-bad", "collision", "userns-preparation-error", "busy", "active", "prior-failure", "wrong-platform", "not-root",
                  "missing-prefix", "existing-module", "spec-missing", "loader-failure", "partial-preparation",
                  "incomplete-report", "late-preparation")
-        for case in cases:
-            with self.subTest(provider_owner_integration=case):
+        cases = tuple((case, False) for case in cases) + tuple((case, True) for case in (
+            "valid", "partial-preparation", "late-preparation", "compiler-refusal", "preflight-failure"))
+        for case, compatibility in cases:
+            with self.subTest(provider_owner_integration=case, compatibility=compatibility):
                 session = session_double(self.module)
                 session.admitted = False
                 python_prefix, ruby_prefix, jdk_prefix = session.python.parent.parent, session.ruby.parent.parent, Path("/synthetic/jdk")
                 session.tool_prefixes = (python_prefix, ruby_prefix, jdk_prefix)
+                if compatibility:
+                    session.compatibility_runtimes = tuple((Path(f"/fixture-tools/python{minor}/bin/python"),
+                        Path(f"/fixture-tools/python{minor}")) for minor in (312, 313, 314))
+                    session.tool_prefixes += tuple(prefix for _, prefix in session.compatibility_runtimes)
                 if case == "missing-prefix":
                     session.tool_prefixes = (python_prefix, ruby_prefix)
                 if case == "wrong-platform":
@@ -9882,7 +10689,10 @@ class CISandboxPureTests(unittest.TestCase):
                 original = OSError(errno.EIO, "synthetic immutable module/preparation failure")
 
                 def protect(prefixes, **kwargs):
-                    self.assertEqual(prefixes, (("python", python_prefix), ("ruby", ruby_prefix), ("jdk", jdk_prefix)))
+                    expected = (("python", python_prefix), ("ruby", ruby_prefix), ("jdk", jdk_prefix))
+                    expected += tuple((role, pair[1]) for role, pair in zip(
+                        ("python312", "python313", "python314"), session.compatibility_runtimes))
+                    self.assertEqual(prefixes, expected)
                     self.assertEqual({k: v for k, v in kwargs.items() if k != "report"},
                                      {"uid": session.uid, "gid": session.gid, "deadline": session.deadline})
                     report = kwargs["report"]
@@ -9927,7 +10737,8 @@ class CISandboxPureTests(unittest.TestCase):
 
                 def tool(path, uid, gid, **options):
                     self.assertEqual((uid, gid), (session.uid, session.gid))
-                    self.assertIn(path, (session.python, Path("/usr/bin/sudo"), Path("/usr/bin/true")))
+                    self.assertIn(path, (session.python, Path("/usr/bin/sudo"), Path("/usr/bin/true"),
+                        *(executable for executable, _ in session.compatibility_runtimes)))
                     self.assertIn(("protect",), events)
                     self.assertTrue(next(n for n in session.admission_results if n["name"] == "provider-runtime-permissions")["ok"])
                     events.append(("tool", options["role"]))
@@ -9941,6 +10752,17 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertIn(("tool", "python"), events)
                     self.assertTrue(next(n for n in session.admission_results if n["name"] == "provider-runtime-permissions")["ok"])
                     events.append(("preflight",))
+                    if case == "preflight-failure":
+                        raise original
+
+                def compiler_binding(uid, gid, *, deadline):
+                    self.assertTrue(compatibility)
+                    self.assertEqual((uid, gid, deadline), (session.uid, session.gid, session.deadline))
+                    self.assertIn(("tool", "python314"), events)
+                    events.append(("compiler-binding",))
+                    if case == "compiler-refusal":
+                        raise original
+                    return {"gcc": Path("/usr/bin/x86_64-linux-gnu-gcc-13"), "evidence": {"gcc_sha256": "d" * 64}}
 
                 def userns_preparation():
                     self.assertEqual(events, [("nss",), ("domain", True)])
@@ -9956,6 +10778,7 @@ class CISandboxPureTests(unittest.TestCase):
                                     sys=SimpleNamespace(platform="linux", base_prefix=str(python_prefix), modules=modules),
                                     subprocess=SimpleNamespace(), signal=SimpleNamespace(), _canonical=Path,
                                     _readonly_tree=Mock(), _small_command=nss, _domain=domain,
+                                    _linux_native_process_toolchain=compiler_binding,
                                     _admit_executable=tool, time=SimpleNamespace(monotonic=lambda: clock.now)), \
                      patch.object(importlib.util, "spec_from_file_location", side_effect=specification) as make_spec, \
                      patch.object(importlib.util, "module_from_spec", return_value=prepared_module) as make_module, \
@@ -9970,7 +10793,7 @@ class CISandboxPureTests(unittest.TestCase):
                     else:
                         with self.assertRaises((self.module.SessionError, OSError)) as caught:
                             session._prepare_provider_runtime() if direct else session.admit()
-                        if case in {"loader-failure", "partial-preparation", "userns-preparation-error"}:
+                        if case in {"loader-failure", "partial-preparation", "userns-preparation-error", "compiler-refusal", "preflight-failure"}:
                             self.assertIs(caught.exception, original)
                 self.assertIs(sys.modules.get(module_name), real_module_before)  # No real lazy import or ownership mutation.
                 self.assertEqual(session.admitted, case == "valid")
@@ -9982,9 +10805,18 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertLess(events.index(("protect",)), events.index(("tool", "python")))
                     self.assertLess(events.index(("tool", "true")), events.index(("preflight",)))
                     self.assertEqual(chown.call_count, 5)
+                    if compatibility:
+                        self.assertEqual(session._native_process_toolchain_binding["evidence"], {"gcc_sha256": "d" * 64})
+                        self.assertLess(events.index(("compiler-binding",)), events.index(("preflight",)))
                 else:
-                    self.assertFalse(any(e[0] in {"tool", "preflight"} for e in events))
-                    chown.assert_not_called()
+                    if case not in {"compiler-refusal", "preflight-failure"}:
+                        self.assertFalse(any(e[0] in {"tool", "preflight"} for e in events))
+                    if case != "preflight-failure":
+                        chown.assert_not_called()
+                    else:
+                        self.assertEqual(chown.call_count, 5)
+                        self.assertFalse(next(n for n in session.admission_results if n["name"] == "native-process-toolchain")["ok"])
+                    self.assertIsNone(session._native_process_toolchain_binding)
                     if not direct:
                         self.assertEqual(session.failure, "native isolation admission failed; no product command permitted")
                 self.assertEqual(userns.call_count, int(not direct and case not in {"nss-bad", "collision"}))
@@ -9997,7 +10829,7 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertIs(modules[module_name], foreign)
                 reports = [n for n in session.admission_results if n["name"] == "provider-runtime-permissions"]
                 if reports:
-                    self.assertEqual(reports[0]["ok"], case == "valid")
+                    self.assertEqual(reports[0]["ok"], case in {"valid", "compiler-refusal", "preflight-failure"})
                 if case in {"partial-preparation", "incomplete-report", "late-preparation"}:
                     self.assertEqual((reports[0]["attempted"], reports[0]["confirmed"]), (2, 1 if case == "partial-preparation" else 2))
 
