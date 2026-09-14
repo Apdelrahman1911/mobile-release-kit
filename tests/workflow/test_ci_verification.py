@@ -121,7 +121,8 @@ NATIVE_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inpu
 MATRIX_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'signing-matrix-canary') }}"
 MATRIX_SHARD_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[0]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]') }}"
 MATRIX_INCLUDE_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[{\"os\":\"ubuntu-24.04\",\"shard\":11},{\"os\":\"macos-26\",\"shard\":9}]' || '[]') }}"
-ADAPTER_TARGET_CONDITION = "${{ github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-adapter' }}"
+ADAPTER_TARGET_CONDITION = "${{ github.event_name == 'workflow_dispatch' && (inputs.verification_target == 'signing-adapter' || inputs.verification_target == 'signing-adapter-macos') }}"
+ADAPTER_OS_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-adapter-macos' && '[\"macos-26\"]' || '[\"ubuntu-24.04\",\"macos-26\"]') }}"
 VERIFICATION_CONCURRENCY = "release-kit-ci-${{ github.ref }}-${{ github.event_name }}-${{ inputs.verification_target || 'full' }}"
 AGGREGATE_GUARD = '''set -euo pipefail
 [[ "$LINUX_RESULT" == success && "$NATIVE_RESULT" == success && "$MATRIX_RESULT" == success ]]
@@ -204,7 +205,7 @@ class CIWorkflowIsolationTests(unittest.TestCase):
             "pull_request": None, "push": {"branches": ["main"]},
             "workflow_dispatch": {"inputs": {"verification_target": {
                 "description": "Full verification, macOS-only evidence, signing-adapter smoke, or fixed-shard matrix canary (partial aggregate remains incomplete)",
-                "type": "choice", "required": True, "default": "full", "options": ["full", "macos", "signing-adapter", "signing-matrix-canary"],
+                "type": "choice", "required": True, "default": "full", "options": ["full", "macos", "signing-adapter", "signing-adapter-macos", "signing-matrix-canary"],
             }}},
         })
         self.assertEqual(workflow["concurrency"], {"group": VERIFICATION_CONCURRENCY, "cancel-in-progress": True})
@@ -300,8 +301,9 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         self.assertEqual(matrix["strategy"]["matrix"]["os"], ["ubuntu-24.04", "macos-26"])
         for event, ref in (("pull_request", "refs/pull/1/merge"), ("push", "refs/heads/main"),
                            ("workflow_dispatch", "refs/heads/qa006-native-candidate")):
-            for target in ("full", "macos", "signing-adapter", "signing-matrix-canary", None, "", "unknown",
-                           "MACOS", "mAcOs", "SIGNING-MATRIX-CANARY", "signing-matrix-canary ", "[0]", "macos "):
+            for target in ("full", "macos", "signing-adapter", "signing-adapter-macos", "signing-matrix-canary", None, "", "unknown",
+                           "MACOS", "mAcOs", "SIGNING-ADAPTER-MACOS", "signing-adapter-macos ",
+                           "SIGNING-MATRIX-CANARY", "signing-matrix-canary ", "[0]", "macos "):
                 with self.subTest(candidate_route=(event, target)):
                     context = {"github": {"event_name": event, "ref": ref}}
                     # For this one pinned comparison and fixed ASCII fixture,
@@ -314,11 +316,11 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                     expected = {"test-linux": not dispatch or compared == "full",
                                 "test-native-profiles": not dispatch or compared in {"full", "macos"},
                                 "test-signing-matrix": not dispatch or compared in {"full", "signing-matrix-canary"},
-                                "test-signing-adapter": dispatch and compared == "signing-adapter"}
+                                "test-signing-adapter": dispatch and compared in {"signing-adapter", "signing-adapter-macos"}}
                     for name, enabled in expected.items():
                         self.assertEqual(evaluate_condition(workflow["jobs"][name]["if"], context,
                                                             success=True, cancelled=False), enabled)
-                    if dispatch and compared not in {"full", "macos", "signing-adapter", "signing-matrix-canary"}:
+                    if dispatch and compared not in {"full", "macos", "signing-adapter", "signing-adapter-macos", "signing-matrix-canary"}:
                         self.assertFalse(any(expected.values()))  # Skipped prerequisites cannot pass the pinned guard.
                     selected = canary_shards if evaluate_condition(canary_condition, context,
                         success=True, cancelled=False) else full_shards
@@ -387,8 +389,9 @@ class CIWorkflowIsolationTests(unittest.TestCase):
 
         groups = {group_for("pull_request", None), group_for("push", None),
                   group_for("workflow_dispatch", "full"), group_for("workflow_dispatch", "macos"),
-                  group_for("workflow_dispatch", "signing-adapter"), group_for("workflow_dispatch", "signing-matrix-canary")}
-        self.assertEqual(len(groups), 6)  # Partial dispatch cannot cancel any full event/target.
+                  group_for("workflow_dispatch", "signing-adapter"), group_for("workflow_dispatch", "signing-adapter-macos"),
+                  group_for("workflow_dispatch", "signing-matrix-canary")}
+        self.assertEqual(len(groups), 7)  # Partial dispatch cannot cancel any full event/target.
         self.assertTrue(all("${{" not in value for value in groups))
         for absent in (None, ""):
             self.assertEqual(group_for("workflow_dispatch", absent), group_for("workflow_dispatch", "full"))
@@ -399,7 +402,20 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         self.assertEqual(job["if"], ADAPTER_TARGET_CONDITION)
         self.assertEqual(job["runs-on"], "${{ matrix.os }}")
         self.assertEqual(job["strategy"], {"fail-fast": False, "max-parallel": 2,
-                                           "matrix": {"os": ["ubuntu-24.04", "macos-26"]}})
+                                           "matrix": {"os": ADAPTER_OS_SELECTION}})
+        # Pin the whole expression before interpreting its one fixed selector.
+        selection = job["strategy"]["matrix"]["os"]
+        left, otherwise = selection.removeprefix("${{ fromJSON(").removesuffix(") }}").rsplit(" || ", 1)
+        condition, selected = left.rsplit(" && ", 1)
+        macos_only, both = (json.loads(literal[1:-1]) for literal in (selected, otherwise))
+        self.assertEqual((macos_only, both), (["macos-26"], ["ubuntu-24.04", "macos-26"]))
+        for event in ("workflow_dispatch", "pull_request", "push"):
+            for target in ("signing-adapter", "signing-adapter-macos", "SIGNING-ADAPTER-MACOS",
+                           "signing-adapter-macos ", "full", "macos", "signing-matrix-canary", "unknown", ""):
+                context = {"github": {"event_name": event}, "inputs": {"verification_target": target.lower()}}
+                systems = macos_only if evaluate_condition(condition, context, success=True, cancelled=False) else both
+                self.assertEqual(systems, macos_only if event == "workflow_dispatch"
+                                 and target.lower() == "signing-adapter-macos" else both)
         self.assertEqual(job["permissions"], {"contents": "read"})
         self.assertEqual(job["steps"][0]["run"], HOSTED_GUARD)
         self.assertFalse(any("actions/upload-artifact" in step.get("uses", "") for step in job["steps"]))

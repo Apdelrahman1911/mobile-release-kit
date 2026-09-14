@@ -36,9 +36,12 @@ MiB = 1024 * 1024
 CAPTURE_TOTAL = 256 * MiB
 DISK_RESERVE = (4 * 1024 + 512) * MiB
 _PRIVATE_PTY_ENV = "MRK_CI_PRIVATE_PTY"
-_PRIVATE_PTY_STAGES = frozenset({"allocate", "admit", "private-mode", "named-positive", "transfer",
+_PRIVATE_PTY_STAGES = frozenset({"entry", "allocate", "admit", "private-mode", "named-positive", "transfer",
                                 "binding", "canonical", "write", "read", "eof", "named-denial",
                                 "metadata-denial", "close"})
+_PRIVATE_PTY_ENTRY_GROUPS = ("platform", "numeric", "entry", "policy", "original-shape", "original-suffix",
+                             "original-tool-shape", "runtime", "flags", "command")
+_PRIVATE_PTY_ARGV0_RELATIONS = frozenset({"same", "different", "unavailable"})
 _PRIVATE_PTY_PREFIX = b"MRK_PRIVATE_PTY_FAILURE "
 JAVA_LIMITS = (
     "-Xms32m -Xmx256m -XX:MaxMetaspaceSize=256m "
@@ -1366,15 +1369,92 @@ def _private_pty_command(argv: list[str], root: Path, python: Path, uid: int) ->
         return False
 
 
-def _private_pty_failure(stage: str, error: BaseException, cleanup: list) -> None:
+def _private_pty_entry(argv: list[str]) -> None:
+    """Same selected-runtime/suffix contract as the fixed native checkpoints."""
+    platform, uid, gid, _cpu, policy = argv[1:6]
+    command, failed, primary = argv[6:], [], None
+    entry = python = None
+    relation = "unavailable"
+
+    def check(group, predicate):
+        nonlocal primary
+        try:
+            if predicate():
+                return True
+        except BaseException as exc:
+            if primary is None:
+                primary = exc
+        failed.append(group)
+        return False
+
+    check("platform", lambda: platform == sys.platform == "darwin")
+    numeric = check("numeric", lambda: 60000 <= int(uid) < 65000 and uid == str(int(uid)) and gid == uid)
+
+    def resolve_entry():
+        nonlocal entry
+        entry = Path(__file__).resolve(strict=True)
+        return (entry.name == "ci_sandbox.py" and entry.parent.name == "bootstrap"
+                and entry.parent.parent.parent == Path("/private/tmp"))
+
+    entry_ok = check("entry", resolve_entry)
+    if entry is not None:
+        check("policy", lambda: policy == str(entry.parent / "subject.sb"))
+    original = getattr(sys, "orig_argv", None)
+    original_ok = check("original-shape", lambda: type(original) is list and len(original) == len(argv) + 5
+                        and all(type(value) is str for value in original))
+    original_tool_ok = False
+    if original_ok:
+        if entry is not None:
+            check("original-suffix", lambda: original[1:] == ["-I", "-S", "-B", str(entry), *argv])
+        original_tool_ok = check("original-tool-shape", lambda: bool(original[0]) and Path(original[0]).is_absolute())
+
+    def resolve_runtime():
+        nonlocal python
+        value = getattr(sys, "executable", None)
+        if type(value) is not str or not value or not Path(value).is_absolute():
+            return False
+        python = Path(value).resolve(strict=True)
+        return python.parent.name == "bin"
+
+    runtime_ok = check("runtime", resolve_runtime)
+    # Framework launchers may replace only orig_argv[0]. It is an observation,
+    # never alternate tool authority. Keep the selected canonical executable,
+    # exact original isolated suffix and all six actual flags, as native entry.
+    check("flags", lambda: (sys.flags.isolated, sys.flags.no_site, sys.flags.dont_write_bytecode,
+                           sys.flags.ignore_environment, sys.flags.no_user_site, sys.flags.safe_path)
+                          == (1, 1, 1, 1, 1, True))
+    if entry_ok and runtime_ok and numeric:
+        check("command", lambda: _private_pty_command(command, entry.parent.parent, python, int(uid)))
+    if original_tool_ok and runtime_ok:
+        relation = "same" if original[0] == str(python) else "different"
+    if failed:
+        # Boolean rejections carry no original exception. Preserve the first
+        # actual observation error; synthesize a rejection only when none arose.
+        if primary is None:
+            primary = SessionError("private terminal entry escaped its fixed ordinary subject role")
+        _private_pty_failure("entry", primary, [], failed_predicates=failed, argv0_relation=relation)
+        raise primary
+
+
+def _private_pty_failure(stage: str, error: BaseException, cleanup: list, *,
+                         failed_predicates: list[str] | None = None, argv0_relation: str | None = None) -> None:
     """Finite optional diagnostics only; never publish exception text or paths."""
     try:
         number = OSError.__dict__["errno"].__get__(error, OSError) if isinstance(error, OSError) else None
         note = {"stage": stage, "errno": number if type(number) is int and 0 < number < 4096 else None,
                 "cleanup_errors": len(cleanup)}
+        if stage == "entry":
+            if (cleanup or type(failed_predicates) is not list or not failed_predicates
+                    or failed_predicates != [group for group in _PRIVATE_PTY_ENTRY_GROUPS if group in failed_predicates]
+                    or type(argv0_relation) is not str or argv0_relation not in _PRIVATE_PTY_ARGV0_RELATIONS):
+                return
+            note.update(failed_predicates=failed_predicates, argv0_relation=argv0_relation)
+        elif failed_predicates is not None or argv0_relation is not None:
+            return
         if stage in _PRIVATE_PTY_STAGES and len(cleanup) <= 3:
             raw = json.dumps(note, sort_keys=True, separators=(",", ":")).encode("ascii")
-            os.write(2, _PRIVATE_PTY_PREFIX + raw + b"\n")
+            if len(raw) <= 256:
+                os.write(2, _PRIVATE_PTY_PREFIX + raw + b"\n")
     except BaseException:
         pass  # Diagnostic delivery is not a lifecycle or success decision.
 
@@ -1391,11 +1471,21 @@ def _private_pty_failure_note(data: bytes) -> dict | None:
         return None
     try:
         note = json.loads(lines[0])
-        if (type(note) is not dict or set(note) != {"stage", "errno", "cleanup_errors"}
+        base = {"stage", "errno", "cleanup_errors"}
+        if (type(note) is not dict or not base <= set(note)
                 or type(note["stage"]) is not str or note["stage"] not in _PRIVATE_PTY_STAGES
                 or note["errno"] is not None and (type(note["errno"]) is not int or not 0 < note["errno"] < 4096)
                 or type(note["cleanup_errors"]) is not int or not 0 <= note["cleanup_errors"] <= 3
                 or json.dumps(note, sort_keys=True, separators=(",", ":")).encode("ascii") != lines[0]):
+            return None
+        if note["stage"] == "entry":
+            if (set(note) != base | {"failed_predicates", "argv0_relation"} or note["cleanup_errors"] != 0
+                    or type(note["failed_predicates"]) is not list or not note["failed_predicates"]
+                    or note["failed_predicates"] != [group for group in _PRIVATE_PTY_ENTRY_GROUPS
+                                                    if group in note["failed_predicates"]]
+                    or type(note["argv0_relation"]) is not str or note["argv0_relation"] not in _PRIVATE_PTY_ARGV0_RELATIONS):
+                return None
+        elif set(note) != base:
             return None
         return note
     except (ValueError, TypeError, UnicodeError, RecursionError):
@@ -6695,17 +6785,7 @@ def _main(argv: list[str]) -> int:
                 _userns_zero()
             _limits(platform, int(cpu))
         if argv[0] == "--enter-private-pty":
-            entry = Path(__file__).resolve(strict=True)
-            original = getattr(sys, "orig_argv", None)
-            if (platform != "darwin" or sys.platform != "darwin" or not 60000 <= int(uid) < 65000
-                    or uid != str(int(uid)) or gid != uid or policy != str(entry.parent / "subject.sb")
-                    or entry.name != "ci_sandbox.py" or entry.parent.name != "bootstrap"
-                    or entry.parent.parent.parent != Path("/private/tmp")
-                    or type(original) is not list or len(original) != len(argv) + 5
-                    or original[1:5] != ["-I", "-S", "-B", str(entry)] or original[5:] != argv
-                    or type(original[0]) is not str or not Path(original[0]).is_absolute()
-                    or not _private_pty_command(command, entry.parent.parent, Path(original[0]), int(uid))):
-                raise SessionError("private terminal entry escaped its fixed ordinary subject role")
+            _private_pty_entry(argv)
             _exec_private_pty(command, policy, int(uid), int(gid))
             raise SessionError("private terminal entry unexpectedly returned")
         if "--mach-initial" in command and "--aia-offline-baseline" in command:

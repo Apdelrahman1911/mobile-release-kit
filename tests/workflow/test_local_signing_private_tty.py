@@ -329,24 +329,147 @@ class PrivateTTYContractTests(unittest.TestCase):
         for command in invalid:
             self.assertFalse(self.module._private_pty_command(command, session.root, session.python, session.uid))
             self.assertEqual(session._argv(command, 10)[0][5], "--enter")
-        args = ["--enter-private-pty", "darwin", str(session.uid), str(session.gid), "10", str(session.policy), *probe]
-        original = [str(session.python), "-I", "-S", "-B", str(session.entry), *args]
+        framework = "/inert/python/Resources/Python.app/Contents/MacOS/Python"
+        for original_tool, command in ((str(session.python), probe), (framework, probe), (framework, vectors[-1])):
+            with self.subTest(original_tool_spelling="framework" if original_tool == framework else "selected",
+                              command_role=command[5]):
+                args = ["--enter-private-pty", "darwin", str(session.uid), str(session.gid), "10", str(session.policy), *command]
+                original = [original_tool, "-I", "-S", "-B", str(session.entry), *args]
+                tty = InertTTY()
+                boundary = RuntimeError("inert transfer boundary")
+                flags = SimpleNamespace(isolated=1, no_site=1, dont_write_bytecode=1,
+                                        ignore_environment=1, no_user_site=1, safe_path=True)
+                fake_sys = SimpleNamespace(platform="darwin", orig_argv=original,
+                                           executable=str(session.python), flags=flags)
+                transfer = Mock(side_effect=boundary)
+                resolved = []
+                def resolve(path, *, strict):
+                    self.assertTrue(strict)
+                    self.assertIn(path, (session.entry, session.python))
+                    resolved.append(path)
+                    return path  # No native resolution, launcher or PTY operation.
+                with patch.multiple(self.module, __file__=str(session.entry), os=tty.os, sys=fake_sys,
+                                    _limits=Mock(), _exec_private_pty=transfer), \
+                     patch.object(Path, "resolve", resolve):
+                    with self.assertRaises(RuntimeError) as caught:
+                        self.module._main(args)
+                self.assertIs(caught.exception, boundary)
+                transfer.assert_called_once_with(command, str(session.policy), session.uid, session.gid)
+                self.assertEqual(resolved, [session.entry, session.python])
+                self.assertFalse(tty.acquired or tty.closed or tty.output)
+
+        expected = {
+            "platform": ["platform"], "numeric": ["numeric"],
+            "entry": ["entry", "original-suffix"], "policy": ["policy"],
+            "original-shape": ["original-shape"], "original-suffix": ["original-suffix"],
+            "original-tool-shape": ["original-tool-shape"], "runtime": ["runtime"],
+            "runtime-bin": ["runtime"], "runtime-different": ["command"], "flags": ["flags"],
+            "command": ["command"], "several": ["original-suffix", "flags", "command"],
+        }
+        for case, groups in expected.items():
+            with self.subTest(rejected_group=case):
+                tty = InertTTY()
+                command = list(probe)
+                if case == "command":
+                    command[5] = "--leaf"
+                args = ["--enter-private-pty", "darwin", str(session.uid), str(session.gid), "10", str(session.policy), *command]
+                if case == "numeric":
+                    args[2] = "0" + args[2]  # Same dropped UID, noncanonical entry literal.
+                if case == "policy":
+                    args[5] = str(session.cleanup_policy)
+                original = [framework, "-I", "-S", "-B", str(session.entry), *args]
+                flags = SimpleNamespace(isolated=1, no_site=1, dont_write_bytecode=1,
+                                        ignore_environment=1, no_user_site=1, safe_path=True)
+                fake_sys = SimpleNamespace(platform="darwin", orig_argv=original,
+                                           executable=str(session.python), flags=flags)
+                entry = session.entry
+                if case == "platform":
+                    fake_sys.platform = "not-darwin"
+                elif case == "entry":
+                    entry = session.bootstrap / "different.py"
+                elif case == "original-shape":
+                    fake_sys.orig_argv = tuple(original)
+                elif case == "original-tool-shape":
+                    original[0] = "relative"
+                elif case == "runtime":
+                    fake_sys.executable = "relative"
+                elif case == "runtime-bin":
+                    fake_sys.executable = framework
+                if case in {"original-suffix", "several"}:
+                    original[1] = "-E"
+                if case in {"runtime-different", "several"}:
+                    fake_sys.executable = "/inert/other/bin/python"
+                if case in {"flags", "several"}:
+                    flags.no_site = 0
+                transfer, resolved = Mock(), []
+                def resolve(path, *, strict):
+                    self.assertTrue(strict)
+                    resolved.append(path)
+                    return path
+                with patch.multiple(self.module, __file__=str(entry), os=tty.os, sys=fake_sys,
+                                    _limits=Mock(), _exec_private_pty=transfer), \
+                     patch.object(Path, "resolve", resolve):
+                    with self.assertRaises(self.module.SessionError):
+                        self.module._main(args)
+                transfer.assert_not_called()
+                self.assertFalse(tty.acquired or tty.closed)
+                note = self.module._private_pty_failure_note(b"".join(tty.output))
+                self.assertEqual((note["stage"], note["failed_predicates"], note["cleanup_errors"]), ("entry", groups, 0))
+                self.assertEqual(len(resolved), 1 if case == "runtime" else 2)
+                self.assertNotIn(b"/inert", b"".join(tty.output))
+                self.assertNotIn(b"/private", b"".join(tty.output))
+
+        # Observation and diagnostic errors retain the first actual exception;
+        # dependent suffix/command checks are not claimed when resolution failed.
+        for diagnostic_error in (False, True):
+            tty = InertTTY()
+            original_error = OSError(errno.EIO, "synthetic first entry resolution")
+            later = OSError(errno.ENOENT, "synthetic later runtime resolution")
+            args = ["--enter-private-pty", "darwin", str(session.uid), str(session.gid), "10", str(session.policy), *probe]
+            fake_sys = SimpleNamespace(platform="darwin", executable=str(session.python), flags=SimpleNamespace(),
+                orig_argv=[framework, "-I", "-S", "-B", str(session.entry), *args])
+            def resolve(path, *, strict):
+                raise original_error if path == session.entry else later
+            if diagnostic_error:
+                tty.os.write = Mock(side_effect=OSError(errno.EPIPE, "synthetic diagnostic delivery"))
+            transfer = Mock()
+            with patch.multiple(self.module, __file__=str(session.entry), os=tty.os, sys=fake_sys,
+                                _limits=Mock(), _exec_private_pty=transfer), \
+                 patch.object(Path, "resolve", resolve):
+                with self.assertRaises(OSError) as caught:
+                    self.module._main(args)
+            self.assertIs(caught.exception, original_error)
+            transfer.assert_not_called()
+            self.assertFalse(tty.acquired or tty.closed)
+            note = self.module._private_pty_failure_note(b"".join(tty.output))
+            if diagnostic_error:
+                self.assertIsNone(note)
+            else:
+                self.assertEqual((note["errno"], note["failed_predicates"], note["argv0_relation"]),
+                                 (errno.EIO, ["entry", "runtime", "flags"], "unavailable"))
+
         tty = InertTTY()
-        boundary = RuntimeError("inert transfer boundary")
-        fake_sys = SimpleNamespace(platform="darwin", orig_argv=original,
-                                   executable="/inert/framework-normalized/Python")
-        transfer = Mock(side_effect=boundary)
-        with patch.multiple(self.module, os=tty.os, sys=fake_sys, _limits=Mock(),
-                            _exec_private_pty=transfer), \
-             patch.object(Path, "resolve", return_value=session.entry):
-            with self.assertRaises(RuntimeError) as caught:
+        observed = OSError(errno.EIO, "synthetic runtime observation after boolean rejection")
+        args = ["--enter-private-pty", "darwin", str(session.uid), str(session.gid), "10", str(session.policy), *probe]
+        flags = SimpleNamespace(isolated=1, no_site=1, dont_write_bytecode=1,
+                                ignore_environment=1, no_user_site=1, safe_path=True)
+        fake_sys = SimpleNamespace(platform="darwin", executable=str(session.python), flags=flags,
+            orig_argv=[framework, "-E", "-S", "-B", str(session.entry), *args])
+        def resolve(path, *, strict):
+            if path == session.entry:
+                return path
+            raise observed
+        transfer = Mock()
+        with patch.multiple(self.module, __file__=str(session.entry), os=tty.os, sys=fake_sys,
+                            _limits=Mock(), _exec_private_pty=transfer), \
+             patch.object(Path, "resolve", resolve):
+            with self.assertRaises(OSError) as caught:
                 self.module._main(args)
-            self.assertIs(caught.exception, boundary)
-            transfer.assert_called_once_with(probe, str(session.policy), session.uid, session.gid)
-            fake_sys.orig_argv = [str(session.python), "-E", *original[2:]]
-            with self.assertRaises(self.module.SessionError):
-                self.module._main(args)
+        self.assertIs(caught.exception, observed)
+        transfer.assert_not_called()
         self.assertFalse(tty.acquired or tty.closed)
+        note = self.module._private_pty_failure_note(b"".join(tty.output))
+        self.assertEqual((note["errno"], note["failed_predicates"]), (errno.EIO, ["original-suffix", "runtime"]))
 
     def test_fixture_setup_failure_and_cleanup_errors_do_not_leak_or_rearm(self):
         for fault in ("allocate", "setraw", "attributes", "setattrs", "flush", "blocking:2", "dup:2", "fdopen-r", "fdopen-w"):
@@ -449,3 +572,31 @@ class PrivateTTYContractTests(unittest.TestCase):
         with patch.object(self.module, "os", tty.os):
             self.module._private_pty_failure("transfer", HiddenErrno(errno.EIO, "private error"), [])
         self.assertEqual(self.module._private_pty_failure_note(b"".join(tty.output))["errno"], errno.EIO)
+        entry = {"stage": "entry", "errno": None, "cleanup_errors": 0,
+                 "failed_predicates": list(self.module._PRIVATE_PTY_ENTRY_GROUPS), "argv0_relation": "unavailable"}
+        encoded = json.dumps(entry, sort_keys=True, separators=(",", ":")).encode("ascii")
+        self.assertLessEqual(len(encoded), 256)
+        self.assertEqual(self.module._private_pty_failure_note(prefix + encoded), entry)
+        for change in ({"failed_predicates": []}, {"failed_predicates": ["unknown"]},
+                       {"failed_predicates": ["flags", "flags"]}, {"failed_predicates": ["flags", "entry"]},
+                       {"failed_predicates": "entry"}, {"argv0_relation": "/private/path"},
+                       {"argv0_relation": False}, {"cleanup_errors": 1}, {"stage": "allocate"}):
+            raw = json.dumps({**entry, **change}, sort_keys=True, separators=(",", ":")).encode("ascii")
+            self.assertIsNone(self.module._private_pty_failure_note(prefix + raw))
+        self.assertIsNone(self.module._private_pty_failure_note(prefix + valid.replace(b'"transfer"', b'"entry"')))
+        self.assertIsNone(self.module._private_pty_failure_note(prefix + encoded + b"\n" + prefix + encoded))
+        for relation in self.module._PRIVATE_PTY_ARGV0_RELATIONS:
+            tty = InertTTY()
+            with patch.object(self.module, "os", tty.os):
+                self.module._private_pty_failure("entry", HiddenErrno(errno.EIO, "private error"), [],
+                    failed_predicates=["runtime"], argv0_relation=relation)
+            note = self.module._private_pty_failure_note(b"".join(tty.output))
+            self.assertEqual((note["errno"], note["failed_predicates"], note["argv0_relation"]),
+                             (errno.EIO, ["runtime"], relation))
+        entry_capture = self.module.CapturedRun(stdout=b"", stderr=prefix + encoded, returncode=1,
+            waited=True, stdout_eof=True, stderr_eof=True, domain_finality=True, timed_out=False, cancelled=False,
+            duration=0.1, primary_error="entry failure", cleanup_errors=(), persisted=(0, len(prefix + encoded)))
+        note = session._note_capture("native-isolation", entry_capture)
+        self.assertFalse(note["ok"] or note["subject_ok"])
+        self.assertEqual(note["private_pty_error"], entry)
+        self.assertEqual(entry_capture.primary_error, "entry failure")

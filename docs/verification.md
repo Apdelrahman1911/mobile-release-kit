@@ -52,6 +52,9 @@ Never bypass branch protection or dispatch release/Store workflows for testing.
 For an intermediate macOS-only correction, manual `verification_target: macos`
 omits Linux but runs the **same complete macOS catalog and owner path**. The
 partial selection, `signing-adapter`, runs only the two-OS smoke scope below.
+`signing-adapter-macos` selects the identical source/wheel smoke on macOS only
+when a Darwin-only change does not invalidate previously recorded Linux evidence.
+It does not supply fresh Linux evidence or satisfy the full protected gate.
 `signing-matrix-canary` runs exactly four source/wheel cells: Linux shards 0 and
 11, and macOS shards 0 and 9. These probe shard-zero integration and each OS's
 largest planned-command shard for capacity qualification, not full verification;
