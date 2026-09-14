@@ -17,6 +17,7 @@ from mobile_release.errors import CredentialError
 from mobile_release.owned_process import run_owned
 from workflow import local_signing_bridge as bridge
 from workflow.local_signing_workload import worker_timeout
+from workflow.local_signing_regression_catalog import HANDOFF_MODES, inherited_modes
 from .local_signing_helpers import completed_case_directory
 
 
@@ -32,17 +33,22 @@ def capture(argv, root, *, timeout):
 @unittest.skipUnless(os.name == 'posix', 'local signing lease requires POSIX')
 class SigningAccountNativeTests(unittest.TestCase):
     def test_real_fork_during_resource_handoff_never_mutates_or_retains_parent_resources(self):
+        for mode in HANDOFF_MODES:
+            with self.subTest(mode=mode):
+                self.run_handoff_variant(mode)
+
+    def run_handoff_variant(self, mode):
+        self.assertIn(mode, HANDOFF_MODES)
         fixture = Path(__file__).parents[1] / 'workflow/local_signing_handoff_fixture.py'
-        for mode in ('lease-open', 'session-open', 'native-open', 'profile-directory', 'profile-stage', 'profile-read'):
-            with self.subTest(mode=mode), completed_case_directory(prefix='mrk-fork-handoff-') as root:
-                result = capture(
-                    [sys.executable, '-I', '-S', '-B', str(fixture),
-                     str(Path(mobile_release.__file__).resolve().parent.parent), str(root), mode],
-                    root, timeout=worker_timeout("account-native-flow"),
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertFalse(result.stderr)
-                self.assertTrue(json.loads(result.stdout)['checkedBeforeFallback'])
+        with completed_case_directory(prefix='mrk-fork-handoff-') as root:
+            result = capture(
+                [sys.executable, '-I', '-S', '-B', str(fixture),
+                 str(Path(mobile_release.__file__).resolve().parent.parent), str(root), mode],
+                root, timeout=worker_timeout("account-native-flow"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(result.stderr)
+            self.assertTrue(json.loads(result.stdout)['checkedBeforeFallback'])
 
     def test_real_process_thread_and_independent_account_lock_lifetimes(self):
         with completed_case_directory(prefix='mrk-flock-account-') as home:
@@ -66,18 +72,21 @@ class SigningAccountNativeTests(unittest.TestCase):
             self.assertEqual((home/signing.LEASE_DIRECTORY).stat().st_ino,inode)
 
     def test_inherited_fork_exit_gc_and_new_child_admission_cannot_cleanup_parent(self):
+        for mode in inherited_modes('macos-26' if sys.platform == 'darwin' else 'ubuntu-24.04'):
+            with self.subTest(mode=mode):
+                self.run_inherited_variant(mode)
+
+    def run_inherited_variant(self, mode):
+        self.assertIn(mode, inherited_modes('macos-26' if sys.platform == 'darwin' else 'ubuntu-24.04'))
         fixture=Path(__file__).parents[1]/'workflow/local_signing_fork_fixture.py'
-        modes=['explicit-exit','gc-exit','child-reentry','profile-read']
-        if sys.platform == 'darwin': modes.append('profile-scratch')
-        for mode in modes:
-            with self.subTest(mode=mode), completed_case_directory(prefix='mrk-fork-account-') as root:
-                process = capture([sys.executable,'-I','-S','-B',str(fixture),
-                                   str(Path(mobile_release.__file__).resolve().parent.parent),str(root),mode],
-                                  root, timeout=worker_timeout("account-native-flow"))
-                self.assertEqual(process.returncode,0,process.stderr)
-                self.assertFalse(process.stderr)
-                result=json.loads(process.stdout)
-                self.assertTrue(result['childReaped'] and result['parentResourcesUnchangedBeforeFallback'])
+        with completed_case_directory(prefix='mrk-fork-account-') as root:
+            process = capture([sys.executable,'-I','-S','-B',str(fixture),
+                               str(Path(mobile_release.__file__).resolve().parent.parent),str(root),mode],
+                              root, timeout=worker_timeout("account-native-flow"))
+            self.assertEqual(process.returncode,0,process.stderr)
+            self.assertFalse(process.stderr)
+            result=json.loads(process.stdout)
+            self.assertTrue(result['childReaped'] and result['parentResourcesUnchangedBeforeFallback'])
 
     def test_default_account_rejects_unsupported_host_and_conflicting_home_before_native_work(self):
         with patch.object(signing.sys,'platform','win32'), self.assertRaisesRegex(CredentialError,'require macOS'):

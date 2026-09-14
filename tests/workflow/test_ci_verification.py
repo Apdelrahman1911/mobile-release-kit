@@ -26,7 +26,7 @@ import unittest
 import warnings
 import zipfile
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from unittest.mock import patch
 
 from .workflow_harness import evaluate_condition, load_workflow, simulate_steps
@@ -34,6 +34,27 @@ from .workflow_harness import evaluate_condition, load_workflow, simulate_steps
 
 ROOT = Path(__file__).resolve().parents[2]
 CI = ROOT / ".github/workflows/ci.yml"
+_G_LINUX_METHODS = (
+    "unit.test_signing_fixture.DelegatedTests.test_alias",
+    "unit.test_signing_fixture.DelegatedTests.test_variants",
+)
+_G_DARWIN_ONLY_METHODS = (
+    "unit.test_local_signing_composition.SigningCompositionTests.test_full_preflight_shares_one_guard_through_early_authentication_signing_build_and_late_authentication",
+    "unit.test_local_signing_composition.SigningCompositionTests.test_real_early_and_late_profile_cleanup_signals_under_full_preflight_never_return_cancelled_content",
+)
+
+
+def _g_metadata_fixture(operating_system):
+    """Closed inert metadata only; no actual G/test/helper import or execution."""
+    if operating_system not in {"ubuntu-24.04", "macos-26"}:
+        raise AssertionError("unexpected fixture G platform")
+    methods = tuple(sorted(_G_LINUX_METHODS + (_G_DARWIN_ONLY_METHODS if operating_system == "macos-26" else ())))
+    return methods, MappingProxyType({method: tuple("G/" + method + suffix for suffix in (
+        ("/semantic/C/caller/04",) if method == _G_LINUX_METHODS[0] else
+        ("/variant/first", "/variant/second") if method == _G_LINUX_METHODS[1] else ("/whole",)))
+        for method in methods})
+
+
 _PYTHON_POISON_FIXTURES = (
     ("poison-wait-loss", "unit.test_native_process.NativeProcessLifecycleTests.test_native_consumed_wait_result_loss_never_retries_numeric_custody"),
     ("poison-startup-error", "unit.test_native_process.NativeProcessLifecycleTests.test_native_error_startup_is_unknown_not_a_wait_receipt"),
@@ -453,9 +474,10 @@ class CIControllerContractTests(unittest.TestCase):
         checks = ci_module("ci_checks")
         authority = checks.NATIVE_AUTHORITY_IDS
         ordinary = ("unit.synthetic.OrdinaryTests.test_first", "unit.synthetic.OrdinaryTests.test_second")
+        delegated, requirements = _g_metadata_fixture("macos-26")
         poison = {name: (identifier,) for name, identifier in zip(checks.PYTHON_POISON_PARTITIONS, checks.PYTHON_POISON_IDS)}
-        inventories = {"authority": authority, "ordinary": ordinary,
-                       **poison, "all": tuple(sorted(authority + ordinary + checks.PYTHON_POISON_IDS))}
+        inventories = {"authority": authority, "ordinary": ordinary, "delegated": delegated,
+                       **poison, "all": tuple(sorted(authority + ordinary + checks.PYTHON_POISON_IDS + delegated))}
         python = paths.source_python if phase == "source" else paths.wheel_python
         step = controller.Step("native-profile-" + phase,
             argv=(str(python), "-I", "-B", str(ROOT / "tests/workflow/run_native_profile_checks.py"),
@@ -465,7 +487,7 @@ class CIControllerContractTests(unittest.TestCase):
                               inventories=inventories, events=[], captures=[], changes={},
                               prepare_error=None, idle_error=None, run_error=None,
                               prepare_advance=100.0, run_advance=1.0, parsed=[], phase=phase,
-                              idle_failure_after=None)
+                              idle_failure_after=None, operating_system="macos-26", metadata=(delegated, requirements))
 
         def identities(source, partition, *, deadline):
             self.assertEqual(source, ROOT)
@@ -476,6 +498,11 @@ class CIControllerContractTests(unittest.TestCase):
             self.assertEqual(source, ROOT)
             rig.events.append(("package", root, deadline))
             return {"bytes_match_source": True, "immutable_modes": True}
+
+        def metadata(source, operating_system, *, deadline):
+            self.assertEqual((source, operating_system), (ROOT, rig.operating_system))
+            rig.events.append(("delegation", operating_system, deadline))
+            return rig.metadata
 
         def idle(*, deadline):
             rig.events.append(("idle", deadline))
@@ -526,7 +553,8 @@ class CIControllerContractTests(unittest.TestCase):
             rig.now += rig.run_advance
             return capture
 
-        rig.checks = SimpleNamespace(native_partition_ids=identities, inspect_native_package=package)
+        rig.checks = SimpleNamespace(native_partition_ids=identities, inspect_native_package=package,
+                                     signing_regression_metadata=metadata)
         rig.session = SimpleNamespace(ensure_idle=idle, prepare_native_authority=prepare, run=run)
         return rig
 
@@ -534,9 +562,12 @@ class CIControllerContractTests(unittest.TestCase):
         rig = self._native_gate_fixture(phase)
         controller, paths = rig.controller, rig.paths
         healthy = rig.inventories["ordinary"]
+        rig.operating_system = "ubuntu-24.04"
+        rig.metadata = _g_metadata_fixture(rig.operating_system)
+        delegated = rig.metadata[0]
         poison = {name: rig.inventories[name] for name in controller.PYTHON_POISON_PARTITIONS}
-        rig.inventories = {"healthy": healthy, **poison,
-            "all": tuple(sorted(healthy + tuple(identifier for ids in poison.values() for identifier in ids)))}
+        rig.inventories = {"healthy": healthy, "delegated": delegated, **poison,
+            "all": tuple(sorted(healthy + delegated + tuple(identifier for ids in poison.values() for identifier in ids)))}
         name = "python-full" if phase == "source" else "python-wheel"
         python = paths.source_python if phase == "source" else paths.wheel_python
         rig.step = controller.Step(name, argv=(str(python), "-I", "-B", str(paths.checks), "--check", name,
@@ -676,14 +707,20 @@ class CIControllerContractTests(unittest.TestCase):
                 result = self._perform_native_fixture(rig, deadline=original_deadline)
                 self.assertTrue(result.ok, result)
                 self.assertEqual(result.details["stage"], "complete")
-                self.assertEqual(result.details["completed"], list(rig.inventories["all"]))
-                self.assertEqual(result.details["tests"], len(rig.inventories["all"]))
+                actual = sorted(set(rig.inventories["all"]) - set(rig.inventories["delegated"]))
+                self.assertEqual(result.details["completed"], actual)
+                self.assertEqual(result.details["tests"], len(actual))
+                self.assertEqual(result.details["source_obligation_count"], len(rig.inventories["all"]))
+                self.assertEqual(result.details["pending_delegation"], {"methods": list(rig.metadata[0]),
+                    "requirements": {method: list(parts) for method, parts in rig.metadata[1].items()}})
+                self.assertEqual(result.details["coverage"], "partial-until-layered-matrix")
                 self.assertNotIn("returncode", result.details)  # No invented aggregate capture.
                 records = result.details["partitions"]
                 self.assertEqual([row["partition"] for row in records], list(parts))
                 self.assertEqual([row["status"] for row in records], ["PASS"] * len(parts))
                 calls = [event for event in rig.events if event[0] == "run"]
                 self.assertEqual(len(calls), len(parts))
+                self.assertEqual([event for event in rig.events if event[0] == "delegation"], [("delegation", "macos-26", cutoff)])
                 python = rig.paths.source_python if phase == "source" else rig.paths.wheel_python
                 entry = str(ROOT / "tests/workflow/run_native_profile_checks.py")
                 tail = [] if phase == "source" else ["--installed-wheel"]
@@ -729,7 +766,9 @@ class CIControllerContractTests(unittest.TestCase):
                 self.assertEqual(rig.events, [])
         self.assertEqual(self._perform_native_fixture(rig, platform="linux").error, "NATIVE_GATE_CONTRACT")
         self.assertEqual(rig.events, [])
-        for mutation in ("missing", "duplicate", "overlap", "expanded-authority", "pooled-poison", "missing-poison"):
+        for mutation in ("missing", "duplicate", "overlap", "expanded-authority", "pooled-poison", "missing-poison",
+                         "delegated-missing", "delegated-foreign", "delegated-duplicate", "delegated-overlap",
+                         "delegated-poison", "delegated-wrong-os", "obligation-missing", "obligation-empty", "obligation-foreign"):
             with self.subTest(mutation=mutation):
                 rig = self._native_gate_fixture()
                 if mutation == "missing":
@@ -742,8 +781,28 @@ class CIControllerContractTests(unittest.TestCase):
                     rig.inventories["authority"] += rig.inventories["ordinary"][:1]
                 elif mutation == "pooled-poison":
                     rig.inventories["poison-wait-loss"] += rig.inventories["poison-startup-error"]
-                else:
+                elif mutation == "missing-poison":
                     rig.inventories["poison-startup-error"] = ()
+                elif mutation == "delegated-missing":
+                    rig.inventories["delegated"] = rig.inventories["delegated"][:-1]
+                elif mutation == "delegated-foreign":
+                    rig.inventories["delegated"] += ("unit.test_foreign.Contracts.test_unknown",)
+                elif mutation == "delegated-duplicate":
+                    rig.inventories["delegated"] *= 2
+                elif mutation == "delegated-overlap":
+                    rig.inventories["ordinary"] += rig.inventories["delegated"][:1]
+                elif mutation == "delegated-poison":
+                    rig.inventories["delegated"] = tuple(sorted(rig.inventories["delegated"] + rig.inventories["poison-wait-loss"]))
+                elif mutation == "delegated-wrong-os":
+                    rig.metadata = _g_metadata_fixture("ubuntu-24.04")
+                else:
+                    methods, required = rig.metadata
+                    altered = dict(required)
+                    if mutation == "obligation-missing":
+                        altered.pop(methods[0])
+                    else:
+                        altered[methods[0]] = () if mutation == "obligation-empty" else ("G/foreign/whole",)
+                    rig.metadata = methods, MappingProxyType(altered)
                 result = self._perform_native_fixture(rig)
                 self.assertEqual(result.error, "NATIVE_PARTITION_UNION")
                 self.assertFalse(any(event[0] in {"package", "prepare", "run"} for event in rig.events))
@@ -785,6 +844,7 @@ class CIControllerContractTests(unittest.TestCase):
                         stack.enter_context(patch.object(rig.controller, "failure_details", side_effect=failure))
                     result = self._perform_native_fixture(rig)
                 self.assertFalse(result.ok)
+                self.assertFalse(set(result.details.get("completed", ())) & set(rig.inventories["delegated"]))
                 self.assertNotIn(str(failure), json.dumps(result.details))
                 records = result.details["partitions"]
                 failed_index = parts.index(mode) if mode in parts else 2 if mode == "poison-origin" else 0
@@ -818,10 +878,9 @@ class CIControllerContractTests(unittest.TestCase):
 
                 def late_sorted(values, *args, **kwargs):
                     result = sorted(values, *args, **kwargs)
-                    if type(values) is list and tuple(result) == rig.inventories["all"]:
+                    if len(rig.captures) == len(parts) and tuple(result) == rig.inventories["all"]:
                         reconciliations.append(True)
-                        if len(reconciliations) == 2:
-                            rig.now = 1000.0
+                        rig.now = 1000.0
                     return result
 
                 with contextlib.ExitStack() as stack:
@@ -839,7 +898,7 @@ class CIControllerContractTests(unittest.TestCase):
                     self.assertEqual(records[1]["status"], "UNEXECUTED")
                 elif mode == "union":
                     self.assertEqual([row["status"] for row in records], ["PASS"] * len(parts))
-                    self.assertEqual(len(reconciliations), 2)
+                    self.assertEqual(len(reconciliations), 1)
                 for index, capture in enumerate(rig.captures):
                     self.assertEqual(records[index]["capture"]["persisted"], list(capture.persisted))
 
@@ -854,11 +913,17 @@ class CIControllerContractTests(unittest.TestCase):
                 rows = result.details["partitions"]
                 self.assertEqual([row["partition"] for row in rows], list(parts))
                 self.assertEqual([row["status"] for row in rows], ["PASS"] * len(parts))
-                self.assertEqual(result.details["completed"], list(rig.inventories["all"]))
-                self.assertEqual(result.details["tests"], len(rig.inventories["all"]))
+                actual = sorted(set(rig.inventories["all"]) - set(rig.inventories["delegated"]))
+                self.assertEqual(result.details["completed"], actual)
+                self.assertEqual(result.details["tests"], len(actual))
+                self.assertEqual(result.details["source_obligation_count"], len(rig.inventories["all"]))
+                self.assertEqual(result.details["pending_delegation"], {"methods": list(rig.metadata[0]),
+                    "requirements": {method: list(parts) for method, parts in rig.metadata[1].items()}})
+                self.assertEqual(result.details["coverage"], "partial-until-layered-matrix")
                 self.assertNotIn("returncode", result.details)
                 calls = [event for event in rig.events if event[0] == "run"]
                 self.assertEqual(len(calls), len(parts))
+                self.assertEqual([event for event in rig.events if event[0] == "delegation"], [("delegation", "ubuntu-24.04", cutoff)])
                 self.assertEqual(calls[0][1], list(rig.step.argv))
                 self.assertEqual(calls[0][1][-2:], ["--deadline", repr(original_deadline)])
                 python = rig.paths.source_python if phase == "source" else rig.paths.wheel_python
@@ -892,7 +957,9 @@ class CIControllerContractTests(unittest.TestCase):
 
     def test_python_gate_rejects_contract_partition_and_singleton_origin_drift(self):
         for phase in ("source", "wheel"):
-            for fault in ("argv", "profile-shape", "healthy-omission", "duplicate", "pooled", "missing", "origin"):
+            for fault in ("argv", "profile-shape", "healthy-omission", "duplicate", "pooled", "missing", "origin",
+                          "delegated-missing", "delegated-foreign", "delegated-duplicate", "delegated-overlap",
+                          "delegated-poison", "delegated-wrong-os", "obligation-missing", "obligation-empty", "obligation-foreign"):
                 with self.subTest(phase=phase, fault=fault):
                     rig = self._python_gate_fixture(phase)
                     parts = ("healthy", *rig.controller.PYTHON_POISON_PARTITIONS)
@@ -909,6 +976,26 @@ class CIControllerContractTests(unittest.TestCase):
                         rig.inventories["poison-wait-loss"] += rig.inventories["poison-startup-error"]
                     elif fault == "missing":
                         rig.inventories["poison-startup-error"] = ()
+                    elif fault == "delegated-missing":
+                        rig.inventories["delegated"] = rig.inventories["delegated"][:-1]
+                    elif fault == "delegated-foreign":
+                        rig.inventories["delegated"] += ("unit.test_foreign.Contracts.test_unknown",)
+                    elif fault == "delegated-duplicate":
+                        rig.inventories["delegated"] *= 2
+                    elif fault == "delegated-overlap":
+                        rig.inventories["healthy"] += rig.inventories["delegated"][:1]
+                    elif fault == "delegated-poison":
+                        rig.inventories["delegated"] = tuple(sorted(rig.inventories["delegated"] + rig.inventories["poison-wait-loss"]))
+                    elif fault == "delegated-wrong-os":
+                        rig.metadata = _g_metadata_fixture("macos-26")
+                    elif fault.startswith("obligation-"):
+                        methods, required = rig.metadata
+                        altered = dict(required)
+                        if fault == "obligation-missing":
+                            altered.pop(methods[0])
+                        else:
+                            altered[methods[0]] = () if fault == "obligation-empty" else ("G/foreign/whole",)
+                        rig.metadata = methods, MappingProxyType(altered)
                     else:
                         original_run = rig.session.run
 
@@ -956,6 +1043,7 @@ class CIControllerContractTests(unittest.TestCase):
                         self.assertEqual([row["status"] for row in rows],
                             ["PASS"] * failed + ["FAIL"] + ["UNEXECUTED"] * (len(parts) - failed - 1))
                         self.assertNotIn("PRIVATE_IDLE_ERROR", json.dumps(result.details))
+                        self.assertFalse(set(result.details.get("completed", ())) & set(rig.inventories["delegated"]))
                         for index, capture in enumerate(rig.captures):
                             for field, value in rig.controller.capture_observations(capture).items():
                                 self.assertEqual(rows[index]["capture"][field], value)
@@ -971,20 +1059,19 @@ class CIControllerContractTests(unittest.TestCase):
 
                 def late_sorted(values, *args, **kwargs):
                     result = sorted(values, *args, **kwargs)
-                    if type(values) is list and tuple(result) == rig.inventories["all"]:
+                    if len(rig.captures) == len(parts) and tuple(result) == rig.inventories["all"]:
                         reconciliations.append(True)
-                        if len(reconciliations) == 2:
-                            rig.now = 1000.0
+                        rig.now = 1000.0
                     return result
 
                 with patch.object(rig.controller, "sorted", create=True, side_effect=late_sorted):
                     result = self._perform_native_fixture(rig, platform="linux")
                 self.assertFalse(result.ok)
                 self.assertEqual(result.error, "AGGREGATE_DEADLINE")
-                self.assertEqual(len(reconciliations), 2)
+                self.assertEqual(len(reconciliations), 1)
                 self.assertEqual(len(rig.captures), len(parts))
                 self.assertEqual([row["status"] for row in result.details["partitions"]], ["PASS"] * len(parts))
-                self.assertEqual(result.details["tests"], len(rig.inventories["all"]))
+                self.assertEqual(result.details["tests"], len(rig.inventories["all"]) - len(rig.inventories["delegated"]))
 
     def test_python_failure_callbacks_are_source_bound_and_keep_private_errors_out(self):
         controller = controller_module()
@@ -1026,7 +1113,8 @@ class CIControllerContractTests(unittest.TestCase):
                    for outcome in ("skip", "unexpected-success"))]
         for row in valid:
             self.assertEqual(controller.python_failure_callbacks([row], (identifier,)), [row])
-        invalid = [None, {}, [callback] * 17, [{**callback, "id": private}], [{**callback, "message": private}]]
+        invalid = [None, {}, [callback] * 17, [{**callback, "id": private}],
+                   [{**callback, "id": _G_LINUX_METHODS[0]}], [{**callback, "message": private}]]
         invalid += [[{**callback, key: item}] for key, values in (
             ("errno", (True, False, 0, -1, 4096, "27", [])),
             ("outcome", ("ok", "incomplete", [], True)),
@@ -1380,12 +1468,51 @@ class CIControllerContractTests(unittest.TestCase):
         with self.assertRaisesRegex(controller.VerificationError, "PYTHON_COMPLETION_INVENTORY"):
             controller.parse_capture(step, capture(profile, tests=[{
                 "id": identifier, "outcome": "ok", "extra": "private"}]), paths, "linux", checks)
+        for delegated in _G_LINUX_METHODS:
+            with self.subTest(unexecuted_delegated=delegated), \
+                    self.assertRaisesRegex(controller.VerificationError, "PYTHON_COMPLETION_INVENTORY"):
+                controller.parse_capture(step, capture(profile, tests=[{
+                    "id": delegated, "outcome": "ok"}]), paths, "linux", checks)
         for callbacks in ([{"id": identifier, "outcome": "error", "category": "os-error", "errno": 27}],
                           [{"id": "private", "outcome": "error", "category": "os-error", "errno": 27}],
                           [{"id": identifier, "raw_message": "private"}], [None]):
             with self.subTest(success_failure_callbacks=callbacks):
                 with self.assertRaisesRegex(controller.VerificationError, "PYTHON_FAILURE_CALLBACKS_ON_SUCCESS"):
                     controller.parse_capture(step, capture(profile, callbacks=callbacks), paths, "linux", checks)
+
+    def test_python_parser_allows_only_exact_linux_full_and_wheel_skip_intersections(self):
+        controller = controller_module()
+        permitted = ci_module("ci_checks").linux_allowed_skips()
+        wheel_skips = set(_G_DARWIN_ONLY_METHODS) | {
+            "unit.test_local_signing_native.SigningDarwinABITests.test_real_header_layout_and_local_volume_match_ctypes_without_private_state"}
+        for phase, selected in (("source", permitted), ("wheel", wheel_skips)):
+            rig = self._python_gate_fixture(phase)
+            rig.checks.linux_allowed_skips = lambda: permitted
+            healthy = rig.inventories["healthy"]
+            expected = tuple(sorted(healthy + tuple(selected)))
+            rig.inventories["healthy"] = expected
+            original = rig.session.run(list(rig.step.argv))  # The existing inert capture rig only.
+            summary = json.loads(original.stdout.decode().split("=", 1)[1])
+            summary["tests"] = [{"id": identifier, "outcome": "skip" if identifier in selected else "ok"}
+                                for identifier in expected]
+
+            def capture(rows):
+                data = ("MRK_CHECK_RESULT=" + json.dumps({**summary, "tests": rows}) + "\n").encode()
+                return SimpleNamespace(**{**vars(original), "stdout": data})
+
+            result = controller.parse_capture(rig.step, capture(summary["tests"]), rig.paths, "linux", rig.checks)
+            self.assertTrue(result.ok)
+            self.assertEqual(sum(row["outcome"] == "skip" for row in summary["tests"]), 20 if phase == "source" else 3)
+            for platform in ("macos", "darwin"):
+                with self.subTest(phase=phase, platform=platform), \
+                        self.assertRaisesRegex(controller.VerificationError, "PYTHON_UNEXPECTED_SKIP_OR_FAILURE"):
+                    controller.parse_capture(rig.step, capture(summary["tests"]), rig.paths, platform, rig.checks)
+            for changed in (healthy[0], *selected):
+                rows = [{**row, "outcome": "ok" if row["id"] in selected else "skip"}
+                        if row["id"] == changed else row for row in summary["tests"]]
+                with self.subTest(phase=phase, incorrect_skip=changed), \
+                        self.assertRaisesRegex(controller.VerificationError, "PYTHON_UNEXPECTED_SKIP_OR_FAILURE"):
+                    controller.parse_capture(rig.step, capture(rows), rig.paths, "linux", rig.checks)
 
     def test_complete_fixed_gate_inventory_cannot_omit_duplicate_or_reorder_a_step(self):
         controller = controller_module()
@@ -4235,11 +4362,11 @@ class CIControllerContractTests(unittest.TestCase):
 
         def identities(source, selection, **_kwargs):
             self.assertEqual(source, ROOT)
-            self.assertEqual(selection, "all")
+            self.assertEqual(selection, "ordinary")
             return expected
 
         checks = SimpleNamespace(native_partition_ids=identities)
-        step = controller.Step("native-profile-source", parser="native")
+        step = controller.Step("native-profile-source", parser="native", native_partition="ordinary")
         footer = "\nRan 1 test in 0.01s\n\nOK\n"
         full = "test_native (unit.synthetic.NativeContracts.test_native) ... ok\n"
         legacy = "test_native (unit.synthetic.NativeContracts) ... ok\n"
@@ -4252,6 +4379,11 @@ class CIControllerContractTests(unittest.TestCase):
 
         for line in (full, legacy):
             self.assertTrue(controller.parse_capture(step, capture(line + footer), paths, "macos", checks).ok)
+        for delegated in _G_LINUX_METHODS:
+            forged = f"{delegated.rsplit('.', 1)[1]} ({delegated}) ... ok\n"
+            with self.subTest(unexecuted_delegated=delegated), \
+                    self.assertRaisesRegex(controller.VerificationError, "NATIVE_PYTHON_INVENTORY"):
+                controller.parse_capture(step, capture(forged + footer), paths, "macos", checks)
         for text in (footer, full + full + footer, full + footer + footer,
                      full.replace("... ok", "... skipped 'fixture'") + footer,
                      full.replace("test_native)", "test_different)") + footer,
@@ -4266,6 +4398,126 @@ class CIControllerContractTests(unittest.TestCase):
 
 
 class CIProductEvidenceContractTests(unittest.TestCase):
+    def test_signing_metadata_is_fixed_pure_source_and_leaves_no_import_or_path_authority(self):
+        checks = ci_module("ci_checks")
+        alias = "_mrk_ci_signing_regression_catalog"
+        prefixes = ("workflow", "unit", "mobile_release")
+
+        def protected_modules():
+            return {name: module for name, module in sys.modules.items()
+                    if any(name == prefix or name.startswith(prefix + ".") for prefix in prefixes)}
+
+        modules = protected_modules()
+        paths, hooks, finders = list(sys.path), list(sys.path_hooks), list(sys.meta_path)
+        self.assertNotIn(alias, sys.modules)
+        for operating_system in ("ubuntu-24.04", "macos-26"):
+            methods, required = checks.signing_regression_metadata(ROOT, operating_system)
+            self.assertIs(type(methods), tuple)
+            self.assertEqual(tuple(sorted(set(methods))), methods)
+            self.assertIs(type(required), MappingProxyType)
+            self.assertEqual(tuple(required), methods)
+            for method, identifiers in required.items():
+                self.assertIs(type(identifiers), tuple)
+                self.assertTrue(identifiers)
+                self.assertEqual(tuple(sorted(set(identifiers))), identifiers)
+                self.assertTrue(all(identifier.startswith("G/" + method + "/") for identifier in identifiers))
+            with self.assertRaises(TypeError):
+                required[methods[0]] = ()
+            self.assertNotIn(alias, sys.modules)
+            self.assertEqual(protected_modules(), modules)
+            self.assertEqual((sys.path, sys.path_hooks, sys.meta_path), (paths, hooks, finders))
+
+    def test_signing_metadata_rejects_collision_drift_bad_tables_and_original_deadline_without_alias_cleanup_retry(self):
+        checks = ci_module("ci_checks")
+        alias = "_mrk_ci_signing_regression_catalog"
+        methods, required = _g_metadata_fixture("ubuntu-24.04")
+        cases = ("success", "occupied", "read-collision", "read-error", "foreign-import", "execute-error",
+                 "execute-replacement", "late-replacement", "removed-alias", "expired-entry", "expired-read", "expired-exec", "expired-return",
+                 "empty-methods", "list-methods", "duplicate-methods", "unsorted-methods", "foreign-method",
+                 "wrong-keys", "mutable-map", "empty-parts", "list-parts", "duplicate-parts", "unsorted-parts", "foreign-parts",
+                 "empty-suffix-parts", "control-parts")
+        for case in cases:
+            with self.subTest(case=case):
+                foreign, protected = object(), object()
+                runtime = SimpleNamespace(modules={"workflow": protected, "unit": protected, "mobile_release": protected},
+                                          path=["/fixed/stdlib"])
+                original = OSError(5, "PRIVATE_METADATA_ERROR")
+                clock = SimpleNamespace(now=10.0 if case == "expired-entry" else 1.0)
+                if case == "occupied":
+                    runtime.modules[alias] = foreign
+
+                def read(path, *, deadline):
+                    self.assertEqual(path, ROOT / "tests/workflow/local_signing_regression_catalog.py")
+                    self.assertEqual(deadline, 10.0)
+                    if case == "read-error":
+                        raise original
+                    if case == "read-collision":
+                        runtime.modules[alias] = foreign
+                    if case == "expired-read":
+                        clock.now = 10.0
+                    return b"from workflow import forbidden\n" if case == "foreign-import" else b"from types import MappingProxyType\n"
+
+                def execute(code, namespace):
+                    self.assertEqual(code.co_filename, str(ROOT / "tests/workflow/local_signing_regression_catalog.py"))
+                    self.assertIs(runtime.modules[alias].__dict__, namespace)
+                    if case == "execute-error":
+                        raise original
+                    selected = (() if case == "empty-methods" else list(methods) if case == "list-methods" else
+                                methods + methods[:1] if case == "duplicate-methods" else
+                                tuple(reversed(methods)) if case == "unsorted-methods" else
+                                ("unit.test_fixture.Contracts.test_other PRIVATE",) if case == "foreign-method" else methods)
+                    obligations = dict(required)
+                    if case == "wrong-keys":
+                        obligations.pop(methods[0])
+                    elif case.endswith("-parts"):
+                        first = obligations[methods[0]][0]
+                        obligations[methods[0]] = (() if case == "empty-parts" else [first] if case == "list-parts" else
+                            (first, first) if case == "duplicate-parts" else (first + "z", first) if case == "unsorted-parts" else
+                            ("G/" + methods[0] + "/",) if case == "empty-suffix-parts" else (first + "\0",) if case == "control-parts" else
+                            ("G/" + methods[1] + "/whole",))
+
+                    def obligation_table(operating_system):
+                        self.assertEqual(operating_system, "ubuntu-24.04")
+                        if case == "late-replacement":
+                            runtime.modules[alias] = foreign
+                        if case == "expired-return":
+                            clock.now = 10.0
+                        return obligations if case == "mutable-map" else MappingProxyType(obligations)
+
+                    namespace["delegated_methods"] = lambda operating_system: selected
+                    namespace["obligations"] = obligation_table
+                    if case == "execute-replacement":
+                        runtime.modules[alias] = foreign
+                    elif case == "removed-alias":
+                        del runtime.modules[alias]
+                    if case == "expired-exec":
+                        clock.now = 10.0
+
+                with patch.object(checks, "sys", runtime), patch.object(checks, "_read_regular", side_effect=read) as reader, \
+                        patch.object(checks, "exec", create=True, side_effect=execute) as executor, \
+                        patch.object(checks, "time", SimpleNamespace(monotonic=lambda: clock.now)):
+                    if case == "success":
+                        self.assertEqual(checks.signing_regression_metadata(ROOT, "ubuntu-24.04", deadline=10.0),
+                                         (methods, required))
+                    else:
+                        with self.assertRaises(OSError if case in {"read-error", "execute-error"} else checks.CheckError) as raised:
+                            checks.signing_regression_metadata(ROOT, "ubuntu-24.04", deadline=10.0)
+                        if case in {"read-error", "execute-error"}:
+                            self.assertIs(raised.exception, original)
+                        if case.startswith("expired-"):
+                            self.assertEqual(str(raised.exception), "DEADLINE_EXPIRED")
+                foreign_retained = case in {"occupied", "read-collision", "execute-replacement", "late-replacement"}
+                self.assertEqual(runtime.modules, {"workflow": protected, "unit": protected, "mobile_release": protected,
+                                                   **({alias: foreign} if foreign_retained else {})})
+                self.assertEqual(runtime.path, ["/fixed/stdlib"])
+                self.assertEqual(reader.call_count, 0 if case in {"occupied", "expired-entry"} else 1)
+                self.assertEqual(executor.call_count, 0 if case in {"occupied", "expired-entry", "expired-read", "read-collision", "read-error", "foreign-import"} else 1)
+        with patch.object(checks, "_read_regular") as reader:
+            for operating_system in ("linux", "darwin", "macos", None, True, [], "ubuntu-24.04 "):
+                with self.subTest(platform=operating_system), self.assertRaisesRegex(checks.CheckError, "SIGNING_REGRESSION_PLATFORM"):
+                    checks.signing_regression_metadata(ROOT, operating_system)
+            reader.assert_not_called()
+
     def test_fixed_poison_partitions_preserve_full_wheel_and_authority_disjoint_union(self):
         checks = ci_module("ci_checks")
         poison = tuple(identifier for _name, identifier in _PYTHON_POISON_FIXTURES)
@@ -4277,35 +4529,59 @@ class CIProductEvidenceContractTests(unittest.TestCase):
         self.assertEqual(len(set(parts)), len(parts))
         self.assertEqual(len(set(poison)), len(poison))
         healthy = ("unit.synthetic.Contracts.test_first", "unit.synthetic.Contracts.test_second")
-        complete = tuple(sorted(healthy + poison))
+        delegated, requirements = _g_metadata_fixture("ubuntu-24.04")
+        complete = tuple(sorted(healthy + poison + delegated))
         for selection in ("full", "wheel"):
-            with patch.object(checks, "expected_python_ids", return_value=complete) as source:
+            with patch.object(checks, "expected_python_ids", return_value=complete) as source, \
+                    patch.object(checks, "signing_regression_metadata", return_value=(delegated, requirements)) as metadata:
                 self.assertEqual(checks.python_capture_ids(ROOT, selection, "all", deadline=42.0), complete)
                 self.assertEqual(checks.python_capture_ids(ROOT, selection, "healthy", deadline=42.0), healthy)
+                self.assertEqual(checks.python_capture_ids(ROOT, selection, "delegated", deadline=42.0), delegated)
                 selected = [checks.python_capture_ids(ROOT, selection, name, deadline=42.0) for name in parts]
                 self.assertEqual(selected, [(identifier,) for identifier in poison])
-                self.assertEqual(tuple(sorted(healthy + tuple(identifier for ids in selected for identifier in ids))), complete)
+                self.assertEqual(tuple(sorted(healthy + delegated + tuple(identifier for ids in selected for identifier in ids))), complete)
                 self.assertTrue(all(call.args == (ROOT, selection) and call.kwargs == {"deadline": 42.0}
                                     for call in source.call_args_list))
+                self.assertTrue(all(call.args == (ROOT, "ubuntu-24.04") and call.kwargs == {"deadline": 42.0}
+                                    for call in metadata.call_args_list))
                 for invalid in ("ordinary", "authority", "all-poison", poison[0], None, True, []):
                     with self.assertRaises(checks.CheckError):
                         checks.python_capture_ids(ROOT, selection, invalid)
         authority = checks.NATIVE_AUTHORITY_IDS
-        with patch.object(checks, "expected_python_ids", return_value=tuple(sorted(authority + complete))):
+        with patch.object(checks, "expected_python_ids", return_value=tuple(sorted(authority + complete))), \
+                patch.object(checks, "signing_regression_metadata", return_value=(delegated, requirements)) as metadata:
             self.assertEqual(checks.native_partition_ids(ROOT, "authority"), authority)
+            metadata.assert_called_once_with(ROOT, "macos-26", deadline=None)
             self.assertEqual(checks.native_partition_ids(ROOT, "ordinary"), healthy)
+            self.assertEqual(checks.native_partition_ids(ROOT, "delegated"), delegated)
             self.assertEqual(tuple(checks.native_partition_ids(ROOT, part) for part in parts),
                              tuple((identifier,) for identifier in poison))
         for changed in (healthy, tuple(sorted(healthy + poison[:1])), tuple(sorted(complete + poison[:1])),
                         tuple(reversed(complete)), poison, list(complete)):
-            with patch.object(checks, "expected_python_ids", return_value=changed), self.assertRaises(checks.CheckError):
+            with patch.object(checks, "expected_python_ids", return_value=changed), \
+                    patch.object(checks, "signing_regression_metadata", return_value=(delegated, requirements)), \
+                    self.assertRaises(checks.CheckError):
                 checks.python_capture_ids(ROOT, "full", "healthy")
+        for changed in ((), list(delegated), tuple(reversed(delegated)), delegated + delegated[:1],
+                        (True,), delegated + ("unit.test_foreign.Contracts.test_unknown",),
+                        tuple(sorted(delegated + poison[:1])), tuple(sorted(delegated + authority[:1]))):
+            with self.subTest(delegated=changed), \
+                    self.assertRaisesRegex(checks.CheckError, "PYTHON_DELEGATED_INVENTORY"):
+                checks._python_capture_partition(complete, "healthy", changed)
+        for missing in delegated:
+            with self.subTest(missing_delegated=missing), \
+                    self.assertRaisesRegex(checks.CheckError, "PYTHON_DELEGATED_INVENTORY"):
+                checks._python_capture_partition(tuple(identifier for identifier in complete if identifier != missing),
+                                                 "all", delegated)
+        with self.assertRaisesRegex(checks.CheckError, "PYTHON_CAPTURE_UNION"):
+            checks._python_capture_partition(tuple(sorted(poison + delegated)), "healthy", delegated)
         for missing in poison:
             incomplete = tuple(identifier for identifier in complete if identifier != missing)
             for selection in ("full", "wheel", "native"):
                 inventory = tuple(sorted(authority + incomplete)) if selection == "native" else incomplete
                 with self.subTest(selection=selection, missing=missing), \
                         patch.object(checks, "expected_python_ids", return_value=inventory), \
+                        patch.object(checks, "signing_regression_metadata", return_value=(delegated, requirements)), \
                         self.assertRaisesRegex(checks.CheckError, "PYTHON_POISON_INVENTORY"):
                     if selection == "native":
                         checks.native_partition_ids(ROOT, "ordinary")
@@ -4315,14 +4591,15 @@ class CIProductEvidenceContractTests(unittest.TestCase):
             with self.assertRaises(checks.CheckError):
                 checks.python_capture_ids(ROOT, selection, "healthy")
 
-    def test_python_healthy_discovery_withholds_only_poison_and_stops_on_actual_adverse_callbacks(self):
+    def test_python_healthy_discovery_withholds_poison_and_delegated_and_stops_on_actual_adverse_callbacks(self):
         checks = ci_module("ci_checks")
         poison = checks.PYTHON_POISON_IDS
+        delegated, requirements = _g_metadata_fixture("ubuntu-24.04")
         healthy = tuple(f"unit.synthetic.HealthyContracts.test_{name}" for name in ("first", "subject", "third"))
-        complete = tuple(sorted(healthy + poison))
+        complete = tuple(sorted(healthy + poison + delegated))
         for selection in ("full", "wheel"):
             for outcome in ("success", "allowed-skip", "error", "failure", "skip", "subtest", "expected-failure", "unexpected-success",
-                            "missing-poison", "duplicate-discovery"):
+                            "missing-poison", "missing-delegated", "duplicate-discovery"):
                 with self.subTest(selection=selection, outcome=outcome):
                     events, observations, retained = [], [], []
 
@@ -4336,8 +4613,8 @@ class CIProductEvidenceContractTests(unittest.TestCase):
 
                         def runTest(self):
                             events.append(self.identifier)
-                            if self.identifier in poison:
-                                raise AssertionError("a poison fixture must never execute in the healthy capture")
+                            if self.identifier in poison + delegated:
+                                raise AssertionError("a poison/delegated fixture must never execute in the healthy capture")
                             if self.identifier != healthy[1]:
                                 return
                             if outcome in {"error", "expected-failure"}:
@@ -4364,8 +4641,10 @@ class CIProductEvidenceContractTests(unittest.TestCase):
 
                     loaded = [Fixture(healthy[0]),
                               (ExpectedFixture if outcome in {"expected-failure", "unexpected-success"} else Fixture)(healthy[1]),
-                              Fixture(healthy[2]), *(Fixture(identifier) for identifier in poison)]
+                              Fixture(healthy[2]), *(Fixture(identifier) for identifier in poison + delegated)]
                     if outcome == "missing-poison":
+                        loaded = [test for test in loaded if test.id() != poison[0]]
+                    elif outcome == "missing-delegated":
                         loaded.pop()
                     elif outcome == "duplicate-discovery":
                         loaded.append(Fixture(poison[0]))
@@ -4375,6 +4654,7 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                         TestLoader=lambda: SimpleNamespace(errors=[], discover=lambda *_args, **_kwargs: suite))
                     with patch.object(checks, "unittest", framework), \
                             patch.object(checks, "expected_python_ids", return_value=complete), \
+                            patch.object(checks, "signing_regression_metadata", return_value=(delegated, requirements)), \
                             patch.object(checks, "WHEEL_PATTERNS", ("test_fixed_fixture.py",)), \
                             patch.object(checks, "LINUX_MACOS_SKIPS", frozenset({healthy[1]}) if outcome == "allowed-skip" else frozenset()), \
                             patch.object(checks, "_remaining", return_value=10.0), \
@@ -4392,7 +4672,7 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                         else:
                             with self.assertRaises(checks.CheckError) as raised:
                                 checks.run_python_tests(ROOT, selection, 1000.0, observations, work_root=Path("/fixture/checks"))
-                            if outcome in {"missing-poison", "duplicate-discovery"}:
+                            if outcome in {"missing-poison", "missing-delegated", "duplicate-discovery"}:
                                 self.assertEqual(events, [])
                                 self.assertEqual(str(raised.exception), "TEST_LOADED_INVENTORY")
                             else:
@@ -4406,7 +4686,8 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                                 with self.assertRaisesRegex(checks.CheckError, "TEST_CONTINUED_AFTER_FAILURE"):
                                     retained[0].startTest(Fixture(healthy[2]))
                                 self.assertTrue(retained[0].shouldStop)
-                    self.assertFalse(set(events) & set(poison))
+                    self.assertFalse(set(events) & set(poison + delegated))
+                    self.assertFalse({row["id"] for row in observations} & set(poison + delegated))
 
     def test_native_partition_authority_is_exact_and_cannot_silently_expand(self):
         checks = ci_module("ci_checks")
@@ -4414,15 +4695,26 @@ class CIProductEvidenceContractTests(unittest.TestCase):
         complete = checks.expected_python_ids(ROOT, "native", deadline=deadline)
         authority = checks.native_partition_ids(ROOT, "authority", deadline=deadline)
         ordinary = checks.native_partition_ids(ROOT, "ordinary", deadline=deadline)
+        delegated = checks.native_partition_ids(ROOT, "delegated", deadline=deadline)
         poison = tuple(identifier for name, _identifier in _PYTHON_POISON_FIXTURES
                        for identifier in checks.native_partition_ids(ROOT, name, deadline=deadline))
         self.assertEqual(authority, checks.NATIVE_AUTHORITY_IDS)
         self.assertEqual(len(authority), 5)
         self.assertTrue(ordinary)
         self.assertFalse(set(authority) & set(ordinary))
-        self.assertEqual(tuple(sorted(authority + ordinary + poison)), complete)
+        self.assertEqual(tuple(sorted(authority + ordinary + poison + delegated)), complete)
         self.assertEqual(set(poison), {identifier for _name, identifier in _PYTHON_POISON_FIXTURES})
-        self.assertEqual(len(set(authority + ordinary + poison)), len(complete))
+        self.assertEqual(len(set(authority + ordinary + poison + delegated)), len(complete))
+        self.assertEqual(delegated, checks.signing_regression_metadata(ROOT, "macos-26", deadline=deadline)[0])
+        linux_delegated = checks.signing_regression_metadata(ROOT, "ubuntu-24.04", deadline=deadline)[0]
+        self.assertEqual(len(delegated), 86)
+        self.assertEqual(len(linux_delegated), 84)
+        self.assertEqual(set(delegated) - set(linux_delegated), set(_G_DARWIN_ONLY_METHODS))
+        self.assertTrue(set(linux_delegated) <= set(delegated))
+        for selection in ("full", "wheel"):
+            actual = checks.python_capture_ids(ROOT, selection, "delegated", deadline=deadline)
+            self.assertEqual(actual, linux_delegated)
+            self.assertTrue(set(_G_DARWIN_ONLY_METHODS) <= set(checks.python_capture_ids(ROOT, selection, "healthy", deadline=deadline)))
         self.assertEqual(checks.native_partition_ids(ROOT, "all", deadline=deadline), complete)
         for prefix in ("unit.test_native_process.", "unit.test_profile_process_owner.", "unit.test_inspection_budget."):
             self.assertTrue(any(identifier.startswith(prefix) for identifier in ordinary))
@@ -4635,6 +4927,10 @@ class CIProductEvidenceContractTests(unittest.TestCase):
     def test_exact_native_skip_identities_and_all_unsuccessful_outcomes_fail_closed(self):
         checks = ci_module("ci_checks")
         families = {
+            "unit.test_local_signing_composition.SigningCompositionTests": (
+                "full_preflight_shares_one_guard_through_early_authentication_signing_build_and_late_authentication",
+                "real_early_and_late_profile_cleanup_signals_under_full_preflight_never_return_cancelled_content",
+            ),
             "unit.test_ios_profile_authority.NativeProfileAuthorityTests": (
                 "actual_signature_integrity_and_exact_signer_are_checked_before_policy",
                 "complete_two_layer_synthetic_signature_succeeds_only_with_explicit_policy_seam",
@@ -4662,7 +4958,14 @@ class CIProductEvidenceContractTests(unittest.TestCase):
         native = {f"{group}.test_{method}" for group, methods in families.items() for method in methods}
         native.add("unit.test_local_signing_native.SigningDarwinABITests.test_real_header_layout_and_local_volume_match_ctypes_without_private_state")
         self.assertEqual(checks.linux_allowed_skips(), frozenset(native))
-        self.assertEqual(len(native), 18)
+        self.assertEqual(len(native), 20)
+        wheel = checks.expected_python_ids(ROOT, "wheel")
+        wheel_skips = set(wheel) & native
+        self.assertEqual(wheel_skips, set(_G_DARWIN_ONLY_METHODS) | {
+            "unit.test_local_signing_native.SigningDarwinABITests.test_real_header_layout_and_local_volume_match_ctypes_without_private_state"})
+        self.assertEqual(len(wheel_skips), 3)
+        checks.validate_test_outcomes(wheel, [{"id": identifier, "outcome": "skip" if identifier in wheel_skips else "ok"}
+                                             for identifier in wheel], "linux")
         ids = ("unit.fixture.Contracts.test_positive", *sorted(native))
         rows = [{"id": identifier, "outcome": "skip" if identifier in native else "ok"} for identifier in ids]
         checks.validate_test_outcomes(ids, rows, "linux")

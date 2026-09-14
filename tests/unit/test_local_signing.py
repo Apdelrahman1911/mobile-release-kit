@@ -25,12 +25,10 @@ from .helpers import ios_config, write_project
 from .ios_entitlement_helpers import profile
 from .local_signing_helpers import NativeSigningModel, fictional_signing_profile, model_result
 from .local_signing_algorithm_helpers import profile_algorithm_session
+from .local_signing_workspace import NativeCaseWorkspaceMixin
+from workflow.local_signing_regression_catalog import NATIVE_FAILURE_COMMANDS, SPECIAL_PROFILE_NATIVE_VARIANTS
 
 
-SPECIAL_PROFILE_NATIVE_VARIANTS = (
-    ("owned-symlink", False, "symlink"),
-    ("borrowed-fifo", True, "fifo"),
-)
 SPECIAL_PROFILE_DIRECT_VARIANTS = (
     ("owned-symlink", False, "symlink"),
     ("owned-fifo", False, "fifo"),
@@ -41,11 +39,9 @@ SPECIAL_PROFILE_DIRECT_VARIANTS = (
 )
 
 
-class LocalSigningTests(unittest.TestCase):
+class LocalSigningTests(NativeCaseWorkspaceMixin, unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix="mrk-signing-account-")
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = self.native_case_directory(prefix="mrk-signing-account-")
         self.home = self.root / "home"; self.home.mkdir(mode=0o700)
         self.project = self.root / "project"; self.project.mkdir()
         self.private = self.root / "private"; self.private.mkdir(mode=0o700)
@@ -271,22 +267,26 @@ class LocalSigningTests(unittest.TestCase):
         self.assert_clean()
 
     def test_every_completed_native_failure_after_effect_is_cleaned_without_repeating_setup(self):
-        for command in ('create-keychain', 'set-keychain-settings', 'unlock-keychain', 'import',
-                        'set-key-partition-list', 'list-keychains', 'default-keychain', 'delete-keychain'):
-            fired = []
-            before = len(self.model.calls)
-            def fail_after(argv):
-                if argv[1] == command and (command not in {'list-keychains', 'default-keychain'} or '-s' in argv) and not fired:
-                    fired.append(True)
-                    return model_result(returncode=9)
-            self.model.result_policy = fail_after
-            with self.subTest(command=command), self.assertRaises(CredentialError):
-                with self.context():
-                    self.assertEqual(command, 'delete-keychain')
-            self.assertTrue(fired)
-            self.assertLessEqual(sum(argv[1] == 'create-keychain' for argv in self.model.calls[before:]), 1)
-            self.model.result_policy = None
-            self.assert_clean()
+        for command in NATIVE_FAILURE_COMMANDS:
+            with self.subTest(command=command):
+                self.run_native_failure_variant(command)
+
+    def run_native_failure_variant(self, command):
+        self.assertIn(command, NATIVE_FAILURE_COMMANDS)
+        fired = []
+        before = len(self.model.calls)
+        def fail_after(argv):
+            if argv[1] == command and (command not in {'list-keychains', 'default-keychain'} or '-s' in argv) and not fired:
+                fired.append(True)
+                return model_result(returncode=9)
+        self.model.result_policy = fail_after
+        with self.assertRaises(CredentialError):
+            with self.context():
+                self.assertEqual(command, 'delete-keychain')
+        self.assertTrue(fired)
+        self.assertLessEqual(sum(argv[1] == 'create-keychain' for argv in self.model.calls[before:]), 1)
+        self.model.result_policy = None
+        self.assert_clean()
 
     def test_failed_create_without_effect_does_not_invent_native_ownership(self):
         def policy(argv):

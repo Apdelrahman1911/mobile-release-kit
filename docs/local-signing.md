@@ -258,8 +258,9 @@ recovers unchanged original journals in a fresh process. The bare-home crash fix
 adds seven complementary cuts: before/after each of three successful profile-directory
 creations and one partial empty-native cleanup-state write after profile resolution.
 Those cuts require automatic production recovery; unexpected refusal retains the
-case and fails the test. The persistent matrix below owns the exhaustive protocol
-I/O and terminal-teardown replay rather than duplicating it in the bare-home fixture.
+case and fails the test. The layered matrix below owns primitive protocol I/O cuts,
+semantic caller/recovery cases and the delegated regression variants rather than
+duplicating each complete native lifetime at every primitive operation.
 `test_owned_process*.py` plus profile resource/process tests
 exercise real descendants, deadlines, cancellation, malformed frames and cleanup.
 The required macOS source and installed-wheel gates include these tests without
@@ -272,8 +273,22 @@ one-shot setup/cleanup errors, original-session recovery and stable hardlink con
 Real-EEXIST tests validate the actual last borrowed observation and preserve owned
 link cleanup when linking succeeded before its result was interrupted.
 
-An additional mandatory persistent-native matrix executes the complete signing
-context with fictional native tools and real journal/profile/filesystem effects.
+An additional mandatory layered matrix uses one source-defined coverage catalog:
+
+- Seventeen primitive algorithm components execute every observed before/after
+  edge (plus real partial writes) and the fixed failure variants, without native
+  commands. These are algorithm obligations, not claims that the historical
+  full-context crash inventory was replayed.
+- 131 semantic cases cover explicit seeds, fresh recovery, focused conflicts,
+  original command boundaries, the healthy caller-context map and three actual
+  native database/lock/transaction-stage write prefixes.
+- 160 Linux or 170 Darwin original-regression executions preserve 84 or 86
+  original method obligations. Eighteen specialized semantic contributions reuse
+  the corresponding actual semantic evidence; they are not extra executions or
+  fabricated unittest successes. An original method remains pending until all
+  its required variants/contributions complete.
+
+Native cases use fictional tools with real journal/profile/filesystem effects.
 Each fresh recovery process reloads the preferences and native resources left by
 the killed process; it cannot invent a clean baseline. Every explicit preparation,
 active, partial-restoration, pending-control, terminal and manual-recheck seed is
@@ -314,15 +329,25 @@ production recovery predicates, never a recorded-PID absence check, constrain
 case disposal. Expected worker exit 73 cannot authorize whole-phase residual
 disposal or remove retained product UNKNOWN.
 
-CI runs the full Linux/macOS × sixteen-shard × source/wheel product, in addition
-to the native authority/ABI checks. Mandatory compact proofs bind actual reached
-cut IDs, effect inventories, package/test hashes, OS, shard, run, commit and the
-producing attempt. The aggregate checks every proof before selecting the latest
+CI requires the full Linux/macOS × sixteen-shard × source/wheel product, in addition
+to the native authority/ABI checks. The phase executes only its source-defined
+assignment, without a repeated native discovery prefix. Deterministic scheduling
+weights are planning estimates, not measured capacity; complete packing must be
+qualified before a full dispatch.
+
+Version-2 compact proofs bind the independently recomputed catalog and assignment,
+typed actual evidence, exact regression contributions, package/test hashes, OS,
+shard, run, commit and producing attempt. Old version-1 proofs cannot discharge
+this contract. Each case's validated evidence is persisted before identity-bound
+disposal. The exact private phase output is `catalog.json`, `matrix-result.json`
+and `results.jsonl.gz`; extra retained paths prevent phase success. The aggregate
+checks every proof before selecting the latest
 complete cell, rejects invalid later evidence rather than falling back silently,
 and proves the disjoint complete executed union. Older successful cells of the
 same run/commit need not be rerun merely because a sibling's attempt changed.
-Raw fictional observations are retained separately; no credential or real binary
-is included. These CI records cannot authorize a release or replace GitHub release
+Raw fictional observations stay private inside the test domain; only the compact
+proof is published. No credential or real binary is included. These CI records
+cannot authorize a release or replace GitHub release
 attestations. Local Darwin results do not imply that hosted Linux checks ran.
 
 This modeled coverage does not prove real Apple credential suitability, asynchronous

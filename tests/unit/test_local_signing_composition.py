@@ -20,6 +20,7 @@ from mobile_release.reporting import Report
 from .helpers import android_config, ios_config, write_project
 from .ios_entitlement_helpers import profile
 from .local_signing_helpers import NativeSigningModel
+from workflow.local_signing_regression_catalog import PREFLIGHT_CANCELLATION_VARIANTS
 
 
 class SigningCompositionTests(unittest.TestCase):
@@ -89,11 +90,14 @@ class SigningCompositionTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == 'darwin', 'native profile caller is macOS-only')
     def test_real_early_and_late_profile_cleanup_signals_under_full_preflight_never_return_cancelled_content(self):
-        for stage in ('early', 'late'):
-            for edge in ('read-cleanup', 'cms-cleanup'):
-                for signum in (signal.SIGINT, signal.SIGTERM):
-                    with self.subTest(stage=stage, edge=edge, signum=signum):
-                        self.exercise_full_preflight(cancel_at=(stage, edge), signum=signum)
+        for variant in PREFLIGHT_CANCELLATION_VARIANTS:
+            with self.subTest(variant=variant):
+                self.run_preflight_cancellation_variant(variant)
+
+    def run_preflight_cancellation_variant(self, variant):
+        self.assertIn(variant, PREFLIGHT_CANCELLATION_VARIANTS)
+        stage, edge, signum = variant
+        self.exercise_full_preflight(cancel_at=(stage, edge), signum={"INT": signal.SIGINT, "TERM": signal.SIGTERM}[signum])
 
     def exercise_full_preflight(self, *, cancel_at=None, signum=signal.SIGINT):
         # Keep the real public preflight, materializer, signing session, private

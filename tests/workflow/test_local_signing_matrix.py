@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import copy
 import gzip
+import hashlib
 import io
 import json
 import linecache
@@ -14,7 +15,7 @@ import tempfile
 import time
 import traceback
 import unittest
-from contextlib import redirect_stderr
+from contextlib import ExitStack, redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -70,7 +71,7 @@ class SemanticSelectorContractTests(unittest.TestCase):
     def test_closed_subset_preserves_semantics_and_global_not_context_filtered_occurrences(self):
         from collections import Counter
         self.assertEqual(Counter(case.kind for case in semantic_catalog.CASES.values()), {
-            "seed": 42, "recovery": 50, "focused": 15, "command": 20, "healthy": 1})
+            "seed": 42, "recovery": 50, "focused": 15, "command": 20, "healthy": 1, "native-prefix": 3})
         self.assertFalse(semantic_catalog.definition()["completeRequiredUnion"])
         self.assertEqual(len(semantic_catalog.SEEDS), 28)
         for number, occurrence in ((1, 3), (2, 4), (3, 5), (4, 5), (7, 6), (8, 6)):
@@ -204,6 +205,7 @@ class SemanticSelectorContractTests(unittest.TestCase):
                 self.assertEqual(fixture._CASE_RECOVERY_DEBT[str(root)], identity)
 
     def test_final_case_publication_rechecks_original_deadline_after_real_owned_removal(self):
+        from . import local_signing_regression_fixture as regression_fixture
         with tempfile.TemporaryDirectory(prefix="mrk-semantic-final-cutoff-inert-") as temporary:
             parent = Path(temporary)
             clock = [0.0]
@@ -226,6 +228,8 @@ class SemanticSelectorContractTests(unittest.TestCase):
                     patch.object(fixture, "PHASE_DEADLINE", 1.0), \
                     patch.object(contract.time, "monotonic", side_effect=lambda: clock[0]), \
                     patch.object(fixture, "run_worker", side_effect=inert_return), \
+                    patch.object(semantic_fixture, "assert_healthy_observation", return_value=None), \
+                    patch.object(regression_fixture, "semantic_contributions", return_value=()), \
                     patch.object(fixture, "remove_case", side_effect=remove_at_cutoff), \
                     self.assertRaisesRegex(ValueError, "original matrix cutoff expired"):
                 semantic_fixture.run_case(parent, "H/full-context")
@@ -355,53 +359,116 @@ class MatrixContractTests(unittest.TestCase):
         self.scope = {"kind": "github", "repository": "example/mobile-release-kit", "commit": "1" * 40,
                       "runId": "1234", "attempt": 3, "job": "test-signing-matrix", "os": "ubuntu-24.04"}
         self.package, self.definitions = contract.digest("production"), contract.digest("test definitions")
+        self.catalog = contract.layered_catalog()
+        self.expected = {system: list(self.catalog.expected_ids(system)) for system in contract.OPERATING_SYSTEMS}
         self.original = {"events": [event(number) for number in range(1, 129)], "lines": ["production:1"]}
         self.recovery = {"groups": {}}
-        self.cases = fixture.matrix_cases(self.original, self.recovery)
-        self.expected = list(self.cases)
+        self.legacy_cases = fixture.matrix_cases(self.original, self.recovery)
+        self.legacy_expected = list(self.legacy_cases)
 
     def candidates(self):
         result = []
         for operating_system in contract.OPERATING_SYSTEMS:
+            expected = self.expected[operating_system]
+            catalog_sha = contract.digest(self.catalog.definition(operating_system))
             for shard in range(contract.SHARDS):
                 scope = {**self.scope, "os": operating_system, "attempt": 1}
-                selected = [case for case in self.expected if contract.shard_for(case) == shard]
-                run = {"executedCaseIds": selected, "inventorySha256": contract.digest(operating_system),
+                selected = list(self.catalog.shard_ids(operating_system, shard))
+                run = {"executedCaseIds": selected, "catalogSha256": catalog_sha,
                        "packageSha256": self.package, "definitionsSha256": self.definitions,
                        "resultsSha256": contract.digest((operating_system, shard)),
+                       "coverage": self.catalog.coverage(operating_system, selected),
                        "allExactChildrenReapedAndGroupsAbsent": True, "allCasePathsRemoved": True}
-                proof = {"schemaVersion": 1, "scope": scope, "shard": shard, "expectedCaseIds": self.expected[:],
-                         "expectedSha256": contract.digest(self.expected), "source": copy.deepcopy(run), "wheel": copy.deepcopy(run)}
+                proof = {"schemaVersion": 2, "scope": scope, "shard": shard, "expectedCaseIds": expected[:],
+                         "expectedSha256": contract.digest(expected), "catalogSha256": catalog_sha,
+                         "source": copy.deepcopy(run), "wheel": copy.deepcopy(run)}
                 result.append((contract.artifact_name(scope, shard), proof))
         return result
 
     def reduce(self, candidates):
         return contract.reconcile(candidates, self.scope, self.package, self.definitions)
 
-    def test_partition_is_disjoint_complete_and_stable_across_hash_order_and_global_indices(self):
+    @staticmethod
+    def inert_clean_snapshot():
+        return {"session": None, "controls": {}, "fences": {}, "native": {}, "ownedRemaining": {},
+                "nativeDirectory": False, "preferences": {"default": "fictional", "search": ["fictional"]}}
+
+    @classmethod
+    def inert_recovery(cls, token, expected="recovered", manual="none"):
+        after = cls.inert_clean_snapshot()
+        refused = expected == "refused-unknown-resource"
+        if refused:
+            after["session"] = token
+        return {"sessionToken": token, "expectedStatus": expected,
+                "before": {"session": token}, "after": after, "snapshot": copy.deepcopy(after),
+                "unknown": {"inert-unproven-file": {}} if refused else {},
+                "result": None if refused else {"status": expected, "session": token},
+                "refused": "inert unknown resource" if refused else None, "idleAndRenewedAdmission": not refused,
+                "events": [] if manual == "none" else [{"index": 1, "operation": "manual/input", "origin": "owner",
+                    "slot": "tty", "phase": "recovery", "details": {"action": manual}, "succeeded": True}]}
+
+    @staticmethod
+    def inert_cut(selector, token):
+        return {"sessionToken": token, "selector": selector.record(), "edge": selector.edge,
+                "context": dict(selector.context), "event": {
+                    **{key: getattr(selector, key) for key in ("operation", "slot", "origin", "phase", "occurrence")},
+                    "index": 91234, "details": {"destination": selector.destination}}}
+
+    def inert_semantic_row(self, name, steps, negatives=()):
+        """Self-consistent parser DATA only, never an original execution receipt."""
+        item = next(item for item in self.catalog.cases_for(self.scope["os"]) if item.name == name)
+        stem = "semantic-" + contract.digest(name)
+        filename = stem + "-complete.json"
+        parts = list(self.catalog.regression_parts(item, self.scope["os"]))
+        complete = {"schema": "mrk-signing-semantic-case-v1", "case": json.loads(item.specification), "steps": steps,
+                    "negativeEvidence": [stem + "-" + suffix + ".json" for suffix, _step in negatives]}
+        evidence = {filename: complete, **{stem + "-" + suffix + ".json": copy.deepcopy(step) for suffix, step in negatives}}
+        if parts:
+            evidence[stem + "-regression.json"] = {"schema": "mrk-signing-semantic-contribution-v1", "semantic": name,
+                "contributions": parts, "evidenceSha256": contract.digest(complete)}
+        return {"schemaVersion": 2, "caseId": item.identifier, "kind": "semantic", "name": name,
+            "observation": {"caseId": name, "status": "semantic-subset-case", "evidence": filename,
+                "caseRemoved": True, "originalWorkersSettled": True, "regressionContributions": parts},
+            "evidence": evidence, "regressionParts": parts}
+
+    @staticmethod
+    def refresh_inert_semantic_digests(row):
+        complete = row["evidence"][row["observation"]["evidence"]]
+        for filename in complete["negativeEvidence"]:
+            if filename in row["evidence"]:
+                for step in complete["steps"]:
+                    if step["name"] == row["evidence"][filename]["name"]:
+                        row["evidence"][filename] = copy.deepcopy(step)
+        for filename, value in row["evidence"].items():
+            if filename.endswith("-regression.json"):
+                value["evidenceSha256"] = contract.digest(complete)
+
+    def test_legacy_algorithm_ids_stay_stable_without_becoming_active_catalog_authority(self):
         shuffled = copy.deepcopy(self.original)
         shuffled["events"].reverse()
         for index, item in enumerate(shuffled["events"], 9000):
             item["index"] = index
         other = fixture.matrix_cases(shuffled, self.recovery)
-        self.assertEqual(list(other), self.expected)
-        self.assertEqual(fixture.matrix_inventory_digest(self.cases, self.original, self.recovery),
+        self.assertEqual(list(other), self.legacy_expected)
+        self.assertEqual(fixture.matrix_inventory_digest(self.legacy_cases, self.original, self.recovery),
                          fixture.matrix_inventory_digest(other, shuffled, self.recovery))
         union = set()
         for shard in range(contract.SHARDS):
-            selected = {case for case in self.expected if contract.shard_for(case) == shard}
+            selected = {case for case in self.legacy_expected if contract.shard_for(case) == shard}
             self.assertTrue(selected)
             self.assertFalse(union.intersection(selected))
             union.update(selected)
-        self.assertEqual(union, set(self.expected))
+        self.assertEqual(union, set(self.legacy_expected))
+        for expected in self.expected.values():
+            self.assertFalse(union.intersection(expected))
         changed = copy.deepcopy(self.original)
         changed["events"][0]["succeeded"] = False
         changed["events"][0]["error"] = "OSError"
         changed["events"][0]["details"]["flags"] = 256
         changed_cases = fixture.matrix_cases(changed, self.recovery)
-        self.assertEqual(list(changed_cases), self.expected)
+        self.assertEqual(list(changed_cases), self.legacy_expected)
         self.assertNotEqual(fixture.matrix_inventory_digest(changed_cases, changed, self.recovery),
-                            fixture.matrix_inventory_digest(self.cases, self.original, self.recovery))
+                            fixture.matrix_inventory_digest(self.legacy_cases, self.original, self.recovery))
 
     def test_complete_two_os_source_wheel_union_accepts_older_successful_cells_after_partial_rerun(self):
         candidates = self.candidates()
@@ -414,9 +481,14 @@ class MatrixContractTests(unittest.TestCase):
         self.assertEqual(result["producingAttempts"]["macos-26/0"], 1)
         for operating_system in contract.OPERATING_SYSTEMS:
             for mode in ("source", "wheel"):
-                self.assertEqual(result["operatingSystems"][operating_system][mode]["cases"], len(self.expected))
+                row = result["operatingSystems"][operating_system][mode]
+                self.assertEqual(row["cases"], len(self.expected[operating_system]))
+                self.assertEqual(row["coverage"], self.catalog.coverage(operating_system, self.expected[operating_system]))
+                obligations = self.catalog.REGRESSION.obligations(operating_system)
+                self.assertEqual(row["originalRegressionMethods"], len(obligations))
+                self.assertEqual(row["originalRegressionParts"], sum(map(len, obligations.values())))
 
-    def test_one_cell_can_locally_pass_an_omitted_case_but_the_actual_cross_cell_reducer_rejects_it(self):
+    def test_source_authority_rejects_a_self_consistent_producer_omission_at_the_first_proof(self):
         candidates = self.candidates()
         name, proof = candidates[0]
         missing = proof["source"]["executedCaseIds"][0]
@@ -424,16 +496,21 @@ class MatrixContractTests(unittest.TestCase):
         proof["expectedSha256"] = contract.digest(proof["expectedCaseIds"])
         for mode in ("source", "wheel"):
             proof[mode]["executedCaseIds"].remove(missing)
-        # This is the old design's real logical counterexample, not an expected
-        # local failure masquerading as proof that aggregate success is enough.
-        contract.validate_proof(proof, name, self.scope, self.package, self.definitions)
-        with self.assertRaisesRegex(ValueError, "cross-cell expected inventory"):
+            proof[mode]["coverage"] = self.catalog.coverage(proof["scope"]["os"], proof[mode]["executedCaseIds"])
+        # Even internally consistent producer IDs/digests/coverage cannot
+        # replace the independently reconstructed source authority. Unlike v1,
+        # rejection does not depend on finding a disagreeing second cell.
+        with self.assertRaisesRegex(ValueError, "expected cases differ from source catalog"):
+            contract.validate_proof(proof, name, self.scope, self.package, self.definitions)
+        with self.assertRaisesRegex(ValueError, "expected cases differ from source catalog"):
             self.reduce(candidates)
 
     def test_missing_duplicate_extra_wrong_scope_and_invalid_later_proofs_never_fall_back(self):
         for change in ("missing", "duplicate", "wrong-name", "repository", "commit", "runId", "job", "future-attempt",
-                       "package", "definitions", "inventory", "omitted-source", "omitted-wheel", "duplicate-ID", "extra-ID",
-                       "wrong-shard", "empty", "bool-version", "bool-attempt", "bool-shard", "unknown-field", "cleanup"):
+                       "package", "definitions", "catalog", "proof-catalog", "coverage-kinds", "coverage-parts",
+                       "omitted-source", "omitted-wheel", "duplicate-ID", "extra-ID", "wrong-shard", "empty",
+                       "legacy-version", "legacy-inventory", "bool-version", "bool-attempt", "bool-shard", "unknown-field",
+                       "cleanup", "paths"):
             with self.subTest(change=change):
                 candidates = self.candidates()
                 name, proof = candidates[0]
@@ -442,27 +519,40 @@ class MatrixContractTests(unittest.TestCase):
                 elif change == "wrong-name": candidates[0] = (name + "-other", proof)
                 elif change in ("repository", "commit", "runId", "job"): proof["scope"][change] = "wrong"
                 elif change == "future-attempt": proof["scope"]["attempt"] = 4
-                elif change in ("package", "definitions", "inventory"):
-                    key = {"package": "packageSha256", "definitions": "definitionsSha256", "inventory": "inventorySha256"}[change]
+                elif change in ("package", "definitions", "catalog"):
+                    key = {"package": "packageSha256", "definitions": "definitionsSha256", "catalog": "catalogSha256"}[change]
                     proof["source"][key] = "f" * 64
+                elif change == "proof-catalog": proof["catalogSha256"] = "f" * 64
+                elif change == "coverage-kinds": proof["source"]["coverage"]["kinds"]["semantic"] += 1
+                elif change == "coverage-parts": proof["wheel"]["coverage"]["regressionParts"].append("G/unknown")
                 elif change.startswith("omitted-"): proof[change.removeprefix("omitted-")]["executedCaseIds"].pop()
                 elif change == "duplicate-ID": proof["source"]["executedCaseIds"].append(proof["source"]["executedCaseIds"][0])
                 elif change == "extra-ID": proof["wheel"]["executedCaseIds"] = sorted([*proof["wheel"]["executedCaseIds"], "f" * 64])
                 elif change == "wrong-shard": proof["shard"] = 1
                 elif change == "empty": proof["expectedCaseIds"] = []
+                elif change == "legacy-version": proof["schemaVersion"] = 1
+                elif change == "legacy-inventory": proof["source"]["inventorySha256"] = proof["source"].pop("catalogSha256")
                 elif change == "bool-version": proof["schemaVersion"] = True
                 elif change == "bool-attempt": proof["scope"]["attempt"] = True
                 elif change == "bool-shard": proof["shard"] = False
                 elif change == "unknown-field": proof["forcePass"] = True
                 elif change == "cleanup": proof["source"]["allExactChildrenReapedAndGroupsAbsent"] = False
+                elif change == "paths": proof["wheel"]["allCasePathsRemoved"] = False
                 with self.assertRaises(ValueError): self.reduce(candidates)
-        candidates = self.candidates()
-        invalid_newer = copy.deepcopy(candidates[0][1])
-        invalid_newer["scope"]["attempt"] = 3
-        invalid_newer["source"]["executedCaseIds"].pop()
-        candidates.append((contract.artifact_name(invalid_newer["scope"], 0), invalid_newer))
-        with self.assertRaisesRegex(ValueError, "omitted"):
-            self.reduce(candidates)
+        for invalid_attempt in (1, 3):
+            with self.subTest(invalid_attempt=invalid_attempt):
+                candidates = self.candidates()
+                valid = candidates.pop(0)[1]
+                invalid = copy.deepcopy(valid)
+                valid["scope"]["attempt"] = 4 - invalid_attempt
+                invalid["scope"]["attempt"] = invalid_attempt
+                invalid["source"]["executedCaseIds"].pop()
+                # Every candidate is checked, including a later-listed older
+                # invalid attempt when a valid newer attempt is available.
+                candidates.insert(0, (contract.artifact_name(valid["scope"], 0), valid))
+                candidates.append((contract.artifact_name(invalid["scope"], 0), invalid))
+                with self.assertRaisesRegex(ValueError, "omitted"):
+                    self.reduce(candidates)
 
     def test_bounded_strict_json_and_unmerged_artifact_identity_are_required(self):
         with tempfile.TemporaryDirectory(prefix="mrk-matrix-proof-") as directory:
@@ -562,28 +652,259 @@ class MatrixContractTests(unittest.TestCase):
                         for observed in scans:
                             with self.assertRaises(StopIteration): next(observed.scan)
 
-    def test_actual_reached_cut_not_requested_id_is_the_execution_authority(self):
+    def test_actual_typed_observation_not_requested_id_is_the_execution_authority(self):
+        # Synthetic parser fixtures only: these rows do not demonstrate an
+        # original TestCase, native worker, cleanup or platform execution.
+        operating_system = self.scope["os"]
+        items = [item for item in self.catalog.cases_for(operating_system) if item.kind == "regression"][:2]
+        self.assertEqual(len(items), 2)
+        def record(item):
+            specification = json.loads(item.specification)
+            filename = "regression-" + contract.digest(item.name) + ".json"
+            return {"schemaVersion": 2, "caseId": item.identifier, "kind": item.kind, "name": item.name,
+                    "observation": {"caseId": item.name, "status": "regression-case", "evidence": filename,
+                                    "caseRemoved": True, "originalWorkersSettled": True},
+                    "evidence": {filename: {"schema": "mrk-signing-regression-case-v1", "case": specification,
+                        "originalTestcaseCompleted": True, "typedVariant": specification["helper"] != "whole",
+                        "testsRun": 1, "setupBodyTeardownCleanupsReturned": True,
+                        "originalWorkersSettled": True, "caseRemoved": True}},
+                    "regressionParts": [item.name]}
+        records = [record(item) for item in items]
+        expected = [item.identifier for item in items]
         with tempfile.TemporaryDirectory(prefix="mrk-matrix-actual-") as directory:
             root = Path(directory)
-            item = event(1)
-            case_id = contract.logical_case_id("original", item, "before")
-            record = {"caseId": case_id, "seed": "original", "outcome": {"automatic": "recovered", "manual": None},
-                      "results": {"original-cut": {"event": item, "edge": "before"}, "final-automatic": {}}}
-            def write(records):
+            def write(values):
                 with gzip.open(root / "results.jsonl.gz", "wb") as stream:
-                    for value in records: stream.write(contract.canonical(value) + b"\n")
-            write([record])
-            self.assertRegex(runner.validate_actual_results(root, [case_id]), r"^[0-9a-f]{64}$")
-            for variant in ("wrong-cut", "duplicate", "missing", "missing-recovery"):
-                bad = copy.deepcopy(record)
-                if variant == "wrong-cut": bad["results"]["original-cut"]["event"]["occurrence"] += 1
-                if variant == "missing-recovery": bad["results"].pop("final-automatic")
-                write([] if variant == "missing" else [bad, bad] if variant == "duplicate" else [bad])
-                with self.assertRaises(ValueError): runner.validate_actual_results(root, [case_id])
+                    for value in values: stream.write(contract.canonical(value) + b"\n")
+            write(records)
+            self.assertRegex(runner.validate_actual_results(root, expected, operating_system=operating_system),
+                             r"^[0-9a-f]{64}$")
+            for variant in ("wrong-kind", "wrong-name", "wrong-observation", "wrong-descriptor", "wrong-variant",
+                            "missing-evidence", "extra-evidence", "missing-contribution", "unreturned-testcase",
+                            "unsettled-worker", "retained-path", "legacy-row", "bool-version", "extra-field",
+                            "duplicate", "missing", "reordered"):
+                with self.subTest(variant=variant):
+                    values = copy.deepcopy(records)
+                    bad = values[0]
+                    payload = bad["evidence"][bad["observation"]["evidence"]]
+                    if variant == "wrong-kind": bad["kind"] = "primitive"
+                    elif variant == "wrong-name": bad["name"] = items[1].name
+                    elif variant == "wrong-observation": bad["observation"]["caseId"] = items[1].name
+                    elif variant == "wrong-descriptor": payload["case"]["helper"] = "unknown"
+                    elif variant == "wrong-variant": payload["typedVariant"] = not payload["typedVariant"]
+                    elif variant == "missing-evidence": bad["evidence"].clear()
+                    elif variant == "extra-evidence": bad["evidence"]["unrecognized.json"] = {}
+                    elif variant == "missing-contribution": bad["regressionParts"] = []
+                    elif variant == "unreturned-testcase": payload["setupBodyTeardownCleanupsReturned"] = False
+                    elif variant == "unsettled-worker": bad["observation"]["originalWorkersSettled"] = False
+                    elif variant == "retained-path": payload["caseRemoved"] = False
+                    elif variant == "legacy-row": values[0] = {"caseId": bad["caseId"], "seed": "original",
+                        "outcome": {"automatic": "recovered", "manual": None},
+                        "results": {"original-cut": {"event": event(1), "edge": "before"}, "final-automatic": {}}}
+                    elif variant == "bool-version": bad["schemaVersion"] = True
+                    elif variant == "extra-field": bad["forcePass"] = True
+                    elif variant == "duplicate": values[1] = copy.deepcopy(bad)
+                    elif variant == "missing": values.pop()
+                    elif variant == "reordered": values.reverse()
+                    write(values)
+                    with self.assertRaises(ValueError):
+                        runner.validate_actual_results(root, expected, operating_system=operating_system)
+
+        # Preserve the old wrong-reached-cut counterexample in the active v2
+        # semantic shape. These are inert parser DATA, not native receipts.
+        item = next(item for item in self.catalog.cases_for(operating_system) if item.name == "C/caller/02")
+        specification = json.loads(item.specification)
+        token = "a" * 32
+        filename = "semantic-" + contract.digest(item.name) + "-complete.json"
+        original = {"exit": 0, "originalAnchorWait": True, "originalWorkerWait": True, "originalStatusEOF": True,
+                    "groupAbsentBeforeAnchorWait": True, "deadlineTest": False, "runDeadlineExpired": False}
+        cut = self.inert_cut(self.catalog.SEMANTIC.case(item.name).selector, token)
+        semantic = self.inert_semantic_row(item.name, [
+            {"name": "seed", "original": {**original, "exit": 73}, "observation": cut},
+            {"name": "semantic-main", "original": original, "manual": "none", "expected": specification["expected"],
+             "observation": self.inert_recovery(token, specification["expected"])}])
+        self.assertEqual(contract.validate_layered_record(semantic, operating_system), item.identifier)
+        reindexed = copy.deepcopy(semantic)
+        reindexed["evidence"][filename]["steps"][0]["observation"]["event"]["index"] = 1
+        self.assertEqual(contract.validate_layered_record(reindexed, operating_system), item.identifier)
+        for variant in ("actual-occurrence", "actual-destination", "actual-edge", "actual-context-type", "missing-context",
+                        "missing-recovery", "unreturned-original", "actual-outcome", "actual-session", "actual-refusal",
+                        "actual-idle", "retained-resource"):
+            with self.subTest(semantic_variant=variant):
+                changed = copy.deepcopy(semantic)
+                steps = changed["evidence"][filename]["steps"]
+                reached = steps[0]["observation"]
+                if variant == "actual-occurrence": reached["event"]["occurrence"] += 1
+                elif variant == "actual-destination": reached["event"]["details"]["destination"] += "-other"
+                elif variant == "actual-edge": reached["edge"] = "before"
+                elif variant == "actual-context-type": reached["context"]["beforeGrant"] = 1
+                elif variant == "missing-context": reached.pop("context")
+                elif variant == "missing-recovery": steps.pop()
+                elif variant == "unreturned-original": steps[-1]["original"]["originalWorkerWait"] = False
+                elif variant == "actual-outcome": steps[-1]["observation"]["result"]["status"] = "absent"
+                elif variant == "actual-session": steps[-1]["observation"]["result"]["session"] = "b" * 32
+                elif variant == "actual-refusal": steps[-1]["observation"]["refused"] = "not recovered"
+                elif variant == "actual-idle": steps[-1]["observation"]["idleAndRenewedAdmission"] = False
+                elif variant == "retained-resource": steps[-1]["observation"]["after"]["ownedRemaining"] = {"inert": {}}
+                with self.assertRaises(ValueError):
+                    contract.validate_layered_record(changed, operating_system)
+
+        # Reuse the existing pure H data fixture rather than simulate another
+        # native flow. Rehash alias DATA after mutations so a digest mismatch
+        # cannot mask acceptance of an incomplete actual observation.
+        from .test_local_signing_observation import ObservationContractTests
+        healthy = ObservationContractTests.inert_healthy_data(Path("/fictional-inert-root"))
+        healthy["snapshot"].update(self.inert_clean_snapshot())
+        healthy["snapshot"]["preferences"] = copy.deepcopy(healthy["snapshot"]["original"])
+        healthy_row = self.inert_semantic_row("H/full-context", [
+            {"name": "healthy", "original": original, "observation": healthy}])
+        self.assertEqual(contract.validate_layered_record(healthy_row, operating_system), healthy_row["caseId"])
+        for variant in ("missing-H", "missing-checkpoint", "failed-effect", "retained-H", "early-terminal"):
+            with self.subTest(healthy_variant=variant):
+                changed = copy.deepcopy(healthy_row)
+                step = changed["evidence"][changed["observation"]["evidence"]]["steps"][0]
+                value = step["observation"]
+                if variant == "missing-H": step["observation"] = {}
+                elif variant == "missing-checkpoint": value["healthyContexts"]["checkpoints"].pop()
+                elif variant == "failed-effect":
+                    value["events"][value["healthyContexts"]["effects"][0]["eventIndex"] - 1]["succeeded"] = False
+                elif variant == "retained-H": value["snapshot"]["ownedRemaining"] = {"inert-retained": {}}
+                elif variant == "early-terminal": value["events"][-1]["index"] = 450
+                self.refresh_inert_semantic_digests(changed)
+                with self.assertRaises(ValueError): contract.validate_layered_record(changed, operating_system)
+
+        def recovery_step(name, expected, manual="none"):
+            return {"name": name, "original": original, "manual": manual, "expected": expected,
+                    "observation": self.inert_recovery(token, expected, manual)}
+
+        for prefix_name in ("database", "lock", "transaction-stage"):
+            source = self.catalog.SEMANTIC
+            declared = source.case("N/native-prefix/" + prefix_name)
+            cut = self.inert_cut(declared.selector, token)
+            payload = source.NATIVE_PREFIX_CONTENT[prefix_name]
+            size = len(payload) // 2
+            facts = {"device": 1, "inode": 2, "mode": 0o600, "size": size,
+                     "sha256": hashlib.sha256(payload[:size]).hexdigest()}
+            filename = declared.selector.operation.removeprefix("native-effect/write/")
+            names = ["default-keychain", "list-keychains", "create-keychain"]
+            if prefix_name == "transaction-stage": names.append("set-keychain-settings")
+            cut["context"]["recoveryAttempt"] = False
+            cut["originalCommand"] = {"command": names[-1], "ordinal": len(names),
+                                      "keychain": source.KEYCHAIN + "/" + source.DB_NAME, "revisionBefore": 0}
+            cut["physicalWrite"] = {"name": filename, "bytes": size, "intendedBytes": len(payload),
+                "sha256": facts["sha256"], "intendedSha256": hashlib.sha256(payload).hexdigest(),
+                "facts": facts, "properPrefix": True, "revisionAtCut": int(prefix_name == "transaction-stage")}
+            cut["snapshot"] = {"session": token, "native": {
+                source.KEYCHAIN.removeprefix("<ROOT>/").replace("<TOKEN>", token) + "/" + filename: copy.deepcopy(facts)},
+                "nativeCalls": [{"command": name, "mutation": number >= 2, "recovery": False}
+                                for number, name in enumerate(names)]}
+            main = recovery_step("semantic-main", source.REFUSED)
+            native_row = self.inert_semantic_row(declared.identifier, [
+                {"name": "seed", "original": {**original, "exit": 73}, "observation": cut}, main,
+                recovery_step("semantic-resolution", declared.resolution, "resolve")], [("negative", main)])
+            self.assertEqual(contract.validate_layered_record(native_row, operating_system), native_row["caseId"])
+        for variant in ("missing-prefix", "empty-prefix", "changed-prefix", "changed-inode", "wrong-command", "false-refusal-idle"):
+            with self.subTest(native_variant=variant):
+                changed = copy.deepcopy(native_row)  # Last positive is the distinct transaction-stage case.
+                steps = changed["evidence"][changed["observation"]["evidence"]]["steps"]
+                cut = steps[0]["observation"]
+                if variant == "missing-prefix": cut.pop("physicalWrite")
+                elif variant == "empty-prefix": cut["physicalWrite"]["bytes"] = 0
+                elif variant == "changed-prefix": cut["physicalWrite"]["sha256"] = "f" * 64
+                elif variant == "changed-inode": cut["physicalWrite"]["facts"]["inode"] += 1
+                elif variant == "wrong-command": cut["originalCommand"]["ordinal"] = 3
+                elif variant == "false-refusal-idle": steps[1]["observation"]["idleAndRenewedAdmission"] = True
+                self.refresh_inert_semantic_digests(changed)
+                with self.assertRaises(ValueError): contract.validate_layered_record(changed, operating_system)
+
+        refusals = []
+        for mode in ("none", "resolve"):
+            refusal_event = {"index": 1, "operation": "manual/input", "origin": "owner", "slot": "tty", "details": {"action": mode}}
+            refusals.append({"name": "focused-" + mode, "original": original, "manual": mode, "observation": {
+                "before": {"session": token, "preferences": {"default": "fictional", "search": []}},
+                "after": {"session": token, "preferences": {"default": "fictional", "search": []}},
+                "error": "inert expected refusal", "caughtType": "CredentialError" if mode == "none" else "OwnerResolutionRefused",
+                "events": [] if mode == "none" else [refusal_event],
+                "inputObservations": [] if mode == "none" else [{"eventIndex": 1, "action": mode}],
+                "resourcesPreserved": True, "freshAdmission": "pending"}})
+        action = "fixture/foreign-native-db"
+        owner_value = {"manualFixtureAction": True, "idleAndRenewedAdmission": True,
+            "result": {"status": "recovered-with-conflict", "session": token}, "after": self.inert_clean_snapshot(),
+            "preferences": self.inert_clean_snapshot()["preferences"],
+            "events": [{"index": 1, "operation": "manual/input", "origin": "owner", "slot": "tty",
+                        "details": {"action": action}, "succeeded": True}],
+            "inputObservations": [{"eventIndex": 1, "action": action, "read": {"kind": "recheck", "characters": 41}}]}
+        focused_row = self.inert_semantic_row("F/07", [
+            {"name": "seed", "original": {**original, "exit": 73},
+             "observation": self.inert_cut(self.catalog.SEMANTIC.SEEDS["active-after-build"], token)}, *refusals,
+            {"name": "focused-fixture-owner", "original": original, "observation": owner_value}],
+            [("negative-none", refusals[0]), ("negative-resolve", refusals[1])])
+        self.assertEqual(contract.validate_layered_record(focused_row, operating_system), focused_row["caseId"])
+        for variant in ("seed-only", "missing-owner", "owner-idle", "owner-outcome", "unpreserved", "missing-negative"):
+            with self.subTest(focused_variant=variant):
+                changed = copy.deepcopy(focused_row)
+                complete = changed["evidence"][changed["observation"]["evidence"]]
+                steps = complete["steps"]
+                if variant == "seed-only": del steps[1:]
+                elif variant == "missing-owner": steps.pop()
+                elif variant == "owner-idle": steps[-1]["observation"]["idleAndRenewedAdmission"] = False
+                elif variant == "owner-outcome": steps[-1]["observation"]["result"]["status"] = "recovered"
+                elif variant == "unpreserved": steps[1]["observation"]["resourcesPreserved"] = False
+                elif variant == "missing-negative": changed["evidence"].pop(complete["negativeEvidence"][0])
+                self.refresh_inert_semantic_digests(changed)
+                with self.assertRaises(ValueError): contract.validate_layered_record(changed, operating_system)
+
+        primitive_rows = {}
+        for family in ("writer-failures", "reader-failures", "remover-failures"):
+            rows = []
+            for variant in self.catalog.PRIMITIVE_FAILURES[family]:
+                operation = ("write" if variant in {"short-write", "zero-write", "oversized-write", "partial-write-error"}
+                             else "fsync" if "sync-" in variant else "unlink" if variant.startswith("unlink-")
+                             else "read" if variant in {"read-before", "read-after", "reader-name-changed"} else "close")
+                fault = {"variant": variant, "effectCompleted": not variant.endswith("-before")
+                         and variant not in {"zero-write", "oversized-write"}, "event": {
+                    "index": 1, "operation": operation, "slot": "<ROOT>/home/inert", "origin": "mobile_release.local_signing:_write",
+                    "phase": "component", "occurrence": 1, "details": {}}}
+                generations = {}
+                if variant in {"short-write", "partial-write-error"}: fault.update(written=1, prefixHex="7b")
+                if variant in {"stage-replaced", "target-replaced", "reader-name-changed"}:
+                    fault["replacement"] = {"device": 1, "inode": 3, "mode": 0o600, "size": 1,
+                                            "sha256": hashlib.sha256(b"x").hexdigest()}
+                    generations["1:3"] = {"fixtureReplacement": variant}
+                error = (None if variant == "short-write" else "ProcessError" if variant in {"close-after", "reader-close-after"}
+                         else "OSError" if variant.endswith(("-before", "-after")) or variant == "partial-write-error"
+                         else "FileExistsError" if variant.startswith("pending-") else "CredentialError")
+                rows.append({"variant": variant, "originalError": error,
+                    "journalFailed": family != "reader-failures" and variant != "short-write",
+                    "faults": [] if variant.startswith(("pending-", "immutable-")) else [fault],
+                    "initial": {"<ROOT>/home": [1, 2]}, "retainedIdentities": {"<ROOT>/home": [1, 2]}, "generations": generations,
+                    "physical": {"<ROOT>/home": {"type": stat.S_IFDIR, "mode": 0o700, "links": 1,
+                                                 "initialAliases": ["<ROOT>/home"]}}, "nativeCommands": 0})
+            item = next(item for item in self.catalog.cases_for(operating_system) if item.name == "A/" + family)
+            row = {"schemaVersion": 2, "caseId": item.identifier, "kind": "primitive", "name": item.name,
+                "observation": {"component": family, "actualFailureCases": len(rows), "resultsSha256": contract.digest(rows),
+                    "nativeCommands": 0, "allExactChildrenReapedAndGroupsAbsent": True, "allCasePathsRemoved": True},
+                "evidence": {"component-evidence.json": rows}, "regressionParts": []}
+            self.assertEqual(contract.validate_layered_record(row, operating_system), item.identifier)
+            primitive_rows[family] = row
+        for variant in ("missing-outcome", "short-latched", "writer-unlatched", "reader-latched", "remover-success",
+                        "missing-fault", "repeated-fault", "wrong-effect", "missing-physical"):
+            with self.subTest(primitive_variant=variant):
+                family = "reader-failures" if variant == "reader-latched" else "remover-failures" if variant == "remover-success" else "writer-failures"
+                changed = copy.deepcopy(primitive_rows[family])
+                rows = changed["evidence"]["component-evidence.json"]
+                if variant == "missing-outcome": rows[0].pop("originalError")
+                elif variant in {"short-latched", "reader-latched"}: rows[0]["journalFailed"] = True
+                elif variant == "writer-unlatched": rows[1]["journalFailed"] = False
+                elif variant == "remover-success": rows[0]["originalError"] = None
+                elif variant == "missing-fault": rows[0]["faults"].clear()
+                elif variant == "repeated-fault": rows[0]["faults"] *= 2
+                elif variant == "wrong-effect": rows[0]["faults"][0]["effectCompleted"] = False
+                elif variant == "missing-physical": rows[0].pop("physical")
+                changed["observation"]["resultsSha256"] = contract.digest(rows)
+                with self.assertRaises(ValueError): contract.validate_layered_record(changed, operating_system)
 
     def test_original_c_prefix_reducer_requires_actual_positive_bytes_and_exact_read_inode(self):
-        item = {**event(1), "operation": "command-fence/PENDING_WRITE", "origin": "original-custodian"}
-        case_id = contract.logical_case_id("original", item, "partial")
         observation = {"nonce": "1" * 32, "commandSequence": 1, "ordinal": 4, "operation": "PENDING_WRITE",
             "edge": "PARTIAL", "outcome": "OK", "written": 2, "total": 8, "syncFlags": 0,
             "creationIdentity": [1, 2, 1000, 1000, stat.S_IFREG | 0o600, 1], "operandHex": b"test".hex(),
@@ -591,11 +912,8 @@ class MatrixContractTests(unittest.TestCase):
             "originalFileState": [1, 2, stat.S_IFREG | 0o600, 1, 1000, 1000, 2, 17, 19],
             "finalAbsentBeforeAndAfter": True, "originalReadClosed": True}
         def validate(value):
-            record = {"caseId": case_id, "seed": "original", "outcome": {"automatic": "recovered", "manual": None},
-                "results": {"original-cut": {"event": item, "edge": "partial", "originalCFenceObservation": value},
-                            "final-automatic": {}}}
-            return contract.validate_actual_results(gzip.compress(contract.canonical(record) + b"\n"), [case_id])
-        self.assertRegex(validate(observation), r"^[0-9a-f]{64}$")
+            return contract.validate_original_c_prefix(value)
+        self.assertIsNone(validate(observation))
         changes = ({"written": 0, "actualReadHex": ""}, {"written": -1}, {"written": True}, {"total": 9.0},
                    {"total": 4097}, {"operandHex": "not-hex!"}, {"actualReadHex": "ffff"}, {"syncFlags": True},
                    {"nonce": "x" * 32}, {"commandSequence": True}, {"ordinal": 0}, {"outcome": "PENDING"},
@@ -1299,6 +1617,168 @@ class SigningAdapterDiagnosticTests(unittest.TestCase):
                 if mode == "enabled":
                     record = json.loads(output.getvalue().removeprefix(contract.ADAPTER_FAILURE_PREFIX))
                     self.assertEqual(record["targetResult"], {"returncode": 1, "stderrKind": "empty", "locations": []})
+
+
+class SigningAdapterPhaseDiagnosticTests(unittest.TestCase):
+    """Optional phase observations only; no real worker, file or suite dispatch."""
+
+    def context_and_task(self):
+        actual = ("/fixed/runner.py", "/fixed/contract.py")
+        context = ("source", 20.0, tuple(zip(actual, contract.ADAPTER_PHASE_FAILURE_FILES)))
+        namespace = {}
+        exec(compile("def fail():\n    raise ValueError('PRIVATE phase message')\n", actual[0], "exec"), namespace)
+        return context, namespace["fail"]
+
+    def test_phase_projection_uses_true_prebound_frames_and_fixed_visit_and_output_bounds(self):
+        context, task = self.context_and_task()
+        try:
+            task()
+        except ValueError:
+            error = sys.exc_info()
+        with patch.object(contract, "time", SimpleNamespace(monotonic=lambda: 10.0)), \
+                patch.object(Path, "resolve", side_effect=AssertionError("no diagnostic resolution")), \
+                patch.object(Path, "stat", side_effect=AssertionError("no diagnostic stat")), \
+                patch.object(Path, "read_bytes", side_effect=AssertionError("no diagnostic read")), \
+                patch.object(traceback, "extract_tb", side_effect=AssertionError("no formatted traceback")), \
+                patch.object(linecache, "getline", side_effect=AssertionError("no source reads")):
+            for stage in contract.ADAPTER_PHASE_FAILURE_STAGES:
+                output = io.StringIO()
+                with redirect_stderr(output):
+                    record = contract.emit_adapter_phase_failure(context, stage, error)
+                self.assertEqual(record["locations"], [{"file": contract.ADAPTER_PHASE_FAILURE_FILES[0], "line": 2}])
+                self.assertEqual(record["category"], "value-error")
+                self.assertEqual(set(record), {"schema", "phase", "stage", "category", "locations"})
+                self.assertNotIn("PRIVATE", output.getvalue())
+                self.assertLessEqual(len(output.getvalue().encode("ascii")), 2048)
+            for invalid, stage, actual_error in (
+                    (("foreign", *context[1:]), "suite", error),
+                    (("source", True, context[2]), "suite", error),
+                    (("source", None, context[2]), "suite", error),
+                    (("source", float("nan"), context[2]), "suite", error),
+                    (("source", 20.0, ((context[2][0][0], "/PRIVATE/file"), context[2][1])), "suite", error),
+                    (context, "suite-extra", error), (context, True, error),
+                    (context, "suite", (TypeError, error[1], error[2])),
+                    (context, "suite", (error[0], error[1], None))):
+                output = io.StringIO()
+                with redirect_stderr(output):
+                    self.assertIsNone(contract.emit_adapter_phase_failure(invalid, stage, actual_error))
+                self.assertEqual(output.getvalue(), "")
+
+            # More than64 actual foreign frames precede the one allowed frame.
+            # A projector scanning beyond its raw-frame budget would expose it.
+            namespace = {}
+            exec(compile("def descend(depth, task):\n    return descend(depth - 1, task) if depth else task()\n",
+                         "/PRIVATE/foreign.py", "exec"), namespace)
+            try:
+                namespace["descend"](70, task)
+            except ValueError:
+                deep_error = sys.exc_info()
+            self.assertEqual(contract.adapter_phase_failure_record(context, "suite", deep_error)["locations"], [])
+            # Repeated allowed frames still publish at most four locations.
+            namespace = {}
+            exec(compile("def descend(depth):\n    if depth: return descend(depth - 1)\n    raise ValueError('PRIVATE')\n",
+                         context[2][0][0], "exec"), namespace)
+            try:
+                namespace["descend"](8)
+            except ValueError:
+                repeated_error = sys.exc_info()
+            self.assertEqual(len(contract.adapter_phase_failure_record(context, "suite", repeated_error)["locations"]), 4)
+
+        output = io.StringIO()
+        with patch.object(contract, "time", SimpleNamespace(monotonic=lambda: 20.0)), redirect_stderr(output):
+            self.assertIsNone(contract.emit_adapter_phase_failure(context, "suite", error))
+        self.assertEqual(output.getvalue(), "")
+
+    def test_actual_adapter_wrapper_preserves_setup_and_post_suite_failures_after_finally(self):
+        flags = SimpleNamespace(**{name: 1 for name in (
+            "isolated", "ignore_environment", "no_user_site", "no_site", "safe_path", "dont_write_bytecode")})
+        package = runner.ROOT.parent / "work/source-build/src/mobile_release"
+        output_path = runner.ROOT.parent / "work/signing-adapter/source"
+        namespace = {}
+        exec(compile("def method(self):\n    pass\n",
+                     str(runner.ROOT / "tests/unit/test_local_signing_persistent.py"), "exec"), namespace)
+
+        class SelectedTest:
+            method = namespace["method"]
+            _testMethodName = "method"
+
+            def __init__(self, identifier):
+                self.identifier = identifier
+
+            def id(self):
+                return self.identifier
+
+        class Single:
+            def __init__(self, identifier):
+                self.test = SelectedTest(identifier)
+
+            def __iter__(self):
+                return iter((self.test,))
+
+            def countTestCases(self):
+                return 1
+
+        model = sys.modules[fixture.PersistentSigningModel.__module__]
+        actual_emitter = contract.emit_adapter_phase_failure
+        original_deadline = fixture.PHASE_DEADLINE
+        for stage in ("admission", "postconditions"):
+            for emitter_raises in (False, True):
+                with self.subTest(stage=stage, emitter_raises=emitter_raises):
+                    events, observed, output = [], [], io.StringIO()
+                    temporary = SimpleNamespace(tempdir="original-tempdir")
+                    local_sys = SimpleNamespace(flags=flags, path=list(sys.path), modules=sys.modules)
+                    fake_unittest = SimpleNamespace(
+                        TestLoader=lambda: SimpleNamespace(errors=[], loadTestsFromName=Single),
+                        TestSuite=lambda _tests: SimpleNamespace(run=lambda _result: events.append("suite-returned")),
+                    )
+                    args = SimpleNamespace(deadline=20.0, adapter_phase="source", output=output_path,
+                                           package_root=Path("/not-fixed") if stage == "admission" else package)
+
+                    def emit(context, actual_stage, error):
+                        observed.append((context, actual_stage, error[1], temporary.tempdir,
+                                         runner.case_owner.ADAPTER_DIAGNOSTIC_CONTEXT))
+                        events.append("diagnostic")
+                        if emitter_raises:
+                            raise KeyboardInterrupt("PRIVATE optional emission failure")
+                        return actual_emitter(context, actual_stage, error)
+
+                    with ExitStack() as stack:
+                        for manager in (
+                            patch.object(runner, "sys", local_sys),
+                            patch.object(runner, "time", SimpleNamespace(monotonic=lambda: 10.0)),
+                            patch.object(contract, "time", SimpleNamespace(monotonic=lambda: 10.0)),
+                            patch.object(runner, "tempfile", temporary), patch.object(runner, "unittest", fake_unittest),
+                            patch.object(contract, "adapter_test_ids", return_value=contract.ADAPTER_TEST_IDS),
+                            patch.object(runner, "adapter_source_map", return_value=(("/fixed/runner.py", contract.ADAPTER_FAILURE_TEST_FILES[0]),)),
+                            patch.object(fixture.signing, "__file__", str(package / "local_signing.py")),
+                            patch.object(fixture, "PHASE_DEADLINE", original_deadline),
+                            patch.object(fixture, "_CASE_CUSTODY", {}), patch.object(fixture, "_CASE_RECOVERY_DEBT", {}),
+                            patch.object(model, "_RETAINED_MODEL_LIFETIMES", (object(),)),
+                            patch.object(runner.case_owner, "ADAPTER_DIAGNOSTIC_CONTEXT", object()),
+                            patch.object(Path, "resolve", new=lambda path, **_kw: path),
+                            patch.object(Path, "exists", return_value=False), patch.object(Path, "is_symlink", return_value=False),
+                            patch.object(Path, "mkdir", new=lambda path, **_kw: events.append("mkdir")),
+                            patch.object(Path, "iterdir", side_effect=AssertionError("retained model short-circuits output IO")),
+                            patch.object(contract, "emit_adapter_phase_failure", side_effect=emit), redirect_stderr(output),
+                        ):
+                            stack.enter_context(manager)
+                        with self.assertRaisesRegex(ValueError, "fixed adapter roots" if stage == "admission" else "adapter failed or retained") as caught:
+                            runner.adapter_phase(args, {})
+                    self.assertIs(fixture.PHASE_DEADLINE, original_deadline)
+                    self.assertEqual(len(observed), 1)
+                    self.assertEqual(observed[0][1], stage)
+                    self.assertIs(observed[0][2], caught.exception)
+                    self.assertEqual(observed[0][3], "original-tempdir")
+                    if stage == "postconditions":
+                        self.assertIsNone(observed[0][4])
+                    self.assertEqual(events, ["diagnostic"] if stage == "admission" else ["mkdir", "suite-returned", "diagnostic"])
+                    if emitter_raises:
+                        self.assertEqual(output.getvalue(), "")
+                    else:
+                        record = json.loads(output.getvalue().removeprefix(contract.ADAPTER_PHASE_FAILURE_PREFIX))
+                        self.assertEqual(record["stage"], stage)
+                        self.assertTrue(record["locations"])
+                    self.assertNotIn("PRIVATE", output.getvalue())
 
 
 if __name__ == "__main__":

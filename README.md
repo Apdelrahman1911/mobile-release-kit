@@ -287,8 +287,11 @@ workflow or use real Store/signing credentials to test this repository.
 The persistent local-signing matrix is also required: sixteen shards on each
 of Linux and macOS, with source and installed-wheel execution in every cell.
 The reviewed CI owner, not a raw fixture launcher, runs those phases under the
-original deadlines. Protected aggregation checks actual reached-cut inventories,
-package/test bindings and every candidate proof before accepting the full union.
+original deadlines. One source-defined catalog combines primitive operation cuts,
+semantic recovery cases and the exact delegated regression variants. Protected
+aggregation checks their actual evidence, package/test bindings and every candidate
+proof before accepting the full union; ordinary test output never invents passes
+for the still-pending delegated methods.
 Unchanged successful cells from an earlier attempt of the same run/commit may
 be reused; a partial shard, green job alone or process snapshot is not full
 verification. See [matrix verification](docs/local-signing.md#verification).

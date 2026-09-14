@@ -2270,13 +2270,17 @@ class SigningMatrixControllerTests(unittest.TestCase):
         controller = controller_module()
         paths = fixture_paths(controller)
         rig = SimpleNamespace(controller=controller, paths=paths, clock=10.0, events=[], captures=[],
-                              changes={}, capture_changes={}, publish_advance=0.0, inspect_advance=0.0,
+                              changes={}, catalog_changes={}, capture_changes={}, publish_advance=0.0, inspect_advance=0.0,
                               idle_error=False, actual_error=False)
         rig.selection = controller.MatrixSelection("example/mobile-release-kit", "1" * 40, "1234", 1,
             "test-signing-matrix", "ubuntu-24.04", 0, Path("/fixture/signing-matrix-proof/proof.json"))
         rig.scope = contract.scope_from_metadata(rig.selection.metadata(), rig.selection.operating_system, producer=True)
-        rig.expected = sorted(contract.digest(str(number)) for number in range(200))
-        rig.selected = [value for value in rig.expected if contract.shard_for(value) == 0]
+        catalog = contract.layered_catalog()
+        rig.definition = catalog.definition(rig.selection.operating_system)
+        rig.catalog_sha = contract.digest(rig.definition)
+        rig.expected = list(catalog.expected_ids(rig.selection.operating_system))
+        rig.selected = list(catalog.shard_ids(rig.selection.operating_system, rig.selection.shard))
+        rig.coverage = catalog.coverage(rig.selection.operating_system, rig.selected)
         rig.contract = SimpleNamespace(**vars(contract))
         rig.contract.package_manifest = lambda *_args, **_kwargs: {"package": "bound"}
         rig.contract.definitions_manifest = lambda *_args, **_kwargs: {"definitions": "bound"}
@@ -2289,7 +2293,7 @@ class SigningMatrixControllerTests(unittest.TestCase):
             rig.events.append(("run", phase, tuple(argv), options))
             package = paths.work / ("source-build/src/mobile_release" if phase == "source" else
                                      "wheel-venv/lib/python3.11/site-packages/mobile_release")
-            value = {"schema": 1, "phase": phase, "shard": 0, "scope": rig.scope,
+            value = {"schema": 2, "phase": phase, "shard": 0, "scope": rig.scope,
                      "status": "phase-finished", "productionRoot": str(package)}
             capture = native_capture_fixture(stdout=b"MRK_MATRIX_PHASE=" + contract.canonical(value) + b"\n",
                                              **rig.capture_changes.get(phase, {}))
@@ -2312,24 +2316,26 @@ class SigningMatrixControllerTests(unittest.TestCase):
             if path.name == "results.jsonl.gz":
                 return b"inert compressed-input double"
             phase = path.parent.name
-            value = {"shard": 0, "scope": "partial; one of sixteen required shards",
+            if path.name == "catalog.json":
+                return contract.canonical({**rig.definition, **rig.catalog_changes.get(phase, {})})
+            value = {"schemaVersion": 2, "shard": 0, "scope": rig.scope,
                      "expectedCaseIds": rig.expected, "executedCaseIds": rig.selected,
-                     "inventorySha256": contract.digest("original inventory"), "packageSha256": rig.package_sha,
-                     "definitionsSha256": rig.definitions_sha, "counts": {}, "recoveryGroups": ["original"], "elapsed": 1,
+                     "catalogSha256": rig.catalog_sha, "packageSha256": rig.package_sha,
+                     "definitionsSha256": rig.definitions_sha, "coverage": rig.coverage, "elapsed": 1.0,
                      "productionRoot": str(paths.work / ("source-build/src/mobile_release" if phase == "source" else
                                                           "wheel-venv/lib/python3.11/site-packages/mobile_release")),
                      "allExactChildrenReapedAndGroupsAbsent": True, "allCasePathsRemoved": True}
             return contract.canonical({**value, **rig.changes.get(phase, {})})
 
-        def actual(_data, expected, *, deadline):
-            rig.events.append(("actual", tuple(expected), deadline))
+        def actual(_data, expected, *, operating_system, deadline):
+            rig.events.append(("actual", tuple(expected), deadline, operating_system))
             if rig.actual_error:
                 raise ValueError("actual reached cut differs")
             return contract.digest("actual cut bytes")
 
         def finalized(path, session, *, deadline):
             rig.events.append(("finalized", path, deadline))
-            return {"files": 4, "bytes": 17, "original_finality_before_read": True}
+            return {"files": 3, "bytes": 17, "original_finality_before_read": True}
 
         def publish(selection, proof, selected_contract, session, *, deadline):
             rig.events.append(("publish", deadline, proof))
@@ -2376,6 +2382,12 @@ class SigningMatrixControllerTests(unittest.TestCase):
         publication = next(index for index, event in enumerate(rig.events) if event[0] == "publish")
         self.assertEqual(rig.events[publication - 1], ("idle", 910.0))
         self.assertEqual(rig.events[publication][1], 910.0)
+        proof = rig.events[publication][2]
+        self.assertEqual(proof["schemaVersion"], 2)
+        self.assertEqual(proof["catalogSha256"], rig.catalog_sha)
+        self.assertEqual(proof["expectedCaseIds"], rig.expected)
+        self.assertTrue(all(event[1] == tuple(rig.selected) and event[3] == rig.selection.operating_system
+                            for event in rig.events if event[0] == "actual"))
         first_read = next(index for index, event in enumerate(rig.events) if event[0] == "read")
         self.assertEqual(rig.events[first_read - 2], ("idle", 430.0))
         self.assertTrue(result.details["proof"]["private_raw_outputs_published"] is False)
@@ -2399,7 +2411,10 @@ class SigningMatrixControllerTests(unittest.TestCase):
     def test_source_proof_contradiction_or_actual_cut_mismatch_stops_before_wheel(self):
         for changes in ({"packageSha256": "f" * 64}, {"definitionsSha256": "f" * 64},
                         {"allCasePathsRemoved": False}, {"allExactChildrenReapedAndGroupsAbsent": False},
-                        {"executedCaseIds": []}, {"shard": True}, {"extra": True}):
+                        {"executedCaseIds": []}, {"shard": True}, {"extra": True},
+                        {"schemaVersion": 1}, {"schemaVersion": 2.0}, {"catalogSha256": "f" * 64},
+                        {"coverage": {}}, {"expectedCaseIds": []}, {"elapsed": True}, {"elapsed": -1},
+                        {"elapsed": 421}, {"scope": "legacy-partial"}):
             with self.subTest(changes=changes):
                 rig = self.rig()
                 rig.changes["source"] = changes
@@ -2410,6 +2425,53 @@ class SigningMatrixControllerTests(unittest.TestCase):
         rig.actual_error = True
         self.assertFalse(self.execute(rig).ok)
         self.assertEqual(len(rig.captures), 1)
+        for phase in ("source", "wheel"):
+            with self.subTest(catalog_phase=phase):
+                rig = self.rig()
+                rig.catalog_changes[phase] = {"assignment": list(reversed(rig.definition["assignment"]))}
+                result = self.execute(rig)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error, "MATRIX_SOURCE_CATALOG_CHANGED")
+                self.assertEqual(len(rig.captures), 1 if phase == "source" else 2)
+                self.assertFalse(any(event[0] == "publish" for event in rig.events))
+        for attempt in (True, 1.0):
+            rig = self.rig()
+            rig.changes["source"] = {"scope": {**rig.scope, "attempt": attempt}}
+            self.assertEqual(self.execute(rig).error, "MATRIX_PHASE_RESULT_BINDING")
+
+    def test_finalized_output_requires_exact_private_original_files_and_accounts_all_bytes(self):
+        controller = controller_module()
+        for change in (None, "extra", "missing", "file-mode", "directory-mode", "link", "hardlink", "owner"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory(prefix="mrk-matrix-output-inert-") as temporary:
+                root = Path(temporary)
+                root.chmod(0o700)
+                for name in controller.MATRIX_PHASE_FILES:
+                    (root / name).write_bytes(b"synthetic")
+                    (root / name).chmod(0o600)
+                selected = root / "catalog.json"
+                if change == "extra": (root / "undeclared").write_bytes(b"not ignored")
+                if change == "missing": selected.unlink()
+                if change == "file-mode": selected.chmod(0o644)
+                if change == "directory-mode": root.chmod(0o755)
+                if change == "link":
+                    selected.unlink()
+                    selected.symlink_to(root / "matrix-result.json")
+                if change == "hardlink":
+                    selected.unlink()
+                    os.link(root / "matrix-result.json", selected)
+                session = SimpleNamespace(uid=os.getuid() + (1 if change == "owner" else 0), persisted_bytes=37)
+                with patch.object(controller, "freeze_tree") as freeze, \
+                        patch.object(controller, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+                    if change is None:
+                        actual = controller.finalized_matrix_outputs(root, session, deadline=20.0)
+                        self.assertEqual(actual, {"files": 3, "bytes": 27, "original_finality_before_read": True})
+                        self.assertEqual(session.persisted_bytes, 64)
+                        freeze.assert_called_once_with(root, deadline=20.0)
+                    else:
+                        with self.assertRaises(controller.VerificationError):
+                            controller.finalized_matrix_outputs(root, session, deadline=20.0)
+                        self.assertEqual(session.persisted_bytes, 37)
+                        freeze.assert_not_called()
 
     def test_preparation_and_final_proof_publication_consume_original_cutoffs(self):
         rig = self.rig()
@@ -2475,15 +2537,38 @@ class SigningAdapterControllerTests(unittest.TestCase):
         return b"MRK_SIGNING_ADAPTER_FAILURE=" + rig.contract.canonical(value) + b"\n"
 
     def test_progress_parser_independently_rejects_private_fields_and_stale_service_generation(self):
+        from . import local_signing_matrix_contract as emitter
         rig = self.rig()
         scope = rig.controller.SigningAdapterDiagnostic("source", rig.contract.ADAPTER_TEST_IDS,
                                                         rig.contract.ADAPTER_FAILURE_TEST_FILES)
         progress = {"case": "inventory", "owner": {"stage": "run-owned", "command": 4, "elapsedMs": 321,
                     "completed": 3, "totalMs": 222, "maxMs": 111},
                     "service": {"stage": "EOF", "command": 4, "elapsedMs": 320}}
-        with patch.object(rig.controller, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+        with patch.object(rig.controller, "time", SimpleNamespace(monotonic=lambda: 10.0)), \
+                patch.object(emitter, "time", SimpleNamespace(monotonic=lambda: 10.0)):
             parse = lambda data: rig.controller.signing_adapter_failure(data, scope, deadline=20.0)
             self.assertEqual(parse(self.diagnostic(rig, progress=progress))["observations"][0]["progress"], progress)
+            # Exercise the actual emitter and independent parser together. A
+            # newly declared case must not silently lose its failure evidence.
+            try:
+                raise ValueError("PRIVATE diagnostic sentinel")
+            except ValueError as failure:
+                error = (type(failure), failure, failure.__traceback__)
+            context = (scope.phase, scope.identifiers[0], (("/inert/adapter.py", scope.files[0]),))
+            for name in emitter.ADAPTER_PROGRESS_CASES:
+                with self.subTest(emitted_case=name):
+                    output = io.StringIO()
+                    actual_progress = {**progress, "case": name}
+                    with patch.object(emitter, "sys", SimpleNamespace(stderr=output)):
+                        emitted = emitter.emit_adapter_failure(context, "unittest", "error", error,
+                            deadline=20.0, progress=actual_progress)
+                    self.assertIsNotNone(emitted)
+                    raw = output.getvalue().encode("ascii")
+                    self.assertNotIn(b"PRIVATE", raw)
+                    self.assertEqual(parse(raw)["observations"][0]["progress"], actual_progress)
+            # Feed invalid DATA to the parser, not merely to the producer's
+            # own validator: exact finite names remain independently checked.
+            self.assertIsNone(parse(self.diagnostic(rig, progress={**progress, "case": "semantic-main-extra"})))
             unavailable = {"case": "inventory", "owner": None, "service": None}
             self.assertEqual(parse(self.diagnostic(rig, progress=unavailable))["observations"][0]["progress"], unavailable)
             for key, value in (("case", "/PRIVATE/path"), ("case", True), ("owner", None), ("service", [])):
@@ -2627,7 +2712,7 @@ class SigningAdapterControllerTests(unittest.TestCase):
         matrix = SigningMatrixControllerTests().rig()
         adapter = self.rig()
         package = matrix.paths.work / "source-build/src/mobile_release"
-        matrix_record = {"schema": 1, "phase": "source", "shard": 0, "scope": matrix.scope,
+        matrix_record = {"schema": 2, "phase": "source", "shard": 0, "scope": matrix.scope,
                          "status": "phase-finished", "productionRoot": str(package)}
         adapter_record = {"schema": "mrk-signing-adapter-phase-v1", "phase": "source", "scope": adapter.scope,
                           "status": "adapter-only", "productionRoot": str(package), "testsRun": 4,
@@ -2735,6 +2820,106 @@ class SigningAdapterControllerTests(unittest.TestCase):
         rig.inspect_advance = 421.0
         self.assertFalse(self.execute(rig).ok)
         self.assertFalse(rig.captures)
+
+
+class SigningAdapterPhaseControllerTests(unittest.TestCase):
+    """Independent phase DATA parsing; every capture/Session remains inert."""
+
+    def packet(self, rig, **changes):
+        value = {"schema": 1, "phase": "source", "stage": "postconditions", "category": "value-error",
+                 "locations": [{"file": "tests/workflow/run_local_signing_matrix.py", "line": 246}]}
+        value.update(changes)
+        return b"MRK_SIGNING_ADAPTER_PHASE_FAILURE=" + rig.contract.canonical(value) + b"\n"
+
+    def test_actual_phase_emitter_and_independent_parser_are_closed_bounded_and_private(self):
+        from . import local_signing_matrix_contract as emitter
+        rig = SigningAdapterControllerTests().rig()
+        scope = rig.controller.SigningAdapterDiagnostic("source", rig.contract.ADAPTER_TEST_IDS,
+                                                        rig.contract.ADAPTER_FAILURE_TEST_FILES)
+        context = ("source", 20.0, (("/fixed/phase.py", "tests/workflow/run_local_signing_matrix.py"),
+                                    ("/fixed/contract.py", "tests/workflow/local_signing_matrix_contract.py")))
+        namespace = {}
+        exec(compile("def fail():\n    raise ValueError('PRIVATE phase message')\n", context[2][0][0], "exec"), namespace)
+        try:
+            namespace["fail"]()
+        except ValueError as exception:
+            error = (type(exception), exception, exception.__traceback__)
+        with patch.object(rig.controller, "time", SimpleNamespace(monotonic=lambda: 10.0)), \
+                patch.object(emitter, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+            parse = lambda raw: rig.controller.signing_adapter_phase_failure(raw, scope, deadline=20.0)
+            for stage in emitter.ADAPTER_PHASE_FAILURE_STAGES:
+                output = io.StringIO()
+                with patch.object(emitter, "sys", SimpleNamespace(stderr=output)):
+                    emitted = emitter.emit_adapter_phase_failure(context, stage, error)
+                self.assertIsNotNone(emitted)
+                observed = parse(output.getvalue().encode("ascii"))
+                self.assertEqual(observed, emitted)
+                self.assertEqual(observed["locations"], [{"file": context[2][0][1], "line": 2}])
+                self.assertNotIn("PRIVATE", output.getvalue())
+            for changes in ({"schema": True}, {"schema": 2}, {"phase": "wheel"}, {"stage": "postconditions-extra"},
+                            {"stage": True}, {"category": "none"}, {"category": "PrivateError"},
+                            {"message": "PRIVATE"}, {"testId": scope.identifiers[0]}, {"locations": {}},
+                            {"locations": [{"file": scope.files[0], "line": 1}]},
+                            {"locations": [{"file": "/PRIVATE/run_local_signing_matrix.py", "line": 1}]},
+                            {"locations": [{"file": context[2][0][1], "line": True}]},
+                            {"locations": [{"file": context[2][0][1], "line": 0}]},
+                            {"locations": [{"file": context[2][0][1], "line": 1_000_000}]},
+                            {"locations": [{"file": context[2][0][1], "line": 1, "text": "PRIVATE"}]},
+                            {"locations": [{"file": context[2][0][1], "line": 1}] * 5}):
+                with self.subTest(changes=changes):
+                    self.assertIsNone(parse(self.packet(rig, **changes)))
+            raw = self.packet(rig)
+            for invalid in (raw + raw, raw[:-1], raw.replace(b'"schema":1', b'"schema":1,"schema":1'),
+                            raw.replace(b'{', b'{ ', 1), b"MRK_SIGNING_ADAPTER_PHASE_FAILURE=" + b" " * 2048 + b"\n",
+                            b"x" * 65537, bytearray(raw)):
+                self.assertIsNone(parse(invalid))
+            self.assertEqual(parse(b"PRIVATE unrelated stderr\n" + raw), json.loads(raw.split(b"=", 1)[1]))
+            worker = SigningAdapterControllerTests().diagnostic(rig, layer="worker",
+                locations=[{"file": context[2][0][1], "line": 2}])
+            self.assertIsNone(rig.controller.signing_adapter_failure(worker, scope, deadline=20.0))
+        with patch.object(rig.controller, "time", SimpleNamespace(monotonic=lambda: 20.0)):
+            with self.assertRaisesRegex(rig.controller.VerificationError, "AGGREGATE_DEADLINE"):
+                rig.controller.signing_adapter_phase_failure(self.packet(rig), scope, deadline=20.0)
+
+    def test_phase_and_worker_projections_are_independent_and_never_change_original_failure(self):
+        adapter = SigningAdapterControllerTests()
+        for mode in ("both", "bad-phase", "bad-worker", "phase-parser-error", "worker-parser-error", "unknown", "zero"):
+            with self.subTest(mode=mode):
+                rig = adapter.rig()
+                worker = adapter.diagnostic(rig, layer="worker")
+                phase = self.packet(rig)
+                if mode == "bad-phase":
+                    phase = self.packet(rig, message="PRIVATE")
+                elif mode == "bad-worker":
+                    worker = adapter.diagnostic(rig, layer="worker", message="PRIVATE")
+                rig.capture_changes["source"] = {"stderr": worker + phase}
+                if mode != "zero":
+                    rig.capture_changes["source"].update(ok=False, returncode=1)
+                if mode == "unknown":
+                    rig.capture_changes["source"].update(waited=False, stdout_eof=False, domain_finality=False)
+                    rig.idle_error = True
+                phase_parser = patch.object(rig.controller, "signing_adapter_phase_failure", side_effect=RuntimeError("PRIVATE")) \
+                    if mode == "phase-parser-error" else nullcontext()
+                worker_parser = patch.object(rig.controller, "signing_adapter_failure", side_effect=RuntimeError("PRIVATE")) \
+                    if mode == "worker-parser-error" else nullcontext()
+                with phase_parser, worker_parser:
+                    result = adapter.execute(rig)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error, "SIGNING_ADAPTER_UNEXPECTED_STDERR" if mode == "zero" else "COMMAND_EXIT_OR_FINALITY")
+                self.assertEqual(len(rig.captures), 1)
+                run = next(index for index, event in enumerate(rig.events) if event[0] == "run")
+                self.assertFalse(any(event[0] in {"inspect", "read", "output", "finalized", "publish"}
+                                     for event in rig.events[run + 1:]))
+                row = result.details["phases"][0]
+                self.assertEqual(row["status"], "FAIL")
+                self.assertEqual("adapter_failure" in row, mode not in {"bad-worker", "worker-parser-error", "zero"})
+                self.assertEqual("adapter_phase_failure" in row, mode not in {"bad-phase", "phase-parser-error", "zero"})
+                if "adapter_phase_failure" in row:
+                    self.assertEqual(row["adapter_phase_failure"]["stage"], "postconditions")
+                if mode == "unknown":
+                    self.assertFalse(row["capture"]["domain_finality"])
+                    self.assertIn("idle_error", row)
+                self.assertNotIn("PRIVATE", json.dumps(result.details))
 
 
 if __name__ == "__main__":

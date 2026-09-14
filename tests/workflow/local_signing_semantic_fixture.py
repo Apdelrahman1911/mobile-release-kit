@@ -11,7 +11,9 @@ import json
 import os
 import stat
 import sys
+from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import patch
 
 from mobile_release import local_signing as signing
 from workflow import local_signing_persistent_fixture as fixture
@@ -147,13 +149,440 @@ class SemanticTrace(fixture.Trace):
             record["originalCFenceObservation"] = copy.deepcopy(self._fence_evidence)
         if self.manual_before is not None:
             record["manualBefore"] = self.manual_before
+        self.extend_cut(record)
         assert not (self.root / (self.name + "-cut.json")).exists(), "selected cut output already exists"
         fixture.write_json(self.root / (self.name + "-cut.json"), record)
         os._exit(fixture.CRASH)  # Original O really exits; this does not kill/settle C.
 
+    def extend_cut(self, record):
+        pass
+
     def result(self):
         assert self.selector is None, {"selectedSemanticCutNotReached": self.selector.record()}
         return super().result()
+
+
+_D, _L = ("default-keychain", False, False), ("list-keychains", False, False)
+HEALTHY_COMMANDS = (
+    _D, _L,
+    ("create-keychain", True, False), ("set-keychain-settings", True, False), ("unlock-keychain", True, False),
+    *(("openssl", True, False),) * 3, *(("import", True, False),) * 3,
+    ("set-key-partition-list", True, False), _D, _L, _D, _L,
+    ("list-keychains", True, False), _D, _L, _D, _L,
+    ("default-keychain", True, False), _D, _L, _D, _L, ("build", True, False),
+    _D, _L, _D, _L, ("default-keychain", True, False), _D, _L,
+    _D, _L, ("list-keychains", True, False), _D, _L,
+    ("delete-keychain", True, False), _D, _L, _D, _L, _D, _L, _D, _L, _D, _L,
+)
+# Direct caller, actual completed model calls, preferences, attempted flags,
+# cleanupStarted. These are checkpoint RETURNS, not os.replace after-events.
+HEALTHY_CHECKPOINTS = (
+    ("activate", 14, "baseline", False, False, False),
+    ("activate", 16, "baseline", True, False, False),
+    ("remember_preferences", 19, "search", True, False, False),
+    ("activate", 21, "search", True, True, False),
+    ("remember_preferences", 24, "active", True, True, False),
+    ("remember_preferences", 26, "active", True, True, False),
+    ("cleanup_native", 27, "active", True, True, True),
+    ("cleanup_native", 34, "search", True, True, True),
+    ("cleanup_native", 39, "baseline", True, True, True),
+    ("cleanup_profile", 44, "baseline", True, True, True),
+    ("cleanup_profile", 46, "baseline", True, True, True),
+)
+HEALTHY_EFFECTS = (
+    ("extract", "setup", 1, 6), ("extract", "setup", 2, 7), ("extract", "setup", 3, 8),
+    ("preference/search", "setup", 1, 17), ("preference/default", "setup", 1, 22),
+    ("preference/default", "cleanup", 1, 32), ("preference/search", "cleanup", 1, 37),
+)
+EXTRACT_NAMES = ("signing-certificate.pem", "signing-private-key.pem", "signing-chain.pem")
+IMPORT_NAMES = (EXTRACT_NAMES[1], EXTRACT_NAMES[0], EXTRACT_NAMES[2])
+FICTIONAL_PEM = b"-----BEGIN CERTIFICATE-----\nfictional-not-a-certificate\n"
+assert len(HEALTHY_COMMANDS) == 50
+
+
+def _model_state(root):
+    content, details = fixture.read_fixture_file(root / "observed-native.json", limit=65536)
+    assert stat.S_IMODE(details.st_mode) == 0o600 and details.st_nlink == 1
+    value = fixture.strict_json(content.decode("utf-8"))
+    assert type(value) is dict and set(value) == {"original", "preferences", "keychain", "revisions", "calls"}
+    assert type(value["revisions"]) is int and value["revisions"] >= 0
+    return value
+
+
+def _call_signatures(calls):
+    assert type(calls) is list and len(calls) <= 50
+    assert all(type(row) is dict and set(row) == {"command", "mutation", "recovery"}
+               and type(row["command"]) is str and type(row["mutation"]) is bool
+               and type(row["recovery"]) is bool for row in calls)
+    return tuple((row["command"], row["mutation"], row["recovery"]) for row in calls)
+
+
+def _read_expected_file(path, expected, *, partial=False):
+    content, info = fixture.read_fixture_file(path, limit=len(expected))
+    assert info.st_nlink == 1, "observed effect file was linked"
+    if partial:
+        assert 0 < len(content) < len(expected) and content == expected[:len(content)], \
+            "not the source-defined proper native prefix"
+    else:
+        assert content == expected, "observed effect bytes differ from fixed source"
+    return {"device": info.st_dev, "inode": info.st_ino, "mode": stat.S_IMODE(info.st_mode),
+            "size": info.st_size, "sha256": hashlib.sha256(content).hexdigest()}
+
+
+class OriginalInputTrace(SemanticTrace):
+    """Observe O's actual immutable input; never inspect nonexistent W frames."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.original_model = self.original_session = self.original_input = None
+        self.original_model_before = None
+        self.command_ordinal = 0
+
+    def observe_original_command(self, model, command_argv):
+        assert type(model) is fixture.PersistentSigningModel and model.root == self.root
+        assert model.trace is self and not model.recovery and not model.auto_add
+        assert type(command_argv) is tuple, "original command was not snapshotted"
+        # This _call frame really belongs to O, unlike execute_model/file_write.
+        frame, session = sys._getframe(1), None
+        try:
+            for _ in range(64):
+                if frame is None:
+                    break
+                if frame.f_code is signing.SigningSession._call.__code__:
+                    assert session is None, "ambiguous original caller"
+                    session = frame.f_locals["self"]
+                frame = frame.f_back
+        finally:
+            del frame
+        assert type(session) is signing.SigningSession and session.runner is model
+        assert self.original_model is None or self.original_model is model
+        assert self.original_session is None or self.original_session is session
+        self.original_model, self.original_session = model, session
+        self.original_input = command_argv
+        self.original_model_before = copy.deepcopy(model.state)
+        self.command_ordinal = len(model.state["calls"]) + 1
+        self.bound_session()
+
+    def bound_session(self):
+        session = self.original_session
+        assert type(session) is signing.SigningSession and session.pid == os.getpid() and not session.closed
+        assert session.runner is self.original_model and self.original_model.trace is self
+        assert session.lease.home == self.root / "home" and session.path == (
+            self.root / "home" / signing.LEASE_DIRECTORY / ("session-" + session.token))
+        opened, named = os.fstat(session.fd), session.path.lstat()
+        assert stat.S_ISDIR(opened.st_mode) and stat.S_IMODE(opened.st_mode) == 0o700 and opened.st_uid == os.getuid()
+        assert (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_uid, opened.st_gid) == (
+            named.st_dev, named.st_ino, named.st_mode, named.st_uid, named.st_gid)
+        assert session.identity == {"device": opened.st_dev, "inode": opened.st_ino}
+        assert self.session_token in {None, session.token}
+        self.session_token = session.token
+        if self._fence_session is not None:
+            observed, descriptor, identity, original = self._fence_session
+            assert observed is session and descriptor == session.fd and identity == session.identity
+            assert original == os.getpid()
+        return session
+
+
+class NativePrefixTrace(OriginalInputTrace):
+    def __init__(self, root, name, prefix):
+        super().__init__(root, name, catalog.NATIVE_PREFIXES[prefix])
+        self.prefix = prefix
+
+    def extend_cut(self, record):
+        session, argv = self.bound_session(), self.original_input
+        expected_command = "set-keychain-settings" if self.prefix == "transaction-stage" else "create-keychain"
+        assert len(argv) == 5 and argv[0] == "/usr/bin/security" and argv[1] == expected_command
+        assert argv[-1] == str(session.keychain)
+        if expected_command == "set-keychain-settings":
+            assert argv[2:4] == ("-lut", "21600")
+        else:
+            assert argv[2] == "-p"
+        before = self.original_model_before
+        assert _call_signatures(before["calls"]) == HEALTHY_COMMANDS[:self.command_ordinal - 1]
+        assert self.command_ordinal == (4 if self.prefix == "transaction-stage" else 3)
+        assert before["revisions"] == 0
+        record["originalCommand"] = {"command": expected_command, "ordinal": self.command_ordinal,
+                                     "keychain": catalog.KEYCHAIN + "/" + catalog.DB_NAME,
+                                     "revisionBefore": before["revisions"]}
+        record["physicalWrite"] = native_prefix_proof(self.root, self.prefix, record)
+
+
+def native_prefix_proof(root, name, cut):
+    """Compare actual physical bytes/oracle/state, not an alleged W operand."""
+    selector = catalog.NATIVE_PREFIXES[name]
+    assert cut["selector"] == selector.record() and selector.routes(cut["event"]) and cut["edge"] == "partial"
+    selector.check_context(cut["context"])
+    assert cut["context"]["recoveryAttempt"] is False
+    observed, token = cut["snapshot"], cut["sessionToken"]
+    state, model = _state(observed), _model_state(root)
+    assert state["inflight"]["kind"] == ("settings" if name == "transaction-stage" else "create")
+    assert _phase(observed) == "ARMED" and not state["cleanupStarted"] and not state["conflict"]
+    assert observed["session"] == token and observed["preferences"] == observed["original"] == state["preferences"]
+    assert set(observed["controls"]) == {"intent.json", "state.json"} and not observed["fences"]
+    assert state["profile"]["phase"] == "stage-removed"
+    installed = _profile(observed, fixture.UUID + ".mobileprovision")
+    assert installed["sha256"] == hashlib.sha256(fixture.PROFILE).hexdigest()
+    assert state["profile"]["ownedIdentity"] == {key: installed[key] for key in ("device", "inode")}
+    assert _profile(observed, ".mobile-release-profile-" + token) is None
+    ordinal = 4 if name == "transaction-stage" else 3
+    assert cut["originalCommand"] == {"command": "set-keychain-settings" if ordinal == 4 else "create-keychain",
+        "ordinal": ordinal, "keychain": catalog.KEYCHAIN + "/" + catalog.DB_NAME, "revisionBefore": 0}
+    assert _call_signatures(model["calls"]) == HEALTHY_COMMANDS[:ordinal]
+    assert model["calls"] == observed["nativeCalls"] and model["preferences"] == observed["preferences"]
+    assert model["revisions"] == (1 if ordinal == 4 else 0)
+    native = _native_identities(observed)
+    expected_names = {catalog.DB_NAME} if name == "database" else {catalog.DB_NAME, catalog.LOCK_NAME}
+    if name == "transaction-stage":
+        expected_names.add("native-atomic-stage")
+        assert state["native"] == {key: native[key] for key in (catalog.DB_NAME, catalog.LOCK_NAME)}
+    else:
+        assert not state["native"]
+    assert set(native) == expected_names
+    directory = root / "home" / signing.LEASE_DIRECTORY / ("session-" + token) / "keychain"
+    assert model["keychain"] == str(directory / catalog.DB_NAME) == observed["keychain"]
+    oracle = fixture.ResourceOracle(root)
+    oracle.assert_sentinels()
+    oracle_native = oracle.read()["native"]
+    selected_name = selector.operation.removeprefix("native-effect/write/")
+    proof = None
+    for filename in sorted(expected_names):
+        selected = filename == selected_name
+        payload = catalog.NATIVE_PREFIX_CONTENT[name] if selected else (
+            catalog.NATIVE_PREFIX_CONTENT["database"] if filename == catalog.DB_NAME else catalog.NATIVE_PREFIX_CONTENT["lock"])
+        path = directory / filename
+        facts = _read_expected_file(path, payload, partial=selected)
+        relative = str(path.relative_to(root))
+        assert facts["mode"] == 0o600 and facts == observed["native"][relative] == oracle_native[relative]
+        if selected:
+            proof = {"name": filename, "bytes": facts["size"], "intendedBytes": len(payload),
+                "sha256": facts["sha256"], "intendedSha256": hashlib.sha256(payload).hexdigest(),
+                "facts": facts, "properPrefix": True, "revisionAtCut": model["revisions"]}
+    assert proof is not None and fixture.uncertainty(root, observed), "native prefix lost its genuine unknown-resource state"
+    return proof
+
+
+class HealthyTrace(OriginalInputTrace):
+    def __init__(self, root, name):
+        super().__init__(root, name)
+        self.commands, self.checkpoints, self.effects = [], [], []
+        self.effect_pending = None
+        self.intent_bytes = None
+
+    def preferences(self, role):
+        baseline = copy.deepcopy(self.original_model_before["original"])
+        if role in {"search", "active"}:
+            baseline["search"] = [str(self.original_session.keychain)]
+        if role == "active":
+            baseline["default"] = str(self.original_session.keychain)
+        return baseline
+
+    def observe_original_command(self, model, command_argv):
+        super().observe_original_command(model, command_argv)
+        ordinal, argv = self.command_ordinal, self.original_input
+        assert ordinal == len(self.commands) + 1 and ordinal <= len(HEALTHY_COMMANDS)
+        if ordinal <= 2:
+            assert self.original_session.intent is None and self.intent_bytes is None
+        elif ordinal == 3:
+            self.observe_intent(self.original_session, initial=True)
+        else:
+            assert self.intent_bytes is not None, "setup intent was not observed before native effects"
+        assert _call_signatures(model.state["calls"]) == HEALTHY_COMMANDS[:ordinal - 1]
+        command = argv[1] if Path(argv[0]).name == "security" else Path(argv[0]).name
+        signature = (command, "-s" in argv or command not in {"default-keychain", "list-keychains"}, model.recovery)
+        assert signature == HEALTHY_COMMANDS[ordinal - 1], "healthy original command order differs"
+        record = {"ordinal": ordinal, "command": command, "mutation": signature[1], "phase": self.phase}
+        if command in {"openssl", "import"}:
+            assert (command == "openssl" and 6 <= ordinal <= 8) or (command == "import" and 9 <= ordinal <= 11)
+            name = EXTRACT_NAMES[ordinal - 6] if command == "openssl" else IMPORT_NAMES[ordinal - 9]
+            if command == "openssl":
+                assert argv.count("-out") == 1
+                path = Path(argv[argv.index("-out") + 1])
+            else:
+                path = Path(argv[2])
+            assert path == self.root / "private" / name, "healthy input file routing differs"
+            record["inputPath"] = "<ROOT>/private/" + name
+            if command == "import":
+                facts = _read_expected_file(path, FICTIONAL_PEM)
+                if ordinal == 9:
+                    assert facts["mode"] == 0o600, "private key was not restricted before first import"
+                extraction = next(row for row in self.effects if row.get("path") == record["inputPath"])
+                assert all(facts[key] == extraction["file"][key] for key in ("device", "inode", "size", "sha256"))
+                record["inputFile"] = facts
+        self.commands.append(record)
+
+    def observe_intent(self, session, *, initial=False):
+        content, info = fixture.read_fixture_file(session.path / "intent.json", limit=signing.CONTROL_LIMIT)
+        assert stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1
+        assert content == session._committed_controls["intent.json"]
+        assert fixture.strict_json(content.decode("utf-8")) == session.intent
+        if initial:
+            assert self.command_ordinal == 3 and self.intent_bytes is None, "initial setup intent observation was delayed"
+            self.intent_bytes = content  # Before the first original setup command acquires its target.
+        else:
+            assert self.intent_bytes is not None and content == self.intent_bytes, "initial setup intent changed"
+        return content
+
+    def begin(self, operation, slot, origin, details):
+        event = super().begin(operation, slot, origin, details)
+        if operation not in {"native-effect/extract", "native-effect/preference/search", "native-effect/preference/default"}:
+            return event
+        self.bound_session()
+        assert self.effect_pending is None and len(self.effects) < len(HEALTHY_EFFECTS)
+        expected = HEALTHY_EFFECTS[len(self.effects)]
+        assert (operation.removeprefix("native-effect/"), event["phase"], event["occurrence"], self.command_ordinal) == expected
+        assert event["slot"] == "native" and event["origin"] == "model" and not event["details"]
+        context = self.observe_context(event)
+        assert context["operationPhase"] == "ARMED" and not context["recoveryAttempt"]
+        assert context["operationKind"] == ("extract" if expected[0] == "extract" else expected[0].split("/")[1])
+        model = _model_state(self.root)
+        # BEGIN precedes this first effect's save; persisted calls still end at
+        # the previous original. END below requires the newly persisted call.
+        assert _call_signatures(model["calls"]) == HEALTHY_COMMANDS[:self.command_ordinal - 1]
+        record = {"eventIndex": event["index"], "operation": expected[0], "phase": event["phase"],
+                  "occurrence": event["occurrence"], "commandOrdinal": self.command_ordinal,
+                  "beforePreferences": model["preferences"]}
+        if expected[0] == "extract":
+            record["path"] = self.commands[-1]["inputPath"]
+            path = self.root / "private" / EXTRACT_NAMES[len(self.effects)]
+            assert not path.exists() and not path.is_symlink(), "healthy extraction destination already existed"
+        self.effect_pending = record
+        return event
+
+    def end(self, event, *, succeeded, error=None):
+        super().end(event, succeeded=succeeded, error=error)
+        if self.effect_pending is None or self.effect_pending["eventIndex"] != event["index"]:
+            return
+        assert succeeded and error is None, "healthy effect did not actually return"
+        record, self.effect_pending = self.effect_pending, None
+        model = _model_state(self.root)
+        assert _call_signatures(model["calls"]) == HEALTHY_COMMANDS[:self.command_ordinal]
+        record["afterPreferences"] = model["preferences"]
+        number = len(self.effects)
+        before_role, after_role = (("baseline", "baseline") if number < 3 else (
+            ("baseline", "search"), ("search", "active"), ("active", "search"), ("search", "baseline"))[number - 3])
+        assert record["beforePreferences"] == self.preferences(before_role)
+        assert record["afterPreferences"] == self.preferences(after_role)
+        if number < 3:
+            record["file"] = _read_expected_file(self.root / "private" / EXTRACT_NAMES[number], FICTIONAL_PEM)
+        self.effects.append(record)
+
+    def checkpoint_wrapper(self, original):
+        callers = {getattr(signing.SigningSession, name).__code__: name for name in
+                   ("activate", "remember_preferences", "cleanup_native", "cleanup_profile")}
+        def checkpoint(session):
+            frame = sys._getframe(1)
+            try:
+                caller = callers.get(frame.f_code)
+                if caller is not None:
+                    assert frame.f_locals.get("self") is session, "checkpoint caller/session differs"
+            finally:
+                del frame
+            result = original(session)  # An exception can never become a completed checkpoint record.
+            if caller is not None:
+                self.checkpoint_return(session, caller)
+            return result
+        return checkpoint
+
+    @contextmanager
+    def installed(self):
+        original = signing.SigningSession.checkpoint
+        with super().installed(), patch.object(signing.SigningSession, "checkpoint", new=self.checkpoint_wrapper(original)):
+            yield
+
+    def checkpoint_return(self, session, caller):
+        assert session is self.bound_session() and len(self.checkpoints) < len(HEALTHY_CHECKPOINTS)
+        expected = HEALTHY_CHECKPOINTS[len(self.checkpoints)]
+        completed = len(self.original_model.state["calls"])
+        assert (caller, completed) == expected[:2], "healthy checkpoint caller/return order differs"
+        assert _call_signatures(self.original_model.state["calls"]) == HEALTHY_COMMANDS[:completed]
+        assert _model_state(self.root) == self.original_model.state, "checkpoint preceded actual original model return"
+        content, info = fixture.read_fixture_file(session.path / "state.json", limit=signing.CONTROL_LIMIT)
+        intent = self.observe_intent(session)
+        assert stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1
+        assert content == session._committed_controls["state.json"]
+        state = fixture.strict_json(content.decode("utf-8"))
+        assert state == session.state
+        assert not (session.path / "state.pending").exists() and not (session.path / "state.pending").is_symlink()
+        assert not session.unresolved and not session.journal_failed and state["inflight"] is None and not state["conflict"]
+        observed = fixture.snapshot(self.root)
+        assert not observed["fences"] and state["native"] == _native_identities(observed)
+        assert observed["preferences"] == state["preferences"] == self.preferences(expected[2])
+        assert (state["searchAttempted"], state["defaultAttempted"], state["cleanupStarted"]) == expected[3:]
+        if completed < 40:
+            assert set(state["native"]) == {catalog.DB_NAME, catalog.LOCK_NAME} and state["profile"]["phase"] == "stage-removed"
+        else:
+            assert not state["native"] and state["profile"]["phase"] == "resolved"
+            assert _profile(observed, ".mobile-release-profile-" + session.token) is None
+            assert _profile(observed, fixture.UUID + ".mobileprovision") is None
+        self.checkpoints.append({"ordinal": len(self.checkpoints) + 1, "caller": caller, "completedModelCalls": completed,
+            "eventPosition": len(self.events), "stateIdentity": {"device": info.st_dev, "inode": info.st_ino},
+            "stateSha256": hashlib.sha256(content).hexdigest(), "intentSha256": hashlib.sha256(intent).hexdigest(),
+            "state": copy.deepcopy(state)})
+
+    def result(self):
+        value = super().result()
+        assert self.effect_pending is None
+        value["healthyContexts"] = {"commands": self.commands, "checkpoints": self.checkpoints, "effects": self.effects}
+        assert_healthy_observation(self.root, value)
+        return value
+
+
+def assert_healthy_observation(root, value):
+    contexts, observed = value["healthyContexts"], value["snapshot"]
+    assert _call_signatures(observed["nativeCalls"]) == HEALTHY_COMMANDS and not observed["session"]
+    commands, checkpoints, effects = (contexts[name] for name in ("commands", "checkpoints", "effects"))
+    assert len(commands) == 50 and len(checkpoints) == 11 and len(effects) == 7
+    assert tuple((row["command"], row["mutation"], False) for row in commands) == HEALTHY_COMMANDS
+    assert [row["ordinal"] for row in commands] == list(range(1, 51))
+    assert [row["phase"] for row in commands] == ["setup"] * 26 + ["build"] + ["cleanup"] * 23
+    assert [row.get("inputPath") for row in commands[5:11]] == ["<ROOT>/private/" + name for name in (*EXTRACT_NAMES, *IMPORT_NAMES)]
+    assert commands[8]["inputFile"]["mode"] == 0o600
+    assert tuple((row["caller"], row["completedModelCalls"]) for row in checkpoints) == tuple(row[:2] for row in HEALTHY_CHECKPOINTS)
+    assert [row["ordinal"] for row in checkpoints] == list(range(1, 12))
+    assert len({row["intentSha256"] for row in checkpoints}) == 1
+    assert observed["keychain"] == str(root / "home" / signing.LEASE_DIRECTORY / (
+        "session-" + value["sessionToken"]) / "keychain" / catalog.DB_NAME)
+    baseline = observed["original"]
+    preferences = {"baseline": baseline,
+        "search": {"default": baseline["default"], "search": [observed["keychain"]]},
+        "active": {"default": observed["keychain"], "search": [observed["keychain"]]}}
+    revisions = []
+    for row, expected in zip(checkpoints, HEALTHY_CHECKPOINTS):
+        state = row["state"]
+        assert state["preferences"] == preferences[expected[2]] and state["inflight"] is None and not state["conflict"]
+        assert (state["searchAttempted"], state["defaultAttempted"], state["cleanupStarted"]) == expected[3:]
+        assert bool(state["native"]) is (expected[1] < 40)
+        assert state["profile"]["phase"] == ("stage-removed" if expected[1] < 40 else "resolved")
+        assert row["stateSha256"] == hashlib.sha256(signing._json(state)).hexdigest()
+        revisions.append(state["revision"])
+    assert revisions == sorted(set(revisions))
+    assert tuple((row["operation"], row["phase"], row["occurrence"], row["commandOrdinal"]) for row in effects) == HEALTHY_EFFECTS
+    positions = [row["eventPosition"] for row in checkpoints]
+    assert positions == sorted(set(positions))
+    for row in effects:
+        event = value["events"][row["eventIndex"] - 1]
+        assert event["index"] == row["eventIndex"] and event["operation"] == "native-effect/" + row["operation"]
+        assert event["phase"] == row["phase"] and event["occurrence"] == row["occurrence"]
+        assert event["origin"] == "model" and event["slot"] == "native" and event.get("succeeded") is True
+        assert not event["details"] and "error" not in event
+    # Actual returned checkpoints bracket their genuine four preference effects.
+    for effect, before, after in ((effects[3], checkpoints[1], checkpoints[2]),
+                                  (effects[4], checkpoints[3], checkpoints[4]),
+                                  (effects[5], checkpoints[6], checkpoints[7]),
+                                  (effects[6], checkpoints[7], checkpoints[8])):
+        assert before["eventPosition"] < effect["eventIndex"] <= after["eventPosition"]
+    for row, (before, after) in zip(effects, (("baseline", "baseline"),) * 3 + (
+            ("baseline", "search"), ("search", "active"), ("active", "search"), ("search", "baseline"))):
+        assert row["beforePreferences"] == preferences[before] and row["afterPreferences"] == preferences[after]
+    for row, name in zip(effects[:3], EXTRACT_NAMES):
+        assert row["path"] == "<ROOT>/private/" + name
+        assert row["file"]["size"] == len(FICTIONAL_PEM) and row["file"]["sha256"] == hashlib.sha256(FICTIONAL_PEM).hexdigest()
+        imported = next(command["inputFile"] for command in commands[8:11] if command["inputPath"] == row["path"])
+        assert all(imported[key] == row["file"][key] for key in ("device", "inode", "size", "sha256"))
+    publication = [event for event in value["events"] if event["operation"] == "replace"
+                   and event["slot"] == catalog.SESSION + "/completed.pending"
+                   and event["origin"] == catalog.LOCAL + "_write"]
+    assert len(publication) == 1 and publication[0]["index"] > positions[-1]
+    assert publication[0].get("succeeded") is True
 
 
 def _state(observed):
@@ -394,20 +823,26 @@ def _new_step(root, name):
         assert not path.exists() and not path.is_symlink(), "case step output already exists"
 
 
-def seed(root, name, *, auto_add=False, after_effect=None, context=None):
-    selector = catalog.QUERY_DEBT_SEED if name == "query-settled-partial" else catalog.SEEDS[name]
+def seed(root, name, *, auto_add=False, after_effect=None, context=None, native_prefix=False):
+    assert type(native_prefix) is bool
+    selector = (catalog.NATIVE_PREFIXES[name] if native_prefix else
+                catalog.QUERY_DEBT_SEED if name == "query-settled-partial" else catalog.SEEDS[name])
     if context is not None:
         fixture.check_case_context(root, context)
     _new_step(root, "seed")
     fixture.require_fresh_recovery(root)
-    trace = lambda: SemanticTrace(root, "seed", selector, after_effect=after_effect)
+    assert not native_prefix or (not auto_add and after_effect is None), "native prefix cannot alter its original model"
+    trace = lambda: (NativePrefixTrace(root, "seed", name) if native_prefix else
+                     SemanticTrace(root, "seed", selector, after_effect=after_effect))
     task = (lambda: one_journalled_query(root, trace(), phase="command")) if name == "query-settled-partial" else (
         lambda: fixture.original_flow(root, trace(), auto_add=auto_add))
     role = "minimal-query-seed" if name == "query-settled-partial" else "persistent-original"
     original = fixture.run_worker(root, "seed", task, timeout=worker_timeout(role), expect=fixture.CRASH)
     fixture.assert_original_return(original, expected=fixture.CRASH)
     cut = fixture.read_case_json(root, "seed-cut")
-    if name == "query-settled-partial":
+    if native_prefix:
+        assert cut["physicalWrite"] == native_prefix_proof(root, name, cut)
+    elif name == "query-settled-partial":
         _assert_settlement_cut(cut, 1)
         assert not cut["snapshot"]["native"] and cut["context"]["operationKind"] == "observe"
     else:
@@ -450,6 +885,26 @@ def _persist_step(parent, identifier, name, value):
     return path.name
 
 
+def finish_semantic_case(parent, root, identifier, evidence, context):
+    """Retain canonical observations before alias predicates or any removal."""
+    from workflow.local_signing_regression_fixture import semantic_contributions
+
+    fixture.check_case_context(root, context)
+    evidence_name = _persist_step(parent, identifier, "complete", evidence)
+    contributions = semantic_contributions(parent, identifier, evidence)
+    if contributions:
+        _persist_step(parent, identifier, "regression", {
+            "schema": "mrk-signing-semantic-contribution-v1", "semantic": identifier,
+            "contributions": list(contributions), "evidenceSha256": digest(evidence),
+        })
+    fixture.check_case_context(root, context)
+    fixture.remove_case(root)
+    assert not root.exists() and str(root) not in fixture._CASE_CUSTODY and str(root) not in fixture._CASE_RECOVERY_DEBT
+    fixture.check_phase_context(context)
+    return {"caseId": identifier, "status": "semantic-subset-case", "evidence": evidence_name,
+            "caseRemoved": True, "originalWorkersSettled": True, "regressionContributions": list(contributions)}
+
+
 def run_case(parent, identifier):
     """One source-defined case; inactive until the reviewed router calls it."""
     case = catalog.case(identifier)
@@ -464,11 +919,11 @@ def run_case(parent, identifier):
     evidence = {"schema": "mrk-signing-semantic-case-v1", "case": case.record(), "steps": [], "negativeEvidence": []}
     if case.kind == "healthy":
         _new_step(root, "healthy")
-        original = fixture.run_worker(root, "healthy", lambda: fixture.original_flow(root, SemanticTrace(root, "healthy")),
+        original = fixture.run_worker(root, "healthy", lambda: fixture.original_flow(root, HealthyTrace(root, "healthy")),
                                       timeout=worker_timeout("persistent-original"))
         fixture.assert_original_return(original)
         value = fixture.read_case_json(root, "healthy")
-        assert len(value["snapshot"]["nativeCalls"]) == 50 and not value["snapshot"]["session"]
+        assert_healthy_observation(root, value)
         assert not fixture._CASE_RECOVERY_DEBT.get(str(root))
         evidence["steps"].append({"name": "healthy", "original": original, "observation": value})
     else:
@@ -482,7 +937,7 @@ def run_case(parent, identifier):
             cut = fixture.read_case_json(root, "seed-cut")
             assert_transition_cut(root, case, cut)
         else:
-            cut, original = seed(root, case.seed, context=context)
+            cut, original = seed(root, case.seed, context=context, native_prefix=case.kind == "native-prefix")
         token = cut["sessionToken"]
         evidence["steps"].append({"name": "seed", "original": original, "observation": cut})
         if case.kind == "recovery":
@@ -514,12 +969,4 @@ def run_case(parent, identifier):
             resolved = recovery_step(root, "semantic-resolution", token=token, manual="resolve", expected=case.resolution,
                                      context=context, final=True)
             evidence["steps"].append(resolved)
-    fixture.check_case_context(root, context)
-    evidence_name = _persist_step(parent, identifier, "complete", evidence)
-    fixture.remove_case(root)
-    assert not root.exists() and str(root) not in fixture._CASE_CUSTODY and str(root) not in fixture._CASE_RECOVERY_DEBT
-    # Evidence/removal can consume the remaining original budget. Their safe
-    # completion is not permission to publish an expired success case ID.
-    fixture.check_phase_context(context)
-    return {"caseId": identifier, "status": "semantic-subset-case", "evidence": evidence_name,
-            "caseRemoved": True, "originalWorkersSettled": True}
+    return finish_semantic_case(parent, root, identifier, evidence, context)

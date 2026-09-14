@@ -34,6 +34,7 @@ import sysconfig
 import time
 import tomllib
 import traceback
+from types import MappingProxyType, ModuleType
 import unittest
 import zipfile
 
@@ -169,6 +170,8 @@ PYTHON_POISON_IDS = tuple(identifier for _name, identifier in PYTHON_POISON_CASE
 # Exact method identities, not a count, file-wide exemption or skip-message match.
 LINUX_MACOS_SKIPS = frozenset({
     "unit.test_local_signing_native.SigningDarwinABITests.test_real_header_layout_and_local_volume_match_ctypes_without_private_state",
+    "unit.test_local_signing_composition.SigningCompositionTests.test_full_preflight_shares_one_guard_through_early_authentication_signing_build_and_late_authentication",
+    "unit.test_local_signing_composition.SigningCompositionTests.test_real_early_and_late_profile_cleanup_signals_under_full_preflight_never_return_cancelled_content",
     "unit.test_ios_profile_authority.NativeProfileAuthorityTests.test_actual_signature_integrity_and_exact_signer_are_checked_before_policy",
     "unit.test_ios_profile_authority.NativeProfileAuthorityTests.test_complete_two_layer_synthetic_signature_succeeds_only_with_explicit_policy_seam",
     "unit.test_ios_profile_authority.NativeProfileAuthorityTests.test_default_policy_rejects_even_valid_signature_with_production_looking_fake_issuer",
@@ -867,46 +870,114 @@ def expected_python_ids(source_root: Path, selection: str = "full", *, deadline:
         result.extend(module_ids)
     _require(bool(result) and len(result) == len(set(result)), "TEST_EMPTY_OR_DUPLICATE_INVENTORY")
     if selection == "full":
-        _require(len(LINUX_MACOS_SKIPS) == 18 and LINUX_MACOS_SKIPS <= set(result), "TEST_NATIVE_INVENTORY_DRIFT")
+        _require(len(LINUX_MACOS_SKIPS) == 20 and LINUX_MACOS_SKIPS <= set(result), "TEST_NATIVE_INVENTORY_DRIFT")
     return tuple(sorted(result))
 
 
-def _python_capture_partition(complete: tuple[str, ...], partition: str) -> tuple[str, ...]:
-    """Fixed healthy/singleton division, never a caller-supplied ID list."""
-    _require(type(partition) is str and partition in {"all", "healthy", *PYTHON_POISON_PARTITIONS},
+def signing_regression_metadata(source_root: Path, operating_system: str, *,
+                                deadline: float | None = None) -> tuple[tuple[str, ...], MappingProxyType]:
+    """Snapshot fixed pure G obligations, never import a test or grant execution.
+
+    The temporary private binding is needed by dataclasses, not a cache. Native
+    authority/singleton origin admission must see no new workflow/unit/product
+    modules, and no ambient path or already-loaded alias may supply this table.
+    """
+    _require(type(operating_system) is str and operating_system in {"ubuntu-24.04", "macos-26"},
+             "SIGNING_REGRESSION_PLATFORM")
+    if deadline is not None:
+        _remaining(deadline, 3300)
+    alias = "_mrk_ci_signing_regression_catalog"
+    _require(alias not in sys.modules, "SIGNING_REGRESSION_MODULE_OCCUPIED")
+    path = Path(source_root) / "tests/workflow/local_signing_regression_catalog.py"
+    parsed = ast.parse(_read_regular(path, deadline=deadline), filename=str(path))
+    _require(all(isinstance(node, ast.ImportFrom) and node.level == 0
+                 and node.module in {"__future__", "dataclasses", "types"}
+                 for node in ast.walk(parsed) if isinstance(node, (ast.Import, ast.ImportFrom))),
+             "SIGNING_REGRESSION_IMPORTS")
+    if deadline is not None:
+        _remaining(deadline, 3300)
+    module = ModuleType(alias)
+    module.__file__, module.__package__ = str(path), ""
+    _require(alias not in sys.modules, "SIGNING_REGRESSION_MODULE_OCCUPIED")
+    sys.modules[alias] = module
+    try:
+        # Execute exactly the bounded immutable bytes read above, never a
+        # loader's second pathname read or a cached .pyc file.
+        exec(compile(parsed, str(path), "exec"), module.__dict__)
+        _require(sys.modules.get(alias) is module, "SIGNING_REGRESSION_MODULE_CUSTODY")
+        if deadline is not None:
+            _remaining(deadline, 3300)
+        methods = module.delegated_methods(operating_system)
+        required = module.obligations(operating_system)
+        _require(type(methods) is tuple and bool(methods)
+                 and all(type(method) is str and re.fullmatch(
+                     r"(?:unit|workflow)\.test_[A-Za-z0-9_]+\.[A-Za-z_][A-Za-z0-9_]*\.test_[A-Za-z0-9_]+", method)
+                     for method in methods)
+                 and tuple(sorted(set(methods))) == methods, "SIGNING_REGRESSION_METHODS")
+        _require(type(required) is MappingProxyType and tuple(required) == methods,
+                 "SIGNING_REGRESSION_OBLIGATIONS")
+        snapshot = {}
+        for method, identifiers in required.items():
+            _require(type(identifiers) is tuple and bool(identifiers)
+                     and all(type(identifier) is str and identifier.startswith("G/" + method + "/")
+                             and len(identifier) > len(method) + 3 and identifier.isascii() and identifier.isprintable()
+                             and not any(character.isspace() for character in identifier)
+                             for identifier in identifiers)
+                     and tuple(sorted(set(identifiers))) == identifiers, "SIGNING_REGRESSION_OBLIGATIONS")
+            snapshot[method] = identifiers
+        if deadline is not None:
+            _remaining(deadline, 3300)
+        _require(sys.modules.get(alias) is module, "SIGNING_REGRESSION_MODULE_CUSTODY")
+        return methods, MappingProxyType(snapshot)
+    finally:
+        if sys.modules.get(alias) is module:
+            del sys.modules[alias]
+
+
+def _python_capture_partition(complete: tuple[str, ...], partition: str,
+                              delegated: tuple[str, ...]) -> tuple[str, ...]:
+    """Exact healthy/singleton/G division; delegated is data, never a CLI role."""
+    _require(type(partition) is str and partition in {"all", "healthy", "delegated", *PYTHON_POISON_PARTITIONS},
              "PYTHON_CAPTURE_PARTITION")
     _require(type(complete) is tuple and bool(complete)
              and all(type(identifier) is str for identifier in complete)
              and tuple(sorted(set(complete))) == complete
              and set(PYTHON_POISON_IDS) <= set(complete), "PYTHON_POISON_INVENTORY")
-    healthy = tuple(identifier for identifier in complete if identifier not in PYTHON_POISON_IDS)
-    _require(bool(healthy) and len(healthy) + len(PYTHON_POISON_IDS) == len(complete)
-             and tuple(sorted(healthy + PYTHON_POISON_IDS)) == complete, "PYTHON_CAPTURE_UNION")
+    _require(type(delegated) is tuple and bool(delegated) and all(type(identifier) is str for identifier in delegated)
+             and tuple(sorted(set(delegated))) == delegated and set(delegated) <= set(complete)
+             and not set(delegated) & set(PYTHON_POISON_IDS), "PYTHON_DELEGATED_INVENTORY")
+    healthy = tuple(identifier for identifier in complete if identifier not in PYTHON_POISON_IDS and identifier not in delegated)
+    joined = healthy + PYTHON_POISON_IDS + delegated
+    _require(bool(healthy) and len(joined) == len(set(joined))
+             and tuple(sorted(joined)) == complete, "PYTHON_CAPTURE_UNION")
     parts = {name: (identifier,) for name, identifier in zip(PYTHON_POISON_PARTITIONS, PYTHON_POISON_IDS)}
-    return {"all": complete, "healthy": healthy, **parts}[partition]
+    return {"all": complete, "healthy": healthy, "delegated": delegated, **parts}[partition]
 
 
 def python_capture_ids(source_root: Path, selection: str, partition: str = "all", *,
                        deadline: float | None = None) -> tuple[str, ...]:
-    """Linux full/wheel coverage; every fixed singleton ID must precede splitting."""
+    """Linux full/wheel obligations; G is pending the independent matrix union."""
     _require(type(selection) is str and selection in {"full", "wheel"}, "PYTHON_CAPTURE_SELECTION")
-    return _python_capture_partition(expected_python_ids(source_root, selection, deadline=deadline), partition)
+    complete = expected_python_ids(source_root, selection, deadline=deadline)
+    delegated, _required = signing_regression_metadata(source_root, "ubuntu-24.04", deadline=deadline)
+    return _python_capture_partition(complete, partition, delegated)
 
 
 def native_partition_ids(source_root: Path, partition: str = "all", *, deadline: float | None = None) -> tuple[str, ...]:
-    """Authority5, healthy ordinary and source-bound intentional-UNKNOWN originals."""
-    _require(type(partition) is str and partition in {"all", "ordinary", "authority", *PYTHON_POISON_PARTITIONS},
+    """macOS authority5/ordinary/singletons, plus data-only pending G obligations."""
+    _require(type(partition) is str and partition in {"all", "ordinary", "authority", "delegated", *PYTHON_POISON_PARTITIONS},
              "NATIVE_PARTITION")
     complete = expected_python_ids(source_root, "native", deadline=deadline)
     prefix = "unit.test_ios_profile_authority.NativeProfileAuthorityTests."
     authority = tuple(identifier for identifier in complete if identifier.startswith(prefix))
     _require(authority == NATIVE_AUTHORITY_IDS, "NATIVE_AUTHORITY_INVENTORY")
     ordinary_complete = tuple(identifier for identifier in complete if identifier not in authority)
-    ordinary = _python_capture_partition(ordinary_complete, "healthy")
-    poison = {name: _python_capture_partition(ordinary_complete, name) for name in PYTHON_POISON_PARTITIONS}
-    joined = authority + ordinary + tuple(identifier for ids in poison.values() for identifier in ids)
+    delegated, _required = signing_regression_metadata(source_root, "macos-26", deadline=deadline)
+    ordinary = _python_capture_partition(ordinary_complete, "healthy", delegated)
+    poison = {name: _python_capture_partition(ordinary_complete, name, delegated) for name in PYTHON_POISON_PARTITIONS}
+    joined = authority + ordinary + delegated + tuple(identifier for ids in poison.values() for identifier in ids)
     _require(len(joined) == len(set(joined)) and tuple(sorted(joined)) == complete, "NATIVE_PARTITION_UNION")
-    return {"all": complete, "ordinary": ordinary, "authority": authority, **poison}[partition]
+    return {"all": complete, "ordinary": ordinary, "authority": authority, "delegated": delegated, **poison}[partition]
 
 
 def native_compatibility_ids(source_root: Path, *, public_only: bool = False,
@@ -984,7 +1055,8 @@ def run_python_tests(source_root: Path, selection: str, deadline: float, observa
         # Even source-derived inventory/discovery follows the actual new view's
         # admission. A failed/unknown profile cannot reach a product import.
         complete = expected_python_ids(source_root, selection, deadline=deadline)
-        expected = _python_capture_partition(complete, "healthy")
+        delegated, _required = signing_regression_metadata(source_root, "ubuntu-24.04", deadline=deadline)
+        expected = _python_capture_partition(complete, "healthy", delegated)
         if selection != "full":
             inspect_installed_wheel(source_root, deadline=deadline)
         allowed = LINUX_MACOS_SKIPS if sys.platform == "linux" else frozenset()
@@ -1072,7 +1144,7 @@ def run_python_tests(source_root: Path, selection: str, deadline: float, observa
             actual = tuple(test.id() for test in loaded)
             _require(len(actual) == len(set(actual)) and tuple(sorted(actual)) == complete, "TEST_LOADED_INVENTORY")
             # Discovery still proves the complete source inventory. Only the
-            # source-fixed poison methods are withheld for their singleton owners.
+            # source-fixed poison/G methods are withheld for their actual owners.
             suite = unittest.TestSuite(test for test in loaded if test.id() in expected)
             _require(tuple(sorted(test.id() for test in flatten(suite))) == expected, "TEST_HEALTHY_INVENTORY")
             result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2, failfast=True, resultclass=Result).run(suite)

@@ -50,8 +50,10 @@ skipped, unavailable or queued is not success.
 Never bypass branch protection or dispatch release/Store workflows for testing.
 
 For an intermediate macOS-only correction, manual `verification_target: macos`
-omits Linux but runs the **same complete macOS catalog and owner path**. The other
+omits Linux but runs the **same complete macOS catalog and owner path**. The
 partial selection, `signing-adapter`, runs only the two-OS smoke scope below.
+`signing-matrix-canary` runs only the two shard-zero source/wheel cells for
+qualification; it also cannot satisfy the protected aggregate.
 Actions compares these string values without case sensitivity. Missing, empty or
 nonmatching values do not omit Linux. A partial dispatch's
 aggregate `test` deliberately **fails** because skipped Linux is not a
@@ -99,6 +101,19 @@ case worker and production command owner drive durable before/partial/after cuts
 Original custodian-fence observations identify actual reached operations, not
 simulated execution receipts or power-loss durability. Fresh recovery is subject
 to the production account hold, generation/fence and ownership checks.
+
+The version-2 catalog combines 17 primitive components, 131 semantic cases and
+160 Linux/170 Darwin delegated original-regression executions. The ordinary
+Python/native gates retain their complete source method inventory but report
+84 Linux/86 Darwin methods separately as pending delegation, never as executed
+passes. All required variants and the 18 semantic contributions must reconcile
+in the full matrix. The source-defined OS assignment is identical for source and
+wheel. Planning weights alone do not qualify the 420-second workload capacity.
+
+After original capture finality, the controller checks the exact three-file
+private output inventory, charges every retained byte and independently compares
+`catalog.json`, `matrix-result.json` and the bounded typed `results.jsonl.gz`
+against that source authority. Persisted result data cannot confer finality.
 
 Only validated compact proofs leave the test domain before work disposal. The
 protected reducer checks every same-run candidate and exact source/test binding,

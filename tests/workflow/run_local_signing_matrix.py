@@ -46,14 +46,14 @@ def write_record(path, value):
             os.close(closing)
 
 
-def validate_actual_results(directory, expected, *, deadline=None):
+def validate_actual_results(directory, expected, *, operating_system, deadline=None):
     path = directory / "results.jsonl.gz"
     info = path.lstat()
     contract.require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1
                      and 0 < info.st_size <= contract.MAX_RESULTS_BYTES, "actual results file state")
     with path.open("rb") as stream:
         content = stream.read(contract.MAX_RESULTS_BYTES + 1)
-    return contract.validate_actual_results(content, expected, deadline=deadline)
+    return contract.validate_actual_results(content, expected, operating_system=operating_system, deadline=deadline)
 
 
 def operating_system():
@@ -86,20 +86,25 @@ def phase(args, scope):
     contract.require(args.package_root == package and package.resolve(strict=True) == package
                      and args.output == output and not output.exists() and not output.is_symlink(), "fixed phase roots differ")
     contract.require(args.shard is not None and args.local_reduction is False, "phase selection incomplete")
+    # Source-defined admission precedes all product/fixture imports and work.
+    contract.layered_catalog().shard_ids(scope["os"], args.shard)
+    package_files = contract.package_manifest(package, deadline=deadline)
+    definitions = contract.definitions_manifest(ROOT, deadline=deadline)
     output.mkdir(mode=0o700)
     contract.before_deadline(deadline)
     sys.path[:0] = [str(package.parent), str(ROOT / "tests")]
     from workflow import local_signing_persistent_fixture as fixture
+    from workflow import local_signing_layered_fixture as layered
     from mobile_release import local_signing
     contract.require(Path(local_signing.__file__).resolve().parent == package, "wrong actual production import")
     fixture.PHASE_DEADLINE = deadline
-    fixture.main(output, "shard/" + str(args.shard))
+    layered.run_phase(output, args.shard, scope, package, package_files, definitions, deadline=deadline)
     contract.before_deadline(deadline)
     for name, module in tuple(sys.modules.items()):
         if name == "mobile_release" or name.startswith("mobile_release."):
             origin = getattr(module, "__file__", None)
             contract.require(type(origin) is str and Path(origin).resolve().is_relative_to(package), "phase import escaped bound package")
-    record = {"schema": 1, "phase": args.phase, "shard": args.shard, "scope": scope,
+    record = {"schema": 2, "phase": args.phase, "shard": args.shard, "scope": scope,
               "status": "phase-finished", "productionRoot": str(package)}
     print("MRK_MATRIX_PHASE=" + contract.canonical(record).decode("ascii"), flush=True)
     contract.before_deadline(deadline)
@@ -199,6 +204,36 @@ def adapter_source_map(package, *, deadline):
 
 
 def adapter_phase(args, scope):
+    """Observe one escaping exception only after the actual phase's finally."""
+    context, stage = None, ["admission"]
+    try:
+        # Code filenames are prebound data, not paths resolved after a failure.
+        # An unavailable optional context never replaces original admission.
+        try:
+            deadline, selected = args.deadline, args.adapter_phase
+            if (type(deadline) is float and math.isfinite(deadline)
+                    and 0 < deadline - time.monotonic() <= SHARD_SECONDS
+                    and type(selected) is str and selected in {"source", "wheel"}):
+                candidate = (selected, deadline, (
+                    (adapter_phase.__code__.co_filename, contract.ADAPTER_PHASE_FAILURE_FILES[0]),
+                    (contract.require.__code__.co_filename, contract.ADAPTER_PHASE_FAILURE_FILES[1]),
+                ))
+                contract._adapter_phase_context(candidate)
+                context = candidate
+        except Exception:
+            pass
+        return _adapter_phase(args, scope, stage)
+    except BaseException as error:
+        try:
+            contract.emit_adapter_phase_failure(context, stage[0], (
+                type(error), error, BaseException.__dict__["__traceback__"].__get__(error, BaseException),
+            ))
+        except BaseException:
+            pass
+        raise
+
+
+def _adapter_phase(args, scope, stage):
     """Fixed diagnostic smoke, never a source/wheel matrix proof producer."""
     contract.require(all(getattr(sys.flags, name, None) == 1 for name in (
         "isolated", "ignore_environment", "no_user_site", "no_site", "safe_path", "dont_write_bytecode")),
@@ -212,8 +247,10 @@ def adapter_phase(args, scope):
     output = ROOT.parent / "work/signing-adapter" / selected
     contract.require(args.package_root == package and package.resolve(strict=True) == package
                      and args.output == output and not output.exists() and not output.is_symlink(), "fixed adapter roots differ")
+    stage[0] = "inventory"
     expected = contract.adapter_test_ids(ROOT, deadline=deadline)
     output.mkdir(mode=0o700)
+    stage[0] = "imports"
     sys.path[:0] = [str(package.parent), str(ROOT / "tests")]
     from workflow import local_signing_persistent_fixture as fixture
     from mobile_release import local_signing
@@ -221,11 +258,13 @@ def adapter_phase(args, scope):
     contract.require(Path(local_signing.__file__).resolve().parent == package, "wrong adapter production import")
     fixture.PHASE_DEADLINE = deadline  # BEFORE importing/constructing/running the selected suite.
     contract.require(not fixture._CASE_CUSTODY and not fixture._CASE_RECOVERY_DEBT, "adapter inherited retained cases")
+    stage[0] = "inventory"
     source_map = adapter_source_map(package, deadline=deadline)
     previous_tempdir = tempfile.tempdir
     tempfile.tempdir = str(output)
 
     try:
+        stage[0] = "inventory"
         contract.before_deadline(deadline)
         loader = unittest.TestLoader()
         tests = [loader.loadTestsFromName(identifier) for identifier in expected]
@@ -237,19 +276,23 @@ def adapter_phase(args, scope):
             method = getattr(test, test._testMethodName)
             contract.require(test.id() == identifier and Path(method.__func__.__code__.co_filename).resolve()
                              == ROOT / "tests/unit/test_local_signing_persistent.py", "adapter actual method origin")
+        stage[0] = "suite"
         result = SigningAdapterResult(selected, deadline, source_map)
         result.failfast = True
         unittest.TestSuite(tests).run(result)
+        stage[0] = "postconditions"
         contract.before_deadline(deadline)
         contract.require(not result.failed and result.wasSuccessful() and not fixture._CASE_CUSTODY
                          and not fixture._CASE_RECOVERY_DEBT and not model._RETAINED_MODEL_LIFETIMES
                          and not any(output.iterdir()), "adapter failed or retained cases")
+        stage[0] = "origins"
         origins = {}
         for name, module in tuple(sys.modules.items()):
             if name == "mobile_release" or name.startswith("mobile_release."):
                 origin = getattr(module, "__file__", None)
                 contract.require(type(origin) is str and Path(origin).resolve().is_relative_to(package), "adapter import escaped package")
                 origins[name] = Path(origin).resolve().relative_to(package).as_posix()
+        stage[0] = "publication"
         record = {"schema": "mrk-signing-adapter-phase-v1", "phase": selected, "scope": scope,
                   "status": "adapter-only", "productionRoot": str(package), "startedIds": result.started,
                   "successfulIds": result.succeeded, "testsRun": result.testsRun, "origins": origins, "casePathsRemoved": True}

@@ -26,6 +26,8 @@ from workflow.local_signing_workload import worker_timeout
 from .ios_entitlement_helpers import profile
 from .local_signing_helpers import NativeSigningModel, fictional_signing_profile
 from .local_signing_algorithm_helpers import profile_algorithm_session, refuse_signing_execution
+from .local_signing_workspace import NativeCaseWorkspaceMixin
+from workflow.local_signing_regression_catalog import PROFILE_OWNER_NATIVE_VARIANTS, PROFILE_BORROWED_NATIVE_VARIANTS
 from .test_local_signing_failures import DescriptorFault
 
 TOKEN = "e" * 32
@@ -34,12 +36,6 @@ CONTENT = b"fictional authenticated profile shared by original and equal-byte fo
 OTHER = b"different fictional profile bytes, not authenticated by this session"
 
 # Exact finite variants: direct algorithms do not claim native/recovery evidence.
-PROFILE_OWNER_NATIVE_VARIANTS = (
-    ("owned-after-close-same", False, "after-close", "same"),
-    ("owned-during-read-metadata", False, "during-read", "metadata"),
-    ("borrowed-before-open-same", True, "before-open", "same"),
-    ("borrowed-after-close-metadata", True, "after-close", "metadata"),
-)
 PROFILE_OWNER_DIRECT_VARIANTS = (
     ("owned-before-open-same", False, "before-open", "same"),
     ("owned-before-open-different", False, "before-open", "different"),
@@ -59,12 +55,6 @@ PROFILE_OWNER_DIRECT_VARIANTS = (
     ("borrowed-after-close-same", True, "after-close", "same"),
     ("borrowed-after-close-different", True, "after-close", "different"),
     ("borrowed-after-close-metadata", True, "after-close", "metadata"),
-)
-PROFILE_BORROWED_NATIVE_VARIANTS = (
-    ("active-during-read-metadata", False, "during-read", "metadata"),
-    ("active-after-close-same", False, "after-close", "same"),
-    ("terminal-during-read-metadata", True, "during-read", "metadata"),
-    ("terminal-after-close-same", True, "after-close", "same"),
 )
 PROFILE_BORROWED_DIRECT_VARIANTS = (
     ("active-before-open-same", False, "before-open", "same"),
@@ -239,11 +229,9 @@ class SetupStageIO(ProfileIO):
         return os.unlink(name, *args, **kwargs)
 
 
-class ProfileIdentityTests(unittest.TestCase):
+class ProfileIdentityTests(NativeCaseWorkspaceMixin, unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix="mrk-profile-observation-")
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name).resolve()
+        self.root = self.native_case_directory(prefix="mrk-profile-observation-")
         self.serial = 0
 
     def case(self, *, borrowed=False, native=True):

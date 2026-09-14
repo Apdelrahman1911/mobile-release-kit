@@ -26,9 +26,11 @@ from mobile_release.errors import CredentialError, ValidationError
 from mobile_release.owned_process import ProcessError, run_owned
 from mobile_release.reporting import Status
 from workflow.local_signing_workload import profile_signal_timeout
+from workflow.local_signing_regression_catalog import SIGNAL_METHOD_VARIANTS, signal_modes
 
 from .helpers import ios_config, write_project
 from .ios_entitlement_helpers import profile
+from .local_signing_workspace import NativeCaseWorkspaceMixin
 
 
 class ProfileInstallationTests(unittest.TestCase):
@@ -520,54 +522,59 @@ class ProfileInstallationSignalTests(unittest.TestCase):
         self.assertTrue(result["handlersRestored"])
         return result
 
+    def run_regression_boundary(self, mode):
+        self.assertIn(mode, {item for values in SIGNAL_METHOD_VARIANTS.values() for item in values})
+        result = self.run_boundary(mode)
+        if mode in signal_modes("test_real_pending_signals_during_native_open_fstat_fdopen_and_close_are_owned"):
+            self.assertEqual(result["signalCount"], 1)
+        if mode in signal_modes("test_first_signal_at_cleanup_entry_and_before_exit_dispatch_cannot_skip_ownership"):
+            self.assertEqual(result["cleanupAttempts"], 1)
+        return result
+
     def test_real_pending_signals_during_native_open_fstat_fdopen_and_close_are_owned(self):
-        for mode in ("open-home", "open-child", "open-stage", "fstat", "fdopen", "close"):
+        for mode in signal_modes("test_real_pending_signals_during_native_open_fstat_fdopen_and_close_are_owned"):
             with self.subTest(mode=mode):
-                self.assertEqual(self.run_boundary(mode)["signalCount"], 1)
+                self.run_regression_boundary(mode)
 
     def test_original_unmocked_open_and_initial_fstat_interruptions_cannot_leak_files_or_descriptors(self):
-        for mode in ("assigned-open", "before-fstat"):
-            with self.subTest(mode=mode): self.run_boundary(mode)
+        for mode in signal_modes("test_original_unmocked_open_and_initial_fstat_interruptions_cannot_leak_files_or_descriptors"):
+            with self.subTest(mode=mode):
+                self.run_regression_boundary(mode)
 
     def test_actual_caller_handoff_and_repeated_cleanup_signals_do_not_rely_on_generator_gc(self):
-        for mode in ("handoff", "body-repeat", "unexpected-cleanup"):
-            with self.subTest(mode=mode): self.run_boundary(mode)
+        for mode in signal_modes("test_actual_caller_handoff_and_repeated_cleanup_signals_do_not_rely_on_generator_gc"):
+            with self.subTest(mode=mode):
+                self.run_regression_boundary(mode)
 
     def test_successful_native_mutation_is_registered_before_deferred_cancellation(self):
-        for mode in ("mutation-create", "mutation-search", "mutation-default"):
-            with self.subTest(mode=mode): self.run_boundary(mode)
+        for mode in signal_modes("test_successful_native_mutation_is_registered_before_deferred_cancellation"):
+            with self.subTest(mode=mode):
+                self.run_regression_boundary(mode)
 
     def test_first_signal_at_cleanup_entry_and_before_exit_dispatch_cannot_skip_ownership(self):
-        for prefix in ("", "standalone-"):
-            for phase in ("cleanup-entry", "cleanup-dispatch", "restore-entry", "restore-active"):
-                for signum in ("INT", "TERM"):
-                    mode = f"{prefix}{phase}:{signum}"
-                    with self.subTest(mode=mode):
-                        self.assertEqual(self.run_boundary(mode)["cleanupAttempts"], 1)
+        for mode in signal_modes("test_first_signal_at_cleanup_entry_and_before_exit_dispatch_cannot_skip_ownership"):
+            with self.subTest(mode=mode):
+                self.run_regression_boundary(mode)
 
     def test_handler_restoration_and_partial_installation_cannot_swallow_or_abandon_cancellation(self):
-        for prefix in ("", "standalone-"):
-            for phase in ("restore-term", "restore-int", "partial-install"):
-                with self.subTest(prefix=prefix, phase=phase):
-                    self.run_boundary(prefix + phase)
+        for mode in signal_modes("test_handler_restoration_and_partial_installation_cannot_swallow_or_abandon_cancellation"):
+            with self.subTest(mode=mode):
+                self.run_regression_boundary(mode)
 
     def test_late_setup_and_actual_materialized_body_cancellation_never_execute_following_build_code(self):
-        for prefix in ("", "standalone-", "material-"):
-            for phase in ("pre-yield", "body"):
-                for signum in ("INT", "TERM"):
-                    mode = f"{prefix}{phase}:{signum}"
-                    with self.subTest(mode=mode): self.run_boundary(mode)
+        for mode in signal_modes("test_late_setup_and_actual_materialized_body_cancellation_never_execute_following_build_code"):
+            with self.subTest(mode=mode):
+                self.run_regression_boundary(mode)
 
     def test_cleanup_failure_is_not_masked_by_deferred_cancellation_and_remaining_cleanup_runs(self):
-        for signum in ("INT", "TERM"):
-            with self.subTest(signum=signum): self.run_boundary("cleanup-error-signal:" + signum)
+        for mode in signal_modes("test_cleanup_failure_is_not_masked_by_deferred_cancellation_and_remaining_cleanup_runs"):
+            with self.subTest(mode=mode):
+                self.run_regression_boundary(mode)
 
 
-class ProfileCredentialFlowTests(unittest.TestCase):
+class ProfileCredentialFlowTests(NativeCaseWorkspaceMixin, unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix="mrk-profile-credentials-")
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = self.native_case_directory(prefix="mrk-profile-credentials-")
         self.home = self.root / "home"; self.home.mkdir(mode=0o700)
         self.private = self.root / "private"; self.private.mkdir(mode=0o700)
         self.p12, self.profile_path = self.private / "identity.p12", self.private / "profile"

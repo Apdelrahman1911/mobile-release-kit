@@ -23,6 +23,8 @@ from workflow.local_signing_workload import worker_timeout
 from .ios_entitlement_helpers import profile
 from .local_signing_helpers import NativeSigningModel, fictional_signing_profile, model_result
 from .local_signing_algorithm_helpers import refuse_signing_execution
+from .local_signing_workspace import NativeCaseWorkspaceMixin
+from workflow.local_signing_regression_catalog import HANDLER_RESTORATION_VARIANTS
 
 TOKEN = "b" * 32
 UUID = "12345678-1234-1234-1234-1234567890AB"
@@ -131,11 +133,9 @@ class DescriptorFault:
                 os.close(entry["fd"])
 
 
-class SigningFailureTests(unittest.TestCase):
+class SigningFailureTests(NativeCaseWorkspaceMixin, unittest.TestCase):
     def setUp(self):
-        scratch = tempfile.TemporaryDirectory(prefix="mrk-signing-fatal-")
-        self.addCleanup(scratch.cleanup)
-        self.root = Path(scratch.name).resolve()
+        self.root = self.native_case_directory(prefix="mrk-signing-fatal-")
         self.serial = 0
 
     def case(self, *, borrowed=False, seed=True):
@@ -539,53 +539,59 @@ raise SystemExit(status)
         self.fresh_recovery(home, model, token=status["session"])
 
     def test_actual_handler_restoration_cannot_mask_retained_resource_failure(self):
-        for boundary in ("read", "lease", "installer", "signing"):
-            for masking_type in (OSError, FileNotFoundError, CredentialError, KeyboardInterrupt):
-                with self.subTest(boundary=boundary, masking=masking_type.__name__):
-                    root, home, destination, model = self.case(borrowed=True, seed=False)
-                    name = str(home) if boundary == "lease" else destination.name
-                    original_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
-                    real_restore = DefaultCancellation.restore
-                    masked = []
-                    with DescriptorFault(root, lambda e: e["name"] == name, armed=boundary != "signing") as fault:
-                        def restore(guard):
-                            real_restore(guard)
-                            if fault.faults and not masked:
-                                masked.append(True)
-                                raise masking_type("fictional restoration canary")
+        for variant in HANDLER_RESTORATION_VARIANTS:
+            with self.subTest(variant=variant):
+                self.run_handler_restoration_variant(variant)
 
-                        stack = ExitStack()
-                        context = None
-                        if boundary == "signing":
-                            stack, context = self.signing_context(root, home, model)
+    def run_handler_restoration_variant(self, variant):
+        self.assertIn(variant, HANDLER_RESTORATION_VARIANTS)
+        boundary, masking = variant
+        masking_type = {"OSError": OSError, "FileNotFoundError": FileNotFoundError,
+                        "CredentialError": CredentialError, "KeyboardInterrupt": KeyboardInterrupt}[masking]
+        root, home, destination, model = self.case(borrowed=True, seed=False)
+        name = str(home) if boundary == "lease" else destination.name
+        original_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+        real_restore = DefaultCancellation.restore
+        masked = []
+        with DescriptorFault(root, lambda e: e["name"] == name, armed=boundary != "signing") as fault:
+            def restore(guard):
+                real_restore(guard)
+                if fault.faults and not masked:
+                    masked.append(True)
+                    raise masking_type("fictional restoration canary")
+
+            stack = ExitStack()
+            context = None
+            if boundary == "signing":
+                stack, context = self.signing_context(root, home, model)
+            try:
+                with stack, patch.object(signing, "os", fault.os), patch.object(credentials, "os", fault.os), \
+                     patch.object(DefaultCancellation, "restore", new=restore), self.assertRaises(owned.ProcessError) as caught:
+                    if boundary == "read":
+                        directory = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
                         try:
-                            with stack, patch.object(signing, "os", fault.os), patch.object(credentials, "os", fault.os), \
-                                 patch.object(DefaultCancellation, "restore", new=restore), self.assertRaises(owned.ProcessError) as caught:
-                                if boundary == "read":
-                                    directory = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
-                                    try:
-                                        signing._profile_snapshot(directory, destination.name)
-                                    finally:
-                                        os.close(directory)
-                                elif boundary == "lease":
-                                    with signing.local_signing_lease(home=home):
-                                        pass
-                                elif boundary == "installer":
-                                    with credentials._temporary_profile_installation(CONTENT, UUID, home):
-                                        self.fail("initial read close failure admitted installer")
-                                else:
-                                    with context:
-                                        fault.armed = True
-                            self.assert_fatal(caught.exception, dispatched=boundary == "signing")
-                            self.assertEqual(masked, [True])
-                            fault.assert_observed(self)
-                            self.assertEqual({sig: signal.getsignal(sig) for sig in original_handlers}, original_handlers)
+                            signing._profile_snapshot(directory, destination.name)
                         finally:
-                            for sig, handler in original_handlers.items():
-                                signal.signal(sig, handler)
-                    status = signing.signing_status(home=home)
-                    if status["status"] == "pending":
-                        self.fresh_recovery(home, model, token=status["session"])
+                            os.close(directory)
+                    elif boundary == "lease":
+                        with signing.local_signing_lease(home=home):
+                            pass
+                    elif boundary == "installer":
+                        with credentials._temporary_profile_installation(CONTENT, UUID, home):
+                            self.fail("initial read close failure admitted installer")
+                    else:
+                        with context:
+                            fault.armed = True
+                self.assert_fatal(caught.exception, dispatched=boundary == "signing")
+                self.assertEqual(masked, [True])
+                fault.assert_observed(self)
+                self.assertEqual({sig: signal.getsignal(sig) for sig in original_handlers}, original_handlers)
+            finally:
+                for sig, handler in original_handlers.items():
+                    signal.signal(sig, handler)
+        status = signing.signing_status(home=home)
+        if status["status"] == "pending":
+            self.fresh_recovery(home, model, token=status["session"])
 
     def test_optional_missing_read_does_not_invent_a_new_failure_from_active_body_context(self):
         _, home, destination, _ = self.case(borrowed=True, seed=False)

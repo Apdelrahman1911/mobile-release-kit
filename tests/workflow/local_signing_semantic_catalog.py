@@ -132,6 +132,21 @@ UNKNOWN_STATUS = MappingProxyType({
     "native-unrecorded-inode": CONFLICT, "active-build-result": CONFLICT, "active-build-pending": CONFLICT,
 })
 
+# Physical prefix expectations come from this fixed source, never worker JSON
+# or a claim to have observed an operand inside another process's stack.
+NATIVE_PREFIXES = MappingProxyType({
+    "database": native("native-effect/write/" + DB_NAME, edge="partial",
+                       operationKind="create", operationPhase="ARMED"),
+    "lock": native("native-effect/write/" + LOCK_NAME, edge="partial",
+                   operationKind="create", operationPhase="ARMED"),
+    "transaction-stage": native("native-effect/write/native-atomic-stage", edge="partial",
+                                operationKind="settings", operationPhase="ARMED"),
+})
+NATIVE_PREFIX_CONTENT = MappingProxyType({
+    "database": b"fictional-db", "lock": b"fictional-lock",
+    "transaction-stage": b"fictional-db-revision-1",
+})
+
 
 @dataclass(frozen=True)
 class Case:
@@ -145,7 +160,7 @@ class Case:
     variant: str | None = None
 
     def __post_init__(self):
-        assert self.kind in {"seed", "recovery", "command", "focused", "healthy"}
+        assert self.kind in {"seed", "recovery", "command", "focused", "healthy", "native-prefix"}
         assert self.manual in {"none", "observe", "resolve"}
         assert self.expected in {RECOVERED, CONFLICT, ABSENT, REFUSED, "focused"}
         assert self.resolution in {None, RECOVERED, CONFLICT}
@@ -256,8 +271,11 @@ FOCUSED_VARIANTS = (
 for _number, _variant in enumerate(FOCUSED_VARIANTS, 1):
     _cases.append(Case(f"F/{_number:02}", "focused", None, None, "none", "focused", variant=_variant))
 _cases.append(Case("H/full-context", "healthy", None, None, "none", RECOVERED))
+for _name, _selector in NATIVE_PREFIXES.items():
+    _cases.append(Case("N/native-prefix/" + _name, "native-prefix", _name, _selector, "none", REFUSED,
+                       CONFLICT if _name == "transaction-stage" else RECOVERED))
 
-assert len(SEEDS) == 28 and len(_cases) == 128 and len({item.identifier for item in _cases}) == 128
+assert len(SEEDS) == 28 and len(_cases) == 131 and len({item.identifier for item in _cases}) == 131
 CASES = MappingProxyType({item.identifier: item for item in sorted(_cases, key=lambda item: item.identifier)})
 
 

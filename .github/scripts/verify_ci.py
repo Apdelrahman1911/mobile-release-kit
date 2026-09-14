@@ -28,6 +28,7 @@ import time
 import tomllib
 import traceback
 from typing import Callable
+from types import MappingProxyType
 
 
 AGGREGATE_SECONDS = 3300
@@ -730,8 +731,7 @@ _WHEEL = (
 MATRIX_PHASE_SECONDS = 420
 MATRIX_PAIR_SECONDS = 900
 MATRIX_PERSISTED_LIMIT = 256 * 1024**2  # Same whole-attempt bound as original Session captures.
-MATRIX_PHASE_FILES = frozenset({"original-inventory.json", "recovery-inventory.json",
-                                "matrix-result.json", "results.jsonl.gz"})
+MATRIX_PHASE_FILES = frozenset({"catalog.json", "matrix-result.json", "results.jsonl.gz"})
 _MATRIX_GATES = (
     "source-copy", "source-environment", "source-dependencies", "editable-install",
     "source-freeze", "source-pip-check", *_WHEEL, "local-signing-matrix", "source-integrity",
@@ -1589,7 +1589,7 @@ def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, de
                            or type(row["id"]) is not str or type(row["outcome"]) is not str for row in tests)
                     or tuple(sorted(row["id"] for row in tests)) != expected):
                 raise VerificationError("PYTHON_COMPLETION_INVENTORY")
-            allowed = checks.linux_allowed_skips() if platform == "linux" and selection == "full" else frozenset()
+            allowed = (set(expected) & checks.linux_allowed_skips()) if platform == "linux" else frozenset()
             skips = {row["id"] for row in tests if row["outcome"] == "skip"}
             if skips != allowed or any(row["outcome"] not in ("ok", "skip") for row in tests):
                 raise VerificationError("PYTHON_UNEXPECTED_SKIP_OR_FAILURE")
@@ -1672,7 +1672,8 @@ def signing_adapter_failure(raw: bytes, scope: SigningAdapterDiagnostic, *, dead
             if (type(progress) is not dict or set(progress) != {"case", "owner", "service"}
                     or type(progress["case"]) is not str or progress["case"] not in {
                         "healthy", "crash", "deadline", "query", "seed", "inventory",
-                        "final-automatic", "final-no-resolution", "final-owner-resolution"}):
+                        "final-automatic", "final-no-resolution", "final-owner-resolution",
+                        "semantic-main", "semantic-resolution"}):
                 return False
             owner, service = progress["owner"], progress["service"]
             commands = {"begin", "run-owned", "target-return", "service-joined", "model-return"}
@@ -1769,6 +1770,48 @@ def signing_adapter_failure(raw: bytes, scope: SigningAdapterDiagnostic, *, dead
         return {"schema": 1, "observations": observations} if observations else None
     finally:
         check_clock(deadline)  # Optional diagnostics cannot renew the original phase endpoint.
+
+
+def signing_adapter_phase_failure(raw: bytes, scope: SigningAdapterDiagnostic, *, deadline: float) -> dict | None:
+    """Independent optional phase DATA; never changes original capture finality."""
+    check_clock(deadline)
+    try:
+        if (type(raw) is not bytes or not 0 < len(raw) <= 65536 or type(scope) is not SigningAdapterDiagnostic
+                or scope.phase not in {"source", "wheel"}):
+            return None
+        marker = b"MRK_SIGNING_ADAPTER_PHASE_FAILURE="
+        stages = {"admission", "imports", "inventory", "suite", "postconditions", "origins", "publication"}
+        categories = {"os-error", "assertion-error", "value-error", "type-error", "memory-error", "exception", "base-exception"}
+        files = {"tests/workflow/run_local_signing_matrix.py", "tests/workflow/local_signing_matrix_contract.py"}
+        observation = None
+        for line in raw.splitlines(keepends=True):
+            check_clock(deadline)
+            if not line.startswith(marker):
+                continue
+            if len(line) > 2048 or not line.endswith(b"\n") or observation is not None:
+                return None
+            try:
+                value = strict_json(line[len(marker):-1].decode("ascii"))
+            except (UnicodeError, ValueError, VerificationError, RecursionError):
+                return None
+            if (type(value) is not dict or set(value) != {"schema", "phase", "stage", "category", "locations"}
+                    or type(value["schema"]) is not int or value["schema"] != 1
+                    or type(value["phase"]) is not str or value["phase"] != scope.phase
+                    or type(value["stage"]) is not str or value["stage"] not in stages
+                    or type(value["category"]) is not str or value["category"] not in categories
+                    or type(value["locations"]) is not list or len(value["locations"]) > 4
+                    or any(type(location) is not dict or set(location) != {"file", "line"}
+                           or type(location["file"]) is not str or location["file"] not in files
+                           or type(location["line"]) is not int or not 0 < location["line"] < 1_000_000
+                           for location in value["locations"])):
+                return None
+            canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii")
+            if canonical != line[len(marker):-1]:
+                return None
+            observation = value
+        return observation
+    finally:
+        check_clock(deadline)
 
 
 def python_storage_profile(data: object) -> dict | None:
@@ -2449,6 +2492,12 @@ def original_native_capture(session, argv, paths: Paths, rows: list[dict], name:
                     row["adapter_failure"] = diagnostic
             except BaseException:
                 row["diagnostic_error"] = {"error": "SIGNING_ADAPTER_DIAGNOSTIC_UNAVAILABLE"}
+            try:
+                phase_diagnostic = signing_adapter_phase_failure(result.stderr, signing_adapter_diagnostic, deadline=deadline)
+                if phase_diagnostic is not None:
+                    row["adapter_phase_failure"] = phase_diagnostic
+            except BaseException:
+                row["phase_diagnostic_error"] = {"error": "SIGNING_ADAPTER_PHASE_DIAGNOSTIC_UNAVAILABLE"}
         raise primary
     check_clock(deadline)
     row["status"] = "FINALIZED"
@@ -3255,6 +3304,31 @@ def perform_compatibility_gate(step: Step, paths: Paths, session, checks, platfo
         return CheckResult(False, details, exc.code if isinstance(exc, VerificationError) else "NATIVE_COMPATIBILITY_GATE_FAILURE")
 
 
+def pending_signing_delegation(checks, source: Path, operating_system: str, inventories: dict,
+                               details: dict, code: str, *, deadline: float) -> tuple[str, ...]:
+    """Source-only pending obligations, never appended to executed-test receipts."""
+    delegated, requirements = checks.signing_regression_metadata(source, operating_system, deadline=deadline)
+    if (type(delegated) is not tuple or not delegated or any(type(value) is not str for value in delegated)
+            or tuple(sorted(set(delegated))) != delegated or type(requirements) is not MappingProxyType
+            or tuple(requirements) != delegated or inventories["delegated"] != delegated):
+        raise VerificationError(code)
+    parts = []
+    for method, identifiers in requirements.items():
+        if (type(identifiers) is not tuple or not identifiers
+                or any(type(value) is not str or not value.startswith("G/" + method + "/") for value in identifiers)
+                or tuple(sorted(set(identifiers))) != identifiers):
+            raise VerificationError(code)
+        parts.extend(identifiers)
+    if len(parts) != len(set(parts)):
+        raise VerificationError(code)
+    details.update(source_obligation_count=len(inventories["all"]),
+        pending_delegation={"methods": list(delegated),
+                            "requirements": {method: list(parts) for method, parts in requirements.items()}},
+        coverage="partial-until-layered-matrix")
+    check_clock(deadline)
+    return delegated
+
+
 def perform_native_gate(step: Step, paths: Paths, session, checks,
                         platform: str, *, deadline: float) -> CheckResult:
     """Authority, healthy and literal singleton originals share one logical cutoff.
@@ -3291,8 +3365,10 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
         check_capacity(paths.work, 64 * 1024**2)
         details["stage"] = "inventory"
         inventories = {name: checks.native_partition_ids(paths.source, name, deadline=cutoff)
-                       for name in ("all", "authority", "ordinary", *PYTHON_POISON_PARTITIONS)}
-        joined = tuple(identifier for row in details["partitions"] for identifier in inventories[row["partition"]])
+                       for name in ("all", "delegated", "authority", "ordinary", *PYTHON_POISON_PARTITIONS)}
+        delegated = pending_signing_delegation(checks, paths.source, "macos-26", inventories, details,
+                                               "NATIVE_PARTITION_UNION", deadline=cutoff)
+        joined = tuple(identifier for row in details["partitions"] for identifier in inventories[row["partition"]]) + delegated
         if (any(type(ids) is not tuple or not ids or tuple(sorted(set(ids))) != ids
                 for ids in inventories.values())
                 or len(inventories["authority"]) != 5
@@ -3359,7 +3435,8 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
             completed.extend(observed)
         details["stage"] = "union"
         check_clock(cutoff)
-        if tuple(sorted(completed)) != inventories["all"] or len(completed) != len(set(completed)):
+        if (tuple(sorted(completed + list(delegated))) != inventories["all"]
+                or len(completed) + len(delegated) != len(set(completed) | set(delegated))):
             raise VerificationError("NATIVE_PARTITION_UNION")
         details.update(stage="complete", tests=len(completed), completed=sorted(completed))
         check_clock(cutoff)
@@ -3404,8 +3481,10 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
         check_capacity(paths.work, 64 * 1024**2)
         details["stage"] = "inventory"
         inventories = {name: checks.python_capture_ids(paths.source, selection, name, deadline=cutoff)
-                       for name in ("all", "healthy", *PYTHON_POISON_PARTITIONS)}
-        joined = tuple(identifier for row in details["partitions"] for identifier in inventories[row["partition"]])
+                       for name in ("all", "delegated", "healthy", *PYTHON_POISON_PARTITIONS)}
+        delegated = pending_signing_delegation(checks, paths.source, "ubuntu-24.04", inventories, details,
+                                               "PYTHON_CAPTURE_UNION", deadline=cutoff)
+        joined = tuple(identifier for row in details["partitions"] for identifier in inventories[row["partition"]]) + delegated
         if (any(type(ids) is not tuple or not ids or tuple(sorted(set(ids))) != ids for ids in inventories.values())
                 or any(len(inventories[name]) != 1 for name in PYTHON_POISON_PARTITIONS)
                 or len(joined) != len(set(joined)) or tuple(sorted(joined)) != inventories["all"]):
@@ -3467,7 +3546,8 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
             completed.extend(observed)
         details["stage"] = "union"
         check_clock(cutoff)
-        if tuple(sorted(completed)) != inventories["all"] or len(completed) != len(set(completed)):
+        if (tuple(sorted(completed + list(delegated))) != inventories["all"]
+                or len(completed) + len(delegated) != len(set(completed) | set(delegated))):
             raise VerificationError("PYTHON_CAPTURE_UNION")
         details.update(stage="complete", tests=len(completed), completed=sorted(completed))
         check_clock(cutoff)
@@ -3786,6 +3866,10 @@ def finalized_matrix_outputs(directory: Path, session, *, deadline: float) -> di
     """Called only after the actual capture and same-cutoff Session idle proof."""
     from itertools import islice
     check_clock(deadline)
+    parent = directory.lstat()
+    if (not stat.S_ISDIR(parent.st_mode) or stat.S_IMODE(parent.st_mode) != 0o700
+            or parent.st_uid != session.uid):
+        raise VerificationError("MATRIX_PHASE_OUTPUT_STATE")
     with os.scandir(directory) as entries:
         names = [entry.name for entry in islice(entries, len(MATRIX_PHASE_FILES) + 1)]
     if set(names) != MATRIX_PHASE_FILES or len(names) != len(MATRIX_PHASE_FILES):
@@ -3795,6 +3879,7 @@ def finalized_matrix_outputs(directory: Path, session, *, deadline: float) -> di
         check_clock(deadline)
         info = (directory / name).lstat()
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != session.uid
+                or stat.S_IMODE(info.st_mode) != 0o600
                 or info.st_size < 0 or info.st_size > 64 * 1024**2):
             raise VerificationError("MATRIX_PHASE_OUTPUT_STATE")
         count += info.st_size
@@ -3825,7 +3910,7 @@ def parse_matrix_phase(result, phase: str, scope: dict, package: Path, shard: in
             or not result.stdout.endswith(b"\n") or result.stdout.count(b"\n") != 1 or len(result.stdout) > 65536):
         raise VerificationError("MATRIX_PHASE_CAPTURE_RECORD")
     record = strict_json(result.stdout[len(prefix):-1].decode("ascii"))
-    expected = {"schema": 1, "phase": phase, "shard": shard, "scope": scope,
+    expected = {"schema": 2, "phase": phase, "shard": shard, "scope": scope,
                 "status": "phase-finished", "productionRoot": str(package)}
     # Python mapping equality aliases True/1/1.0 even in nested scope fields.
     # These child records must preserve the exact admitted JSON field types.
@@ -3936,7 +4021,15 @@ def perform_matrix_gate(step: Step, paths: Paths, session, checks, platform: str
         package_files = contract.package_manifest(paths.source / "src/mobile_release", deadline=pair_deadline)
         definitions = contract.definitions_manifest(paths.source, deadline=pair_deadline)
         package_sha, definitions_sha = contract.digest(package_files), contract.digest(definitions)
-        expected, phases = None, {}
+        # Admission is source-defined before either original starts. Child
+        # output can demonstrate this exact union, never choose its own work.
+        catalog = contract.layered_catalog()
+        definition = catalog.definition(selection.operating_system)
+        catalog_sha = contract.digest(definition)
+        expected = list(catalog.expected_ids(selection.operating_system))
+        selected = list(catalog.shard_ids(selection.operating_system, selection.shard))
+        expected_coverage = catalog.coverage(selection.operating_system, selected)
+        phases = {}
         for phase in ("source", "wheel"):
             phase_deadline = min(pair_deadline, time.monotonic() + MATRIX_PHASE_SECONDS)
             check_clock(phase_deadline)
@@ -3955,27 +4048,37 @@ def perform_matrix_gate(step: Step, paths: Paths, session, checks, platform: str
             parse_matrix_phase(capture, phase, scope, package, selection.shard)
             output = paths.work / "signing-matrix" / phase
             rows[-1]["outputs"] = finalized_matrix_outputs(output, session, deadline=phase_deadline)
+            observed_catalog = strict_json(read_regular(output / "catalog.json", deadline=phase_deadline,
+                                                       maximum=16 * 1024**2).decode("utf-8"))
+            if contract.canonical(observed_catalog) != contract.canonical(definition):
+                raise VerificationError("MATRIX_SOURCE_CATALOG_CHANGED")
             observed = strict_json(read_regular(output / "matrix-result.json", deadline=phase_deadline,
                                                  maximum=16 * 1024**2).decode("utf-8"))
-            required = {"shard", "scope", "expectedCaseIds", "executedCaseIds", "inventorySha256", "packageSha256",
-                        "definitionsSha256", "counts", "productionRoot", "recoveryGroups", "elapsed",
+            required = {"schemaVersion", "shard", "scope", "expectedCaseIds", "executedCaseIds", "catalogSha256",
+                        "packageSha256", "definitionsSha256", "coverage", "productionRoot", "elapsed",
                         "allExactChildrenReapedAndGroupsAbsent", "allCasePathsRemoved"}
-            if (type(observed) is not dict or set(observed) != required or type(observed["shard"]) is not int
-                    or observed["shard"] != selection.shard or observed["productionRoot"] != str(package)):
+            if (type(observed) is not dict or set(observed) != required
+                    or type(observed["schemaVersion"]) is not int or observed["schemaVersion"] != 2
+                    or type(observed["shard"]) is not int or observed["shard"] != selection.shard
+                    or type(observed["productionRoot"]) is not str or observed["productionRoot"] != str(package)
+                    or contract.canonical(observed["scope"]) != contract.canonical(scope)
+                    or type(observed["elapsed"]) not in (int, float) or not math.isfinite(observed["elapsed"])
+                    or not 0 <= observed["elapsed"] <= MATRIX_PHASE_SECONDS):
                 raise VerificationError("MATRIX_PHASE_RESULT_BINDING")
             contract.validate_ids(observed["expectedCaseIds"], "inventoried cases")
             contract.validate_ids(observed["executedCaseIds"], "actual cases")
-            if expected is None:
-                expected = observed["expectedCaseIds"]
-            if observed["expectedCaseIds"] != expected:
-                raise VerificationError("MATRIX_SOURCE_WHEEL_INVENTORY")
+            if (observed["expectedCaseIds"] != expected or observed["executedCaseIds"] != selected
+                    or observed["catalogSha256"] != catalog_sha
+                    or contract.canonical(observed["coverage"]) != contract.canonical(expected_coverage)):
+                raise VerificationError("MATRIX_SOURCE_DEFINED_UNION")
             phases[phase] = {key: observed[key] for key in (
-                "executedCaseIds", "inventorySha256", "packageSha256", "definitionsSha256",
+                "executedCaseIds", "catalogSha256", "packageSha256", "definitionsSha256", "coverage",
                 "allExactChildrenReapedAndGroupsAbsent", "allCasePathsRemoved")}
             phases[phase]["resultsSha256"] = contract.validate_actual_results(
                 read_regular(output / "results.jsonl.gz", deadline=phase_deadline, maximum=contract.MAX_RESULTS_BYTES),
-                observed["executedCaseIds"], deadline=phase_deadline)
-            contract.validate_phase(phases[phase], expected, selection.shard, package_sha, definitions_sha, phase)
+                selected, operating_system=selection.operating_system, deadline=phase_deadline)
+            contract.validate_phase(phases[phase], expected, selection.shard, package_sha, definitions_sha, phase,
+                                    operating_system=selection.operating_system)
             checks.inspect_native_package(paths.source, package, deadline=phase_deadline)
             check_clock(phase_deadline)
             rows[-1].update(status="PASS", package=binding, executed=len(observed["executedCaseIds"]))
@@ -3985,7 +4088,7 @@ def perform_matrix_gate(step: Step, paths: Paths, session, checks, platform: str
                 or contract.definitions_manifest(paths.source, deadline=pair_deadline) != definitions):
             raise VerificationError("MATRIX_ORIGINAL_PAIR_OR_SOURCE_CHANGED")
         session.ensure_idle(deadline=pair_deadline)
-        proof = {"schemaVersion": 1, "scope": scope, "shard": selection.shard,
+        proof = {"schemaVersion": 2, "scope": scope, "shard": selection.shard, "catalogSha256": catalog_sha,
                  "expectedCaseIds": expected, "expectedSha256": contract.digest(expected), **phases}
         contract.validate_proof(proof, contract.artifact_name(scope, selection.shard), scope, package_sha, definitions_sha)
         details["proof"] = publish_matrix_proof(selection, proof, contract, session, deadline=pair_deadline)

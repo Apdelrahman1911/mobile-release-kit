@@ -638,7 +638,7 @@ class NativeProfileCITests(unittest.TestCase):
     def test_native_inventory_reuses_exact_fixed_source_authority_without_budget(self):
         gate = run_native_profile_checks
         for case, partition in itertools.product(("success", "missing-loader", "pattern-drift", "inventory-error"),
-                ("all", "authority", "ordinary", *(name for name, _identifier in _PYTHON_POISON_FIXTURES))):
+                ("all", "authority", "ordinary", "delegated", *(name for name, _identifier in _PYTHON_POISON_FIXTURES))):
             with self.subTest(case=case, partition=partition):
                 events = []
                 original = ValueError("PRIVATE_SOURCE_INVENTORY_FAILURE")
@@ -688,6 +688,7 @@ class NativeProfileCITests(unittest.TestCase):
                 self.assertEqual(gate.main(arguments), 7)
                 run.assert_called_once_with(partition=partition, installed_wheel=wheel)
         invalid = (None, "--authority", {}, [True], ["--help"], ["--authority", "--ordinary"],
+                   ["--delegated"], ["--delegated", "--installed-wheel"], ["--delegated-source"], ["--delegated-wheel"],
                    ["--ordinary", "--authority"], ["--authority", "--authority"],
                    ["--installed-wheel", "--authority"], ["--installed-wheel", "--ordinary"],
                    ["--authority", "--installed-wheel", "--installed-wheel"], ["--test", _FIXTURE_IDS[0]])
@@ -696,7 +697,7 @@ class NativeProfileCITests(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     gate.main(arguments)
                 run.assert_not_called()
-        for arguments in ({"partition": "other"}, {"partition": True}, {"installed_wheel": 1}):
+        for arguments in ({"partition": "other"}, {"partition": "delegated"}, {"partition": True}, {"installed_wheel": 1}):
             with _inert_native_gate() as fixture, self.assertRaises(AssertionError):
                 gate.run(**arguments)
             self.assertEqual(fixture.events, [])
@@ -780,7 +781,9 @@ class NativeProfileCITests(unittest.TestCase):
             # In particular primitive2 never gains either profile workflow closure.
             faults = [(None, None)] + [("missing", name) for name in sorted(required)]
             faults += [("extra", name) for name in sorted((all_family_modules - required)
-                                                        | {"mobile_release.extra", "unit.foreign", "workflow.foreign"})]
+                                                        | {"mobile_release.extra", "unit.foreign", "workflow.foreign",
+                                                           "workflow.local_signing_regression_catalog",
+                                                           "workflow.local_signing_regression_fixture", "unit.local_signing_workspace"})]
             faults += [(name, None) for name in metadata_faults]
             for fault, subject in faults:
                 with self.subTest(module=module_name, phase=phase, fault=fault, subject=subject):
@@ -1540,7 +1543,7 @@ class NativeProfileCITests(unittest.TestCase):
         for wheel, fault in itertools.product((False, True), (
                 "none", "source-mix", "extra-package-path", "loader", "spec-origin", "package-name", "nested-package",
                 "missing-product", "missing-test", "unrelated-test", "ordinary-workflow", "late-search-path",
-                "command-module", "ordinary-profile-caller")):
+                "command-module", "ordinary-profile-caller", "regression-catalog", "regression-fixture", "workspace")):
             with self.subTest(wheel=wheel, fault=fault):
                 runtime = _inert_authority_runtime(installed_wheel=wheel)
                 with patch.object(gate, "sys", runtime):
@@ -1573,6 +1576,11 @@ class NativeProfileCITests(unittest.TestCase):
                     elif fault == "ordinary-workflow":
                         runtime.modules["workflow"] = _inert_origin_module(
                             "workflow", gate.ROOT / "tests/workflow", package=True)
+                    elif fault in {"regression-catalog", "regression-fixture", "workspace"}:
+                        name = {"regression-catalog": "workflow.local_signing_regression_catalog",
+                                "regression-fixture": "workflow.local_signing_regression_fixture",
+                                "workspace": "unit.local_signing_workspace"}[fault]
+                        runtime.modules[name] = _inert_origin_module(name, gate.ROOT / "tests" / name.partition(".")[0])
                     elif fault == "late-search-path":
                         runtime.path.append("")
                     elif fault in {"command-module", "ordinary-profile-caller"}:

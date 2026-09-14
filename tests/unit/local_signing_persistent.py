@@ -279,10 +279,19 @@ class PersistentSigningModel:
         require(not _RETAINED_MODEL_LIFETIMES, "prior original model lifecycle is unresolved")
         timeout = kwargs.get("timeout", 30)
         require(type(timeout) is int and timeout > 0, "finite model timeout required")
-        require(type(argv) in (list, tuple) and 0 < len(argv) <= 64
-                and all(type(item) is str and 0 < len(item) <= 8192 for item in argv)
-                and sum(len(item.encode("utf-8")) for item in argv) <= 32768, "bounded fictional command required")
         deadline = time.monotonic() + timeout
+        require(type(argv) in (list, tuple) and 0 < len(argv) <= 64, "bounded fictional command required")
+        command_argv = tuple(argv)
+        require(0 < len(command_argv) <= 64
+                and all(type(item) is str and 0 < len(item) <= 8192 for item in command_argv)
+                and sum(len(item.encode("utf-8")) for item in command_argv) <= 32768,
+                "bounded fictional command required")
+        observer = getattr(self.trace, "observe_original_command", None)
+        if observer is not None:
+            # O observes its actual immutable input, not frames in separate W.
+            # This work consumes the original endpoint before any acquisition.
+            observer(self, command_argv)
+            remaining(deadline)
         token = uuid.uuid4().hex
         stop = threading.Event()
         service_finished = threading.Event()
@@ -312,7 +321,7 @@ class PersistentSigningModel:
                             and hello == {"version": VERSION, "kind": "HELLO", "token": token}, "wrong target HELLO")
                     outgoing = Channel(namespace.open("acks.fifo", os.O_WRONLY, deadline), deadline, stop=stop)
                     outgoing.send({"version": VERSION, "kind": "HELLO-ACK", "token": token,
-                                   "argv": list(argv), "recovery": self.recovery, "auto_add": self.auto_add,
+                                   "argv": list(command_argv), "recovery": self.recovery, "auto_add": self.auto_add,
                                    "trace": self.trace is not None, "result_policy": policy})
                     incoming.established = outgoing.established = True
                     sequence = 0

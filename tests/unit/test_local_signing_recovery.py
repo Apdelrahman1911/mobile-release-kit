@@ -21,17 +21,16 @@ from mobile_release import local_signing as signing
 from mobile_release.errors import CredentialError
 from mobile_release.credentials import _temporary_profile_installation
 from .local_signing_helpers import NativeSigningModel, model_result
+from .local_signing_workspace import NativeCaseWorkspaceMixin
 
 
 class TTY(io.StringIO):
     def isatty(self): return True
 
 
-class SigningRecoveryTests(unittest.TestCase):
+class SigningRecoveryTests(NativeCaseWorkspaceMixin, unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix='mrk-signing-recovery-')
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = self.native_case_directory(prefix='mrk-signing-recovery-')
         self.home = self.root / 'home'; self.home.mkdir(mode=0o700)
         self.model = NativeSigningModel(self.home)
         self.token = 'b'*32

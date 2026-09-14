@@ -178,9 +178,4 @@ def run_case(parent, identifier):
                                    "observation": final["observation"]})
     fixture.check_case_context(root, context)
     assert str(root) not in fixture._CASE_RECOVERY_DEBT
-    evidence_name = semantic._persist_step(parent, identifier, "complete", evidence)
-    fixture.remove_case(root)
-    assert not root.exists() and str(root) not in fixture._CASE_CUSTODY
-    fixture.check_phase_context(context)
-    return {"caseId": identifier, "status": "semantic-subset-case", "evidence": evidence_name,
-            "caseRemoved": True, "originalWorkersSettled": True}
+    return semantic.finish_semantic_case(parent, root, identifier, evidence, context)

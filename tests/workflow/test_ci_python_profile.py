@@ -3,7 +3,7 @@
 Only reviewed helper definitions are loaded lazily. Every project filesystem,
 resource, clock and process seam is replaced with the private in-memory fixture.
 The only executed test bodies are locally defined inert methods. Synthetic
-discovery also carries fixed singleton-ID stand-ins that must never execute;
+discovery also carries fixed singleton/G-ID stand-ins that must never execute;
 discovery never imports product tests, helpers or native entry points.
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ import os
 from pathlib import Path, PurePosixPath
 import stat
 import sys
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, call, patch
 
@@ -28,6 +28,9 @@ ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT = object()
 _USERNS = "/proc/sys/user/max_user_namespaces"
 _MOUNTINFO = "/proc/self/mountinfo"
+_DELEGATED_IDS = ("unit.test_fixed_fixture.Delegated.test_matrix_only",)
+_DELEGATED_METADATA = (_DELEGATED_IDS, MappingProxyType({
+    identifier: ("G/" + identifier + "/whole",) for identifier in _DELEGATED_IDS}))
 
 
 @functools.lru_cache(maxsize=2)
@@ -317,6 +320,7 @@ def _pure(module, fixture, **overrides):
         "subprocess": SimpleNamespace(), "selectors": SimpleNamespace(), "shutil": SimpleNamespace(),
         "importlib": SimpleNamespace(), "unittest": framework,
         "expected_python_ids": Mock(side_effect=AssertionError("unexpected inventory")),
+        "signing_regression_metadata": Mock(return_value=_DELEGATED_METADATA),
         "inspect_installed_wheel": Mock(side_effect=AssertionError("unexpected installed-product inspection")),
         "traceback": SimpleNamespace(extract_tb=lambda _tb: [SimpleNamespace(
             filename=str(fixture.source / "tests/fixed_fixture.py"), lineno=7)])}
@@ -380,14 +384,14 @@ def _inert_suite(events, singleton_ids, *, outcome="os-error", callback_count=1)
             return self.identifier
 
         def run(self, result=None):
-            events.append("unexpected-singleton")
-            raise AssertionError("singleton stand-in must never execute in the healthy suite")
+            events.append("unexpected-withheld")
+            raise AssertionError("singleton/G stand-in must never execute in the healthy suite")
 
         def runTest(self):
             self.run()
 
-    # IDs are data only: never import or load the actual singleton fixtures.
-    suite.addTests(Singleton(identifier) for identifier in singleton_ids)
+    # IDs are data only: never import or load singleton/G test fixtures.
+    suite.addTests(Singleton(identifier) for identifier in singleton_ids + _DELEGATED_IDS)
     complete = tuple(sorted(test.id() for test in suite))
     return suite, expected, complete
 
@@ -524,10 +528,12 @@ class CIPythonProfileTests(unittest.TestCase):
 
                 fixture.hook = hook
                 inventory = Mock(side_effect=AssertionError("invalid profile reached inventory"))
-                with _pure(self.module, fixture, expected_python_ids=inventory):
+                metadata = Mock(side_effect=AssertionError("invalid profile reached G metadata"))
+                with _pure(self.module, fixture, expected_python_ids=inventory, signing_regression_metadata=metadata):
                     with self.assertRaises((OSError, self.module.CheckError)):
                         self.module.run_python_tests(fixture.source, "full", 10.0, [], work_root=fixture.checks)
                 inventory.assert_not_called()
+                metadata.assert_not_called()
                 self.assertEqual(fixture.fds, {})
                 self.assertTrue(all(count == 1 for count in fixture.close_calls.values()))
                 if case == "not-empty": self.assertIn(str(fixture.checks / "unowned"), fixture.nodes)
@@ -583,17 +589,26 @@ class CIPythonProfileTests(unittest.TestCase):
                     discovered.append("inventory")
                     return complete
 
+                def metadata(source, operating_system, *, deadline):
+                    self.assertEqual((source, operating_system, deadline), (fixture.source, "ubuntu-24.04", 10.0))
+                    self.assertEqual(discovered, ["inventory"])
+                    self.assertEqual(len(fixture.created), 12 if selection == "full" else 0)
+                    self.assertEqual(fixture.fds, {})
+                    discovered.append("delegation")
+                    return _DELEGATED_METADATA
+
                 def discover(path, *, pattern):
                     self.assertEqual(path, str(fixture.source / "tests"))
-                    self.assertIn("inventory", discovered)
+                    self.assertEqual(discovered[:2], ["inventory", "delegation"])
                     discovered.append(pattern)
                     # Each selected wheel pattern is still visited once, without
                     # loading any project module; the finite inert suite is supplied once.
-                    return suite if len(discovered) == 2 else unittest.TestSuite()
+                    return suite if len(discovered) == 3 else unittest.TestSuite()
 
                 wheel = Mock(return_value={})
                 observations = []
-                with _pure(self.module, fixture, expected_python_ids=inventory, inspect_installed_wheel=wheel) as framework:
+                with _pure(self.module, fixture, expected_python_ids=inventory,
+                           signing_regression_metadata=metadata, inspect_installed_wheel=wheel) as framework:
                     framework.TestLoader = lambda: SimpleNamespace(errors=[], discover=discover)
                     details = self.module.run_python_tests(fixture.source, selection, 10.0, observations,
                                                           work_root=fixture.checks)
@@ -604,12 +619,12 @@ class CIPythonProfileTests(unittest.TestCase):
                 if selection == "full":
                     self.assertEqual(details["storage_profile"], _profile_details())
                     wheel.assert_not_called()
-                    self.assertEqual(discovered, ["inventory", "test*.py"])
+                    self.assertEqual(discovered, ["inventory", "delegation", "test*.py"])
                 else:
                     self.assertNotIn("storage_profile", details)
                     self.assertEqual(fixture.events, [])
                     self.assertEqual(wheel.call_args_list, [call(fixture.source, deadline=10.0)] * 2)
-                    self.assertEqual(discovered, ["inventory", *self.module.WHEEL_PATTERNS])
+                    self.assertEqual(discovered, ["inventory", "delegation", *self.module.WHEEL_PATTERNS])
 
     def test_actual_failfast_subtest_metadata_survives_main_and_controller_without_private_data(self):
         fixture, events = _Profile(), []

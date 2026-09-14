@@ -1358,12 +1358,14 @@ class PersistentSigningTests(unittest.TestCase):
         self._semantic_adapter_complete = True
 
     def semantic_adapter(self, identifier):
+        from workflow.local_signing_regression_catalog import semantic_contributions
         self.assertIn(identifier, {"C/fence/04", "S/active-build-pending/none"})
         self._semantic_adapter_complete = False
         value = semantic.run_case(self.root, identifier)
         stem = "semantic-" + fixture.digest(identifier) + "-complete"
         self.assertEqual(value, {"caseId": identifier, "status": "semantic-subset-case", "evidence": stem + ".json",
-                                 "caseRemoved": True, "originalWorkersSettled": True})
+                                 "caseRemoved": True, "originalWorkersSettled": True,
+                                 "regressionContributions": list(semantic_contributions(identifier))})
         evidence = fixture.read_case_json(self.root, stem)
         self.assertEqual(evidence["schema"], "mrk-signing-semantic-case-v1")
         self.assertEqual(evidence["case"], semantic.catalog.case(identifier).record())

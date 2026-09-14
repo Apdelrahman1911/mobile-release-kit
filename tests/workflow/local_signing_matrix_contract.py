@@ -5,6 +5,7 @@ import hashlib
 import ast
 import gzip
 import io
+import importlib.util
 import json
 import math
 import os
@@ -58,6 +59,13 @@ ADAPTER_FAILURE_TEST_FILES = (
     "tests/workflow/local_signing_bridge.py", "tests/workflow/local_signing_model_target.py",
     "tests/workflow/local_signing_semantic_fixture.py", "tests/workflow/local_signing_semantic_catalog.py",
     "tests/workflow/local_signing_workload.py",
+)
+ADAPTER_PHASE_FAILURE_PREFIX = "MRK_SIGNING_ADAPTER_PHASE_FAILURE="
+ADAPTER_PHASE_FAILURE_STAGES = (
+    "admission", "imports", "inventory", "suite", "postconditions", "origins", "publication",
+)
+ADAPTER_PHASE_FAILURE_FILES = (
+    "tests/workflow/run_local_signing_matrix.py", "tests/workflow/local_signing_matrix_contract.py",
 )
 
 
@@ -291,8 +299,83 @@ def emit_adapter_failure(context, layer, outcome, error, *, deadline, command_fi
         return None  # Original test/worker failure is already irreversibly latched.
 
 
+def _adapter_phase_context(context):
+    require(type(context) is tuple and len(context) == 3, "adapter phase diagnostic context")
+    phase, deadline, source_map = context
+    require(type(phase) is str and phase in {"source", "wheel"}
+            and type(deadline) is float and math.isfinite(deadline), "adapter phase diagnostic binding")
+    require(type(source_map) is tuple and len(source_map) == 2
+            and all(type(pair) is tuple and len(pair) == 2
+                    and type(pair[0]) is str and 0 < len(pair[0]) <= 4096
+                    and type(pair[1]) is str for pair in source_map)
+            and tuple(pair[1] for pair in source_map) == ADAPTER_PHASE_FAILURE_FILES
+            and source_map[0][0] != source_map[1][0], "adapter phase diagnostic filename map")
+    before_deadline(deadline)
+    return phase, deadline, source_map
+
+
+def adapter_phase_failure_record(context, stage, error):
+    """One actual escaping phase exception; no test identity or resource proof."""
+    phase, deadline, source_map = _adapter_phase_context(context)
+    require(type(stage) is str and stage in ADAPTER_PHASE_FAILURE_STAGES, "adapter phase diagnostic stage")
+    require(type(error) is tuple and len(error) == 3 and isinstance(error[1], BaseException)
+            and error[0] is type(error[1])
+            and error[2] is _adapter_exception_data(error[1], "__traceback__"), "adapter phase actual exception")
+    locations = _adapter_locations(error[2], source_map, [64], 4)
+    record = {"schema": 1, "phase": phase, "stage": stage,
+              "category": _adapter_category(error[1]), "locations": locations}
+    before_deadline(deadline)
+    return record
+
+
+def emit_adapter_phase_failure(context, stage, error):
+    """Best-effort existing stderr only; the wrapper re-raises its original."""
+    if context is None:
+        return None
+    try:
+        record = adapter_phase_failure_record(context, stage, error)
+        data = ADAPTER_PHASE_FAILURE_PREFIX + canonical(record).decode("ascii") + "\n"
+        require(len(data.encode("ascii")) <= ADAPTER_FAILURE_MAX_BYTES, "adapter phase diagnostic byte bound")
+        before_deadline(context[1])
+        sys.stderr.write(data)
+        sys.stderr.flush()
+        before_deadline(context[1])
+        return record
+    except BaseException:
+        return None  # No observation can replace the already escaping exception.
+
+
 def digest(value):
     return hashlib.sha256(canonical(value)).hexdigest()
+
+
+_LAYERED_CATALOG = None
+
+
+def layered_catalog():
+    """Exact pure source authority, also usable outside the workflow package."""
+    global _LAYERED_CATALOG
+    path = Path(__file__).resolve().with_name("local_signing_layered_catalog.py")
+    require(path.is_file() and not path.is_symlink(), "layered source catalog missing")
+    name = "_mrk_layered_" + hashlib.sha256(str(path).encode()).hexdigest()
+    # A matching filename is only DATA. Reuse only this loader's original
+    # object, never a pre-existing alias supplied by another import/consumer.
+    require(name not in sys.modules, "layered source catalog alias occupied")
+    if _LAYERED_CATALOG is not None:
+        require(Path(_LAYERED_CATALOG.__file__) == path, "layered source catalog origin differs")
+        return _LAYERED_CATALOG
+    spec = importlib.util.spec_from_file_location(name, path)
+    require(spec is not None and spec.loader is not None, "layered source catalog loader missing")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+        require(sys.modules.get(name) is module, "layered source catalog binding changed")
+    finally:
+        if sys.modules.get(name) is module:
+            del sys.modules[name]
+    _LAYERED_CATALOG = module
+    return module
 
 
 def shard_for(case_id):
@@ -464,27 +547,32 @@ def _hash(value, label):
     require(type(value) is str and HEX.fullmatch(value), "invalid " + label + " hash")
 
 
-def validate_phase(run, expected, shard, package_sha, definitions_sha, mode):
-    """The same per-phase contract before wheel dispatch and in the reducer."""
+def validate_phase(run, expected, shard, package_sha, definitions_sha, mode, *, operating_system):
+    """Independently source-bound phase contract; producer IDs are not authority."""
     require(mode in {"source", "wheel"} and type(shard) is int and 0 <= shard < SHARDS, "invalid phase selection")
+    catalog = layered_catalog()
     validate_ids(expected, "expected cases")
-    selected = [case for case in expected if shard_for(case) == shard]
-    require(selected, "empty shard")
-    _object(run, ("executedCaseIds", "inventorySha256", "packageSha256", "definitionsSha256",
-                  "resultsSha256", "allExactChildrenReapedAndGroupsAbsent", "allCasePathsRemoved"), mode)
+    require(expected == list(catalog.expected_ids(operating_system)), "expected cases differ from source catalog")
+    selected = list(catalog.shard_ids(operating_system, shard))
+    _object(run, ("executedCaseIds", "catalogSha256", "packageSha256", "definitionsSha256",
+                  "resultsSha256", "coverage", "allExactChildrenReapedAndGroupsAbsent", "allCasePathsRemoved"), mode)
     validate_ids(run["executedCaseIds"], mode + " executed cases")
     require(run["executedCaseIds"] == selected, mode + " has omitted, extra or incorrectly assigned cases")
-    for key in ("inventorySha256", "packageSha256", "definitionsSha256", "resultsSha256"):
+    for key in ("catalogSha256", "packageSha256", "definitionsSha256", "resultsSha256"):
         _hash(run[key], mode + " " + key)
+    require(run["catalogSha256"] == digest(catalog.definition(operating_system)), "phase source catalog differs")
     require(run["packageSha256"] == package_sha, "production package differs from aggregate checkout")
     require(run["definitionsSha256"] == definitions_sha, "test definitions differ from aggregate checkout")
+    require(canonical(run["coverage"]) == canonical(catalog.coverage(operating_system, selected)),
+            "phase kind/variant/contribution coverage differs")
     require(run["allExactChildrenReapedAndGroupsAbsent"] is True and run["allCasePathsRemoved"] is True,
             "unconfirmed worker/fixture cleanup")
 
 
 def validate_proof(proof, name, expected_scope, package_sha, definitions_sha):
-    _object(proof, ("schemaVersion", "scope", "shard", "expectedCaseIds", "expectedSha256", "source", "wheel"), "proof")
-    require(type(proof["schemaVersion"]) is int and proof["schemaVersion"] == 1, "unsupported proof version")
+    _object(proof, ("schemaVersion", "scope", "shard", "expectedCaseIds", "expectedSha256",
+                    "catalogSha256", "source", "wheel"), "proof")
+    require(type(proof["schemaVersion"]) is int and proof["schemaVersion"] == 2, "unsupported proof version")
     scope = proof["scope"]
     _object(scope, ("kind", "repository", "commit", "runId", "attempt", "job", "os"), "scope")
     require(type(scope["attempt"]) is int and 1 <= scope["attempt"] <= expected_scope["attempt"], "invalid producing attempt")
@@ -495,18 +583,23 @@ def validate_proof(proof, name, expected_scope, package_sha, definitions_sha):
     require(type(shard) is int and 0 <= shard < SHARDS, "invalid producing shard")
     require(type(name) is str and ARTIFACT.fullmatch(name) and name == artifact_name(scope, shard), "artifact identity disagrees with proof")
     expected = validate_ids(proof["expectedCaseIds"], "expected cases")
+    catalog = layered_catalog()
+    require(expected == list(catalog.expected_ids(scope["os"])), "expected cases differ from source catalog")
     _hash(proof["expectedSha256"], "expected cases")
+    _hash(proof["catalogSha256"], "source catalog")
     require(proof["expectedSha256"] == digest(expected), "expected case digest differs")
+    require(proof["catalogSha256"] == digest(catalog.definition(scope["os"])), "source catalog digest differs")
     for mode in ("source", "wheel"):
-        validate_phase(proof[mode], expected, shard, package_sha, definitions_sha, mode)
-    require(proof["source"]["inventorySha256"] == proof["wheel"]["inventorySha256"], "source/wheel inventory drift")
+        validate_phase(proof[mode], expected, shard, package_sha, definitions_sha, mode, operating_system=scope["os"])
     return proof
 
 
 def reconcile(candidates, expected_scope, package_sha, definitions_sha, *, operating_systems=OPERATING_SYSTEMS):
     """Validate ALL attempts before selecting latest complete cells; no fallback."""
     require(tuple(operating_systems) in (OPERATING_SYSTEMS, ("ubuntu-24.04",), ("macos-26",)), "invalid required OS set")
-    expected_by_os, inventory_by_os, latest, seen, names = {}, {}, {}, set(), set()
+    catalog = layered_catalog()
+    expected_by_os = {system: list(catalog.expected_ids(system)) for system in operating_systems}
+    latest, seen, names = {}, set(), set()
     count = 0
     for name, proof in candidates:
         count += 1
@@ -521,13 +614,7 @@ def reconcile(candidates, expected_scope, package_sha, definitions_sha, *, opera
         identity = (*key, scope["attempt"])
         require(identity not in seen, "duplicate OS/shard/attempt proof")
         seen.add(identity)
-        expected = proof["expectedCaseIds"]
-        inventory = proof["source"]["inventorySha256"]
-        require(expected_by_os.setdefault(operating_system, expected) == expected, "cross-cell expected inventory differs")
-        require(inventory_by_os.setdefault(operating_system, inventory) == inventory, "cross-cell effect inventory differs")
         if key not in latest or scope["attempt"] > latest[key]["scope"]["attempt"]:
-            # Share the agreed immutable expected list instead of retaining a
-            # separate large copy for every selected cell/older run attempt.
             latest[key] = {**proof, "expectedCaseIds": expected_by_os[operating_system]}
     require(count > 0, "missing execution proofs")
     required = {(system, shard) for system in operating_systems for shard in range(SHARDS)}
@@ -535,15 +622,28 @@ def reconcile(candidates, expected_scope, package_sha, definitions_sha, *, opera
     results = {}
     for operating_system in operating_systems:
         results[operating_system] = {}
+        obligations = catalog.REGRESSION.obligations(operating_system)
+        required_parts = sorted(part for parts in obligations.values() for part in parts)
         for mode in ("source", "wheel"):
-            union = set()
+            union, parts = set(), set()
             for shard in range(SHARDS):
-                actual = latest[(operating_system, shard)][mode]["executedCaseIds"]
+                row = latest[(operating_system, shard)][mode]
+                actual = row["executedCaseIds"]
+                contribution = row["coverage"]["regressionParts"]
                 require(not union.intersection(actual), "executed shard sets overlap")
+                require(not parts.intersection(contribution), "regression contribution sets overlap")
                 union.update(actual)
+                parts.update(contribution)
             require(sorted(union) == expected_by_os[operating_system], "actual execution union omits expected cases")
-            results[operating_system][mode] = {"cases": len(union), "caseIdsSha256": digest(sorted(union))}
-    return {"status": "complete", "scope": expected_scope, "shards": SHARDS, "operatingSystems": results,
+            require(sorted(parts) == required_parts, "original regression obligations incomplete")
+            results[operating_system][mode] = {
+                "cases": len(union), "caseIdsSha256": digest(sorted(union)),
+                "coverage": catalog.coverage(operating_system, sorted(union)),
+                "originalRegressionMethods": len(obligations),
+                "originalRegressionParts": len(parts),
+            }
+    return {"schema": "mrk-signing-layered-reduction-v2", "status": "complete", "scope": expected_scope,
+            "shards": SHARDS, "operatingSystems": results,
             "packageSha256": package_sha, "definitionsSha256": definitions_sha,
             "producingAttempts": {f"{system}/{shard}": latest[(system, shard)]["scope"]["attempt"]
                                   for system, shard in sorted(required)}}
@@ -591,10 +691,495 @@ def validate_original_c_prefix(observation):
             and creation == [opened[index] for index in (0, 1, 4, 5, 2, 3)], "original-C prefix inode binding")
 
 
-def validate_actual_results(content, expected, *, deadline=None):
-    """Finalized bytes only; reconcile reached cuts, not requested IDs or PIDs."""
+def _original_case_return(value, expected):
+    require(type(value) is dict and type(value.get("exit")) is int and value["exit"] == expected,
+            "original case return missing")
+    require(all(value.get(name) is True for name in
+                ("originalAnchorWait", "originalWorkerWait", "originalStatusEOF", "groupAbsentBeforeAnchorWait"))
+            and value.get("deadlineTest") is False and value.get("runDeadlineExpired") is False,
+            "incomplete or late original case return")
+
+
+def _primitive_record(item, observation, evidence):
+    name = item.name.removeprefix("A/")
+    failures = layered_catalog().PRIMITIVE_FAILURES.get(name)
+    keys = {"component", "resultsSha256", "nativeCommands",
+            "allExactChildrenReapedAndGroupsAbsent", "allCasePathsRemoved"}
+    keys |= {"actualFailureCases"} if failures is not None else {"algorithmEvents", "actualCuts"}
+    _object(observation, keys, "primitive observation")
+    require(observation["component"] == name and type(observation["nativeCommands"]) is int
+            and observation["nativeCommands"] == 0
+            and observation["allExactChildrenReapedAndGroupsAbsent"] is True
+            and observation["allCasePathsRemoved"] is True, "primitive native/cleanup observation")
+    require(set(evidence) == {"component-evidence.json"}, "primitive evidence inventory")
+    rows = evidence["component-evidence.json"]
+    require(type(rows) is list and 0 < len(rows) <= 10000 and all(type(row) is dict for row in rows),
+            "primitive evidence rows")
+    require(observation["resultsSha256"] == digest(rows), "primitive evidence digest")
+    require(all(type(row.get("nativeCommands")) is int and row["nativeCommands"] == 0 for row in rows),
+            "primitive attempted native commands")
+    if failures is not None:
+        require(type(observation["actualFailureCases"]) is int and observation["actualFailureCases"] == len(failures)
+                and [row.get("variant") for row in rows] == list(failures), "primitive failure union")
+        for row in rows:
+            _object(row, ("variant", "originalError", "journalFailed", "faults", "initial", "generations",
+                          "retainedIdentities", "physical", "nativeCommands"), "primitive failure observation")
+            variant = row["variant"]
+            expected_error = (None if variant == "short-write" else "ProcessError" if variant in {
+                "close-after", "reader-close-after"} else "OSError" if variant.endswith(("-before", "-after"))
+                or variant == "partial-write-error" else "FileExistsError" if variant.startswith("pending-")
+                else "CredentialError")
+            require(row["originalError"] == expected_error
+                    and row["journalFailed"] is (name != "reader-failures" and variant != "short-write"),
+                    "primitive failure outcome/latch differs")
+            for key in ("initial", "retainedIdentities"):
+                require(type(row[key]) is dict and 0 < len(row[key]) <= 256
+                        and all(type(path) is str and 0 < len(path) <= 4096 and type(identity) is list
+                                and len(identity) == 2 and all(type(value) is int for value in identity)
+                                and identity[0] >= 0 and identity[1] > 0 for path, identity in row[key].items()),
+                        "primitive original identity observations missing")
+            require(type(row["generations"]) is dict and len(row["generations"]) <= 256
+                    and all(type(key) is str and re.fullmatch(r"[0-9]+:[0-9]+", key)
+                            and type(value) is dict and bool(value) for key, value in row["generations"].items())
+                    and type(row["physical"]) is dict and set(row["physical"]) == set(row["retainedIdentities"]),
+                    "primitive retained generation/physical observations missing")
+            for physical in row["physical"].values():
+                require(type(physical) is dict and type(physical.get("type")) is int
+                        and physical["type"] in {stat.S_IFREG, stat.S_IFDIR, stat.S_IFLNK}
+                        and type(physical.get("mode")) is int and 0 <= physical["mode"] <= 0o7777
+                        and type(physical.get("links")) is int and physical["links"] > 0
+                        and type(physical.get("initialAliases")) is list
+                        and len(physical["initialAliases"]) <= 256
+                        and all(type(alias) is str for alias in physical["initialAliases"]),
+                        "primitive physical observation fields")
+                if physical["type"] == stat.S_IFREG:
+                    require(type(physical.get("size")) is int and 0 <= physical["size"] <= 4 * 1024**2,
+                            "primitive retained file size")
+                    _hash(physical.get("sha256"), "primitive retained bytes")
+            faults = row["faults"]
+            no_fault = variant.startswith(("pending-", "immutable-"))
+            require(type(faults) is list and len(faults) == (0 if no_fault else 1), "primitive actual fault count differs")
+            if no_fault:
+                continue
+            fault = faults[0]
+            prefix = variant in {"short-write", "partial-write-error"}
+            replacement = variant in {"stage-replaced", "target-replaced", "reader-name-changed"}
+            _object(fault, {"variant", "event", "effectCompleted"} | ({"written", "prefixHex"} if prefix else set())
+                    | ({"replacement"} if replacement else set()), "primitive actual fault")
+            require(fault["variant"] == variant
+                    and fault["effectCompleted"] is (not variant.endswith("-before")
+                        and variant not in {"zero-write", "oversized-write"}), "primitive original fault effect differs")
+            event = fault["event"]
+            _object(event, ("index", "operation", "slot", "origin", "phase", "occurrence", "details"), "primitive fault event")
+            operation = ("write" if variant in {"short-write", "zero-write", "oversized-write", "partial-write-error"}
+                         else "fsync" if "sync-" in variant else "unlink" if variant.startswith("unlink-")
+                         else "read" if variant in {"read-before", "read-after", "reader-name-changed"} else "close")
+            require(event["operation"] == operation and event["phase"] == "component"
+                    and type(event["index"]) is int and event["index"] > 0
+                    and type(event["occurrence"]) is int and event["occurrence"] > 0
+                    and type(event["slot"]) is str and bool(event["slot"])
+                    and type(event["origin"]) is str and bool(event["origin"]) and type(event["details"]) is dict,
+                    "primitive original fault route differs")
+            if prefix:
+                require(type(fault["written"]) is int and 0 < fault["written"] <= 65536
+                        and type(fault["prefixHex"]) is str and len(fault["prefixHex"]) == 2 * fault["written"]
+                        and re.fullmatch(r"[0-9a-f]+", fault["prefixHex"]), "primitive actual write prefix missing")
+            if replacement:
+                replaced = fault["replacement"]
+                _object(replaced, ("device", "inode", "mode", "size", "sha256"), "primitive replacement facts")
+                require(type(replaced["device"]) is int and replaced["device"] >= 0
+                        and type(replaced["inode"]) is int and replaced["inode"] > 0
+                        and type(replaced["mode"]) is int and replaced["mode"] == 0o600
+                        and type(replaced["size"]) is int and 0 <= replaced["size"] <= 4 * 1024**2
+                        and row["generations"].get(str(replaced["device"]) + ":" + str(replaced["inode"]))
+                            == {"fixtureReplacement": variant}, "primitive replacement generation differs")
+                _hash(replaced["sha256"], "primitive replacement bytes")
+    else:
+        require(type(observation["actualCuts"]) is int and observation["actualCuts"] == len(rows)
+                and type(observation["algorithmEvents"]) is int and observation["algorithmEvents"] > 0,
+                "primitive dynamic cut count")
+        groups = {}
+        for row in rows:
+            _object(row, ("event", "edge", "physicalSha256", "nativeCommands"), "primitive cut")
+            event = row["event"]
+            require(type(event) is dict and type(event.get("operation")) is str
+                    and row["edge"] in {"before", "after", "partial"}, "primitive reached operation")
+            _hash(row["physicalSha256"], "primitive physical state")
+            key = canonical({name: value for name, value in event.items() if name not in {"succeeded", "error"}})
+            edges = groups.setdefault(key, [])
+            require(row["edge"] not in edges, "primitive duplicate reached cut")
+            edges.append(row["edge"])
+        require(len(groups) == observation["algorithmEvents"], "primitive operation inventory differs")
+        for event, actual in groups.items():
+            operation = strict_json(event)["operation"]
+            expected = {"before", "after"}
+            if operation in {"write", "buffer.write"}:
+                expected.add("partial")
+            require(set(actual) == expected, "primitive omitted operation edge")
+
+
+def _semantic_cut(observation, selector):
+    require(type(observation) is dict and type(observation.get("event")) is dict
+            and type(observation["event"].get("details")) is dict
+            and type(observation["event"].get("occurrence")) is int
+            and canonical(observation.get("selector")) == canonical(selector.record())
+            and selector.routes(observation["event"]) and observation.get("edge") == selector.edge,
+            "semantic actual selected cut differs")
+    context = observation.get("context")
+    require(type(context) is dict and all(key in context and type(context[key]) is type(value)
+                                        and context[key] == value for key, value in selector.context),
+            "semantic actual live context differs")
+
+
+def _semantic_clean_snapshot(value):
+    require(type(value) is dict and value.get("session") is None and "session" in value
+            and all(type(value.get(key)) is dict and not value[key]
+                    for key in ("controls", "fences", "native", "ownedRemaining"))
+            and value.get("nativeDirectory") is False and type(value.get("preferences")) is dict,
+            "semantic final snapshot retains or omits resource state")
+
+
+def _semantic_recovery(step, token, *, manual, expected):
+    _object(step, ("name", "manual", "expected", "original", "observation"), "semantic recovery step")
+    value = step["observation"]
+    require(step["manual"] == manual and step["expected"] == expected
+            and value.get("sessionToken") == token and value.get("expectedStatus") == expected
+            and type(value.get("unknown")) is dict and type(value.get("before")) is dict
+            and type(value.get("after")) is dict, "semantic actual recovery route differs")
+    if expected == "refused-unknown-resource":
+        require(type(value.get("refused")) is str and bool(value["refused"])
+                and value.get("result") is None and "result" in value and bool(value["unknown"])
+                and value.get("idleAndRenewedAdmission") is False
+                and value["before"].get("session") == value["after"].get("session") == token,
+                "semantic actual refusal/pending state differs")
+    else:
+        require(value.get("refused") is None and "refused" in value
+                and value.get("idleAndRenewedAdmission") is True, "semantic actual positive recovery missing")
+        _object(value.get("result"), ("status", "session"), "semantic actual recovery result")
+        require(value["result"] == {"status": expected, "session": token}, "semantic actual recovery outcome differs")
+        _semantic_clean_snapshot(value["after"])
+        _semantic_clean_snapshot(value.get("snapshot"))
+    events = value.get("events")
+    require(type(events) is list and len(events) <= MAX_CASES and all(type(event) is dict for event in events),
+            "semantic recovery events missing")
+    inputs = [event for event in events if event.get("operation") == "manual/input"]
+    require(len(inputs) == (0 if manual == "none" else 1)
+            and all(event.get("details") == {"action": manual} and event.get("origin") == "owner"
+                    and event.get("slot") == "tty" and event.get("succeeded") is True for event in inputs),
+            "semantic actual manual recovery differs")
+
+
+def _semantic_focused_refusal(step, token, *, manual, preserve_preferences=False):
+    _object(step, ("name", "manual", "original", "observation"), "focused refusal step")
+    value = step["observation"]
+    require(step["manual"] == manual and value.get("resourcesPreserved") is True
+            and value.get("freshAdmission") == "pending" and type(value.get("error")) is str and bool(value["error"])
+            and type(value.get("before")) is dict and type(value.get("after")) is dict
+            and value["before"].get("session") == value["after"].get("session") == token,
+            "focused actual refusal/preservation missing")
+    if preserve_preferences:
+        require(type(value["before"].get("preferences")) is dict
+                and value["before"]["preferences"] == value["after"].get("preferences"),
+                "focused refusal changed preserved preferences")
+    events, inputs = value.get("events"), value.get("inputObservations")
+    require(type(events) is list and type(inputs) is list and len(events) == len(inputs) == (manual != "none")
+            and all(type(event) is dict for event in events) and all(type(row) is dict for row in inputs),
+            "focused actual manual refusal observations missing")
+    expected_error = {"none": "CredentialError", "wrong": "CredentialError", "eof": "CredentialError",
+                      "cancel": "KeyboardInterrupt", "resolve": "OwnerResolutionRefused"}[manual]
+    require(value.get("caughtType") == expected_error, "focused original refusal outcome differs")
+    if events:
+        event, observed = events[0], inputs[0]
+        require(event.get("operation") == "manual/input" and event.get("origin") == "owner"
+                and event.get("slot") == "tty" and event.get("details") == {"action": manual}
+                and type(event.get("index")) is int and event["index"] > 0
+                and type(observed.get("eventIndex")) is int and observed["eventIndex"] == event["index"]
+                and observed.get("action") == manual,
+                "focused actual input route differs")
+        if manual in {"wrong", "eof"}:
+            require(event.get("succeeded") is True and canonical(observed.get("read")) == canonical({
+                "kind": manual, "characters": 6 if manual == "wrong" else 0}), "focused actual terminal read differs")
+        else:
+            require(event.get("succeeded") is None and "read" not in observed, "focused failed input was completed")
+
+
+def _semantic_fixture_owner(step, token, *, variant, expected):
+    _object(step, ("name", "original", "observation"), "focused fixture-owner step")
+    value = step["observation"]
+    require(value.get("manualFixtureAction") is True and value.get("idleAndRenewedAdmission") is True
+            and value.get("result") == {"status": expected, "session": token}, "focused original owner recovery missing")
+    _semantic_clean_snapshot(value.get("after"))
+    require(type(value.get("preferences")) is dict and value["preferences"] == value["after"]["preferences"],
+            "focused owner preferences differ")
+    events, inputs = value.get("events"), value.get("inputObservations")
+    require(type(events) is list and len(events) == 1 and type(events[0]) is dict
+            and type(inputs) is list and len(inputs) == 1, "focused actual owner input missing")
+    event, action = events[0], "fixture/" + variant
+    require(event.get("operation") == "manual/input" and event.get("origin") == "owner"
+            and event.get("slot") == "tty" and event.get("details") == {"action": action}
+            and type(event.get("index")) is int and event["index"] > 0 and event.get("succeeded") is True
+            and canonical(inputs[0]) == canonical({"eventIndex": event["index"], "action": action,
+                "read": {"kind": "recheck", "characters": len(token) + 9}}), "focused actual owner completion differs")
+
+
+def _semantic_focused(source, variant, steps, token):
+    """Closed existing F routes, not an adaptive recovery or permission engine."""
+    require(variant in source.FOCUSED_VARIANTS, "unknown focused variant")
+    seed = (source.native("native-effect/create-search-add", operationKind="create", operationPhase="ARMED")
+            if variant == "auto-add-ambiguous-create" else source.SEEDS[
+                "profile-unrecorded-stage" if variant.startswith("manual-") else
+                "completed" if variant.startswith("terminal-") else "active-after-build"])
+    _semantic_cut(steps[0]["observation"], seed)
+    direct = {"foreign-default": source.CONFLICT, "reordered-search": source.CONFLICT,
+              "deleted-search": source.CONFLICT, "foreign-profile": source.CONFLICT,
+              "auto-add-active": source.RECOVERED, "borrowed-profile": source.RECOVERED}
+    owner = {"profile-inplace-edit": source.RECOVERED, "terminal-profile-reappeared": source.RECOVERED,
+             "terminal-native-reappeared": source.RECOVERED, "foreign-native-db": source.CONFLICT}
+    if variant in direct:
+        names, negatives = ["seed", "focused-main"], []
+    elif variant == "foreign-native-db":
+        names, negatives = ["seed", "focused-none", "focused-resolve", "focused-fixture-owner"], [
+            ("negative-none", 1), ("negative-resolve", 2)]
+    else:
+        names = ["seed", "focused-refusal", "focused-fixture-owner" if variant in owner else "focused-resolution"]
+        negatives = [("negative", 1)]
+    require([step["name"] for step in steps] == names, "focused lifecycle steps differ")
+    if variant in direct:
+        _semantic_recovery(steps[1], token, manual="none", expected=direct[variant])
+    elif variant in {"native-unknown-stage", "auto-add-ambiguous-create"}:
+        _semantic_recovery(steps[1], token, manual="none", expected=source.REFUSED)
+        _semantic_recovery(steps[2], token, manual="resolve",
+                           expected=source.CONFLICT if variant == "native-unknown-stage" else source.RECOVERED)
+    elif variant == "foreign-native-db":
+        for step, mode in zip(steps[1:3], ("none", "resolve")):
+            _semantic_focused_refusal(step, token, manual=mode, preserve_preferences=True)
+    else:
+        _semantic_focused_refusal(steps[1], token,
+            manual=variant.removeprefix("manual-") if variant.startswith("manual-") else "none",
+            preserve_preferences=variant.startswith("terminal-"))
+        if variant.startswith("manual-"):
+            _semantic_recovery(steps[2], token, manual="resolve", expected=source.RECOVERED)
+    if variant in owner:
+        _semantic_fixture_owner(steps[-1], token, variant=variant, expected=owner[variant])
+    return [(suffix, steps[index]) for suffix, index in negatives]
+
+
+def _semantic_healthy(value, source):
+    """Bounded finalized H data; original fixture owns detailed native predicates."""
+    contexts = value.get("healthyContexts")
+    _object(contexts, ("commands", "checkpoints", "effects"), "healthy context inventory")
+    commands, checkpoints, effects = (contexts[key] for key in ("commands", "checkpoints", "effects"))
+    require(all(type(rows) is list and len(rows) == count and all(type(row) is dict for row in rows)
+                for rows, count in ((commands, 50), (checkpoints, 11), (effects, 7))), "healthy context union incomplete")
+    snapshot, events = value.get("snapshot"), value.get("events")
+    _semantic_clean_snapshot(snapshot)
+    require(type(snapshot.get("original")) is dict and snapshot["preferences"] == snapshot["original"],
+            "healthy final preferences differ")
+    calls = snapshot.get("nativeCalls")
+    require(type(calls) is list and len(calls) == 50 and all(type(row) is dict for row in calls)
+            and type(events) is list and 0 < len(events) <= MAX_CASES and all(type(row) is dict for row in events),
+            "healthy original command/event observations missing")
+    for ordinal, (command, call) in enumerate(zip(commands, calls), 1):
+        _object(call, ("command", "mutation", "recovery"), "healthy original command")
+        require(type(call["command"]) is str and bool(call["command"]) and type(call["mutation"]) is bool
+                and call["recovery"] is False and type(command.get("ordinal")) is int
+                and command["ordinal"] == ordinal and command.get("command") == call["command"]
+                and command.get("mutation") is call["mutation"]
+                and command.get("phase") == ("setup" if ordinal < 27 else "build" if ordinal == 27 else "cleanup"),
+                "healthy original command context differs")
+    positions, revisions, intents = [], [], []
+    for ordinal, (row, completed) in enumerate(zip(checkpoints, (14, 16, 19, 21, 24, 26, 27, 34, 39, 44, 46)), 1):
+        require(type(row.get("ordinal")) is int and row["ordinal"] == ordinal
+                and row.get("caller") in {"activate", "remember_preferences", "cleanup_native", "cleanup_profile"}
+                and type(row.get("completedModelCalls")) is int and row["completedModelCalls"] == completed
+                and type(row.get("eventPosition")) is int and 0 <= row["eventPosition"] < len(events),
+                "healthy checkpoint return context differs")
+        state = row.get("state")
+        require(type(state) is dict and "inflight" in state and state["inflight"] is None
+                and state.get("conflict") is False and type(state.get("revision")) is int and state["revision"] > 0,
+                "healthy checkpoint state missing or unsettled")
+        _hash(row.get("intentSha256"), "healthy original intent")
+        require(row.get("stateSha256") == hashlib.sha256(canonical(state) + b"\n").hexdigest(),
+                "healthy checkpoint bytes differ")
+        positions.append(row["eventPosition"])
+        revisions.append(state["revision"])
+        intents.append(row["intentSha256"])
+    require(positions == sorted(set(positions)) and revisions == sorted(set(revisions)) and len(set(intents)) == 1,
+            "healthy checkpoint order or original intent differs")
+    for row, operation in zip(effects, ("extract", "extract", "extract", "preference/search", "preference/default",
+                                        "preference/default", "preference/search")):
+        require(row.get("operation") == operation and type(row.get("eventIndex")) is int
+                and 1 <= row["eventIndex"] <= len(events) and type(row.get("commandOrdinal")) is int
+                and 1 <= row["commandOrdinal"] <= 50 and type(row.get("occurrence")) is int
+                and row["occurrence"] > 0 and row.get("phase") == commands[row["commandOrdinal"] - 1]["phase"]
+                and type(row.get("beforePreferences")) is dict and type(row.get("afterPreferences")) is dict,
+                "healthy effect context missing")
+        event = events[row["eventIndex"] - 1]
+        require(type(event.get("index")) is int and event["index"] == row["eventIndex"]
+                and event.get("operation") == "native-effect/" + operation and event.get("phase") == row["phase"]
+                and type(event.get("occurrence")) is int and event["occurrence"] == row["occurrence"]
+                and event.get("origin") == "model" and event.get("slot") == "native"
+                and event.get("details") == {} and event.get("succeeded") is True and "error" not in event,
+                "healthy actual effect did not complete")
+    publication = [event for event in events if event.get("operation") == "replace"
+                   and event.get("slot") == source.SESSION + "/completed.pending"
+                   and event.get("origin") == source.LOCAL + "_write"]
+    require(len(publication) == 1 and type(publication[0].get("index")) is int
+            and positions[-1] < publication[0]["index"] <= len(events) and publication[0].get("succeeded") is True,
+            "healthy actual terminal publication missing or early")
+
+
+def _semantic_native_prefix(cut, source, name, token):
+    payload = source.NATIVE_PREFIX_CONTENT[name]
+    proof = cut.get("physicalWrite")
+    _object(proof, ("name", "bytes", "intendedBytes", "sha256", "intendedSha256", "facts", "properPrefix", "revisionAtCut"),
+            "native prefix observation")
+    filename = source.NATIVE_PREFIXES[name].operation.removeprefix("native-effect/write/")
+    revision, ordinal = (1, 4) if name == "transaction-stage" else (0, 3)
+    require(proof["name"] == filename and type(proof["bytes"]) is int and 0 < proof["bytes"] < len(payload)
+            and type(proof["intendedBytes"]) is int and proof["intendedBytes"] == len(payload)
+            and proof["properPrefix"] is True and type(proof["revisionAtCut"]) is int and proof["revisionAtCut"] == revision
+            and proof["sha256"] == hashlib.sha256(payload[:proof["bytes"]]).hexdigest()
+            and proof["intendedSha256"] == hashlib.sha256(payload).hexdigest(), "native actual source prefix differs")
+    facts = proof["facts"]
+    _object(facts, ("device", "inode", "mode", "size", "sha256"), "native prefix file facts")
+    require(type(facts["device"]) is int and facts["device"] >= 0 and type(facts["inode"]) is int and facts["inode"] > 0
+            and type(facts["mode"]) is int and facts["mode"] == 0o600
+            and type(facts["size"]) is int and facts["size"] == proof["bytes"] and facts["sha256"] == proof["sha256"],
+            "native actual prefix file differs")
+    snapshot = cut.get("snapshot")
+    relative = source.KEYCHAIN.removeprefix("<ROOT>/").replace("<TOKEN>", token) + "/" + filename
+    require(type(snapshot) is dict and snapshot.get("session") == token and type(snapshot.get("native")) is dict
+            and canonical(snapshot["native"].get(relative)) == canonical(facts)
+            and cut["context"].get("recoveryAttempt") is False, "native prefix snapshot is not its original file")
+    command = "set-keychain-settings" if ordinal == 4 else "create-keychain"
+    require(canonical(cut.get("originalCommand")) == canonical({"command": command, "ordinal": ordinal,
+        "keychain": source.KEYCHAIN + "/" + source.DB_NAME, "revisionBefore": 0}), "native original command binding differs")
+    calls = snapshot.get("nativeCalls")
+    require(type(calls) is list and len(calls) == ordinal and type(calls[-1]) is dict
+            and canonical(calls[-1]) == canonical({"command": command, "mutation": True, "recovery": False}),
+            "native prefix original model call missing")
+
+
+def _semantic_record(item, observation, evidence, parts):
+    name = item.name
+    _object(observation, ("caseId", "status", "evidence", "caseRemoved", "originalWorkersSettled",
+                          "regressionContributions"), "semantic observation")
+    stem = "semantic-" + digest(name)
+    complete_name = stem + "-complete.json"
+    require(observation["caseId"] == name and observation["status"] == "semantic-subset-case"
+            and observation["evidence"] == complete_name and observation["caseRemoved"] is True
+            and observation["originalWorkersSettled"] is True
+            and canonical(observation["regressionContributions"]) == canonical(parts), "semantic observation binding")
+    require(complete_name in evidence, "semantic complete evidence missing")
+    complete = evidence[complete_name]
+    _object(complete, ("schema", "case", "steps", "negativeEvidence"), "semantic complete evidence")
+    specification = json.loads(item.specification)
+    require(complete["schema"] == "mrk-signing-semantic-case-v1"
+            and canonical(complete["case"]) == canonical(specification), "semantic case specification changed")
+    steps = complete["steps"]
+    require(type(steps) is list and 0 < len(steps) <= 8 and all(type(step) is dict for step in steps)
+            and all(type(step.get("name")) is str for step in steps)
+            and len({step["name"] for step in steps}) == len(steps), "semantic step inventory")
+    for step in steps:
+        require({"name", "original", "observation"} <= set(step) and type(step["observation"]) is dict,
+                "semantic original observation missing")
+        _original_case_return(step["original"], 73 if step["name"] in {"seed", "recovery-cut"} else 0)
+        if step["name"] in {"seed", "recovery-cut", "healthy"}:
+            _object(step, ("name", "original", "observation"), "semantic original step")
+    kind, source = specification["kind"], layered_catalog().SEMANTIC
+    token = steps[0]["observation"].get("sessionToken")
+    require(type(token) is str and re.fullmatch(r"[0-9a-f]{32}", token), "semantic original session token missing")
+    negative_steps = []
+    if kind == "focused":
+        negative_steps = _semantic_focused(source, specification["variant"], steps, token)
+    else:
+        names = ["healthy"] if kind == "healthy" else [
+            "seed", *(("recovery-cut",) if kind == "recovery" else ()), "semantic-main",
+            *(("semantic-resolution",) if specification["resolution"] is not None else ()),
+        ]
+        require([step["name"] for step in steps] == names, "semantic lifecycle steps differ")
+        if kind == "healthy":
+            _semantic_healthy(steps[0]["observation"], source)
+        else:
+            cut = steps[1 if kind == "recovery" else 0]["observation"]
+            require(cut.get("sessionToken") == token, "semantic selected session differs from its original seed")
+            _semantic_cut(cut, source.case(name).selector)
+            if kind == "recovery":
+                initial = source.QUERY_DEBT_SEED if specification["seed"] == "query-settled-partial" else source.SEEDS[specification["seed"]]
+                _semantic_cut(steps[0]["observation"], initial)
+            if kind == "command" and specification["selector"]["operation"].startswith("command-fence/"):
+                fence = cut.get("originalCFenceObservation")
+                require(type(fence) is dict and fence.get("originalWorker") is True
+                        and fence.get("operation") == specification["selector"]["operation"].removeprefix("command-fence/")
+                        and fence.get("edge") == specification["selector"]["edge"].upper(), "actual original-C cut missing")
+                if specification["selector"]["edge"] == "partial":
+                    validate_original_c_prefix(fence)
+            if kind == "native-prefix":
+                _semantic_native_prefix(cut, source, specification["seed"], token)
+            main = steps[-2] if specification["resolution"] is not None else steps[-1]
+            _semantic_recovery(main, token, manual=specification["manual"] if kind == "seed" else "none",
+                               expected=specification["expected"])
+            if specification["resolution"] is not None:
+                negative_steps = [("negative", main)]
+                _semantic_recovery(steps[-1], token, manual="resolve", expected=specification["resolution"])
+    negative = complete["negativeEvidence"]
+    expected_negative = [(stem + "-" + suffix + ".json", step) for suffix, step in negative_steps]
+    require(type(negative) is list and negative == [filename for filename, _step in expected_negative],
+            "semantic source-required negative evidence names differ")
+    required = {complete_name, *negative}
+    for filename, step in expected_negative:
+        require(filename in evidence and canonical(evidence[filename]) == canonical(step),
+                "semantic negative evidence lost")
+    if parts:
+        alias_name = stem + "-regression.json"
+        required.add(alias_name)
+        require(alias_name in evidence, "semantic regression contribution evidence missing")
+        expected_alias = {"schema": "mrk-signing-semantic-contribution-v1", "semantic": name,
+                          "contributions": parts, "evidenceSha256": digest(complete)}
+        require(canonical(evidence[alias_name]) == canonical(expected_alias), "semantic regression predicates not bound")
+    require(set(evidence) == required, "semantic evidence inventory differs")
+
+
+def validate_layered_record(record, operating_system):
+    """Validate typed original observations as DATA, never as live resource custody."""
+    _object(record, ("schemaVersion", "caseId", "kind", "name", "observation", "evidence", "regressionParts"),
+            "layered actual result")
+    require(type(record["schemaVersion"]) is int and record["schemaVersion"] == 2, "unsupported actual result version")
+    catalog = layered_catalog()
+    item = catalog.case(record["caseId"], operating_system)
+    require(record["kind"] == item.kind and record["name"] == item.name, "cross-kind or renamed actual result")
+    parts = list(catalog.regression_parts(item, operating_system))
+    require(canonical(record["regressionParts"]) == canonical(parts), "missing or extra regression contribution")
+    observation, evidence = record["observation"], record["evidence"]
+    require(type(observation) is dict and type(evidence) is dict and 0 < len(evidence) <= 5,
+            "missing bounded original evidence")
+    if item.kind == "primitive":
+        _primitive_record(item, observation, evidence)
+    elif item.kind == "semantic":
+        _semantic_record(item, observation, evidence, parts)
+    else:
+        _object(observation, ("caseId", "status", "evidence", "caseRemoved", "originalWorkersSettled"),
+                "regression observation")
+        filename = "regression-" + digest(item.name) + ".json"
+        require(observation["caseId"] == item.name and observation["status"] == "regression-case"
+                and observation["evidence"] == filename and observation["caseRemoved"] is True
+                and observation["originalWorkersSettled"] is True and set(evidence) == {filename},
+                "regression original completion missing")
+        specification = json.loads(item.specification)
+        expected = {"schema": "mrk-signing-regression-case-v1", "case": specification,
+                    "originalTestcaseCompleted": True, "typedVariant": specification["helper"] != "whole",
+                    "testsRun": 1, "setupBodyTeardownCleanupsReturned": True,
+                    "originalWorkersSettled": True, "caseRemoved": True}
+        require(canonical(evidence[filename]) == canonical(expected), "regression testcase lifecycle differs")
+    return item.identifier
+
+
+def validate_actual_results(content, expected, *, operating_system, deadline=None):
+    """Only original finalized bytes; exact source-defined kinds/variant union."""
     before_deadline(deadline)
     validate_ids(expected, "actual assigned cases")
+    require(set(expected) <= set(layered_catalog().expected_ids(operating_system)), "unknown assigned source cases")
     require(type(content) is bytes and 0 < len(content) <= MAX_RESULTS_BYTES, "actual result compressed bound")
     actual, expanded = [], 0
     with gzip.GzipFile(fileobj=io.BytesIO(content), mode="rb") as stream:
@@ -607,29 +1192,9 @@ def validate_actual_results(content, expected, *, deadline=None):
             require(expanded <= MAX_EXPANDED_RESULTS and len(line) <= 2 * 1024 * 1024
                     and line.endswith(b"\n"), "oversized/incomplete actual result")
             record = strict_json(line.decode("utf-8"))
-            require(type(record) is dict and {"caseId", "seed", "outcome", "results"} <= set(record), "actual result fields")
-            group = record["seed"]
-            require(type(group) is str and type(record["results"]) is dict, "actual result group")
-            cut_name = "original-cut" if group == "original" else "recovery-cut"
-            require(cut_name in record["results"], "actual reached cut missing")
-            cut = record["results"][cut_name]
-            case_id = logical_case_id(group, cut["event"], cut["edge"])
-            require(record["caseId"] == case_id, "result ID disagrees with the actual reached crash cut")
-            actual.append(case_id)
+            actual.append(validate_layered_record(record, operating_system))
             require(len(actual) <= len(expected), "extra actual executions")
-            require("final-automatic" in record["results"], "final recovery was not observed")
-            require(type(record["outcome"]) is dict and "manual" in record["outcome"], "actual recovery outcome missing")
-            if record["outcome"]["manual"] is not None:
-                require({"final-no-resolution", "final-owner-resolution"} <= set(record["results"]),
-                        "manual recheck observations missing")
-            if cut["event"]["operation"].startswith("command-fence/"):
-                observation = cut.get("originalCFenceObservation")
-                require(type(observation) is dict and observation.get("originalWorker") is True
-                        and observation.get("operation") == cut["event"]["operation"].removeprefix("command-fence/")
-                        and observation.get("edge") == cut["edge"].upper(), "actual original-C cut evidence missing")
-                if cut["edge"] == "partial":
-                    validate_original_c_prefix(observation)
-    require(actual == expected, "actual crash executions omit, duplicate or reorder assigned cases")
+    require(actual == expected, "actual layered executions omit, duplicate or reorder assigned cases")
     before_deadline(deadline)
     return hashlib.sha256(content).hexdigest()
 
