@@ -3243,7 +3243,7 @@ class NativeUploadValidationTest < Minitest::Test
       when :bad_return then [1, 0]
       when :bad_errno then [-1, 0]
       else
-        state[:published] = state[:written]
+        state[:published] = state[:written].b
         raise primary if fault == :rename_after
         [0, 0]
       end
@@ -3284,7 +3284,15 @@ class NativeUploadValidationTest < Minitest::Test
     payload = {"version" => 1, "value" => "complete \u263a record"}
     with_record_publication_model do |state|
       assert_equal true, owner.write_record(state[:final], payload)
-      assert_equal JSON.generate(payload), state[:published]
+      serialized = JSON.generate(payload)
+      assert_equal Encoding::UTF_8, serialized.encoding
+      assert_equal Encoding::BINARY, state[:published].encoding
+      assert_equal serialized.bytes, state[:published].bytes
+      refute_equal serialized, state[:published] # Non-ASCII byte reads have a distinct encoding contract.
+      assert_equal serialized.b, state[:published]
+      changed = serialized.b
+      changed.setbyte(0, changed.getbyte(0) ^ 1)
+      refute_equal changed, state[:published]
       assert_equal %i[prepare register directory_open stage_open write flush stage_close stage_close_returned
                       rename directory_close directory_close_returned release], state[:events]
       assert_empty state[:registry].instance_variable_get(:@retained_fixture_cases)
@@ -3483,7 +3491,7 @@ class NativeUploadValidationTest < Minitest::Test
       assert_equal frame.leases.first.io.fileno, descriptor
       stat = File.lstat(File.join(directory, staged))
       assert_equal [0o600, 1], [stat.mode & 0o7777, stat.nlink]
-      assert_equal JSON.generate(payload), owner.bounded_file(File.join(directory, staged))
+      assert_equal JSON.generate(payload).b, owner.bounded_file(File.join(directory, staged))
       assert_raises(Errno::ENOENT) { File.lstat(final) } if captured.empty?
       captured << owner.identity(stat)
       original.call(binding, descriptor, staged, name)
@@ -3491,12 +3499,12 @@ class NativeUploadValidationTest < Minitest::Test
     owner.stub(:rename_record_exclusively, observe) do
       assert_equal true, owner.write_record(final, payload)
       assert_equal captured.first, owner.identity(File.lstat(final))
-      assert_equal JSON.generate(payload), owner.bounded_file(final)
+      assert_equal JSON.generate(payload).b, owner.bounded_file(final)
       refute File.exist?(File.join(directory, ".mrk-record-ready.json.stage"))
       refused = assert_raises(UploadProcessFixture::Failure) { owner.write_record(final, payload) }
       assert_equal "bootstrap record publication refused", refused.message
       assert_equal captured.first, owner.identity(File.lstat(final))
-      assert_equal JSON.generate(payload), owner.bounded_file(final)
+      assert_equal JSON.generate(payload).b, owner.bounded_file(final)
       assert_equal captured.last, owner.identity(File.lstat(File.join(directory, ".mrk-record-ready.json.stage")))
       refute UploadProcessFixture.record_publication_unresolved?(directory)
       link = File.join(directory, "dangling.json")
