@@ -317,6 +317,171 @@ class WorkloadContractTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             workload.WORKER_SECONDS["persistent-original"] = 999
 
+    def test_profile_signal_actual_launcher_transports_only_its_selected_temporary_parent(self):
+        from . import local_signing_workload as workload
+        from unit import test_ios_profile_installation as profiles
+        selected = str(Path.cwd() / "inert-selected-profile-parent")
+        ambient = str(Path.cwd() / "inert-ambient-profile-parent")
+        original_cache, observed = tempfile.tempdir, []
+        stopped = RuntimeError("inert request recorder; never launch or return a native result")
+
+        def record(command, **options):
+            observed.append((command, options))
+            raise stopped
+
+        # Invoke the actual caller, not its former whole-method mock. The sole
+        # command boundary stops before any process, receipt or fixture exists.
+        with patch.object(tempfile, "tempdir", selected), \
+                patch.object(tempfile, "gettempdir", wraps=tempfile.gettempdir) as selection, \
+                patch.object(tempfile, "_get_default_tempdir", side_effect=AssertionError("no default probe")), \
+                patch.dict(os.environ, {"TMPDIR": ambient, "TMP": ambient, "TEMP": ambient,
+                                        "MRK_INERT_UNRELATED_ENV": "must-not-be-forwarded"}), \
+                patch.object(profiles, "run_owned", side_effect=record):
+            for mode in workload.PROFILE_SIGNAL_SECONDS:
+                with self.subTest(mode=mode), self.assertRaises(RuntimeError) as caught:
+                    profiles.ProfileInstallationSignalTests().run_boundary(mode)
+                self.assertIs(caught.exception, stopped)
+                self.assertEqual(selection.call_count, len(observed))
+                self.assertEqual(tempfile.tempdir, selected)
+                command, options = observed[-1]
+                self.assertEqual(command, [sys.executable, "-I", "-S", "-B",
+                    str(Path(profiles.__file__).parents[1] / "workflow/profile_installation_fixture.py"),
+                    str(Path(mobile_release.__file__).resolve().parent.parent), mode, selected])
+                self.assertEqual(options, {"timeout": workload.profile_signal_timeout(mode), "capture": True,
+                    "output_limit": 64 * 1024, "environ": {
+                        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C", "LANG": "C",
+                        "TMPDIR": selected, "TMP": selected, "TEMP": selected}})
+            self.assertEqual(len(observed), 50)
+        self.assertIs(tempfile.tempdir, original_cache)
+
+    def test_profile_signal_bootstrap_pins_exact_parent_before_imports_or_work(self):
+        path = Path(__file__).with_name("profile_installation_fixture.py")
+        tree = ast.parse(path.read_text(), str(path))
+        bootstrap, entry = [node for node in tree.body if isinstance(node, ast.If)]
+        first_product_import = next(index for index, node in enumerate(tree.body)
+                                    if isinstance(node, ast.ImportFrom) and node.module == "mobile_release")
+        self.assertLess(tree.body.index(bootstrap), first_product_import)
+        cache_writes = lambda node: [child for child in ast.walk(node) if isinstance(child, ast.Attribute)
+            and isinstance(child.ctx, ast.Store) and isinstance(child.value, ast.Name)
+            and (child.value.id, child.attr) == ("tempfile", "tempdir")]
+        self.assertEqual(cache_writes(tree), cache_writes(bootstrap))
+        code = compile(ast.Module(body=[bootstrap, entry], type_ignores=[]), str(path), "exec")
+        calls, stopped = [], RuntimeError("inert fixture body stop")
+
+        def stop(mode, parent):
+            calls.append((mode, parent))
+            self.assertEqual(tempfile.tempdir, str(parent))
+            # A real default stdlib allocation stands in for the materialized
+            # path's tempfile consumer; no product body or native owner runs.
+            with tempfile.TemporaryDirectory(prefix="mrk-inert-nested-") as nested:
+                self.assertEqual(Path(nested).parent, parent)
+            raise stopped
+
+        def namespace(name, arguments, environment):
+            return {"__name__": name, "ROOT": path.parents[2], "Path": Path, "tempfile": tempfile,
+                    "sys": SimpleNamespace(argv=list(arguments), path=[]),
+                    "os": SimpleNamespace(environ=environment), "run_case": stop, "json": json}
+
+        # Only the original two main guards are executed. Their real body is
+        # replaced before dispatch; no product imports, signals or waits occur.
+        with tempfile.TemporaryDirectory(prefix="mrk-inert-profile-bootstrap-") as temporary:
+            parent = Path(temporary) / "selected"
+            parent.mkdir(mode=0o700)
+            selected = str(parent)
+            environment = {key: selected for key in ("TMPDIR", "TMP", "TEMP")}
+            arguments = [str(path), "inert-selected-package", "material-body:TERM", selected]
+            with patch.object(tempfile, "tempdir", "inert-unselected-cache"), \
+                    patch.object(tempfile, "_get_default_tempdir", side_effect=AssertionError("no fallback probe")):
+                with self.assertRaises(RuntimeError) as caught:
+                    exec(code, namespace("__main__", arguments, environment))
+                self.assertIs(caught.exception, stopped)
+                self.assertEqual(calls, [("material-body:TERM", parent)])
+                self.assertFalse(list(parent.iterdir()))
+
+            invalid = [(arguments[:-1], environment), (arguments + ["extra"], environment),
+                       (arguments[:-1] + ["relative-parent"], {key: "relative-parent" for key in environment})]
+            for key in environment:
+                invalid.extend(((arguments, {**environment, key: "foreign-parent"}),
+                                (arguments, {name: value for name, value in environment.items() if name != key})))
+            for arguments, environment in invalid:
+                calls.clear()
+                with self.subTest(arguments=arguments, environment=environment), \
+                        patch.object(tempfile, "tempdir", "inert-unselected-cache"):
+                    with self.assertRaises((AssertionError, ValueError)):
+                        exec(code, namespace("__main__", arguments, environment))
+                    self.assertEqual(tempfile.tempdir, "inert-unselected-cache")
+                    self.assertFalse(calls)
+            calls.clear()
+            with patch.object(tempfile, "tempdir", "inert-import-cache"):
+                imported = namespace("workflow.profile_installation_fixture", [], {})
+                exec(code, imported)
+                self.assertEqual(tempfile.tempdir, "inert-import-cache")
+                self.assertEqual(imported["sys"].argv, [])
+                self.assertFalse(calls)
+
+    def test_profile_signal_explicit_case_parent_retains_all_unsuccessful_inert_cases(self):
+        from contextlib import contextmanager
+        import shutil
+        path = Path(__file__).with_name("profile_installation_fixture.py")
+        tree = ast.parse(path.read_text(), str(path))
+        helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                      and node.name == "completed_case_directory")
+        original_case = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_case")
+        context = next(node for node in original_case.body if isinstance(node, ast.With)).items[0].context_expr
+        namespace = {"contextmanager": contextmanager, "Path": Path, "tempfile": tempfile, "stat": stat, "shutil": shutil}
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), str(path), "exec"), namespace)
+        context_code = compile(ast.Expression(body=context), str(path), "eval")
+
+        def case_directory(parent):
+            # Execute the real call expression and helper, not a copied owner.
+            return eval(context_code, {**namespace, "parent": parent})
+
+        # This outer directory holds inert files only. Its later deletion never
+        # represents native recovery or disposal of an uncertain command owner.
+        with tempfile.TemporaryDirectory(prefix="mrk-inert-profile-cases-") as temporary:
+            parent, ambient = Path(temporary) / "selected", Path(temporary) / "ambient"
+            parent.mkdir(mode=0o700)
+            ambient.mkdir(mode=0o700)
+            with patch.object(tempfile, "tempdir", str(ambient)), \
+                    patch.object(tempfile, "_get_default_tempdir", side_effect=AssertionError("no default probe")):
+                with patch.object(tempfile, "mkdtemp", wraps=tempfile.mkdtemp) as allocation:
+                    with case_directory(parent) as successful:
+                        self.assertEqual(successful.parent, parent)
+                        self.assertEqual(stat.S_IMODE(successful.lstat().st_mode), 0o700)
+                    allocation.assert_called_once_with(prefix="mrk-profile-signal-", dir=parent)
+                self.assertFalse(successful.exists())
+
+                original = RuntimeError("inert body failure")
+                with self.assertRaises(RuntimeError) as caught:
+                    with case_directory(parent) as failed:
+                        (failed / "evidence").write_bytes(b"inert retained evidence")
+                        raise original
+                self.assertIs(caught.exception, original)
+                self.assertEqual((failed / "evidence").read_bytes(), b"inert retained evidence")
+
+                with self.assertRaises(AssertionError):
+                    with case_directory(parent) as replaced:
+                        retained = replaced.with_name(replaced.name + "-original")
+                        replaced.rename(retained)
+                        replaced.mkdir(mode=0o700)
+                        (replaced / "evidence").write_bytes(b"inert replacement")
+                self.assertTrue(retained.is_dir())
+                self.assertEqual((replaced / "evidence").read_bytes(), b"inert replacement")
+
+                missing = parent / "missing-parent"
+                with self.assertRaises(FileNotFoundError):
+                    with case_directory(missing):
+                        self.fail("missing selected parent entered the fixture body")
+                self.assertFalse(missing.exists())
+                refused = OSError("inert selected-parent allocation refusal")
+                with patch.object(tempfile, "mkdtemp", side_effect=refused) as allocation:
+                    with self.assertRaises(OSError) as caught:
+                        with case_directory(parent):
+                            self.fail("failed allocation entered the fixture body")
+                    allocation.assert_called_once_with(prefix="mrk-profile-signal-", dir=parent)
+                self.assertIs(caught.exception, refused)
+                self.assertFalse(list(ambient.iterdir()))
+
     def test_adapter_methods_keep_fixed_ids_and_route_only_the_two_canonical_cases(self):
         path = Path(__file__).parents[1] / "unit/test_local_signing_persistent.py"
         tree = ast.parse(path.read_text())
@@ -953,8 +1118,8 @@ class MatrixContractTests(unittest.TestCase):
         workflow = load_workflow(runner.ROOT / ".github/workflows/ci.yml")
         job, aggregate = workflow["jobs"]["test-signing-matrix"], workflow["jobs"]["test"]
         self.assertEqual(job["strategy"]["matrix"], {"os": list(contract.OPERATING_SYSTEMS), "shard":
-            "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[0]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]') }}",
-            "include": "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[{\"os\":\"ubuntu-24.04\",\"shard\":11},{\"os\":\"macos-26\",\"shard\":9}]' || '[]') }}"})
+            "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[12]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]') }}",
+            "include": "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[{\"os\":\"ubuntu-24.04\",\"shard\":11},{\"os\":\"macos-26\",\"shard\":7}]' || '[]') }}"})
         self.assertEqual(job["strategy"]["max-parallel"], 4)
         self.assertIs(job["strategy"]["fail-fast"], False)
         self.assertEqual(job["timeout-minutes"], 60)
@@ -1961,6 +2126,170 @@ class SigningAdapterPhaseDiagnosticTests(unittest.TestCase):
                         self.assertEqual(record["stage"], stage)
                         self.assertTrue(record["locations"])
                     self.assertNotIn("PRIVATE", output.getvalue())
+
+
+class RegressionIsolationContractTests(unittest.TestCase):
+    """Real unittest lifecycle plus inert owner seams, never native receipts."""
+
+    def exercise(self, mode):
+        from . import local_signing_regression_fixture as regression
+        descriptor = next(item for item in regression.catalog.cases_for("ubuntu-24.04") if item.kind == "execution")
+        flags = SimpleNamespace(**{name: 1 for name in (
+            "isolated", "ignore_environment", "no_user_site", "no_site", "safe_path", "dont_write_bytecode")})
+        events, clock, in_worker = [], [10.0], [False]
+        actual_read, actual_write, actual_remove = fixture.read_case_json, fixture.write_json, fixture.remove_case
+        outer = self
+
+        class OriginalCase(unittest.TestCase):
+            def setUp(self):
+                events.append("setup")
+                self.addCleanup(self.original_cleanup)
+
+            def original_cleanup(self):
+                events.append("cleanup")
+                if mode == "cleanup-failed":
+                    raise OSError("inert original cleanup failure")
+
+            def runTest(self):
+                events.append("body")
+                self.assertTrue(in_worker[0])
+                scratch = Path(tempfile.tempdir)
+                self.assertEqual(scratch.name, "scratch")
+                self.assertTrue((scratch.parent / "last-worker.json").is_file())
+                if mode == "test-failed":
+                    self.fail("inert original body failure")
+                elif mode == "outside-debt":
+                    fixture._CASE_RECOVERY_DEBT[str(scratch.parents[2] / "outside")] = ("retained",)
+                elif mode == "outside-case":
+                    fixture._CASE_CUSTODY[str(scratch.parents[2] / "outside")] = None
+                elif mode == "replaced-map":
+                    fixture._CASE_CUSTODY = dict(fixture._CASE_CUSTODY)
+                elif mode == "scratch-retained":
+                    (scratch / "retained.txt").write_text("synthetic unit evidence")
+
+            def tearDown(self):
+                events.append("teardown")
+
+        def construct(actual):
+            outer.assertTrue(in_worker[0], "G construction escaped the original task closure")
+            outer.assertIs(actual, descriptor)
+            events.append("construct")
+            return OriginalCase()
+
+        def checked(root, context):
+            outer.assertEqual(fixture._directory_identity(root), context)
+            contract.before_deadline(fixture.PHASE_DEADLINE)
+            if mode == "source-drift" and "cleanup" in events:
+                raise AssertionError("inert changed source binding")
+
+        def owned(root, name, task, **options):
+            events.append("owner-enter")
+            outer.assertEqual((name, options), ("regression", {"timeout": 10.0}))
+            fixture._CASE_CUSTODY[str(root)] = None
+            actual_write(root / "last-worker.json", {"diagnosticOnly": True})
+            if mode == "owner-error":
+                raise OSError("inert original owner failure")
+            in_worker[0] = True
+            try:
+                observed = task()  # Deliberately inert, synchronous original task seam only.
+            finally:
+                in_worker[0] = False
+            if mode == "bad-evidence":
+                observed["testsRun"] = True  # Equal to1 is not the exact typed lifecycle record.
+            actual_write(root / (name + ".json"), observed)
+            fixture._CASE_CUSTODY[str(root)] = fixture._directory_identity(root)
+            events.append("owner-return")
+            return None if mode == "missing-return" else {
+                "exit": 0, "originalAnchorWait": True, "originalWorkerWait": True,
+                "originalStatusEOF": mode != "owner-unknown", "groupAbsentBeforeAnchorWait": True,
+                "deadlineTest": False, "runDeadlineExpired": False}
+
+        def read(root, name):
+            outer.assertIn("owner-return", events)
+            events.append("read")
+            return actual_read(root, name)
+
+        def preserve(path, value):
+            outer.assertIn("read", events)
+            events.append("preserve")
+            return actual_write(path, value)
+
+        def remove(root):
+            outer.assertIn("preserve", events)
+            outer.assertTrue((root.parent / ("regression-" + fixture.digest(descriptor.identifier) + ".json")).is_file())
+            events.append("remove")
+            if mode == "remove-failed":
+                raise OSError("inert removal failure")
+            actual_remove(root)
+            if mode == "cutoff-after-remove":
+                clock[0] = 20.0
+
+        with tempfile.TemporaryDirectory(prefix="mrk-g-isolation-inert-") as temporary:
+            parent = Path(temporary).resolve() / "case"
+            parent.mkdir(mode=0o700)
+            previous = tempfile.tempdir
+            with patch.object(fixture, "_CASE_CUSTODY", {}), patch.object(fixture, "_CASE_RECOVERY_DEBT", {}), \
+                    patch.object(fixture, "PHASE_DEADLINE", 20.0), \
+                    patch.object(fixture, "pin_case_context", side_effect=fixture._directory_identity), \
+                    patch.object(fixture, "check_case_context", side_effect=checked), \
+                    patch.object(fixture, "run_worker", side_effect=owned), \
+                    patch.object(fixture, "read_case_json", side_effect=read), \
+                    patch.object(fixture, "write_json", side_effect=preserve), \
+                    patch.object(fixture, "remove_case", side_effect=remove), \
+                    patch.object(regression, "_runtime_case", side_effect=construct), \
+                    patch.object(regression.catalog, "case", return_value=descriptor), \
+                    patch.object(regression, "sys", SimpleNamespace(platform="linux", flags=flags)), \
+                    patch.object(regression, "time", SimpleNamespace(monotonic=lambda: clock[0])), \
+                    patch.object(contract, "time", SimpleNamespace(monotonic=lambda: clock[0])):
+                if mode == "success":
+                    result = regression.run_case(parent, descriptor.identifier)
+                    self.assertEqual(result["caseId"], descriptor.identifier)
+                    self.assertEqual(events, ["owner-enter", "construct", "setup", "body", "teardown", "cleanup",
+                                              "owner-return", "read", "preserve", "remove"])
+                    self.assertFalse((parent / "original-g").exists())
+                    self.assertEqual(fixture._CASE_CUSTODY, {})
+                    self.assertEqual(fixture._CASE_RECOVERY_DEBT, {})
+                else:
+                    with self.assertRaises((AssertionError, OSError, ValueError)):
+                        regression.run_case(parent, descriptor.identifier)
+                    self.assertEqual((parent / "original-g").exists(), mode != "cutoff-after-remove")
+                    if mode not in {"remove-failed", "cutoff-after-remove"}:
+                        self.assertNotIn("remove", events)
+                        self.assertNotIn("preserve", events)
+                    else:
+                        self.assertEqual(events[-2:], ["preserve", "remove"])
+                    if mode == "owner-error":
+                        self.assertNotIn("construct", events)
+                    if mode in {"missing-return", "owner-unknown"}:
+                        self.assertNotIn("read", events)
+                self.assertEqual(tempfile.tempdir, previous)
+                self.assertFalse(in_worker[0])
+            # Only inert task-owned bytes exist here; TemporaryDirectory safely
+            # disposes them after all retained-evidence assertions. No workers.
+
+    def test_original_g_construction_and_complete_lifecycle_precede_original_return_and_removal(self):
+        self.exercise("success")
+
+    def test_original_failure_unknown_outside_debt_source_and_cleanup_errors_withhold_rows(self):
+        for mode in ("test-failed", "cleanup-failed", "outside-debt", "outside-case", "replaced-map",
+                     "scratch-retained", "owner-error", "owner-unknown", "missing-return", "bad-evidence",
+                     "source-drift", "remove-failed", "cutoff-after-remove"):
+            with self.subTest(mode=mode):
+                self.exercise(mode)
+
+    def test_layered_g_owner_cost_is_added_without_changing_original_ids_or_commands(self):
+        catalog = contract.layered_catalog()
+        for operating_system in catalog.OPERATING_SYSTEMS:
+            for item in catalog.cases_for(operating_system):
+                if item.kind == "regression":
+                    original = catalog.REGRESSION.case(item.name)
+                    self.assertEqual(json.loads(item.specification), original.record())
+                    self.assertEqual(item.estimated_commands, original.estimated_commands)
+                    self.assertEqual(item.owned_workers, original.owned_workers + 1)
+                    self.assertEqual(item.scheduling_units, original.scheduling_units + 4)
+            groups, _weights = catalog.assignment(operating_system)
+            self.assertEqual(sorted(value for group in groups for value in group), list(catalog.expected_ids(operating_system)))
+            self.assertTrue(all(tuple(sorted(group)) == group for group in groups))
 
 
 if __name__ == "__main__":

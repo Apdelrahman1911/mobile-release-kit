@@ -176,8 +176,8 @@ jobs:
       max-parallel: 4
       matrix:
         os: [ubuntu-24.04, macos-26]
-        shard: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[0]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]') }}
-        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[{"os":"ubuntu-24.04","shard":11},{"os":"macos-26","shard":9}]' || '[]') }}
+        shard: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[12]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]') }}
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[{"os":"ubuntu-24.04","shard":11},{"os":"macos-26","shard":7}]' || '[]') }}
     steps:
       - name: Require a disposable GitHub-hosted runner
         env:

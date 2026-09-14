@@ -26,6 +26,7 @@ REPORTED_FRAME = re.compile(r'  File "([^"\r\n]+)", line ([1-9][0-9]{0,5}), in (
 _PROFILE_CAPTURE = "_mrk_matrix_original_profile_capture"
 _CASE_CAPTURE = "_mrk_matrix_original_case_capture"
 CURRENT = None
+CURRENT_WORKER = None
 
 
 def _require(value):
@@ -38,7 +39,7 @@ def _before(context):
 
 
 class Phase:
-    """One original invocation: parent48 + reserved W16 visits, four locations."""
+    """One invocation: semantic L48/W16; delegated G L0/W64; four locations."""
 
     def __init__(self, phase, deadline, operating_system, shard, identifiers, regression_ids, source_map,
                  child_bindings=()):
@@ -90,15 +91,32 @@ def _selectors(context, role):
                  if identifier == context.case_id and actual_role == role), ())
 
 
+def _worker_role(context, step):
+    if step == "regression" and context.case_id in context.regression_ids:
+        return "regression-worker"
+    if step in _selectors(context, "semantic-worker"):
+        return "semantic-worker"
+    return None
+
+
+def _g_context():
+    worker = CURRENT_WORKER
+    if (type(worker) is Worker and worker.context is CURRENT and worker.role == "regression-worker"
+            and worker.pid == os.getpid() and worker.pid != worker.context.pid
+            and worker.thread is threading.current_thread() and not worker.emitted):
+        return worker
+    return None
+
+
 def _attributes(error):
     return BaseException.__dict__["__dict__"].__get__(error, BaseException)
 
 
 def attach_profile_capture(error, result, mode):
     """Private original-result retention AFTER its assertion, never publication."""
-    context = CURRENT
+    context = _g_context()
     try:
-        _require(_owned(context) and context.stage == "helper" and not context.g_seen
+        _require(context is not None and context.stage == "helper" and not context.g_seen
                  and type(error) is AssertionError and type(result) is CompletedProcess
                  and type(mode) is str and mode in _selectors(context, "profile-signal"))
         _before(context)
@@ -159,17 +177,21 @@ class Worker:
 
     def __init__(self, context, step, deadline):
         self.context, self.case_id, self.step = context, context.case_id, step
+        self.role = _worker_role(context, step)
         self.phase, self.source_map = context.phase, context.source_map
+        self.child_bindings, self.regression_ids = context.child_bindings, context.regression_ids
+        self.stage = "helper"
         self.deadline = min(context.deadline, deadline)
         self.pid = self.thread = None
         self.emitted = False
+        self.g_seen, self.g_failure, self.child, self.budget = False, None, None, [64]
 
 
 def prepare_worker(step, deadline):
     context = CURRENT
     try:
         _require(_owned(context) and context.stage == "helper" and not context.emitted
-                 and type(step) is str and step in _selectors(context, "semantic-worker")
+                 and type(step) is str and _worker_role(context, step) is not None
                  and type(deadline) is float and math.isfinite(deadline))
         _before(context)
         return Worker(context, step, deadline)
@@ -178,11 +200,14 @@ def prepare_worker(step, deadline):
 
 
 def enter_worker(worker):
+    global CURRENT_WORKER
     try:
         _require(type(worker) is Worker and worker.context is CURRENT and worker.pid is None
+                 and worker.role is not None and worker.role == _worker_role(worker.context, worker.step)
                  and os.getpid() != worker.context.pid and threading.current_thread() is threading.main_thread())
         _before(worker)
         worker.pid, worker.thread = os.getpid(), threading.current_thread()
+        CURRENT_WORKER = worker  # W-local diagnostics only; inherited Phase custody is unchanged.
     except BaseException:
         pass
 
@@ -193,7 +218,7 @@ def attach_case_capture(error, worker, observed):
         context = CURRENT
         _require(_owned(context) and type(worker) is Worker and worker.context is context
                  and worker.case_id == context.case_id and context.stage == "helper"
-                 and worker.step in _selectors(context, "semantic-worker"))
+                 and worker.role is not None and worker.role == _worker_role(context, worker.step))
         _before(context)
         attributes = _attributes(error)
         if _CASE_CAPTURE not in attributes:
@@ -209,14 +234,15 @@ def _case_child(context, exception):
     _require(type(retained) is tuple and len(retained) == 2)
     worker, observed = retained
     _require(type(worker) is Worker and worker.context is context and worker.case_id == context.case_id
-             and worker.step in _selectors(context, "semantic-worker")
+             and worker.role is not None and worker.role == _worker_role(context, worker.step)
              and type(observed) is tuple and len(observed) == 5)
     expected, child, anchor, parsed, expired = observed
     _require(type(expected) is int and expected in {0, 73, -9}
+             and (worker.role != "regression-worker" or expected == 0)
              and all(value is None or type(value) is int and -128 <= value <= 255 for value in (child, anchor))
              and type(parsed) is bool and (child is not None) == parsed
              and (type(expired) is bool if parsed else expired is None))
-    return {"role": "semantic-worker", "step": worker.step, "expectedExit": expected,
+    return {"role": worker.role, "step": worker.step, "expectedExit": expected,
             "workerExit": child, "anchorExit": anchor, "terminalParsed": parsed, "anchorExpired": expired}
 
 
@@ -229,14 +255,25 @@ def emit_worker(worker, error):
         _require(worker.context is CURRENT and worker.pid == os.getpid()
                  and worker.thread is threading.current_thread() and worker.pid != worker.context.pid
                  and worker.case_id == worker.context.case_id
-                 and worker.step in _selectors(worker.context, "semantic-worker"))
+                 and worker.role is not None and worker.role == _worker_role(worker.context, worker.step))
         _before(worker)
         exception, frame = _actual(error)
-        record = {"schema": 1, "phase": worker.phase, "caseId": worker.case_id, "step": worker.step,
-                  "category": _category(exception), "locations": _locations(frame, worker.source_map, [16], 2)}
+        if worker.role == "regression-worker":
+            original, child = worker.g_failure, worker.child
+            maximum = 4 - (len(original["locations"]) if original is not None else 0) \
+                - (len(child["locations"]) if child is not None else 0)
+            _require(maximum >= 0 and worker.budget[0] >= 16)
+            worker.budget[0] -= 16  # Reserve fixed outer16; unavailable inner work never renews it.
+            record = {"schema": 2, "phase": worker.phase, "caseId": worker.case_id, "step": worker.step,
+                      "role": worker.role, "category": _category(exception),
+                      "locations": _locations(frame, worker.source_map, [16], maximum),
+                      "originalGFailure": original, "child": child}
+        else:
+            record = {"schema": 1, "phase": worker.phase, "caseId": worker.case_id, "step": worker.step,
+                      "category": _category(exception), "locations": _locations(frame, worker.source_map, [16], 2)}
         data = WORKER_PREFIX + json.dumps(record, sort_keys=True, separators=(",", ":"),
                                           ensure_ascii=True, allow_nan=False) + "\n"
-        _require(len(data.encode("ascii")) <= 768)
+        _require(len(data.encode("ascii")) <= (1536 if worker.role == "regression-worker" else 768))
         _before(worker)
         _require(sys.stderr.write(data) == len(data))
         sys.stderr.flush()
@@ -292,8 +329,8 @@ def _locations(frame, source_map, budget, maximum):
 
 def original_g_failure(error):
     """Only the winning original result callback may offer its actual tuple."""
-    context = CURRENT
-    if not _owned(context) or context.g_seen:
+    context = _g_context()
+    if context is None or context.g_seen:
         return
     context.g_seen = True  # First remains first even with no tuple or a projection exception.
     context.budget[0] -= 16  # Reserve BEFORE projection; never renew visits after optional failure.
@@ -332,17 +369,16 @@ def emit(context, error):
         # W may already have emitted even if the optional launcher attachment
         # failed. Its reserved bytes/locations never return to the parent.
         semantic = bool(_selectors(context, "semantic-worker"))
-        maximum = (2 if semantic else 4) - (len(original["locations"]) if original is not None else 0)
-        if child is not None and child["role"] == "profile-signal":
-            maximum -= len(child["locations"])
-        _require(maximum >= 0)
+        regression = context.stage == "helper" and context.case_id in context.regression_ids
+        _require(original is None)  # G tracebacks belong to its original W, never to warm L.
+        maximum = 0 if regression else 2 if semantic else 4
         record = {"schema": 2, "phase": context.phase, "caseId": context.case_id, "stage": context.stage,
                   "category": _category(exception),
                   "locations": _locations(frame, context.source_map, context.budget, maximum),
                   "originalGFailure": original, "child": child}
         data = PREFIX + json.dumps(record, sort_keys=True, separators=(",", ":"),
                                    ensure_ascii=True, allow_nan=False) + "\n"
-        _require(len(data.encode("ascii")) <= (1280 if semantic else 2048))
+        _require(len(data.encode("ascii")) <= (512 if regression else 1280 if semantic else 2048))
         _before(context)
         _require(sys.stderr.write(data) == len(data))
         sys.stderr.flush()

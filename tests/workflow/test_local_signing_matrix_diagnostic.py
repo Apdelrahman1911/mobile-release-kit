@@ -7,7 +7,7 @@ import dataclasses
 import io
 import json
 import linecache
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from subprocess import CompletedProcess
 from types import SimpleNamespace
@@ -43,6 +43,20 @@ def context(bindings=()):
 def wire(value, *, worker=False):
     return ((diagnostic.WORKER_PREFIX if worker else diagnostic.PREFIX)
             + json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+
+
+@contextmanager
+def original_g_worker(selected):
+    """Inert original fork-copy shape; never a process/finality receipt."""
+    diagnostic.mark("helper", IDS[1])
+    launcher = diagnostic.prepare_worker("regression", 18.0)
+    worker = copy.copy(launcher)
+    worker.budget = list(launcher.budget)
+    parent = diagnostic.os.getpid()
+    with patch.object(diagnostic, "CURRENT_WORKER", None), \
+            patch.object(diagnostic, "os", SimpleNamespace(getpid=lambda: parent + 1)):
+        diagnostic.enter_worker(worker)
+        yield launcher, worker
 
 
 class MatrixDiagnosticTests(unittest.TestCase):
@@ -87,24 +101,26 @@ class MatrixDiagnosticTests(unittest.TestCase):
                 with patch.object(diagnostic, "CURRENT", selected), \
                         patch.object(diagnostic, "sys", SimpleNamespace(stderr=output)), \
                         patch.object(diagnostic, "_profile_child", checked), patch.object(diagnostic, "_locations", counted):
-                    diagnostic.mark("helper", IDS[1])
-                    if mode == "formatted-only":
-                        first[1].args = (reported,)  # Formatted assertions are never capture authority.
-                    else:
-                        diagnostic.attach_profile_capture(first[1], captured,
-                                                          "foreign" if mode == "wrong-mode" else "mutation-search")
-                    if mode == "captured":
-                        self.assertIs(vars(first[1])[diagnostic._PROFILE_CAPTURE][3], captured)
-                    self.assertIsNone(selected.child)
-                    if mode == "stale":
-                        selected = context(bindings)
-                        diagnostic.CURRENT = selected
-                        diagnostic.mark("helper", IDS[1])
-                    result.reject("failure", first)
-                    record = diagnostic.emit(selected, error_tuple(SOURCE_MAP[0][0], depth=80))
+                    with original_g_worker(selected) as (launcher, worker):
+                        if mode == "formatted-only":
+                            first[1].args = (reported,)  # Formatted assertions are never capture authority.
+                        else:
+                            diagnostic.attach_profile_capture(first[1], captured,
+                                                              "foreign" if mode == "wrong-mode" else "mutation-search")
+                        if mode == "captured":
+                            self.assertIs(vars(first[1])[diagnostic._PROFILE_CAPTURE][3], captured)
+                        self.assertIsNone(selected.child)
+                        if mode == "stale":
+                            retained = vars(first[1])[diagnostic._PROFILE_CAPTURE]
+                            vars(first[1])[diagnostic._PROFILE_CAPTURE] = (object(), *retained[1:])
+                        result.reject("failure", first)
+                        record = diagnostic.emit_worker(worker, error_tuple(SOURCE_MAP[0][0], depth=80))
+                    outer = error_tuple(SOURCE_MAP[0][0], depth=80)
+                    diagnostic.attach_case_capture(outer[1], launcher, (0, 91, 0, True, False))
+                    parent = diagnostic.emit(selected, outer)
                 self.assertEqual(record["originalGFailure"]["category"], "assertion-error")
                 self.assertEqual(controller.signing_matrix_failure(output.getvalue().encode("ascii"), scope,
-                                                                  deadline=20.0), record)
+                                                                  deadline=20.0), {**parent, "workerFailure": record})
                 self.assertNotIn("PRIVATE", output.getvalue())
                 if mode in {"wrong-mode", "stale", "formatted-only", "projection-error"}:
                     self.assertIsNone(record["child"])
@@ -118,8 +134,10 @@ class MatrixDiagnosticTests(unittest.TestCase):
                         self.assertEqual(child["locations"], [{"file": SOURCE_MAP[0][1], "line": 7},
                                                               {"file": SOURCE_MAP[1][1], "line": 9}])
                         self.assertEqual(record["locations"], [])
-                        self.assertEqual(visits, [16, 0])  # Zero remaining location capacity is really zero.
-                        self.assertEqual(selected.budget, [0])
+                        self.assertEqual(visits, [16, 0, 0])  # W/L zero remaining location capacity stays zero.
+                        self.assertEqual(worker.budget, [0])
+                        self.assertEqual(parent["locations"], [])
+                        self.assertIsNone(parent["originalGFailure"])
 
     def test_semantic_worker_and_original_launcher_are_separate_bounded_correlated_data(self):
         bindings = ((IDS[0], "semantic-worker", ("seed", "semantic-main", "semantic-resolution")),)
@@ -227,7 +245,7 @@ class MatrixDiagnosticTests(unittest.TestCase):
     def test_prelaunch_child_bindings_come_from_actual_case_modes_and_all_mac9_steps(self):
         with patch.object(contract, "time", SimpleNamespace(monotonic=lambda: 10.0)):
             catalog = contract.layered_catalog()
-            for operating_system, shard in (("ubuntu-24.04", 0), ("ubuntu-24.04", 11), ("macos-26", 0), ("macos-26", 9)):
+            for operating_system, shard in (("ubuntu-24.04", 12), ("ubuntu-24.04", 11), ("macos-26", 12), ("macos-26", 7)):
                 bindings = contract.diagnostic_child_bindings(operating_system, shard, deadline=20.0)
                 self.assertEqual(len({row[0] for row in bindings}), len(bindings))
                 for identifier, role, selectors in bindings:
@@ -238,9 +256,12 @@ class MatrixDiagnosticTests(unittest.TestCase):
                         self.assertEqual((original.helper, selectors), (role, (original.variant,)))
                     else:
                         self.assertEqual(item.kind, "semantic")
-            mac9 = dict((identifier, (role, selectors)) for identifier, role, selectors in
-                        contract.diagnostic_child_bindings("macos-26", 9, deadline=20.0))
-            self.assertEqual(mac9["1b95d952a4fca459d9699aaf1173a4e0145a738a7a99b2fb13a77596760648b8"],
+            # Original Mac9 failure keeps its identity, not its old cost packing.
+            failed = "1b95d952a4fca459d9699aaf1173a4e0145a738a7a99b2fb13a77596760648b8"
+            shard, = (index for index in range(catalog.SHARDS) if failed in catalog.shard_ids("macos-26", index))
+            bindings = dict((identifier, (role, selectors)) for identifier, role, selectors in
+                            contract.diagnostic_child_bindings("macos-26", shard, deadline=20.0))
+            self.assertEqual(bindings[failed],
                              ("semantic-worker", ("seed", "semantic-main", "semantic-resolution")))
 
     def test_original_profile_and_postcleanup_launcher_hook_failures_preserve_identical_exception(self):
@@ -357,20 +378,29 @@ class MatrixDiagnosticTests(unittest.TestCase):
         with patch.object(diagnostic, "time", clock), patch.object(controller, "time", clock):
             selected, output = context(), io.StringIO()
             with patch.object(diagnostic, "CURRENT", selected), patch.object(diagnostic, "sys", SimpleNamespace(stderr=output)):
-                diagnostic.mark("helper", IDS[1])
-                diagnostic.original_g_failure(error_tuple(SOURCE_MAP[1][0], category="AssertionError"))
+                with original_g_worker(selected) as (launcher, worker):
+                    diagnostic.original_g_failure(error_tuple(SOURCE_MAP[1][0], category="AssertionError"))
+                    worker_record = diagnostic.emit_worker(worker, outer)
+                self.assertIsNone(selected.g_failure)
+                self.assertIsNone(launcher.g_failure)
+                self.assertEqual(launcher.budget, [64])
+                diagnostic.attach_case_capture(outer[1], launcher, (0, 91, 0, True, False))
                 record = diagnostic.emit(selected, outer)
                 self.assertIsNone(diagnostic.emit(selected, outer))
             packet = output.getvalue().encode("ascii")
             parse = lambda raw: controller.signing_matrix_failure(raw, scope, deadline=20.0)
-            self.assertEqual(parse(packet), record)
-            self.assertIsNotNone(record["originalGFailure"])
+            projected = {**record, "workerFailure": worker_record}
+            worker_wire = wire(worker_record, worker=True)
+            self.assertEqual(parse(packet), projected)
+            self.assertEqual(parse(wire(record)), record)  # Missing W remains UNKNOWN diagnostic DATA.
+            self.assertEqual(parse(wire({**record, "child": None})), {**record, "child": None})
+            self.assertIsNotNone(worker_record["originalGFailure"])
+            self.assertIsNone(record["originalGFailure"])
+            self.assertLessEqual(len(worker_wire), 1536)
+            self.assertLessEqual(len(wire(record)), 512)
             self.assertLessEqual(len(packet), 2048)
             self.assertEqual(packet.count(diagnostic.PREFIX.encode()), 1)
             self.assertNotIn(b"PRIVATE", packet)
-
-            def wire(value):
-                return (diagnostic.PREFIX + json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
 
             mutations = (
                 {"schema": True}, {"phase": "wheel"}, {"caseId": "3" * 64}, {"stage": "foreign"},
@@ -384,14 +414,23 @@ class MatrixDiagnosticTests(unittest.TestCase):
             )
             for mutation in mutations:
                 with self.subTest(mutation=mutation):
-                    self.assertIsNone(parse(wire({**record, **mutation})))
+                    self.assertIsNone(parse(worker_wire + wire({**record, **mutation})))
+            for mutation in ({"role": "semantic-worker"}, {"step": "seed"}, {"caseId": IDS[0]},
+                             {"schema": 1}, {"schema": True}, {"message": "PRIVATE"},
+                             {"locations": worker_record["locations"] * 4},
+                             {"child": {"role": "profile-signal"}},
+                             {"originalGFailure": {"category": "value-error", "locations": [], "extra": 0}}):
+                with self.subTest(worker_mutation=mutation):
+                    self.assertIsNone(parse(wire({**worker_record, **mutation}, worker=True) + wire(record)))
             missing = copy.deepcopy(record)
             del missing["originalGFailure"]
-            for invalid in (wire(missing), packet + packet, packet[:-1], bytearray(packet), b"x" * 65537,
+            for invalid in (wire(missing), worker_wire, wire(record) + worker_wire, worker_wire + packet,
+                            worker_wire + wire({**record, "child": None}),
+                            packet + packet, packet[:-1], bytearray(packet), b"x" * 65537,
                             packet.replace(b'"schema":2', b'"schema":2,"schema":2'),
                             packet.replace(b"{", b"{ ", 1), diagnostic.PREFIX.encode() + b" " * 2048 + b"\n"):
                 self.assertIsNone(parse(invalid))
-            self.assertEqual(parse(b"PRIVATE unrelated stderr\n" + packet), record)
+            self.assertEqual(parse(b"PRIVATE unrelated stderr\n" + packet), projected)
             for changed in (dataclasses.replace(scope, phase="adapter"), dataclasses.replace(scope, shard=True),
                             dataclasses.replace(scope, operating_system="foreign"),
                             dataclasses.replace(scope, files=("/PRIVATE/file.py",))):
@@ -421,13 +460,16 @@ class MatrixDiagnosticTests(unittest.TestCase):
                     patch.object(Path, "resolve", side_effect=AssertionError("no diagnostic resolution")), \
                     patch.object(Path, "read_text", side_effect=AssertionError("no diagnostic source read")), \
                     patch.object(linecache, "getline", side_effect=AssertionError("no diagnostic source lookup")):
-                diagnostic.mark("helper", IDS[1])
-                diagnostic.original_g_failure(first)
-                record = diagnostic.emit(selected, outer)
-            self.assertEqual(visits, [16, 32])
-            self.assertEqual(selected.budget, [0])
+                with original_g_worker(selected) as (launcher, worker):
+                    diagnostic.original_g_failure(first)
+                    record = diagnostic.emit_worker(worker, outer)
+                diagnostic.attach_case_capture(outer[1], launcher, (0, 91, 0, True, False))
+                parent = diagnostic.emit(selected, outer)
+            self.assertEqual(visits, [16, 16, 0])
+            self.assertEqual(worker.budget, [32])  # Unused profile-line reservation is never reused.
             self.assertEqual(len(record["originalGFailure"]["locations"]), 2)
             self.assertEqual(len(record["locations"]), 2)
+            self.assertEqual(parent["locations"], [])
             self.assertNotIn("PRIVATE", output.getvalue())
             self.assertEqual(set(record["originalGFailure"]), {"category", "locations"})
             self.assertLessEqual(len(output.getvalue().encode("ascii")), 2048)
@@ -451,34 +493,83 @@ class MatrixDiagnosticTests(unittest.TestCase):
                         raise KeyboardInterrupt("PRIVATE optional projection")
                     return original_locations(*args)
 
-                with patch.object(diagnostic, "CURRENT", selected), patch.object(diagnostic, "_locations", project):
-                    diagnostic.mark("helper", IDS[1])
-                    if mode == "failure":
-                        result.addFailure(test, first)
-                    elif mode == "subtest":
-                        result.addSubTest(test, test, first)
-                    elif mode == "missing-first-tuple":
-                        result.addSkip(test, "PRIVATE skip")
+                with patch.object(diagnostic, "CURRENT", selected), original_g_worker(selected) as (_launcher, worker):
+                    with patch.object(diagnostic, "_locations", project):
+                        if mode == "failure":
+                            result.addFailure(test, first)
+                        elif mode == "subtest":
+                            result.addSubTest(test, test, first)
+                        elif mode == "missing-first-tuple":
+                            result.addSkip(test, "PRIVATE skip")
+                        else:
+                            result.addError(test, first)
+                        preserved = result.first_failure
+                        original = copy.deepcopy(worker.g_failure)
+                        result.addError(test, later)
+                        result.addFailure(test, later)
+                    self.assertEqual(result.first_failure, preserved)
+                    self.assertEqual(worker.g_failure, original)
+                    self.assertTrue(worker.g_seen)
+                    self.assertEqual(worker.budget, [48])
+                    self.assertEqual(len(calls), int(mode != "missing-first-tuple"))
+                    if mode in {"missing-first-tuple", "projection-error"}:
+                        self.assertIsNone(original)
                     else:
-                        result.addError(test, first)
-                    preserved = result.first_failure
-                    original = copy.deepcopy(selected.g_failure)
-                    result.addError(test, later)
-                    result.addFailure(test, later)
-                self.assertEqual(result.first_failure, preserved)
-                self.assertEqual(selected.g_failure, original)
-                self.assertTrue(selected.g_seen)
-                self.assertEqual(selected.budget, [32])
-                self.assertEqual(len(calls), int(mode != "missing-first-tuple"))
-                if mode in {"missing-first-tuple", "projection-error"}:
-                    self.assertIsNone(original)
-                else:
-                    self.assertEqual(original["category"], "assertion-error")
-                output = io.StringIO()
-                with patch.object(diagnostic, "sys", SimpleNamespace(stderr=output)):
-                    outer = diagnostic.emit(selected, error_tuple(SOURCE_MAP[0][0]))
-                self.assertEqual(outer["originalGFailure"], original)
-                self.assertEqual(outer["category"], "value-error")
+                        self.assertEqual(original["category"], "assertion-error")
+                    output = io.StringIO()
+                    with patch.object(diagnostic, "sys", SimpleNamespace(stderr=output)):
+                        outer = diagnostic.emit_worker(worker, error_tuple(SOURCE_MAP[0][0]))
+                    self.assertEqual(outer["originalGFailure"], original)
+                    self.assertEqual(outer["category"], "value-error")
+
+    def test_g_callbacks_require_original_worker_pid_thread_case_and_unrenewed_deadline(self):
+        bindings = ((IDS[1], "profile-signal", ("mutation-search",)),)
+        original = error_tuple(SOURCE_MAP[1][0], category="AssertionError")
+        capture = CompletedProcess(["PRIVATE"], 1, "", "")
+        for mode in ("parent", "nested-pid", "thread", "context", "expired"):
+            with self.subTest(mode=mode), patch.object(diagnostic, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+                selected = context(bindings)
+                with patch.object(diagnostic, "CURRENT", selected):
+                    diagnostic.mark("helper", IDS[1])
+                    self.assertIsNone(diagnostic.prepare_worker("seed", 18.0))
+                    if mode == "parent":
+                        diagnostic.original_g_failure(original)
+                        diagnostic.attach_profile_capture(original[1], capture, "mutation-search")
+                        self.assertFalse(selected.g_seen)
+                    else:
+                        with original_g_worker(selected) as (_launcher, worker):
+                            if mode == "nested-pid":
+                                changed = patch.object(diagnostic, "os", SimpleNamespace(getpid=lambda: worker.pid + 1))
+                            elif mode == "thread":
+                                changed = patch.object(diagnostic, "threading", SimpleNamespace(current_thread=lambda: object()))
+                            elif mode == "context":
+                                changed = patch.object(diagnostic, "CURRENT", object())
+                            else:
+                                changed = patch.object(diagnostic, "time", SimpleNamespace(monotonic=lambda: 18.0))
+                            with changed:
+                                diagnostic.attach_profile_capture(original[1], capture, "mutation-search")
+                                diagnostic.original_g_failure(original)
+                            self.assertIsNone(worker.g_failure)
+                            self.assertEqual(worker.deadline, 18.0)
+                            self.assertEqual(worker.g_seen, mode == "expired")
+                    self.assertNotIn(diagnostic._PROFILE_CAPTURE, vars(original[1]))
+
+        writes = []
+        with patch.object(diagnostic, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+            selected = context(bindings)
+            with patch.object(diagnostic, "CURRENT", selected), original_g_worker(selected) as (_launcher, worker):
+                diagnostic.original_g_failure(original)
+
+                def fail_write(value):
+                    writes.append(value)
+                    raise OSError("PRIVATE optional output")
+
+                with patch.object(diagnostic, "sys", SimpleNamespace(stderr=SimpleNamespace(write=fail_write))):
+                    self.assertIsNone(diagnostic.emit_worker(worker, original))
+                    self.assertIsNone(diagnostic.emit_worker(worker, original))
+                self.assertTrue(worker.emitted)
+                self.assertEqual(len(writes), 1)
+                self.assertLessEqual(len(writes[0].encode("ascii")), 1536)
 
     def test_invalid_stage_case_tuple_expiry_and_unavailable_output_never_retry_projection(self):
         original = error_tuple(SOURCE_MAP[0][0])
@@ -557,8 +648,13 @@ class MatrixDiagnosticTests(unittest.TestCase):
                                   if rig.contract.layered_catalog().case(value, "ubuntu-24.04").kind == "regression")
                 value = {"schema": 2, "phase": "source", "caseId": identifier, "stage": "helper",
                          "category": "assertion-error", "locations": [],
-                         "originalGFailure": {"category": "os-error", "locations": []}, "child": None}
-                packet = diagnostic.PREFIX.encode() + rig.contract.canonical(value) + b"\n"
+                         "originalGFailure": None,
+                         "child": {"role": "regression-worker", "step": "regression", "expectedExit": 0,
+                                   "workerExit": 91, "anchorExit": 0, "terminalParsed": True, "anchorExpired": False}}
+                worker = {"schema": 2, "phase": "source", "caseId": identifier, "step": "regression",
+                          "role": "regression-worker", "category": "assertion-error", "locations": [],
+                          "originalGFailure": {"category": "os-error", "locations": []}, "child": None}
+                packet = wire(worker, worker=True) + wire(value)
                 rig.capture_changes["source"] = {"stderr": packet}
                 if mode != "marker-on-zero":
                     rig.capture_changes["source"].update(ok=False, returncode=73)
@@ -588,7 +684,7 @@ class MatrixDiagnosticTests(unittest.TestCase):
                 self.assertEqual(row["status"], "FAIL")
                 self.assertEqual("matrix_failure" in row, mode in {"failure", "unknown"})
                 if mode in {"failure", "unknown"}:
-                    self.assertEqual(row["matrix_failure"], value)
+                    self.assertEqual(row["matrix_failure"], {**value, "workerFailure": worker})
                 if mode in {"expired", "parser-error"}:
                     self.assertEqual(row["matrix_diagnostic_error"], {"error": "SIGNING_MATRIX_DIAGNOSTIC_UNAVAILABLE"})
                 if mode == "unknown":

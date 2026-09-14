@@ -1883,15 +1883,42 @@ def signing_matrix_failure(raw: bytes, scope: SigningMatrixDiagnostic, *, deadli
                             and type(row["line"]) is int and 0 < row["line"] < 1_000_000 for row in value))
 
         bindings = {identifier: (role, selectors) for identifier, role, selectors in scope.child_bindings}
+
+        def worker_binding(identifier):
+            if identifier in scope.regression_ids:
+                return "regression-worker", ("regression",)
+            value = bindings.get(identifier)
+            return value if value is not None and value[0] == "semantic-worker" else None
+
+        def valid_original(value):
+            return (type(value) is dict and set(value) == {"category", "locations"}
+                    and type(value["category"]) is str and value["category"] in categories
+                    and valid_locations(value["locations"]) and len(value["locations"]) <= 2)
+
+        def valid_profile(value, identifier):
+            binding = bindings.get(identifier)
+            return (type(value) is dict and binding is not None and binding[0] == "profile-signal"
+                    and set(value) == {"role", "returncode", "stdoutBytes", "stderrBytes", "stderrKind", "locations"}
+                    and value["role"] == "profile-signal" and type(value["returncode"]) is int
+                    and -128 <= value["returncode"] <= 255 and value["returncode"] != 0
+                    and all(type(value[key]) is int and 0 <= value[key] <= 65536
+                            for key in ("stdoutBytes", "stderrBytes"))
+                    and type(value["stderrKind"]) is str
+                    and value["stderrKind"] in {"empty", "stderr-reported", "unavailable"}
+                    and (value["stderrBytes"] == 0) == (value["stderrKind"] == "empty")
+                    and valid_locations(value["locations"]) and len(value["locations"]) <= 2
+                    and bool(value["locations"]) == (value["stderrKind"] == "stderr-reported")
+                    and (value["stderrKind"] != "stderr-reported" or value["stderrBytes"] <= 8192))
+
         observed = worker = None
-        worker_bytes = 0
+        worker_bytes = worker_locations = 0
         for line in raw.splitlines(keepends=True):
             check_clock(deadline)
             is_worker = line.startswith(worker_marker)
             if not is_worker and not line.startswith(marker):
                 continue
             prefix = worker_marker if is_worker else marker
-            if (len(line) > (768 if is_worker else 2048) or not line.endswith(b"\n")
+            if (len(line) > (1536 if is_worker else 2048) or not line.endswith(b"\n")
                     or observed is not None or is_worker and worker is not None):
                 return None
             try:
@@ -1899,15 +1926,38 @@ def signing_matrix_failure(raw: bytes, scope: SigningMatrixDiagnostic, *, deadli
             except (UnicodeError, ValueError, VerificationError, RecursionError):
                 return None
             if is_worker:
-                if (type(value) is not dict or set(value) != {"schema", "phase", "caseId", "step", "category", "locations"}
-                        or type(value["schema"]) is not int or value["schema"] != 1
+                common = {"schema", "phase", "caseId", "step", "category", "locations"}
+                if (type(value) is not dict or not common <= set(value)
+                        or type(value["schema"]) is not int or value["schema"] not in {1, 2}
                         or type(value["phase"]) is not str or value["phase"] != scope.phase
-                        or type(value["caseId"]) is not str or value["caseId"] not in bindings
-                        or bindings[value["caseId"]][0] != "semantic-worker"
-                        or type(value["step"]) is not str or value["step"] not in bindings[value["caseId"]][1]
+                        or type(value["caseId"]) is not str or value["caseId"] not in scope.identifiers
+                        or type(value["step"]) is not str
                         or type(value["category"]) is not str or value["category"] not in categories
-                        or not valid_locations(value["locations"]) or len(value["locations"]) > 2):
+                        or not valid_locations(value["locations"])):
                     return None
+                binding = worker_binding(value["caseId"])
+                if binding is None or value["step"] not in binding[1]:
+                    return None
+                worker_locations = len(value["locations"])
+                if value["schema"] == 1:
+                    if (set(value) != common or binding[0] != "semantic-worker"
+                            or len(line) > 768 or worker_locations > 2):
+                        return None
+                else:
+                    if (set(value) != common | {"role", "originalGFailure", "child"}
+                            or binding[0] != "regression-worker" or value["role"] != "regression-worker"):
+                        return None
+                    original, child = value["originalGFailure"], value["child"]
+                    if original is not None:
+                        if not valid_original(original):
+                            return None
+                        worker_locations += len(original["locations"])
+                    if child is not None:
+                        if original is None or not valid_profile(child, value["caseId"]):
+                            return None
+                        worker_locations += len(child["locations"])
+                    if worker_locations > 4:
+                        return None
                 canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
                                        allow_nan=False).encode("ascii")
                 if canonical != line[len(prefix):-1]:
@@ -1926,54 +1976,38 @@ def signing_matrix_failure(raw: bytes, scope: SigningMatrixDiagnostic, *, deadli
                     or type(value["category"]) is not str or value["category"] not in categories
                     or not valid_locations(value["locations"])):
                 return None
-            original = value["originalGFailure"]
-            if original is not None and (type(original) is not dict or set(original) != {"category", "locations"}
-                    or value["caseId"] not in scope.regression_ids or value["stage"] != "helper"
-                    or type(original["category"]) is not str or original["category"] not in categories
-                    or not valid_locations(original["locations"]) or len(original["locations"]) > 2
-                    or len(value["locations"]) + len(original["locations"]) > 4):
-                return None
-            binding = bindings.get(value["caseId"])
+            if value["originalGFailure"] is not None:
+                return None  # The original G traceback now belongs only to W.
+            binding = worker_binding(value["caseId"])
             semantic = binding is not None and binding[0] == "semantic-worker"
+            regression = value["stage"] == "helper" and value["caseId"] in scope.regression_ids
             # Source-prebound quotas survive missing optional tuple/W data.
             if semantic and (len(line) > 1280 or len(value["locations"]) > 2):
                 return None
+            if regression and (len(line) > 512 or value["locations"]):
+                return None
             child = value["child"]
-            total_locations = len(value["locations"]) + (len(original["locations"]) if original is not None else 0)
+            total_locations = len(value["locations"])
             if child is not None:
                 if (type(child) is not dict or binding is None or value["stage"] != "helper"
                         or type(child.get("role")) is not str or child["role"] != binding[0]):
                     return None
-                if child["role"] == "profile-signal":
-                    if (set(child) != {"role", "returncode", "stdoutBytes", "stderrBytes", "stderrKind", "locations"}
-                            or original is None or type(child["returncode"]) is not int
-                            or not -128 <= child["returncode"] <= 255 or child["returncode"] == 0
-                            or any(type(child[key]) is not int or not 0 <= child[key] <= 65536
-                                   for key in ("stdoutBytes", "stderrBytes"))
-                            or type(child["stderrKind"]) is not str
-                            or child["stderrKind"] not in {"empty", "stderr-reported", "unavailable"}
-                            or (child["stderrBytes"] == 0) != (child["stderrKind"] == "empty")
-                            or not valid_locations(child["locations"]) or len(child["locations"]) > 2
-                            or bool(child["locations"]) != (child["stderrKind"] == "stderr-reported")
-                            or child["stderrKind"] == "stderr-reported" and child["stderrBytes"] > 8192):
-                        return None
-                    total_locations += len(child["locations"])
-                else:
-                    if (set(child) != {"role", "step", "expectedExit", "workerExit", "anchorExit", "terminalParsed", "anchorExpired"}
-                            or original is not None or type(child["step"]) is not str or child["step"] not in binding[1]
-                            or type(child["expectedExit"]) is not int or child["expectedExit"] not in {0, 73, -9}
-                            or any(child[key] is not None and (type(child[key]) is not int or not -128 <= child[key] <= 255)
-                                   for key in ("workerExit", "anchorExit"))
-                            or type(child["terminalParsed"]) is not bool
-                            or (child["workerExit"] is not None) != child["terminalParsed"]
-                            or (type(child["anchorExpired"]) is not bool if child["terminalParsed"]
-                                else child["anchorExpired"] is not None)):
-                        return None
+                if (set(child) != {"role", "step", "expectedExit", "workerExit", "anchorExit", "terminalParsed", "anchorExpired"}
+                        or type(child["step"]) is not str or child["step"] not in binding[1]
+                        or type(child["expectedExit"]) is not int
+                        or child["expectedExit"] not in ({0} if regression else {0, 73, -9})
+                        or any(child[key] is not None and (type(child[key]) is not int or not -128 <= child[key] <= 255)
+                               for key in ("workerExit", "anchorExit"))
+                        or type(child["terminalParsed"]) is not bool
+                        or (child["workerExit"] is not None) != child["terminalParsed"]
+                        or (type(child["anchorExpired"]) is not bool if child["terminalParsed"]
+                            else child["anchorExpired"] is not None)):
+                    return None
             if worker is not None:
-                if (not semantic or child is None or child["role"] != "semantic-worker"
+                if (not (semantic or regression) or child is None or child["role"] != binding[0]
                         or worker["caseId"] != value["caseId"] or worker["step"] != child["step"]):
                     return None
-                total_locations += len(worker["locations"])
+                total_locations += worker_locations
             if total_locations > 4 or len(line) + worker_bytes > 2048:
                 return None
             canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii")

@@ -119,8 +119,8 @@ HOSTED_GUARD = '''set -euo pipefail
 LINUX_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || inputs.verification_target == 'full' }}"
 NATIVE_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'macos') }}"
 MATRIX_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'signing-matrix-canary') }}"
-MATRIX_SHARD_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[0]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]') }}"
-MATRIX_INCLUDE_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[{\"os\":\"ubuntu-24.04\",\"shard\":11},{\"os\":\"macos-26\",\"shard\":9}]' || '[]') }}"
+MATRIX_SHARD_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[12]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]') }}"
+MATRIX_INCLUDE_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[{\"os\":\"ubuntu-24.04\",\"shard\":11},{\"os\":\"macos-26\",\"shard\":7}]' || '[]') }}"
 ADAPTER_TARGET_CONDITION = "${{ github.event_name == 'workflow_dispatch' && (inputs.verification_target == 'signing-adapter' || inputs.verification_target == 'signing-adapter-macos') }}"
 ADAPTER_OS_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-adapter-macos' && '[\"macos-26\"]' || '[\"ubuntu-24.04\",\"macos-26\"]') }}"
 VERIFICATION_CONCURRENCY = "release-kit-ci-${{ github.ref }}-${{ github.event_name }}-${{ inputs.verification_target || 'full' }}"
@@ -288,7 +288,7 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         left, full_literal = selection.removeprefix("${{ fromJSON(").removesuffix(") }}").rsplit(" || ", 1)
         canary_condition, canary_literal = left.rsplit(" && ", 1)
         canary_shards, full_shards = (json.loads(literal[1:-1]) for literal in (canary_literal, full_literal))
-        self.assertEqual((canary_shards, full_shards), ([0], list(range(16))))
+        self.assertEqual((canary_shards, full_shards), ([12], list(range(16))))
         include = matrix["strategy"]["matrix"]["include"]
         self.assertEqual(include, MATRIX_INCLUDE_SELECTION)
         include_left, full_include_literal = include.removeprefix("${{ fromJSON(").removesuffix(") }}").rsplit(" || ", 1)
@@ -297,7 +297,7 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         canary_include, full_include = (json.loads(literal[1:-1]) for literal in
                                         (canary_include_literal, full_include_literal))
         self.assertEqual((canary_include, full_include),
-                         ([{"os": "ubuntu-24.04", "shard": 11}, {"os": "macos-26", "shard": 9}], []))
+                         ([{"os": "ubuntu-24.04", "shard": 11}, {"os": "macos-26", "shard": 7}], []))
         self.assertEqual(matrix["strategy"]["matrix"]["os"], ["ubuntu-24.04", "macos-26"])
         for event, ref in (("pull_request", "refs/pull/1/merge"), ("push", "refs/heads/main"),
                            ("workflow_dispatch", "refs/heads/qa006-native-candidate")):
@@ -324,7 +324,7 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                         self.assertFalse(any(expected.values()))  # Skipped prerequisites cannot pass the pinned guard.
                     selected = canary_shards if evaluate_condition(canary_condition, context,
                         success=True, cancelled=False) else full_shards
-                    self.assertEqual(selected, [0] if dispatch and compared == "signing-matrix-canary" else list(range(16)))
+                    self.assertEqual(selected, [12] if dispatch and compared == "signing-matrix-canary" else list(range(16)))
                     included = canary_include if evaluate_condition(include_condition, context,
                         success=True, cancelled=False) else full_include
                     original_cells = {(system, shard) for system in matrix["strategy"]["matrix"]["os"]
@@ -335,8 +335,8 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                     # appends these two cells; it does not create a cross product.
                     self.assertTrue(original_cells.isdisjoint(extra_cells))
                     self.assertEqual(len(extra_cells), len(included))
-                    expected_cells = ({("ubuntu-24.04", 0), ("ubuntu-24.04", 11),
-                                       ("macos-26", 0), ("macos-26", 9)}
+                    expected_cells = ({("ubuntu-24.04", 12), ("ubuntu-24.04", 11),
+                                       ("macos-26", 12), ("macos-26", 7)}
                                       if dispatch and compared == "signing-matrix-canary" else
                                       {(system, shard) for system in ("ubuntu-24.04", "macos-26")
                                        for shard in range(16)})

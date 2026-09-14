@@ -24,6 +24,13 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 if __name__ == "__main__":
     sys.path[:0] = [sys.argv.pop(1), str(ROOT / "tests")]
+    _mode, _temporary_parent = sys.argv[1:]
+    assert Path(_temporary_parent).is_absolute() and all(
+        os.environ.get(name) == _temporary_parent for name in ("TMPDIR", "TMP", "TEMP")
+    ), "profile fixture requires its exact selected temporary parent"
+    # Pin before imports/work: materialized variants also use default tempfile
+    # allocation. No unrelated fallback directory may replace the G selection.
+    tempfile.tempdir = _temporary_parent
 
 from mobile_release import credentials, local_signing
 from mobile_release.cancellation import CleanupScope, DefaultCancellation
@@ -35,9 +42,9 @@ from unit.local_signing_helpers import NativeSigningModel, fictional_signing_pro
 
 
 @contextmanager
-def completed_case_directory():
+def completed_case_directory(parent: Path):
     """Remove only a successful case, never finalize uncertain native work."""
-    root = Path(tempfile.mkdtemp(prefix="mrk-profile-signal-"))
+    root = Path(tempfile.mkdtemp(prefix="mrk-profile-signal-", dir=parent))
     before = root.lstat()
     assert stat.S_ISDIR(before.st_mode) and stat.S_IMODE(before.st_mode) == 0o700
     yield root
@@ -88,7 +95,7 @@ def observe_live_post_result_finality(options, result):
     return scope, binding, outcome
 
 
-def run_case(mode: str) -> dict:
+def run_case(mode: str, parent: Path) -> dict:
     requested_mode = mode
     mode, _, selected_signal = mode.partition(":")
     default_signal = signal.SIGTERM if selected_signal == "TERM" else signal.SIGINT
@@ -186,7 +193,7 @@ def run_case(mode: str) -> dict:
                 send(mode, signal.SIGINT)
         return result
 
-    with completed_case_directory() as root:
+    with completed_case_directory(parent) as root:
         home = root / "home"; home.mkdir(mode=0o700)
         private = root / "private"; private.mkdir(mode=0o700)
         p12, supplied = private / "fake.p12", private / "profile"
@@ -365,4 +372,4 @@ def run_case(mode: str) -> dict:
 
 
 if __name__ == "__main__":
-    print(json.dumps(run_case(sys.argv[1])))
+    print(json.dumps(run_case(_mode, Path(_temporary_parent))))

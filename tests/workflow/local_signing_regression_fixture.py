@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import FunctionType
@@ -187,6 +188,13 @@ def _runtime_case(descriptor):
     return variants[original]()
 
 
+def _completed_evidence(descriptor):
+    return {"schema": "mrk-signing-regression-case-v1", "case": descriptor.record(),
+            "originalTestcaseCompleted": True, "typedVariant": descriptor.helper != "whole",
+            "testsRun": 1, "setupBodyTeardownCleanupsReturned": True,
+            "originalWorkersSettled": True, "caseRemoved": True}
+
+
 def run_case(parent, identifier):
     """Run exactly one typed execution; derived aliases are never dispatched."""
     descriptor = catalog.case(identifier)
@@ -198,41 +206,78 @@ def run_case(parent, identifier):
         "isolated", "ignore_environment", "no_user_site", "no_site", "safe_path", "dont_write_bytecode")), \
         "G requires admitted isolated no-site interpreter"
     from workflow import local_signing_persistent_fixture as fixture
-    from workflow.local_signing_matrix_contract import before_deadline
+    from workflow.local_signing_matrix_contract import before_deadline, canonical
     from unit.local_signing_workspace import assert_native_cases_idle
 
     parent = Path(parent)
     assert parent.resolve(strict=True) == parent and not parent.is_symlink() and not list(parent.iterdir()), "fresh G parent required"
     assert (parent.lstat().st_mode & 0o777) == 0o700, "G parent must be private"
     context = fixture.pin_case_context(parent)
+    assert type(fixture.PHASE_DEADLINE) is float, "G requires its original phase endpoint"
     before_deadline(fixture.PHASE_DEADLINE)
     assert_native_cases_idle()
-    test = _runtime_case(descriptor)
-    fixture.check_case_context(parent, context)
-    result = RegressionResult(test, deadline=fixture.PHASE_DEADLINE)
-    previous = tempfile.tempdir
-    tempfile.tempdir = str(parent)
-    try:
-        returned = test.run(result)
-        assert returned is result and result.testsRun == 1 \
-            and (result.started, result.stopped, result.succeeded) == (1, 1, 1) \
-            and result.wasSuccessful() is True and not result.regression_failed and not result.shouldStop, \
-            "original G testcase failed: " + str(result.first_failure)
-        assert_native_cases_idle()
-        assert not list(parent.iterdir()), "original G scratch/evidence is still retained"
+    worker_root = parent / "original-g"
+    worker_root.mkdir(mode=0o700)
+    scratch = worker_root / "scratch"
+    scratch.mkdir(mode=0o700)
+    scratch_identity = fixture._directory_identity(scratch)
+
+    def original_testcase():
+        # L's original outer obligation is still UNKNOWN in this fork copy.
+        # It is never cleared/adopted by W; full-map checks also catch debts
+        # outside testcase scratch that a merely scoped idle check would miss.
+        custody, debt = fixture._CASE_CUSTODY, fixture._CASE_RECOVERY_DEBT
+        baseline = {str(worker_root): None}
+        assert type(custody) is dict and custody == baseline and type(debt) is dict and not debt, \
+            "G inherited enclosing case custody differs"
         fixture.check_case_context(parent, context)
-        evidence = "regression-" + fixture.digest(identifier)
-        fixture.write_json(parent / (evidence + ".json"), {
-            "schema": "mrk-signing-regression-case-v1", "case": descriptor.record(),
-            "originalTestcaseCompleted": True, "typedVariant": descriptor.helper != "whole",
-            "testsRun": 1, "setupBodyTeardownCleanupsReturned": True,
-            "originalWorkersSettled": True, "caseRemoved": True,
-        })
-        fixture.check_phase_context(context)
-        return {"caseId": identifier, "status": "regression-case", "evidence": evidence + ".json",
-                "caseRemoved": True, "originalWorkersSettled": True}
-    finally:
-        tempfile.tempdir = previous
+        assert_native_cases_idle(scratch)
+        previous = tempfile.tempdir
+        tempfile.tempdir = str(scratch)
+        try:
+            # Construction, imports and every original unittest callback stay
+            # inside this W. Fatal negative-test guards cannot pollute warm L.
+            test = _runtime_case(descriptor)
+            fixture.check_case_context(parent, context)
+            result = RegressionResult(test, deadline=fixture.PHASE_DEADLINE)
+            returned = test.run(result)
+            assert returned is result and result.testsRun == 1 \
+                and (result.started, result.stopped, result.succeeded) == (1, 1, 1) \
+                and result.wasSuccessful() is True and not result.regression_failed and not result.shouldStop, \
+                "original G testcase failed: " + str(result.first_failure)
+            assert fixture._CASE_CUSTODY is custody and fixture._CASE_RECOVERY_DEBT is debt \
+                and custody == baseline and not debt, "original G case/recovery custody remains or changed"
+            assert_native_cases_idle(scratch)
+            assert fixture._directory_identity(scratch) == scratch_identity, "original G scratch identity changed"
+            assert not list(scratch.iterdir()), "original G scratch/evidence is still retained"
+            fixture.check_case_context(parent, context)
+            return _completed_evidence(descriptor)
+        finally:
+            tempfile.tempdir = previous
+
+    # No new full per-G budget: both original owner endpoints remain bounded
+    # by this exact already-running phase, including nested G owner work.
+    original = fixture.run_worker(worker_root, "regression", original_testcase,
+                                  timeout=fixture.PHASE_DEADLINE - time.monotonic())
+    fixture.assert_original_return(original)
+    fixture.check_case_context(parent, context)
+    observed = fixture.read_case_json(worker_root, "regression")
+    assert canonical(observed) == canonical(_completed_evidence(descriptor)), "original G lifecycle evidence differs"
+    assert fixture._directory_identity(scratch) == scratch_identity and not list(scratch.iterdir()), \
+        "original G scratch changed after worker completion"
+    evidence = "regression-" + fixture.digest(identifier) + ".json"
+    fixture.write_json(parent / evidence, observed)  # Preserve BEFORE original-custody removal.
+    fixture.remove_case(worker_root)
+    try:
+        worker_root.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError("original G wrapper still exists after removal")
+    assert_native_cases_idle()
+    fixture.check_case_context(parent, context)
+    return {"caseId": identifier, "status": "regression-case", "evidence": evidence,
+            "caseRemoved": True, "originalWorkersSettled": True}
 
 
 def semantic_contributions(parent, identifier, evidence):

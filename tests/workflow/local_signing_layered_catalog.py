@@ -288,7 +288,8 @@ def cases_for(operating_system):
     for item in REGRESSION.cases_for(operating_system):
         if item.kind == "execution":
             result.append(Case("regression", item.identifier, canonical(item.record()).decode(),
-                               item.estimated_commands, item.owned_workers, item.planning_basis))
+                               item.estimated_commands, item.owned_workers + 1,
+                               item.planning_basis + "; one original G lifecycle isolation worker"))
     _require(len({item.identifier for item in result}) == len(result)
              and len({item.name for item in result}) == len(result), "duplicate layered case")
     return tuple(sorted(result, key=lambda item: item.identifier))

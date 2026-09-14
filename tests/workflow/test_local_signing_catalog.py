@@ -14,14 +14,26 @@ from . import local_signing_matrix_contract as contract
 class SigningCatalogAdmissionTests(unittest.TestCase):
     def test_capacity_canary_adds_each_platforms_maximum_planned_command_shard(self):
         catalog = contract.layered_catalog()
-        for operating_system, heavy_shard in (("ubuntu-24.04", 11), ("macos-26", 9)):
+        for operating_system, heavy_shard in (("ubuntu-24.04", 11), ("macos-26", 7)):
             with self.subTest(operating_system=operating_system):
                 cases = {item.identifier: item for item in catalog.cases_for(operating_system)}
                 groups, _weights = catalog.assignment(operating_system)
                 estimates = [sum(cases[identifier].estimated_commands for identifier in group)
                              for group in groups]
                 self.assertEqual(estimates[heavy_shard], max(estimates))
-                self.assertGreater(estimates[heavy_shard], estimates[0])
+                self.assertGreater(estimates[heavy_shard], estimates[12])
+                # The other canary cell keeps an actual fatal G before a later
+                # semantic fork and the original seven-cut bare-home G fork.
+                ordered = [cases[identifier] for identifier in groups[12]]
+                names = [(catalog.REGRESSION.case(item.name).original_method
+                          if item.kind == "regression" else "") for item in ordered]
+                bare, = (index for index, name in enumerate(names)
+                         if name.endswith(".test_seven_bare_home_parent_and_empty_native_prefix_cuts_recover_automatically"))
+                fatal = [index for index, name in enumerate(names)
+                         if name.endswith(".test_genuine_nonzero_command_result_cannot_hide_later_independent_fatal_close")
+                         or name.endswith(".test_actual_handler_restoration_cannot_mask_retained_resource_failure")]
+                self.assertTrue(any(index < bare and any(item.kind == "semantic"
+                    for item in ordered[index + 1:bare]) for index in fatal))
                 # Planning arithmetic selects useful probes; it is not measured
                 # capacity or permission to omit the complete sixteen shards.
 

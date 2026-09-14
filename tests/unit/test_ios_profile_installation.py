@@ -507,14 +507,18 @@ class ProfileInstallationTests(unittest.TestCase):
 @unittest.skipUnless(os.name == "posix", "local Apple signing signal ownership needs POSIX")
 class ProfileInstallationSignalTests(unittest.TestCase):
     def run_boundary(self, mode):
+        # G selects its private parent in tempfile's process-local cache. Carry
+        # that selection across exec, not the broader ambient sandbox TMPDIR.
+        temporary_parent = tempfile.gettempdir()
         command = [sys.executable, "-I", "-S", "-B", str(Path(__file__).parents[1] / "workflow/profile_installation_fixture.py"),
-                   str(Path(mobile_release.__file__).resolve().parent.parent), mode]
+                   str(Path(mobile_release.__file__).resolve().parent.parent), mode, temporary_parent]
         # This fixture now starts real bounded command owners, not only inline
         # native models. The existing outer verification Session remains the
         # final boundary; this inner capture uses actual C/A/W finality rather
         # than communicate(), PID polling or post-wait group cleanup.
         process = run_owned(command, timeout=profile_signal_timeout(mode), capture=True, output_limit=64 * 1024,
-                            environ={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C", "LANG": "C"})
+                            environ={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C", "LANG": "C",
+                                     "TMPDIR": temporary_parent, "TMP": temporary_parent, "TEMP": temporary_parent})
         try:
             self.assertEqual(process.returncode, 0, process.stderr)
         except AssertionError as error:
