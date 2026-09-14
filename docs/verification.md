@@ -788,7 +788,7 @@ Reporting uses the same original cutoff and never changes rejection or cleanup
 authority. The controller binds it to the exact failing source-known callback in
 the healthy partition; successful or duplicate callbacks cannot qualify.
 
-The ten ordinary adapter fixture modes may similarly emit one canonical schema-2
+The ten ordinary adapter fixture modes may similarly emit one canonical schema-3
 `MRK_ADAPTER_FAILURE` line, at most 4096 bytes including prefix and newline, only
 for the same escaping original result-kind/driver-status rejection after fixture
 cleanup. Its closed projection
@@ -803,6 +803,14 @@ original cutoff, never retries, and cannot replace the primary or authorize
 success. The controller requires the matching platform and source-known unique
 adverse callback in that adapter's healthy partition. Native/ownership/kill
 partitions, passing or ambiguous callbacks and malformed records cannot qualify.
+
+Standalone adapter schema3 also reuses the finite `captureDetail` tuple described
+below and adds `readinessStage`, sampled once in the original capture-return
+snapshot. The stage names the last entered readiness boundary, not its completion
+or a protocol, wait or finality receipt. Missing and invalid stages remain distinct;
+later driver progress cannot update that detached observation. These fields add no
+process query or cleanup authority. Historical schema2 records retain their original
+missing information; they are not upgraded or accepted by the schema3 parser.
 
 The healthy ownership families have a separate schema-4 `MRK_OWNERSHIP_FAILURE`
 projection for their fixed async (4), signals (16), and policies (10) cases
@@ -838,7 +846,7 @@ codes disclose no raw proof, path, identity or error message. Diagnostic
 bookkeeping cannot skip cleanup, change retention or replace the primary error;
 the complete line still has the same 4096-byte bound without truncation.
 
-Its ownership-only `driverResult.captureDetail` tuple retains, in order, the
+The ownership `driverResult.captureDetail` tuple retains, in order, the
 adapter error category, the existing 24 result checks, nine timing relations,
 four settlement operands, HELLO/RESERVED/READY presence, and the original native
 primary's finite category/code pair. Check vectors use `0`/`1`/`m`/`x` for
@@ -851,8 +859,9 @@ not inferred from the public redacted exception or reread during later cleanup.
 Absent, unreadable and genuinely nil primary observations remain distinct.
 Optional ordinary read failures cannot change operation success; cancellation
 still preserves the original selected error. The complete legal maximum is
-3983 bytes, below the unchanged 4096-byte cap. Standalone adapter schema2 and
-native-signal schema2 keep their independent contracts. These observations do
+3983 bytes for the ownership envelope, below the unchanged 4096-byte cap.
+Standalone adapter schema3 reuses the tuple under its own failure contract;
+native-signal schema2 remains separate. These observations do
 not establish a historical initiating cause or grant cleanup authority.
 
 Adapter readiness observers inherit their actual capture task's RUN bound via
@@ -881,7 +890,7 @@ original termination receipt does not settle a live frame in the caller's VM.
 Complete record bytes are observations, not process ownership or cleanup authority.
 Adapter diagnostics classify fixed OwnedChild source-literal error pairs under
 `fixture-error`; unlisted pairs remain `other`. No raw exception text or path is
-published, and schema2/schema4 contracts and their bounds remain unchanged.
+published; adapter schema3 and ownership schema4 retain their existing bounds.
 
 The separate native signal-observation test may emit one canonical schema-2
 `MRK_NATIVE_SIGNAL_FAILURE` line, bounded to 4096 bytes including prefix/newline.

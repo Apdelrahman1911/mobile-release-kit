@@ -2460,7 +2460,12 @@ class CIControllerContractTests(unittest.TestCase):
             adapter_fields = (
                 "schema", "platform", "mode", "expectedKind", "failedPredicates", "resultKind", "driverExitStatus",
                 "retainedDriverErrorCategory", "retainedDriverErrorCode", "adapterErrorCategory",
-                "resultChecks", "nativeChecks", "timingChecks", "nativeOutcomes", "slowChecks",
+                "resultChecks", "nativeChecks", "timingChecks", "nativeOutcomes", "slowChecks", "captureDetail", "readinessStage",
+            )
+            adapter_readiness_stages = (
+                "not-entered", "native-ready", "startup-marker", "validator-marker", "validator-live", "dispatch",
+                "control-admission", "startup-driver-loss", "descendant-fork", "descendant-marker", "descendant-live",
+                "inherited-pipes", "descendant-driver-loss", "validator-release", "owner-publication", "ready-return",
             )
             adapter_result_checks = (
                 "ready", "stdinClosedAfterReady", "deadlinePrimarySameObject", "deadlineResultSameObject",
@@ -2561,6 +2566,7 @@ class CIControllerContractTests(unittest.TestCase):
             self.assertEqual(controller.ADAPTER_FAILURE_MODE_CONTRACTS, adapter_contracts)
             self.assertEqual(controller.ADAPTER_FAILURE_PLATFORMS, adapter_platforms)
             self.assertEqual(controller.ADAPTER_FAILURE_FIELDS, adapter_fields)
+            self.assertEqual(controller.ADAPTER_READINESS_STAGES, adapter_readiness_stages)
             self.assertEqual(controller.ADAPTER_FAILURE_RESULT_CHECKS, adapter_result_checks)
             self.assertEqual(controller.ADAPTER_FAILURE_NATIVE_CHECKS, adapter_native_checks)
             self.assertEqual(controller.ADAPTER_FAILURE_TIMING_CHECKS, adapter_timing_checks)
@@ -2573,8 +2579,10 @@ class CIControllerContractTests(unittest.TestCase):
                 return ("MRK_ADAPTER_FAILURE="
                         + json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
 
+            adapter_capture_detail = ["contract-error", "01mx" * 6, "1bamx01mx", "01mx", "m01",
+                                      ["native-lifecycle-error", "deadline"]]
             adapter_record = {
-                "schema": 2, "platform": "ios", "mode": "real-deadline", "expectedKind": "pass",
+                "schema": 3, "platform": "ios", "mode": "real-deadline", "expectedKind": "pass",
                 "failedPredicates": ["result-kind", "driver-status"], "resultKind": "fixture-cleanup", "driverExitStatus": 1,
                 "retainedDriverErrorCategory": "native-lifecycle-error", "retainedDriverErrorCode": "native-deadline",
                 "adapterErrorCategory": "contract-error",
@@ -2587,6 +2595,8 @@ class CIControllerContractTests(unittest.TestCase):
                 "nativeOutcomes": dict(zip(adapter_native_outcomes,
                     ("exit2", "exit2", "signal", "failed", "unknown", "retired", "attempted", "attempted"))),
                 "slowChecks": dict.fromkeys(adapter_slow_checks, "missing"),
+                "captureDetail": adapter_capture_detail,
+                "readinessStage": "validator-live",
             }
             adapter_marker = adapter_bytes(adapter_record)
             adapter_target = "IosUploadValidationTest#" + adapter_contracts["real-deadline"][0]
@@ -2600,10 +2610,13 @@ class CIControllerContractTests(unittest.TestCase):
             with patch.object(controller, "ruby_expected_ids", return_value=adapter_ids), \
                     patch.object(controller, "ruby_capture_ids", return_value=adapter_ids), \
                     patch.object(controller.time, "monotonic", return_value=999.0):
-                with patch.object(controller, "_fixture_failure_record", wraps=controller._fixture_failure_record) as strict:
+                with patch.object(controller, "_fixture_failure_record", wraps=controller._fixture_failure_record) as strict, \
+                        patch.object(controller, "_ownership_capture_detail_valid",
+                                     wraps=controller._ownership_capture_detail_valid) as shared_detail:
                     self.assertEqual(controller.adapter_failure(adapter_marker, deadline=1000.0), adapter_record)
                 strict.assert_called_once_with(adapter_marker, "MRK_ADAPTER_FAILURE=", 4096, deadline=1000.0,
                                                canonical_fields=adapter_fields)
+                shared_detail.assert_called_once_with(adapter_capture_detail)
                 # Representative ordinary, slow and negative-control cases
                 # prove platform routing and mode-specific status, not a matrix
                 # of every flag crossed with every callback.
@@ -2699,14 +2712,29 @@ class CIControllerContractTests(unittest.TestCase):
                         "timingChecks": {**adapter_record["timingChecks"], "slowCleanupWithinOriginalCutoff": value},
                         "slowChecks": dict.fromkeys(adapter_slow_checks, value)}
                     self.assertEqual(controller.adapter_failure(adapter_bytes(record)), record)
+                # The finite last-entered location is diagnostic, not a READY
+                # receipt or a consistency gate for independently sampled facts.
+                for stage in (*adapter_readiness_stages, "missing", "invalid"):
+                    record = {**adapter_record, "readinessStage": stage}
+                    self.assertEqual(controller.adapter_failure(adapter_bytes(record)), record)
+                # Reuse the existing compact grammar rather than duplicating
+                # its exhaustive alphabet/primary controls below. Missing and
+                # malformed original operands remain finite, not fabricated clean.
+                for sentinel, code in (("missing", "m"), ("invalid", "x")):
+                    record = {**adapter_record, "captureDetail": [sentinel, code * 24, code * 9,
+                              code * 4, code * 3, [sentinel, sentinel]], "readinessStage": sentinel}
+                    self.assertEqual(controller.adapter_failure(adapter_bytes(record)), record)
 
                 # Maximize every independent finite field (and the dependent
-                # mode/kind and retained-error pairs). No legal full v2 line can
-                # silently disappear behind the old 2048-byte cap.
+                # mode/kind and retained-error pairs). The schema3 additions
+                # must fit the existing complete-line 4096-byte cap.
                 longest_mode = max(adapter_contracts, key=lambda mode: len(mode) + len(adapter_contracts[mode][1]))
                 error_category, error_code = max(
                     ((category, code) for category, codes in controller.ADAPTER_FAILURE_DRIVER_CODES.items() for code in codes),
                     key=lambda pair: len(pair[0]) + len(pair[1]))
+                adapter_maximum_primary = max(
+                    ([category, code] for category, codes in controller.OWNERSHIP_CAPTURE_PRIMARY_ERROR_KINDS.items()
+                     for code in codes), key=lambda pair: len(json.dumps(pair, separators=(",", ":"))))
                 maximum_record = {**adapter_record,
                     "platform": "android", "mode": longest_mode, "expectedKind": adapter_contracts[longest_mode][1],
                     "resultKind": max((kind for kind in controller.ADAPTER_FAILURE_RESULT_KINDS
@@ -2719,7 +2747,10 @@ class CIControllerContractTests(unittest.TestCase):
                     "timingChecks": {name: "at-or-after-cutoff" if name in ("firstTimeoutCutoff", "selectedTimeoutCutoff")
                                      else "missing" for name in adapter_timing_checks},
                     "nativeOutcomes": {name: max(values, key=len) for name, values in adapter_native_outcomes.items()},
-                    "slowChecks": dict.fromkeys(adapter_slow_checks, "missing")}
+                    "slowChecks": dict.fromkeys(adapter_slow_checks, "missing"),
+                    "captureDetail": [max(controller.ADAPTER_FAILURE_DRIVER_CODES, key=len), "m" * 24,
+                                      "maa" + "m" * 6, "m" * 4, "m" * 3, adapter_maximum_primary],
+                    "readinessStage": max((*adapter_readiness_stages, "missing", "invalid"), key=len)}
                 maximum_marker = adapter_bytes(maximum_record)
                 self.assertGreater(len(maximum_marker), 2048)
                 self.assertLessEqual(len(maximum_marker), 4096)
@@ -2782,7 +2813,22 @@ class CIControllerContractTests(unittest.TestCase):
                 invalid_adapter = [
                     {key: value for key, value in adapter_record.items() if key != "expectedKind"},
                     {**adapter_record, "private": "PRIVATE_ROOT"}, {key: adapter_record[key] for key in reversed(adapter_fields)},
-                    *({**adapter_record, "schema": value} for value in (True, 1, 2.0, "2", 3)),
+                    *({**adapter_record, "schema": value} for value in (True, 1, 2, 3.0, "3", 4)),
+                    # Original schema2 records stay historical: no invented
+                    # new operands or compatibility promotion in this parser.
+                    {key: (2 if key == "schema" else value) for key, value in adapter_record.items()
+                     if key not in ("captureDetail", "readinessStage")},
+                    *({key: value for key, value in adapter_record.items() if key != field}
+                      for field in ("captureDetail", "readinessStage")),
+                    *({**adapter_record, "readinessStage": value}
+                      for value in (None, False, 0, [], {}, "", "validator_live", "PRIVATE_STAGE", "ready-return\n")),
+                    *({**adapter_record, "captureDetail": value} for value in (
+                        None, "missing", {}, [], adapter_capture_detail[:-1], adapter_capture_detail + ["PRIVATE_VALUE"],
+                        ["PRIVATE_CLASS", *adapter_capture_detail[1:]],
+                        [*adapter_capture_detail[:3], "01m", *adapter_capture_detail[4:]],
+                        [*adapter_capture_detail[:4], "m0a", adapter_capture_detail[5]],
+                        [*adapter_capture_detail[:5], ["native-lifecycle-error", "waitability"]],
+                    )),
                     {**adapter_record, "platform": "PRIVATE_PLATFORM"},
                     {**adapter_record, "mode": "native-setup-interrupt"}, {**adapter_record, "expectedKind": "readiness"},
                     {**adapter_record, "resultKind": "PRIVATE_KIND"}, {**adapter_record, "resultKind": None},
@@ -2818,11 +2864,13 @@ class CIControllerContractTests(unittest.TestCase):
                 # Common framing is already exhaustively covered above. These
                 # new-shape cases prove this decoder actually uses that reader.
                 invalid_markers = [*(adapter_bytes(record) for record in invalid_adapter),
-                    adapter_marker * 2, adapter_marker.replace(b'"schema":2', b'"schema":2,"schema":2'),
+                    adapter_marker * 2, adapter_marker.replace(b'"schema":3', b'"schema":3,"schema":3'),
                     adapter_marker.replace(b'"ready":true', b'"ready":true,"ready":true'),
                     adapter_marker.replace(b'"custodian":"exit2"', b'"custodian":"exit2","custodian":"exit2"'),
                     adapter_marker.replace(b'"delayFailed":"missing"', b'"delayFailed":"missing","delayFailed":"missing"'),
-                    adapter_marker.replace(b'"schema":2', b'"schema": 2'), adapter_marker[:-1], oversized,
+                    adapter_marker.replace(b'"captureDetail":', b'"captureDetail":[],"captureDetail":'),
+                    adapter_marker.replace(b'"readinessStage":', b'"readinessStage":"missing","readinessStage":'),
+                    adapter_marker.replace(b'"schema":3', b'"schema": 3'), adapter_marker[:-1], oversized,
                 ]
                 for raw in invalid_markers:
                     detail = controller.failure_details(capture(adapter_stdout, stderr=raw, ok=False, returncode=1),
@@ -2910,6 +2958,8 @@ class CIControllerContractTests(unittest.TestCase):
             # helpers. Child-only bootstrap errors become exit125 + a different
             # finite report; they are not returned adapter error literals.
             fixture_source = ruby_text("tests/workflow/upload_process_fixture.rb")
+            self.assertEqual(ruby_words(fixture_source, "ADAPTER_FAILURE_FIELDS"), adapter_fields)
+            self.assertEqual(ruby_words(fixture_source, "ADAPTER_READINESS_STAGES"), adapter_readiness_stages)
             self.assertEqual(ruby_literal_table(fixture_source, "ADAPTER_FAILURE_OWNED_CODES"), owned_error_codes)
             owned_bodies = controller.re.findall(
                 r"(?ms)^  class OwnedChild\n(.*?)^    def self\.bootstrap\(directory\)\n", ownership_source)
@@ -3071,8 +3121,8 @@ class CIControllerContractTests(unittest.TestCase):
                 run_record = {**ownership_record, "helper": "run", "case": "async-reap", "row": {
                     **ownership_row, "ownerPhase": "reaped", "failedChecks": ["fixture-retained"], "runCleanup": run_cleanup}}
                 run_marker = ownership_bytes(run_record)
-                # Ownership-only detail must neither enter the common five-field
-                # parser nor change standalone adapter schema2's existing wire.
+                # Both envelopes reuse detail outside the common five-field
+                # parser; ownership schema4 does not acquire readinessStage.
                 self.assertTrue(controller._adapter_result_projection_valid(
                     {name: run_result[name] for name in run_result_fields}))
                 self.assertFalse(controller._adapter_result_projection_valid(run_result))

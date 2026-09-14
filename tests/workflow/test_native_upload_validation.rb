@@ -3071,9 +3071,11 @@ class NativeUploadValidationTest < Minitest::Test
         if additions_error
           refute snapshot.key?("slowCleanup")
           refute snapshot.key?("capturePrimary")
+          refute snapshot.key?("readinessStage")
         else
           assert_equal additions.fetch("slowCleanup"), snapshot.fetch("slowCleanup")
           assert_equal additions.fetch("capturePrimary"), snapshot.fetch("capturePrimary")
+          assert_equal "missing", snapshot.fetch("readinessStage")
         end
         assert_equal keys, snapshot.fetch("settlementChecks").keys
         if fatal || snapshot_error || additions_error
@@ -3089,7 +3091,7 @@ class NativeUploadValidationTest < Minitest::Test
           end
           assert fixture.cleanup_unresolved?(root)
         else
-          assert_equal base, snapshot.reject { |key, _| %w[settlementChecks slowCleanup capturePrimary].include?(key) }
+          assert_equal base, snapshot.reject { |key, _| %w[settlementChecks slowCleanup capturePrimary readinessStage].include?(key) }
           expected = session_present ? good : keys.to_h { |key| [key, "missing"] }
           expected = expected.merge("creationSettled" => "invalid", "acquisitionUnknown" => "invalid") if read_error
           assert_equal expected, snapshot.fetch("settlementChecks")
@@ -3538,7 +3540,10 @@ class NativeUploadValidationTest < Minitest::Test
       "unready" => "readiness", "leader-only" => "descendant-alive", "no-deadline" => "capture-watchdog",
       "immediate-deadline" => "elapsed-bound", "real-deadline-slow-cleanup" => "pass", "immediate-deadline-slow-cleanup" => "elapsed-bound"}
     fields = %w[schema platform mode expectedKind failedPredicates resultKind driverExitStatus retainedDriverErrorCategory
-      retainedDriverErrorCode adapterErrorCategory resultChecks nativeChecks timingChecks nativeOutcomes slowChecks]
+      retainedDriverErrorCode adapterErrorCategory resultChecks nativeChecks timingChecks nativeOutcomes slowChecks captureDetail readinessStage]
+    stages = %w[not-entered native-ready startup-marker validator-marker validator-live dispatch control-admission
+      startup-driver-loss descendant-fork descendant-marker descendant-live inherited-pipes descendant-driver-loss
+      validator-release owner-publication ready-return]
     result_keys = %w[ready stdinClosedAfterReady deadlinePrimarySameObject deadlineResultSameObject watchdogStarted watchdogIntervened
       fallbackUsed deadBeforeFallback nativeFinalityBeforeFallback adapterRejected adapterCallObserved captureEntered descendantLiveBeforeRelease
       inheritedPipeBlockObserved validatorReapedAfterRelease commitAfterDataEOF ownedDescriptorsClosed watchdogJoined tasksJoined injectorsJoined
@@ -3555,6 +3560,8 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal classes.values.flat_map { |class_name| callback_modes.map { |suffix, modes| ["#{class_name}##{suffix}", modes] } }.to_h,
       UploadProcessFixture::ADAPTER_FAILURE_CALLBACK_MODES
     assert_equal fields, UploadProcessFixture::ADAPTER_FAILURE_FIELDS
+    assert_equal stages, UploadProcessFixture::ADAPTER_READINESS_STAGES
+    assert UploadProcessFixture::ADAPTER_READINESS_STAGES.all?(&:frozen?)
     assert_equal result_keys, UploadProcessFixture::ADAPTER_FAILURE_RESULT_CHECKS
     assert_equal native_keys, UploadProcessFixture::ADAPTER_FAILURE_NATIVE_CHECKS
     assert_equal timing_keys, UploadProcessFixture::ADAPTER_FAILURE_TIMING_CHECKS
@@ -3570,6 +3577,9 @@ class NativeUploadValidationTest < Minitest::Test
       "cleanupErrors" => ["private-marker"], "private" => "private-marker", "pid" => 999_887_766,
       "nativeObservation" => native_keys.reject { |key| key == "observerErrorsEmpty" }.to_h { |key| [key, false] }.merge(
         "observerErrors" => [], "private" => "private-marker",
+        "settlementChecks" => {"taskCleanupComplete" => true, "creationSettled" => false, "custodianWaitBroken" => "missing", "acquisitionUnknown" => "invalid"},
+        "protocolContext" => {"hello" => {}, "reserved" => nil, "ready" => {}},
+        "capturePrimary" => %w[contract-error none], "readinessStage" => "validator-live",
         "custodian" => {"state" => "reaped", "status_kind" => "exit", "status_code" => 2},
         "final" => {"outcome" => "failed", "cleanup" => "confirmed", "group" => {"state" => "retired", "absent" => true},
           "keeper" => {"state" => "reaped", "status_kind" => "exit", "status_code" => 2},
@@ -3581,7 +3591,7 @@ class NativeUploadValidationTest < Minitest::Test
       "selectedTimeoutNs" => cutoff, "blockedDataWaits" => 2, "firstBlockedDataNs" => start + 1,
       "captureSeconds" => 6.0, "slowCleanupSeconds" => 999.0) # Mutable driver data is NOT the slow snapshot authority.
     formatter = UploadProcessFixture.method(:adapter_failure_line)
-    expected = {"schema" => 2, "platform" => "ios", "mode" => "real-deadline", "expectedKind" => "pass",
+    expected = {"schema" => 3, "platform" => "ios", "mode" => "real-deadline", "expectedKind" => "pass",
       "failedPredicates" => %w[result-kind driver-status], "resultKind" => "fixture-cleanup", "driverExitStatus" => 1,
       "retainedDriverErrorCategory" => "fixture-error", "retainedDriverErrorCode" => "ready-timeout-unobserved",
       "adapterErrorCategory" => "contract-error", "resultChecks" => result_keys.to_h { |key| [key, key != "cleanupErrorsEmpty"] },
@@ -3591,7 +3601,9 @@ class NativeUploadValidationTest < Minitest::Test
         "slowCleanupAtLeastFour" => true, "captureCoversSlowCleanup" => true, "slowCleanupWithinOriginalCutoff" => true},
       "nativeOutcomes" => {"custodian" => "exit2", "keeper" => "exit2", "validator" => "signal", "finalOutcome" => "failed",
         "finalCleanup" => "confirmed", "groupState" => "retired", "captureState" => "attempted", "creatorState" => "not-started"},
-      "slowChecks" => slow_keys.to_h { |key| [key, key != "delayFailed"] }}
+      "slowChecks" => slow_keys.to_h { |key| [key, key != "delayFailed"] },
+      "captureDetail" => ["contract-error", "1" * 23 + "0", "1ba111111", "10mx", "101", %w[contract-error none]],
+      "readinessStage" => "validator-live"}
     classes.each_key do |platform|
       packet = formatter.call(platform: platform, mode: "real-deadline", result: raw, status: status)
       assert_equal "MRK_ADAPTER_FAILURE=#{JSON.generate(expected.merge("platform" => platform))}\n", packet
@@ -3605,6 +3617,20 @@ class NativeUploadValidationTest < Minitest::Test
       packet = formatter.call(platform: "ios", mode: mode, result: value, status: status_class.new(code))
       JSON.parse(packet.delete_prefix("MRK_ADAPTER_FAILURE=")) if packet
     end
+    assert_equal UploadProcessFixture::OwnershipFailureDiagnostic.capture_detail(raw,
+      projected: UploadProcessFixture.adapter_result_projection(mode: "real-deadline", result: raw)),
+      expected.fetch("captureDetail")
+    (stages + %w[missing invalid]).each do |stage|
+      native = raw.fetch("nativeObservation").merge("readinessStage" => stage.dup)
+      assert_equal stage, project.call(raw.merge("nativeObservation" => native)).fetch("readinessStage")
+    end
+    [nil, true, 1, [], {}, "private-marker"].each do |stage|
+      native = raw.fetch("nativeObservation").merge("readinessStage" => stage)
+      row = project.call(raw.merge("nativeObservation" => native))
+      assert_equal "invalid", row.fetch("readinessStage")
+      refute_includes JSON.generate(row), "private-marker"
+    end
+    assert_equal "missing", project.call(raw.merge("nativeObservation" => {})).fetch("readinessStage")
     expected_kinds.each do |mode, kind|
       accepted_status = kind == "pass" ? 0 : 1
       assert_nil project.call(raw.merge("kind" => kind), mode: mode, code: accepted_status)
@@ -3653,6 +3679,8 @@ class NativeUploadValidationTest < Minitest::Test
     missing = project.call({})
     assert_equal ["missing"] * 4, missing.values_at("resultKind", "retainedDriverErrorCategory", "retainedDriverErrorCode", "adapterErrorCategory")
     %w[resultChecks nativeChecks timingChecks nativeOutcomes slowChecks].each { |key| assert_equal ["missing"], missing.fetch(key).values.uniq }
+    assert_equal ["missing", "m" * 24, "m" * 9, "m" * 4, "m" * 3, %w[missing missing]], missing.fetch("captureDetail")
+    assert_equal "missing", missing.fetch("readinessStage")
     assert_equal "missing", project.call(raw.reject { |key, _| key == "errorClass" }).fetch("retainedDriverErrorCode")
     malformed = raw.merge(result_keys.to_h { |key| [key, "private-marker"] }).merge("cleanupErrors" => nil, "nativeObservation" => nil)
     invalid = project.call(malformed)
@@ -3660,6 +3688,7 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal ["invalid"], invalid.fetch("nativeChecks").values.uniq
     assert_equal ["invalid"], invalid.fetch("nativeOutcomes").values.uniq
     assert_equal ["invalid"], invalid.fetch("slowChecks").values.uniq
+    assert_equal "invalid", invalid.fetch("readinessStage")
     false_checks = raw.merge(result_keys.to_h { |key| [key, false] }).merge("cleanupErrors" => [])
     assert_equal result_keys.to_h { |key| [key, key == "cleanupErrorsEmpty"] }, project.call(false_checks).fetch("resultChecks")
 
@@ -3924,6 +3953,151 @@ class NativeUploadValidationTest < Minitest::Test
     assert_empty writes
     assert_equal 3, handoffs.map { |optional| optional.fetch(:adapter_failure_state).object_id }.uniq.length
     assert handoffs.all? { |optional| optional.keys == [:adapter_failure_state] && optional[:adapter_failure_state].empty? }
+
+    # A complete finite upper bound includes the new detail and longest stage;
+    # the shared detail's domain controls below already cover its combinations.
+    fixture = UploadProcessFixture
+    pairs = fixture::ADAPTER_FAILURE_CODES.map { |(name, _message), code| [fixture::ADAPTER_FAILURE_CATEGORIES.fetch(name), code] }
+    pairs.concat((fixture::ADAPTER_FAILURE_CATEGORIES.values + %w[other missing invalid none]).product(%w[missing invalid other]))
+    category, code = pairs.max_by { |pair| pair.sum(&:bytesize) }
+    primary = fixture::OWNERSHIP_CAPTURE_PRIMARY_ERROR_KINDS.flat_map { |kind, values| values.map { |value| [kind, value] } }.
+      max_by { |pair| JSON.generate(pair).bytesize }
+    maximum_mode, maximum_kind = expected_kinds.max_by { |mode, kind| mode.bytesize + kind.bytesize }
+    maximum = expected.merge("platform" => "android", "mode" => maximum_mode, "expectedKind" => maximum_kind,
+      "resultKind" => fixture::ADAPTER_FAILURE_KINDS.max_by(&:bytesize), "driverExitStatus" => 255,
+      "retainedDriverErrorCategory" => category, "retainedDriverErrorCode" => code,
+      "adapterErrorCategory" => fixture::ADAPTER_FAILURE_CATEGORIES.values.max_by(&:bytesize),
+      "resultChecks" => result_keys.to_h { |key| [key, "missing"] },
+      "nativeChecks" => native_keys.to_h { |key| [key, "missing"] },
+      "timingChecks" => timing_keys.to_h { |key| [key, %w[firstTimeoutCutoff selectedTimeoutCutoff].include?(key) ? "at-or-after-cutoff" : "missing"] },
+      "nativeOutcomes" => fixture::ADAPTER_FAILURE_NATIVE_OUTCOMES.to_h { |key, values| [key, values.max_by(&:bytesize)] },
+      "slowChecks" => slow_keys.to_h { |key| [key, "missing"] },
+      "captureDetail" => [fixture::ADAPTER_FAILURE_CATEGORIES.values.max_by(&:bytesize), "m" * 24, "m" * 9, "m" * 4, "m" * 3, primary],
+      "readinessStage" => stages.max_by(&:bytesize))
+    assert fixture::OwnershipFailureDiagnostic.capture_detail_valid?(maximum.fetch("captureDetail"))
+    assert_operator "#{fixture::ADAPTER_FAILURE_PREFIX}#{JSON.generate(maximum)}\n".bytesize, :<=, 4096
+    assert_adapter_readiness_stage_choreography
+  end
+
+  def assert_adapter_readiness_stage_choreography
+    fixture = UploadProcessFixture
+    full = [["record:leader-ready.json", "validator-marker"], ["live:validator", "validator-live"],
+      ["record:adapter-dispatch.json", "dispatch"], ["admission", "control-admission"],
+      ["record:fork-return.json", "descendant-fork"], ["record:child-ready.json", "descendant-marker"],
+      ["live:descendant", "descendant-live"], ["pipes", "inherited-pipes"],
+      ["release", "validator-release"], ["owner:ready", "owner-publication"]]
+    # Only fresh private receivers get these seams. Actual ready! executes;
+    # every process/file/clock operation below it is inert, not a native receipt.
+    exercise = lambda do |mode: "leader-only", stop: nil, error: nil, ready: true|
+      driver = fixture::AdapterDriver.new(@root, "ios", mode, {})
+      marker = {"kind" => mode == "kill-startup" ? "startup-wait" : "leader-ready", "pid" => 203, "group" => 202, "sid" => 201}
+      fork = {"parent" => 203, "child" => 204, "group" => 202}
+      stat = Struct.new(:dev, :ino, :mode, :uid, :gid, :rdev, :ftype, :nlink).new(1, 2, 0o10600, 3, 4, 0, "fifo", 1)
+      lease = Struct.new(:io).new(Struct.new(:stat).new(stat))
+      session = Struct.new(:ready, :reserved, :custodian_child, :leases).new(
+        ready ? {"validator_pid" => 203, "group_id" => 202} : nil, {}, Struct.new(:pid).new(201),
+        {stdout_read: lease, stderr_read: lease})
+      dispatch = {"version" => 1, "pid" => 203, "group" => 202, "sid" => 201,
+        "argv" => ["inert-adapter"], "environment" => {}, "cwd" => "inert-cwd", "sourceSha256" => "f" * 64}
+      {observation: Struct.new(:session).new(session), native_started_ns: 50,
+        expected_argv: dispatch["argv"], expected_environment: dispatch["environment"], tooling: dispatch["cwd"],
+        fake_source_sha: dispatch["sourceSha256"]}.each { |name, value| driver.instance_variable_set(:"@#{name}", value) }
+      records = {"leader-ready.json" => marker, "startup-wait.json" => marker, "fork-return.json" => fork,
+        "adapter-dispatch.json" => dispatch, "child-ready.json" => marker.merge("kind" => "child-ready", "pid" => 204,
+          "stdout" => fixture::OwnedChild.identity(stat), "stderr" => fixture::OwnedChild.identity(stat))}
+      events, returned, escaped, published = [], nil, nil, Object.new
+      note = lambda do |name|
+        events << [name, driver.instance_variable_get(:@readiness_stage)]
+        raise error if name == stop || name == "driver-loss"
+      end
+      control = Object.new
+      control.define_singleton_method(:admitted!) { note.call("admission") }
+      driver.instance_variable_set(:@control, control)
+      driver.define_singleton_method(:wait_record) { |name| note.call("record:#{name}"); records.fetch(name) }
+      verify_marker = ->(marker_value, expected, label) { note.call("live:#{label}"); assert_equal expected, marker_value; true }
+      driver.define_singleton_method(:live_marker!) { |value, expected, label| verify_marker.call(value, expected, label) }
+      driver.define_singleton_method(:observe_inherited_block!) { note.call("pipes") }
+      driver.define_singleton_method(:publish_owner) { |phase| note.call("owner:#{phase}"); published }
+      driver.define_singleton_method(:wait_for_driver_loss) { note.call("driver-loss") }
+      write = ->(path, value) { note.call("release"); assert_equal File.join(@root, "release-validator.json"), path; assert_equal fork, value; true }
+      fixture.stub(:clock_ns, -> { 100 }) do
+        fixture::OwnedChild.stub(:write_record, write) do
+          begin
+            returned = driver.ready!
+          rescue Exception => original
+            escaped = original
+          end
+        end
+      end
+      [driver, events, returned, escaped, published]
+    end
+    driver, events, returned, escaped, published = exercise.call
+    assert_nil escaped
+    assert_equal full, events
+    assert_same published, returned
+    assert_equal "ready-return", driver.instance_variable_get(:@readiness_stage)
+    [IOError.new("marker"), Interrupt.new("observation"), StandardError.new("dispatch"), SystemExit.new(23)].each_with_index do |error, index|
+      driver, events, returned, escaped = exercise.call(stop: full[index].first, error: error)
+      assert_same error, escaped
+      assert_nil returned
+      assert_equal full.take(index + 1), events # No later operation after this original error.
+      assert_equal full[index].last, driver.instance_variable_get(:@readiness_stage)
+    end
+    driver, events, _, escaped = exercise.call(mode: "unready")
+    assert_instance_of fixture::Failure, escaped
+    assert_equal "readiness", escaped.kind
+    assert_equal [["record:startup-wait.json", "startup-marker"]], events
+    %w[kill-startup kill-descendant].each do |mode|
+      error = Interrupt.new("inert driver loss")
+      driver, events, returned, escaped = exercise.call(mode: mode, error: error)
+      stage = mode == "kill-startup" ? "startup-driver-loss" : "descendant-driver-loss"
+      prefix = mode == "kill-startup" ? full.take(4).map { |name, value| [name.sub("leader-ready", "startup-wait"), value] } : full.take(8)
+      assert_same error, escaped
+      assert_nil returned
+      assert_equal prefix + [["owner:#{mode}", stage], ["driver-loss", stage]], events
+    end
+    _, events, returned, escaped, published = exercise.call(mode: "real-deadline")
+    assert_nil escaped
+    assert_same published, returned
+    assert_equal full.take(4) + [full.last], events
+    driver, events, _, escaped = exercise.call(ready: false)
+    assert_instance_of fixture::Failure, escaped
+    assert_empty events
+    assert_equal "native-ready", driver.instance_variable_get(:@readiness_stage)
+
+    driver = fixture::AdapterDriver.new(@root, "ios", "leader-only", {})
+    observer = fixture::AdapterDriver::Observation.new(driver, native: nil, root: @root) # No install/session/native entry.
+    assert_equal "not-entered", observer.snapshot_additions.fetch("readinessStage")
+    raw_stage = "validator-live".dup
+    driver.instance_variable_set(:@readiness_stage, raw_stage)
+    snapshot = observer.snapshot_additions
+    assert snapshot.frozen?
+    assert_same fixture::ADAPTER_READINESS_STAGES.find { |stage| stage == raw_stage }, snapshot.fetch("readinessStage")
+    refute raw_stage.frozen?
+    raw_stage.replace("private-marker")
+    driver.instance_variable_set(:@readiness_stage, "ready-return")
+    assert_equal "validator-live", snapshot.fetch("readinessStage") # A late producer cannot repair this snapshot.
+    driver.remove_instance_variable(:@readiness_stage)
+    assert_equal "missing", observer.snapshot_additions.fetch("readinessStage")
+    driver.instance_variable_set(:@readiness_stage, nil)
+    assert_equal "invalid", observer.snapshot_additions.fetch("readinessStage")
+    singleton = driver.singleton_class # Materialize the lookup class before capturing the original Method.
+    original_getter = driver.method(:instance_variable_get)
+    [IOError.new("optional read"), Interrupt.new("original cancellation")].each do |error|
+      refute singleton.instance_methods(false).include?(:instance_variable_get)
+      singleton.send(:define_method, :instance_variable_get) { |_name| raise error }
+      begin
+        if error.is_a?(StandardError)
+          assert_equal({"capturePrimary" => %w[missing missing], "readinessStage" => "invalid"}, observer.snapshot_additions)
+        else
+          assert_same error, assert_raises(Interrupt) { observer.snapshot_additions }
+        end
+      ensure
+        singleton.send(:remove_method, :instance_variable_get) # Restore the exact inherited method, no alias.
+      end
+      assert_empty observer.instance_variable_get(:@observer_errors)
+      assert_equal original_getter, driver.method(:instance_variable_get)
+    end
   end
 
   def assert_ownership_capture_detail_projection(fresh_state, original)
@@ -7225,7 +7399,7 @@ class NativeUploadValidationTest < Minitest::Test
         m = model.call(mode)
         run.call(m) { assert_equal :observed, observe.call(m) }
         refute m.fetch(:observer).instance_variable_get(:@slow_handoff_performed)
-        assert_equal({"capturePrimary" => %w[invalid invalid]}, m.fetch(:observer).snapshot_additions) unless mode.end_with?("-slow-cleanup")
+        assert_equal({"capturePrimary" => %w[invalid invalid], "readinessStage" => "not-entered"}, m.fetch(:observer).snapshot_additions) unless mode.end_with?("-slow-cleanup")
       end
       m = model.call
       assert_equal :observed, observe.call(m) # Not in the original run-body scope.

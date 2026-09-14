@@ -80,7 +80,11 @@ module UploadProcessFixture
     ADAPTER_FAILURE_CLASSES.each_value { |name| table["#{name}##{callback}".freeze] = modes.freeze }
   end.freeze
   ADAPTER_FAILURE_FIELDS = %w[schema platform mode expectedKind failedPredicates resultKind driverExitStatus
-    retainedDriverErrorCategory retainedDriverErrorCode adapterErrorCategory resultChecks nativeChecks timingChecks nativeOutcomes slowChecks].freeze
+    retainedDriverErrorCategory retainedDriverErrorCode adapterErrorCategory resultChecks nativeChecks timingChecks nativeOutcomes slowChecks
+    captureDetail readinessStage].freeze
+  ADAPTER_READINESS_STAGES = %w[not-entered native-ready startup-marker validator-marker validator-live dispatch
+    control-admission startup-driver-loss descendant-fork descendant-marker descendant-live inherited-pipes
+    descendant-driver-loss validator-release owner-publication ready-return].freeze
   ADAPTER_FAILURE_KINDS = %w[pass readiness descendant-alive capture-watchdog elapsed-bound fixture-cleanup
     setup-fixture-fault process-observation process-ownership fixture-result fixture-source fixture-input
     fixture-observation fixture-control signal-policy diagnostic control unexpected].freeze
@@ -1337,12 +1341,24 @@ module UploadProcessFixture
     return if failed.empty?
 
     projected = adapter_result_projection(mode: mode, result: result)
-    line = "#{ADAPTER_FAILURE_PREFIX}#{JSON.generate({"schema" => 2, "platform" => platform, "mode" => mode,
+    detail = OwnershipFailureDiagnostic.capture_detail(result, projected: projected)
+    return unless OwnershipFailureDiagnostic.capture_detail_valid?(detail)
+
+    native = result["nativeObservation"]
+    stage = if !result.key?("nativeObservation") || native.instance_of?(Hash) && !native.key?("readinessStage")
+      "missing"
+    elsif native.instance_of?(Hash) && native["readinessStage"].instance_of?(String)
+      (ADAPTER_READINESS_STAGES + %w[missing invalid]).find { |known| known == native["readinessStage"] } || "invalid"
+    else
+      "invalid"
+    end
+    line = "#{ADAPTER_FAILURE_PREFIX}#{JSON.generate({"schema" => 3, "platform" => platform, "mode" => mode,
       "expectedKind" => expected, "failedPredicates" => failed, "resultKind" => projected.fetch("resultKind"), "driverExitStatus" => code,
       "retainedDriverErrorCategory" => projected.fetch("retainedDriverErrorCategory"), "retainedDriverErrorCode" => projected.fetch("retainedDriverErrorCode"),
       "adapterErrorCategory" => projected.fetch("adapterErrorCategory"), "resultChecks" => projected.fetch("resultChecks"),
       "nativeChecks" => projected.fetch("nativeChecks"), "timingChecks" => projected.fetch("timingChecks"),
-      "nativeOutcomes" => projected.fetch("nativeOutcomes"), "slowChecks" => projected.fetch("slowChecks")})}\n"
+      "nativeOutcomes" => projected.fetch("nativeOutcomes"), "slowChecks" => projected.fetch("slowChecks"),
+      "captureDetail" => detail, "readinessStage" => stage})}\n"
     line.freeze if line.ascii_only? && line.bytesize <= 4096
   end
 
@@ -3943,8 +3959,20 @@ module UploadProcessFixture
         value
       end
 
+      def readiness_stage_snapshot
+        return "missing" unless @driver.instance_variable_defined?(:@readiness_stage)
+
+        value = @driver.instance_variable_get(:@readiness_stage) # Once, at the original return; never recovery.
+        return "invalid" unless value.instance_of?(String)
+
+        ADAPTER_READINESS_STAGES.find { |known| known == value } || "invalid"
+      rescue StandardError
+        "invalid" # An optional read cannot poison the original native snapshot or primary.
+      end
+
       def snapshot_additions
-        additions = {"capturePrimary" => OwnershipFailureDiagnostic.capture_primary(@session)}
+        stage = readiness_stage_snapshot
+        additions = {"capturePrimary" => OwnershipFailureDiagnostic.capture_primary(@session), "readinessStage" => stage}
         return additions.freeze unless @slow_enabled
         facts = {
           "handoffPerformed" => @slow_handoff_performed, "delayEntered" => @slow_delay_entered,
@@ -3966,6 +3994,7 @@ module UploadProcessFixture
       @platform, @base_mode = platform, mode.delete_suffix("-slow-cleanup")
       @parameters = parameters.transform_keys(&:to_sym).merge(environment: {})
       @timeout_objects = []
+      @readiness_stage = "not-entered"
       @observed.merge!("blockedDataWaits" => 0, "legacyRecordUsedForOwnership" => false,
         "adapterCallObserved" => false, "captureEntered" => false, "stdinClosedAfterReady" => false,
         "descendantLiveBeforeRelease" => false, "inheritedPipeBlockObserved" => false)
@@ -4178,31 +4207,40 @@ module UploadProcessFixture
     end
 
     def ready!
+      @readiness_stage = "native-ready" # Last entered boundary only; never a completion/finality receipt.
       session = @observation.session
       ready = session.ready
       raise Failure.new("readiness", "actual native READY was not accepted") unless ready && session.reserved
       kind = @mode == "kill-startup" ? "startup-wait" : "leader-ready"
       if @mode == "unready"
+        @readiness_stage = "startup-marker"
         wait_record("startup-wait.json")
         raise Failure.new("readiness", "fixture deliberately never became ready")
       end
+      @readiness_stage = "validator-marker"
       marker = wait_record("#{kind}.json")
       expected = {"kind" => kind, "pid" => ready.fetch("validator_pid"), "group" => ready.fetch("group_id"), "sid" => session.custodian_child.pid}
+      @readiness_stage = "validator-live"
       live_marker!(marker, expected, "validator")
+      @readiness_stage = "dispatch"
       dispatch = wait_record("adapter-dispatch.json")
       expected_dispatch = {"version" => 1, "pid" => marker.fetch("pid"), "group" => marker.fetch("group"), "sid" => marker.fetch("sid"),
         "argv" => @expected_argv, "environment" => @expected_environment, "cwd" => @tooling, "sourceSha256" => @fake_source_sha}
       raise Failure.new("fixture-input", "actual validator dispatch contract changed") unless dispatch == expected_dispatch
       @observed["adapterDispatch"] = dispatch
+      @readiness_stage = "control-admission"
       @control.admitted!
       @observed["ready"] = true
       @observed["readinessSeconds"] = (UploadProcessFixture.clock_ns - @native_started_ns) / 1_000_000_000.0
       if @mode == "kill-startup"
+        @readiness_stage = "startup-driver-loss"
         publish_owner(@mode)
         wait_for_driver_loss
       end
       unless %w[real-deadline immediate-deadline no-deadline].include?(@base_mode)
+        @readiness_stage = "descendant-fork"
         fork = wait_record("fork-return.json")
+        @readiness_stage = "descendant-marker"
         child = wait_record("child-ready.json")
         unless fork.keys.sort == %w[child group parent] && fork["parent"] == marker["pid"] && fork["group"] == marker["group"] &&
                fork["child"].instance_of?(Integer) && fork["child"] > 1 && ![session.custodian_child.pid, marker["pid"], marker["group"]].include?(fork["child"])
@@ -4212,20 +4250,27 @@ module UploadProcessFixture
         child_expected = {"kind" => "child-ready", "pid" => @descendant.fetch("pid"), "group" => @descendant.fetch("group"),
           "sid" => marker.fetch("sid"), "stdout" => OwnedChild.identity(session.leases.fetch(:stdout_read).io.stat),
           "stderr" => OwnedChild.identity(session.leases.fetch(:stderr_read).io.stat)}
+        @readiness_stage = "descendant-live"
         live_marker!(child, child_expected, "descendant")
         @observed["descendantProof"] = {"forkReturn" => fork, "readyRecord" => child,
           "stdoutReaderIdentity" => child_expected.fetch("stdout"), "stderrReaderIdentity" => child_expected.fetch("stderr")}
         @observed["descendantLiveBeforeRelease"] = true
+        @readiness_stage = "inherited-pipes"
         observe_inherited_block!
         if @mode == "kill-descendant"
+          @readiness_stage = "descendant-driver-loss"
           publish_owner(@mode)
           wait_for_driver_loss
         end
+        @readiness_stage = "validator-release"
         @release_ns = UploadProcessFixture.clock_ns
         OwnedChild.write_record(path("release-validator.json"), fork)
         @observed["validatorReleasedNs"] = @release_ns
       end
-      publish_owner("ready")
+      @readiness_stage = "owner-publication"
+      value = publish_owner("ready")
+      @readiness_stage = "ready-return"
+      value
     end
 
     def wait_for_driver_loss

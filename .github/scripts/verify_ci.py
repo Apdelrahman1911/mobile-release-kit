@@ -262,7 +262,12 @@ ADAPTER_FAILURE_MODE_CONTRACTS = {
 ADAPTER_FAILURE_FIELDS = (
     "schema", "platform", "mode", "expectedKind", "failedPredicates", "resultKind", "driverExitStatus",
     "retainedDriverErrorCategory", "retainedDriverErrorCode", "adapterErrorCategory",
-    "resultChecks", "nativeChecks", "timingChecks", "nativeOutcomes", "slowChecks",
+    "resultChecks", "nativeChecks", "timingChecks", "nativeOutcomes", "slowChecks", "captureDetail", "readinessStage",
+)
+ADAPTER_READINESS_STAGES = (
+    "not-entered", "native-ready", "startup-marker", "validator-marker", "validator-live", "dispatch",
+    "control-admission", "startup-driver-loss", "descendant-fork", "descendant-marker", "descendant-live",
+    "inherited-pipes", "descendant-driver-loss", "validator-release", "owner-publication", "ready-return",
 )
 ADAPTER_FAILURE_PREDICATES = ("result-kind", "driver-status")
 ADAPTER_FAILURE_RESULT_KINDS = (
@@ -1784,14 +1789,17 @@ def adapter_failure(raw: bytes, *, deadline: float | None = None) -> dict | None
     try:
         data = _fixture_failure_record(raw, ADAPTER_FAILURE_PREFIX, 4096, deadline=deadline,
                                        canonical_fields=ADAPTER_FAILURE_FIELDS)
-        if (type(data) is not dict or type(data["schema"]) is not int or data["schema"] != 2
+        if (type(data) is not dict or type(data["schema"]) is not int or data["schema"] != 3
                 or type(data["platform"]) is not str or data["platform"] not in ADAPTER_FAILURE_PLATFORMS
                 or type(data["mode"]) is not str or data["mode"] not in ADAPTER_FAILURE_MODE_CONTRACTS
                 or type(data["expectedKind"]) is not str
                 or data["expectedKind"] != ADAPTER_FAILURE_MODE_CONTRACTS[data["mode"]][1]
                 or type(data["driverExitStatus"]) is not int or not 0 <= data["driverExitStatus"] <= 255
                 or type(data["adapterErrorCategory"]) is not str or data["adapterErrorCategory"] not in ADAPTER_FAILURE_DRIVER_CODES
-                or not _adapter_result_projection_valid({key: data[key] for key in OWNERSHIP_RUN_RESULT_FIELDS})):
+                or not _adapter_result_projection_valid({key: data[key] for key in OWNERSHIP_RUN_RESULT_FIELDS})
+                or not _ownership_capture_detail_valid(data["captureDetail"])
+                or type(data["readinessStage"]) is not str
+                or data["readinessStage"] not in (*ADAPTER_READINESS_STAGES, "missing", "invalid")):
             return None
         expected_status = 0 if data["expectedKind"] == "pass" else 1
         predicates = [name for name, failed in zip(ADAPTER_FAILURE_PREDICATES,
@@ -1843,8 +1851,8 @@ def _ownership_capture_detail_valid(data: object) -> bool:
 
 
 def _ownership_run_driver_result_valid(data: object) -> bool:
-    # The five-field core is also used by standalone adapter schema2. Its
-    # grammar/eligibility stays unchanged; only ownership schema4 adds detail.
+    # The five-field core is also used by standalone adapter schema3. Both
+    # envelopes reuse capture detail without expanding that core's grammar.
     return (type(data) is dict and tuple(data) == OWNERSHIP_RUN_EXTENDED_RESULT_FIELDS
             and _adapter_result_projection_valid({name: data[name] for name in OWNERSHIP_RUN_RESULT_FIELDS})
             and _ownership_capture_detail_valid(data["captureDetail"]))
