@@ -285,6 +285,7 @@ class PersistentSigningModel:
         token = uuid.uuid4().hex
         stop = threading.Event()
         service_finished = threading.Event()
+        original_target_returned = threading.Event()
         state = {"error": None, "done": False, "eof": False}
         service = None
         start_attempted = start_confirmed = join_confirmed = False
@@ -292,6 +293,7 @@ class PersistentSigningModel:
         primary = None
         cleanup_errors = []
         result = None
+        target_result = None
         namespace = Namespace(self.root / ("model-bridge-" + token), create=True)
         try:
             # Open before any target creation. Only this original service owns
@@ -300,7 +302,7 @@ class PersistentSigningModel:
 
             def serve():
                 try:
-                    incoming = Channel(reader, deadline, stop=stop)
+                    incoming = Channel(reader, deadline, stop=stop, peer_finished=original_target_returned)
                     hello = incoming.receive()
                     require(type(hello) is dict and type(hello.get("version")) is int
                             and hello == {"version": VERSION, "kind": "HELLO", "token": token}, "wrong target HELLO")
@@ -377,7 +379,18 @@ class PersistentSigningModel:
                 require(options.get("execution_scope") is None and options.get("journal_binding") is None,
                         "source and selected scope are mutually exclusive")
                 options["execution_scope"] = source.new_scope()
-            result = owned_process.run_owned(command, **options)
+            target_result = owned_process.run_owned(command, **options)
+            result = target_result
+            # A failed target cannot supply a future HELLO. Latch its actual
+            # result before joining a service still awaiting its first writer;
+            # the existing stop/join cleanup below retains that first failure.
+            require(result.returncode == policy["returncode"]
+                    and result.stderr == (policy["stderr"] if kwargs.get("capture", True) else ""),
+                    "fixed model target result differs from actual selected behavior")
+            # This hint permits a real nonblocking FIFO observation, not an
+            # inferred EOF or service settlement. Buffered DONE/EOF work may
+            # still belong to the original service after the target returns.
+            original_target_returned.set()
             service.join(timeout=remaining(deadline))
             require(service_finished.is_set() and not service.is_alive(), "original model service join unresolved")
             join_confirmed = True
@@ -385,9 +398,6 @@ class PersistentSigningModel:
                 raise AssertionError("original model observation failed") from state["error"]
             require(not service.is_alive() and state["done"] and state["eof"]
                     and not namespace.close_errors, "original model service not settled")
-            require(result.returncode == policy["returncode"]
-                    and result.stderr == (policy["stderr"] if kwargs.get("capture", True) else ""),
-                    "fixed model target result differs from actual selected behavior")
             namespace.remove()
             complete = True
             self.state = json.loads(self.path.read_bytes())
@@ -396,6 +406,12 @@ class PersistentSigningModel:
             result = subprocess.CompletedProcess(argv, result.returncode, result.stdout, result.stderr)
         except BaseException as error:
             primary = error
+            if target_result is not None:
+                try:
+                    from workflow import local_signing_case_owner as case_owner
+                    case_owner.observe_adapter_target_result(target_result)
+                except BaseException:
+                    pass  # Optional data only, after the original failure latch.
         finally:
             try:
                 stop.set()
@@ -413,13 +429,22 @@ class PersistentSigningModel:
                 # join evidence when Thread.start itself was interrupted.
                 # The stop barrier makes any delayed service fail before IO;
                 # only that service may retire its preregistered FIFO slots.
-                _RETAINED_MODEL_LIFETIMES.append((namespace, service, service_finished, stop))
+                _RETAINED_MODEL_LIFETIMES.append((namespace, service, service_finished, stop, state,
+                                                original_target_returned))
                 cleanup_errors.append(AssertionError("original model thread startup/join custody remains unknown"))
             elif not complete:
                 # Preserve the identity-bound namespace on command/bridge
                 # uncertainty. Later case cleanup cannot normalize this failure.
                 if not namespace.close():
                     cleanup_errors.extend(namespace.close_errors)
+            observation_error = state["error"]
+            if (observation_error is not None and observation_error is not primary
+                    and (primary is None or BaseException.__dict__["__cause__"].__get__(primary, BaseException)
+                         is not observation_error)
+                    and not any(error is observation_error for error in cleanup_errors)):
+                # Early target/command failure must not erase the independently
+                # observed service failure, nor replace the original primary.
+                cleanup_errors.append(observation_error)
         if primary is not None:
             if cleanup_errors:
                 primary._model_cleanup_errors = tuple(cleanup_errors)

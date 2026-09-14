@@ -5,11 +5,14 @@ descriptor, O_RDWR endpoint or dummy writer can conceal original peer loss.
 """
 from __future__ import annotations
 
+import ctypes
+import errno
 import json
 import math
 import os
 import select
 import stat
+import sys
 import time
 from pathlib import Path
 
@@ -65,6 +68,37 @@ def result_policy(value=None):
     return dict(value)
 
 
+def _create_fifo(directory, name):
+    """Fixed descriptor-relative creation, including older Darwin Python builds.
+
+    macOS 13+ exports the public mkfifoat API even when the selected CPython
+    was built without it. Never replace the original dirfd with a path/cwd.
+    A failed creation is not retried through a different implementation.
+    """
+    require(type(directory) is int and 0 <= directory < 2**31
+            and type(name) is str and name in NAMES, "fixed FIFO creation arguments")
+    if os.mkfifo in os.supports_dir_fd:
+        os.mkfifo(name, 0o600, dir_fd=directory)
+        return
+    if sys.platform != "darwin":
+        raise NotImplementedError("model bridge: descriptor-relative FIFO creation unavailable")
+    require(ctypes.sizeof(ctypes.c_int) == 4 and ctypes.sizeof(ctypes.c_uint16) == 2
+            and ctypes.sizeof(ctypes.c_void_p) == 8, "unsupported Darwin FIFO ABI")
+    try:
+        function = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True).mkfifoat
+    except (OSError, AttributeError) as error:
+        raise NotImplementedError("model bridge: public mkfifoat unavailable") from error
+    function.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_uint16)
+    function.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    result = function(directory, name.encode("ascii"), 0o600)
+    number = ctypes.get_errno()
+    require(type(result) is int and result in (0, -1), "FIFO creation return is unknown")
+    if result == -1:
+        require(type(number) is int and 0 < number < 4096, "FIFO creation errno is unknown")
+        raise OSError(number, "model bridge: descriptor-relative FIFO creation failed")
+
+
 class Namespace:
     """Preregistered original directory/node slots; no finalizer or close retry."""
 
@@ -85,7 +119,7 @@ class Namespace:
             require(identity(os.fstat(self.directory)) == identity(before), "directory changed during open")
             if create:
                 for name in NAMES:
-                    os.mkfifo(name, 0o600, dir_fd=self.directory)
+                    _create_fifo(self.directory, name)
                 self.binding = {"directory": list(identity(os.fstat(self.directory))), "nodes": {}}
                 for name in NAMES:
                     self.binding["nodes"][name] = list(identity(os.stat(name, dir_fd=self.directory, follow_symlinks=False)))
@@ -155,9 +189,9 @@ class Namespace:
 
 
 class Channel:
-    def __init__(self, descriptor, deadline, *, stop=None):
+    def __init__(self, descriptor, deadline, *, stop=None, peer_finished=None):
         self.descriptor, self.deadline = descriptor, deadline
-        self.stop = stop
+        self.stop, self.peer_finished = stop, peer_finished
         self.buffer = bytearray()
         self.bytes = self.frames = 0
         self.established = False
@@ -203,11 +237,22 @@ class Channel:
                     self.check()  # Decode cannot extend original peer/clock authority.
                     return value
             readable, _, _ = select.select([self.descriptor], [], [], min(.02, remaining(self.deadline)))
-            if not readable:
+            finished_before_hello = (not self.established and self.peer_finished is not None
+                                     and self.peer_finished.is_set())
+            if not readable and not finished_before_hello:
                 continue
-            data = os.read(self.descriptor, min(4096, MAX_FRAME + 4 - len(self.buffer)))
+            # A never-opened FIFO may not select as readable after the real
+            # target has already returned. Its hint permits ONLY this actual
+            # nonblocking read; buffered bytes still precede any EOF decision.
+            try:
+                data = os.read(self.descriptor, min(4096, MAX_FRAME + 4 - len(self.buffer)))
+            except BlockingIOError as error:
+                if error.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                    raise
+                continue
             if not data:
                 require(not self.established, "original peer EOF")
+                require(not finished_before_hello, "original target returned before HELLO")
                 # An unopened FIFO has no writer. This is not admission and
                 # cannot authorize an effect or refresh the original cutoff.
                 time.sleep(min(.002, remaining(self.deadline)))

@@ -12,11 +12,12 @@ import os
 from pathlib import Path
 import select
 import signal
+from subprocess import CompletedProcess
 import threading
 import time
 import traceback
 
-from workflow.local_signing_matrix_contract import adapter_command_first, emit_adapter_failure
+from workflow.local_signing_matrix_contract import adapter_command_first, adapter_target_result, emit_adapter_failure
 
 WORKER_ERROR = 91
 MAX_RECORD = 4096
@@ -55,6 +56,27 @@ def adapter_command_recorder(actual):
 def adapter_case_failure(context):
     value = ADAPTER_CASE_FAILURE
     return value[1] if value is not None and value[0] is context else None
+
+
+def observe_adapter_target_result(result):
+    """Optional original normal-return DATA, called only after primary latched."""
+    slot = _ADAPTER_WORKER_DIAGNOSTIC
+    if slot is None:
+        return
+    try:
+        if (os.getpid() != slot["pid"] or threading.current_thread() is not slot["thread"]
+                or ADAPTER_DIAGNOSTIC_CONTEXT is not slot["context"] or type(result) is not CompletedProcess
+                or not slot["lock"].acquire(blocking=False)):
+            return
+        try:
+            if slot["target_claimed"]:
+                return
+            slot["target_claimed"] = True  # Absorbing even if projection fails or is unavailable.
+        finally:
+            slot["lock"].release()
+        slot["target"] = adapter_target_result(slot["context"], result.returncode, result.stderr)
+    except BaseException:
+        pass  # Never retain the result/raw streams or change the original primary.
 
 
 def require(condition, message):
@@ -205,7 +227,8 @@ def _worker(handles, parent, group, root, name, task, deadline, write_json):
             try:
                 _ADAPTER_WORKER_DIAGNOSTIC = {"context": ADAPTER_DIAGNOSTIC_CONTEXT, "pid": os.getpid(),
                                             "lock": threading.Lock(), "claimed": False, "first": None,
-                                            "reserved": 16}  # Before task, including callbacks not yet entered.
+                                            "reserved": 16, "thread": threading.current_thread(),
+                                            "target_claimed": False, "target": None}  # Before task.
             except BaseException:
                 pass  # An unavailable diagnostic slot never prevents the original task.
         value = task()
@@ -219,7 +242,8 @@ def _worker(handles, parent, group, root, name, task, deadline, write_json):
                                  (type(error), error, BaseException.__dict__["__traceback__"].__get__(error, BaseException)),
                                  deadline=deadline,
                                  command_first=_ADAPTER_WORKER_DIAGNOSTIC["first"] if _ADAPTER_WORKER_DIAGNOSTIC else None,
-                                 command_reserved=_ADAPTER_WORKER_DIAGNOSTIC["reserved"] if _ADAPTER_WORKER_DIAGNOSTIC else 0)
+                                 command_reserved=_ADAPTER_WORKER_DIAGNOSTIC["reserved"] if _ADAPTER_WORKER_DIAGNOSTIC else 0,
+                                 target_result=_ADAPTER_WORKER_DIAGNOSTIC["target"] if _ADAPTER_WORKER_DIAGNOSTIC else None)
         except BaseException:
             pass
         try:

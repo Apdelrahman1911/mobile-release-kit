@@ -1663,7 +1663,7 @@ def signing_adapter_failure(raw: bytes, scope: SigningAdapterDiagnostic, *, dead
                 value = strict_json(line[len(marker):-1].decode("ascii"))
             except (UnicodeError, ValueError, VerificationError, RecursionError):
                 return None
-            if (type(value) is not dict or not required <= set(value) <= required | {"related", "case"}
+            if (type(value) is not dict or not required <= set(value) <= required | {"related", "case", "targetResult"}
                     or type(value["schema"]) is not int or value["schema"] != 1
                     or value["phase"] != scope.phase or type(value["testId"]) is not str
                     or value["testId"] not in scope.identifiers
@@ -1705,6 +1705,15 @@ def signing_adapter_failure(raw: bytes, scope: SigningAdapterDiagnostic, *, dead
                         or type(case["terminalParsed"]) is not bool
                         or (case["workerExit"] is not None) != case["terminalParsed"]
                         or (type(case["anchorExpired"]) is not bool if case["terminalParsed"] else case["anchorExpired"] is not None)):
+                    return None
+            if "targetResult" in value:
+                target = value["targetResult"]
+                if (value["layer"] != "worker" or type(target) is not dict
+                        or set(target) != {"returncode", "stderrKind", "locations"}
+                        or type(target["returncode"]) is not int or not -128 <= target["returncode"] <= 255
+                        or type(target["stderrKind"]) is not str or target["stderrKind"] not in {"empty", "traceback-frames", "unavailable"}
+                        or not locations_valid(target["locations"], 2)
+                        or bool(target["locations"]) != (target["stderrKind"] == "traceback-frames")):
                     return None
             if observations and value["testId"] != observations[0]["testId"]:
                 return None

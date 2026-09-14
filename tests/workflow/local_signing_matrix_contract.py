@@ -26,19 +26,20 @@ MAX_RESULTS_BYTES = 64 * 1024 * 1024
 MAX_EXPANDED_RESULTS = 256 * 1024 * 1024
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 ARTIFACT = re.compile(r"local-signing-matrix-proof-(ubuntu-24\.04|macos-26)-(0|[1-9][0-9]?)-attempt-([1-9][0-9]{0,5})\Z")
-ADAPTER_TEST_IDS = tuple(sorted(
+ADAPTER_TEST_IDS = tuple(
     "unit.test_local_signing_persistent.PersistentSigningTests." + name for name in (
         "test_one_real_model_command_bridge_finishes_before_success",
         "test_actual_case_wait_eof_barrier_crash_and_deadline_settle_before_return",
         "test_original_c_prefix_cut_uses_real_fence_and_fresh_recovery",
         "test_genuine_model_inventory_active_build_pending_contrast",
     )
-))
+)
 ADAPTER_FAILURE_PREFIX = "MRK_SIGNING_ADAPTER_FAILURE="
 ADAPTER_FAILURE_MAX_BYTES = 2048
 ADAPTER_FAILURE_CATEGORIES = (
     "none", "os-error", "assertion-error", "value-error", "type-error", "memory-error", "exception", "base-exception",
 )
+ADAPTER_TARGET_FRAME = re.compile(r'  File "([^"\r\n]+)", line ([1-9][0-9]{0,5}), in ([^\r\n]{1,256})\Z')
 ADAPTER_FAILURE_TEST_FILES = (
     "tests/unit/test_local_signing_persistent.py", "tests/unit/local_signing_persistent.py",
     "tests/unit/local_signing_helpers.py", "tests/unit/ios_entitlement_helpers.py",
@@ -108,7 +109,42 @@ def adapter_command_first(context, exception):
     return (_adapter_category(exception), tuple((row["file"], row["line"]) for row in locations), 16 - budget[0])
 
 
-def adapter_failure_record(context, layer, outcome, error, *, deadline, command_first=None, command_reserved=0, case=None):
+def adapter_target_result(context, returncode, stderr):
+    """Captured target stderr DATA only; not an actual traceback/cause/receipt."""
+    _phase, _identifier, source_map = _adapter_context(context)
+    require(type(returncode) is int and -128 <= returncode <= 255, "adapter original target status")
+    unavailable = (returncode, "unavailable", ())
+    if type(stderr) is not str or len(stderr) > 8192:
+        return unavailable
+    try:
+        if len(stderr.encode("utf-8")) > 8192:
+            return unavailable
+    except UnicodeError:
+        return unavailable
+    if not stderr:
+        return returncode, "empty", ()
+    lines = stderr.split("\n")
+    if lines[-1] == "":
+        lines.pop()  # A final newline terminates a physical line; it is not another one.
+    if len(lines) > 64 or lines[0] != "Traceback (most recent call last):":
+        return unavailable
+    locations = []
+    for line in lines[1:]:
+        if not line.startswith("  File "):
+            continue  # Never copy a function, source line, exception name or message.
+        match = ADAPTER_TARGET_FRAME.fullmatch(line)
+        if match is None:
+            return unavailable
+        filename, number, _function = match.groups()
+        public = next((relative for actual, relative in source_map if filename == actual), None)
+        if public is not None:
+            locations.append((public, int(number)))
+            locations = locations[-2:]
+    return (returncode, "traceback-frames", tuple(locations)) if locations else unavailable
+
+
+def adapter_failure_record(context, layer, outcome, error, *, deadline, command_first=None, command_reserved=0,
+                           case=None, target_result=None):
     """Actual root and bounded Python links; no message/source/linecache reads."""
     before_deadline(deadline)
     phase, identifier, source_map = _adapter_context(context)
@@ -168,6 +204,21 @@ def adapter_failure_record(context, layer, outcome, error, *, deadline, command_
                 and (type(expired) is bool if parsed else expired is None), "adapter case observation fields")
         record["case"] = {"expectedExit": expected, "workerExit": worker, "anchorExit": anchor,
                           "terminalParsed": parsed, "anchorExpired": expired}
+    if target_result is not None:
+        require(layer == "worker" and type(target_result) is tuple and len(target_result) == 3,
+                "adapter original target observation")
+        code, kind, frames = target_result
+        require(type(code) is int and -128 <= code <= 255 and type(kind) is str
+                and kind in {"empty", "traceback-frames", "unavailable"}
+                and type(frames) is tuple and len(frames) <= 2 and bool(frames) == (kind == "traceback-frames")
+                and all(type(row) is tuple and len(row) == 2 and type(row[0]) is str
+                        and row[0] in {public for _actual, public in source_map}
+                        and type(row[1]) is int and 0 < row[1] < 1_000_000 for row in frames),
+                "adapter original target observation fields")
+        record["targetResult"] = {"returncode": code, "stderrKind": kind,
+                                  "locations": [{"file": filename, "line": line} for filename, line in frames]}
+        if len(ADAPTER_FAILURE_PREFIX) + len(canonical(record)) + 1 > ADAPTER_FAILURE_MAX_BYTES:
+            del record["targetResult"]  # Drop new optional data BEFORE any existing observation.
     # Preserve the original root observation before optional related details.
     while record.get("related") and len(ADAPTER_FAILURE_PREFIX) + len(canonical(record)) + 1 > ADAPTER_FAILURE_MAX_BYTES:
         record["related"].pop()
@@ -177,13 +228,15 @@ def adapter_failure_record(context, layer, outcome, error, *, deadline, command_
     return record
 
 
-def emit_adapter_failure(context, layer, outcome, error, *, deadline, command_first=None, command_reserved=0, case=None):
+def emit_adapter_failure(context, layer, outcome, error, *, deadline, command_first=None, command_reserved=0,
+                         case=None, target_result=None):
     """Optional stderr DATA only; a diagnostic error cannot replace its cause."""
     if context is None:
         return None
     try:
         record = adapter_failure_record(context, layer, outcome, error, deadline=deadline,
-                                        command_first=command_first, command_reserved=command_reserved, case=case)
+                                        command_first=command_first, command_reserved=command_reserved,
+                                        case=case, target_result=target_result)
         data = ADAPTER_FAILURE_PREFIX + canonical(record).decode("ascii") + "\n"
         require(len(data.encode("ascii")) <= ADAPTER_FAILURE_MAX_BYTES, "adapter diagnostic byte bound")
         before_deadline(deadline)

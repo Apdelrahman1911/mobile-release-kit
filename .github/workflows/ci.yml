@@ -8,11 +8,11 @@ on:
   workflow_dispatch:
     inputs:
       verification_target:
-        description: Full verification, macOS-only evidence, or narrow signing-adapter smoke (partial aggregate remains incomplete)
+        description: Full verification, macOS-only evidence, signing-adapter smoke, or fixed-shard matrix canary (partial aggregate remains incomplete)
         type: choice
         required: true
         default: full
-        options: [full, macos, signing-adapter]
+        options: [full, macos, signing-adapter, signing-matrix-canary]
 
 permissions:
   contents: read
@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   test-linux:
-    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target != 'macos' && inputs.verification_target != 'signing-adapter') }}
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.verification_target == 'full' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -101,7 +101,7 @@ jobs:
             --run-attempt "$GITHUB_RUN_ATTEMPT" --image "$ImageOS/$ImageVersion" \
             --java-home "$JAVA_HOME_21_X64" --summary "$GITHUB_STEP_SUMMARY"
   test-native-profiles:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.verification_target != 'signing-adapter' }}
+    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'macos') }}
     runs-on: macos-26
     timeout-minutes: 60
     permissions:
@@ -166,7 +166,7 @@ jobs:
             --run-attempt "$GITHUB_RUN_ATTEMPT" --image "$ImageOS/$ImageVersion" \
             --summary "$GITHUB_STEP_SUMMARY"
   test-signing-matrix:
-    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target != 'macos' && inputs.verification_target != 'signing-adapter') }}
+    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'signing-matrix-canary') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     permissions:
@@ -176,7 +176,7 @@ jobs:
       max-parallel: 4
       matrix:
         os: [ubuntu-24.04, macos-26]
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        shard: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[0]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]') }}
     steps:
       - name: Require a disposable GitHub-hosted runner
         env:

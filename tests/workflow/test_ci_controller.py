@@ -2489,9 +2489,11 @@ class SigningAdapterControllerTests(unittest.TestCase):
             related = {"via": ["context"], "category": "os-error", "locations": [{"file": scope.files[0], "line": 9}]}
             first = {**related, "via": ["command-first"]}
             case = {"expectedExit": 0, "workerExit": -9, "anchorExit": 0, "terminalParsed": True, "anchorExpired": True}
-            expanded = self.diagnostic(rig, layer="worker", related=[first, related]) + self.diagnostic(rig, case=case)
+            target = {"returncode": 1, "stderrKind": "traceback-frames", "locations": related["locations"]}
+            expanded = self.diagnostic(rig, layer="worker", related=[first, related], targetResult=target) + self.diagnostic(rig, case=case)
             observed = parse(expanded)["observations"]
             self.assertEqual(observed[0]["related"], [first, related])
+            self.assertEqual(observed[0]["targetResult"], target)
             self.assertEqual(observed[1]["case"], case)
             unknown = {"expectedExit": 0, "workerExit": None, "anchorExit": None, "terminalParsed": False, "anchorExpired": None}
             self.assertEqual(parse(self.diagnostic(rig, case=unknown))["observations"][0]["case"], unknown)
@@ -2523,6 +2525,18 @@ class SigningAdapterControllerTests(unittest.TestCase):
                 with self.subTest(case=change):
                     self.assertIsNone(parse(self.diagnostic(rig, case={**case, **change})))
             self.assertIsNone(parse(self.diagnostic(rig, case={**unknown, "anchorExpired": False})))
+            for kind in ("empty", "unavailable"):
+                value = {"returncode": 0, "stderrKind": kind, "locations": []}
+                self.assertEqual(parse(self.diagnostic(rig, layer="worker", targetResult=value))["observations"][0]["targetResult"], value)
+            self.assertIsNone(parse(self.diagnostic(rig, targetResult=target)))
+            for change in ({"returncode": True}, {"returncode": 1.0}, {"returncode": -129}, {"returncode": 256},
+                           {"stderrKind": "PRIVATE"}, {"stderrKind": "empty"}, {"stderrKind": "unavailable"},
+                           {"locations": []}, {"locations": target["locations"] * 3},
+                           {"locations": [{"file": "/PRIVATE/file.py", "line": 1}]},
+                           {"locations": [{"file": scope.files[0], "line": True}]},
+                           {"message": "PRIVATE"}):
+                with self.subTest(target=change):
+                    self.assertIsNone(parse(self.diagnostic(rig, layer="worker", targetResult={**target, **change})))
             for malformed in (raw + raw, pair + raw, raw[:-1], b"x" * 65537,
                               b"MRK_SIGNING_ADAPTER_FAILURE=" + b" " * 2048 + b"\n",
                               raw.replace(b'"schema":1', b'"schema":1,"schema":1'),
@@ -2539,7 +2553,8 @@ class SigningAdapterControllerTests(unittest.TestCase):
                 case = {"expectedExit": 0, "workerExit": None if mode == "unknown" else 91,
                         "anchorExit": None if mode == "unknown" else 0,
                         "terminalParsed": mode != "unknown", "anchorExpired": None if mode == "unknown" else False}
-                rig.capture_changes["source"] = {"stderr": self.diagnostic(rig, layer="worker", related=related)
+                target = {"returncode": 0, "stderrKind": "unavailable", "locations": []}
+                rig.capture_changes["source"] = {"stderr": self.diagnostic(rig, layer="worker", related=related, targetResult=target)
                                                  + self.diagnostic(rig, case=case)}
                 if mode != "diagnostic-on-zero":
                     rig.capture_changes["source"].update(ok=False, returncode=91)
@@ -2569,6 +2584,7 @@ class SigningAdapterControllerTests(unittest.TestCase):
                 if mode in {"failure", "unknown"}:
                     self.assertEqual([item["layer"] for item in row["adapter_failure"]["observations"]], ["worker", "unittest"])
                     self.assertEqual(row["adapter_failure"]["observations"][0]["related"], related)
+                    self.assertEqual(row["adapter_failure"]["observations"][0]["targetResult"], target)
                     self.assertEqual(row["adapter_failure"]["observations"][1]["case"], case)
                     if mode == "unknown":
                         self.assertFalse(row["capture"]["domain_finality"])

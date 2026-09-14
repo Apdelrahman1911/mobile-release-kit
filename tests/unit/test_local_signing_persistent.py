@@ -275,6 +275,169 @@ class PersistentWorkerRecorderTests(unittest.TestCase):
         self.assertTrue(retained[0][3].is_set())
         self.assertTrue(caught.exception._model_cleanup_errors)
 
+    @contextmanager
+    def recorded_model(self, returned, *, command_error=None, service_error=None, eof_error=None):
+        """Run the actual orchestration with no thread, FIFO, FD or child."""
+        from mobile_release import owned_process
+        calls, events, threads, opened = [], {}, [], {}
+        names = iter(("stop", "service-finished", "target-returned"))
+        token = []
+
+        class Event:
+            def __init__(self):
+                self.name, self.value = next(names), False
+                events[self.name] = self
+            def is_set(self): return self.value
+            def set(self):
+                calls.append(("set", self.name))
+                self.value = True
+
+        class Thread:
+            def __init__(self, *, target, name, daemon):
+                self.target, self.alive = target, False
+                threads.append(self)
+            def start(self):
+                calls.append(("start",))
+                self.alive = True
+            def join(self, *, timeout):
+                calls.append(("join", events["stop"].is_set(), events["target-returned"].is_set(), timeout))
+                self.target()  # Synchronous original service body, explicit channel doubles below.
+                self.alive = False
+            def is_alive(self): return self.alive
+
+        class Channel:
+            def __init__(self, descriptor, deadline, *, stop=None, peer_finished=None):
+                self.descriptor, self.stop, self.peer_finished = descriptor, stop, peer_finished
+                self.established = False
+                self.index = 0
+                calls.append(("channel", descriptor, deadline, peer_finished))
+            def receive(self):
+                if service_error is not None:
+                    raise service_error
+                if self.stop.is_set():
+                    raise AssertionError("inert original service retired")
+                self.index += 1
+                return ({"version": 1, "kind": "HELLO", "token": token[0]} if self.index == 1 else
+                        {"version": 1, "sequence": 1, "kind": "DONE", "value": None})
+            def send(self, value): calls.append(("send", value["kind"]))
+            def require_eof(self):
+                calls.append(("eof",))
+                if eof_error is not None:
+                    raise eof_error
+
+        def open_node(name, flags, deadline):
+            descriptor = 51 if name == "events.fifo" else 52
+            opened[name] = descriptor
+            return descriptor
+
+        def close_node(name):
+            opened.pop(name, None)
+
+        def close():
+            self.assertFalse(threads[0].alive)
+            calls.append(("close",))
+            return True
+
+        def remove():
+            self.assertFalse(opened)
+            self.assertFalse(threads[0].alive)
+            calls.append(("remove",))
+
+        namespace = SimpleNamespace(path=Path("/inert/bridge"), binding={}, close_errors=[],
+            open=Mock(side_effect=open_node), close_node=Mock(side_effect=close_node),
+            close=Mock(side_effect=close), remove=Mock(side_effect=remove))
+
+        def run(command, **kwargs):
+            calls.append(("run-owned",))
+            token.append(command[-1])
+            if command_error is not None:
+                raise command_error
+            return returned
+
+        model = object.__new__(PersistentSigningModel)
+        model.root, model.trace, model.recovery, model.auto_add = Path("/inert/original-case"), None, False, False
+        model.path = SimpleNamespace(read_bytes=lambda: b'{"actual_state_reload":true}')
+        retained = []
+        clock = SimpleNamespace(monotonic=lambda: 10.0)
+        with patch.object(bridge, "Namespace", return_value=namespace), \
+                patch.object(bridge, "Channel", Channel), patch.object(bridge, "time", clock), \
+                patch.object(persistent_model, "threading", SimpleNamespace(Event=Event, Thread=Thread)), \
+                patch.object(persistent_model, "time", clock), \
+                patch.object(persistent_model, "_RETAINED_MODEL_LIFETIMES", retained), \
+                patch.object(owned_process, "run_owned", side_effect=run) as launch, \
+                patch.object(owner, "observe_adapter_target_result", create=True) as diagnostic:
+            yield SimpleNamespace(model=model, calls=calls, events=events, namespace=namespace,
+                                  retained=retained, launch=launch, diagnostic=diagnostic)
+
+    def test_actual_target_failure_precedes_join_and_keeps_independent_service_failure(self):
+        for code, stderr in ((1, "PRIVATE actual target failure"), (0, "PRIVATE unexpected stderr")):
+            with self.subTest(code=code):
+                returned = persistent_model.subprocess.CompletedProcess(["actual-target"], code, "", stderr)
+                observation = OSError("PRIVATE independent service failure")
+                with self.recorded_model(returned, service_error=observation) as rig:
+                    # Projection is optional even after it has observed the actual result.
+                    rig.diagnostic.side_effect = RuntimeError("PRIVATE diagnostic failure")
+                    with self.assertRaisesRegex(AssertionError, "target result differs") as caught:
+                        rig.model(["security", "default-keychain", "-d", "user"])
+                    self.assertEqual([call[1:3] for call in rig.calls if call[0] == "join"], [(True, False)])
+                    self.assertIn(observation, caught.exception._model_cleanup_errors)
+                    self.assertFalse(rig.events["target-returned"].is_set())
+                    self.assertTrue(rig.events["service-finished"].is_set())
+                    self.assertFalse(rig.retained)
+                    rig.namespace.remove.assert_not_called()
+                    rig.namespace.close.assert_called_once()
+                    rig.diagnostic.assert_called_once_with(returned)
+
+    def test_original_command_exception_never_advertises_a_return_or_loses_its_primary(self):
+        first, observation = KeyboardInterrupt(), OSError("PRIVATE independent service failure")
+        with self.recorded_model(None, command_error=first, service_error=observation) as rig:
+            with self.assertRaises(KeyboardInterrupt) as caught:
+                rig.model(["security", "default-keychain", "-d", "user"])
+            self.assertIs(caught.exception, first)
+            self.assertEqual(first._model_cleanup_errors, (observation,))
+            self.assertFalse(rig.events["target-returned"].is_set())
+            self.assertEqual([call[1:3] for call in rig.calls if call[0] == "join"], [(True, False)])
+            rig.diagnostic.assert_not_called()
+            rig.namespace.remove.assert_not_called()
+            self.assertFalse(rig.retained)
+
+    def test_matching_result_preserves_done_eof_race_and_exact_expected_nonzero_policy(self):
+        for code, stderr, capture in ((0, "", True), (7, "fictional selected stderr", True), (7, "", False)):
+            with self.subTest(code=code, capture=capture):
+                returned = persistent_model.subprocess.CompletedProcess(["actual-target"], code, "actual output", stderr)
+                policy = {"returncode": code, "perform_effect": code == 0, "stdout": None,
+                          "stderr": "fictional selected stderr" if code else ""}
+                with self.recorded_model(returned) as rig:
+                    result = rig.model(["security", "default-keychain", "-d", "user"],
+                                       result_policy=policy, capture=capture)
+                    self.assertEqual([call[1:3] for call in rig.calls if call[0] == "join"], [(False, True)])
+                    self.assertIn(("send", "DONE-ACK"), rig.calls)
+                    self.assertIn(("eof",), rig.calls)
+                    channels = [call for call in rig.calls if call[0] == "channel"]
+                    self.assertIs(channels[0][3], rig.events["target-returned"])
+                    self.assertIsNone(channels[1][3])
+                    self.assertTrue(all(call[2] == 40.0 for call in channels))
+                    self.assertEqual([call[3] for call in rig.calls if call[0] == "join"], [30.0])
+                    self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                     (returned.returncode, returned.stdout, returned.stderr))
+                    self.assertEqual(result.args, ["security", "default-keychain", "-d", "user"])
+                    self.assertEqual(returned.args, ["actual-target"])
+                    self.assertEqual(rig.model.state, {"actual_state_reload": True})
+                    rig.namespace.remove.assert_called_once()
+                    rig.namespace.close.assert_not_called()
+                    rig.diagnostic.assert_not_called()
+                    self.assertFalse(rig.retained)
+
+        observation = OSError("PRIVATE actual service EOF failure")
+        returned = persistent_model.subprocess.CompletedProcess(["actual-target"], 0, "", "")
+        with self.recorded_model(returned, eof_error=observation) as rig:
+            with self.assertRaisesRegex(AssertionError, "model observation failed") as caught:
+                rig.model(["security", "default-keychain", "-d", "user"])
+            self.assertIs(caught.exception.__cause__, observation)
+            self.assertFalse(hasattr(caught.exception, "_model_cleanup_errors"))  # Already retained as the actual cause.
+            rig.namespace.remove.assert_not_called()
+            rig.diagnostic.assert_called_once_with(returned)
+
 
 class PersistentBridgeRecorderTests(unittest.TestCase):
     """Strict bounded transport with entirely in-memory I/O doubles."""
@@ -283,6 +446,150 @@ class PersistentBridgeRecorderTests(unittest.TestCase):
     def frame(value):
         content = json.dumps(value).encode("ascii")
         return len(content).to_bytes(4, "big") + content
+
+    @contextmanager
+    def fifo_double(self, *, supported=False, platform="darwin", result=0, number=0):
+        """Public ABI arguments only; no library load, syscall, path or cwd IO."""
+        native = SimpleNamespace(mkfifo=Mock(), supports_dir_fd=set())
+        if supported:
+            native.supports_dir_fd.add(native.mkfifo)
+        function = Mock(return_value=result)
+        c = SimpleNamespace(**{name: getattr(bridge.ctypes, name) for name in
+            ("c_int", "c_char_p", "c_uint16", "c_void_p", "sizeof")})
+        c.CDLL = Mock(return_value=SimpleNamespace(mkfifoat=function))
+        c.set_errno, c.get_errno = Mock(), Mock(return_value=number)
+        with patch.object(bridge, "os", native), patch.object(bridge, "ctypes", c), \
+                patch.object(bridge, "sys", SimpleNamespace(platform=platform)):
+            yield SimpleNamespace(os=native, ctypes=c, function=function)
+
+    def test_fifo_python_capability_keeps_original_dirfd_and_never_retries_failed_creation(self):
+        with self.fifo_double(supported=True) as rig:
+            bridge._create_fifo(51, "events.fifo")
+            rig.os.mkfifo.assert_called_once_with("events.fifo", 0o600, dir_fd=51)
+            rig.ctypes.CDLL.assert_not_called()
+        first = FileExistsError("inert original collision")
+        with self.fifo_double(supported=True) as rig:
+            rig.os.mkfifo.side_effect = first
+            with self.assertRaises(FileExistsError) as caught:
+                bridge._create_fifo(51, "acks.fifo")
+            self.assertIs(caught.exception, first)
+            rig.os.mkfifo.assert_called_once_with("acks.fifo", 0o600, dir_fd=51)
+            rig.ctypes.CDLL.assert_not_called()
+        for directory, name in ((True, "events.fifo"), (-1, "events.fifo"), (2**31, "events.fifo"),
+                                (51.0, "events.fifo"), (51, "../events.fifo"), (51, "/events.fifo"), (51, b"events.fifo")):
+            with self.subTest(directory=directory, name=name), self.fifo_double(supported=True) as rig:
+                with self.assertRaisesRegex(AssertionError, "fixed FIFO creation"):
+                    bridge._create_fifo(directory, name)
+                rig.os.mkfifo.assert_not_called()
+                rig.ctypes.CDLL.assert_not_called()
+        with self.fifo_double(platform="linux") as rig:
+            with self.assertRaises(NotImplementedError):
+                bridge._create_fifo(51, "events.fifo")
+            rig.os.mkfifo.assert_not_called()
+            rig.ctypes.CDLL.assert_not_called()
+
+    def test_darwin_fifo_uses_only_fixed_public_signature_and_actual_errno_without_fallback(self):
+        with self.fifo_double() as rig:
+            order = []
+            rig.ctypes.set_errno.side_effect = lambda value: order.append(("clear", value))
+            rig.function.side_effect = lambda *args: order.append(("call", args)) or 0
+            rig.ctypes.get_errno.side_effect = lambda: order.append(("errno",)) or 0
+            bridge._create_fifo(51, "events.fifo")
+            rig.ctypes.CDLL.assert_called_once_with("/usr/lib/libSystem.B.dylib", use_errno=True)
+            self.assertEqual(rig.function.argtypes, (rig.ctypes.c_int, rig.ctypes.c_char_p, rig.ctypes.c_uint16))
+            self.assertIs(rig.function.restype, rig.ctypes.c_int)
+            self.assertEqual(order, [("clear", 0), ("call", (51, b"events.fifo", 0o600)), ("errno",)])
+            rig.os.mkfifo.assert_not_called()
+        for result, number in ((-1, 17), (-1, 0), (-1, True), (-1, 4096), (1, 0), (True, 0)):
+            with self.subTest(result=result, number=number), self.fifo_double(result=result, number=number) as rig:
+                with self.assertRaises(OSError if result == -1 and number == 17 else AssertionError) as caught:
+                    bridge._create_fifo(51, "acks.fifo")
+                if result == -1 and number == 17:
+                    self.assertEqual(caught.exception.errno, 17)
+                rig.function.assert_called_once_with(51, b"acks.fifo", 0o600)
+                rig.ctypes.CDLL.assert_called_once()
+                rig.os.mkfifo.assert_not_called()
+        for missing in ("library", "symbol", "abi"):
+            with self.subTest(missing=missing), self.fifo_double() as rig:
+                if missing == "library":
+                    rig.ctypes.CDLL.side_effect = OSError("inert library unavailable")
+                elif missing == "symbol":
+                    rig.ctypes.CDLL.return_value = SimpleNamespace()
+                else:
+                    rig.ctypes.sizeof = lambda _kind: 0
+                with self.assertRaises(AssertionError if missing == "abi" else NotImplementedError):
+                    bridge._create_fifo(51, "events.fifo")
+                rig.function.assert_not_called()
+                rig.os.mkfifo.assert_not_called()
+
+    def test_returned_target_requires_actual_eof_and_drains_bytes_after_stale_readiness(self):
+        for ready in (False, True):
+            with self.subTest(ready=ready):
+                finished = SimpleNamespace(is_set=lambda: True)
+                channel = bridge.Channel(51, 20.0, peer_finished=finished)
+                read = Mock(return_value=b"")
+                with patch.object(bridge, "os", SimpleNamespace(read=read)), \
+                        patch.object(bridge, "select", SimpleNamespace(select=lambda *_: ([51] if ready else [], [], []))), \
+                        patch.object(bridge, "time", SimpleNamespace(monotonic=lambda: 10.0)), \
+                        self.assertRaisesRegex(AssertionError, "returned before HELLO"):
+                    channel.receive()
+                read.assert_called_once()
+                self.assertFalse(channel.eof)  # An unexpected EOF is not a success receipt.
+                self.assertFalse(channel.established)
+                self.assertEqual(channel.frames, 0)
+
+        completed = [False]
+        channel = bridge.Channel(51, 20.0, peer_finished=SimpleNamespace(is_set=lambda: completed[0]))
+        frames = self.frame({"kind": "HELLO"}) + self.frame({"kind": "DONE"})
+        read = Mock(side_effect=(BlockingIOError(bridge.errno.EAGAIN, "inert no data"), frames))
+        def selected(*_):
+            completed[0] = True  # Target returns after this stale readiness observation.
+            return [], [], []
+        with patch.object(bridge, "os", SimpleNamespace(read=read)), \
+                patch.object(bridge, "select", SimpleNamespace(select=selected)), \
+                patch.object(bridge, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+            self.assertEqual(channel.receive(), {"kind": "HELLO"})
+            self.assertEqual(channel.receive(), {"kind": "DONE"})
+        self.assertEqual(read.call_count, 2)
+        self.assertEqual(channel.frames, 2)
+        self.assertEqual(channel.deadline, 20.0)
+
+    def test_returned_hint_cannot_refresh_clock_accept_partial_frame_or_override_stop(self):
+        for prefix in (b"", self.frame({"kind": "HELLO"})[:5]):
+            with self.subTest(prefix=prefix):
+                clock = [10.0]
+                channel = bridge.Channel(51, 10.5, peer_finished=SimpleNamespace(is_set=lambda: True))
+                channel.buffer.extend(prefix)
+                def selected(*_):
+                    clock[0] += .2
+                    return [], [], []
+                read = Mock(side_effect=BlockingIOError(bridge.errno.EWOULDBLOCK, "inert outstanding writer"))
+                with patch.object(bridge, "os", SimpleNamespace(read=read)), \
+                        patch.object(bridge, "select", SimpleNamespace(select=selected)), \
+                        patch.object(bridge, "time", SimpleNamespace(monotonic=lambda: clock[0])), \
+                        self.assertRaisesRegex(AssertionError, "cutoff expired"):
+                    channel.receive()
+                self.assertGreater(read.call_count, 0)
+                self.assertEqual(channel.frames, 0)
+                self.assertEqual(channel.deadline, 10.5)
+                self.assertFalse(channel.eof)
+        channel = bridge.Channel(51, 20.0, stop=SimpleNamespace(is_set=lambda: True),
+                                 peer_finished=SimpleNamespace(is_set=lambda: True))
+        channel.buffer.extend(self.frame({"kind": "HELLO"}))
+        with patch.object(bridge, "os", SimpleNamespace(read=Mock(side_effect=AssertionError("no IO after stop")))), \
+                patch.object(bridge, "time", SimpleNamespace(monotonic=lambda: 10.0)), \
+                self.assertRaisesRegex(AssertionError, "service retired"):
+            channel.receive()
+
+    def test_done_eof_after_returned_hint_still_needs_the_original_expected_eof(self):
+        channel = bridge.Channel(51, 20.0, peer_finished=SimpleNamespace(is_set=lambda: True))
+        channel.established = True
+        with patch.object(bridge, "os", SimpleNamespace(read=Mock(return_value=b""))) as native, \
+                patch.object(bridge, "select", SimpleNamespace(select=lambda *_: ([51], [], []))), \
+                patch.object(bridge, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+            channel.require_eof()
+        native.read.assert_called_once_with(51, 1)
+        self.assertTrue(channel.eof)
 
     def test_pre_writer_eof_cannot_admit_an_effect_but_original_peer_eof_fails(self):
         frame = self.frame({"kind": "HELLO"})

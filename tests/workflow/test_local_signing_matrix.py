@@ -345,7 +345,8 @@ class MatrixContractTests(unittest.TestCase):
     def test_ci_requires_fixed_full_matrix_both_imports_and_mandatory_unmerged_proofs(self):
         workflow = load_workflow(runner.ROOT / ".github/workflows/ci.yml")
         job, aggregate = workflow["jobs"]["test-signing-matrix"], workflow["jobs"]["test"]
-        self.assertEqual(job["strategy"]["matrix"], {"os": list(contract.OPERATING_SYSTEMS), "shard": list(range(contract.SHARDS))})
+        self.assertEqual(job["strategy"]["matrix"], {"os": list(contract.OPERATING_SYSTEMS), "shard":
+            "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[0]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]') }}"})
         self.assertEqual(job["strategy"]["max-parallel"], 4)
         self.assertIs(job["strategy"]["fail-fast"], False)
         self.assertEqual(job["timeout-minutes"], 60)
@@ -353,7 +354,7 @@ class MatrixContractTests(unittest.TestCase):
         self.assertNotIn("env", job)
         self.assertNotIn("environment", job)
         self.assertNotIn("outputs", job)
-        self.assertEqual(job["if"], "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target != 'macos' && inputs.verification_target != 'signing-adapter') }}")
+        self.assertEqual(job["if"], "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'signing-matrix-canary') }}")
         self.assertNotIn("continue-on-error", job)
         commands = [step["run"] for step in job["steps"] if "run" in step]
         self.assertEqual(len(commands), 3)  # Hosted guard, Linux provider preparation, fixed controller.
@@ -463,7 +464,14 @@ class SigningAdapterAdmissionTests(unittest.TestCase):
 
     def test_literal_inventory_and_metadata_never_expand_the_matrix_reducer(self):
         self.assertEqual(contract.adapter_test_ids(runner.ROOT), contract.ADAPTER_TEST_IDS)
-        self.assertEqual(len(contract.ADAPTER_TEST_IDS), 4)
+        expected = tuple("unit.test_local_signing_persistent.PersistentSigningTests." + name for name in (
+            "test_one_real_model_command_bridge_finishes_before_success",
+            "test_actual_case_wait_eof_barrier_crash_and_deadline_settle_before_return",
+            "test_original_c_prefix_cut_uses_real_fence_and_fresh_recovery",
+            "test_genuine_model_inventory_active_build_pending_contrast",
+        ))
+        self.assertEqual(contract.ADAPTER_TEST_IDS, expected)
+        self.assertEqual(len(set(contract.ADAPTER_TEST_IDS)), 4)
         value = self.metadata()
         scope = contract.adapter_scope_from_metadata(value, "ubuntu-24.04")
         self.assertEqual(scope["schema"], "mrk-signing-adapter-scope-v1")
@@ -533,6 +541,97 @@ class SigningAdapterDiagnosticTests(unittest.TestCase):
             self.assertEqual(record["locations"], [] if foreign else [
                 {"file": "tests/unit/test_local_signing_persistent.py", "line": 2}])
             self.assertNotIn("PRIVATE", contract.canonical(record).decode())
+
+    def test_target_stderr_projection_is_bounded_private_and_dropped_before_existing_observations(self):
+        context, task = self.context_and_task()
+        actual, public = context[2][0]
+        header = "Traceback (most recent call last):\n"
+        frame = lambda number: f'  File "{actual}", line {number}, in PRIVATE_function\n'
+        raw = header + frame(1) + "    PRIVATE source code\n" + frame(2) + frame(3) + "ValueError: PRIVATE message\n"
+        with patch.object(Path, "resolve", side_effect=AssertionError("no target diagnostic resolution")), \
+                patch.object(Path, "read_bytes", side_effect=AssertionError("no target diagnostic read")), \
+                patch.object(linecache, "getline", side_effect=AssertionError("no source lines")), \
+                patch.object(contract, "_adapter_locations", side_effect=AssertionError("no extra actual traceback walk")):
+            observed = contract.adapter_target_result(context, 1, raw)
+            self.assertEqual(observed, (1, "traceback-frames", ((public, 2), (public, 3))))
+            self.assertNotIn("PRIVATE", str(observed))
+            self.assertEqual(contract.adapter_target_result(context, -128, ""), (-128, "empty", ()))
+            self.assertEqual(contract.adapter_target_result(context, 255, ""), (255, "empty", ()))
+            prefix = header + frame(7)
+            byte_boundary = prefix + "x" * (8192 - len(prefix.encode("utf-8")))
+            lines_boundary = prefix + "PRIVATE ignored line\n" * 62
+            for content in (byte_boundary, lines_boundary):
+                self.assertEqual(contract.adapter_target_result(context, 1, content)[1:],
+                                 ("traceback-frames", ((public, 7),)))
+            invalid = (None, b"", raw.encode(), byte_boundary + "x", lines_boundary + "extra\n",
+                       prefix + "\u00e9" * 4096, prefix + "\ud800", "PRIVATE prefix\n" + raw,
+                       header + '  File "/PRIVATE/other.py", line 1, in private\n',
+                       header + frame("01"), header + frame("1000000"), header + frame("1.0"),
+                       header + frame("True"), header + frame(1).replace("PRIVATE_function", "x" * 257))
+            for content in invalid:
+                self.assertEqual(contract.adapter_target_result(context, 1, content), (1, "unavailable", ()))
+            for status in (True, 1.0, -129, 256, None):
+                with self.assertRaises(ValueError):
+                    contract.adapter_target_result(context, status, raw)
+        try:
+            task()
+        except ValueError:
+            error = sys.exc_info()
+        # A long but prebound public module path cannot crowd out the existing
+        # root/related observation or raise the established 2048-byte envelope.
+        long_public = "src/mobile_release/" + "nested/" * 130 + "module.py"
+        context = (*context[:2], (*context[2], ("/fixed/target.py", long_public)))
+        large_target = (1, "traceback-frames", ((long_public, 1), (long_public, 2)))
+        with patch.object(contract, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+            original = contract.adapter_failure_record(context, "worker", "error", error, deadline=20.0)
+            reduced = contract.adapter_failure_record(context, "worker", "error", error, deadline=20.0,
+                                                       target_result=large_target)
+        self.assertEqual(reduced, original)
+        self.assertLessEqual(len(contract.ADAPTER_FAILURE_PREFIX) + len(contract.canonical(reduced)) + 1, 2048)
+
+    def test_target_observer_requires_original_prearmed_pid_context_thread_and_absorbing_claim(self):
+        owner = runner.case_owner
+        context, _task = self.context_and_task()
+        original_projection = owner.adapter_target_result
+        thread = object()
+        result = owner.CompletedProcess(["PRIVATE argv"], 1, "PRIVATE stdout", "")
+        class Lookalike(owner.CompletedProcess):
+            pass
+        for mode in ("observed", "projection-error", "bad-status", "busy", "foreign-pid", "foreign-thread", "foreign-context", "lookalike"):
+            with self.subTest(mode=mode):
+                calls = []
+                slot = {"context": context, "pid": 7, "thread": thread, "lock": owner.threading.Lock(),
+                        "claimed": False, "first": None, "reserved": 16, "target_claimed": False, "target": None}
+                current = (context[0], context[1], context[2]) if mode == "foreign-context" else context
+                selected = (Lookalike(["PRIVATE"], 1, "", "") if mode == "lookalike" else
+                            owner.CompletedProcess(["PRIVATE"], True, "", "") if mode == "bad-status" else result)
+                def project(scope, status, stderr):
+                    self.assertTrue(slot["target_claimed"])
+                    calls.append((scope, status, stderr))
+                    value = original_projection(scope, status, stderr)
+                    if mode == "projection-error":
+                        raise ValueError("PRIVATE optional diagnostic failure")
+                    return value
+                if mode == "busy":
+                    slot["lock"].acquire()
+                try:
+                    with patch.multiple(owner, _ADAPTER_WORKER_DIAGNOSTIC=slot, ADAPTER_DIAGNOSTIC_CONTEXT=current,
+                                        os=SimpleNamespace(getpid=lambda: 8 if mode == "foreign-pid" else 7),
+                                        adapter_target_result=project), \
+                            patch.object(owner.threading, "current_thread", return_value=object() if mode == "foreign-thread" else thread):
+                        owner.observe_adapter_target_result(selected)
+                        owner.observe_adapter_target_result(selected)
+                finally:
+                    if mode == "busy":
+                        slot["lock"].release()
+                claimed = mode in {"observed", "projection-error", "bad-status"}
+                self.assertEqual(len(calls), int(claimed))
+                self.assertEqual(slot["target_claimed"], claimed)
+                self.assertEqual(slot["target"], (1, "empty", ()) if mode == "observed" else None)
+                self.assertFalse(slot["claimed"])
+                self.assertEqual(slot["reserved"], 16)
+        with patch.object(owner, "_ADAPTER_WORKER_DIAGNOSTIC", None):
+            owner.observe_adapter_target_result(object())  # Disabled means no inspection or dynamic slot allocation.
 
     def test_suppressed_cyclic_links_use_builtin_data_and_share_the_original_frame_budget(self):
         class PrivateError(Exception):
@@ -829,23 +928,32 @@ class SigningAdapterDiagnosticTests(unittest.TestCase):
                     if mode == "writer-error" else output
                 handles = SimpleNamespace(errors=[], close_except=lambda *_: calls.append("close-all"),
                     close=lambda name: calls.append(("close", name)), get=lambda _name: 123)
-                native = SimpleNamespace(getppid=lambda: 7, getpgrp=lambda: 8,
+                native = SimpleNamespace(getpid=lambda: 9, getppid=lambda: 7, getpgrp=lambda: 8,
                     _exit=lambda code: (_ for _ in ()).throw(Exited(code)))
+                def failed_task():
+                    try:
+                        task()
+                    except BaseException as primary:
+                        owner.observe_adapter_target_result(owner.CompletedProcess(["PRIVATE target"], 1, "PRIVATE output", ""))
+                        raise primary
                 def receive(_fd, buffer, _deadline):
                     buffer.extend(b"RUN\n")
                     return True
                 with patch.multiple(owner, os=native, receive=receive, send=lambda *_: None,
-                                    remaining=lambda _deadline: 1, CASE_DEADLINE=None,
+                                    remaining=lambda _deadline: 1, CASE_DEADLINE=None, _ADAPTER_WORKER_DIAGNOSTIC=None,
                                     ADAPTER_DIAGNOSTIC_CONTEXT=None if mode == "disabled" else context), \
                         patch.object(contract, "time", SimpleNamespace(monotonic=lambda: 10.0)), redirect_stderr(sink), \
                         self.assertRaises(Exited) as caught:
-                    owner._worker(handles, 7, 8, Path("/not-created"), "synthetic", task, 20.0,
+                    owner._worker(handles, 7, 8, Path("/not-created"), "synthetic", failed_task, 20.0,
                         lambda path, _value: calls.append(("private-write", path.name)))
                 self.assertEqual(caught.exception.args, (owner.WORKER_ERROR,))
                 self.assertEqual(calls.count(("private-write", "synthetic-error.json")), 1)
                 self.assertEqual(calls[-1], "close-all")
                 self.assertNotIn("PRIVATE", output.getvalue())
                 self.assertEqual(output.getvalue().count(contract.ADAPTER_FAILURE_PREFIX), int(mode == "enabled"))
+                if mode == "enabled":
+                    record = json.loads(output.getvalue().removeprefix(contract.ADAPTER_FAILURE_PREFIX))
+                    self.assertEqual(record["targetResult"], {"returncode": 1, "stderrKind": "empty", "locations": []})
 
 
 if __name__ == "__main__":
