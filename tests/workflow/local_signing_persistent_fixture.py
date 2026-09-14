@@ -836,8 +836,11 @@ def _owner_tty_original():
     for item in data["pair"]:
         assert type(item) is list and len(item) == 2 and type(item[0]) is int \
             and 2 < item[0] < 1024 and item[0] not in pair, "private terminal descriptor slot"
+        # st_dev/st_rdev can be signed native scalars. They still must match the
+        # original fstat exactly below; no masked or pathname-derived identity.
         assert type(item[1]) is list and len(item[1]) == 6 \
-            and all(type(value) is int and 0 <= value < 2 ** 64 for value in item[1]), "private terminal identity shape"
+            and all(type(value) is int and (-(2 ** 63) if index in (0, 5) else 0) <= value < 2 ** 64
+                    for index, value in enumerate(item[1])), "private terminal identity shape"
         info = os.fstat(item[0])
         assert [info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_rdev] == item[1] \
             and stat.S_ISCHR(info.st_mode) and os.isatty(item[0]), "original terminal descriptor changed"

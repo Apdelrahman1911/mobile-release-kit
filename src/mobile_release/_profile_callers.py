@@ -28,6 +28,12 @@ def fatal_cancellation_error(
     """
     if isinstance(primary, (KeyboardInterrupt, SystemExit)):
         raise primary
+    if (type(primary) is GeneratorExit and type(guard) is DefaultCancellation
+            and guard.pid != os.getpid()):
+        # Inherited generators relinquish copied handles without consulting the
+        # parent's ledger. Normal close consumes this exact exception; it grants
+        # no successful lifetime verdict and cannot hide a copied-handle error.
+        raise primary
     verdict = None
     if (type(guard) is DefaultCancellation and guard.pid == os.getpid()
             and guard.owner_thread is threading.current_thread()):

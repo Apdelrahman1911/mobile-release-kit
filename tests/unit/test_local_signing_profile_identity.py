@@ -360,7 +360,8 @@ raise SystemExit(status)
         payload["UUID"] = UUID
         stack = ExitStack()
         stack.enter_context(patch("mobile_release.credentials._authenticated_signing_profile",
-                                  side_effect=fictional_signing_profile))
+                                  side_effect=lambda path, *, cancellation: fictional_signing_profile(
+                                      path, cancellation=cancellation, payload=payload)))
         stack.enter_context(patch.object(credentials, "_run_private", case.model))
         return stack, credentials._temporary_apple_signing_environment(
             p12=p12, password="fictional", profile=supplied, directory=private, home=case.home,

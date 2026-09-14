@@ -101,10 +101,11 @@ def model_result(*, returncode=0, perform_effect=True, stdout=None, stderr=""):
             "stdout": stdout, "stderr": stderr}
 
 
-def fictional_signing_profile(path: Path, *, cancellation):
+def fictional_signing_profile(path: Path, *, cancellation, payload: dict | None = None):
     """Account-resource-only seam; dedicated composition tests do not use it."""
     from mobile_release.ios_profiles import read_profile_bytes
     from .ios_entitlement_helpers import profile
 
     cancellation.check()
-    return read_profile_bytes(path, cancellation=cancellation), profile()
+    assert payload is None or type(payload) is dict, "fictional profile metadata must be explicit data"
+    return read_profile_bytes(path, cancellation=cancellation), profile() if payload is None else copy.deepcopy(payload)

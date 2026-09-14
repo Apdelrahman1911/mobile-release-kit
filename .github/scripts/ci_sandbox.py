@@ -1513,7 +1513,10 @@ def _private_pty_binding(raw: str | None) -> tuple[int, int]:
         if (type(item) is not list or len(item) != 2 or type(item[0]) is not int
                 or not 2 < item[0] < 1024 or item[0] in descriptors
                 or type(item[1]) is not list or len(item[1]) != 6
-                or any(type(value) is not int or not 0 <= value < 2 ** 64 for value in item[1])):
+                # Native device identifiers may be signed; retain their exact
+                # fstat values, not an unsigned normalization or path identity.
+                or any(type(value) is not int or not (-(2 ** 63) if index in (0, 5) else 0) <= value < 2 ** 64
+                       for index, value in enumerate(item[1]))):
             raise SessionError("original private terminal descriptor shape differs")
         info = os.fstat(item[0])
         if _pty_identity(info) != item[1] or not stat.S_ISCHR(info.st_mode) or not os.isatty(item[0]):

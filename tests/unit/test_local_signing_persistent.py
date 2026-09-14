@@ -32,6 +32,100 @@ from unit.local_signing_persistent import PROFILE, UUID, OwnerResolutionRefused,
 class PersistentWorkerRecorderTests(unittest.TestCase):
     """No fork, native wait, process signal or actual descriptor is acquired."""
 
+    def test_fictional_profile_preserves_explicit_payload_and_original_reader(self):
+        from mobile_release import ios_profiles
+        from unit.ios_entitlement_helpers import profile
+        from unit.local_signing_helpers import fictional_signing_profile
+
+        path, content = Path("/inert/original-profile"), b"original-reader-bytes"
+        payload = {"UUID": "44444444-5555-6666-7777-888888888888", "nested": {"values": ["original"]}}
+        events = []
+        guard = SimpleNamespace(check=lambda: events.append("check"))
+
+        def read(selected, *, cancellation):
+            self.assertIs(selected, path)
+            self.assertIs(cancellation, guard)
+            events.append("read")
+            return content
+
+        with patch.object(ios_profiles, "read_profile_bytes", side_effect=read) as reader:
+            actual, metadata = fictional_signing_profile(path, cancellation=guard, payload=payload)
+            self.assertIs(actual, content)
+            self.assertEqual(metadata, payload)
+            self.assertIsNot(metadata, payload)
+            metadata["nested"]["values"].append("returned")
+            self.assertEqual(payload["nested"]["values"], ["original"])
+            payload["nested"]["values"].append("caller")
+            self.assertEqual(metadata["nested"]["values"], ["original", "returned"])
+            actual, default = fictional_signing_profile(path, cancellation=guard)
+            self.assertIs(actual, content)
+            self.assertEqual(default, profile())
+            self.assertEqual(reader.call_count, 2)
+        self.assertEqual(events, ["check", "read", "check", "read"])
+
+        cancelled = RuntimeError("inert original cancellation")
+        guard.check = Mock(side_effect=cancelled)
+        with patch.object(ios_profiles, "read_profile_bytes") as reader:
+            with self.assertRaises(RuntimeError) as caught:
+                fictional_signing_profile(path, cancellation=guard, payload=payload)
+            self.assertIs(caught.exception, cancelled)
+            reader.assert_not_called()
+        guard.check = Mock()
+        failure = OSError("inert original read failure")
+        with patch.object(ios_profiles, "read_profile_bytes", side_effect=failure) as reader:
+            with self.assertRaises(OSError) as caught:
+                fictional_signing_profile(path, cancellation=guard, payload=payload)
+            self.assertIs(caught.exception, failure)
+            guard.check.assert_called_once_with()
+            reader.assert_called_once_with(path, cancellation=guard)
+
+    def test_post_result_cleanup_requires_live_original_finality(self):
+        from mobile_release import _command_process as commands
+        from workflow import profile_installation_fixture as signal_fixture
+
+        engine, nonce = object(), b"n" * 32
+        result = SimpleNamespace(returncode=0)
+
+        def incomplete_scope(outcome):
+            # Negative data shapes only: no engine, authority constructor,
+            # finality receipt, process, descriptor or fence is acquired.
+            scope = object.__new__(commands.AccountExecutionScope)
+            slot = object.__new__(commands.CommandOutcomeSlot)
+            binding = object.__new__(commands.JournalledCommandBinding)
+            scope.nonce, scope._outcome, scope._binding = nonce, slot, binding
+            slot._engine, slot._value = engine, outcome
+            binding._scope = scope
+            return {"execution_scope": scope, "journal_binding": binding}
+
+        def incomplete_outcome(**changed):
+            fields = {"_engine": engine, "nonce": nonce, "create_w": commands.RouteHistory(False, False),
+                      "run_tool": commands.RouteHistory(False, False), "no_target": None,
+                      "termination": "normal-exit", "returncode": 0, "result_integrity": "complete",
+                      "original_finality": None}
+            return commands.OriginalCommandOutcome(**{**fields, **changed})
+
+        foreign_binding = incomplete_scope(incomplete_outcome())
+        foreign_binding["journal_binding"] = object()
+        cases = (
+            ("missing-scope", {}, "original scope"),
+            ("foreign-scope", {"execution_scope": object()}, "original scope"),
+            ("missing-outcome", incomplete_scope(None), "original outcome"),
+            ("foreign-outcome", incomplete_scope(object()), "original outcome"),
+            ("foreign-binding", foreign_binding, "foreign binding or outcome"),
+            ("foreign-generation", incomplete_scope(incomplete_outcome(_engine=object())), "foreign binding or outcome"),
+            ("incomplete-result", incomplete_scope(incomplete_outcome(result_integrity="unknown")), "complete normal result"),
+            ("unknown-result", incomplete_scope(incomplete_outcome(termination="signal-wait", returncode=-15)), "complete normal result"),
+            ("missing-finality", incomplete_scope(incomplete_outcome()), "original finality is missing"),
+            ("foreign-finality", incomplete_scope(incomplete_outcome(
+                original_finality=SimpleNamespace(_engine=engine))), "original finality is missing"),
+        )
+        with patch.object(commands.OriginalCommandOutcome, "require_binding",
+                          side_effect=AssertionError("inert rejection must precede any binding consumption")) as consume:
+            for name, options, message in cases:
+                with self.subTest(name=name), self.assertRaisesRegex(AssertionError, message):
+                    signal_fixture.observe_live_post_result_finality(options, result)
+            consume.assert_not_called()
+
     def test_adapter_command_origins_follow_original_return_before_bounded_read_and_fresh_slot(self):
         origins = {name: "__init__.py" if name == "mobile_release" else name.split(".")[-1] + ".py"
                    for name in ("mobile_release", "mobile_release.local_signing", "mobile_release.owned_process",

@@ -257,6 +257,52 @@ class PrivateTTYContractTests(unittest.TestCase):
                 self.module._probe_private_pty(tty.binding())
         self.assertEqual(self.module._private_pty_failure_note(b"".join(tty.output))["stage"], "metadata-denial")
 
+    def test_both_binding_consumers_preserve_signed_device_ids_and_reject_invalid_shapes(self):
+        for field, name in ((0, "st_dev"), (5, "st_rdev")):
+            for value in (-(2 ** 63), -1, 0, 2 ** 64 - 1):
+                with self.subTest(field=field, value=value):
+                    tty = InertTTY(ready=True)
+                    for node in tty.nodes.values():
+                        setattr(node, name, value)
+                    raw = tty.binding()
+                    tty.environ[self.module._PRIVATE_PTY_ENV] = raw
+                    fixture = tty.fixture()
+                    with patch.object(self.module, "os", tty.os):
+                        self.assertEqual(self.module._private_pty_binding(raw), (41, 42))
+                        self.assertEqual(fixture["_owner_tty_original"](), (41, 42))
+                    self.assertFalse(any(tty.inherit.values()))
+                    self.assertFalse(tty.acquired or tty.closed)
+            tty = InertTTY(ready=True)
+            setattr(tty.nodes[41], name, -1)
+            raw = tty.binding()
+            tty.environ[self.module._PRIVATE_PTY_ENV] = raw
+            fixture = tty.fixture()
+            setattr(tty.nodes[41], name, -2)  # Signed but not the original object.
+            with patch.object(self.module, "os", tty.os):
+                with self.assertRaisesRegex(self.module.SessionError, "descriptor changed"):
+                    self.module._private_pty_binding(raw)
+                with self.assertRaisesRegex(AssertionError, "descriptor changed"):
+                    fixture["_owner_tty_original"]()
+
+        invalid = [(field, value) for field in (0, 5) for value in (-(2 ** 63) - 1, 2 ** 64, True)]
+        invalid += [(field, value) for field in (1, 2, 3, 4) for value in (-1, 2 ** 64, False)]
+        for field, value in invalid:
+            with self.subTest(invalid_field=field, invalid_value=value):
+                tty = InertTTY(ready=True)
+                data = json.loads(tty.binding())
+                data["pair"][0][1][field] = value
+                raw = json.dumps(data, sort_keys=True, separators=(",", ":"))
+                tty.environ[self.module._PRIVATE_PTY_ENV] = raw
+                fixture = tty.fixture()
+                tty.os.fstat = Mock(side_effect=AssertionError("invalid shape reached native observation"))
+                with patch.object(self.module, "os", tty.os):
+                    with self.assertRaisesRegex(self.module.SessionError, "descriptor shape"):
+                        self.module._private_pty_binding(raw)
+                    with self.assertRaisesRegex(AssertionError, "identity shape"):
+                        fixture["_owner_tty_original"]()
+                tty.os.fstat.assert_not_called()
+                self.assertFalse(tty.acquired or tty.closed)
+
     def test_top_pair_exemption_does_not_reach_exec_descendants_or_native_roles(self):
         tty = InertTTY(ready=True)
         tty.environ[self.module._PRIVATE_PTY_ENV] = tty.binding()

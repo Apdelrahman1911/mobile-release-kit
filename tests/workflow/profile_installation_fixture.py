@@ -50,6 +50,44 @@ def completed_case_directory():
     shutil.rmtree(root)
 
 
+def observe_live_post_result_finality(options, result):
+    """Observe a genuine returned command; never settle or retire its journal."""
+    from mobile_release._command_process import (
+        AccountExecutionScope, JournalledCommandBinding, OriginalCommandFinality,
+        OriginalCommandOutcome, RouteHistory,
+    )
+
+    scope, binding = options.get("execution_scope"), options.get("journal_binding")
+    assert type(scope) is AccountExecutionScope, "post-result callback lacks its original scope"
+    outcome = scope.outcome.read()
+    assert type(outcome) is OriginalCommandOutcome, "post-result callback lacks an original outcome"
+    assert type(binding) is JournalledCommandBinding and binding._scope is scope \
+        and outcome.matches(scope, binding), "post-result callback has a foreign binding or outcome"
+    assert outcome.no_target is None and not outcome.execution_unknown \
+        and outcome.termination == "normal-exit" and type(outcome.returncode) is int \
+        and outcome.returncode == 0 and type(result.returncode) is int and result.returncode == 0 \
+        and outcome.result_integrity == "complete", "post-result callback lacks a complete normal result"
+    assert type(outcome.original_finality) is OriginalCommandFinality \
+        and outcome.original_finality._engine is outcome._engine, "post-result original finality is missing"
+    assert all(type(route) is RouteHistory and route.attempted is True and route.retired is True
+               for route in (outcome.create_w, outcome.run_tool)), "post-result routes are not retired"
+    outcome.require_binding(binding)
+    session = binding._session
+    assert type(session) is local_signing.SigningSession and session._command_scope is scope \
+        and session._command_binding is binding and scope._source._lease is session.lease \
+        and scope._used is True and session._command_finished is False \
+        and not session.unresolved and not session.journal_failed, "post-result journal is not the live original"
+    session.assert_owner()
+    operation = session.state["inflight"]
+    assert type(operation) is dict and operation["phase"] == "ARMED" \
+        and operation["nonce"] == scope.nonce.hex(), "post-result original command is not armed"
+    # This only reads the producer's actual identity-bound fence. The product's
+    # exception path, not this callback, must perform settlement and retirement.
+    assert session._read_fence_pair(operation)["outcome"] == "producer-settled", \
+        "post-result producer fence is missing"
+    return scope, binding, outcome
+
+
 def run_case(mode: str) -> dict:
     requested_mode = mode
     mode, _, selected_signal = mode.partition(":")
@@ -61,6 +99,7 @@ def run_case(mode: str) -> dict:
     previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
     assert previous == {signal.SIGINT: signal.default_int_handler, signal.SIGTERM: signal.SIG_DFL}
     captured, references, native_calls = {}, [], []
+    post_result_cleanup = []
     signals, reached, visits, cleanup_calls, target_scopes = [], [], [], [], []
     installation_code = credentials._temporary_profile_installation.__wrapped__.__code__
     signing_code = credentials._temporary_apple_signing_environment.__wrapped__.__code__
@@ -205,6 +244,8 @@ def run_case(mode: str) -> dict:
                 if mode == "body-repeat":
                     send("enclosing-cleanup", signal.SIGTERM)
                 elif mode == "unexpected-cleanup":
+                    assert not post_result_cleanup, "post-result cleanup callback was retried"
+                    post_result_cleanup.append(observe_live_post_result_finality(kwargs, result))
                     reached.append(mode)
                     raise RuntimeError("synthetic native cleanup failure")
                 elif mode == "cleanup-error-signal":
@@ -271,7 +312,17 @@ def run_case(mode: str) -> dict:
                 status = local_signing.signing_status(home=home)
                 assert status["status"] == "pending", "ambiguous/failed cleanup must retain original authority"
                 if mode == "unexpected-cleanup":
-                    assert destination.is_file(), "ambiguous native consumers require retained profiles"
+                    # The callback saw real original finality, not an ambiguous
+                    # consumer. Only the product catch may have settled its
+                    # journal; independently safe profile cleanup must complete.
+                    (scope, binding, outcome), = post_result_cleanup
+                    assert scope.outcome.read() is outcome and outcome.matches(scope, binding)
+                    session = binding._session
+                    assert status["session"] == session.token and session.state["inflight"] is None
+                    assert json.loads((session.path / "state.json").read_bytes())["inflight"] is None
+                    assert (session.path / "intent.json").read_bytes() == session._committed_controls["intent.json"]
+                    assert not local_signing.FENCE_CONTROLS.intersection(path.name for path in session.path.iterdir())
+                    assert not list(destination.parent.iterdir()), "settled profile cleanup did not finish independently"
                 model.after = None
                 model.result_policy = None
                 recovered = local_signing.recover_signing(status["session"], local_signing.CONFIRMATION, home=home, runner=model)

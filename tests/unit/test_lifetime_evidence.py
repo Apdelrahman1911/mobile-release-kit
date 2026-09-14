@@ -266,11 +266,72 @@ class InertCancellationLifecycleTests(unittest.TestCase):
                 self.assertEqual((projected.dispatched, projected.contained, projected.cleanup_complete),
                                  (True, False, False))
                 ledger.assert_not_called()
-                for first in (KeyboardInterrupt("original"), SystemExit(19)):
+                for first in (KeyboardInterrupt("original"), SystemExit(19), GeneratorExit()):
                     with self.subTest(kind=type(first).__name__), self.assertRaises(type(first)) as caught:
                         fatal_cancellation_error(first, owner, "fixed")
                     self.assertIs(caught.exception, first)
                     ledger.assert_not_called()
+                class OtherGeneratorExit(GeneratorExit):
+                    pass
+                for first, selected in ((OtherGeneratorExit(), owner),
+                                        (GeneratorExit(), SimpleNamespace(pid=original_pid))):
+                    projected = fatal_cancellation_error(first, selected, "fixed")
+                    self.assertTrue(projected.fatal)
+                    self.assertFalse(projected.contained)
+                    ledger.assert_not_called()
+            with patch.object(callers, "threading", SimpleNamespace(current_thread=lambda: object())), \
+                    patch.object(DefaultCancellation, "lifetime_ledger", new_callable=PropertyMock) as ledger:
+                ledger.side_effect = AssertionError("foreign-thread ledger property was touched")
+                projected = fatal_cancellation_error(GeneratorExit(), owner, "fixed")
+                self.assertTrue(projected.fatal)
+                ledger.assert_not_called()
+
+            # Exercise real generator.close and the actual copied-scope path,
+            # but model PID observations and close failure: no fork, FD or signal.
+            for close_error in (None, OSError("copied descriptor close failed")):
+                with self.subTest(copy_close_failed=close_error is not None):
+                    closed, primaries = [], []
+                    def close_copy():
+                        closed.append(True)
+                        if close_error is not None:
+                            raise close_error
+                    scope = CleanupScope(owner, lambda: self.fail("parent cleanup was called"),
+                                         owns_cancellation=False, fork_cleanup=close_copy)
+                    def inherited_generator():
+                        try:
+                            with scope:
+                                yield
+                        except BaseException as primary:
+                            primaries.append(primary)
+                            projected = fatal_cancellation_error(primary, owner, "fixed")
+                            if projected is not None:
+                                raise projected from None
+                            raise
+                    stream = inherited_generator()
+                    next(stream)
+                    foreign_pid = SimpleNamespace(getpid=lambda: original_pid + 1)
+                    with patch.object(callers, "os", foreign_pid), \
+                            patch.object(cancellation, "os", foreign_pid), \
+                            patch.object(cancellation, "_FORK_UNSAFE", False), \
+                            patch.object(DefaultCancellation, "lifetime_ledger", new_callable=PropertyMock) as ledger:
+                        ledger.side_effect = AssertionError("inherited close touched the parent ledger")
+                        if close_error is None:
+                            stream.close()
+                            self.assertIs(type(primaries[0]), GeneratorExit)
+                            self.assertFalse(cancellation._FORK_UNSAFE)
+                        else:
+                            with self.assertRaises(ProcessError) as caught:
+                                stream.close()
+                            self.assertIs(primaries[0], close_error)
+                            self.assertTrue(caught.exception.fatal)
+                            self.assertTrue(cancellation._FORK_UNSAFE)
+                        ledger.assert_not_called()
+                        self.assertTrue(scope.claimed and scope.fork_relinquished)
+                        self.assertEqual(closed, [True])
+                    self.assertIsNone(stream.gi_frame)
+            owner.lifetime_ledger._abort(OSError("own-process unresolved resource"))
+            projected = fatal_cancellation_error(GeneratorExit(), owner, "fixed")
+            self.assertTrue(projected.fatal)
             owner.restore()
 
     def test_healthy_guard_cannot_demote_direct_fatal_facts_and_missing_verdict_is_unknown(self):

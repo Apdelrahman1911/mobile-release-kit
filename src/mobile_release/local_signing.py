@@ -1041,8 +1041,9 @@ class SigningSession:
                 return result
         except BaseException:
             if not self._command_finished:
-                # This can discharge only the retained original no-target
-                # outcome. A public exception flag or absent callback cannot.
+                # Only the retained original outcome and its bound fence (or
+                # genuine no-dispatch proof) can settle a lost callback return.
+                # A public exception flag or absent callback cannot do so.
                 try:
                     with self.cancellation.deferred(check_on_exit=False):
                         self.finish_original_command_if_settled()
