@@ -2133,14 +2133,66 @@ def native_failure_diagnostic(text: str, expected: tuple[str, ...], *, deadline:
     return {"schema": 1, "phase": phase, "records": records}
 
 
+CAPTURE_ERROR_CODE_LIMIT = 32
+_CAPTURE_ERROR_MESSAGES = {
+    "command/original aggregate deadline expired": "TIMEOUT",
+    "command cancellation": "CANCELLATION",
+    "late controller cancellation": "CANCELLATION",
+    "finality exceeded original command cutoff": "FINALITY_TIMEOUT",
+    "per-stream or whole-attempt persisted-output limit": "OUTPUT_LIMIT",
+    "subject per-process RSS limit exceeded": "RSS_LIMIT",
+    "native original-parent observation identity mismatch": "ORIGINAL_IDENTITY",
+    "native terminal status disagrees with original wait": "ORIGINAL_WAIT_STATUS",
+    "original wait or complete stream EOF missing": "WAIT_OR_EOF",
+    "stream EOF unavailable at bounded cleanup cutoff": "STREAM_EOF",
+    "late capture/cleanup/finality error": "FINALIZATION",
+    "capture persisted length differs from returned bytes": "CAPTURE_LENGTH",
+    # This also follows a missing original wait; do not invent a nonempty census.
+    "reserved identity did not reach finality": "DOMAIN_FINALITY",
+    "reserved-domain disposal failed": "RETAINED_DOMAIN_DISPOSAL",
+}
+_CAPTURE_EXCEPTION_PREFIXES = (
+    ("collection ", "COLLECTION"),
+    ("numerical cleanup ", "NUMERICAL_CLEANUP"),
+    ("reserved-domain cleanup ", "RETAINED_DOMAIN_CLEANUP"),
+    ("original child stop ", "ORIGINAL_STOP"),
+    ("original child wait ", "ORIGINAL_WAIT"),
+    ("stream close ", "STREAM_CLOSE"),
+    ("selector close ", "SELECTOR_CLOSE"),
+    ("capture fsync ", "CAPTURE_FSYNC"),
+    ("capture persist ", "CAPTURE_PERSIST"),
+    ("capture close ", "CAPTURE_CLOSE"),
+    ("reserved identity census ", "DOMAIN_CENSUS"),
+)
+
+
+def _capture_error_code(reason) -> str:
+    """Finite original-owner categories only; never copy messages or suffixes."""
+    if type(reason) is not str or len(reason) > 160:
+        return "UNCLASSIFIED"
+    code = _CAPTURE_ERROR_MESSAGES.get(reason)
+    if code is not None:
+        return code
+    if re.fullmatch(r"command exited (?:0|-?[1-9][0-9]{0,9})", reason):
+        return "COMMAND_EXIT"
+    for prefix, code in _CAPTURE_EXCEPTION_PREFIXES:
+        if reason.startswith(prefix) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", reason[len(prefix):]):
+            return code
+    return "UNCLASSIFIED"
+
+
 def capture_observations(result) -> dict:
-    """Original capture facts, retained even when later parsing/inspection fails."""
+    """Original facts and bounded reason codes; diagnostics never confer finality."""
+    cleanup_codes = [_capture_error_code(reason) for reason in result.cleanup_errors[:CAPTURE_ERROR_CODE_LIMIT]]
     return {"returncode": result.returncode, "waited": result.waited,
             "stdout_eof": result.stdout_eof, "stderr_eof": result.stderr_eof,
             "domain_finality": result.domain_finality, "timed_out": result.timed_out,
             "cancelled": result.cancelled, "stdout_bytes": len(result.stdout),
             "stderr_bytes": len(result.stderr), "persisted": list(result.persisted),
-            "seconds": round(result.duration, 3), "cleanup_error_count": len(result.cleanup_errors)}
+            "seconds": round(result.duration, 3), "cleanup_error_count": len(result.cleanup_errors),
+            "primary_error_code": None if result.primary_error is None else _capture_error_code(result.primary_error),
+            "cleanup_error_codes": cleanup_codes,
+            "cleanup_error_codes_omitted": len(result.cleanup_errors) - len(cleanup_codes)}
 
 
 def require_original_finality(result) -> None:
@@ -3054,7 +3106,7 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
             value = session.run(list(part.argv), cwd=part.cwd, env=dict(part.env), seconds=900,
                                 output_limit=8 * 1024**2, cpu_seconds=180,
                                  profile=f"native-authority-{phase}" if authority else "ordinary",
-                                 absolute_deadline=cutoff)
+                                 absolute_deadline=cutoff, dispose_retained_domain=poison)
             originals.append(value)
             row["capture"] = capture_observations(value)
             primary = None
@@ -3159,7 +3211,8 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
             row["status"] = "RUNNING"
             value = session.run(list(part.argv), cwd=part.cwd, env=dict(part.env), seconds=900,
                 output_limit=8 * 1024**2, cpu_seconds=300 if healthy and selection == "full" else 180,
-                profile="python-full" if healthy and selection == "full" else "ordinary", absolute_deadline=cutoff)
+                profile="python-full" if healthy and selection == "full" else "ordinary", absolute_deadline=cutoff,
+                dispose_retained_domain=partition in PYTHON_POISON_PARTITIONS)
             originals.append(value)
             row["capture"] = capture_observations(value)
             primary = None
@@ -3281,7 +3334,8 @@ def perform_partitioned_ruby_gate(step: Step, paths: Paths, session, checks, pla
                 check_clock(cutoff)
             row["status"] = "RUNNING"
             value = session.run(list(part.argv), cwd=part.cwd, env=dict(part.env), seconds=part_seconds,
-                output_limit=8 * 1024**2, cpu_seconds=180, profile="ordinary", absolute_deadline=cutoff)
+                output_limit=8 * 1024**2, cpu_seconds=180, profile="ordinary", absolute_deadline=cutoff,
+                dispose_retained_domain=partition in dict(poison))
             originals.append(value)
             row["capture"] = capture_observations(value)
             primary = None

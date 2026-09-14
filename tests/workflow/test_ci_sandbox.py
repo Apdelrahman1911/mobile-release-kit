@@ -261,6 +261,7 @@ class _Collection:
         self.selector_error = None
         self.terminate_exits = True
         self.cleanup_diagnostics = []
+        self.cleanup_action = None
         self.domain_calls, self.final_domain = 0, {}
         self.cancel_at = self.final_time = None
         self.cancel_on_finality = False
@@ -365,9 +366,12 @@ class _Collection:
         if fd - 100 in self.fd_close_errors:
             raise OSError("synthetic capture close")
 
-    def cleanup(self, *, deadline=None):
+    def cleanup(self, *, deadline=None, observe_disposal=False):
         self.events.append(("cleanup",))
         self.events.append(("cleanup-deadline", deadline))
+        self.events.append(("cleanup-observe", observe_disposal))
+        if self.cleanup_action is not None:
+            self.cleanup_action(deadline=deadline, observe_disposal=observe_disposal)
         return list(self.cleanup_diagnostics)
 
     @contextmanager
@@ -400,9 +404,11 @@ class _Collection:
             stack.enter_context(patch.object(self.session, "_argv", return_value=(["/synthetic/entry"], {})))
             yield
 
-    def collect(self, *, seconds=1.0, output_limit=64, latch=True, absolute_deadline=None):
+    def collect(self, *, seconds=1.0, output_limit=64, latch=True, absolute_deadline=None,
+                dispose_retained_domain=False):
         with self.scope():
-            kwargs = dict(cwd=self.session.work, env={}, seconds=seconds, output_limit=output_limit)
+            kwargs = dict(cwd=self.session.work, env={}, seconds=seconds, output_limit=output_limit,
+                          dispose_retained_domain=dispose_retained_domain)
             if absolute_deadline is not None:
                 kwargs["absolute_deadline"] = absolute_deadline
             if latch:
@@ -7515,6 +7521,387 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertFalse(result.finality)
                 self.assertLessEqual(rig.select_calls, 512)
 
+    def test_retained_domain_disposal_requires_explicit_role_and_original_finality(self):
+        for platform in ("linux", "darwin"):
+            for case in ("healthy-residual", "disposed", "residual", "census-error", "cleanup-error",
+                         "no-wait", "no-eof", "late-cancel"):
+                with self.subTest(retained_domain=(platform, case)):
+                    session = session_double(self.module, platform)
+                    rig = _Collection(self.module, session)
+                    rig.snapshot_rows = {(rig.child.pid, rig.child.pid): ((session.uid,) * 3, (session.gid,) * 3, 65536)}
+                    rig.final_domain = {4242}
+
+                    def dispose(**_options):
+                        rig.final_domain = (OSError("synthetic census unavailable") if case == "census-error"
+                                            else {4242} if case == "residual" else {})
+
+                    rig.cleanup_action = dispose
+                    if case == "cleanup-error":
+                        rig.cleanup_diagnostics = ["numerical cleanup OSError"]
+                    elif case == "no-wait":
+                        rig.unreapable = True
+                    elif case == "no-eof":
+                        rig.hold = {0}
+                    elif case == "late-cancel":
+                        rig.cancel_on_finality = True
+                    result = rig.collect(seconds=0.2, dispose_retained_domain=case != "healthy-residual")
+                    self.assertEqual(result.ok, case == "disposed", result)
+                    self.assertEqual(rig.events.count(("cleanup",)), int(case != "healthy-residual"))
+                    if case != "healthy-residual":
+                        cleanup = rig.events.index(("cleanup",))
+                        if case == "no-wait":
+                            self.assertFalse(result.waited or result.finality)
+                            self.assertIs(session._active, rig.child)
+                            self.assertEqual(rig.domain_calls, 1)  # No invented post-wait census.
+                        else:
+                            final = max(i for i, event in enumerate(rig.events) if event[0] == "domain")
+                            self.assertLess(cleanup, final)
+                        if case not in {"no-wait", "no-eof"}:
+                            self.assertLess(rig.events.index(("unregister-eof", 0)), cleanup)
+                            self.assertLess(rig.events.index(("unregister-eof", 1)), cleanup)
+                            self.assertLess(next(i for i, e in enumerate(rig.events) if e[0] == "wait-original"), cleanup)
+                    if case == "disposed":
+                        self.assertTrue(result.waited and result.stdout_eof and result.stderr_eof and result.finality)
+                        self.assertEqual(result.cleanup_errors, ())
+                        with self.assertRaises(dataclasses.FrozenInstanceError):
+                            result.domain_finality = False
+                    else:
+                        self.assertIsNotNone(result.primary_error)
+                        self.assertIsNotNone(session.failure)
+                    if case == "healthy-residual":
+                        self.assertIn("reserved identity did not reach finality", result.cleanup_errors)
+                    elif case == "census-error":
+                        self.assertIn("reserved identity census OSError", result.cleanup_errors)
+                    elif case == "cleanup-error":
+                        self.assertTrue(result.finality)  # Later empty census cannot erase this error.
+                        self.assertEqual(result.primary_error, "reserved-domain disposal failed")
+
+    def test_retained_domain_cleanup_exceptions_are_once_and_cannot_skip_owned_closes(self):
+        for exitcode in (0, 7):
+            for after_effect in (False, True):
+                for error_type in (OSError, KeyboardInterrupt):
+                    with self.subTest(cleanup_once=(exitcode, after_effect, error_type.__name__)):
+                        rig = _Collection(self.module)
+                        rig.exitcode = exitcode
+                        if exitcode:
+                            rig.exit_at = 0.0
+                        rig.final_domain = {4242}
+                        original = error_type("synthetic cleanup exception")
+
+                        def dispose(**_options):
+                            if after_effect:
+                                rig.final_domain = {}
+                            raise original
+
+                        rig.cleanup_action = dispose
+                        result = rig.collect(dispose_retained_domain=True)
+                        self.assertFalse(result.ok)
+                        self.assertEqual(result.primary_error,
+                                         "command exited 7" if exitcode else "reserved-domain disposal failed")
+                        self.assertEqual(rig.session.failure, result.primary_error)
+                        self.assertIn("reserved-domain cleanup " + error_type.__name__, result.cleanup_errors)
+                        self.assertEqual(rig.events.count(("cleanup",)), 1)
+                        self.assertEqual(result.domain_finality, after_effect)
+                        self.assertTrue(result.waited and result.stdout_eof and result.stderr_eof)
+                        self.assertEqual(result.persisted, (5, 0))
+                        self.assertEqual(rig.session.persisted_bytes, 5)
+                        for event in (("stream-close", 0), ("stream-close", 1), ("selector-close",),
+                                      ("capture-fsync", 100), ("capture-fsync", 101),
+                                      ("capture-fstat", 100), ("capture-fstat", 101),
+                                      ("capture-close", 100), ("capture-close", 101)):
+                            self.assertIn(event, rig.events)
+                        self.assertEqual(rig.session.cleanup_errors, list(result.cleanup_errors))
+
+    def test_retained_domain_disposal_never_renews_the_original_success_cutoff(self):
+        for mode in ("relative", "absolute", "aggregate", "equality", "cleanup-failure"):
+            with self.subTest(disposal_cutoff=mode):
+                rig = _Collection(self.module)
+                if mode == "aggregate":
+                    rig.session.deadline = 0.5
+                observed = []
+
+                def dispose(*, deadline, observe_disposal):
+                    observed.append(deadline)
+                    self.assertFalse(observe_disposal)
+                    if mode in {"equality", "cleanup-failure"}:
+                        rig.now = deadline
+                        if mode == "cleanup-failure":
+                            raise OSError("synthetic cleanup reached the old cutoff")
+
+                rig.cleanup_action = dispose
+                result = rig.collect(seconds=0.2 if mode == "relative" else 10,
+                                     absolute_deadline=None if mode == "aggregate" else 0.5,
+                                     dispose_retained_domain=True)
+                self.assertEqual(len(observed), 1)
+                if mode == "relative":
+                    self.assertLess(observed[0], 0.5)
+                    self.assertGreaterEqual(observed[0], 0.2)
+                else:
+                    self.assertEqual(observed[0], 0.5)
+                final = [e for e in rig.events if e[0] == "domain-deadline"][-1]
+                self.assertEqual(final[2], observed[0])
+                self.assertEqual(result.ok, mode not in {"equality", "cleanup-failure"}, result)
+                if mode == "cleanup-failure":
+                    self.assertEqual(result.primary_error, "reserved-domain disposal failed")
+                    self.assertIn("reserved-domain cleanup OSError", result.cleanup_errors)
+                    self.assertFalse(result.finality)
+                self.assertEqual(rig.session.deadline, 0.5 if mode == "aggregate" else 100.0)
+
+    def test_retained_domain_role_validation_precedes_all_preparation(self):
+        cases = ("valid-public", "valid-private", "integer", "none", "text", "native-authority",
+                 "native-control", "python-full", "cancel", "unadmitted", "admitting-public",
+                 "private-outside-admission", "private-admitted", "private-argv", "private-cwd",
+                 "private-env", "private-seconds", "private-output", "private-cpu", "private-deadline")
+        for case in cases:
+            with self.subTest(disposal_role=case):
+                rig = _Collection(self.module)
+                session = rig.session
+                private = case == "valid-private" or case.startswith("private-")
+                argv = [str(session.python), "--synthetic"]
+                options = dict(cwd=session.work, env={}, seconds=10, output_limit=1024,
+                               cpu_seconds=180, latch=not private, dispose_retained_domain=True)
+                if private:
+                    session.admitted, session._admitting = False, True
+                    argv = [str(session.python), "-I", "-S", "-B", str(session.entry), "--fixture", "retained-domain"]
+                if case in {"integer", "none", "text"}:
+                    options["dispose_retained_domain"] = {"integer": 1, "none": None, "text": "true"}[case]
+                elif case in {"native-authority", "native-control", "python-full"}:
+                    options["profile"] = "native-authority-source" if case == "native-authority" else case
+                elif case == "cancel":
+                    options["cancel_after"] = 0.1
+                elif case == "unadmitted":
+                    session.admitted = False
+                elif case == "admitting-public":
+                    session._admitting = True
+                elif case == "private-outside-admission":
+                    session._admitting = False
+                elif case == "private-admitted":
+                    session.admitted = True
+                elif case == "private-argv":
+                    argv[-1] = "held-pipe"
+                elif case == "private-cwd":
+                    options["cwd"] = session.source
+                elif case == "private-env":
+                    options["env"] = {"UNEXPECTED": "value"}
+                elif case == "private-seconds":
+                    options["seconds"] = 11
+                elif case == "private-output":
+                    options["output_limit"] = 1025
+                elif case == "private-cpu":
+                    options["cpu_seconds"] = 181
+                elif case == "private-deadline":
+                    options["absolute_deadline"] = 50.0
+                with rig.scope():
+                    if case.startswith("valid-"):
+                        result = session._run(argv, **options)
+                        self.assertTrue(result.ok, result)
+                        self.assertEqual(rig.events.count(("cleanup",)), 1)
+                    else:
+                        with patch.object(self.module, "_canonical", side_effect=AssertionError("no path preparation")) as canonical:
+                            with self.assertRaises(self.module.SessionError):
+                                session._run(argv, **options)
+                            canonical.assert_not_called()
+                            session._argv.assert_not_called()
+                        self.assertEqual(rig.opened, [])
+                        self.assertFalse(any(e[0] in {"popen", "cleanup"} for e in rig.events))
+
+    def test_retained_domain_admission_requires_fresh_nonvacuous_original_census(self):
+        for platform in ("linux", "darwin"):
+            cases = ("valid", "failed-capture", "missing-marker", "stderr", "idle-error")
+            cases += ("missing", "stale", "duplicate", "empty", "not-empty", "failed-note", "integer-note", "extra") if platform == "darwin" else ("unexpected-note",)
+            for case in cases:
+                with self.subTest(retained_admission=(platform, case)):
+                    session = session_double(self.module, platform)
+                    session.admitted, session._admitting = False, True
+                    observation = {"name": "retained-domain-disposal", "ok": True,
+                                   "saw_reserved_process": True, "empty_census": True}
+                    session.admission_results.append(dict(observation))  # Earlier successful note is never enough.
+                    changes = ({"domain_finality": False} if case == "failed-capture" else
+                               {"stdout": b""} if case == "missing-marker" else
+                               {"stderr": b"unexpected"} if case == "stderr" else {})
+                    result = self.module.CapturedRun(b"MRK_RETAINED_DOMAIN_READY\n", b"", 0, True, True, True,
+                                                     True, False, False, 0.1, None, (), (26, 0))
+                    result = dataclasses.replace(result, **changes)
+
+                    def run(*_args, **_options):
+                        if platform == "darwin" and case not in {"missing", "stale"} or case == "unexpected-note":
+                            value = dict(observation)
+                            if case == "empty":
+                                value["saw_reserved_process"] = False
+                            elif case == "not-empty":
+                                value["empty_census"] = False
+                            elif case == "failed-note":
+                                value["ok"] = False
+                            elif case == "integer-note":
+                                value["ok"] = 1
+                            elif case == "extra":
+                                value["unexpected"] = True
+                            session.admission_results.append(value)
+                            if case == "duplicate":
+                                session.admission_results.append(dict(value))
+                        return result
+
+                    idle_error = OSError("synthetic idle failure") if case == "idle-error" else None
+                    with patch.object(session, "_run", side_effect=run) as captured, \
+                            patch.object(session, "ensure_idle", side_effect=idle_error) as idle:
+                        if case == "valid":
+                            session._retained_domain_preflight()
+                        else:
+                            with self.assertRaises((self.module.SessionError, OSError)):
+                                session._retained_domain_preflight()
+                        captured.assert_called_once_with(
+                            [str(session.python), "-I", "-S", "-B", str(session.entry), "--fixture", "retained-domain"],
+                            cwd=session.work, env={}, seconds=10, output_limit=1024, latch=False,
+                            dispose_retained_domain=True)
+                        self.assertEqual(idle.call_count, int(case in {"valid", "idle-error"}))
+                    note = session.admission_results[-1]
+                    self.assertEqual(note["name"], "retained-domain")
+                    self.assertEqual(note["ok"], case == "valid")
+                    self.assertEqual(note["domain_finality"], result.domain_finality)
+
+        # Exercise the actual _run -> cleanup request -> capture -> preflight
+        # chain with entirely synthetic observations and original child handles.
+        session = session_double(self.module, "darwin")
+        session.admitted, session._admitting = False, True
+        rig = _Collection(self.module, session, stdout=(b"MRK_RETAINED_DOMAIN_READY\n",))
+        rig.snapshot_rows = {(rig.child.pid, rig.child.pid): ((session.uid,) * 3, (session.gid,) * 3, 65536)}
+
+        def observe(*, deadline, observe_disposal):
+            self.assertTrue(observe_disposal)
+            self.assertLessEqual(deadline, session.deadline)
+            session.admission_results.append({"name": "retained-domain-disposal", "ok": True,
+                                              "saw_reserved_process": True, "empty_census": True})
+
+        rig.cleanup_action = observe
+        with rig.scope():
+            session._retained_domain_preflight()
+        self.assertEqual(rig.events.count(("cleanup",)), 1)
+        self.assertTrue(session.admission_results[-1]["ok"])
+
+    def test_retained_domain_fixture_uses_actual_ready_protocol_and_only_original_cleanup(self):
+        for case in ("success", "creation", "readiness", "wrong-ready", "already-exited",
+                     "reader-close", "readiness-expired", "independent-cleanup"):
+            with self.subTest(retained_fixture=case):
+                now = [10.0]
+                original = OSError("synthetic original failure")
+                close_error = OSError("synthetic reader close failure")
+                kill_error, wait_error = KeyboardInterrupt("synthetic kill"), OSError("synthetic wait")
+                reader = SimpleNamespace(close=Mock(side_effect=close_error if case in {"reader-close", "independent-cleanup"} else None))
+                child = SimpleNamespace(stdout=reader, poll=Mock(return_value=0 if case == "already-exited" else None),
+                                        kill=Mock(side_effect=kill_error if case == "independent-cleanup" else None),
+                                        wait=Mock(side_effect=wait_error if case == "independent-cleanup" else None))
+                popen = Mock(side_effect=original if case == "creation" else None, return_value=child)
+
+                def ready(stream, seconds, *, deadline):
+                    self.assertIs(stream, reader)
+                    self.assertEqual((seconds, deadline), (5, 15.0))
+                    if case in {"readiness", "independent-cleanup"}:
+                        raise original
+                    if case == "readiness-expired":
+                        now[0] = deadline
+                    return b"incorrect\n" if case == "wrong-ready" else b"MRK_RETAINED_LEAF_READY\n"
+
+                with patch.multiple(self.module, _ready_line=ready,
+                                    subprocess=SimpleNamespace(Popen=popen, PIPE=-1, DEVNULL=-3),
+                                    os=SimpleNamespace(), signal=SimpleNamespace(),
+                                    time=SimpleNamespace(monotonic=lambda: now[0])), redirect_stdout(io.StringIO()) as output:
+                    if case == "success":
+                        self.assertEqual(self.module._fixture("retained-domain"), 0)
+                    else:
+                        with self.assertRaises(BaseExceptionGroup) as caught:
+                            self.module._fixture("retained-domain")
+                popen.assert_called_once()
+                self.assertEqual(popen.call_args.args[0][-2:], ["--fixture", "retained-domain-leaf"])
+                self.assertEqual(popen.call_args.kwargs, {"stdin": -3, "stdout": -1, "stderr": -3,
+                                                         "close_fds": True, "start_new_session": True, "bufsize": 0})
+                if case == "success":
+                    self.assertEqual(output.getvalue(), "MRK_RETAINED_DOMAIN_READY\n")
+                    reader.close.assert_called_once_with()
+                    child.kill.assert_not_called()
+                    child.wait.assert_not_called()  # This is deliberate retained custody, not a fake join.
+                elif case == "creation":
+                    self.assertIs(caught.exception.exceptions[0], original)
+                    reader.close.assert_not_called()
+                    child.kill.assert_not_called()
+                    child.wait.assert_not_called()
+                else:
+                    reader.close.assert_called_once_with()  # No close retry after a possible after-effect.
+                    self.assertEqual(child.kill.call_count, int(case != "already-exited"))
+                    child.wait.assert_called_once_with(timeout=2)
+                    self.assertEqual(output.getvalue(), "")
+                    if case == "independent-cleanup":
+                        self.assertEqual(caught.exception.exceptions, (original, kill_error, wait_error, close_error))
+                    elif case == "readiness":
+                        self.assertIs(caught.exception.exceptions[0], original)
+                    elif case == "reader-close":
+                        self.assertIs(caught.exception.exceptions[0], close_error)
+
+        marker = b"MRK_RETAINED_LEAF_READY\n"
+        for case in ("success", "short-write", "close-error"):
+            write = Mock(return_value=0 if case == "short-write" else len(marker))
+            close = Mock(side_effect=OSError("synthetic leaf close") if case == "close-error" else None)
+            sleep = Mock()
+            with patch.multiple(self.module, os=SimpleNamespace(write=write, close=close),
+                                time=SimpleNamespace(sleep=sleep), subprocess=SimpleNamespace()):
+                if case == "success":
+                    self.assertEqual(self.module._fixture("retained-domain-leaf"), 0)
+                else:
+                    with self.assertRaises((self.module.SessionError, OSError)):
+                        self.module._fixture("retained-domain-leaf")
+            write.assert_called_once_with(1, marker)
+            self.assertEqual(close.call_count, int(case != "short-write"))
+            if case == "success":
+                close.assert_called_once_with(1)
+                sleep.assert_called_once_with(30)
+            else:
+                sleep.assert_not_called()
+
+        # The real reader must preserve the readiness error when its original
+        # selector also fails to close. Never fall back to native selectors/FDs.
+        for case in ("success", "register", "read", "deadline", "close"):
+            now = [10.0]
+            original, close_error = OSError("synthetic ready read/register"), OSError("synthetic selector close")
+            reader = SimpleNamespace(fileno=lambda: 77, close=Mock())
+            child = SimpleNamespace(stdout=reader, poll=Mock(return_value=None), kill=Mock(), wait=Mock())
+
+            def select(_timeout):
+                if case == "deadline":
+                    now[0] = 15.0
+                    return []
+                return [object()]
+
+            selector = SimpleNamespace(register=Mock(side_effect=original if case == "register" else None),
+                select=select, close=Mock(side_effect=None if case == "success" else close_error))
+            read = Mock(side_effect=original if case == "read" else None, return_value=marker)
+            with patch.multiple(self.module, selectors=SimpleNamespace(DefaultSelector=lambda: selector, EVENT_READ=1),
+                                os=SimpleNamespace(read=read), signal=SimpleNamespace(),
+                                subprocess=SimpleNamespace(Popen=Mock(return_value=child), PIPE=-1, DEVNULL=-3),
+                                time=SimpleNamespace(monotonic=lambda: now[0])), redirect_stdout(io.StringIO()):
+                if case == "success":
+                    self.assertEqual(self.module._fixture("retained-domain"), 0)
+                else:
+                    with self.assertRaises(BaseExceptionGroup) as caught:
+                        self.module._fixture("retained-domain")
+            selector.close.assert_called_once_with()
+            reader.close.assert_called_once_with()
+            if case == "success":
+                child.kill.assert_not_called()
+                child.wait.assert_not_called()
+            else:
+                child.kill.assert_called_once_with()
+                child.wait.assert_called_once_with(timeout=2)
+                first = caught.exception.exceptions[0]
+                if case == "close":
+                    self.assertIs(first, close_error)
+                else:
+                    self.assertIsInstance(first, BaseExceptionGroup)
+                    self.assertIs(first.exceptions[1], close_error)
+                    if case == "deadline":
+                        self.assertIsInstance(first.exceptions[0], self.module.SessionError)
+                        self.assertEqual(str(first.exceptions[0]), "owned control readiness deadline")
+                    else:
+                        self.assertIs(first.exceptions[0], original)
+
     def test_original_timeout_cancellation_and_late_events_latch_failure(self):
         for case in ("aggregate", "relative-timeout", "cancel", "late-timeout", "late-cancel"):
             with self.subTest(case=case):
@@ -8016,9 +8403,14 @@ class CISandboxPureTests(unittest.TestCase):
             ("empty", 100.0, None), ("bad-ack", 100.0, None), ("ack-at-cutoff", 100.0, None),
             ("unknown-census", 100.0, None), ("oversized", 100.0, None),
             ("helper-wait-error", 100.0, None), ("enclosing-expired", 100.0, 10.0),
+            ("observe-sequence", 100.0, 11.5), ("observe-empty", 100.0, None),
+            ("observe-unknown-census", 100.0, None), ("observe-enclosing-expired", 100.0, 10.0),
         ):
             with self.subTest(root_cleanup=(case, aggregate, enclosing)):
                 session = session_double(self.module, "darwin")
+                observe = case.startswith("observe-")
+                case = case.removeprefix("observe-")
+                session._admitting = observe
                 session.deadline = aggregate
                 clock = SimpleNamespace(now=10.0)
                 cutoff = min(aggregate, 14.0, enclosing if enclosing is not None else aggregate)
@@ -8054,12 +8446,22 @@ class CISandboxPureTests(unittest.TestCase):
                     clock.now += seconds
 
                 with patch.multiple(self.module, _domain=census, _small_command=batch,
-                                    os=SimpleNamespace(kill=root_kill), subprocess=SimpleNamespace(),
+                                    os=SimpleNamespace(kill=root_kill, path=SimpleNamespace(basename=os.path.basename)),
+                                    subprocess=SimpleNamespace(),
                                     signal=SimpleNamespace(),
                                     time=SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep)):
-                    errors = session._cleanup(deadline=enclosing)
+                    errors = session._cleanup(deadline=enclosing, observe_disposal=observe)
                 root_kill.assert_not_called()
                 self.assertEqual(errors == [], case in {"sequence", "empty"}, errors)
+                if observe:
+                    self.assertEqual(session.admission_results[0], {
+                        "name": "retained-domain-disposal", "ok": case in {"sequence", "empty"},
+                        "saw_reserved_process": case not in {"empty", "enclosing-expired"},
+                        "empty_census": case in {"sequence", "empty"}})
+                    if errors:
+                        self.assertEqual(session.admission_results[1]["name"], "cleanup-exception")
+                        self.assertFalse(session.admission_results[1]["ok"])
+                        self.assertTrue(session.admission_results[1]["exceptions"])
                 if case == "sequence":
                     self.assertEqual(censuses, [{4242, 4343}, {4343}, set()])
                     self.assertEqual(len(batches), 2)
@@ -8078,6 +8480,16 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertEqual(sleeps, [])  # Receipt alone never proves an empty domain.
                 elif case == "helper-wait-error":
                     self.assertEqual(errors, ["numerical cleanup ExceptionGroup"])
+
+        for platform, admitting, observation in (("linux", True, True), ("darwin", False, True),
+                                                ("darwin", True, 1), ("darwin", True, None)):
+            session = session_double(self.module, platform)
+            session._admitting = admitting
+            with patch.object(self.module, "_domain", side_effect=AssertionError("unadmitted observation")) as census:
+                with self.assertRaises(self.module.SessionError):
+                    session._cleanup(observe_disposal=observation)
+                census.assert_not_called()
+            self.assertEqual(session.admission_results, [])
 
         cases = ("TERM", "KILL", "esrch", "eperm", "unknown-errno", "initial-expiry", "between-targets-expiry",
                  "after-last-expiry", "wrong-platform", "uid-range", "bool-uid", "gid-mismatch", "root-euid",

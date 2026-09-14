@@ -630,6 +630,41 @@ nine singleton partitions under the 3300s job endpoint. These independent ceilin
 are not a performance guarantee or a promise that all maxima sum to fit the gate;
 aggregate exhaustion remains failure.
 
+Only the trusted controller's literal Python/Ruby poison partitions request
+`dispose_retained_domain=True` on their ordinary Session captures. The option is
+an exact boolean, validated before preparation or acquisition; child output and
+expected-negative assertions cannot grant it. Healthy complements, native
+authority/control, `python-full`, generic captures, ABI, compatibility and
+packaged-Ruby gates keep False/default. An unexpected healthy residual still
+fails rather than receiving success-path disposal. The sole private exception
+is the exact fixed retained-domain admission invocation, not an arbitrary fixture.
+
+After the original direct-child wait and both collected stream EOFs, an eligible
+success-shaped capture disposes its retained domain **before** its immutable
+result is returned. macOS reuses the bounded reserved-UID TERM/KILL helper: root
+only observes, while the kernel rechecks signaling authority in the unprivileged
+identity. Linux keeps its existing disposable PID namespace. Disposal uses the
+original command/gate/job cutoff and gains no new failure-tail allowance. Its
+cleanup attempt is fenced before invocation, including exceptional after-effects;
+all independent owned closes and persisted-byte accounting still run. Cleanup
+errors remain failures even if the subsequent mandatory final census is empty.
+
+Hosted admission includes a fixed rc0 retained-child control with a genuine
+bounded private-pipe READY; its 30-second synthetic hold is not readiness evidence.
+The child does not inherit the outer capture streams. macOS additionally requires
+this capture's existing cleanup censuses to observe a nonempty reserved domain
+and then complete emptiness; a helper acknowledgement or stale note cannot pass.
+Linux must not claim a nonempty post-parent census when namespace disposal already
+removed the child. Original wait, both EOFs and genuine outer finality remain
+mandatory. Source inspection or inert doubles do not establish this native proof.
+
+Public capture observations retain a finite `primary_error_code`, at most 32
+ordered `cleanup_error_codes`, the full cleanup count and an omitted-code count.
+Unknown reasons become `UNCLASSIFIED`; raw messages, exception-name suffixes,
+paths, PIDs and child output are not copied into these codes. They diagnose the
+original capture only and cannot authorize success or reconstruct an unobserved
+census outcome. Actual capture/finality checks remain authoritative.
+
 Before any next part, the existing Session must establish the preceding original
 capture's actual wait, stream EOFs, domain finality/disposal and `ensure_idle`.
 Each part retains its own result and byte accounting. Success and failure parsers

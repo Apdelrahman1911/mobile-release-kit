@@ -497,6 +497,108 @@ class CIControllerContractTests(unittest.TestCase):
             return rig.controller.perform_step(step or rig.step, rig.paths, rig.session, rig.checks,
                                                {}, platform, deadline=deadline)
 
+    def test_original_capture_reason_codes_are_finite_bounded_and_never_authorize_finality(self):
+        controller = controller_module()
+        private = "PRIVATE_DIAGNOSTIC_CANARY"
+        stdout = ("reserved-domain disposal failed\n" + private + "\n").encode()
+        stderr = ("reserved identity census OSError\n" + private + "\n").encode()
+        fields = dict(ok=True, returncode=0, waited=True, stdout_eof=True, stderr_eof=True,
+            domain_finality=True, timed_out=False, cancelled=False, primary_error=None, cleanup_errors=(),
+            stdout=stdout, stderr=stderr, persisted=(len(stdout), len(stderr)), duration=0.01)
+        original = SimpleNamespace(**fields)
+        observed = controller.capture_observations(original)
+        self.assertIsNone(observed["primary_error_code"])  # Child text cannot supply owner reasons.
+        self.assertEqual(observed["cleanup_error_codes"], [])
+        self.assertEqual((observed["cleanup_error_count"], observed["cleanup_error_codes_omitted"]), (0, 0))
+        controller.require_original_finality(original)
+
+        known = (
+            ("command exited 7", "COMMAND_EXIT"), ("command exited -9", "COMMAND_EXIT"),
+            ("command/original aggregate deadline expired", "TIMEOUT"),
+            ("command cancellation", "CANCELLATION"), ("late controller cancellation", "CANCELLATION"),
+            ("finality exceeded original command cutoff", "FINALITY_TIMEOUT"),
+            ("per-stream or whole-attempt persisted-output limit", "OUTPUT_LIMIT"),
+            ("subject per-process RSS limit exceeded", "RSS_LIMIT"),
+            ("native original-parent observation identity mismatch", "ORIGINAL_IDENTITY"),
+            ("native terminal status disagrees with original wait", "ORIGINAL_WAIT_STATUS"),
+            ("original wait or complete stream EOF missing", "WAIT_OR_EOF"),
+            ("stream EOF unavailable at bounded cleanup cutoff", "STREAM_EOF"),
+            ("late capture/cleanup/finality error", "FINALIZATION"),
+            ("capture persisted length differs from returned bytes", "CAPTURE_LENGTH"),
+            ("reserved identity did not reach finality", "DOMAIN_FINALITY"),
+            ("reserved-domain disposal failed", "RETAINED_DOMAIN_DISPOSAL"),
+            ("collection OSError", "COLLECTION"), ("collection " + private, "COLLECTION"),
+            ("numerical cleanup ExceptionGroup", "NUMERICAL_CLEANUP"),
+            ("reserved-domain cleanup KeyboardInterrupt", "RETAINED_DOMAIN_CLEANUP"),
+            ("original child stop OSError", "ORIGINAL_STOP"),
+            ("original child wait TimeoutError", "ORIGINAL_WAIT"),
+            ("stream close OSError", "STREAM_CLOSE"), ("selector close OSError", "SELECTOR_CLOSE"),
+            ("capture fsync OSError", "CAPTURE_FSYNC"), ("capture persist OSError", "CAPTURE_PERSIST"),
+            ("capture close OSError", "CAPTURE_CLOSE"), ("reserved identity census OSError", "DOMAIN_CENSUS"),
+        )
+        for reason, code in known:
+            for primary in (True, False):
+                with self.subTest(reason=reason, primary=primary):
+                    original = SimpleNamespace(**{**fields, "primary_error": reason if primary else None,
+                        "cleanup_errors": () if primary else (reason,)})
+                    before = dict(vars(original))
+                    observed = controller.capture_observations(original)
+                    self.assertEqual(observed["primary_error_code"], code if primary else None)
+                    self.assertEqual(observed["cleanup_error_codes"], [] if primary else [code])
+                    self.assertEqual(observed["cleanup_error_count"], 0 if primary else 1)
+                    self.assertEqual(observed["cleanup_error_codes_omitted"], 0)
+                    reported = controller.failure_details(original)
+                    for key, value in observed.items():
+                        self.assertEqual(reported[key], value)
+                    self.assertNotIn(reason, json.dumps(reported))
+                    self.assertNotIn(private, json.dumps(reported))
+                    with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                        controller.require_original_finality(original)
+                    self.assertEqual(vars(original), before)
+
+        class Unformattable:
+            def __str__(self):
+                raise AssertionError("diagnostics cannot format an arbitrary reason")
+
+        unknown = (private + " /private/secret pid=4242", "collection OSError: " + private,
+            "collection OSError\n" + private, "collection \u03bbError", "collection " + "A" * 81,
+            "command exited +7", "command exited 07", "command exited 12345678901",
+            "command exited 7 /private/secret", "reserved-domain disposal failed " + private,
+            "reserved identity census ", "x" * 65536, b"collection OSError", None, True, Unformattable())
+        for index, reason in enumerate(unknown):
+            with self.subTest(unclassified=index):
+                original = SimpleNamespace(**{**fields, "primary_error": reason, "cleanup_errors": (reason,)})
+                observed = controller.capture_observations(original)
+                self.assertEqual(observed["primary_error_code"], None if reason is None else "UNCLASSIFIED")
+                self.assertEqual(observed["cleanup_error_codes"], ["UNCLASSIFIED"])
+                for hidden in (private, "/private/", "4242", "OSError", "\u03bbError"):
+                    self.assertNotIn(hidden, json.dumps(observed))
+                with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                    controller.require_original_finality(original)
+
+        self.assertEqual(controller.CAPTURE_ERROR_CODE_LIMIT, 32)
+        for count in (0, 1, 32, 33, 80):
+            with self.subTest(cleanup_count=count):
+                reasons = tuple("stream close OSError" if index % 2 else private for index in range(count))
+                original = SimpleNamespace(**{**fields, "primary_error": "reserved-domain disposal failed",
+                    "cleanup_errors": reasons})
+                with patch.object(controller, "_capture_error_code", wraps=controller._capture_error_code) as classify:
+                    observed = controller.capture_observations(original)
+                self.assertEqual([call.args[0] for call in classify.call_args_list],
+                    [*reasons[:32], original.primary_error])
+                self.assertEqual(observed["cleanup_error_codes"],
+                    ["STREAM_CLOSE" if index % 2 else "UNCLASSIFIED" for index in range(min(count, 32))])
+                self.assertEqual((observed["cleanup_error_count"], observed["cleanup_error_codes_omitted"]),
+                    (count, max(0, count - 32)))
+                self.assertLess(len(json.dumps(observed)), 4096)
+                self.assertNotIn(private, json.dumps(observed))
+                observed["primary_error_code"] = None
+                observed["cleanup_error_codes"].clear()  # Publication cannot alter the original evidence.
+                self.assertEqual(original.cleanup_errors, reasons)
+                self.assertEqual(original.primary_error, "reserved-domain disposal failed")
+                with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                    controller.require_original_finality(original)
+
     def test_native_gate_keeps_every_original_capture_record_and_one_source_wheel_cutoff(self):
         for phase, original_deadline, cutoff in (("source", 2500.0, 1000.0), ("wheel", 800.0, 800.0)):
             with self.subTest(phase=phase):
@@ -531,6 +633,7 @@ class CIControllerContractTests(unittest.TestCase):
                 self.assertEqual(calls[1][2]["cwd"], rig.paths.work)
                 self.assertEqual(calls[1][2]["profile"], "ordinary")
                 for index, (_, _, options) in enumerate(calls):
+                    self.assertIs(options["dispose_retained_domain"], parts[index] in dict(_PYTHON_POISON_FIXTURES))
                     self.assertEqual(options["absolute_deadline"], cutoff)
                     self.assertEqual(options["seconds"], 900)
                     self.assertEqual(options["cpu_seconds"], 180)
@@ -693,6 +796,7 @@ class CIControllerContractTests(unittest.TestCase):
                 entry = str(ROOT / "tests/workflow/run_native_profile_checks.py")
                 for index, (_, argv, options) in enumerate(calls):
                     profiles.append(options["profile"])
+                    self.assertIs(options["dispose_retained_domain"], parts[index] in dict(_PYTHON_POISON_FIXTURES))
                     self.assertEqual(options["profile"], "python-full" if index == 0 and phase == "source" else "ordinary")
                     self.assertEqual(options["cpu_seconds"], 300 if index == 0 and phase == "source" else 180)
                     self.assertEqual(options["seconds"], 900)
@@ -837,7 +941,8 @@ class CIControllerContractTests(unittest.TestCase):
             raw = ("MRK_CHECK_RESULT=" + json.dumps(report) + "\n").encode()
             return SimpleNamespace(ok=ok, returncode=1, waited=True, stdout_eof=True, stderr_eof=True,
                                    domain_finality=True, timed_out=False, cancelled=False,
-                                   stdout=raw, stderr=stderr, persisted=(len(raw), len(stderr)), duration=0.1, cleanup_errors=())
+                                   stdout=raw, stderr=stderr, persisted=(len(raw), len(stderr)), duration=0.1,
+                                   primary_error="command exited 1", cleanup_errors=())
 
         value = controller.failure_details(capture([callback]), step, paths, checks=checks, deadline=1000.0)
         self.assertEqual(value["failure_callbacks"], [callback])

@@ -3716,8 +3716,19 @@ class Session:
         self._headroom()
         _remaining(cutoff)
 
-    def _cleanup(self, *, deadline: float | None = None) -> list[str]:
+    def _cleanup(self, *, deadline: float | None = None, observe_disposal: bool = False) -> list[str]:
+        if (type(observe_disposal) is not bool or observe_disposal
+                and (self.platform != "darwin" or not getattr(self, "_admitting", False))):
+            raise SessionError("retained-domain observation requires fixed Darwin admission")
         errors = []
+        note = None
+        if observe_disposal:
+            # Only the original admission capture requests this note. These
+            # are observations of the existing root censuses, not receipts
+            # from the numerical helper and never authority for a signal.
+            note = {"name": "retained-domain-disposal", "ok": False,
+                    "saw_reserved_process": False, "empty_census": False}
+            self.admission_results.append(note)
         if self.platform == "darwin":
             try:
                 # Root observes only; kernel-authorized signalling stays in U.
@@ -3729,7 +3740,12 @@ class Session:
                 kind = "TERM"
                 while True:
                     targets = sorted(_domain("darwin", self.uid, deadline=cutoff))
+                    if note is not None:
+                        note["saw_reserved_process"] |= bool(targets)
                     if not targets:
+                        _remaining(cutoff)
+                        if note is not None:
+                            note["empty_census"] = True
                         break  # Actual root census, not a helper receipt.
                     if len(targets) > 4096:
                         raise SessionError("numerical cleanup batch exceeds fixed bound")
@@ -3748,11 +3764,13 @@ class Session:
                 if getattr(self, "_admitting", False):
                     self.admission_results.append({"name": "cleanup-exception", "ok": False,
                                                    "exceptions": _exception_notes(exc)})
+        if note is not None:
+            note["ok"] = not errors and note["empty_census"]
         return errors
 
     def run(self, argv: list[str], *, cwd: str | Path, env: dict[str, str], seconds: float,
             output_limit: int = 8 * MiB, cpu_seconds: int = 180, profile: str = "ordinary",
-            absolute_deadline: float | None = None) -> CapturedRun:
+            absolute_deadline: float | None = None, dispose_retained_domain: bool = False) -> CapturedRun:
         self._guard()
         if not self.admitted:
             raise SessionError("native admission has not completed")
@@ -3763,7 +3781,7 @@ class Session:
         try:
             return self._run(argv, cwd=cwd, env=env, seconds=seconds,
                              output_limit=output_limit, cpu_seconds=cpu_seconds, latch=True, profile=profile,
-                             absolute_deadline=absolute_deadline)
+                             absolute_deadline=absolute_deadline, dispose_retained_domain=dispose_retained_domain)
         except BaseException:
             if type(profile) is str and profile in _NATIVE_PROFILES:
                 self._fail("native authority invocation failed before a complete capture")
@@ -3776,8 +3794,21 @@ class Session:
     def _run(self, argv: list[str], *, cwd: str | Path, env: dict[str, str], seconds: float,
              output_limit: int = 8 * MiB, cpu_seconds: int = 180, latch: bool,
              cancel_after: float | None = None, profile: str = "ordinary",
-             absolute_deadline: float | None = None) -> CapturedRun:
+             absolute_deadline: float | None = None, dispose_retained_domain: bool = False) -> CapturedRun:
         self._guard()
+        if type(dispose_retained_domain) is not bool:
+            raise SessionError("retained-domain disposal requires an exact boolean")
+        if dispose_retained_domain:
+            public = latch is True and self.admitted and not self._admitting
+            admission = (latch is False and self._admitting and not self.admitted
+                         and type(argv) is list and all(type(arg) is str for arg in argv)
+                         and argv == [str(self.python), "-I", "-S", "-B", str(self.entry),
+                                      "--fixture", "retained-domain"]
+                         and cwd == self.work and env == {} and seconds == 10
+                         and output_limit == 1024 and cpu_seconds == 180 and absolute_deadline is None)
+            if (type(profile) is not str or profile != "ordinary" or cancel_after is not None
+                    or not (public or admission)):
+                raise SessionError("retained-domain disposal is outside its fixed ordinary capture role")
         bound = self.deadline
         if absolute_deadline is not None:
             if (type(absolute_deadline) not in (int, float) or not math.isfinite(absolute_deadline)
@@ -3881,6 +3912,22 @@ class Session:
             else:
                 errors.append(message)
 
+        def cleanup_once(endpoint: float) -> None:
+            nonlocal cleanup_done
+            if cleanup_done:
+                return
+            cleanup_done = True  # An after-effect exception cannot authorize a retry.
+            before = len(errors)
+            try:
+                options = {"deadline": endpoint}
+                if dispose_retained_domain and not latch and self.platform == "darwin":
+                    options["observe_disposal"] = True
+                errors.extend(self._cleanup(**options))
+            except BaseException as exc:
+                errors.append(f"reserved-domain cleanup {type(exc).__name__}")
+            if len(errors) != before and failure is None:
+                fail("reserved-domain disposal failed")
+
         try:
             sel = selectors.DefaultSelector()
             for suffix in ("stdout", "stderr"):
@@ -3972,8 +4019,7 @@ class Session:
                         child.kill()
                         kill_sent = True
                     if code is not None and not cleanup_done:
-                        errors.extend(self._cleanup(deadline=min(bound, stop_at + 8)))
-                        cleanup_done = True
+                        cleanup_once(min(bound, stop_at + 8))
                     if now - stop_at >= 8:
                         if not all(eof):
                             errors.append("stream EOF unavailable at bounded cleanup cutoff")
@@ -4048,8 +4094,11 @@ class Session:
                         self._native_abort_stamp(abort, "wall_wait")
                 except BaseException as exc:
                     errors.append(f"original child wait {type(exc).__name__}")
-                if failure is not None and not cleanup_done:
-                    errors.extend(self._cleanup(deadline=final_cutoff))
+                if failure is not None or (dispose_retained_domain and waited and code == 0 and all(eof)):
+                    # Fixed intentional-UNKNOWN singleton success needs outer
+                    # disposal too. Keep the ORIGINAL success cutoff even if
+                    # this cleanup fails; no fresh failure tail is earned.
+                    cleanup_once(final_cutoff)
                 for stream in (child.stdout, child.stderr):
                     try:
                         stream.close()
@@ -4980,6 +5029,7 @@ class Session:
                 if not basic:
                     raise SessionError(f"collector admission case failed: {name}")
                 capture_note["ok"] = True
+            self._retained_domain_preflight()
             self._owner_loss_preflight()
         except BaseException as exc:
             failures.append(exc)
@@ -4991,6 +5041,32 @@ class Session:
                     failures.append(exc)
         if failures:
             raise BaseExceptionGroup("native admission and owned listener cleanup failed", failures)
+
+    def _retained_domain_preflight(self) -> None:
+        """Original rc0/EOF with intentional retained custody needs disposal.
+
+        The Darwin note observes the same cleanup censuses; no extra lookup or
+        child-provided receipt can make an empty/vacuous control pass.
+        """
+        first = len(self.admission_results)
+        result = self._run([str(self.python), "-I", "-S", "-B", str(self.entry),
+                            "--fixture", "retained-domain"], cwd=self.work, env={},
+                           seconds=10, output_limit=1024, latch=False, dispose_retained_domain=True)
+        observations = self.admission_results[first:]
+        note = self._note_capture("retained-domain", result)
+        if not result.ok or result.stdout != b"MRK_RETAINED_DOMAIN_READY\n" or result.stderr:
+            raise SessionError("retained-domain original capture/disposal control failed")
+        if self.platform == "darwin":
+            if (len(observations) != 1 or type(observations[0]) is not dict
+                    or set(observations[0]) != {"name", "ok", "saw_reserved_process", "empty_census"}
+                    or observations[0]["name"] != "retained-domain-disposal"
+                    or any(observations[0][field] is not True
+                           for field in ("ok", "saw_reserved_process", "empty_census"))):
+                raise SessionError("retained-domain control did not observe genuine original disposal")
+        elif observations:
+            raise SessionError("namespace disposal control gained an unrequested census observation")
+        self.ensure_idle()
+        note["ok"] = True
 
     def _trusted_entry(self, policy: Path, tail: list[str]) -> list[str]:
         return [str(self.python), "-I", "-S", "-B", str(self.entry), "--enter", self.platform,
@@ -5458,7 +5534,9 @@ def _ready_line(stream, seconds: float, *, deadline: float | None = None) -> byt
     if deadline is not None:
         _remaining(deadline)
         cutoff = min(cutoff, deadline)
-    with selectors.DefaultSelector() as sel:
+    sel, result, errors = None, None, []
+    try:
+        sel = selectors.DefaultSelector()
         sel.register(stream, selectors.EVENT_READ)
         while time.monotonic() < cutoff:
             if not sel.select(min(0.1, max(0, cutoff - time.monotonic()))):
@@ -5470,10 +5548,25 @@ def _ready_line(stream, seconds: float, *, deadline: float | None = None) -> byt
             if b"\n" in data:
                 if deadline is not None:
                     _remaining(cutoff)
-                return bytes(data)
+                result = bytes(data)
+                break
             if len(data) == 256:
                 raise SessionError("owned control line exceeds bound")
-    raise SessionError("owned control readiness deadline")
+        else:
+            raise SessionError("owned control readiness deadline")
+    except BaseException as exc:
+        errors.append(exc)
+    if sel is not None:
+        try:
+            sel.close()  # Exactly once; a close exception cannot replace the read error.
+        except BaseException as exc:
+            errors.append(exc)
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise BaseExceptionGroup("owned control readiness and selector cleanup failed", errors)
+    _remaining(cutoff)
+    return result
 
 
 def _signal_subject(target: int) -> None:
@@ -6208,6 +6301,55 @@ def _cleanup_numeric(uid: int, gid: int, kind: str, targets: list[int], deadline
 
 
 def _fixture(name: str) -> int:
+    if name == "retained-domain-leaf":
+        marker = b"MRK_RETAINED_LEAF_READY\n"
+        if os.write(1, marker) != len(marker):
+            raise SessionError("retained-domain leaf readiness write was incomplete")
+        os.close(1)  # This private readiness pipe is not the outer capture pipe.
+        time.sleep(30)  # Finite retained lifetime, never readiness evidence.
+        return 0
+    if name == "retained-domain":
+        started = time.monotonic()
+        ready_cutoff, cleanup_cutoff = started + 5, started + 7
+        child, reader_close_attempted, errors = None, False, []
+        try:
+            _remaining(ready_cutoff)
+            child = subprocess.Popen([sys.executable, "-I", "-S", "-B", str(Path(__file__).resolve()),
+                                      "--fixture", "retained-domain-leaf"],
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                     close_fds=True, start_new_session=True, bufsize=0)
+            if _ready_line(child.stdout, 5, deadline=ready_cutoff) != b"MRK_RETAINED_LEAF_READY\n":
+                raise SessionError("retained-domain leaf did not publish exact readiness")
+            if child.poll() is not None:
+                raise SessionError("retained-domain leaf exited before parent release")
+            reader_close_attempted = True
+            child.stdout.close()
+            _remaining(ready_cutoff)
+            print("MRK_RETAINED_DOMAIN_READY", flush=True)
+            _remaining(ready_cutoff)
+        except BaseException as exc:
+            errors.append(exc)
+        if not errors:
+            # Deliberately leave this child for the independently authorized
+            # enclosing domain. This rc0 is not an original child wait receipt.
+            return 0
+        if child is not None:
+            try:
+                if child.poll() is None:
+                    child.kill()  # Original Popen only, never a discovered PID.
+            except BaseException as exc:
+                errors.append(exc)
+            try:
+                child.wait(timeout=max(0.0, min(2, cleanup_cutoff - time.monotonic())))
+            except BaseException as exc:
+                errors.append(exc)
+            if not reader_close_attempted:
+                reader_close_attempted = True
+                try:
+                    child.stdout.close()
+                except BaseException as exc:
+                    errors.append(exc)
+        raise BaseExceptionGroup("retained-domain readiness/original-child cleanup failed", errors)
     if name in {"positive", "nonzero"}:
         print("PASS", flush=True)
         return 7 if name == "nonzero" else 0

@@ -227,7 +227,9 @@ class NativeProcessCIIntegrationTests(unittest.TestCase):
                 for index, (_, partition, argv, options) in enumerate(calls):
                     self.assertEqual(argv, (*rig.step.argv, "--name", "/\\A(?:" + "|".join(rig.partitions[partition]) + ")\\z/"))
                     self.assertEqual(options, {"cwd": rig.paths.work, "env": dict(rig.step.env), "seconds": 120,
-                        "output_limit": 8 * 1024**2, "cpu_seconds": 180, "profile": "ordinary", "absolute_deadline": cutoff})
+                        "output_limit": 8 * 1024**2, "cpu_seconds": 180, "profile": "ordinary", "absolute_deadline": cutoff,
+                        "dispose_retained_domain": index > 0})
+                    self.assertIs(options["dispose_retained_domain"], index > 0)
                     self.assertIs(rig.parsed[index], rig.captures[index])
                     self.assertEqual(rows[index]["capture"], rig.controller.capture_observations(rig.captures[index]))
                     position = rig.events.index(calls[index])
@@ -448,7 +450,9 @@ class NativeProcessCIIntegrationTests(unittest.TestCase):
                         part_cutoff = min(cutoff, 10.0 + index * 10.0 + part_seconds) if native_capture else cutoff
                         self.assertEqual(argv, (*rig.step.argv, "--name", "/\\A(?:" + "|".join(rig.partitions[partition]) + ")\\z/"))
                         self.assertEqual(options, {"cwd": rig.paths.work, "env": dict(rig.step.env), "seconds": part_seconds,
-                            "output_limit": 8 * 1024**2, "cpu_seconds": 180, "profile": "ordinary", "absolute_deadline": part_cutoff})
+                            "output_limit": 8 * 1024**2, "cpu_seconds": 180, "profile": "ordinary", "absolute_deadline": part_cutoff,
+                            "dispose_retained_domain": index > 0})
+                        self.assertIs(options["dispose_retained_domain"], index > 0)
                         self.assertIs(rig.parsed[index], rig.captures[index])
                         self.assertEqual(rows[index]["capture"], rig.controller.capture_observations(rig.captures[index]))
                         position = rig.events.index(calls[index])
@@ -744,6 +748,7 @@ class NativeProcessCIIntegrationTests(unittest.TestCase):
             self.assertTrue(all(call.kwargs == {"deadline": 12.0} for call in session.ensure_idle.call_args_list))
             self.assertEqual(session.run.call_args.kwargs["absolute_deadline"], 12.0)
             self.assertEqual(session.run.call_args.kwargs["profile"], "ordinary")
+            self.assertIs(session.run.call_args.kwargs.get("dispose_retained_domain", False), False)
             self.assertEqual(rows[0]["status"], "FAIL")
             self.assertEqual(rows[0]["capture"]["stdout_bytes"], len(result.stdout))
             self.assertNotIn("PRIVATE", json.dumps(rows))
@@ -757,6 +762,8 @@ class NativeProcessCIIntegrationTests(unittest.TestCase):
         self.assertIs(originals[1], second)
         self.assertEqual(len(rows), 2)
         self.assertTrue(all(row["status"] == "FINALIZED" for row in rows))
+        self.assertTrue(all(call.kwargs.get("dispose_retained_domain", False) is False
+                            for call in session.run.call_args_list))
 
     def test_compatibility_requires_matching_original_declaration_before_any_control(self):
         controller = controller_module()
@@ -819,6 +826,7 @@ class NativeProcessCIIntegrationTests(unittest.TestCase):
                         self.assertEqual(captures[1][1][-1], f"--compat-312-{phase}")
                     self.assertTrue(all(item[2]["absolute_deadline"] == 130.0 for item in captures))
                     self.assertTrue(all(item[2]["profile"] == "ordinary" for item in captures))
+                    self.assertTrue(all(item[2].get("dispose_retained_domain", False) is False for item in captures))
                     self.assertNotIn("PRIVATE", json.dumps(result.details))
 
     def test_compiler_version_is_bound_to_actual_family_and_original_finality(self):
@@ -912,6 +920,7 @@ class NativeProcessCIIntegrationTests(unittest.TestCase):
                     self.assertEqual(retain.call_count, int(phase == "source"))
                     self.assertTrue(all(item[2]["absolute_deadline"] == 310.0 and item[2]["profile"] == "ordinary"
                                         for item in captures))
+                    self.assertTrue(all(item[2].get("dispose_retained_domain", False) is False for item in captures))
                     if len(captures) >= 4:
                         self.assertEqual([item[0] for item in events[:6]],
                                          ["capture", "capture", "compare", "capture", "compare", "capture"])
@@ -1101,6 +1110,7 @@ class NativeProcessCIIntegrationTests(unittest.TestCase):
                     captures = [item for item in events if item[0] == "capture"]
                     self.assertTrue(all(item[3]["absolute_deadline"] == 310.0 and item[3]["profile"] == "ordinary"
                                         for item in captures))
+                    self.assertTrue(all(item[3].get("dispose_retained_domain", False) is False for item in captures))
                     self.assertTrue(all(item[2]["deadline"] == 310.0 for item in events if item[0] == "idle"))
                     if phase == "source":
                         self.assertEqual([item[1] for item in captures], ["suite"])
@@ -1914,7 +1924,7 @@ class CICoordinatorResultTests(unittest.TestCase):
         captured = SimpleNamespace(returncode=7, waited=True, stdout_eof=True, stderr_eof=True,
                                    domain_finality=True, timed_out=False, cancelled=False,
                                    stdout=text.encode(), stderr=b"",
-                                   persisted=(len(text), 0), duration=0.2, cleanup_errors=())
+                                   persisted=(len(text), 0), duration=0.2, primary_error="command exited 7", cleanup_errors=())
         details = controller.failure_details(captured, step, paths)
         self.assertEqual(details["returncode"], 7)
         self.assertEqual(details["failed_tests"], sorted([known, assertion]))
