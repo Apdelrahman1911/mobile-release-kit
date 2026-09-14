@@ -2350,7 +2350,8 @@ class SigningMatrixControllerTests(unittest.TestCase):
         def scope():
             with patch.multiple(controller, time=SimpleNamespace(monotonic=lambda: rig.clock),
                                 _module=Mock(return_value=rig.contract), check_capacity=Mock(), read_regular=read,
-                                finalized_matrix_outputs=finalized, publish_matrix_proof=publish):
+                                finalized_matrix_outputs=finalized, publish_matrix_proof=publish), \
+                    patch.object(contract, "time", SimpleNamespace(monotonic=lambda: rig.clock)):
                 yield
         rig.scope_context = scope
         return rig

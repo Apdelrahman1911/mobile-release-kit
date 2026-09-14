@@ -515,7 +515,15 @@ class ProfileInstallationSignalTests(unittest.TestCase):
         # than communicate(), PID polling or post-wait group cleanup.
         process = run_owned(command, timeout=profile_signal_timeout(mode), capture=True, output_limit=64 * 1024,
                             environ={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C", "LANG": "C"})
-        self.assertEqual(process.returncode, 0, process.stderr)
+        try:
+            self.assertEqual(process.returncode, 0, process.stderr)
+        except AssertionError as error:
+            try:
+                from workflow import local_signing_matrix_diagnostic
+                local_signing_matrix_diagnostic.attach_profile_capture(error, process, mode)
+            except BaseException:
+                pass  # Preserve the original assertion even if optional retention fails.
+            raise
         self.assertFalse(process.stderr)
         result = json.loads(process.stdout)
         self.assertTrue(result["ownedFilesAndDescriptorsGoneBeforeFallback"])

@@ -868,6 +868,7 @@ class SigningMatrixDiagnostic:
     identifiers: tuple[str, ...]
     regression_ids: tuple[str, ...]
     files: tuple[str, ...]
+    child_bindings: tuple = ()
 
 
 def required_gate_ids(platform: str, scope: str = "platform") -> tuple[str, ...]:
@@ -1840,7 +1841,28 @@ def _signing_matrix_diagnostic_scope(scope) -> bool:
             and all(type(value) is str and len(value) <= 256 and re.fullmatch(
                 r"(?:tests|\.github/scripts|src/mobile_release)/(?:[A-Za-z_][A-Za-z0-9_-]*/)*[A-Za-z_][A-Za-z0-9_-]*\.py",
                 value) for value in scope.files)
-            and len(set(scope.files)) == len(scope.files))
+            and len(set(scope.files)) == len(scope.files)
+            and _signing_matrix_child_bindings(scope))
+
+
+def _signing_matrix_child_bindings(scope) -> bool:
+    if type(scope.child_bindings) is not tuple or len(scope.child_bindings) > len(scope.identifiers):
+        return False
+    seen = set()
+    steps = {"healthy", "seed", "recovery", "semantic-main", "semantic-resolution"}
+    for row in scope.child_bindings:
+        if (type(row) is not tuple or len(row) != 3 or type(row[0]) is not str
+                or row[0] not in scope.identifiers or row[0] in seen or type(row[1]) is not str
+                or row[1] not in {"profile-signal", "semantic-worker"}
+                or type(row[2]) is not tuple or not row[2]
+                or any(type(value) is not str or not 0 < len(value) <= 64 for value in row[2])
+                or len(set(row[2])) != len(row[2])):
+            return False
+        if (row[1] == "profile-signal" and (row[0] not in scope.regression_ids or len(row[2]) != 1)
+                or row[1] == "semantic-worker" and (row[0] in scope.regression_ids or not set(row[2]) <= steps)):
+            return False
+        seen.add(row[0])
+    return True
 
 
 def signing_matrix_failure(raw: bytes, scope: SigningMatrixDiagnostic, *, deadline: float) -> dict | None:
@@ -1850,6 +1872,7 @@ def signing_matrix_failure(raw: bytes, scope: SigningMatrixDiagnostic, *, deadli
         if type(raw) is not bytes or not 0 < len(raw) <= 65536 or not _signing_matrix_diagnostic_scope(scope):
             return None
         marker = b"MRK_SIGNING_MATRIX_FAILURE="
+        worker_marker = b"MRK_SIGNING_MATRIX_WORKER_FAILURE="
         stages = {"admission", "helper", "typed-result", "persist", "cleanup", "postconditions", "publication"}
         categories = {"os-error", "assertion-error", "value-error", "type-error", "memory-error", "exception", "base-exception"}
 
@@ -1859,20 +1882,41 @@ def signing_matrix_failure(raw: bytes, scope: SigningMatrixDiagnostic, *, deadli
                             and type(row["file"]) is str and row["file"] in scope.files
                             and type(row["line"]) is int and 0 < row["line"] < 1_000_000 for row in value))
 
-        observed = None
+        bindings = {identifier: (role, selectors) for identifier, role, selectors in scope.child_bindings}
+        observed = worker = None
+        worker_bytes = 0
         for line in raw.splitlines(keepends=True):
             check_clock(deadline)
-            if not line.startswith(marker):
+            is_worker = line.startswith(worker_marker)
+            if not is_worker and not line.startswith(marker):
                 continue
-            if len(line) > 2048 or not line.endswith(b"\n") or observed is not None:
+            prefix = worker_marker if is_worker else marker
+            if (len(line) > (768 if is_worker else 2048) or not line.endswith(b"\n")
+                    or observed is not None or is_worker and worker is not None):
                 return None
             try:
-                value = strict_json(line[len(marker):-1].decode("ascii"))
+                value = strict_json(line[len(prefix):-1].decode("ascii"))
             except (UnicodeError, ValueError, VerificationError, RecursionError):
                 return None
+            if is_worker:
+                if (type(value) is not dict or set(value) != {"schema", "phase", "caseId", "step", "category", "locations"}
+                        or type(value["schema"]) is not int or value["schema"] != 1
+                        or type(value["phase"]) is not str or value["phase"] != scope.phase
+                        or type(value["caseId"]) is not str or value["caseId"] not in bindings
+                        or bindings[value["caseId"]][0] != "semantic-worker"
+                        or type(value["step"]) is not str or value["step"] not in bindings[value["caseId"]][1]
+                        or type(value["category"]) is not str or value["category"] not in categories
+                        or not valid_locations(value["locations"]) or len(value["locations"]) > 2):
+                    return None
+                canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+                                       allow_nan=False).encode("ascii")
+                if canonical != line[len(prefix):-1]:
+                    return None
+                worker, worker_bytes = value, len(line)
+                continue
             if (type(value) is not dict
-                    or set(value) != {"schema", "phase", "caseId", "stage", "category", "locations", "originalGFailure"}
-                    or type(value["schema"]) is not int or value["schema"] != 1
+                    or set(value) != {"schema", "phase", "caseId", "stage", "category", "locations", "originalGFailure", "child"}
+                    or type(value["schema"]) is not int or value["schema"] != 2
                     or type(value["phase"]) is not str or value["phase"] != scope.phase
                     or (value["caseId"] is not None and (type(value["caseId"]) is not str
                                                        or value["caseId"] not in scope.identifiers))
@@ -1889,11 +1933,54 @@ def signing_matrix_failure(raw: bytes, scope: SigningMatrixDiagnostic, *, deadli
                     or not valid_locations(original["locations"]) or len(original["locations"]) > 2
                     or len(value["locations"]) + len(original["locations"]) > 4):
                 return None
+            binding = bindings.get(value["caseId"])
+            semantic = binding is not None and binding[0] == "semantic-worker"
+            # Source-prebound quotas survive missing optional tuple/W data.
+            if semantic and (len(line) > 1280 or len(value["locations"]) > 2):
+                return None
+            child = value["child"]
+            total_locations = len(value["locations"]) + (len(original["locations"]) if original is not None else 0)
+            if child is not None:
+                if (type(child) is not dict or binding is None or value["stage"] != "helper"
+                        or type(child.get("role")) is not str or child["role"] != binding[0]):
+                    return None
+                if child["role"] == "profile-signal":
+                    if (set(child) != {"role", "returncode", "stdoutBytes", "stderrBytes", "stderrKind", "locations"}
+                            or original is None or type(child["returncode"]) is not int
+                            or not -128 <= child["returncode"] <= 255 or child["returncode"] == 0
+                            or any(type(child[key]) is not int or not 0 <= child[key] <= 65536
+                                   for key in ("stdoutBytes", "stderrBytes"))
+                            or type(child["stderrKind"]) is not str
+                            or child["stderrKind"] not in {"empty", "stderr-reported", "unavailable"}
+                            or (child["stderrBytes"] == 0) != (child["stderrKind"] == "empty")
+                            or not valid_locations(child["locations"]) or len(child["locations"]) > 2
+                            or bool(child["locations"]) != (child["stderrKind"] == "stderr-reported")
+                            or child["stderrKind"] == "stderr-reported" and child["stderrBytes"] > 8192):
+                        return None
+                    total_locations += len(child["locations"])
+                else:
+                    if (set(child) != {"role", "step", "expectedExit", "workerExit", "anchorExit", "terminalParsed", "anchorExpired"}
+                            or original is not None or type(child["step"]) is not str or child["step"] not in binding[1]
+                            or type(child["expectedExit"]) is not int or child["expectedExit"] not in {0, 73, -9}
+                            or any(child[key] is not None and (type(child[key]) is not int or not -128 <= child[key] <= 255)
+                                   for key in ("workerExit", "anchorExit"))
+                            or type(child["terminalParsed"]) is not bool
+                            or (child["workerExit"] is not None) != child["terminalParsed"]
+                            or (type(child["anchorExpired"]) is not bool if child["terminalParsed"]
+                                else child["anchorExpired"] is not None)):
+                        return None
+            if worker is not None:
+                if (not semantic or child is None or child["role"] != "semantic-worker"
+                        or worker["caseId"] != value["caseId"] or worker["step"] != child["step"]):
+                    return None
+                total_locations += len(worker["locations"])
+            if total_locations > 4 or len(line) + worker_bytes > 2048:
+                return None
             canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii")
             if canonical != line[len(marker):-1]:
                 return None
             observed = value
-        return observed
+        return {**observed, "workerFailure": worker} if observed is not None and worker is not None else observed
     finally:
         check_clock(deadline)  # No optional projection extends the original capture endpoint.
 
@@ -4136,6 +4223,8 @@ def perform_matrix_gate(step: Step, paths: Paths, session, checks, platform: str
         expected_coverage = catalog.coverage(selection.operating_system, selected)
         regression_ids = tuple(identifier for identifier in selected
                                if catalog.case(identifier, selection.operating_system).kind == "regression")
+        child_bindings = contract.diagnostic_child_bindings(selection.operating_system, selection.shard,
+                                                            deadline=pair_deadline)
         diagnostic_files = tuple(sorted(
             {name for name in definitions if name.endswith(".py")}
             | {"src/mobile_release/" + name for name in package_files if name.endswith(".py")}))
@@ -4155,7 +4244,7 @@ def perform_matrix_gate(step: Step, paths: Paths, session, checks, platform: str
                 paths, rows, phase, deadline=phase_deadline, seconds=MATRIX_PHASE_SECONDS,
                 env=env, output_limit=65536, cpu_seconds=300,
                 signing_matrix_diagnostic=SigningMatrixDiagnostic(phase, selection.operating_system, selection.shard,
-                                                                 tuple(selected), regression_ids, diagnostic_files))
+                                                                 tuple(selected), regression_ids, diagnostic_files, child_bindings))
             captures.append(capture)  # Retain originals through pair acceptance/publication.
             parse_matrix_phase(capture, phase, scope, package, selection.shard)
             output = paths.work / "signing-matrix" / phase

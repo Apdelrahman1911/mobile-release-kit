@@ -386,6 +386,30 @@ def layered_catalog():
     return module
 
 
+def diagnostic_child_bindings(operating_system, shard, *, deadline=None):
+    """Prelaunch DATA from the actual selected catalog, never reported selectors."""
+    catalog, result = layered_catalog(), []
+    for identifier in catalog.shard_ids(operating_system, shard):
+        before_deadline(deadline)
+        item = catalog.case(identifier, operating_system)
+        if item.kind == "regression":
+            original = catalog.REGRESSION.case(item.name)
+            if original.helper == "profile-signal":
+                result.append((identifier, "profile-signal", (original.variant,)))
+        elif item.kind == "semantic":
+            original = catalog.SEMANTIC.case(item.name)
+            if original.kind == "healthy":
+                steps = ("healthy",)
+            elif original.kind in {"seed", "command", "native-prefix", "recovery"}:
+                steps = ("seed",) + (("recovery",) if original.kind == "recovery" else ()) + ("semantic-main",)
+                if original.resolution is not None:
+                    steps += ("semantic-resolution",)
+            else:
+                continue  # Focused helpers retain the original outer diagnostic.
+            result.append((identifier, "semantic-worker", steps))
+    return tuple(result)
+
+
 def shard_for(case_id):
     require(type(case_id) is str and HEX.fullmatch(case_id), "invalid logical case ID")
     return int(hashlib.sha256(case_id.encode("ascii")).hexdigest(), 16) % SHARDS

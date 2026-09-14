@@ -23,6 +23,7 @@ from workflow.local_signing_matrix_contract import (
     ADAPTER_PROGRESS_CASES, ADAPTER_PROGRESS_OWNER_STAGES, ADAPTER_PROGRESS_SERVICE_STAGES,
     ADAPTER_PROGRESS_MAX, adapter_command_first, adapter_target_result, emit_adapter_failure,
 )
+from workflow import local_signing_matrix_diagnostic as matrix_diagnostic
 
 WORKER_ERROR = 91
 MAX_RECORD = 4096
@@ -382,7 +383,8 @@ def absent(group, *, route_live):
     return False
 
 
-def _worker(handles, parent, group, root, name, task, deadline, write_json, *, hard=None, progress=None):
+def _worker(handles, parent, group, root, name, task, deadline, write_json, *, hard=None, progress=None,
+            matrix_context=None):
     global CASE_DEADLINE, _ADAPTER_WORKER_DIAGNOSTIC, _ADAPTER_PROGRESS_WRITER
     code = WORKER_ERROR
     try:
@@ -398,6 +400,10 @@ def _worker(handles, parent, group, root, name, task, deadline, write_json, *, h
         require(not handles.errors, "worker setup close failed")
         remaining(deadline)
         CASE_DEADLINE = deadline
+        try:
+            matrix_diagnostic.enter_worker(matrix_context)
+        except BaseException:
+            pass
         _ADAPTER_WORKER_DIAGNOSTIC = None
         _ADAPTER_PROGRESS_WRITER = None
         if ADAPTER_DIAGNOSTIC_CONTEXT is not None:
@@ -422,6 +428,12 @@ def _worker(handles, parent, group, root, name, task, deadline, write_json, *, h
         remaining(deadline)
         code = 0
     except BaseException as error:
+        code = WORKER_ERROR  # The original failure precedes every optional projection.
+        try:
+            matrix_diagnostic.emit_worker(matrix_context,
+                (type(error), error, BaseException.__dict__["__traceback__"].__get__(error, BaseException)))
+        except BaseException:
+            pass
         try:
             emit_adapter_failure(ADAPTER_DIAGNOSTIC_CONTEXT, "worker", "error",
                                  (type(error), error, BaseException.__dict__["__traceback__"].__get__(error, BaseException)),
@@ -442,7 +454,8 @@ def _worker(handles, parent, group, root, name, task, deadline, write_json, *, h
         os._exit(code)
 
 
-def _anchor(handles, launcher, home_group, root, name, task, run_deadline, hard, write_json, *, progress=None):
+def _anchor(handles, launcher, home_group, root, name, task, run_deadline, hard, write_json, *, progress=None,
+            matrix_context=None):
     code, moved, live_group, loss = WORKER_ERROR, False, True, False
     child = OriginalWait()
     own = os.getpid()
@@ -454,7 +467,8 @@ def _anchor(handles, launcher, home_group, root, name, task, run_deadline, hard,
         handles.pipe("w-run")
         handles.pipe("w-state")
         if child.fork() == 0:
-            _worker(handles, own, own, root, name, task, run_deadline, write_json, hard=hard, progress=progress)
+            _worker(handles, own, own, root, name, task, run_deadline, write_json, hard=hard, progress=progress,
+                    matrix_context=matrix_context)
         handles.close("w-runr")
         handles.close("w-statew")
         worker_data, owner_data = bytearray(), bytearray()
@@ -578,6 +592,10 @@ def run_worker(root: Path, name: str, task, *, timeout=20, expect=0, deadline=No
     cleanup_errors = []
     progress = observed_progress = None
     try:
+        matrix_context = matrix_diagnostic.prepare_worker(name, hard)
+    except BaseException:
+        matrix_context = None
+    try:
         if ADAPTER_DIAGNOSTIC_CONTEXT is not None and type(name) is str and name in ADAPTER_PROGRESS_CASES:
             try:
                 progress = _AdapterProgress(ADAPTER_DIAGNOSTIC_CONTEXT, name, started, owner)
@@ -587,7 +605,8 @@ def run_worker(root: Path, name: str, task, *, timeout=20, expect=0, deadline=No
         handles.pipe("l-control")
         handles.pipe("a-state")
         if anchor.fork() == 0:
-            _anchor(handles, owner, home_group, root, name, task, run_deadline, hard, write_json, progress=progress)
+            _anchor(handles, owner, home_group, root, name, task, run_deadline, hard, write_json, progress=progress,
+                    matrix_context=matrix_context)
         handles.close("l-controlr")
         handles.close("a-statew")
         require(not handles.errors, "launcher setup close unresolved")
@@ -684,7 +703,12 @@ def run_worker(root: Path, name: str, task, *, timeout=20, expect=0, deadline=No
         remaining(hard)
         if expect != -signal.SIGKILL:
             remaining(run_deadline)
-    except BaseException:
+    except BaseException as error:
+        try:
+            matrix_diagnostic.attach_case_capture(error, matrix_context,
+                (expect, worker_code, anchor_code, settled, anchor_expired if settled else None))
+        except BaseException:
+            pass
         try:
             if ADAPTER_DIAGNOSTIC_CONTEXT is not None:
                 # Only original variables after failure/cleanup. No new wait,

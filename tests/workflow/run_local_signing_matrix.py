@@ -119,7 +119,8 @@ def _phase(args, scope, diagnostic_context):
         regression_ids = tuple(identifier for identifier in selected
                                if catalog.case(identifier, scope["os"]).kind == "regression")
         diagnostic_context[0] = matrix_diagnostic.Phase(
-            args.phase, deadline, scope["os"], args.shard, selected, regression_ids, source_map)
+            args.phase, deadline, scope["os"], args.shard, selected, regression_ids, source_map,
+            contract.diagnostic_child_bindings(scope["os"], args.shard, deadline=deadline))
         matrix_diagnostic.CURRENT = diagnostic_context[0]
     except BaseException:
         pass  # Optional metadata cannot alter original phase admission/work.
