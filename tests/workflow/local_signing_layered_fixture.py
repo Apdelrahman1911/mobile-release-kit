@@ -14,6 +14,7 @@ from itertools import islice
 
 from workflow import local_signing_matrix_contract as contract
 from workflow import local_signing_persistent_fixture as fixture
+from workflow import local_signing_matrix_diagnostic as diagnostic
 from unit.local_signing_workspace import assert_native_cases_idle
 
 
@@ -91,6 +92,7 @@ def _write_record(path, value, deadline):
 
 def run_phase(output, shard, scope, package, package_files, definitions, *, deadline):
     """Execute only the source-defined shard; no native discovery prefix."""
+    diagnostic.mark("admission")
     contract.before_deadline(deadline)
     contract.require(type(deadline) is float and fixture.PHASE_DEADLINE == deadline,
                      "layered original deadline not bound")
@@ -110,12 +112,14 @@ def run_phase(output, shard, scope, package, package_files, definitions, *, dead
         ("writer-failures", primitive._WRITER_FAILURES), ("reader-failures", primitive._READER_FAILURES),
         ("remover-failures", primitive._REMOVER_FAILURES))} == dict(catalog.PRIMITIVE_FAILURES),
         "primitive failure variants differ")
+    diagnostic.mark("persist")
     _write_record(output / "catalog.json", definition, deadline)
     started, expanded, completed = time.monotonic(), 0, []
     destination = output / "results.jsonl.gz"
     with open(destination, "xb", opener=_private_opener) as raw:
         with gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=0) as compressed:
             for identifier in selected:
+                diagnostic.mark("helper", identifier)
                 contract.before_deadline(deadline)
                 assert_native_cases_idle()
                 item = catalog.case(identifier, operating_system)
@@ -128,6 +132,7 @@ def run_phase(output, shard, scope, package, package_files, definitions, *, dead
                     observed = semantic.run_case(parent, item.name)
                 else:
                     observed = regression.run_case(parent, item.name)
+                diagnostic.mark("typed-result", identifier)
                 assert_native_cases_idle()
                 evidence, files = _evidence(parent, deadline)
                 row = {"schemaVersion": 2, "caseId": identifier, "kind": item.kind, "name": item.name,
@@ -135,6 +140,7 @@ def run_phase(output, shard, scope, package, package_files, definitions, *, dead
                        "regressionParts": list(catalog.regression_parts(item, operating_system))}
                 contract.require(contract.validate_layered_record(row, operating_system) == identifier,
                                  "layered original result differs")
+                diagnostic.mark("persist", identifier)
                 data = contract.canonical(row) + b"\n"
                 expanded += len(data)
                 contract.require(len(data) <= 2 * 1024**2 and expanded <= contract.MAX_EXPANDED_RESULTS,
@@ -148,16 +154,20 @@ def run_phase(output, shard, scope, package, package_files, definitions, *, dead
                 # Complete original evidence is now durable in results before
                 # deleting its task-owned parent. A late error withholds the
                 # final phase result and retains the already-written evidence.
+                diagnostic.mark("cleanup", identifier)
                 _dispose_parent(parent, identity, files, deadline)
                 completed.append(identifier)
+            diagnostic.mark("persist")
         raw.flush()
         os.fsync(raw.fileno())
         contract.require(raw.tell() <= contract.MAX_RESULTS_BYTES, "layered final compressed bound")
+    diagnostic.mark("postconditions")
     assert_native_cases_idle()
     contract.before_deadline(deadline)
     contract.require(completed == selected and contract.package_manifest(package, deadline=deadline) == package_files
                      and contract.definitions_manifest(fixture.ROOT, deadline=deadline) == definitions,
                      "layered final source or coverage differs")
+    diagnostic.mark("publication")
     _write_record(output / "matrix-result.json", {
         "schemaVersion": 2, "shard": shard, "scope": scope, "expectedCaseIds": expected,
         "executedCaseIds": completed, "catalogSha256": contract.digest(definition),

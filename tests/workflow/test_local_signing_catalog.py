@@ -12,6 +12,19 @@ from . import local_signing_matrix_contract as contract
 
 
 class SigningCatalogAdmissionTests(unittest.TestCase):
+    def test_capacity_canary_adds_each_platforms_maximum_planned_command_shard(self):
+        catalog = contract.layered_catalog()
+        for operating_system, heavy_shard in (("ubuntu-24.04", 11), ("macos-26", 9)):
+            with self.subTest(operating_system=operating_system):
+                cases = {item.identifier: item for item in catalog.cases_for(operating_system)}
+                groups, _weights = catalog.assignment(operating_system)
+                estimates = [sum(cases[identifier].estimated_commands for identifier in group)
+                             for group in groups]
+                self.assertEqual(estimates[heavy_shard], max(estimates))
+                self.assertGreater(estimates[heavy_shard], estimates[0])
+                # Planning arithmetic selects useful probes; it is not measured
+                # capacity or permission to omit the complete sixteen shards.
+
     def loaders(self):
         catalog = contract.layered_catalog()
         yield contract, contract.layered_catalog, "_LAYERED_CATALOG", None, catalog, "_mrk_layered_"

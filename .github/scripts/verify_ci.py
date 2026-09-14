@@ -859,6 +859,17 @@ class SigningAdapterDiagnostic:
     files: tuple[str, ...]
 
 
+@dataclasses.dataclass(frozen=True)
+class SigningMatrixDiagnostic:
+    """Source-selected failed-capture DATA scope; separate from fixed-four."""
+    phase: str
+    operating_system: str
+    shard: int
+    identifiers: tuple[str, ...]
+    regression_ids: tuple[str, ...]
+    files: tuple[str, ...]
+
+
 def required_gate_ids(platform: str, scope: str = "platform") -> tuple[str, ...]:
     if platform not in {"linux", "macos"}:
         raise VerificationError("UNSUPPORTED_PLATFORM")
@@ -1814,6 +1825,79 @@ def signing_adapter_phase_failure(raw: bytes, scope: SigningAdapterDiagnostic, *
         check_clock(deadline)
 
 
+def _signing_matrix_diagnostic_scope(scope) -> bool:
+    return (type(scope) is SigningMatrixDiagnostic
+            and type(scope.phase) is str and scope.phase in {"source", "wheel"}
+            and type(scope.operating_system) is str and scope.operating_system in {"ubuntu-24.04", "macos-26"}
+            and type(scope.shard) is int and 0 <= scope.shard < 16
+            and type(scope.identifiers) is tuple and 0 < len(scope.identifiers) <= 512
+            and all(type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) for value in scope.identifiers)
+            and len(set(scope.identifiers)) == len(scope.identifiers)
+            and type(scope.regression_ids) is tuple
+            and all(type(value) is str and value in scope.identifiers for value in scope.regression_ids)
+            and len(set(scope.regression_ids)) == len(scope.regression_ids)
+            and type(scope.files) is tuple and len(scope.files) <= 512
+            and all(type(value) is str and len(value) <= 256 and re.fullmatch(
+                r"(?:tests|\.github/scripts|src/mobile_release)/(?:[A-Za-z_][A-Za-z0-9_-]*/)*[A-Za-z_][A-Za-z0-9_-]*\.py",
+                value) for value in scope.files)
+            and len(set(scope.files)) == len(scope.files))
+
+
+def signing_matrix_failure(raw: bytes, scope: SigningMatrixDiagnostic, *, deadline: float) -> dict | None:
+    """Independently validate already-captured failure DATA, including UNKNOWN."""
+    check_clock(deadline)
+    try:
+        if type(raw) is not bytes or not 0 < len(raw) <= 65536 or not _signing_matrix_diagnostic_scope(scope):
+            return None
+        marker = b"MRK_SIGNING_MATRIX_FAILURE="
+        stages = {"admission", "helper", "typed-result", "persist", "cleanup", "postconditions", "publication"}
+        categories = {"os-error", "assertion-error", "value-error", "type-error", "memory-error", "exception", "base-exception"}
+
+        def valid_locations(value):
+            return (type(value) is list and len(value) <= 4
+                    and all(type(row) is dict and set(row) == {"file", "line"}
+                            and type(row["file"]) is str and row["file"] in scope.files
+                            and type(row["line"]) is int and 0 < row["line"] < 1_000_000 for row in value))
+
+        observed = None
+        for line in raw.splitlines(keepends=True):
+            check_clock(deadline)
+            if not line.startswith(marker):
+                continue
+            if len(line) > 2048 or not line.endswith(b"\n") or observed is not None:
+                return None
+            try:
+                value = strict_json(line[len(marker):-1].decode("ascii"))
+            except (UnicodeError, ValueError, VerificationError, RecursionError):
+                return None
+            if (type(value) is not dict
+                    or set(value) != {"schema", "phase", "caseId", "stage", "category", "locations", "originalGFailure"}
+                    or type(value["schema"]) is not int or value["schema"] != 1
+                    or type(value["phase"]) is not str or value["phase"] != scope.phase
+                    or (value["caseId"] is not None and (type(value["caseId"]) is not str
+                                                       or value["caseId"] not in scope.identifiers))
+                    or type(value["stage"]) is not str or value["stage"] not in stages
+                    or value["stage"] in {"helper", "typed-result", "cleanup"} and value["caseId"] is None
+                    or value["stage"] in {"admission", "postconditions", "publication"} and value["caseId"] is not None
+                    or type(value["category"]) is not str or value["category"] not in categories
+                    or not valid_locations(value["locations"])):
+                return None
+            original = value["originalGFailure"]
+            if original is not None and (type(original) is not dict or set(original) != {"category", "locations"}
+                    or value["caseId"] not in scope.regression_ids or value["stage"] != "helper"
+                    or type(original["category"]) is not str or original["category"] not in categories
+                    or not valid_locations(original["locations"]) or len(original["locations"]) > 2
+                    or len(value["locations"]) + len(original["locations"]) > 4):
+                return None
+            canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii")
+            if canonical != line[len(marker):-1]:
+                return None
+            observed = value
+        return observed
+    finally:
+        check_clock(deadline)  # No optional projection extends the original capture endpoint.
+
+
 def python_storage_profile(data: object) -> dict | None:
     """Closed native-control observations, not an alternate execution receipt."""
     expected = {"name": "linux-python-full-v1", "logical_file_bytes": (1 << 32) + 1024**2,
@@ -2449,7 +2533,8 @@ def require_original_finality(result) -> None:
 
 def original_native_capture(session, argv, paths: Paths, rows: list[dict], name: str, *,
                             deadline: float, seconds: int, env: dict, output_limit: int = 65536,
-                            cpu_seconds: int = 180, signing_adapter_diagnostic: SigningAdapterDiagnostic | None = None):
+                            cpu_seconds: int = 180, signing_adapter_diagnostic: SigningAdapterDiagnostic | None = None,
+                            signing_matrix_diagnostic: SigningMatrixDiagnostic | None = None):
     """One original ordinary capture plus idle closure under the same cutoff.
 
     Never synthesize/merge CapturedRun objects. Semantic parsing follows this
@@ -2464,6 +2549,18 @@ def original_native_capture(session, argv, paths: Paths, rows: list[dict], name:
                 or "--adapter-phase" not in argv
                 or str(paths.source / "tests/workflow/run_local_signing_matrix.py") not in argv):
             raise VerificationError("SIGNING_ADAPTER_DIAGNOSTIC_SCOPE")
+    if signing_matrix_diagnostic is not None:
+        scope = signing_matrix_diagnostic
+        arguments = tuple(map(str, argv))
+        if (signing_adapter_diagnostic is not None or not _signing_matrix_diagnostic_scope(scope)
+                or scope.phase != name or "--adapter-phase" in arguments
+                or arguments.count(str(paths.source / "tests/workflow/run_local_signing_matrix.py")) != 1):
+            raise VerificationError("SIGNING_MATRIX_DIAGNOSTIC_SCOPE")
+        for option, expected in (("--phase", scope.phase), ("--os", scope.operating_system),
+                                 ("--shard", str(scope.shard)), ("--deadline", repr(deadline))):
+            if (arguments.count(option) != 1 or arguments.index(option) + 1 == len(arguments)
+                    or arguments[arguments.index(option) + 1] != expected):
+                raise VerificationError("SIGNING_MATRIX_DIAGNOSTIC_SCOPE")
     session.ensure_idle(deadline=deadline)
     row = {"stage": name, "status": "RUNNING"}
     rows.append(row)
@@ -2476,6 +2573,7 @@ def original_native_capture(session, argv, paths: Paths, rows: list[dict], name:
         require_original_finality(result)
     except BaseException as exc:
         primary = exc
+    capture_failed = primary is not None
     try:
         session.ensure_idle(deadline=deadline)
     except BaseException as exc:
@@ -2498,6 +2596,13 @@ def original_native_capture(session, argv, paths: Paths, rows: list[dict], name:
                     row["adapter_phase_failure"] = phase_diagnostic
             except BaseException:
                 row["phase_diagnostic_error"] = {"error": "SIGNING_ADAPTER_PHASE_DIAGNOSTIC_UNAVAILABLE"}
+        if signing_matrix_diagnostic is not None and capture_failed:
+            try:
+                diagnostic = signing_matrix_failure(result.stderr, signing_matrix_diagnostic, deadline=deadline)
+                if diagnostic is not None:
+                    row["matrix_failure"] = diagnostic
+            except BaseException:
+                row["matrix_diagnostic_error"] = {"error": "SIGNING_MATRIX_DIAGNOSTIC_UNAVAILABLE"}
         raise primary
     check_clock(deadline)
     row["status"] = "FINALIZED"
@@ -4029,6 +4134,11 @@ def perform_matrix_gate(step: Step, paths: Paths, session, checks, platform: str
         expected = list(catalog.expected_ids(selection.operating_system))
         selected = list(catalog.shard_ids(selection.operating_system, selection.shard))
         expected_coverage = catalog.coverage(selection.operating_system, selected)
+        regression_ids = tuple(identifier for identifier in selected
+                               if catalog.case(identifier, selection.operating_system).kind == "regression")
+        diagnostic_files = tuple(sorted(
+            {name for name in definitions if name.endswith(".py")}
+            | {"src/mobile_release/" + name for name in package_files if name.endswith(".py")}))
         phases = {}
         for phase in ("source", "wheel"):
             phase_deadline = min(pair_deadline, time.monotonic() + MATRIX_PHASE_SECONDS)
@@ -4043,7 +4153,9 @@ def perform_matrix_gate(step: Step, paths: Paths, session, checks, platform: str
                 env["MOBILE_RELEASE_TEST_PYTHON"] = str(paths.wheel_python)
             capture = original_native_capture(session, matrix_phase_argv(paths, selection, phase, deadline=phase_deadline),
                 paths, rows, phase, deadline=phase_deadline, seconds=MATRIX_PHASE_SECONDS,
-                env=env, output_limit=65536, cpu_seconds=300)
+                env=env, output_limit=65536, cpu_seconds=300,
+                signing_matrix_diagnostic=SigningMatrixDiagnostic(phase, selection.operating_system, selection.shard,
+                                                                 tuple(selected), regression_ids, diagnostic_files))
             captures.append(capture)  # Retain originals through pair acceptance/publication.
             parse_matrix_phase(capture, phase, scope, package, selection.shard)
             output = paths.work / "signing-matrix" / phase

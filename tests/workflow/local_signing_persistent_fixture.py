@@ -814,73 +814,160 @@ def _focused_controls(root, token):
     return result
 
 
+_OWNER_TTY_ENV = "MRK_CI_PRIVATE_PTY"
+_OWNER_TTY_STATE = {"active": False, "broken": False, "pair": None, "binding": None}
+
+
+def _owner_tty_original():
+    """Admit only the original ordinary entry's inherited Darwin capability."""
+    assert not _OWNER_TTY_STATE["broken"], "private terminal custody is uncertain"
+    raw = os.environ.get(_OWNER_TTY_ENV)
+    assert type(raw) is str and 0 < len(raw) <= 1024, "missing original private terminal"
+    assert _OWNER_TTY_STATE["binding"] in (None, raw), "original terminal binding was replaced"
+    data = json.loads(raw)
+    assert type(data) is dict and set(data) == {"version", "uid", "gid", "pair"}, "private terminal schema"
+    assert type(data["version"]) is int and data["version"] == 1, "private terminal version"
+    assert type(data["uid"]) is int and type(data["gid"]) is int \
+        and 60000 <= data["uid"] < 65000 and data["gid"] == data["uid"], "private terminal numerical identity"
+    assert (os.getuid(), os.geteuid(), os.getgid(), os.getegid()) == (data["uid"],) * 4, "private terminal credentials"
+    assert type(data["pair"]) is list and len(data["pair"]) == 2, "private terminal pair shape"
+    assert json.dumps(data, sort_keys=True, separators=(",", ":")) == raw, "private terminal canonical binding"
+    pair = []
+    for item in data["pair"]:
+        assert type(item) is list and len(item) == 2 and type(item[0]) is int \
+            and 2 < item[0] < 1024 and item[0] not in pair, "private terminal descriptor slot"
+        assert type(item[1]) is list and len(item[1]) == 6 \
+            and all(type(value) is int and 0 <= value < 2 ** 64 for value in item[1]), "private terminal identity shape"
+        info = os.fstat(item[0])
+        assert [info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_rdev] == item[1] \
+            and stat.S_ISCHR(info.st_mode) and os.isatty(item[0]), "original terminal descriptor changed"
+        pair.append(item[0])
+    slave = os.fstat(pair[1])
+    assert slave.st_uid == data["uid"] and stat.S_IMODE(slave.st_mode) == 0o600 \
+        and re.fullmatch(r"/dev/ttys[0-9]{1,6}", os.ttyname(pair[1])), "private owned slave changed"
+    pair = tuple(pair)
+    assert _OWNER_TTY_STATE["pair"] in (None, pair), "original terminal pair was replaced"
+    for fd in pair:
+        os.set_inheritable(fd, False)  # Fork survives, unrelated exec does not.
+    _OWNER_TTY_STATE.update(pair=pair, binding=raw)
+    return pair
+
+
+# Real ordinary fixture admission occurs at import, before model commands can
+# run. No pair is allocated here and Linux/no-capability native roles are inert.
+if sys.platform == "darwin" and _OWNER_TTY_ENV in os.environ:
+    _owner_tty_original()
+
+
 @contextmanager
 def owner_tty(root, token, model, trace, action, *, focused_owner=None, input_observations=None):
     assert input_observations is None or type(input_observations) is list and not input_observations
-    master, slave = os.openpty()
-    tty.setraw(slave)
-    attributes = termios.tcgetattr(slave)
-    attributes[3] |= termios.ICANON  # Real canonical EOF on an empty input line.
-    termios.tcsetattr(slave, termios.TCSANOW, attributes)
-    os.set_blocking(master, False)
-    read_stream = os.fdopen(os.dup(slave), "r")
-    write_stream = os.fdopen(os.dup(slave), "w")
-    class OwnerOutput:
-        def isatty(self): return write_stream.isatty()
-        def drain(self):
-            while True:
-                try:
-                    assert os.read(master, 4096), "fictional terminal disconnected"
-                except BlockingIOError:
-                    return
-        def write(self, text):
-            # Read the actual terminal peer as a human terminal would. Long
-            # synthetic paths must not deadlock on Darwin's small PTY queue.
-            for offset in range(0, len(text), 64):
-                write_stream.write(text[offset:offset + 64])
+    private = sys.platform == "darwin"
+    if private:
+        assert not _OWNER_TTY_STATE["active"] and not _OWNER_TTY_STATE["broken"], "private terminal is busy or uncertain"
+        _OWNER_TTY_STATE["active"] = True
+    base, copies, streams = None, [None, None], [None, None]
+    primary, cleanup, yielded = None, [], False
+    try:
+        if private:
+            original = _owner_tty_original()
+            base = [None, None]
+            base[0] = os.dup(original[0])
+            base[1] = os.dup(original[1])
+        else:
+            base = os.openpty()  # Own the entire returned pair before setup.
+        master, slave = base
+        tty.setraw(slave)
+        attributes = termios.tcgetattr(slave)
+        attributes[3] |= termios.ICANON  # Real canonical EOF on an empty input line.
+        termios.tcsetattr(slave, termios.TCSANOW, attributes)
+        termios.tcflush(slave, termios.TCIOFLUSH)  # No state crosses serialized contexts.
+        os.set_blocking(master, False)
+        os.set_blocking(slave, True)
+        copies[0] = os.dup(slave)
+        streams[0] = os.fdopen(copies[0], "r", closefd=False)
+        copies[1] = os.dup(slave)
+        streams[1] = os.fdopen(copies[1], "w", closefd=False)
+        read_stream, write_stream = streams
+        class OwnerOutput:
+            def isatty(self): return write_stream.isatty()
+            def drain(self):
+                while True:
+                    try:
+                        assert os.read(master, 4096), "fictional terminal disconnected"
+                    except BlockingIOError:
+                        return
+            def write(self, text):
+                # Real peer reads avoid Darwin's small PTY queue deadlock.
+                for offset in range(0, len(text), 64):
+                    write_stream.write(text[offset:offset + 64])
+                    write_stream.flush()
+                    self.drain()
+                return len(text)
+            def flush(self):
                 write_stream.flush()
                 self.drain()
-            return len(text)
-        def flush(self):
-            write_stream.flush()
-            self.drain()
-    class OwnerInput:
-        def isatty(self): return read_stream.isatty()
-        def readline(self, bound):
-            assert signing.signing_status(home=root / "home")["status"] == "busy"
-            event = trace.begin("manual/input", "tty", "owner", {"action": action})
-            observed = {"eventIndex": event["index"], "action": action}
-            if input_observations is not None:
-                input_observations.append(observed)
-            if action == "resolve":
-                model.oracle.resolve_owned(model)
-            elif action in {"fixture/" + variant for variant in FOCUSED_OWNER_VARIANTS}:
-                assert focused_owner is not None and action == "fixture/" + focused_owner["variant"]
-                controls = _focused_controls(root, token)
-                try:
-                    resolve_focused_fixture(root, model, focused_owner)
-                finally:
-                    assert _focused_controls(root, token) == controls, "fixture owner changed production controls"
-            if action == "cancel":
-                os.kill(os.getpid(), signal.SIGINT)
-                raise AssertionError("default manual cancellation was ignored")
-            response = "wrong\n" if action == "wrong" else f"recheck {token}\n"
-            os.write(master, attributes[6][termios.VEOF] if action == "eof" else response.encode())
-            actual = read_stream.readline(bound)
-            if input_observations is not None:
-                # Classify the actual bounded PTY read, not the intended input.
-                # Keep this separate from the historical Trace event schema.
-                expected = "" if action == "eof" else response
-                assert actual == expected, "fictional terminal read differs from the selected input"
-                observed["read"] = {"kind": "eof" if actual == "" else "wrong" if actual == "wrong\n" else "recheck",
-                                    "characters": len(actual)}
-            trace.end(event, succeeded=True)
-            return actual
-    try:
+        class OwnerInput:
+            def isatty(self): return read_stream.isatty()
+            def readline(self, bound):
+                assert signing.signing_status(home=root / "home")["status"] == "busy"
+                event = trace.begin("manual/input", "tty", "owner", {"action": action})
+                observed = {"eventIndex": event["index"], "action": action}
+                if input_observations is not None:
+                    input_observations.append(observed)
+                if action == "resolve":
+                    model.oracle.resolve_owned(model)
+                elif action in {"fixture/" + variant for variant in FOCUSED_OWNER_VARIANTS}:
+                    assert focused_owner is not None and action == "fixture/" + focused_owner["variant"]
+                    controls = _focused_controls(root, token)
+                    try:
+                        resolve_focused_fixture(root, model, focused_owner)
+                    finally:
+                        assert _focused_controls(root, token) == controls, "fixture owner changed production controls"
+                if action == "cancel":
+                    os.kill(os.getpid(), signal.SIGINT)
+                    raise AssertionError("default manual cancellation was ignored")
+                response = "wrong\n" if action == "wrong" else f"recheck {token}\n"
+                os.write(master, attributes[6][termios.VEOF] if action == "eof" else response.encode())
+                actual = read_stream.readline(bound)
+                if input_observations is not None:
+                    expected = "" if action == "eof" else response
+                    assert actual == expected, "fictional terminal read differs from the selected input"
+                    observed["read"] = {"kind": "eof" if actual == "" else "wrong" if actual == "wrong\n" else "recheck",
+                                        "characters": len(actual)}
+                trace.end(event, succeeded=True)
+                return actual
+        yielded = True
         yield OwnerInput(), OwnerOutput()
-    finally:
-        read_stream.close(); write_stream.close()
-        os.close(slave); os.close(master)
+    except BaseException as error:
+        primary = error
+        if private and not yielded:
+            _OWNER_TTY_STATE["broken"] = True
+    # Streams never own their raw FD. Retire all exact slots independently;
+    # a failing close never prevents another close or authorizes a retry.
+    for index, stream in enumerate(streams):
+        streams[index] = None
+        if stream is not None:
+            try:
+                stream.close()
+            except BaseException as error:
+                cleanup.append(error)
+    closing, copies = copies, None
+    for fd in (*reversed(closing), *reversed(base or ())):
+        if fd is not None:
+            try:
+                os.close(fd)
+            except BaseException as error:
+                cleanup.append(error)
+    if private:
+        _OWNER_TTY_STATE["active"] = False
+        if cleanup:
+            _OWNER_TTY_STATE["broken"] = True
+    if cleanup:
+        raise BaseExceptionGroup("fictional terminal operation and independent cleanup failed",
+                                 ([primary] if primary is not None else []) + cleanup)
+    if primary is not None:
+        raise primary
 
 
 def recovery_flow(root: Path, trace: Trace, *, manual="none", expected_preferences=None,

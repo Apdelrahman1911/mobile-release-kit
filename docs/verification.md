@@ -52,8 +52,10 @@ Never bypass branch protection or dispatch release/Store workflows for testing.
 For an intermediate macOS-only correction, manual `verification_target: macos`
 omits Linux but runs the **same complete macOS catalog and owner path**. The
 partial selection, `signing-adapter`, runs only the two-OS smoke scope below.
-`signing-matrix-canary` runs only the two shard-zero source/wheel cells for
-qualification; it also cannot satisfy the protected aggregate.
+`signing-matrix-canary` runs exactly four source/wheel cells: Linux shards 0 and
+11, and macOS shards 0 and 9. These probe shard-zero integration and each OS's
+largest planned-command shard for capacity qualification, not full verification;
+they also cannot satisfy the protected aggregate.
 Actions compares these string values without case sensitivity. Missing, empty or
 nonmatching values do not omit Linux. A partial dispatch's
 aggregate `test` deliberately **fails** because skipped Linux is not a
@@ -82,7 +84,7 @@ invented full result or count an unexecuted gate as passed.
 
 ### Required account-signing matrix
 
-`test-signing-matrix` selects exactly sixteen shards on each supported OS,
+Full verification's `test-signing-matrix` selects exactly sixteen shards on each supported OS,
 maximum four concurrent cells. Each cell prepares only its required offline
 Python inputs, builds/freezes/inspects the same complete source and installed
 package, then invokes both phases through `verify_ci.py --scope signing-matrix`.

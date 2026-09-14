@@ -120,6 +120,7 @@ LINUX_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || inputs
 NATIVE_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'macos') }}"
 MATRIX_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'signing-matrix-canary') }}"
 MATRIX_SHARD_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[0]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]') }}"
+MATRIX_INCLUDE_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[{\"os\":\"ubuntu-24.04\",\"shard\":11},{\"os\":\"macos-26\",\"shard\":9}]' || '[]') }}"
 ADAPTER_TARGET_CONDITION = "${{ github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-adapter' }}"
 VERIFICATION_CONCURRENCY = "release-kit-ci-${{ github.ref }}-${{ github.event_name }}-${{ inputs.verification_target || 'full' }}"
 AGGREGATE_GUARD = '''set -euo pipefail
@@ -287,6 +288,16 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         canary_condition, canary_literal = left.rsplit(" && ", 1)
         canary_shards, full_shards = (json.loads(literal[1:-1]) for literal in (canary_literal, full_literal))
         self.assertEqual((canary_shards, full_shards), ([0], list(range(16))))
+        include = matrix["strategy"]["matrix"]["include"]
+        self.assertEqual(include, MATRIX_INCLUDE_SELECTION)
+        include_left, full_include_literal = include.removeprefix("${{ fromJSON(").removesuffix(") }}").rsplit(" || ", 1)
+        include_condition, canary_include_literal = include_left.rsplit(" && ", 1)
+        self.assertEqual(include_condition, canary_condition)
+        canary_include, full_include = (json.loads(literal[1:-1]) for literal in
+                                        (canary_include_literal, full_include_literal))
+        self.assertEqual((canary_include, full_include),
+                         ([{"os": "ubuntu-24.04", "shard": 11}, {"os": "macos-26", "shard": 9}], []))
+        self.assertEqual(matrix["strategy"]["matrix"]["os"], ["ubuntu-24.04", "macos-26"])
         for event, ref in (("pull_request", "refs/pull/1/merge"), ("push", "refs/heads/main"),
                            ("workflow_dispatch", "refs/heads/qa006-native-candidate")):
             for target in ("full", "macos", "signing-adapter", "signing-matrix-canary", None, "", "unknown",
@@ -312,6 +323,22 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                     selected = canary_shards if evaluate_condition(canary_condition, context,
                         success=True, cancelled=False) else full_shards
                     self.assertEqual(selected, [0] if dispatch and compared == "signing-matrix-canary" else list(range(16)))
+                    included = canary_include if evaluate_condition(include_condition, context,
+                        success=True, cancelled=False) else full_include
+                    original_cells = {(system, shard) for system in matrix["strategy"]["matrix"]["os"]
+                                      for shard in selected}
+                    extra_cells = {(item["os"], item["shard"]) for item in included}
+                    # Both fixed-axis values are explicit. Neither canary include
+                    # can merge into an original shard0 combination, so Actions
+                    # appends these two cells; it does not create a cross product.
+                    self.assertTrue(original_cells.isdisjoint(extra_cells))
+                    self.assertEqual(len(extra_cells), len(included))
+                    expected_cells = ({("ubuntu-24.04", 0), ("ubuntu-24.04", 11),
+                                       ("macos-26", 0), ("macos-26", 9)}
+                                      if dispatch and compared == "signing-matrix-canary" else
+                                      {(system, shard) for system in ("ubuntu-24.04", "macos-26")
+                                       for shard in range(16)})
+                    self.assertEqual(original_cells | extra_cells, expected_cells)
 
         # This is the existing fixed job, not a synthesized cross-run status.
         # Pin every field before the harmless shell can be executed below.

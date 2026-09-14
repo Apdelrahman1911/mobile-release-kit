@@ -2714,7 +2714,7 @@ class SigningAdapterControllerTests(unittest.TestCase):
         package = matrix.paths.work / "source-build/src/mobile_release"
         matrix_record = {"schema": 2, "phase": "source", "shard": 0, "scope": matrix.scope,
                          "status": "phase-finished", "productionRoot": str(package)}
-        adapter_record = {"schema": "mrk-signing-adapter-phase-v1", "phase": "source", "scope": adapter.scope,
+        adapter_record = {"schema": "mrk-signing-adapter-phase-v2", "phase": "source", "scope": adapter.scope,
                           "status": "adapter-only", "productionRoot": str(package), "testsRun": 4,
                           "startedIds": list(adapter.contract.ADAPTER_TEST_IDS),
                           "successfulIds": list(adapter.contract.ADAPTER_TEST_IDS),
@@ -2741,15 +2741,16 @@ class SigningAdapterControllerTests(unittest.TestCase):
                                                           "test-signing-adapter", "ubuntu-24.04")
         rig.scope = rig.contract.adapter_scope_from_metadata(rig.selection.metadata(), "ubuntu-24.04")
         rig.contract.adapter_test_ids = Mock(return_value=rig.contract.ADAPTER_TEST_IDS)
-        rig.origins = {name: "__init__.py" if name == "mobile_release" else name.split(".")[-1] + ".py"
-                       for name in ("mobile_release", "mobile_release.local_signing", "mobile_release.owned_process",
-                                    "mobile_release._command_process", "mobile_release._native_process")}
+        parent = {name: "__init__.py" if name == "mobile_release" else name.split(".")[-1] + ".py"
+                  for name in ("mobile_release", "mobile_release.local_signing", "mobile_release.owned_process",
+                               "mobile_release._native_process")}
+        rig.origins = {"parent": parent, "commandWorker": {**parent, "mobile_release._command_process": "_command_process.py"}}
         def run(argv, **options):
             phase = argv[argv.index("--adapter-phase") + 1]
             rig.events.append(("run", phase, tuple(argv), options))
             package = rig.paths.work / ("source-build/src/mobile_release" if phase == "source" else
                                         "wheel-venv/lib/python3.11/site-packages/mobile_release")
-            record = {"schema": "mrk-signing-adapter-phase-v1", "phase": phase, "scope": rig.scope,
+            record = {"schema": "mrk-signing-adapter-phase-v2", "phase": phase, "scope": rig.scope,
                       "status": "adapter-only", "productionRoot": str(package), "testsRun": 4,
                       "startedIds": list(rig.contract.ADAPTER_TEST_IDS), "successfulIds": list(rig.contract.ADAPTER_TEST_IDS),
                       "origins": rig.origins, "casePathsRemoved": True, **rig.changes.get(phase, {})}
@@ -2784,6 +2785,10 @@ class SigningAdapterControllerTests(unittest.TestCase):
         self.assertIs(result.details["matrix_proof"], False)
         self.assertEqual(len(rig.captures), 2)
         self.assertIsNot(rig.captures[0], rig.captures[1])
+        for row in result.details["phases"]:
+            self.assertEqual(row["origins"], rig.origins)
+            self.assertNotIn("mobile_release._command_process", row["origins"]["parent"])
+            self.assertIn("mobile_release._command_process", row["origins"]["commandWorker"])
         runs = [event for event in rig.events if event[0] == "run"]
         self.assertEqual([event[3]["absolute_deadline"] for event in runs], [430.0, 431.0])
         for _, phase, argv, options in runs:
@@ -2797,8 +2802,18 @@ class SigningAdapterControllerTests(unittest.TestCase):
         self.assertFalse(any(event[0] == "publish" for event in rig.events))
 
     def test_source_failure_missing_duplicate_skip_retained_output_or_late_preparation_stops_wheel(self):
+        origins = self.rig().origins
         for changes in ({"successfulIds": []}, {"successfulIds": ["wrong"] * 4}, {"testsRun": True},
                         {"casePathsRemoved": False}, {"status": "complete"}, {"origins": {}},
+                        {"schema": "mrk-signing-adapter-phase-v1"}, {"origins": origins["parent"]},
+                        {"origins": {"parent": origins["parent"]}},
+                        {"origins": {**origins, "unknown": origins["commandWorker"]}},
+                        {"origins": {**origins, "commandWorker": origins["parent"]}},
+                        {"origins": {**origins, "parent": {**origins["parent"], "mobile_release": ".py"}}},
+                        {"origins": {**origins, "commandWorker": {
+                            **origins["commandWorker"], "mobile_release._command_process": "../_command_process.py"}}},
+                        {"origins": {**origins, "parent": {**origins["parent"], "mobile_release.optional": "/foreign.py"}}},
+                        {"productionRoot": "/wrong/phase/mobile_release"}, {"phase": "wheel"},
                         {"startedIds": list(self.rig().contract.ADAPTER_TEST_IDS) + ["duplicate"]}):
             with self.subTest(changes=changes):
                 rig = self.rig()

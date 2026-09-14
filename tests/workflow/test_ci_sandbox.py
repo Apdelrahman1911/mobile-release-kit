@@ -2250,7 +2250,7 @@ class CISandboxPureTests(unittest.TestCase):
             with self.subTest(platform=platform, groups=groups):
                 fstat = Mock(side_effect=DescriptorBoundary)
                 fake_os = SimpleNamespace(getuid=lambda: uid, geteuid=lambda: uid,
-                                          getgid=lambda: gid, getegid=lambda: gid, fstat=fstat)
+                                          getgid=lambda: gid, getegid=lambda: gid, fstat=fstat, environ={})
                 with patch.dict(sys.modules, {"ctypes": None}), \
                      patch.multiple(self.module, os=fake_os, socket=SimpleNamespace(),
                                     subprocess=SimpleNamespace(), signal=SimpleNamespace(),
@@ -9853,7 +9853,7 @@ class CISandboxPureTests(unittest.TestCase):
                  patch.multiple(self.module, os=SimpleNamespace(getuid=lambda: uid, geteuid=lambda: uid,
                                     getgid=lambda: gid, getegid=lambda: gid, fstat=inherited,
                                     getresuid=lambda: (uid, uid, uid), getresgid=lambda: (gid, gid, gid),
-                                    readlink=namespace, listdir=root_entries, setuid=regain),
+                                    readlink=namespace, listdir=root_entries, setuid=regain, environ={}),
                                 socket=SimpleNamespace(), subprocess=SimpleNamespace(), signal=SimpleNamespace(),
                                 _process_groups=Mock(return_value=[] if platform == "linux" else [gid]),
                                 _probe_provider_boundaries=Mock(side_effect=boundary)), \

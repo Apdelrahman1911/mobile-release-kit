@@ -20,18 +20,26 @@ import pwd
 import re
 import resource
 import secrets
+import select
 import selectors
 import signal
 import socket
 import stat
 import subprocess
 import sys
+import termios
 import time
+import tty
 
 
 MiB = 1024 * 1024
 CAPTURE_TOTAL = 256 * MiB
 DISK_RESERVE = (4 * 1024 + 512) * MiB
+_PRIVATE_PTY_ENV = "MRK_CI_PRIVATE_PTY"
+_PRIVATE_PTY_STAGES = frozenset({"allocate", "admit", "private-mode", "named-positive", "transfer",
+                                "binding", "canonical", "write", "read", "eof", "named-denial",
+                                "metadata-denial", "close"})
+_PRIVATE_PTY_PREFIX = b"MRK_PRIVATE_PTY_FAILURE "
 JAVA_LIMITS = (
     "-Xms32m -Xmx256m -XX:MaxMetaspaceSize=256m "
     "-XX:CompressedClassSpaceSize=128m -XX:ReservedCodeCacheSize=128m"
@@ -1309,6 +1317,263 @@ def _linux_native_process_toolchain(uid: int, gid: int, *, deadline: float) -> d
     _remaining(deadline)
     return {"gcc": compiler, "evidence": {"gcc_sha256": digest.hexdigest(),
             "provider": "ubuntu-24.04-distribution", "compiler_family": "gcc-13"}}
+
+
+def _pty_identity(info) -> list[int]:
+    return [info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_rdev]
+
+
+def _private_pty_command(argv: list[str], root: Path, python: Path, uid: int) -> bool:
+    """Closed original probe/matrix roles, never a generic ordinary capability."""
+    if (type(argv) is not list or not 7 <= len(argv) <= 27
+            or any(type(value) is not str or not value or len(value) > 65536 for value in argv)):
+        return False
+    entry = root / "bootstrap/ci_sandbox.py"
+    if len(argv) == 7 and argv[:6] == [str(python), "-I", "-S", "-B", str(entry), "--probe"]:
+        try:
+            data = json.loads(argv[6])
+        except (ValueError, TypeError, RecursionError):
+            return False
+        return (type(data) is dict and data.get("private_pty_required") is True
+                and type(data.get("uid")) is int and type(data.get("gid")) is int
+                and data["uid"] == data["gid"] == uid and data.get("platform") == "darwin"
+                and data.get("work") == str(root / "work") and data.get("source") == str(root / "source")
+                and "probe_scratch" not in data)
+    if (argv[1:5] != ["-I", "-S", "-B", str(root / "source/tests/workflow/run_local_signing_matrix.py")]
+            or argv[5] not in {"--phase", "--adapter-phase"} or argv[6] not in {"source", "wheel"}):
+        return False
+    phase, matrix = argv[6], argv[5] == "--phase"
+    labels = ["--package-root", "--output", *(["--shard"] if matrix else []), "--deadline", "--os",
+              "--repository", "--commit", "--run-id", "--run-attempt", "--job"]
+    if argv[7::2] != labels or len(argv) != 7 + len(labels) * 2:
+        return False
+    fields = dict(zip(labels, argv[8::2]))
+    package = (root / "work/source-build/src/mobile_release" if phase == "source" else
+               root / "work/wheel-venv/lib/python3.11/site-packages/mobile_release")
+    if (argv[0] != str(root / f"work/{phase}-venv/bin/python") or fields["--package-root"] != str(package)
+            or fields["--output"] != str(root / "work" / ("signing-matrix" if matrix else "signing-adapter") / phase)
+            or fields["--os"] != "macos-26"
+            or fields["--job"] not in ({"test", "test-signing-matrix"} if matrix else {"test-signing-adapter"})
+            or matrix and re.fullmatch(r"(?:[0-9]|1[0-5])", fields["--shard"]) is None
+            or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", fields["--repository"]) is None
+            or re.fullmatch(r"[0-9a-f]{40}", fields["--commit"]) is None
+            or any(re.fullmatch(r"[1-9][0-9]{0,19}", fields[label]) is None for label in ("--run-id", "--run-attempt"))):
+        return False
+    try:
+        endpoint = float(fields["--deadline"])
+        return math.isfinite(endpoint) and endpoint > 0
+    except ValueError:
+        return False
+
+
+def _private_pty_failure(stage: str, error: BaseException, cleanup: list) -> None:
+    """Finite optional diagnostics only; never publish exception text or paths."""
+    try:
+        number = OSError.__dict__["errno"].__get__(error, OSError) if isinstance(error, OSError) else None
+        note = {"stage": stage, "errno": number if type(number) is int and 0 < number < 4096 else None,
+                "cleanup_errors": len(cleanup)}
+        if stage in _PRIVATE_PTY_STAGES and len(cleanup) <= 3:
+            raw = json.dumps(note, sort_keys=True, separators=(",", ":")).encode("ascii")
+            os.write(2, _PRIVATE_PTY_PREFIX + raw + b"\n")
+    except BaseException:
+        pass  # Diagnostic delivery is not a lifecycle or success decision.
+
+
+def _private_pty_failure_note(data: bytes) -> dict | None:
+    if len(data) > 65536:
+        return None
+    content = data.splitlines()
+    if len(content) > 512:
+        return None
+    lines = [line[len(_PRIVATE_PTY_PREFIX):] for line in content
+             if line.startswith(_PRIVATE_PTY_PREFIX)]
+    if len(lines) != 1 or len(lines[0]) > 256:
+        return None
+    try:
+        note = json.loads(lines[0])
+        if (type(note) is not dict or set(note) != {"stage", "errno", "cleanup_errors"}
+                or type(note["stage"]) is not str or note["stage"] not in _PRIVATE_PTY_STAGES
+                or note["errno"] is not None and (type(note["errno"]) is not int or not 0 < note["errno"] < 4096)
+                or type(note["cleanup_errors"]) is not int or not 0 <= note["cleanup_errors"] <= 3
+                or json.dumps(note, sort_keys=True, separators=(",", ":")).encode("ascii") != lines[0]):
+            return None
+        return note
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        return None
+
+
+def _private_pty_binding(raw: str | None) -> tuple[int, int]:
+    """Validate the original entry's two capabilities, not a reusable receipt."""
+    if type(raw) is not str or not 0 < len(raw) <= 1024:
+        raise SessionError("missing original private terminal capability")
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError, RecursionError) as error:
+        raise SessionError("invalid original private terminal binding") from error
+    if (type(data) is not dict or set(data) != {"version", "uid", "gid", "pair"}
+            or type(data["version"]) is not int or data["version"] != 1
+            or type(data["uid"]) is not int or type(data["gid"]) is not int
+            or not 60000 <= data["uid"] < 65000 or data["gid"] != data["uid"]
+            or (os.getuid(), os.geteuid(), os.getgid(), os.getegid()) != (data["uid"],) * 4
+            or type(data["pair"]) is not list or len(data["pair"]) != 2
+            or json.dumps(data, sort_keys=True, separators=(",", ":")) != raw):
+        raise SessionError("original private terminal identity or schema differs")
+    descriptors = []
+    for item in data["pair"]:
+        if (type(item) is not list or len(item) != 2 or type(item[0]) is not int
+                or not 2 < item[0] < 1024 or item[0] in descriptors
+                or type(item[1]) is not list or len(item[1]) != 6
+                or any(type(value) is not int or not 0 <= value < 2 ** 64 for value in item[1])):
+            raise SessionError("original private terminal descriptor shape differs")
+        info = os.fstat(item[0])
+        if _pty_identity(info) != item[1] or not stat.S_ISCHR(info.st_mode) or not os.isatty(item[0]):
+            raise SessionError("original private terminal descriptor changed")
+        descriptors.append(item[0])
+    slave = os.fstat(descriptors[1])
+    if (slave.st_uid != data["uid"] or stat.S_IMODE(slave.st_mode) != 0o600
+            or re.fullmatch(r"/dev/ttys[0-9]{1,6}", os.ttyname(descriptors[1])) is None):
+        raise SessionError("original private slave is not a private owned terminal")
+    # Exec transfer is over. Forked case workers still inherit these originals;
+    # unrelated later execs must not receive ambient terminal capabilities.
+    for descriptor in descriptors:
+        os.set_inheritable(descriptor, False)
+    return tuple(descriptors)
+
+
+def _exec_private_pty(command: list[str], policy: str, uid: int, gid: int) -> None:
+    """Existing original entry owns one pair before applying unchanged policy."""
+    pair = positive = primary = None
+    cleanup, stage = [], "allocate"
+    try:
+        if (_PRIVATE_PTY_ENV in os.environ or sys.platform != "darwin" or uid != gid
+                or not 60000 <= uid < 65000
+                or (os.getuid(), os.geteuid(), os.getgid(), os.getegid()) != (uid,) * 4):
+            raise SessionError("private terminal requires its original numerical entry")
+        pair = os.openpty()  # Record the whole returned pair before another action.
+        stage = "admit"
+        if (type(pair) is not tuple or len(pair) != 2 or pair[0] == pair[1]
+                or any(type(fd) is not int or not 2 < fd < 1024 for fd in pair)):
+            raise SessionError("invalid original terminal pair")
+        before = [os.fstat(fd) for fd in pair]
+        if (any(not stat.S_ISCHR(info.st_mode) or not os.isatty(fd) or os.get_inheritable(fd)
+                for fd, info in zip(pair, before)) or before[1].st_uid != uid):
+            raise SessionError("original terminal pair is not owned and close-on-exec")
+        name = os.ttyname(pair[1])
+        if re.fullmatch(r"/dev/ttys[0-9]{1,6}", name) is None:
+            raise SessionError("original slave is not a generated Darwin terminal")
+        stage = "private-mode"
+        # Only our original returned slave FD, never /dev/ptmx or a pathname.
+        os.fchmod(pair[1], 0o600)
+        slave = os.fstat(pair[1])
+        if (slave.st_uid != uid or stat.S_IMODE(slave.st_mode) != 0o600
+                or (slave.st_dev, slave.st_ino, slave.st_rdev) !=
+                   (before[1].st_dev, before[1].st_ino, before[1].st_rdev)):
+            raise SessionError("original slave private-mode postcondition failed")
+        stage = "named-positive"
+        positive = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_NOCTTY | os.O_NONBLOCK | os.O_CLOEXEC)
+        if _pty_identity(os.fstat(positive)) != _pty_identity(slave):
+            raise SessionError("original slave named-open positive changed identity")
+        closing, positive = positive, None
+        os.close(closing)  # An uncertain close fails; never retry its number.
+        binding = {"version": 1, "uid": uid, "gid": gid,
+                   "pair": [[fd, _pty_identity(os.fstat(fd))] for fd in pair]}
+        environment = dict(os.environ)
+        environment[_PRIVATE_PTY_ENV] = json.dumps(binding, sort_keys=True, separators=(",", ":"))
+        stage = "transfer"
+        for fd in pair:
+            os.set_inheritable(fd, True)
+        os.execve("/usr/bin/sandbox-exec", ["/usr/bin/sandbox-exec", "-f", policy, *command], environment)
+        raise SessionError("original private terminal exec unexpectedly returned")
+    except BaseException as error:
+        primary = error
+    # Reached only before a successful exec. Retire each owned slot once and
+    # attempt every close even when one fails; original process exit is still due.
+    if positive is not None:
+        closing, positive = positive, None
+        try:
+            os.close(closing)
+        except BaseException as error:
+            cleanup.append(error)
+    if pair is not None:
+        closing, pair = pair, None
+        for fd in reversed(closing):
+            try:
+                os.close(fd)
+            except BaseException as error:
+                cleanup.append(error)
+    _private_pty_failure(stage, primary, cleanup)
+    if cleanup:
+        raise BaseExceptionGroup("original private terminal entry and cleanup failed", [primary, *cleanup])
+    raise primary
+
+
+def _probe_private_pty(raw: str | None) -> tuple[int, int]:
+    """Real inherited I/O plus same-object named/metadata denials, not mocks."""
+    stage = "binding"
+    unexpected, primary, cleanup = None, None, []
+    pair = None
+    try:
+        pair = _private_pty_binding(raw)
+        master, slave = pair
+        stage = "canonical"
+        tty.setraw(slave)
+        attributes = termios.tcgetattr(slave)
+        attributes[3] |= termios.ICANON
+        termios.tcsetattr(slave, termios.TCSANOW, attributes)
+        termios.tcflush(slave, termios.TCIOFLUSH)
+        for fd in pair:
+            os.set_blocking(fd, False)
+        for sender, receiver, payload, action in ((master, slave, b"private canonical input\n", "read"),
+                                                   (slave, master, b"private terminal output\n", "write"),
+                                                   (master, slave, attributes[6][termios.VEOF], "eof")):
+            stage = action
+            if os.write(sender, payload) != len(payload):
+                raise SessionError("private terminal positive short write")
+            expected = b"" if action == "eof" else payload
+            value = bytearray()
+            cutoff = time.monotonic() + 1.0
+            while True:
+                if not select.select([receiver], [], [], _remaining(cutoff))[0]:
+                    raise SessionError("private terminal positive read timed out")
+                block = os.read(receiver, len(expected) + 1 - len(value))
+                if expected and not block:
+                    raise SessionError("private terminal positive unexpected EOF")
+                value.extend(block)
+                if not expected or len(value) >= len(expected):
+                    break
+            if bytes(value) != expected:
+                raise SessionError("private terminal positive data differs")
+        stage = "named-denial"
+        try:
+            unexpected = os.open(os.ttyname(slave), os.O_RDWR | os.O_NOFOLLOW | os.O_NOCTTY | os.O_NONBLOCK | os.O_CLOEXEC)
+        except OSError as error:
+            if error.errno not in {errno.EACCES, errno.EPERM}:
+                raise
+        else:
+            raise SessionError("private terminal unexpectedly gained named-open authority")
+        stage = "metadata-denial"
+        try:
+            os.fchmod(slave, 0o400)  # A real restrictive change, not a same-mode no-op.
+        except OSError as error:
+            if error.errno not in {errno.EACCES, errno.EPERM}:
+                raise
+        else:
+            raise SessionError("private terminal unexpectedly gained metadata authority")
+        _private_pty_binding(raw)  # Includes actual unchanged owned0600 state.
+    except BaseException as error:
+        primary = error
+    if unexpected is not None:
+        closing, unexpected = unexpected, None
+        try:
+            os.close(closing)
+        except BaseException as error:
+            cleanup.append(error)
+    if primary is not None:
+        _private_pty_failure(stage, primary, cleanup)
+        if cleanup:
+            raise BaseExceptionGroup("private terminal admission and owned close failed", [primary, *cleanup])
+        raise primary
+    return pair
 
 
 def _small_command(argv: list[str], seconds: float = 10.0,
@@ -3606,7 +3871,9 @@ class Session:
         if profile == "python-full" and (self.platform != "linux" or cpu != 300
                                           or argv != _python_full_command(self.root, self.deadline)):
             raise SessionError("fixed Python profile command/platform differs")
-        role = "--enter-python-full" if profile == "python-full" else "--enter"
+        role = ("--enter-python-full" if profile == "python-full" else
+                "--enter-private-pty" if profile == "ordinary" and self.platform == "darwin"
+                and _private_pty_command(argv, self.root, self.python, self.uid) else "--enter")
         policy = self.policy
         if profile in _NATIVE_PROFILES:
             phase = profile.removeprefix("native-authority-")
@@ -4885,6 +5152,9 @@ class Session:
         launcher_error = _launcher_error(result.stderr, self.python, self.entry)
         if launcher_error is not None:
             row["launcher_error"] = launcher_error
+        private_pty_error = _private_pty_failure_note(result.stderr)
+        if private_pty_error is not None:
+            row["private_pty_error"] = private_pty_error
         if self.platform == "darwin" and name == "ruby-numerical-identity":
             ruby_error = _ruby_launch_error(result, self.ruby)
             if ruby_error is not None:
@@ -4968,6 +5238,7 @@ class Session:
                 data["host_pid"] = os.readlink("/proc/self/ns/pid")
                 data["runtime_executables"] = [str(self.python), str(self.ruby)]
             else:
+                data["private_pty_required"] = True  # Only this original ordinary top probe.
                 canary, endpoint = _home_paths(self.runner_home, self.root)
                 data["home_canary"], data["home_socket"] = str(canary), str(endpoint)
                 data["ruby_prefix"], data["ruby_executable"] = str(self.ruby_prefix), str(self.ruby)
@@ -6169,7 +6440,22 @@ def _probe_leaf(data: dict) -> None:
     # groups[0], so primary-only[gid] (not []) proves no additional groups.
     if _process_groups(data["platform"]) != ([] if data["platform"] == "linux" else [gid]):
         raise SessionError("process retains unexpected groups")
-    # Check before opening any probe descriptors.  No inherited socket or extra FD.
+    private_required = data.get("private_pty_required", False)
+    if (type(private_required) is not bool or private_required and
+            (data["platform"] != "darwin" or "probe_scratch" in data)):
+        raise SessionError("private terminal capability escaped its ordinary top probe")
+    private_raw = os.environ.get(_PRIVATE_PTY_ENV)
+    private_pair = ()
+    if private_required:
+        try:
+            private_pair = _private_pty_binding(private_raw)
+        except BaseException as error:
+            _private_pty_failure("binding", error, [])
+            raise
+    if not private_required and private_raw is not None:
+        raise SessionError("non-PTY probe inherited a private terminal binding")
+    # Check before opening probe descriptors. Only the original ordinary pair
+    # is exempt; no socket, arbitrary FD, native role or zero-FD child is widened.
     for fd in range(1024):
         try:
             mode = os.fstat(fd).st_mode
@@ -6177,7 +6463,7 @@ def _probe_leaf(data: dict) -> None:
             if exc.errno == errno.EBADF:
                 continue
             raise
-        if fd > 2 or stat.S_ISSOCK(mode):
+        if fd > 2 and fd not in private_pair or stat.S_ISSOCK(mode):
             raise SessionError("unexpected inherited descriptor")
     if data["platform"] == "linux":
         root = Path(data["work"]).parent
@@ -6254,16 +6540,24 @@ def _probe_leaf(data: dict) -> None:
     finally:
         a.close()
         b.close()
+    if private_required:
+        if _probe_private_pty(private_raw) != private_pair:
+            raise SessionError("original private terminal probe changed its pair")
     _probe_network(data["platform"], data["endpoints"])
 
 
 def _probe(data: dict, *, grandchild: bool = False) -> None:
     _probe_leaf(data)
     base = [sys.executable, "-I", "-S", "-B", str(Path(__file__).resolve())]
+    descendants = dict(data)
+    if "private_pty_required" in descendants:
+        # _small_command deliberately closes extra FDs and supplies clean ENV;
+        # leaf/exec/grandchild probes retain the original zero-extra-FD contract.
+        descendants["private_pty_required"] = False
     # Each intermediate is its child's original parent and genuinely waits.
     roles = ("--leaf",) if grandchild else ("--leaf", "--grandchild")
     for role in roles:
-        raw = _small_command([*base, role, json.dumps(data)], 10, detached=role == "--grandchild")
+        raw = _small_command([*base, role, json.dumps(descendants)], 10, detached=role == "--grandchild")
         if raw != b"MRK_LEAF_OK\n":
             raise SessionError("fork/exec/detached-grandchild admission failed")
     if not grandchild:
@@ -6375,7 +6669,7 @@ def _fixture(name: str) -> int:
 def _main(argv: list[str]) -> int:
     if not argv:
         raise SessionError("this module has only fixed internal entry roles")
-    if argv[0] in {"--enter", "--enter-python-full"} and len(argv) >= 7:
+    if argv[0] in {"--enter", "--enter-python-full", "--enter-private-pty"} and len(argv) >= 7:
         platform, uid, gid, cpu, policy = argv[1:6]
         if (os.getuid(), os.geteuid(), os.getgid(), os.getegid()) != (int(uid), int(uid), int(gid), int(gid)):
             raise SessionError("trusted entry did not receive dropped numerical credentials")
@@ -6400,6 +6694,20 @@ def _main(argv: list[str]) -> int:
             if platform == "linux":
                 _userns_zero()
             _limits(platform, int(cpu))
+        if argv[0] == "--enter-private-pty":
+            entry = Path(__file__).resolve(strict=True)
+            original = getattr(sys, "orig_argv", None)
+            if (platform != "darwin" or sys.platform != "darwin" or not 60000 <= int(uid) < 65000
+                    or uid != str(int(uid)) or gid != uid or policy != str(entry.parent / "subject.sb")
+                    or entry.name != "ci_sandbox.py" or entry.parent.name != "bootstrap"
+                    or entry.parent.parent.parent != Path("/private/tmp")
+                    or type(original) is not list or len(original) != len(argv) + 5
+                    or original[1:5] != ["-I", "-S", "-B", str(entry)] or original[5:] != argv
+                    or type(original[0]) is not str or not Path(original[0]).is_absolute()
+                    or not _private_pty_command(command, entry.parent.parent, Path(original[0]), int(uid))):
+                raise SessionError("private terminal entry escaped its fixed ordinary subject role")
+            _exec_private_pty(command, policy, int(uid), int(gid))
+            raise SessionError("private terminal entry unexpectedly returned")
         if "--mach-initial" in command and "--aia-offline-baseline" in command:
             raise SessionError("fixed native entry markers cannot be combined")
         if "--mach-initial" in command:
@@ -6421,6 +6729,8 @@ def _main(argv: list[str]) -> int:
         if sys.platform == "linux":
             _userns_zero()
         data = json.loads(argv[1])
+        if argv[0] != "--probe" and data.get("private_pty_required", False) is not False:
+            raise SessionError("only the original top probe may receive a private terminal")
         if argv[0] == "--leaf":
             _probe_leaf(data)
             print("MRK_LEAF_OK", flush=True)

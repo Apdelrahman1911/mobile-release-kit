@@ -35,6 +35,14 @@ ADAPTER_TEST_IDS = tuple(
         "test_genuine_model_inventory_active_build_pending_contrast",
     )
 )
+ADAPTER_PARENT_MODULES = frozenset({
+    "mobile_release", "mobile_release.local_signing", "mobile_release.owned_process",
+    "mobile_release._native_process",
+})
+ADAPTER_ORIGIN_MODULES = {
+    "parent": ADAPTER_PARENT_MODULES,
+    "commandWorker": ADAPTER_PARENT_MODULES | {"mobile_release._command_process"},
+}
 ADAPTER_FAILURE_PREFIX = "MRK_SIGNING_ADAPTER_FAILURE="
 ADAPTER_FAILURE_MAX_BYTES = 2048
 ADAPTER_FAILURE_CATEGORIES = (
@@ -469,10 +477,47 @@ def adapter_scope_from_metadata(metadata, operating_system):
     return {"schema": "mrk-signing-adapter-scope-v1", **metadata, "os": operating_system}
 
 
+def validate_adapter_origins(origins, role):
+    """Closed role-local DATA; a parent import cannot stand in for its worker."""
+    require(type(role) is str and role in ADAPTER_ORIGIN_MODULES, "adapter origin role")
+    require(type(origins) is dict and 1 <= len(origins) <= 100
+            and ADAPTER_ORIGIN_MODULES[role] <= set(origins), "adapter actual loaded modules missing: " + role)
+    for name, relative in origins.items():
+        require(type(name) is str and re.fullmatch(r"mobile_release(?:\.[A-Za-z_][A-Za-z0-9_]*)*", name)
+                and type(relative) is str, "adapter loaded origin fields")
+        expected = {"__init__.py"} if name == "mobile_release" else {
+            "/".join(name.split(".")[1:]) + ".py",
+            "/".join([*name.split(".")[1:], "__init__.py"]),
+        }
+        require(relative in expected, "adapter loaded origin escaped package")
+    return origins
+
+
+def actual_adapter_origins(package, role, *, deadline=None):
+    """Observe existing imports only, without loading unused production modules."""
+    before_deadline(deadline)
+    require(package.is_absolute() and package.resolve(strict=True) == package and package.is_dir(),
+            "adapter actual package root")
+    origins = {}
+    for name, module in tuple(sys.modules.items()):
+        before_deadline(deadline)
+        if type(name) is str and (name == "mobile_release" or name.startswith("mobile_release.")):
+            origin = getattr(module, "__file__", None)
+            require(type(origin) is str, "adapter actual loaded origin missing")
+            path = Path(origin)
+            require(path.is_absolute() and path.resolve(strict=True) == path and path.is_file()
+                    and path.is_relative_to(package), "adapter actual import escaped package")
+            origins[name] = path.relative_to(package).as_posix()
+            require(len(origins) <= 100, "adapter actual import count")
+    validate_adapter_origins(origins, role)
+    before_deadline(deadline)
+    return origins
+
+
 def validate_adapter_record(record, scope, phase, package):
     require(type(record) is dict and set(record) == {"schema", "phase", "scope", "status", "productionRoot",
             "startedIds", "successfulIds", "testsRun", "origins", "casePathsRemoved"}, "adapter record fields")
-    require(record["schema"] == "mrk-signing-adapter-phase-v1" and record["status"] == "adapter-only"
+    require(record["schema"] == "mrk-signing-adapter-phase-v2" and record["status"] == "adapter-only"
             and type(record["scope"]) is dict and canonical(record["scope"]) == canonical(scope)
             and record["phase"] == phase
             and record["productionRoot"] == str(package), "adapter record binding")
@@ -480,16 +525,9 @@ def validate_adapter_record(record, scope, phase, package):
             and type(record["testsRun"]) is int and record["testsRun"] == len(ADAPTER_TEST_IDS)
             and record["casePathsRemoved"] is True, "adapter actual successful IDs or retained cases")
     origins = record["origins"]
-    require(type(origins) is dict and 1 <= len(origins) <= 100
-            and {"mobile_release", "mobile_release.local_signing", "mobile_release.owned_process",
-                 "mobile_release._command_process", "mobile_release._native_process"} <= set(origins),
-            "adapter actual loaded modules missing")
-    for name, relative in origins.items():
-        require(type(name) is str and re.fullmatch(r"mobile_release(?:\.[A-Za-z_][A-Za-z0-9_]*)*", name)
-                and type(relative) is str and relative in {
-                    "/".join(name.split(".")[1:]) + ".py",
-                    "/".join([*name.split(".")[1:], "__init__.py"]),
-                }, "adapter loaded origin escaped package")
+    require(type(origins) is dict and set(origins) == set(ADAPTER_ORIGIN_MODULES), "adapter origin roles missing")
+    for role, values in origins.items():
+        validate_adapter_origins(values, role)
 
 
 def scope_from_metadata(metadata, operating_system, *, producer):

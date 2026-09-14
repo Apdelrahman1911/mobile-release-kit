@@ -83,6 +83,7 @@ class _InertRouter:
         )
         workflow = SimpleNamespace(
             local_signing_matrix_contract=contract, local_signing_persistent_fixture=fixture,
+            local_signing_matrix_diagnostic=SimpleNamespace(mark=lambda *_args: None),
             local_signing_primitive_fixture=primitive,
             local_signing_semantic_fixture=SimpleNamespace(
                 run_case=lambda parent, name: self.helper(parent, "semantic", name)),

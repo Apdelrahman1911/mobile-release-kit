@@ -13,6 +13,7 @@ from pathlib import Path
 from types import FunctionType
 
 from workflow import local_signing_regression_catalog as catalog
+from workflow import local_signing_matrix_diagnostic as diagnostic
 
 
 class RegressionResult(unittest.TestResult):
@@ -47,18 +48,23 @@ class RegressionResult(unittest.TestResult):
         self.succeeded += 1
         super().addSuccess(test)
 
-    def reject(self, outcome):
+    def reject(self, outcome, error=None):
+        first = not self.regression_failed
         self.regression_failed = True
         self.stop()
-        if self.first_failure is None:
-            self.first_failure = outcome
+        if first:
+            self.first_failure = outcome  # Absorbing slot BEFORE any optional projection.
+            try:
+                diagnostic.original_g_failure(error)
+            except BaseException:
+                pass
 
     def addError(self, test, error):
-        self.reject("error")
+        self.reject("error", error)
         super().addError(test, error)
 
     def addFailure(self, test, error):
-        self.reject("failure")
+        self.reject("failure", error)
         super().addFailure(test, error)
 
     def addSkip(self, test, reason):
@@ -75,7 +81,7 @@ class RegressionResult(unittest.TestResult):
 
     def addSubTest(self, test, subtest, error):
         if error is not None:
-            self.reject("subtest-failure")
+            self.reject("subtest-failure", error)
         super().addSubTest(test, subtest, error)
 
 

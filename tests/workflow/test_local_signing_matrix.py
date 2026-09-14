@@ -15,7 +15,7 @@ import tempfile
 import time
 import traceback
 import unittest
-from contextlib import ExitStack, redirect_stderr
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -953,7 +953,8 @@ class MatrixContractTests(unittest.TestCase):
         workflow = load_workflow(runner.ROOT / ".github/workflows/ci.yml")
         job, aggregate = workflow["jobs"]["test-signing-matrix"], workflow["jobs"]["test"]
         self.assertEqual(job["strategy"]["matrix"], {"os": list(contract.OPERATING_SYSTEMS), "shard":
-            "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[0]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]') }}"})
+            "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[0]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]') }}",
+            "include": "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[{\"os\":\"ubuntu-24.04\",\"shard\":11},{\"os\":\"macos-26\",\"shard\":9}]' || '[]') }}"})
         self.assertEqual(job["strategy"]["max-parallel"], 4)
         self.assertIs(job["strategy"]["fail-fast"], False)
         self.assertEqual(job["timeout-minutes"], 60)
@@ -1118,6 +1119,94 @@ class SigningAdapterAdmissionTests(unittest.TestCase):
             flags.no_site = 0
             with self.assertRaisesRegex(ValueError, "isolated no-site"):
                 runner.adapter_phase(args, {})
+
+    def test_actual_origin_roles_require_existing_exact_files_without_importing_unused_modules(self):
+        original_import = __import__
+
+        def no_production_import(name, *args, **kwargs):
+            if name == "mobile_release" or name.startswith("mobile_release."):
+                raise AssertionError("origin inspection must not import production modules")
+            # pathlib may import a standard-library path helper on Python 3.12+.
+            return original_import(name, *args, **kwargs)
+
+        parent_names = {"mobile_release", "mobile_release.local_signing", "mobile_release.owned_process",
+                        "mobile_release._native_process"}
+        self.assertEqual(contract.ADAPTER_ORIGIN_MODULES, {
+            "parent": parent_names, "commandWorker": parent_names | {"mobile_release._command_process"}})
+        relative = {name: "__init__.py" if name == "mobile_release" else name.split(".")[-1] + ".py"
+                    for name in parent_names | {"mobile_release._command_process"}}
+        with tempfile.TemporaryDirectory(prefix="mrk-adapter-origins-inert-") as temporary:
+            root = Path(temporary).resolve()
+            packages = (root / "source/mobile_release", root / "wheel/lib/python3.11/site-packages/mobile_release")
+            for package in packages:
+                package.mkdir(parents=True)
+                for name in (*relative.values(), "optional.py", ".py"):
+                    (package / name).write_text("# Inert origin metadata, never imported.\n")
+            for package, other in (packages, tuple(reversed(packages))):
+                modules = {name: SimpleNamespace(__file__=str(package / path)) for name, path in relative.items()}
+                parent = {name: module for name, module in modules.items() if name in parent_names}
+                with self.subTest(package=package.name), patch.object(contract, "sys", SimpleNamespace(modules=parent)), \
+                        patch("builtins.__import__", side_effect=no_production_import):
+                    actual = contract.actual_adapter_origins(package, "parent")
+                    self.assertEqual(set(actual), parent_names)
+                    with self.assertRaisesRegex(ValueError, "loaded modules missing"):
+                        contract.actual_adapter_origins(package, "commandWorker")
+                with patch.object(contract, "sys", SimpleNamespace(modules=modules)):
+                    self.assertEqual(contract.actual_adapter_origins(package, "commandWorker"), relative)
+                    self.assertEqual(contract.actual_adapter_origins(package, "parent"), relative)
+                missing = dict(modules)
+                missing.pop("mobile_release._native_process")
+                wrong = (
+                    missing,
+                    {**modules, "mobile_release": SimpleNamespace(__file__=str(package / ".py"))},
+                    {**modules, "mobile_release.local_signing": SimpleNamespace(__file__=str(package / "owned_process.py"))},
+                    {**modules, "mobile_release._command_process": SimpleNamespace(__file__=str(other / "_command_process.py"))},
+                    {**modules, "mobile_release.optional": SimpleNamespace(__file__=str(other / "optional.py"))},
+                    {**modules, "mobile_release.optional": SimpleNamespace(__file__=str(package / "missing.py"))},
+                    {**modules, "mobile_release.optional": SimpleNamespace()},
+                )
+                for snapshot in wrong:
+                    with patch.object(contract, "sys", SimpleNamespace(modules=snapshot)), \
+                            self.assertRaises((ValueError, OSError)):
+                        contract.actual_adapter_origins(package, "commandWorker")
+                with patch.object(contract, "sys", SimpleNamespace(modules=modules)), \
+                        patch.object(contract, "time", SimpleNamespace(monotonic=lambda: 20.0)), \
+                        self.assertRaisesRegex(ValueError, "cutoff"):
+                    contract.actual_adapter_origins(package, "commandWorker", deadline=20.0)
+
+    def test_actual_result_accepts_only_fresh_first_worker_origins_before_success(self):
+        origins = {name: "__init__.py" if name == "mobile_release" else name.split(".")[-1] + ".py"
+                   for name in ("mobile_release", "mobile_release.local_signing", "mobile_release.owned_process",
+                                "mobile_release._native_process", "mobile_release._command_process")}
+        for mode in ("good", "missing", "malformed", "foreign", "already-supplied", "failed", "stopped", "wrong-provider"):
+            with self.subTest(mode=mode):
+                identifier = contract.ADAPTER_TEST_IDS[1 if mode == "wrong-provider" else 0]
+                test = SimpleNamespace(id=lambda: identifier, _adapter_command_worker_origins=dict(origins))
+                result = runner.SigningAdapterResult("source", 20.0, ())
+                with patch.object(contract, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+                    result.startTest(test)
+                    previous = None
+                    candidate = test
+                    if mode == "missing": test._adapter_command_worker_origins = None
+                    if mode == "malformed": test._adapter_command_worker_origins.pop("mobile_release._command_process")
+                    if mode == "foreign": candidate = SimpleNamespace(id=test.id, _adapter_command_worker_origins=dict(origins))
+                    if mode == "already-supplied":
+                        previous = result.command_worker_origins = dict(origins)
+                    if mode == "failed": result.failed = True
+                    if mode == "stopped": result.stop()
+                    first = result.first_failure = ("original", "failure") if mode in {"failed", "stopped"} else None
+                    if mode == "good":
+                        result.addSuccess(candidate)
+                        test._adapter_command_worker_origins.clear()
+                        self.assertEqual(result.command_worker_origins, origins)
+                        self.assertEqual(result.succeeded, [identifier])
+                        with self.assertRaises(ValueError): result.addSuccess(candidate)
+                    else:
+                        with self.assertRaises(ValueError): result.addSuccess(candidate)
+                        self.assertEqual(result.succeeded, [])
+                        self.assertIs(result.command_worker_origins, previous)
+                    self.assertIs(result.first_failure, first)
+                    result.stopTest(test)
 
 
 class SigningAdapterDiagnosticTests(unittest.TestCase):
@@ -1688,6 +1777,99 @@ class SigningAdapterPhaseDiagnosticTests(unittest.TestCase):
         with patch.object(contract, "time", SimpleNamespace(monotonic=lambda: 20.0)), redirect_stderr(output):
             self.assertIsNone(contract.emit_adapter_phase_failure(context, "suite", error))
         self.assertEqual(output.getvalue(), "")
+
+    def test_actual_adapter_emits_separate_parent_and_command_worker_origins_through_publication(self):
+        flags = SimpleNamespace(**{name: 1 for name in (
+            "isolated", "ignore_environment", "no_user_site", "no_site", "safe_path", "dont_write_bytecode")})
+        parent = {name: "__init__.py" if name == "mobile_release" else name.split(".")[-1] + ".py"
+                  for name in ("mobile_release", "mobile_release.local_signing", "mobile_release.owned_process",
+                               "mobile_release._native_process")}
+        worker = {**parent, "mobile_release._command_process": "_command_process.py"}
+        namespace = {}
+        exec(compile("def method(self):\n    raise AssertionError('inert emitter must not execute native tests')\n",
+                     str(runner.ROOT / "tests/unit/test_local_signing_persistent.py"), "exec"), namespace)
+
+        class SelectedTest:
+            method = namespace["method"]
+            _testMethodName = "method"
+
+            def __init__(self, identifier):
+                self.identifier = identifier
+                self._adapter_command_worker_origins = (
+                    dict(worker) if identifier == contract.ADAPTER_TEST_IDS[0] and defect != "missing-worker" else None)
+
+            def id(self):
+                return self.identifier
+
+        class Single:
+            def __init__(self, identifier):
+                self.test = SelectedTest(identifier)
+
+            def __iter__(self):
+                return iter((self.test,))
+
+            def countTestCases(self):
+                return 1
+
+        def run(suites, result):
+            for suite in suites:
+                test = suite.test
+                result.startTest(test)
+                result.addSuccess(test)  # Inert unittest/worker observation, not an executed native case.
+                result.stopTest(test)
+
+        model = sys.modules[fixture.PersistentSigningModel.__module__]
+        for phase, defect in (("source", None), ("wheel", None), ("source", "parent-escape"), ("source", "missing-worker")):
+            with self.subTest(phase=phase, defect=defect):
+                package = runner.ROOT.parent / ("work/source-build/src/mobile_release" if phase == "source" else
+                                               "work/wheel-venv/lib/python3.11/site-packages/mobile_release")
+                output_path = runner.ROOT.parent / "work/signing-adapter" / phase
+                modules = {name: SimpleNamespace(__file__=str(package / relative)) for name, relative in parent.items()}
+                if defect == "parent-escape": modules["mobile_release.optional"] = SimpleNamespace(__file__="/foreign/optional.py")
+                output, errors = io.StringIO(), io.StringIO()
+                temporary = SimpleNamespace(tempdir="original-tempdir")
+                local_sys = SimpleNamespace(flags=flags, path=list(sys.path), modules=modules)
+                fake_unittest = SimpleNamespace(TestLoader=lambda: SimpleNamespace(errors=[], loadTestsFromName=Single),
+                    TestSuite=lambda suites: SimpleNamespace(run=lambda result: run(suites, result)))
+                args = SimpleNamespace(deadline=20.0, adapter_phase=phase, output=output_path, package_root=package)
+                scope = contract.adapter_scope_from_metadata({"kind": "github", "repository": "example/mobile-release-kit",
+                    "commit": "1" * 40, "runId": "1234", "attempt": 1, "job": "test-signing-adapter"}, "ubuntu-24.04")
+                with ExitStack() as stack:
+                    for manager in (
+                        patch.object(runner, "sys", local_sys),
+                        patch.object(contract, "sys", SimpleNamespace(modules=modules, stderr=errors)),
+                        patch.object(runner, "time", SimpleNamespace(monotonic=lambda: 10.0)),
+                        patch.object(contract, "time", SimpleNamespace(monotonic=lambda: 10.0)),
+                        patch.object(runner, "tempfile", temporary), patch.object(runner, "unittest", fake_unittest),
+                        patch.object(contract, "adapter_test_ids", return_value=contract.ADAPTER_TEST_IDS),
+                        patch.object(runner, "adapter_source_map", return_value=()),
+                        patch.object(fixture.signing, "__file__", str(package / "local_signing.py")),
+                        patch.object(fixture, "PHASE_DEADLINE", None),
+                        patch.object(fixture, "_CASE_CUSTODY", {}), patch.object(fixture, "_CASE_RECOVERY_DEBT", {}),
+                        patch.object(model, "_RETAINED_MODEL_LIFETIMES", ()),
+                        patch.object(runner.case_owner, "ADAPTER_DIAGNOSTIC_CONTEXT", None),
+                        patch.object(Path, "resolve", new=lambda path, **_kw: path),
+                        patch.object(Path, "exists", return_value=False), patch.object(Path, "is_symlink", return_value=False),
+                        patch.object(Path, "is_dir", return_value=True), patch.object(Path, "is_file", return_value=True),
+                        patch.object(Path, "mkdir", return_value=None), patch.object(Path, "iterdir", return_value=iter(())),
+                        redirect_stdout(output), redirect_stderr(errors),
+                    ):
+                        stack.enter_context(manager)
+                    if defect:
+                        with self.assertRaises(ValueError): runner.adapter_phase(args, scope)
+                    else:
+                        self.assertEqual(runner.adapter_phase(args, scope), 0)
+                    self.assertEqual(temporary.tempdir, "original-tempdir")
+                    self.assertIsNone(runner.case_owner.ADAPTER_DIAGNOSTIC_CONTEXT)
+                if defect:
+                    self.assertEqual(output.getvalue(), "")
+                else:
+                    record = json.loads(output.getvalue().removeprefix("MRK_SIGNING_ADAPTER_PHASE="))
+                    contract.validate_adapter_record(record, scope, phase, package)
+                    self.assertEqual(record["schema"], "mrk-signing-adapter-phase-v2")
+                    self.assertEqual(record["origins"], {"parent": parent, "commandWorker": worker})
+                    self.assertEqual(record["successfulIds"], list(contract.ADAPTER_TEST_IDS))
+                    self.assertEqual(errors.getvalue(), "")
 
     def test_actual_adapter_wrapper_preserves_setup_and_post_suite_failures_after_finally(self):
         flags = SimpleNamespace(**{name: 1 for name in (

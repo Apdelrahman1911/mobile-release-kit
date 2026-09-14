@@ -22,6 +22,7 @@ from unittest.mock import Mock, patch
 
 from workflow import local_signing_bridge as bridge
 from workflow import local_signing_case_owner as owner
+from workflow import local_signing_matrix_contract as matrix_contract
 from workflow import local_signing_persistent_fixture as fixture
 from workflow import local_signing_semantic_fixture as semantic
 from unit import local_signing_persistent as persistent_model
@@ -30,6 +31,76 @@ from unit.local_signing_persistent import PROFILE, UUID, OwnerResolutionRefused,
 
 class PersistentWorkerRecorderTests(unittest.TestCase):
     """No fork, native wait, process signal or actual descriptor is acquired."""
+
+    def test_adapter_command_origins_follow_original_return_before_bounded_read_and_fresh_slot(self):
+        origins = {name: "__init__.py" if name == "mobile_release" else name.split(".")[-1] + ".py"
+                   for name in ("mobile_release", "mobile_release.local_signing", "mobile_release.owned_process",
+                                "mobile_release._native_process", "mobile_release._command_process")}
+        expected_package = Path("/inert/selected/mobile_release")
+        for mode in ("good", "unconfirmed", "missing-worker", "wrong-result"):
+            with self.subTest(mode=mode):
+                events, payload = [], {}
+                subject = PersistentSigningTests("test_one_real_model_command_bridge_finishes_before_success")
+                subject.root = Path("/inert/case")
+                subject._adapter_command_worker_origins = {"stale": "must be cleared"}
+
+                class Model:
+                    state = {"original": {"default": "inert-default"}}
+
+                    def __call__(self, argv):
+                        events.append("command-return")
+                        return SimpleNamespace(returncode=0, stderr="", stdout="inert-default")
+
+                def collect(package, role, *, deadline):
+                    self.assertEqual((package, role, deadline), (expected_package, "commandWorker", 20.0))
+                    self.assertEqual(events[-1], "command-return")
+                    self.assertIsNone(subject._adapter_command_worker_origins)
+                    events.append("worker-origins")
+                    value = dict(origins)
+                    if mode == "missing-worker": value.pop("mobile_release._command_process")
+                    return value
+
+                def worker(root, name, task, *, timeout):
+                    self.assertEqual((root, name, timeout), (subject.root / "one-model-command", "healthy", 10))
+                    self.assertIsNone(subject._adapter_command_worker_origins)
+                    # Expected package was captured before dispatch, not selected from this worker's metadata.
+                    fixture.signing.__file__ = "/inert/foreign/mobile_release/local_signing.py"
+                    payload.update(task())
+                    events.append("original-return")
+                    return {"exit": 0, "originalAnchorWait": True, "originalWorkerWait": mode != "unconfirmed",
+                            "originalStatusEOF": True, "groupAbsentBeforeAnchorWait": True,
+                            "deadlineTest": False, "runDeadlineExpired": False}
+
+                def read(root, name):
+                    self.assertEqual(events[-1], "original-return")
+                    self.assertIsNone(subject._adapter_command_worker_origins)
+                    events.append("bounded-read")
+                    if mode == "wrong-result": payload["actual_model_command"] = False
+                    return payload
+
+                with patch.object(fixture.signing, "__file__", str(expected_package / "local_signing.py")), \
+                        patch.object(fixture, "PHASE_DEADLINE", 20.0), \
+                        patch.object(Path, "resolve", new=lambda path, **_kw: path), \
+                        patch.object(Path, "mkdir", return_value=None), patch.object(Path, "glob", return_value=()), \
+                        patch(__name__ + ".initialize", side_effect=lambda root: events.append("initialize")), \
+                        patch(__name__ + ".PersistentSigningModel", side_effect=lambda root: Model()), \
+                        patch.object(matrix_contract, "actual_adapter_origins", side_effect=collect), \
+                        patch.object(fixture, "run_worker", side_effect=worker), \
+                        patch.object(fixture, "read_case_json", side_effect=read), \
+                        patch.object(fixture, "remove_case", side_effect=lambda root: events.append("cleanup")), \
+                        patch.object(owner, "run_worker", side_effect=AssertionError("inert test must not dispatch")):
+                    if mode == "good":
+                        subject.test_one_real_model_command_bridge_finishes_before_success()
+                        payload["origins"].clear()
+                        self.assertEqual(subject._adapter_command_worker_origins, origins)
+                    else:
+                        with self.assertRaises(ValueError if mode == "missing-worker" else AssertionError):
+                            subject.test_one_real_model_command_bridge_finishes_before_success()
+                        self.assertIsNone(subject._adapter_command_worker_origins)
+                expected = ["initialize", "command-return", "worker-origins", "original-return"]
+                if mode != "unconfirmed": expected.append("bounded-read")
+                if mode == "good": expected.append("cleanup")
+                self.assertEqual(events, expected)
 
     class Page:
         """Inert mapping; neither this class nor its close acquires a resource."""
@@ -1326,6 +1397,8 @@ class PersistentSigningTests(unittest.TestCase):
                 fixture.remove_case(case)
 
     def test_one_real_model_command_bridge_finishes_before_success(self):
+        self._adapter_command_worker_origins = None  # A reused TestCase cannot supply stale evidence.
+        package = Path(fixture.signing.__file__).resolve(strict=True).parent  # Before the original worker fork.
         case = self.root / "one-model-command"
         case.mkdir(mode=0o700)
         initialize(case)
@@ -1336,9 +1409,14 @@ class PersistentSigningTests(unittest.TestCase):
             self.assertEqual(result.stderr, "")
             self.assertIn(model.state["original"]["default"], result.stdout)
             self.assertFalse(list(case.glob("model-bridge-*")))
-            return {"actual_model_command": True}
-        fixture.run_worker(case, "healthy", task, timeout=10)
-        self.assertEqual(json.loads((case / "healthy.json").read_bytes()), {"actual_model_command": True})
+            return {"actual_model_command": True, "origins": matrix_contract.actual_adapter_origins(
+                package, "commandWorker", deadline=fixture.PHASE_DEADLINE)}
+        returned = fixture.run_worker(case, "healthy", task, timeout=10)
+        fixture.assert_original_return(returned, expected=0)
+        record = fixture.read_case_json(case, "healthy")
+        self.assertEqual(set(record), {"actual_model_command", "origins"})
+        self.assertIs(record["actual_model_command"], True)
+        self._adapter_command_worker_origins = dict(matrix_contract.validate_adapter_origins(record["origins"], "commandWorker"))
         fixture.remove_case(case)
 
     def test_original_c_prefix_cut_uses_real_fence_and_fresh_recovery(self):
