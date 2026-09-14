@@ -32,6 +32,10 @@ module UploadProcessFixture
   ADAPTER_COMPLETION_LIMIT = [ADAPTER_RUN_LIMIT + CLEANUP_LIMIT,
     ADAPTER_MUTANT_RUN_LIMIT + CLEANUP_LIMIT, ADAPTER_CAPTURE_LIMIT + CLEANUP_LIMIT].max
   ADAPTER_DRIVER_LIMIT = ADAPTER_SETUP_LIMIT + ADAPTER_COMPLETION_LIMIT + ADAPTER_PUBLICATION_LIMIT
+  # Healthy ownership families admit work for 60s, then finish the ONE last
+  # admitted row and publish under the same original endpoint. Never renewed.
+  OWNERSHIP_COMPLETION_TAIL = ADAPTER_DRIVER_LIMIT + CLEANUP_LIMIT + ADAPTER_PUBLICATION_LIMIT
+  OWNERSHIP_HEALTHY_LIMIT = OWNERSHIP_LIMIT + OWNERSHIP_COMPLETION_TAIL
   OUTPUT_LIMIT = 32_768
   PROCESS_OBSERVER_KEY = "MOBILE_RELEASE_TEST_PROCESS_OBSERVER"
   # The owner fixes this before entry. Later configuration/canary changes must
@@ -169,6 +173,9 @@ module UploadProcessFixture
       "actual adapter result parser call changed" => "parser-contract",
       "actual capture start/cutoff was not observed" => "capture-clock-binding",
       "adapter preparation missed original entry budget" => "adapter-entry-budget",
+      "adapter entry original session or clocks changed" => "adapter-entry-binding",
+      "adapter entry missed original one-second window" => "adapter-entry-window",
+      "adapter entry lacks original completion reserve" => "adapter-entry-reserve",
       "adapter readiness missed original cutoff" => "adapter-readiness-budget",
       "fixture record missed original capture cutoff" => "record-cutoff",
       "validator record is not bound" => "validator-marker",
@@ -671,7 +678,7 @@ module UploadProcessFixture
                       cwd: nil, root: nil, deadline: nil, parent_slot: nil, run_deadline_ns: nil)
     assert_domain_reusable!
     unless seconds.is_a?(Numeric) && seconds.finite? && seconds.positive? &&
-           (deadline.nil? || deadline.is_a?(Numeric) && deadline.finite?) &&
+           (deadline.nil? || deadline.is_a?(Numeric) && deadline.finite? && (deadline.to_r * 1_000_000_000).floor > clock_ns) &&
            (run_deadline_ns.nil? || run_deadline_ns.instance_of?(Integer) && run_deadline_ns > clock_ns)
       raise Failure.new("process-observation", "invalid observation deadline")
     end
@@ -4219,9 +4226,14 @@ module UploadProcessFixture
         capture, started, cutoff = @capture_started_ns, @native_started_ns, @driver_deadline_ns
         unless object.equal?(@observation.session) &&
                [capture, started, cutoff, now].all? { |time| time.instance_of?(Integer) && time.positive? } &&
-               capture <= started && started <= now && now < capture + ADAPTER_ENTRY_LIMIT * 1_000_000_000 &&
-               started + (ADAPTER_COMPLETION_LIMIT + ADAPTER_PUBLICATION_LIMIT) * 1_000_000_000 < cutoff
-          raise Failure.new("setup-fixture-fault", "adapter preparation missed original entry budget")
+               capture <= started && started <= now
+          raise Failure.new("setup-fixture-fault", "adapter entry original session or clocks changed")
+        end
+        unless now < capture + ADAPTER_ENTRY_LIMIT * 1_000_000_000
+          raise Failure.new("setup-fixture-fault", "adapter entry missed original one-second window")
+        end
+        unless started + (ADAPTER_COMPLETION_LIMIT + ADAPTER_PUBLICATION_LIMIT) * 1_000_000_000 < cutoff
+          raise Failure.new("setup-fixture-fault", "adapter entry lacks original completion reserve")
         end
       when :custodian_attempt
         snapshot_output_sources!(object) if OUTPUT_SOURCE_MODES.include?(@base_mode)
@@ -5503,9 +5515,13 @@ module UploadProcessFixture
       raise Failure.new("fixture-input", "ownership probe must use its fixed CLI")
     end
     cutoff, now = input["deadlineNs"], clock_ns
-    limit = ownership_mode ? OWNERSHIP_LIMIT : driver_limit_seconds(platform)
+    healthy = ownership_mode && OWNERSHIP_FAILURE_MODES.key?(ownership_mode)
+    limit = ownership_mode ? (healthy ? OWNERSHIP_HEALTHY_LIMIT : OWNERSHIP_LIMIT) : driver_limit_seconds(platform)
     unless cutoff.instance_of?(Integer) && cutoff > now && cutoff <= now + limit * 1_000_000_000
       raise Failure.new("fixture-input", "original driver cutoff is missing or expired")
+    end
+    if healthy && cutoff - OWNERSHIP_COMPLETION_TAIL * 1_000_000_000 <= now
+      raise Failure.new("fixture-input", "original ownership admission cutoff expired")
     end
     unless Dir.tmpdir == directory
       raise Failure.new("fixture-input", "driver temporary directory is not its owned case root")
@@ -5548,6 +5564,7 @@ module UploadProcessFixture
       ObservationProbe.new(directory).execute
     else
       probe = OwnershipProbe.new(directory, mode.delete_prefix("ownership-"))
+      raise Failure.new("fixture-input", "original ownership cutoff changed") unless probe.deadline_ns == input.fetch("deadlineNs")
       probe.execute
     end
   rescue Exception => original
@@ -6876,10 +6893,24 @@ module UploadProcessFixture
           assert_raises(Failure) { fixture.driver(directory) }
           assert_equal previous, [writes.length, adapter_acquired.length, hardloss_acquired.length]
           family = base.merge("platform" => "ios", "mode" => "ownership-async",
-            "deadlineNs" => now + OWNERSHIP_LIMIT * 1_000_000_000)
+            "deadlineNs" => now + OWNERSHIP_HEALTHY_LIMIT * 1_000_000_000)
           assert_same family, fixture.validate_driver_input!(directory, family, ownership_mode: "ownership-async")
           assert_raises(Failure) do
             fixture.validate_driver_input!(directory, family.merge("deadlineNs" => family.fetch("deadlineNs") + 1), ownership_mode: "ownership-async")
+          end
+          [now + OWNERSHIP_COMPLETION_TAIL * 1_000_000_000, now].each do |expired|
+            previous = [reads, metadata_reads.length, writes.length]
+            assert_raises(Failure) do
+              fixture.validate_driver_input!(directory, family.merge("deadlineNs" => expired), ownership_mode: "ownership-async")
+            end
+            assert_equal previous, [reads, metadata_reads.length, writes.length]
+          end
+          (%w[ownership-setup ownership-observation] + OWNERSHIP_UNKNOWN_MODES.keys).each do |fixed_mode|
+            original = family.merge("mode" => fixed_mode, "deadlineNs" => now + OWNERSHIP_LIMIT * 1_000_000_000)
+            assert_same original, fixture.validate_driver_input!(directory, original, ownership_mode: fixed_mode)
+            assert_raises(Failure) do
+              fixture.validate_driver_input!(directory, original.merge("deadlineNs" => original.fetch("deadlineNs") + 1), ownership_mode: fixed_mode)
+            end
           end
         end
       end

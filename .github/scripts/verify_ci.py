@@ -300,7 +300,8 @@ ADAPTER_FAILURE_DRIVER_CODES = {
     "fixture-error": frozenset({
         *ADAPTER_FAILURE_OWNED_CODES,
         "missing", "invalid", "other", "source-size", "mutation-anchor", "capture-contract", "parser-contract",
-        "capture-clock-binding", "adapter-entry-budget", "adapter-readiness-budget",
+        "capture-clock-binding", "adapter-entry-budget", "adapter-entry-binding", "adapter-entry-window",
+        "adapter-entry-reserve", "adapter-readiness-budget",
         "record-cutoff", "validator-marker", "validator-cutoff", "validator-live",
         "descendant-marker", "descendant-cutoff", "descendant-live", "native-ready", "deliberately-unready",
         "dispatch-contract", "descendant-fork", "pipe-interval", "pipes-not-blocked", "watchdog-admission",

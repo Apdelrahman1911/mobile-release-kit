@@ -2360,7 +2360,7 @@ module UploadProcessFixture
       "unknown" => %w[unknown-spawn unknown-reap unknown-echild],
     }.freeze
 
-    attr_reader :records
+    attr_reader :records, :deadline_ns
 
     def initialize(directory, family)
       @directory, @family = directory, family
@@ -2369,6 +2369,25 @@ module UploadProcessFixture
       @records = []
       @deadline_ns = @input.fetch("deadlineNs")
       raise Failure.new("fixture-input", "ownership cutoff is not original") unless @deadline_ns.instance_of?(Integer)
+      if OWNERSHIP_FAILURE_CASES.key?(@family) && @input["mode"] != "ownership-#{@family}"
+        raise Failure.new("fixture-input", "original ownership family changed")
+      end
+    end
+
+    def admission_deadline_ns
+      @deadline_ns - (OWNERSHIP_FAILURE_CASES.key?(@family) ? OWNERSHIP_COMPLETION_TAIL * 1_000_000_000 : 0)
+    end
+
+    def admit_row!
+      now = UploadProcessFixture.clock_ns
+      raise Failure.new("ownership-probe", "original family admission cutoff expired") unless now < admission_deadline_ns
+      now
+    end
+
+    def timely_success!
+      if OWNERSHIP_FAILURE_CASES.key?(@family) && UploadProcessFixture.clock_ns >= @deadline_ns
+        raise Failure.new("ownership-probe", "ownership success exceeds original family cutoff")
+      end
     end
 
     def ownership_failure_phase(phase)
@@ -2856,14 +2875,22 @@ module UploadProcessFixture
     end
 
     def invoke
+      cutoff = @deadline_ns
+      if OWNERSHIP_FAILURE_CASES.key?(@family)
+        # This checked sample is AFTER row setup. A delegate's later clock may
+        # shorten, never renew, the original row completion/publication tail.
+        started = admit_row!
+        cutoff = [started + (ADAPTER_DRIVER_LIMIT + CLEANUP_LIMIT) * 1_000_000_000,
+          @deadline_ns - ADAPTER_PUBLICATION_LIMIT * 1_000_000_000].min
+      end
       if @helper == "capture"
         code = @case.end_with?("-spawn") ? "sleep 30" : "exit 0"
         UploadProcessFixture.capture_command([File.realpath(RbConfig.ruby), "-e", code],
-          seconds: 2, root: @case_root, deadline: Rational(@deadline_ns, 1_000_000_000))
+          seconds: 2, root: @case_root, deadline: Rational(cutoff, 1_000_000_000))
       else
         @run_cleanup_state = {} if OWNERSHIP_FAILURE_CASES.key?(@family)
         UploadProcessFixture.run(platform: @input.fetch("platform"), root: @case_root,
-          parameters: @input.fetch("parameters"), mode: "inherited", deadline_ns: @deadline_ns,
+          parameters: @input.fetch("parameters"), mode: "inherited", deadline_ns: cutoff,
           run_cleanup_state: @run_cleanup_state)
       end
     end
@@ -2876,6 +2903,7 @@ module UploadProcessFixture
       unless %w[capture run].include?(helper) && CASES.fetch(@family).include?(name)
         raise Failure.new("fixture-input", "unknown fixed ownership case")
       end
+      admit_row! if OWNERSHIP_FAILURE_CASES.key?(@family)
       @helper, @case = helper, name
       @case_root = case_root || File.realpath(Dir.mktmpdir("ownership-#{helper}-", @directory))
       @context = {token: Object.new.freeze, helper: helper.dup.freeze, name: name.dup.freeze,
@@ -3043,6 +3071,7 @@ module UploadProcessFixture
           "runDeadlineNs" => entry[:slot].run_deadline_ns, "hardDeadlineNs" => entry[:slot].hard_cleanup_deadline_ns} })
       failure_row = ownership_failure_row(summary, snapshot, error)
       ownership_failure_phase("proof-publication")
+      timely_success! if failures.empty? # An existing row rejection remains primary.
       raise Failure.new("ownership-probe", "ownership proof exceeds original reporting bound") if JSON.generate(detail).bytesize > OUTPUT_LIMIT
       UploadProcessFixture.atomic_json(proof, detail)
       summary["proofSha256"] = Digest::SHA256.file(proof).hexdigest
@@ -3055,6 +3084,7 @@ module UploadProcessFixture
       end
       ownership_failure_phase("case-cleanup")
       UploadProcessFixture.remove_fixture_directory(@case_root, root: @directory, layout: :joined_case) unless retained || case_root
+      timely_success!
       summary
     rescue Exception => failure
       ownership_failure_caught(failure)
@@ -3082,8 +3112,11 @@ module UploadProcessFixture
       @case_probes = []
       %w[capture run].each do |helper|
         CASES.fetch(@family).each do |name|
-          raise Failure.new("ownership-probe", "original family deadline expired") unless UploadProcessFixture.clock_ns < @deadline_ns
+          admit_row!
           probe = self.class.new(@directory, @family)
+          unless probe.deadline_ns == @deadline_ns && probe.admission_deadline_ns == admission_deadline_ns
+            raise Failure.new("fixture-input", "original ownership cutoff changed")
+          end
           @case_probes << probe # Never repurpose a late wrapper's receiver.
           record = begin
             probe.one(helper, name)
@@ -3094,6 +3127,7 @@ module UploadProcessFixture
           @records << record
         end
       end
+      timely_success!
       {"kind" => "pass", "family" => @family, "cases" => @records, "retainedFixture" => false}
     end
 
@@ -3644,7 +3678,12 @@ module UploadProcessFixture
     unless mode.start_with?("ownership-") && (deadline_ns.nil? || deadline_ns.instance_of?(Integer) && deadline_ns > clock_ns)
       raise Failure.new("fixture-input", "invalid original ownership probe request")
     end
-    run_ns = [clock_ns + OWNERSHIP_LIMIT * 1_000_000_000, deadline_ns].compact.min
+    healthy = OWNERSHIP_FAILURE_MODES.key?(mode)
+    limit = healthy ? OWNERSHIP_HEALTHY_LIMIT : OWNERSHIP_LIMIT
+    started_ns = clock_ns
+    run_ns = [started_ns + limit * 1_000_000_000, deadline_ns].compact.min
+    admission_ns = healthy ? run_ns - OWNERSHIP_COMPLETION_TAIL * 1_000_000_000 : run_ns
+    raise Failure.new("fixture-input", "original ownership admission cutoff expired") unless clock_ns < admission_ns
     expected_unknown = OWNERSHIP_UNKNOWN_MODES.key?(mode) || mode == "ownership-observation"
     accepted = lifetime(deadline_ns: run_ns) do |scope|
       directory = observation = result = nil

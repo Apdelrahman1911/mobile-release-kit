@@ -2562,9 +2562,19 @@ class CIControllerContractTests(unittest.TestCase):
             self.assertEqual((len(owned_error_codes), len(owned_codes)), (49, 49))
             self.assertEqual(controller.ADAPTER_FAILURE_OWNED_CODES, owned_codes)
             self.assertLessEqual(max(map(len, owned_codes)), 26)
+            adapter_entry_error_codes = {
+                "adapter preparation missed original entry budget": "adapter-entry-budget",
+                "adapter entry original session or clocks changed": "adapter-entry-binding",
+                "adapter entry missed original one-second window": "adapter-entry-window",
+                "adapter entry lacks original completion reserve": "adapter-entry-reserve",
+            }
+            entry_codes = frozenset(adapter_entry_error_codes.values())
+            self.assertEqual((len(adapter_entry_error_codes), len(entry_codes)), (4, 4))
             for category, codes in controller.ADAPTER_FAILURE_DRIVER_CODES.items():
                 self.assertEqual(frozenset(code for code in codes if code.startswith("owned-")),
                                  owned_codes if category == "fixture-error" else frozenset())
+                self.assertEqual(frozenset(code for code in codes if code.startswith("adapter-entry-")),
+                                 entry_codes if category == "fixture-error" else frozenset())
             self.assertEqual(controller.ADAPTER_FAILURE_PREFIX, "MRK_ADAPTER_FAILURE=")
             self.assertEqual(controller.ADAPTER_FAILURE_MODE_CONTRACTS, adapter_contracts)
             self.assertEqual(controller.ADAPTER_FAILURE_PLATFORMS, adapter_platforms)
@@ -2694,6 +2704,15 @@ class CIControllerContractTests(unittest.TestCase):
                 for code in ("owned-record-identity-PRIVATE_MESSAGE", "owned-unmapped"):
                     self.assertIsNone(controller.adapter_failure(adapter_bytes({**adapter_record,
                         "retainedDriverErrorCategory": "fixture-error", "retainedDriverErrorCode": code})))
+                # The three split guards and historical compound guard remain
+                # exact fixture-error codes, not prefix matches or native causes.
+                for code in (*adapter_entry_error_codes.values(), "adapter-entry-unlisted",
+                             "adapter-entry-window-PRIVATE_MESSAGE"):
+                    for category in controller.ADAPTER_FAILURE_DRIVER_CODES:
+                        record = {**adapter_record, "resultKind": "setup-fixture-fault",
+                                  "retainedDriverErrorCategory": category, "retainedDriverErrorCode": code}
+                        self.assertEqual(controller.adapter_failure(adapter_bytes(record)),
+                                         record if category == "fixture-error" and code in entry_codes else None)
                 for first_cutoff, selected_cutoff in (("before-start", "before-cutoff"),
                                                      ("missing", "invalid"), ("at-or-after-cutoff", "before-start")):
                     record = {**adapter_record, "timingChecks": {**adapter_record["timingChecks"],
@@ -2758,6 +2777,11 @@ class CIControllerContractTests(unittest.TestCase):
                 self.assertGreater(len(maximum_marker), 2048)
                 self.assertLessEqual(len(maximum_marker), 4096)
                 self.assertEqual(controller.adapter_failure(maximum_marker), maximum_record)
+                for code in adapter_entry_error_codes.values():
+                    record = {**maximum_record, "retainedDriverErrorCategory": "fixture-error",
+                              "retainedDriverErrorCode": code}
+                    self.assertLessEqual(len(adapter_bytes(record)), len(maximum_marker))
+                    self.assertEqual(controller.adapter_failure(adapter_bytes(record)), record)
                 # Padding is not canonical. At exactly 4096 bytes the bounded
                 # reader may inspect JSON; at 4097 it must reject BEFORE parsing.
                 # Both sizes count the prefix and the final LF, not just JSON.
@@ -2943,16 +2967,19 @@ class CIControllerContractTests(unittest.TestCase):
             self.assertEqual(ruby_words(ownership_source, "OWNERSHIP_FAILURE_HELPERS"), ("capture", "run"))
             self.assertEqual(ruby_words(ownership_source, "OWNERSHIP_FAILURE_PLATFORMS"), ("ios", "android"))
 
+            def ruby_literal_pairs(body, name, *, words=False):
+                pattern = (r'"([^"\r\n]+)" => %w\[([A-Za-z0-9_\-\s]*)\]' if words else
+                           r'"([^"\r\n]+)" => "([^"\r\n]+)"')
+                pairs = controller.re.findall(pattern, body)
+                self.assertEqual(len(pairs), len(dict(pairs)), name)
+                self.assertEqual("".join(controller.re.sub(pattern + r"\s*,?", "", body).split()), "", name)
+                return {key: tuple(value.split()) if words else value for key, value in pairs}
+
             def ruby_literal_table(text, name, *, words=False):
                 bodies = controller.re.findall(r"(?ms)^\s*" + name
                     + r" = \{(.*?)^\s*\}\.(?:transform_values\(&:freeze\)\.)?freeze", text)
                 self.assertEqual(len(bodies), 1, name)
-                pattern = (r'"([^"\r\n]+)" => %w\[([A-Za-z0-9_\-\s]*)\]' if words else
-                           r'"([^"\r\n]+)" => "([^"\r\n]+)"')
-                pairs = controller.re.findall(pattern, bodies[0])
-                self.assertEqual(len(pairs), len(dict(pairs)), name)
-                self.assertEqual("".join(controller.re.sub(pattern + r"\s*,?", "", bodies[0]).split()), "", name)
-                return {key: tuple(value.split()) if words else value for key, value in pairs}
+                return ruby_literal_pairs(bodies[0], name, words=words)
 
             def ownership_literal_table(name, *, words=False):
                 return ruby_literal_table(ownership_source, name, words=words)
@@ -2964,6 +2991,15 @@ class CIControllerContractTests(unittest.TestCase):
             self.assertEqual(ruby_words(fixture_source, "ADAPTER_FAILURE_FIELDS"), adapter_fields)
             self.assertEqual(ruby_words(fixture_source, "ADAPTER_READINESS_STAGES"), adapter_readiness_stages)
             self.assertEqual(ruby_literal_table(fixture_source, "ADAPTER_FAILURE_OWNED_CODES"), owned_error_codes)
+            driver_literal_bodies = controller.re.findall(
+                r"(?ms)^  ADAPTER_FAILURE_CODES = begin\n    literals = \{\n(.*?)^    \}\n"
+                r"    literals\.merge!\(ADAPTER_FAILURE_OWNED_CODES\)\n", fixture_source)
+            self.assertEqual(len(driver_literal_bodies), 1)
+            driver_literals = ruby_literal_pairs(driver_literal_bodies[0], "ADAPTER_FAILURE_CODES")
+            self.assertEqual({message: code for message, code in driver_literals.items()
+                              if code.startswith("adapter-entry-")}, adapter_entry_error_codes)
+            self.assertEqual(controller.ADAPTER_FAILURE_DRIVER_CODES["fixture-error"],
+                             frozenset({"missing", "invalid", "other", *owned_codes, *driver_literals.values()}))
             owned_bodies = controller.re.findall(
                 r"(?ms)^  class OwnedChild\n(.*?)^    def self\.bootstrap\(directory\)\n", ownership_source)
             self.assertEqual(len(owned_bodies), 1)
@@ -3141,6 +3177,14 @@ class CIControllerContractTests(unittest.TestCase):
                             "retainedDriverErrorCode": "owned-publish-return"}}}}
                     self.assertEqual(controller.ownership_failure(ownership_bytes(owned_record)),
                                      owned_record if category == "fixture-error" else None)
+                for code in (*adapter_entry_error_codes.values(), "adapter-entry-unlisted",
+                             "adapter-entry-window-PRIVATE_MESSAGE"):
+                    for category in ("fixture-error", "native-lifecycle-error"):
+                        entry_record = {**run_record, "row": {**run_record["row"], "runCleanup": {
+                            **run_cleanup, "driverResult": {**run_result, "resultKind": "setup-fixture-fault",
+                                "retainedDriverErrorCategory": category, "retainedDriverErrorCode": code}}}}
+                        self.assertEqual(controller.ownership_failure(ownership_bytes(entry_record)),
+                                         entry_record if category == "fixture-error" and code in entry_codes else None)
 
                 def record_with_detail(detail):
                     return {**run_record, "row": {**run_record["row"], "runCleanup": {
@@ -3536,6 +3580,12 @@ class CIControllerContractTests(unittest.TestCase):
                 self.assertEqual(len(ownership_bytes(maximum_record)), 3983)
                 self.assertLessEqual(len(ownership_bytes(maximum_record)), 4096)
                 self.assertEqual(controller.ownership_failure(ownership_bytes(maximum_record)), maximum_record)
+                for code in adapter_entry_error_codes.values():
+                    record = {**maximum_record, "row": {**maximum_record["row"], "runCleanup": {
+                        **maximum_run_cleanup, "driverResult": {**maximum_run_result,
+                            "retainedDriverErrorCategory": "fixture-error", "retainedDriverErrorCode": code}}}}
+                    self.assertLessEqual(len(ownership_bytes(record)), 3983)
+                    self.assertEqual(controller.ownership_failure(ownership_bytes(record)), record)
                 largest_missing = {**maximum_record, "family": "signals", "helper": "capture",
                     "case": "install-published-TERM", "phase": "proof-publication",
                     "errorCategory": "native-lifecycle-error", "errorKind": "parent_lost", "row": "missing"}

@@ -560,14 +560,16 @@ The synthetic adapter process controls use a separate fixed timing profile:
 10 seconds for complete readiness (the existing five-second startup allowance,
 two independently bounded two-second liveness observations and one second for
 markers/delay/publication), 12 seconds for the original startup-inclusive native
-RUN, the unchanged five-second cleanup grace, an 18-second capture watchdog,
-and a 20-second no-deadline mutant RUN. The adapter driver has 31 seconds:
+RUN, the unchanged five-second cleanup grace, an 18-second capture watchdog
+with its original 19-second join boundary, and a 20-second no-deadline mutant RUN.
+The adapter driver has 31 seconds:
 five for preparation, the maximum original completion window of 25 seconds
 (mutant RUN20 + cleanup5), and one for result/publication. None is restarted at
 READY; the real timeout still needs positive actual data blocking, and the
 premature control must execute after actual READY/stdin close but before RUN.
-Generic native/setup driver15, worker30, ownership-family60, adapter gate300 and
-aggregate3300 remain unchanged. Production adapter `MAX_SECONDS` stays3600.
+Generic native/setup driver15, worker30, adapter gate300 and aggregate3300 remain
+unchanged. Setup, observation and all six fixed UNKNOWN singleton ownership modes
+retain their original 60s profile. Production adapter `MAX_SECONDS` stays3600.
 
 The independent capture timer C starts before the native initializer's original
 time T. Admission at the original capture task's pre-acquisition entry requires
@@ -593,6 +595,40 @@ the exact deliberate rejection. Late readiness, unactivated mutants, missing
 waits/EOFs, retained UNKNOWN and exhausted gate budgets remain failures, regardless
 of how much cleanup time elapsed. The fixed limits are not guarantees that all
 cases' worst-case durations fit a gate or that an arbitrarily stalled host passes.
+
+Only the source-pinned healthy `ownership-async`, `ownership-signals` and
+`ownership-policies` families use a fixed 60s admission/work window plus a 37s tail:
+existing driver31 + cleanup5 + outer publication/bookkeeping1, for 97s total.
+From one original monotonic sample S, before any lifetime, directory, observation
+or child acquisition, fix `F=min(S+97s, P)` for an optional validated parent P
+(otherwise `F=S+97s`) and `A=F−37s`. An unusable `A<=now` rejects before effects;
+a supplied parent cap never creates a new 60s interval. Input/CLI and every row
+must retain the identical F and derived A, including after input rereads. The
+healthy child admits only an integer future F no later than `now+97s` with
+`A>now`; other ownership modes retain their 60s input bound.
+
+New-row admission checks run in the family loop, before row setup and at the
+actual invoke endpoint after setup/traps/hooks. The last original sample R must
+satisfy `R<A`; equality fails. That same R fixes the immutable nested overall cap
+`H=min(R+36s, F−1s)`, without resampling or renewal. Inherited `run` keeps its
+original 31s work and 5s cleanup maxima clipped by H; `capture` keeps seconds2 and
+its existing RUN+5 bound, also capped by H. Delayed delegation does not earn a
+fresh full cleanup grace; stale H rejects through original admission before
+acquisition. A stops new rows only: active callbacks, injectors, restoration,
+finality and reporting retain F and their original owner cutoffs. A row admitted
+before A may finish afterward, but successful proof, return and publication must
+still precede F, including after the parent Lifetime completes. Deadline checks
+cannot replace an already selected failure during unwind or optional reporting.
+
+Every healthy family still requires the complete original
+`%w[capture run].product(CASES[family])` tuple and order: async 8, signals 32 and
+policies 20 rows. Expiry with rows remaining fails; no skip, truncation or
+reordering can pass. Setup/observation tuples and UNKNOWN singleton routing stay
+unchanged. Native/readiness/entry/watchdog/cleanup limits are not extended. The
+adapter's one original 300s gate cutoff still covers the healthy partition and
+nine singleton partitions under the 3300s job endpoint. These independent ceilings
+are not a performance guarantee or a promise that all maxima sum to fit the gate;
+aggregate exhaustion remains failure.
 
 Before any next part, the existing Session must establish the preceding original
 capture's actual wait, stream EOFs, domain finality/disposal and `ensure_idle`.
@@ -935,6 +971,15 @@ Complete record bytes are observations, not process ownership or cleanup authori
 Adapter diagnostics classify fixed OwnedChild source-literal error pairs under
 `fixture-error`; unlisted pairs remain `other`. No raw exception text or path is
 published; adapter schema3 and ownership schema4 retain their existing bounds.
+
+The retained `fixture-error` codes split the original pre-acquisition adapter
+entry guard in precedence order: `adapter-entry-binding` for a wrong session,
+nonpositive/noninteger C/T/E/now or failed `C<=T<=now` ordering;
+`adapter-entry-window` for `now>=C+1s`; then `adapter-entry-reserve` for
+`T+26s>=E`. Each remains `setup-fixture-fault` through original task/caller
+cleanup. The legacy `adapter-entry-budget` code stays parseable but does not
+identify which historical conjunct failed. These finite codes add no timestamps,
+raw errors, schema fields or authority; both envelopes keep the 4096-byte bound.
 
 The separate native signal-observation test may emit one canonical schema-2
 `MRK_NATIVE_SIGNAL_FAILURE` line, bounded to 4096 bytes including prefix/newline.

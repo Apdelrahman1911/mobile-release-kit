@@ -1773,6 +1773,7 @@ class NativeUploadValidationTest < Minitest::Test
       assert_native_order_failure_projection
       assert_native_setup_failure_projection
       assert_adapter_fixed_timing_profile
+      assert_ownership_family_admission
       assert_adapter_parent_cutoff_composition
       assert_original_capture_settlement_projection
       assert_record_publication_lifecycle
@@ -2720,7 +2721,7 @@ class NativeUploadValidationTest < Minitest::Test
 
     # Original initialization and the actual pre-acquisition event are pure
     # here. No execute/task/observer installation or native operation occurs.
-    entry = lambda do |mode: "inherited", changes: {}, accepted: true|
+    entry = lambda do |mode: "inherited", changes: {}, rejected: nil|
       times = {capture: 5_000_000_000, started: 5_200_000_000, now: 5_300_000_000, outer: 32_000_000_000}.merge(changes)
       driver = fixture::AdapterDriver.new(@root, "ios", mode, {}, deadline_ns: times.fetch(:outer))
       span = mode == "no-deadline" ? fixture::ADAPTER_MUTANT_RUN_LIMIT : fixture::ADAPTER_RUN_LIMIT
@@ -2735,7 +2736,7 @@ class NativeUploadValidationTest < Minitest::Test
       body = []
       enter = -> { driver.native_event(:run_enter, session); body << :original_native_body }
       fixture.stub(:clock_ns, times.fetch(:now)) do
-        if accepted
+        unless rejected
           enter.call
           assert_equal [:original_native_body], body
           assert_operator times.fetch(:started) + 17_000_000_000, :<, times.fetch(:capture) + 18_000_000_000
@@ -2743,7 +2744,12 @@ class NativeUploadValidationTest < Minitest::Test
           assert_operator times.fetch(:started) + 26_000_000_000, :<, times.fetch(:outer)
         else
           error = assert_raises(fixture::Failure, &enter)
-          assert_equal ["setup-fixture-fault", "adapter preparation missed original entry budget"], [error.kind, error.message]
+          messages = {
+            binding: "adapter entry original session or clocks changed",
+            window: "adapter entry missed original one-second window",
+            reserve: "adapter entry lacks original completion reserve",
+          }
+          assert_equal ["setup-fixture-fault", messages.fetch(rejected)], [error.kind, error.message]
           assert_empty body # The original TaskSlot owns the veto before its native body.
         end
       end
@@ -2752,10 +2758,12 @@ class NativeUploadValidationTest < Minitest::Test
     %w[inherited real-deadline immediate-deadline no-deadline kill-startup kill-descendant].each { |mode| entry.call(mode: mode) }
     entry.call(changes: {now: 5_999_999_999})
     entry.call(changes: {outer: 31_200_000_001}) # More than the whole publication second remains.
-    [{now: 6_000_000_000}, {now: 6_000_000_001}, {now: 5_199_999_999},
-     {capture: 5_200_000_001}, {started: 6_000_000_000, now: 6_000_000_000},
-     {outer: 31_200_000_000}, {outer: 31_199_999_999}, {outer: 32_000_000_000.0}].each do |changes|
-      entry.call(changes: changes, accepted: false)
+    [[{now: 6_000_000_000}, :window], [{now: 6_000_000_001}, :window],
+     [{now: 5_199_999_999}, :binding], [{capture: 5_200_000_001}, :binding],
+     [{started: 6_000_000_000, now: 6_000_000_000}, :window],
+     [{outer: 31_200_000_000}, :reserve], [{outer: 31_199_999_999}, :reserve],
+     [{outer: 32_000_000_000.0}, :binding]].each do |changes, reason|
+      entry.call(changes: changes, rejected: reason)
     end
 
     # Read already-retained C/K endpoints and original parent times only. Ties
@@ -2784,6 +2792,140 @@ class NativeUploadValidationTest < Minitest::Test
     end
     assert evidence.adapter_hardloss_timely?("kill-native-setup", {}, {}, {})
     assert_adapter_original_readiness_helpers
+  end
+
+  def assert_ownership_family_admission
+    fixture, probe_class = UploadProcessFixture, UploadProcessFixture::OwnershipProbe
+    ns, now = 1_000_000_000, 100_000_000_000
+    start = now
+    final, admission = start + 97 * ns, start + 60 * ns
+    assert_equal [60, 37, 97], [fixture::OWNERSHIP_LIMIT, fixture::OWNERSHIP_COMPLETION_TAIL, fixture::OWNERSHIP_HEALTHY_LIMIT]
+    assert_equal fixture::ADAPTER_DRIVER_LIMIT + fixture::CLEANUP_LIMIT + fixture::ADAPTER_PUBLICATION_LIMIT,
+      fixture::OWNERSHIP_COMPLETION_TAIL
+    directory = "/inert-original-family"
+    stubs = lambda do |bindings, &body|
+      if bindings.empty?
+        body.call
+      else
+        target, name, replacement = bindings.first
+        target.stub(name, replacement) { stubs.call(bindings.drop(1), &body) }
+      end
+    end
+
+    # Stop at the actual parent's first lifecycle seam: no directory or native
+    # body runs, but its original S/F/A computation and post-return gate do.
+    offered, lifetimes = Object.new, []
+    stop_before_acquisition = ->(deadline_ns:, &_) { lifetimes << deadline_ns; offered }
+    stubs.call([[fixture, :clock_ns, -> { now }], [fixture, :lifetime, stop_before_acquisition]]) do
+      fixture::OWNERSHIP_FAILURE_MODES.each_key do |mode|
+        [[nil, final], [start + 70 * ns, start + 70 * ns], [start + 120 * ns, final],
+         [start + 37 * ns + 1, start + 37 * ns + 1]].each do |parent, expected|
+          assert_same offered, fixture.run_ownership_probe(platform: "ios", root: directory, parameters: {}, mode: mode, deadline_ns: parent)
+          assert_equal expected, lifetimes.last
+        end
+        [start + 37 * ns, start + 37 * ns - 1].each do |parent|
+          before = lifetimes.length
+          assert_raises(fixture::Failure) do
+            fixture.run_ownership_probe(platform: "ios", root: directory, parameters: {}, mode: mode, deadline_ns: parent)
+          end
+          assert_equal before, lifetimes.length
+        end
+      end
+      (%w[ownership-setup ownership-observation] + fixture::OWNERSHIP_UNKNOWN_MODES.keys).each do |mode|
+        assert_same offered, fixture.run_ownership_probe(platform: "ios", root: directory, parameters: {}, mode: mode)
+        assert_equal start + 60 * ns, lifetimes.last
+      end
+    end
+
+    input = {"platform" => "ios", "parameters" => {}, "mode" => "ownership-async", "deadlineNs" => final}
+    owned_reads = []
+    stubs.call([[fixture, :clock_ns, -> { now }], [Dir, :tmpdir, directory],
+      [fixture, :owned_fixture_directory, ->(path) { owned_reads << path }]]) do
+      fixture::OWNERSHIP_FAILURE_MODES.each_key do |mode|
+        value = input.merge("mode" => mode)
+        assert_same value, fixture.validate_driver_input!(directory, value, ownership_mode: mode)
+        [final + 1, start + 37 * ns, start, final.to_f].each do |bad|
+          before = owned_reads.length
+          assert_raises(fixture::Failure) { fixture.validate_driver_input!(directory, value.merge("deadlineNs" => bad), ownership_mode: mode) }
+          assert_equal before, owned_reads.length
+        end
+      end
+    end
+
+    # Actual initializer/execute/invoke bindings; only selected downstream
+    # commands are inert. Their later validation clock cannot renew H.
+    fixture.stub(:read_json, ->(*) { input }) do
+      probe = probe_class.new(directory, "async")
+      assert_equal [final, admission], [probe.deadline_ns, probe.admission_deadline_ns]
+      late_probe = probe_class.new(directory, "async")
+      fixture.stub(:clock_ns, admission) do
+        fixture.stub(:mark_process_domain_failed!, ->(**_) { nil }) do
+          error = assert_raises(fixture::Failure) { late_probe.one("capture", "async-spawn") }
+          assert_equal "original family admission cutoff expired", error.message
+        end
+      end
+      refute late_probe.instance_variable_defined?(:@case_root)
+      refute late_probe.instance_variable_defined?(:@context) # Actual one refused before directory/hooks/traps.
+      input = input.merge("mode" => "ownership-signals")
+      assert_raises(fixture::Failure) { probe_class.new(directory, "async") }
+      input = input.merge("mode" => "ownership-async")
+      calls, delayed = [], false
+      original_run, original_capture = fixture.method(:run), fixture.method(:capture_command)
+      run = lambda do |**keywords|
+        calls << [:run, keywords]
+        if delayed
+          now = keywords.fetch(:deadline_ns)
+          original_run.call(**keywords) # Existing stale-input refusal before lifetime.
+        else
+          :inert_command
+        end
+      end
+      capture = lambda do |argv, **keywords|
+        calls << [:capture, keywords]
+        if delayed
+          now = (keywords.fetch(:deadline) * ns).floor
+          original_capture.call(argv, environment: {}, **keywords)
+        else
+          :inert_command
+        end
+      end
+      bindings = [[fixture, :clock_ns, -> { now }], [File, :realpath, ->(path) { path }],
+        [fixture, :run, run], [fixture, :capture_command, capture],
+        [fixture, :lifetime, ->(**_keywords, &_body) { flunk "stale H reached lifetime" }],
+        [fixture, :command_lifetime, ->(**_keywords, &_body) { flunk "stale H reached command lifetime" }]]
+      stubs.call(bindings) do
+        %w[capture run].each do |helper|
+          {helper: helper, case: "async-reap", case_root: directory}.each { |key, value| probe.instance_variable_set(:"@#{key}", value) }
+          now = admission - 1
+          assert_equal :inert_command, probe.invoke
+          offered_cutoff = helper == "run" ? calls.last.last.fetch(:deadline_ns) : (calls.last.last.fetch(:deadline) * ns).floor
+          assert_equal final - ns - 1, offered_cutoff
+          assert_equal 2, calls.last.last.fetch(:seconds) if helper == "capture"
+          assert_equal [final, admission], [probe.deadline_ns, probe.admission_deadline_ns]
+          [admission, admission + 1].each do |expired|
+            now = expired
+            before = calls.length
+            assert_raises(fixture::Failure) { probe.invoke }
+            assert_equal before, calls.length
+          end
+          now, delayed = admission - 1, true
+          error = assert_raises(fixture::Failure) { probe.invoke }
+          assert_equal(helper == "run" ? "fixture-input" : "process-observation", error.kind)
+          actual = helper == "run" ? calls.last.last.fetch(:deadline_ns) : (calls.last.last.fetch(:deadline) * ns).floor
+          assert_equal offered_cutoff, actual
+          delayed = false
+        end
+        input = input.merge("mode" => "ownership-unknown-capture-spawn", "deadlineNs" => start + 60 * ns)
+        singleton = probe_class.new(directory, "unknown")
+        %w[capture run].each do |helper|
+          {helper: helper, case: "unknown-spawn", case_root: directory}.each { |key, value| singleton.instance_variable_set(:"@#{key}", value) }
+          now = start
+          assert_equal :inert_command, singleton.invoke
+          actual = helper == "run" ? calls.last.last.fetch(:deadline_ns) : (calls.last.last.fetch(:deadline) * ns).floor
+          assert_equal start + 60 * ns, actual
+        end
+      end
+    end
   end
 
   def assert_adapter_original_readiness_helpers
@@ -2995,6 +3137,17 @@ class NativeUploadValidationTest < Minitest::Test
             assert_equal [10_500_000_000, 15_500_000_000, parent], captured
             assert_same offered, fixture.capture_command([], environment: {}, seconds: 3, deadline: Rational(run_ns, 1_000_000_000))
             assert_equal [run_ns, run_ns, nil], captured
+            [Rational(now - 1, 1_000_000_000), Rational(now, 1_000_000_000),
+             Rational(2 * now + 1, 2_000_000_000)].each do |expired|
+              captured = nil
+              invalid = assert_raises(fixture::Failure) { fixture.capture_command([], environment: {}, deadline: expired) }
+              assert_equal ["process-observation", "invalid observation deadline"], [invalid.kind, invalid.message]
+              assert_nil captured # No command_lifetime, directory or child at stale input entry.
+            end
+            assert_same offered, fixture.capture_command([], environment: {}, deadline: Rational(now + 1, 1_000_000_000))
+            assert_equal [now + 1, now + 1, nil], captured
+            assert_same offered, fixture.capture_command([], environment: {}, deadline: nil)
+            assert_equal [now + 2_000_000_000, now + 7_000_000_000, nil], captured
             # Absolute readiness caps RUN only, without a resampled relative
             # deadline or converting readiness into the overall cleanup cap.
             assert_same offered, fixture.capture_command([], environment: {}, seconds: 2,
@@ -3878,6 +4031,9 @@ class NativeUploadValidationTest < Minitest::Test
       ["MobileReleaseKit::NativeUploadProcess::ProtocolError", "native capture deadline failure", "native-protocol-error", "other"],
       ["MobileReleaseKit::NativeProcessSpawn::Error", "native process close failure", "native-spawn-error", "spawn-close"],
       ["UploadProcessFixture::Failure", "adapter preparation missed original entry budget", "fixture-error", "adapter-entry-budget"],
+      ["UploadProcessFixture::Failure", "adapter entry original session or clocks changed", "fixture-error", "adapter-entry-binding"],
+      ["UploadProcessFixture::Failure", "adapter entry missed original one-second window", "fixture-error", "adapter-entry-window"],
+      ["UploadProcessFixture::Failure", "adapter entry lacks original completion reserve", "fixture-error", "adapter-entry-reserve"],
       ["UploadProcessFixture::Failure", "adapter readiness missed original cutoff", "fixture-error", "adapter-readiness-budget"],
       ["UploadProcessFixture::Failure", "private-marker actual ready timeout cause was not observed", "fixture-error", "other"],
       ["private-marker", "private-marker", "other", "other"],
@@ -5178,35 +5334,40 @@ class NativeUploadValidationTest < Minitest::Test
 
     # The real invoke routing gives run a fresh state, not a prior invocation's
     # error; the capture endpoint never receives this optional run keyword.
+    family_final = 97_000_000_001
+    family_admission = 60_000_000_001
+    row_cutoff = 36_000_000_001
     invoker, invocations = probe_class.allocate, []
-    {family: "async", helper: "run", case: "async-reap", case_root: "/inert-run-route", deadline_ns: 10,
+    {family: "async", helper: "run", case: "async-reap", case_root: "/inert-run-route", deadline_ns: family_final,
      input: {"platform" => "ios", "parameters" => {}}}.each { |key, value| invoker.instance_variable_set(:"@#{key}", value) }
-    fixture.stub(:run, ->(**keywords) { invocations << keywords; :inert_run }) do
-      2.times { assert_equal :inert_run, invoker.invoke }
+    fixture.stub(:clock_ns, 1) do
+      fixture.stub(:run, ->(**keywords) { invocations << keywords; :inert_run }) do
+        2.times { assert_equal :inert_run, invoker.invoke }
+      end
     end
     invocations.each do |keywords|
       assert_equal %i[platform root parameters mode deadline_ns run_cleanup_state], keywords.keys
-      assert_equal ["ios", "/inert-run-route", {}, "inherited", 10], keywords.values_at(:platform, :root, :parameters, :mode, :deadline_ns)
+      assert_equal ["ios", "/inert-run-route", {}, "inherited", row_cutoff], keywords.values_at(:platform, :root, :parameters, :mode, :deadline_ns)
       assert_empty keywords.fetch(:run_cleanup_state)
     end
     refute_same(*invocations.map { |keywords| keywords.fetch(:run_cleanup_state) })
     invoker.instance_variable_set(:@helper, "capture")
-    with_stubs.call([[File, :realpath, ->(path) { path }], [fixture, :capture_command, ->(argv, **keywords) do
+    with_stubs.call([[fixture, :clock_ns, 1], [File, :realpath, ->(path) { path }], [fixture, :capture_command, ->(argv, **keywords) do
       assert_equal [RbConfig.ruby, "-e", "exit 0"], argv
-      assert_equal({seconds: 2, root: "/inert-run-route", deadline: Rational(10, 1_000_000_000)}, keywords)
+      assert_equal({seconds: 2, root: "/inert-run-route", deadline: Rational(row_cutoff, 1_000_000_000)}, keywords)
       :inert_capture
     end]]) { assert_equal :inert_capture, invoker.invoke }
 
     # Run actual one -> execute -> driver-rescue. Directory, proof, observation,
     # trace and signal endpoints are inert; acquisition veto remains outside.
-    produce = lambda do |family: "async", helper: "capture", name: nil, platform: "ios", fault: nil, run_fault: nil, write_result: :full|
+    produce = lambda do |family: "async", helper: "capture", name: nil, platform: "ios", fault: nil, run_fault: nil, timing: nil, write_result: :full|
       name ||= cases.fetch(family).first
       now, constructions, current, lookalike = 1, 0, nil, nil
       events, writes, proofs, rows = [], [], [], []
       run_states, run_projections = [], []
       directory = "/inert-ownership-driver"
       mode = "ownership-#{family}"
-      input = {"platform" => platform, "parameters" => {}, "mode" => mode, "deadlineNs" => 10}
+      input = {"platform" => platform, "parameters" => {}, "mode" => mode, "deadlineNs" => family_final}
       late = IOError.new("private-marker")
       first_error = Interrupt.new("private-marker")
       handlers = {"INT" => "DEFAULT", "TERM" => "DEFAULT"}
@@ -5228,7 +5389,7 @@ class NativeUploadValidationTest < Minitest::Test
       end
       fresh = lambda do
         probe = probe_class.allocate
-        {directory: directory, family: family, input: input, deadline_ns: 10, records: []}.each do |key, value|
+        {directory: directory, family: family, input: input, deadline_ns: family_final, records: []}.each do |key, value|
           probe.instance_variable_set(:"@#{key}", value)
         end
         probe
@@ -5237,30 +5398,41 @@ class NativeUploadValidationTest < Minitest::Test
       constructor = lambda do |selected_directory, selected_family|
         raise "inert constructor scope changed" unless selected_directory == directory && selected_family == family
         constructions += 1
+        driver_probe.instance_variable_set(:@deadline_ns, family_final + 1) if timing == :changed_driver && constructions == 1
         next driver_probe if constructions == 1
         raise late if fault == :next_constructor && constructions == 3
         probe = fresh.call
+        probe.instance_variable_set(:@deadline_ns, family_final + 1) if timing == :changed_row && constructions == 3
         original_one = probe.method(:one)
+        original_invoke = probe.method(:invoke)
         probe.define_singleton_method(:one) do |selected_helper, selected_name|
           current = self
           @target = selected_helper == helper && selected_name == name && !%i[success next_constructor next_cutoff].include?(fault)
           @case_started = true if @target && fault == :entry
           rows << [selected_helper, selected_name]
+          if timing == :near_admission
+            now = rows.length == 2 * cases.fetch(family).length ? family_admission - 1 : rows.length * 1_000_000_000
+          end
           begin
             value = original_one.call(selected_helper, selected_name, case_root: directory)
-            now = 10 if fault == :next_cutoff
+            now = family_admission if fault == :next_cutoff
             value
           ensure
-            now = 10 if @target && fault == :before_report
+            now = family_final if @target && fault == :before_report
             if @target && run_fault == :row_copy && @ownership_run_binding
               bound_row, operation, state = @ownership_run_binding
               @ownership_run_binding = [bound_row.dup.freeze, operation, state].freeze
             end
           end
         end
-        probe.define_singleton_method(:install) { nil }
+        probe.define_singleton_method(:install) { now = family_admission if timing == :invoke_expired }
         probe.define_singleton_method(:trap_state) { handlers.dup }
         probe.define_singleton_method(:invoke) do
+          if timing == :invoke_expired
+            events << :original_invoke
+            next original_invoke.call # Actual post-setup admission, not a mocked guard.
+          end
+          now = family_admission + 1 if timing == :near_admission && rows.length == 2 * cases.fetch(family).length
           @owner = Struct.new(:phase).new(:reaped)
           @owner.define_singleton_method(:complete?) { true }
           # Exercise the REAL policy evaluator, not an async row relabelled
@@ -5319,7 +5491,7 @@ class NativeUploadValidationTest < Minitest::Test
       projection = lambda do |value|
         raise late if fault == :format
         value = formatter.call(value)
-        now = 10 if fault == :before_write
+        now = family_final if fault == :before_write
         value
       end
       sink = lambda do |bytes|
@@ -5337,6 +5509,7 @@ class NativeUploadValidationTest < Minitest::Test
         # incorrectly invoke it immediately, without an event argument.
         [TracePoint, :new, ->(*) { trace }], [Signal, :trap, ->(key, handler) do
           events << :restore
+          now = family_final if timing == :restoration_expired && rows.length == 2 * cases.fetch(family).length
           if current&.instance_variable_get(:@target) && current.instance_variable_get(:@ownership_failure_caught)
             raise late if fault == :restoration
             if fault == :restoration_lookalike
@@ -5351,14 +5524,19 @@ class NativeUploadValidationTest < Minitest::Test
         [ENV, :delete, ->(key) { environment.delete(key) }], [ENV, :to_h, {}], [Thread.current, :pending_interrupt?, false],
         [fixture, :cleanup_unresolved?, false], [fixture, :fixture_entry_names, []],
         [fixture, :mark_process_domain_failed!, ->(**_) { events << :failed_domain }],
-        [fixture, :atomic_json, ->(_path, value) { events << :proof; raise late if fault == :proof && current.instance_variable_get(:@target); proofs << value }],
+        [fixture, :atomic_json, ->(_path, value) do
+          events << :proof
+          raise late if fault == :proof && current.instance_variable_get(:@target)
+          proofs << value
+          now = family_final if timing == :proof_expired
+        end],
         [diagnostic, :line, projection], [diagnostic, :run_cleanup, project_run],
         [fixture, :adapter_result_projection, ->(**keywords) { raise late if run_fault == :projection_error; driver_projector.call(**keywords) }],
         [STDERR, :write, sink],
       ]
       actual = nil
       with_stubs.call(bindings) do
-        if fault == :success
+        if fault == :success && (timing.nil? || timing == :near_admission)
           assert_equal "pass", fixture.ownership_driver(directory, mode).fetch("kind")
         else
           actual = assert_raises(fixture::Failure, IOError) { fixture.ownership_driver(directory, mode) }
@@ -5381,8 +5559,35 @@ class NativeUploadValidationTest < Minitest::Test
       end
       {error: actual, writes: writes, row: writes.empty? ? nil : JSON.parse(writes.first.delete_prefix(prefix)),
        proofs: proofs, rows: rows, late: late, probe: current, driver: driver_probe,
-       run_states: run_states, run_projections: run_projections, first_error: first_error}
+       run_states: run_states, run_projections: run_projections, first_error: first_error, clock: now, events: events}
     end
+    completed = produce.call(family: "signals", fault: :success, timing: :near_admission)
+    assert_equal %w[capture run].product(cases.fetch("signals")), completed.fetch(:rows)
+    assert_equal 32, completed.fetch(:proofs).length
+    assert_equal ["run", "restore-after-TERM"], completed.fetch(:rows).last
+    assert_operator completed.fetch(:clock), :>, family_admission
+    assert_operator completed.fetch(:clock), :<, family_final
+    assert_empty completed.fetch(:writes)
+    expired = produce.call(fault: :next_cutoff)
+    assert_equal [["capture", "async-spawn"]], expired.fetch(:rows)
+    assert_equal family_admission, expired.fetch(:clock) # Stop new rows while F is still future.
+    {changed_driver: 0, changed_row: 1}.each do |timing, row_count|
+      changed = produce.call(fault: :success, timing: timing)
+      assert_equal row_count, changed.fetch(:rows).length
+      assert_equal "original ownership cutoff changed", changed.fetch(:error).message
+    end
+    late_entry = produce.call(fault: :success, timing: :invoke_expired)
+    assert_includes late_entry.fetch(:events), :original_invoke
+    assert_equal "ownership-probe", late_entry.fetch(:error).kind
+    %i[proof_expired restoration_expired].each do |timing|
+      rejected = produce.call(family: "signals", fault: :success, timing: timing)
+      assert_equal "ownership success exceeds original family cutoff", rejected.fetch(:error).message
+      assert_equal family_final, rejected.fetch(:clock)
+      assert_empty rejected.fetch(:writes)
+    end
+    original_rejection = produce.call(timing: :proof_expired)
+    assert_same original_rejection.fetch(:error), original_rejection.fetch(:probe).instance_variable_get(:@ownership_failure_row).first
+    refute_includes JSON.parse(original_rejection.fetch(:error).message).fetch("failures"), "original error object/message replaced"
     fixture::OWNERSHIP_FAILURE_HELPERS.product(cases.fetch("async")).each do |helper, name|
       outcome = produce.call(helper: helper, name: name, platform: helper == "capture" ? "ios" : "android")
       value = outcome.fetch(:row)
@@ -5515,10 +5720,10 @@ class NativeUploadValidationTest < Minitest::Test
       observation.define_singleton_method(:observe) { |&body| body.call }
       observation.define_singleton_method(:snapshot) { snapshot }
       capture = lambda do |argv, seconds:, environment:, root:, deadline:|
-        raise "inert original cutoff changed" unless deadline == Rational(10, 1_000_000_000) && seconds == Rational(9, 1_000_000_000) && root == directory
+        raise "inert original cutoff changed" unless deadline == Rational(family_final, 1_000_000_000) && seconds == Rational(family_final - 1, 1_000_000_000) && root == directory
         events << :captured
         dispatch = {"version" => 1, "argv" => argv, "environment" => environment, "cwd" => Dir.pwd,
-          "fixtureSha256" => digest.hexdigest, "deadlineNs" => 10, "pid" => 701}
+          "fixtureSha256" => digest.hexdigest, "deadlineNs" => family_final, "pid" => 701}
         requested = {"executable" => argv.first, "argv" => argv, "environment" => environment, "cwd" => Dir.pwd}
         snapshot = {"settled" => true, "actualOwnedControlCloses" => true, "actualTaskJoins" => true,
           "children" => [{"pid" => 701, "finality" => "finalized", "originalWaitObserved" => true, "creatorJoinObserved" => true,
@@ -5539,7 +5744,7 @@ class NativeUploadValidationTest < Minitest::Test
         projection_count += 1
         raise replacement if fault == :format
         value = formatter.call(value)
-        now = 10 if fault == :before_write && projection_count == 2
+        now = family_final if fault == :before_write && projection_count == 2
         value
       end
       sink = lambda do |bytes|
@@ -5574,13 +5779,13 @@ class NativeUploadValidationTest < Minitest::Test
             state = optional.fetch(:ownership_failure_state)
             state.freeze if fault == :state
             begin
-              fixture.run(platform: platform, root: directory, parameters: {}, mode: mode, deadline_ns: 10, **optional)
+              fixture.run(platform: platform, root: directory, parameters: {}, mode: mode, deadline_ns: family_final, **optional)
             rescue Exception => original
               escaped = original
               raise
             ensure
               events << :unwound
-              now = 10 if fault == :before_report
+              now = family_final if fault == :before_report
               state[:rejection] = fixture::Failure.new("ownership-probe", escaped.message) if fault == :same_message
               raise replacement if fault == :outer_replacement
             end
@@ -5607,7 +5812,7 @@ class NativeUploadValidationTest < Minitest::Test
       outcome = relay.call(platform: platform, family: family, stderr: bytes)
       assert_equal [bytes], outcome.fetch(:writes)
       assert_same outcome.fetch(:error), outcome.fetch(:state).fetch(:rejection)
-      assert_equal [10, true], outcome.fetch(:state).values_at(:deadline_ns, :write_complete)
+      assert_equal [family_final, true], outcome.fetch(:state).values_at(:deadline_ns, :write_complete)
       assert_equal "ownership-probe", outcome.fetch(:error).kind
       assert_empty relay.call(platform: platform, family: family, stderr: bytes, fault: :other_family_callback).fetch(:writes)
       other_family = family == "async" ? "signals" : "async"
@@ -5617,7 +5822,7 @@ class NativeUploadValidationTest < Minitest::Test
     nested_relay = relay.call(stderr: run_packet)
     assert_equal [run_packet], nested_relay.fetch(:writes)
     assert_same nested_relay.fetch(:error), nested_relay.fetch(:state).fetch(:rejection)
-    assert_equal [10, true], nested_relay.fetch(:state).values_at(:deadline_ns, :write_complete)
+    assert_equal [family_final, true], nested_relay.fetch(:state).values_at(:deadline_ns, :write_complete)
     assert_empty relay.call(stderr: run_packet, fault: :other_family_callback).fetch(:writes)
     %i[custody request dispatch state same_message outer_replacement before_report before_write format callback].each do |fault|
       outcome = relay.call(fault: fault)
