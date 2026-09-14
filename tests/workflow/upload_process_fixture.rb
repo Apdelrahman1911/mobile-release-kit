@@ -3641,6 +3641,7 @@ module UploadProcessFixture
       unless copy["path"] == actual_path && copy["label"] == "signal-observed"
         raise Failure.new("signal-observation", "executed helper copy is not bound")
       end
+      helper.native
       OwnedChild.prepare_record_publication!
       probe = new(:helper, mode, root: directory, helper_copy: copy)
       entry = CaptureObservation::Hooks.new
@@ -4043,7 +4044,10 @@ module UploadProcessFixture
       if @base_mode == "leader-only"
         insertion = <<~RUBY
           require #{File.realpath(__FILE__).inspect}
-          UploadProcessFixture::OwnedChild.prepare_record_publication! if $PROGRAM_NAME == __FILE__
+          if $PROGRAM_NAME == __FILE__
+            MobileReleaseKit::NativeUploadProcess.native
+            UploadProcessFixture::OwnedChild.prepare_record_publication!
+          end
           MobileReleaseKit::NativeUploadProcess::GroupLease.prepend(Module.new do
             def request(signal)
               if signal == "KILL"
@@ -4467,6 +4471,7 @@ module UploadProcessFixture
       UploadProcessFixture.owned_fixture_directory(directory)
       manifest = manifest!(directory, mode, source_hashes)
       raise Failure.new("fixture-source", "wrong copied helper dispatch") unless File.realpath(helper_path) == manifest["helperCopy"]["path"]
+      MobileReleaseKit::NativeUploadProcess.native
       OwnedChild.prepare_record_publication!
       observer = new(directory, mode, manifest)
       (@helper_observers ||= []) << observer

@@ -5195,7 +5195,17 @@ class NativeUploadValidationTest < Minitest::Test
         body.call
       else
         receiver, name, replacement = bindings.first
-        receiver.stub(name, replacement) { with_stubs.call(bindings.drop(1), &body) }
+        inherited_query = receiver.equal?(MobileReleaseKit) && name == :const_defined? &&
+          !receiver.singleton_class.instance_methods(false).include?(name)
+        begin
+          receiver.stub(name, replacement) { with_stubs.call(bindings.drop(1), &body) }
+        ensure
+          # Minitest restores an inherited method as a singleton alias. Remove
+          # only this scoped query alias so the original lookup is exact again.
+          if inherited_query && receiver.singleton_class.instance_methods(false).include?(name)
+            receiver.singleton_class.send(:remove_method, name)
+          end
+        end
       end
     end
     # Original request/dispatch algorithms over finite data and a saved lambda,
@@ -5303,9 +5313,33 @@ class NativeUploadValidationTest < Minitest::Test
     # Execute the REAL helper-entry wrapper and observe unwind over inert
     # method/source/proof endpoints. The original native helper never executes.
     helper_return = lambda do |returned: 2, original_error: nil, observer_failure: false, entry_error: nil,
-                              backend_error: nil, backend_handled: false, prepare_error: nil|
+                              backend_error: nil, backend_handled: false, prepare_error: nil,
+                              dependency_error: nil, fresh_helper: false|
       test = self
       events, writes, observed_errors, facts_calls = [], [], [], []
+      native, spawn = MobileReleaseKit::NativeUploadProcess, MobileReleaseKit::NativeProcessSpawn
+      original_defined, original_native = MobileReleaseKit.method(:const_defined?), native.method(:native)
+      native_modules = fixture::OwnedChild.method(:native_modules)
+      dependency_loaded = !fresh_helper
+      availability = lambda do |name, inherit = true|
+        if inherit.equal?(false) && %i[NativeProcessSpawn NativeUploadProcess].include?(name)
+          name == :NativeUploadProcess || dependency_loaded
+        else
+          original_defined.call(name, inherit)
+        end
+      end
+      complete_dependency = lambda do
+        events << :native_dependency
+        raise dependency_error if dependency_error
+        dependency_loaded = true
+        spawn
+      end
+      prepare = lambda do
+        events << :publication_prepare
+        assert_equal [spawn, native], native_modules.call # Original partial-origin guard, no admission.
+        raise prepare_error if prepare_error
+        true
+      end
       directory = "/inert-native-signal"
       helper_copy = {"path" => "#{directory}/signal-observed-helper.rb", "label" => "signal-observed"}
       entry_block = nil
@@ -5365,9 +5399,10 @@ class NativeUploadValidationTest < Minitest::Test
       previous = [probe_class.current, probe_class.last_parent]
       assert_nil previous.first
       bindings = [[fixture, :owned_fixture_directory, directory], [fixture::OwnedChild, :bounded_file, JSON.generate(helper_copy)],
-        [File, :realpath, helper_copy.fetch("path")], [probe_class, :new, probe],
-        [fixture::OwnedChild, :prepare_record_publication!, -> { events << :publication_prepare; raise prepare_error if prepare_error; true }],
-        [fixture::CaptureObservation::Hooks, :new, entry], [diagnostic, :return_code, normalization],
+        [File, :realpath, helper_copy.fetch("path")], [MobileReleaseKit, :const_defined?, availability],
+        [native, :native, complete_dependency], [probe_class, :new, ->(*) { events << :probe_construct; probe }],
+        [fixture::OwnedChild, :prepare_record_publication!, prepare],
+        [fixture::CaptureObservation::Hooks, :new, -> { events << :entry_construct; entry }], [diagnostic, :return_code, normalization],
         [fixture::OwnedChild, :write_record, ->(path, proof) do
           assert_equal "#{directory}/signal-helper-custodian.json", path
           assert_equal :return_normalization, events.last
@@ -5375,26 +5410,38 @@ class NativeUploadValidationTest < Minitest::Test
           writes << proof
         end]]
       actual = nil
-      if prepare_error
-        with_stubs.call(bindings) do
-          assert_same prepare_error, assert_raises(prepare_error.class) { probe_class.install_helper_observation(directory, modes.first) }
+      entry_failure = dependency_error || prepare_error
+      with_stubs.call(bindings) do
+        if fresh_helper
+          rejection = assert_raises(fixture::Failure) { native_modules.call }
+          assert_equal ["process-ownership", "partial command runtime would mix source origins"], [rejection.kind, rejection.message]
+          assert_empty events
         end
-        assert_equal [:publication_prepare], events
+        if entry_failure
+          assert_same entry_failure, assert_raises(entry_failure.class) { probe_class.install_helper_observation(directory, modes.first) }
+        else
+          probe_class.install_helper_observation(directory, modes.first)
+          refute_nil entry_block
+          invoke = -> { entry_block.call(original, nil, [["custodian"]], {}, nil) }
+          if entry_error
+            assert_same entry_error, assert_raises(entry_error.class) { invoke.call }
+          else
+            actual = invoke.call
+            assert_same(body_error || observer_failure ? 1 : returned, actual)
+          end
+        end
+      end
+      assert_equal original_defined, MobileReleaseKit.method(:const_defined?)
+      assert_equal original_native, native.method(:native)
+      if entry_failure
+        assert_equal dependency_error ? [:native_dependency] : %i[native_dependency publication_prepare], events
         assert_nil entry_block
         assert_empty writes
+        assert_empty facts_calls
+        assert_equal previous, [probe_class.current, probe_class.last_parent]
         next
       end
-      with_stubs.call(bindings) do
-        probe_class.install_helper_observation(directory, modes.first)
-        refute_nil entry_block
-        invoke = -> { entry_block.call(original, nil, [["custodian"]], {}, nil) }
-        if entry_error
-          assert_same entry_error, assert_raises(entry_error.class) { invoke.call }
-        else
-          actual = invoke.call
-          assert_same(body_error || observer_failure ? 1 : returned, actual)
-        end
-      end
+      assert_equal %i[native_dependency publication_prepare probe_construct entry_construct entry_wrap], events.take(5)
       assert_operator events.index(:publication_prepare), :<, events.index(:entry_wrap)
       assert_operator events.index(:entry_wrap), :<, events.index(:original_call)
       assert_equal %i[observer_restore source_validation entry_restore], events.select { |event| %i[observer_restore source_validation entry_restore].include?(event) }
@@ -5426,7 +5473,9 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal ["missing", 2], helper_view.fetch("rows")[1].values_at("returnCode", "observedHelperReturn")
     assert_equal "exit1", helper_view.fetch("nativeOutcomes").fetch("custodian")
     helper_return.call
-    helper_return.call(prepare_error: IOError.new("original publication preparation"))
+    helper_return.call(fresh_helper: true)
+    helper_return.call(fresh_helper: true, dependency_error: LoadError.new("original source-bound native dependency"))
+    helper_return.call(fresh_helper: true, prepare_error: IOError.new("original publication preparation"))
     helper_return.call(returned: true) # Invalid normalization does not change the original return choice.
     [Interrupt.new("PRIVATE_SIGNAL_TOKEN"), SystemExit.new(19, "PRIVATE_SIGNAL_TOKEN")].each do |original|
       helper_return.call(original_error: original)
@@ -5638,35 +5687,80 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal 8192, evidence::OMISSION_LIMIT
     assert_equal({"custodian" => "containment-custodian-omission.json", "keeper" => "containment-keeper-omission.json"}, evidence::OMISSION_FILES)
     real_observers = evidence.instance_variable_get(:@helper_observers)
-    [false, true].each do |preparation_fails|
-      sample, events = missing_cleanup_omission_sample, []
-      model_class = Class.new(evidence) # Class-local observer storage, never the live helper registry.
-      observer, original = Object.new, IOError.new("original containment publication preparation")
-      observer.define_singleton_method(:install) { events << :install }
-      prepare = -> { events << :prepare; raise original if preparation_fails; true }
-      construct = ->(*) { events << :construct; observer }
-      UploadProcessFixture.stub(:owned_fixture_directory, ->(*) { events << :directory }) do
-        model_class.stub(:source_hashes, {}) do
-          model_class.stub(:manifest!, sample[:manifest]) do
-            File.stub(:realpath, sample[:manifest].fetch("helperCopy").fetch("path")) do
-              UploadProcessFixture::OwnedChild.stub(:prepare_record_publication!, prepare) do
-                model_class.stub(:new, construct) do
-                  invoke = -> { model_class.observe_helper(sample[:directory], "native-setup-no-cleanup", "inert-helper") }
-                  if preparation_fails
-                    assert_same original, assert_raises(IOError, &invoke)
-                    assert_nil model_class.instance_variable_get(:@helper_observers)
-                    assert_equal %i[directory prepare], events
-                  else
-                    invoke.call
-                    assert_equal [observer], model_class.instance_variable_get(:@helper_observers)
-                    assert_equal %i[directory prepare construct install], events
-                  end
-                end
-              end
-            end
+    original_defined, original_native = MobileReleaseKit.method(:const_defined?), native.method(:native)
+    spawn, native_modules = MobileReleaseKit::NativeProcessSpawn, UploadProcessFixture::OwnedChild.method(:native_modules)
+    with_stubs = lambda do |bindings, &body|
+      if bindings.empty?
+        body.call
+      else
+        receiver, name, replacement = bindings.first
+        inherited_query = receiver.equal?(MobileReleaseKit) && name == :const_defined? &&
+          !receiver.singleton_class.instance_methods(false).include?(name)
+        begin
+          receiver.stub(name, replacement) { with_stubs.call(bindings.drop(1), &body) }
+        ensure
+          if inherited_query && receiver.singleton_class.instance_methods(false).include?(name)
+            receiver.singleton_class.send(:remove_method, name)
           end
         end
       end
+    end
+    # A fresh copied helper has only NativeUploadProcess until its ORIGINAL
+    # source-bound lazy dependency completes. Model only those two queries;
+    # never remove real constants, import a leaf or invoke native admission.
+    %i[fresh loaded dependency_failure preparation_failure].each do |scenario|
+      sample, events = missing_cleanup_omission_sample, []
+      model_class = Class.new(evidence) # Class-local observer storage, never the live helper registry.
+      observer = Object.new
+      original = scenario == :dependency_failure ? LoadError.new("original source-bound native dependency") :
+                                                  IOError.new("original containment publication preparation")
+      dependency_loaded = scenario == :loaded
+      availability = lambda do |name, inherit = true|
+        if inherit.equal?(false) && %i[NativeProcessSpawn NativeUploadProcess].include?(name)
+          name == :NativeUploadProcess || dependency_loaded
+        else
+          original_defined.call(name, inherit)
+        end
+      end
+      complete_dependency = lambda do
+        events << :native_dependency
+        raise original if scenario == :dependency_failure
+        dependency_loaded = true
+        spawn
+      end
+      observer.define_singleton_method(:install) { events << :install }
+      prepare = lambda do
+        events << :prepare
+        assert_equal [spawn, native], native_modules.call
+        raise original if scenario == :preparation_failure
+        true
+      end
+      construct = ->(*) { events << :construct; observer }
+      bindings = [[UploadProcessFixture, :owned_fixture_directory, ->(*) { events << :directory }],
+        [model_class, :source_hashes, {}], [model_class, :manifest!, sample[:manifest]],
+        [File, :realpath, sample[:manifest].fetch("helperCopy").fetch("path")],
+        [MobileReleaseKit, :const_defined?, availability], [native, :native, complete_dependency],
+        [UploadProcessFixture::OwnedChild, :prepare_record_publication!, prepare], [model_class, :new, construct]]
+      with_stubs.call(bindings) do
+        unless dependency_loaded
+          rejection = assert_raises(UploadProcessFixture::Failure) { native_modules.call }
+          assert_equal ["process-ownership", "partial command runtime would mix source origins"], [rejection.kind, rejection.message]
+          assert_empty events
+        end
+        invoke = -> { model_class.observe_helper(sample[:directory], "native-setup-no-cleanup", "inert-helper") }
+        if %i[dependency_failure preparation_failure].include?(scenario)
+          assert_same original, assert_raises(original.class, &invoke)
+          assert_nil model_class.instance_variable_get(:@helper_observers)
+          expected = scenario == :dependency_failure ? %i[directory native_dependency] : %i[directory native_dependency prepare]
+          assert_equal expected, events
+        else
+          invoke.call
+          assert_equal [observer], model_class.instance_variable_get(:@helper_observers)
+          assert_equal %i[directory native_dependency prepare construct install], events
+        end
+      end
+      assert_equal original_defined, MobileReleaseKit.method(:const_defined?)
+      assert_equal original_native, native.method(:native)
     end
     assert_same real_observers, evidence.instance_variable_get(:@helper_observers)
     make = lambda do |role|
