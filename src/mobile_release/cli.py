@@ -17,6 +17,7 @@ from .config import ConfigurationError, default_config, load_config
 from .credentials import credential_findings
 from .discovery import discover_project, git_context
 from .errors import MobileReleaseError, ValidationError
+from ._profile_callers import first_primary_context
 from .ios import (
     SigningValidityInterval, _validated_ipa_entries, ipa_signing_evidence,
     validate_ipa_current_signing, validate_preparation_signing_time,
@@ -147,6 +148,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Validate an already-built normalized artifact.",
     )
     _add_report_arguments(preflight_parser)
+
+    local_parser = commands.add_parser("local-signing", help="Inspect or recover account-local signing ownership; never contact Stores.")
+    local_commands = local_parser.add_subparsers(dest="local_signing_command", required=True)
+    local_commands.add_parser("status", help="Show sanitized account lease/recovery status.")
+    local_recover = local_commands.add_parser("recover", help="Reconcile original owned resources after all account signing work is idle.")
+    local_recover.add_argument("--session", required=True)
+    local_recover.add_argument("--confirm", required=True)
+    local_recover.add_argument("--manual", action="store_true", help="Hold the lease during exceptional owner inspection; requires an interactive TTY.")
 
     status_parser = commands.add_parser(
         "status", help="Verify local immutable candidate/promotion evidence without Store mutation."
@@ -794,18 +803,18 @@ def _ci(args: argparse.Namespace) -> int:
     # Keep temporary metadata alive through validation and final publication.
     # It must not appear beside incompatible surviving evidence as a side effect
     # of a failed invocation.
-    with ExitStack() as resources:
+    with first_primary_context(ExitStack(), expose_owner=True) as (resources, cancellation):
         temporary = resources.enter_context(tempfile.TemporaryDirectory(prefix="mobile-release-intent-metadata-"))
-        return _ci_operation(args, metadata_directory=Path(temporary), resources=resources)
+        return _ci_operation(args, metadata_directory=Path(temporary), resources=resources, cancellation=cancellation)
 
 
-def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path, resources: ExitStack) -> int:
+def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path, resources: ExitStack, cancellation=None) -> int:
     config = load_config(args.config)
     platform = args.platform
     stage = args.ci_command
     _require_ci_policy(config, platform, stage)
     release = config.release_version()
-    source = git_context(config.root)
+    source = git_context(config.root, cancellation=cancellation)
     output_dir = _repository_path(config, args.output_dir, label="output directory")
     if output_dir.exists() and not output_dir.is_dir():
         raise ValidationError("CI output path must be a directory")
@@ -957,7 +966,7 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path, resourc
         else:
             # Inspect and sign-check the SAME private bytes, not mutable caller
             # paths bracketed by hashes (which would permit an A→B→A swap).
-            ios_snapshot = resources.enter_context(snapshot_ios_artifacts(artifacts))
+            ios_snapshot = resources.enter_context(snapshot_ios_artifacts(artifacts, cancellation=cancellation))
             inspect_ios_artifact_set(
                 ios_snapshot, expected_bundle_id=config.section("ios")["bundleId"],
                 release=release, symbols_policy=config.section("ios").get("symbols", {}).get("policy", "disabled"),
@@ -971,6 +980,7 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path, resourc
                 release=release,
                 require_tools=True,
                 deadline=ios_snapshot.deadline,
+                cancellation=cancellation,
             )
             ios_snapshot.deadline.check()
         failed = [item.code for item in findings if item.status in FAILING_STATUSES]
@@ -983,7 +993,7 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path, resourc
                 raise ValidationError("candidate lacks complete current signing validity evidence")
             assert ios_snapshot is not None
             ios_snapshot.deadline.check()
-            signing_evidence = ipa_signing_evidence(ios_snapshot.paths[primary], deadline=ios_snapshot.deadline)
+            signing_evidence = ipa_signing_evidence(ios_snapshot.paths[primary], deadline=ios_snapshot.deadline, cancellation=cancellation)
             ios_snapshot.assert_unchanged()
         artifacts["store-metadata"] = current_metadata
         _set_artifact_environment(artifacts)
@@ -1206,6 +1216,16 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path, resourc
     print(json.dumps({"receipt": str(receipt_path)}))
     return 0
 
+
+def _local_signing(args: argparse.Namespace) -> int:
+    from .local_signing import recover_signing, signing_status
+
+    result = (signing_status() if args.local_signing_command == "status" else
+              recover_signing(args.session, args.confirm, manual=args.manual))
+    print(json.dumps(result, sort_keys=True))
+    return 0 if result["status"] in {"idle", "absent", "recovered"} else 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1215,6 +1235,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "doctor": _doctor,
             "credentials": _credentials,
             "preflight": _preflight,
+            "local-signing": _local_signing,
             "status": _status,
             "explain": _explain,
             "ci": _ci,

@@ -75,13 +75,23 @@ If the workflow fails after credential import, verify temporary keychains/profil
   existing candidates under their original authenticated pin/bytes; never renew
   profiles or rebuild an accepted candidate for evidence completion. See
   [profile authority and cleanup limits](ios-profile-authority.md).
-- Do not overlap local signing preflights: global keychain/profile lifetime
-  coordination remains the separate confirmed QA-003 blocker, pending remediation.
+- A busy account-signing lease means another toolkit task still owns the full
+  signing lifetime; wait for it. For pending state, run `mobile-release local-signing status`
+  and follow [local recovery](local-signing.md) after your exact build is idle.
+  Never delete the persistent lease/journals or kill a recorded PID to bypass it.
+- A changed profile can leave signing `pending` even after independent keychain
+  cleanup succeeded. The failed observation is not automatically retried by the
+  outer owner. Preserve the file and use explicit original-session recovery after
+  account quiescence. Equal bytes with a different inode are still foreign; an
+  unknown reserved stage cannot be silently removed. A borrowed-file conflict
+  can finish recovery with exit 1 while preserving the current file.
 - A profile descriptor, selector, worker, scratch or handler-cleanup error is a
   failed validation even when authentication already completed. Do not retry an
   ambiguous descriptor close; end that process and inspect only its recorded
-  owned residues. Default-signal protection does not cover custom host handlers
-  or hard termination.
+  owned residues. `--manual` cannot override that failure or authorize another
+  attempt in the same invocation. Once the exact owner is idle, recover the same
+  remaining session in a fresh invocation. Default-signal protection does not
+  cover custom host handlers or hard termination.
 - QA-004 separately leaves outer build-input scratch/client restoration vulnerable
   to cancellation at cleanup entry. Verify decoded scratch removal and original
   client configuration before retrying. Do not infer outer cleanup from successful

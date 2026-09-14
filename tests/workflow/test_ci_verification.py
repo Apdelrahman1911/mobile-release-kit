@@ -79,10 +79,12 @@ _PYTHON_POISON_FIXTURES = (
 HOSTED_GUARD = '''set -euo pipefail
 [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == github-hosted ]]
 '''
-LINUX_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || inputs.verification_target != 'macos' }}"
+LINUX_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target != 'macos' && inputs.verification_target != 'signing-adapter') }}"
+NATIVE_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || inputs.verification_target != 'signing-adapter' }}"
+ADAPTER_TARGET_CONDITION = "${{ github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-adapter' }}"
 VERIFICATION_CONCURRENCY = "release-kit-ci-${{ github.ref }}-${{ github.event_name }}-${{ inputs.verification_target || 'full' }}"
 AGGREGATE_GUARD = '''set -euo pipefail
-[[ "$LINUX_RESULT" == success && "$NATIVE_RESULT" == success ]]
+[[ "$LINUX_RESULT" == success && "$NATIVE_RESULT" == success && "$MATRIX_RESULT" == success ]]
 '''
 LINUX_TOOL_SETUP = '''set -euo pipefail
 if [[ ! -x /usr/bin/bwrap ]]; then
@@ -161,12 +163,12 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         self.assertEqual(workflow["true"], {
             "pull_request": None, "push": {"branches": ["main"]},
             "workflow_dispatch": {"inputs": {"verification_target": {
-                "description": "Full verification, or macOS-only candidate evidence (aggregate remains incomplete)",
-                "type": "choice", "required": True, "default": "full", "options": ["full", "macos"],
+                "description": "Full verification, macOS-only evidence, or narrow signing-adapter smoke (partial aggregate remains incomplete)",
+                "type": "choice", "required": True, "default": "full", "options": ["full", "macos", "signing-adapter"],
             }}},
         })
         self.assertEqual(workflow["concurrency"], {"group": VERIFICATION_CONCURRENCY, "cancel-in-progress": True})
-        self.assertEqual(set(workflow["jobs"]), {"test-linux", "test-native-profiles", "test"})
+        self.assertEqual(set(workflow["jobs"]), {"test-linux", "test-native-profiles", "test-signing-matrix", "test-signing-adapter", "test"})
         text = CI.read_text(encoding="utf-8")
         self.assertNotIn("secrets.", text)
         self.assertNotIn("id-token:", text)
@@ -179,7 +181,7 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                 if platform == "linux":
                     self.assertEqual(job["if"], LINUX_TARGET_CONDITION)
                 else:
-                    self.assertNotIn("if", job)
+                    self.assertEqual(job["if"], NATIVE_TARGET_CONDITION)
                 for forbidden in ("continue-on-error", "environment", "container", "services", "strategy", "defaults", "env"):
                     self.assertNotIn(forbidden, job)
                 self.assertEqual(job.get("permissions", workflow["permissions"]), {"contents": "read"})
@@ -234,10 +236,10 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         workflow = load_workflow(CI)
         linux, native, aggregate = (workflow["jobs"][name] for name in ("test-linux", "test-native-profiles", "test"))
         self.assertEqual(linux["if"], LINUX_TARGET_CONDITION)
-        self.assertNotIn("if", native)
+        self.assertEqual(native["if"], NATIVE_TARGET_CONDITION)
         for event, ref in (("pull_request", "refs/pull/1/merge"), ("push", "refs/heads/main"),
                            ("workflow_dispatch", "refs/heads/qa006-native-candidate")):
-            for target in ("full", "macos", None, "", "unknown", "MACOS", "mAcOs", "macos "):
+            for target in ("full", "macos", "signing-adapter", None, "", "unknown", "MACOS", "mAcOs", "macos "):
                 with self.subTest(candidate_route=(event, target)):
                     context = {"github": {"event_name": event, "ref": ref}}
                     # For this one pinned comparison and fixed ASCII fixture,
@@ -246,36 +248,46 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                     compared = target.lower() if target is not None else None
                     if target is not None:
                         context["inputs"] = {"verification_target": compared}
-                    omitted = event == "workflow_dispatch" and compared == "macos"
+                    omitted = event == "workflow_dispatch" and compared in {"macos", "signing-adapter"}
                     self.assertEqual(evaluate_condition(linux["if"], context, success=True, cancelled=False), not omitted)
-                    self.assertTrue(evaluate_condition(native.get("if"), context, success=True, cancelled=False))
+                    self.assertEqual(evaluate_condition(native["if"], context, success=True, cancelled=False),
+                                     not (event == "workflow_dispatch" and compared == "signing-adapter"))
+                    self.assertEqual(evaluate_condition(workflow["jobs"]["test-signing-adapter"]["if"], context,
+                                                        success=True, cancelled=False),
+                                     event == "workflow_dispatch" and compared == "signing-adapter")
 
         # This is the existing fixed job, not a synthesized cross-run status.
         # Pin every field before the harmless shell can be executed below.
-        self.assertEqual(aggregate, {
-            "needs": ["test-linux", "test-native-profiles"], "if": "${{ always() }}",
-            "runs-on": "ubuntu-24.04", "timeout-minutes": 5, "permissions": {},
-            "steps": [{"name": "Require every verification job to succeed", "env": {
-                "LINUX_RESULT": "${{ needs.test-linux.result }}",
-                "NATIVE_RESULT": "${{ needs.test-native-profiles.result }}",
-            }, "run": AGGREGATE_GUARD}],
+        self.assertEqual({key: value for key, value in aggregate.items() if key != "steps"}, {
+            "needs": ["test-linux", "test-native-profiles", "test-signing-matrix"], "if": "${{ always() }}",
+            "runs-on": "ubuntu-24.04", "timeout-minutes": 5, "permissions": {"contents": "read"},
         })
+        self.assertEqual(aggregate["steps"][0], {"name": "Require every verification job to succeed", "env": {
+            "LINUX_RESULT": "${{ needs.test-linux.result }}", "NATIVE_RESULT": "${{ needs.test-native-profiles.result }}",
+            "MATRIX_RESULT": "${{ needs.test-signing-matrix.result }}",
+        }, "run": AGGREGATE_GUARD})
+        self.assertEqual(len(aggregate["steps"]), 4)
+        self.assertIn("--reduce", aggregate["steps"][-1]["run"])
+        self.assertEqual(workflow["jobs"]["test-signing-matrix"]["if"], LINUX_TARGET_CONDITION)
         self.assertTrue(evaluate_condition(aggregate["if"], {}, success=False, cancelled=True))
         states = ["failure", "cancelled", "skipped", "queued", "unavailable", "", None]
-        pairs = [("success", "success")]
+        triples = [("success", "success", "success")]
         for state in states:
-            pairs.extend(((state, "success"), ("success", state), (state, state)))
+            triples.extend(((state, "success", "success"), ("success", state, "success"),
+                            ("success", "success", state), (state, state, state)))
         body = aggregate["steps"][0]["run"]
-        for linux_result, native_result in pairs:
-            with self.subTest(protected_results=(linux_result, native_result)):
+        for linux_result, native_result, matrix_result in triples:
+            with self.subTest(protected_results=(linux_result, native_result, matrix_result)):
                 env = {"PATH": "/usr/bin:/bin"}
                 if linux_result is not None:
                     env["LINUX_RESULT"] = linux_result
                 if native_result is not None:
                     env["NATIVE_RESULT"] = native_result
+                if matrix_result is not None:
+                    env["MATRIX_RESULT"] = matrix_result
                 result = subprocess.run(["bash", "--noprofile", "--norc", "-c", body],
                                         env=env, capture_output=True, timeout=5)
-                self.assertEqual(result.returncode == 0, linux_result == native_result == "success")
+                self.assertEqual(result.returncode == 0, linux_result == native_result == matrix_result == "success")
                 self.assertEqual(result.stdout, b"")
 
         group = workflow["concurrency"]["group"]
@@ -290,15 +302,36 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                     .replace("${{ inputs.verification_target || 'full' }}", target or "full"))
 
         groups = {group_for("pull_request", None), group_for("push", None),
-                  group_for("workflow_dispatch", "full"), group_for("workflow_dispatch", "macos")}
-        self.assertEqual(len(groups), 4)  # Partial dispatch cannot cancel any full event/target.
+                  group_for("workflow_dispatch", "full"), group_for("workflow_dispatch", "macos"),
+                  group_for("workflow_dispatch", "signing-adapter")}
+        self.assertEqual(len(groups), 5)  # Partial dispatch cannot cancel any full event/target.
         self.assertTrue(all("${{" not in value for value in groups))
         for absent in (None, ""):
             self.assertEqual(group_for("workflow_dispatch", absent), group_for("workflow_dispatch", "full"))
 
+    def test_signing_adapter_smoke_is_explicit_two_os_and_cannot_publish_matrix_proof(self):
+        workflow = load_workflow(CI)
+        job = workflow["jobs"]["test-signing-adapter"]
+        self.assertEqual(job["if"], ADAPTER_TARGET_CONDITION)
+        self.assertEqual(job["runs-on"], "${{ matrix.os }}")
+        self.assertEqual(job["strategy"], {"fail-fast": False, "max-parallel": 2,
+                                           "matrix": {"os": ["ubuntu-24.04", "macos-26"]}})
+        self.assertEqual(job["permissions"], {"contents": "read"})
+        self.assertEqual(job["steps"][0]["run"], HOSTED_GUARD)
+        self.assertFalse(any("actions/upload-artifact" in step.get("uses", "") for step in job["steps"]))
+        commands = [step["run"] for step in job["steps"] if "run" in step]
+        self.assertEqual(len(commands), 3)
+        owner = commands[-1]
+        self.assertIn("--scope signing-adapter", owner)
+        self.assertIn('--job "$GITHUB_JOB")', owner)
+        self.assertIn('PYTHONSAFEPATH=1 "${verifier_args[@]}"', owner)
+        for forbidden in ("--shard", "--local", "run_local_signing_matrix.py", "pip wheel", "continue-on-error"):
+            self.assertNotIn(forbidden, owner)
+        self.assertNotIn("test-signing-adapter", workflow["jobs"]["test"]["needs"])
+
     def test_actual_guard_rejects_non_hosted_or_missing_runner_identity(self):
         workflow = load_workflow(CI)
-        for name in ("test-linux", "test-native-profiles"):
+        for name in ("test-linux", "test-native-profiles", "test-signing-matrix", "test-signing-adapter"):
             body = workflow["jobs"][name]["steps"][0]["run"]
             self.assertEqual(body, HOSTED_GUARD)  # Do not execute arbitrary workflow text.
             for identity in ("github-hosted", "self-hosted", "", "GitHub-hosted", None):
@@ -4361,12 +4394,19 @@ class CIProductEvidenceContractTests(unittest.TestCase):
         self.assertEqual(checks.NATIVE_PATTERNS, (
             "test_ios_profile_authority.py", "test_ios_profile_trust.py", "test_ios_profile_installation.py",
             "test_default_cancellation.py", "test_profile_processes.py", "test_macho_native.py",
-            "test_native_process.py", "test_profile_process_owner.py", "test_inspection_budget.py"))
+            "test_native_process.py", "test_profile_process_owner.py", "test_inspection_budget.py",
+            "test_local_signing.py", "test_local_signing_recovery.py", "test_local_signing_native.py",
+            "test_local_signing_composition.py", "test_owned_process.py", "test_owned_process_callers.py",
+            "test_owned_process_failures.py", "test_local_signing_failures.py", "test_local_signing_profile_identity.py",
+            "test_local_signing_persistent.py", "test_local_signing_matrix.py"))
         self.assertEqual(set(checks.WHEEL_PATTERNS), {
             "test_init_transaction.py", "test_ios_entitlements.py", "test_ios_plist_binary.py",
             "test_native_process.py", "test_profile_process_owner.py", "test_default_cancellation.py",
             "test_profile_processes.py", "test_inspection_budget.py", "test_ios_profile_installation.py",
-            "test_ios_profile_trust.py"})
+            "test_ios_profile_trust.py", "test_local_signing.py", "test_local_signing_recovery.py", "test_local_signing_native.py",
+            "test_local_signing_composition.py", "test_owned_process.py", "test_owned_process_callers.py",
+            "test_owned_process_failures.py", "test_local_signing_failures.py", "test_local_signing_profile_identity.py",
+            "test_local_signing_persistent.py", "test_local_signing_matrix.py"})
         for invalid in ("unknown", "Authority", "", None, True, []):
             with self.subTest(partition=invalid), self.assertRaisesRegex(checks.CheckError, "NATIVE_PARTITION"):
                 checks.native_partition_ids(ROOT, invalid, deadline=deadline)
@@ -4582,8 +4622,9 @@ class CIProductEvidenceContractTests(unittest.TestCase):
             ),
         }
         native = {f"{group}.test_{method}" for group, methods in families.items() for method in methods}
+        native.add("unit.test_local_signing_native.SigningDarwinABITests.test_real_header_layout_and_local_volume_match_ctypes_without_private_state")
         self.assertEqual(checks.linux_allowed_skips(), frozenset(native))
-        self.assertEqual(len(native), 17)
+        self.assertEqual(len(native), 18)
         ids = ("unit.fixture.Contracts.test_positive", *sorted(native))
         rows = [{"id": identifier, "outcome": "skip" if identifier in native else "ok"} for identifier in ids]
         checks.validate_test_outcomes(ids, rows, "linux")
@@ -4603,10 +4644,9 @@ class CIProductEvidenceContractTests(unittest.TestCase):
 
     def test_expected_wheel_test_inventory_is_static_and_rejects_omissions_and_duplicate_methods(self):
         checks = ci_module("ci_checks")
-        names = ("test_init_transaction.py", "test_ios_entitlements.py", "test_ios_plist_binary.py",
-                 "test_native_process.py", "test_profile_process_owner.py", "test_default_cancellation.py",
-                 "test_profile_processes.py", "test_inspection_budget.py", "test_ios_profile_installation.py",
-                 "test_ios_profile_trust.py")
+        # The separate partition-authority contract pins the exact catalog.
+        # This fixture tests static discovery, duplicate methods and omissions.
+        names = checks.WHEEL_PATTERNS
         with tempfile.TemporaryDirectory(prefix="mrk-ci-ast-") as temporary:
             source = Path(temporary)
             directory = source / "tests/unit"

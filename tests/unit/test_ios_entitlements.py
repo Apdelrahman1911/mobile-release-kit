@@ -427,7 +427,7 @@ class SignedEntitlementInventoryTests(unittest.TestCase):
     def test_issuer_rejection_in_either_bundle_stops_current_validation_and_public_evidence(self):
         for relative in ("", "PlugIns/Widget.appex"):
             rejected = (self.exported / relative / "embedded.mobileprovision").read_bytes()
-            def authenticate(raw, *, deadline):
+            def authenticate(raw, *, deadline, cancellation=None):
                 if raw == rejected:
                     raise ValidationError("fixed Apple issuer rejection")
                 return self.native.authenticate_cms(raw, deadline=deadline)

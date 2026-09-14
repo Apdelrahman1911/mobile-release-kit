@@ -7,7 +7,7 @@ the separately owned process-bearing fixture suites, not these unit controls.
 from __future__ import annotations
 
 import copy
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import gc
 import json
 import signal
@@ -99,6 +99,7 @@ class _Channel:
         self.writer = _Lease(102) if writer is None else writer
         self.reader_closed = self.writer_closed = False
         self.eof = True
+        self.decoder = types.SimpleNamespace(ended=True, failed=False)
         self.pending = []
         self.offers = []
         self.frames = []
@@ -154,16 +155,29 @@ class _Cancellation(DefaultCancellation):
 
     def install(self):
         self.calls.append("install")  # No real handler mutation.
+        self._installation = "INSTALLED"  # Explicit inert token-state model.
 
     def restore(self):
         self.calls.append("restore")
         self.depth += 1
         self.restore_action()
+        self._restoration = "RESTORED"
 
 
 def _context(role="outer", *, run=10_000_000_000, hard=13_000_000_000, cancellation=None, parent_pid=None):
     with patch.object(owner.native, "Acquisition", _Acquisition):
         return owner._Context(role, run, hard, cancellation=cancellation, parent_pid=parent_pid)
+
+
+@contextmanager
+def _model_pid(context, pid, *other_contexts):
+    # Match the inert context's origin to its modeled process role without
+    # weakening the production PID-first guard or adding nested block limits.
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(owner.os, "getpid", return_value=pid))
+        for item in (context, *other_contexts):
+            stack.enter_context(patch.object(item, "pid", pid))
+        yield
 
 
 def _receipt(pid=431, kind="exit", code=0):
@@ -248,7 +262,7 @@ def _custodian(context):
 def _keeper(context):
     descriptors = {fd: _Lease(300 + fd) for fd in range(3, 8)}
     context.io.leases.extend(descriptors.values())
-    with patch.object(owner, "_Channel", _Channel), patch.object(owner.os, "getpid", return_value=431):
+    with patch.object(owner, "_Channel", _Channel), _model_pid(context, 431):
         return owner._Keeper(context, descriptors)
 
 
@@ -816,6 +830,60 @@ class ProfileOwnerDeadlineTests(unittest.TestCase):
 
 
 class ProfileOwnerTaskTests(unittest.TestCase):
+    def test_creator_reads_live_stop_facts_without_borrowing_owner_only_guard(self):
+        for stop in ("none", "cancel", "retire", "deadline", "primary"):
+            with self.subTest(stop=stop):
+                guard = DefaultCancellation(ValidationError, "fixed owner failure")
+                context = _context(cancellation=guard)
+                slot = owner.TaskSlot(context, types.SimpleNamespace(fd_sources=()), "custodian")
+                context.tasks.append(slot)
+                creator = Mock()
+                slot.actual = slot.returned = slot.constructed = creator
+                with patch.object(owner.time, "monotonic_ns", return_value=1):
+                    self.assertTrue(slot.reconcile_and_grant())
+                original = ValidationError("first actual owner failure")
+                if stop == "cancel":
+                    guard.cancelled = True
+                elif stop == "retire":
+                    slot.close_launch()
+                elif stop == "primary":
+                    context.primary = original
+                now = context.run if stop == "deadline" else 1
+                with patch.object(owner.threading, "current_thread", return_value=creator), patch.object(owner.time, "monotonic_ns", return_value=now):
+                    # The strict owner guard remains forbidden to a creator.
+                    with self.assertRaises(ValidationError):
+                        guard.check()
+                    if stop == "none":
+                        slot._check()
+                    else:
+                        expected = KeyboardInterrupt if stop == "cancel" else ValidationError
+                        with self.assertRaises(expected) as raised:
+                            slot._check()
+                        if stop == "primary":
+                            self.assertIs(raised.exception, original)
+                self.assertFalse(slot.acquisition.attempted)
+
+    def test_inherited_context_veto_precedes_lock_event_and_normal_recording(self):
+        context = _context()
+        slot = owner.TaskSlot(context, types.SimpleNamespace(fd_sources=()), "custodian")
+        context.tasks.append(slot)
+        slot.granted = Mock()
+        context.lock = Mock()
+        context.io._relinquish_inherited = Mock()
+        context.child_acquisition._relinquish_inherited = Mock()
+        context.pid -= 1  # Model a child copy; never fork a process here.
+        with patch.object(owner, "_mark_fork_unsafe") as unsafe:
+            for operation in (lambda: context.record(ValidationError("inherited")), slot.close_launch,
+                              context.begin_cleanup, context.close_all):
+                with self.assertRaises(ValidationError):
+                    operation()
+        self.assertTrue(unsafe.called)
+        self.assertIsNone(context.primary)
+        self.assertEqual(context.lock.mock_calls, [])
+        self.assertEqual(slot.granted.mock_calls, [])
+        self.assertFalse(slot.launch)
+        self.assertTrue(slot.launch_retired)
+
     def test_task_slot_is_rooted_before_start_and_lost_start_return_is_not_no_attempt(self):
         context = _context()
         slot = owner.TaskSlot(context, types.SimpleNamespace(fd_sources=()), "custodian")
@@ -1155,7 +1223,7 @@ class ProfileOwnerWaitAndGroupTests(unittest.TestCase):
                     if case == "observer_error":
                         raise fault
 
-            with self.subTest(parent_notice=case), patch.object(owner.time, "monotonic_ns", return_value=1), patch.object(owner.os, "getppid", return_value=430), patch.object(owner.os, "getpid", return_value=431), patch.object(owner.os, "read", return_value=content) as read, patch.object(owner.os, "write", side_effect=AssertionError("notice-only model has no output")) as write, patch.object(owner.os, "killpg", side_effect=AssertionError("retired group must never be requested")) as request, patch.object(owner, "_pause", side_effect=AssertionError("retired group must never wait")) as pause, patch.object(owner, "_role_event", side_effect=observe):
+            with self.subTest(parent_notice=case), patch.object(owner.time, "monotonic_ns", return_value=1), patch.object(owner.os, "getppid", return_value=430), _model_pid(context, 431), patch.object(owner.os, "read", return_value=content) as read, patch.object(owner.os, "write", side_effect=AssertionError("notice-only model has no output")) as write, patch.object(owner.os, "killpg", side_effect=AssertionError("retired group must never be requested")) as request, patch.object(owner, "_pause", side_effect=AssertionError("retired group must never wait")) as pause, patch.object(owner, "_role_event", side_effect=observe):
                 try:
                     if case in ("local_false", "local_unknown"):
                         context.record(prior, cleanup=True)
@@ -1449,7 +1517,7 @@ class ProfileOwnerWorkWaitTests(unittest.TestCase):
             parent_context = _context("custodian", hard=hard)
             descriptors = {fd: _Lease(300 + fd) for fd in range(3, 8)}
             context.io.leases.extend(descriptors.values())
-            with patch.object(owner.os, "set_blocking"), patch.object(owner.os, "getpid", return_value=431):
+            with patch.object(owner.os, "set_blocking"), _model_pid(context, 431):
                 keeper = owner._Keeper(context, descriptors)
             parent_channel = _wire_channel(parent_context, "k_to_c", "c_to_k")
             parent_context.io.leases.extend((parent_channel.reader, parent_channel.writer))
@@ -1600,7 +1668,7 @@ class ProfileOwnerWorkWaitTests(unittest.TestCase):
                 if now[0] > context.hard + owner.NANOSECOND:
                     parent[0] = 999  # A broken inert control loop must still terminate.
 
-            with self.subTest(first_run_expiry=stop), patch.object(owner.time, "monotonic_ns", side_effect=lambda: now[0]), patch.object(owner.os, "getppid", side_effect=lambda: parent[0]), patch.object(owner.os, "getpid", return_value=431), patch.object(owner.os, "read", side_effect=read), patch.object(owner.os, "write", side_effect=write), patch.object(owner.os, "killpg", side_effect=group_request), patch.object(owner.os, "_exit") as terminate, patch.object(owner, "_pause", side_effect=pause), patch.object(owner, "_role_event", side_effect=observe), patch.object(owner, "_validate_configuration", return_value=Path("/private/profile")), patch.object(owner, "_spawn", side_effect=AssertionError("settled inert V must not be recreated")) as spawn, patch.object(owner, "_wait_child", side_effect=wait_original) as wait, patch.object(keeper, "move_out", side_effect=AssertionError("original K already moved")) as move, patch.object(keeper, "work", side_effect=work), patch.object(keeper, "fallback_group", side_effect=fallback), patch.object(context, "record", side_effect=record):
+            with self.subTest(first_run_expiry=stop), patch.object(owner.time, "monotonic_ns", side_effect=lambda: now[0]), patch.object(owner.os, "getppid", side_effect=lambda: parent[0]), _model_pid(context, 431, parent_context), patch.object(owner.os, "read", side_effect=read), patch.object(owner.os, "write", side_effect=write), patch.object(owner.os, "killpg", side_effect=group_request), patch.object(owner.os, "_exit") as terminate, patch.object(owner, "_pause", side_effect=pause), patch.object(owner, "_role_event", side_effect=observe), patch.object(owner, "_validate_configuration", return_value=Path("/private/profile")), patch.object(owner, "_spawn", side_effect=AssertionError("settled inert V must not be recreated")) as spawn, patch.object(owner, "_wait_child", side_effect=wait_original) as wait, patch.object(keeper, "move_out", side_effect=AssertionError("original K already moved")) as move, patch.object(keeper, "work", side_effect=work), patch.object(keeper, "fallback_group", side_effect=fallback), patch.object(context, "record", side_effect=record):
                 try:
                     result = keeper.run()
                     # Also schedule C after K returns: old unconditional break
@@ -1739,7 +1807,7 @@ class ProfileOwnerWorkWaitTests(unittest.TestCase):
                 self.assertTrue(keeper.group_retired)
 
             original_pump = keeper.pump
-            with self.subTest(expired_keeper_run=stop), patch.object(owner.time, "monotonic_ns", side_effect=lambda: now[0]), patch.object(owner.os, "getppid", return_value=430), patch.object(owner.os, "getpid", return_value=431), patch.object(owner.os, "killpg", side_effect=AssertionError("expired cleanup must not request G")) as request, patch.object(owner.os, "_exit") as terminate, patch.object(owner, "_pause", side_effect=pause), patch.object(owner, "_role_event", side_effect=observe), patch.object(owner, "_spawn", side_effect=AssertionError("expired work must not create V")) as spawn, patch.object(owner, "_wait_child", side_effect=AssertionError("original V is already reaped")) as wait, patch.object(keeper, "move_out", side_effect=AssertionError("original K already moved")) as move, patch.object(keeper, "pump", wraps=original_pump) as pump, patch.object(keeper, "work", side_effect=work):
+            with self.subTest(expired_keeper_run=stop), patch.object(owner.time, "monotonic_ns", side_effect=lambda: now[0]), patch.object(owner.os, "getppid", return_value=430), _model_pid(context, 431), patch.object(owner.os, "killpg", side_effect=AssertionError("expired cleanup must not request G")) as request, patch.object(owner.os, "_exit") as terminate, patch.object(owner, "_pause", side_effect=pause), patch.object(owner, "_role_event", side_effect=observe), patch.object(owner, "_spawn", side_effect=AssertionError("expired work must not create V")) as spawn, patch.object(owner, "_wait_child", side_effect=AssertionError("original V is already reaped")) as wait, patch.object(keeper, "move_out", side_effect=AssertionError("original K already moved")) as move, patch.object(keeper, "pump", wraps=original_pump) as pump, patch.object(keeper, "work", side_effect=work):
                 result = keeper.run()
                 request.assert_not_called(); terminate.assert_not_called()
                 spawn.assert_not_called(); wait.assert_not_called(); move.assert_not_called()
@@ -1968,7 +2036,7 @@ class ProfileOwnerHandshakeTests(unittest.TestCase):
         final = {"v": 1, "type": "FINAL", "outcome": "ok", "cleanup": "confirmed",
                  "keeper": {"state": "reaped", "pid": 431, "status_kind": "exit", "status_code": 0},
                  "validator": owner._status_record(status), "group": {"state": "retired", "id": 431, "absent": True}}
-        with patch.object(owner.os, "getpid", return_value=429), patch.object(owner.time, "monotonic_ns", return_value=1):
+        with _model_pid(context, 429), patch.object(owner.time, "monotonic_ns", return_value=1):
             for grant, frame, attribute in (("ADMIT", reserved, "reserved"), ("RUN", ready, "ready")):
                 outer.channel.frames = [frame]
                 with self.assertRaises(ValidationError):
@@ -2129,7 +2197,7 @@ class ProfileOwnerHandshakeTests(unittest.TestCase):
             groups.append([terminal])
             chunks = [b"".join(owner.Protocol.encode(frame) for frame in group) for group in groups]
             outer.read_payload = Mock(side_effect=lambda: setattr(outer, "payload_eof", True))
-            with self.subTest(before_grant=stage), patch.object(owner.time, "monotonic_ns", return_value=1), patch.object(owner.os, "getpid", return_value=429), patch.object(owner.os, "getsid", return_value=429), patch.object(owner.os, "set_blocking"), patch.object(Path, "lstat", return_value=types.SimpleNamespace(st_mode=0o40700)), patch.object(owner, "_Channel", return_value=channel), patch.object(owner, "_spawn", return_value=_Child(pid=430)), patch.object(owner, "helper_argv", return_value=("/fake/helper",)), patch.object(owner, "_configuration", return_value=_configuration()), patch.object(ios_profiles, "profile_environment", return_value={"LANG": "C"}), patch.object(ios_profiles, "completed_content", return_value=b"modeled content") as parse, patch.object(owner.os, "read", side_effect=chunks), patch.object(owner.os, "write", side_effect=lambda _fd, content: len(content)), patch.object(owner, "_pause"), patch.object(channel, "send", wraps=channel.send) as send:
+            with self.subTest(before_grant=stage), patch.object(owner.time, "monotonic_ns", return_value=1), _model_pid(context, 429), patch.object(owner.os, "getsid", return_value=429), patch.object(owner.os, "set_blocking"), patch.object(Path, "lstat", return_value=types.SimpleNamespace(st_mode=0o40700)), patch.object(owner, "_Channel", return_value=channel), patch.object(owner, "_spawn", return_value=_Child(pid=430)), patch.object(owner, "helper_argv", return_value=("/fake/helper",)), patch.object(owner, "_configuration", return_value=_configuration()), patch.object(ios_profiles, "profile_environment", return_value={"LANG": "C"}), patch.object(ios_profiles, "completed_content", return_value=b"modeled content") as parse, patch.object(owner.os, "read", side_effect=chunks), patch.object(owner.os, "write", side_effect=lambda _fd, content: len(content)), patch.object(owner, "_pause"), patch.object(channel, "send", wraps=channel.send) as send:
                 with self.assertRaises(ValidationError) as raised:
                     outer.work()
                 self.assertEqual(raised.exception.args, (ios_profiles.AUTHENTICATION_ERROR,))
@@ -2190,6 +2258,7 @@ class ProfileOwnerHandshakeTests(unittest.TestCase):
                     stack.enter_context(patch.object(target, name, side_effect=forbidden))
                 stack.enter_context(patch.object(owner.time, "monotonic_ns", return_value=1))
                 stack.enter_context(patch.object(owner.os, "getpid", return_value=430))
+                stack.enter_context(patch.object(context, "pid", 430))
                 stack.enter_context(patch.object(owner.os, "getppid", return_value=429))
                 read = stack.enter_context(patch.object(owner.os, "read", side_effect=[packet]))
                 sid = stack.enter_context(patch.object(owner.os, "getsid", side_effect=[
@@ -2328,7 +2397,7 @@ class ProfileOwnerHelperTerminalTests(unittest.TestCase):
             custodian.keeper_channel.sent.add("RUN")
             custodian.keeper_channel.write_attempted = attempted
             custodian.keeper_channel.frames = [{"v": 1, "type": "RELEASED", "validator": candidate}]
-            with self.subTest(candidate=candidate, known_status=known_status, attempted=attempted), patch.object(owner.os, "getpid", return_value=430), self.assertRaises(ValidationError):
+            with self.subTest(candidate=candidate, known_status=known_status, attempted=attempted), _model_pid(context, 430), self.assertRaises(ValidationError):
                 custodian.pump_keeper()
             self.assertIsNone(custodian.released)
             self.assertEqual(custodian.validator, known_status)
@@ -2965,6 +3034,14 @@ class ProfileOwnerFinalityTests(unittest.TestCase):
         self.registry = patch.object(owner, "_CUSTODY", [])
         self.registry.start()
         self.addCleanup(self.registry.stop)
+        # This suite's guard is an explicit inert lifecycle double, not an
+        # admission test or a substitute for actual installed handler tokens.
+        from mobile_release import ios_profiles
+        real_resolver = ios_profiles._profile_cancellation
+        resolver = patch.object(ios_profiles, "_profile_cancellation", side_effect=lambda requested=None:
+                                (requested, False) if type(requested) is _Cancellation else real_resolver(requested))
+        resolver.start()
+        self.addCleanup(resolver.stop)
 
     def test_unknown_strongly_retains_exact_scratch_and_blocks_process_reuse(self):
         class Scratch:
@@ -2982,8 +3059,30 @@ class ProfileOwnerFinalityTests(unittest.TestCase):
         self.assertIn(finality, owner._CUSTODY)
         with self.assertRaises(ValidationError):
             finality._finish()
+        refused = owner.CaptureFinality()
         with self.assertRaises(ValidationError):
-            owner.CaptureFinality()._begin(_context())
+            refused._begin(_context())
+        self.assertTrue(refused.blocked)
+        self.assertIs(refused._admission_blocker, finality)
+        self.assertEqual(refused.native_attempt, "NOT_ATTEMPTED")
+
+    def test_producer_settlement_does_not_erase_independent_local_fd_failure(self):
+        context, finality = _context(), owner.CaptureFinality()
+        finality._begin(context)
+        _settled_child(context)
+        channel = _Channel(context)
+        channel.write_attempted.add("RUN")
+        close = _Lease(error=OSError("modeled close result lost"))
+        context.io.leases.append(close)
+        context.close(close)
+        finality._publish_lifetime(types.SimpleNamespace(producers_confirmed=True, channel=channel))
+        finality._unknown()
+        self.assertTrue(finality.producer_settled)
+        self.assertFalse(finality.native_resources_settled)
+        self.assertEqual(finality.native_attempt, "ATTEMPT_ARMED")
+        self.assertEqual(finality.validator_dispatch, "RUN_ATTEMPT_ARMED")
+        self.assertFalse(finality.cleanup_allowed)
+        self.assertEqual(close.close_calls, 1)
 
     def test_exited_active_owner_is_unknown_even_if_explicit_tail_publication_is_lost(self):
         context, finality = _context(), owner.CaptureFinality()
@@ -3072,6 +3171,7 @@ class ProfileOwnerFinalityTests(unittest.TestCase):
         class Outer:
             def __init__(self, context, *_args):
                 self.context = context
+                self.channel = None
                 self.cleanup_claimed = False
                 self.confirmed = False
                 self.safe_pump = lambda: None
@@ -3085,7 +3185,7 @@ class ProfileOwnerFinalityTests(unittest.TestCase):
                 if guard.depth <= 0:
                     raise AssertionError("cleanup dispatch was not shielded")
                 guard.cancelled = True  # Deferred default signal, not an actual KI.
-                self.confirmed = True
+                self.confirmed = self.producers_confirmed = True
 
         deadline = types.SimpleNamespace(expires_at=100.0, check=lambda: None)
         with patch.object(owner.native, "Acquisition", _Acquisition), patch.object(owner, "_Outer", Outer), patch.object(owner.time, "monotonic_ns", return_value=1):
@@ -3106,6 +3206,7 @@ class ProfileOwnerFinalityTests(unittest.TestCase):
         class Outer:
             def __init__(self, context, *_args):
                 self.context = context
+                self.channel = None
                 self.cleanup_claimed = False
                 self.confirmed = False
                 self.safe_pump = lambda: None
@@ -3118,7 +3219,7 @@ class ProfileOwnerFinalityTests(unittest.TestCase):
                 raise OSError("PRIVATE_CLEANUP_MARKER")
 
         deadline = types.SimpleNamespace(expires_at=100.0, check=lambda: None)
-        with patch.object(owner.native, "Acquisition", _Acquisition), patch.object(owner, "_Outer", Outer), patch.object(owner.time, "monotonic_ns", return_value=1), patch.object(ios_profiles, "_profile_cancellation", return_value=guard):
+        with patch.object(owner.native, "Acquisition", _Acquisition), patch.object(owner, "_Outer", Outer), patch.object(owner.time, "monotonic_ns", return_value=1), patch.object(ios_profiles, "_profile_cancellation", return_value=(guard, True)):
             with self.assertRaises(SystemExit) as raised:
                 owner.capture_profile(Path("/private/profile"), deadline, finality=finality)
         self.assertIs(raised.exception, first)
@@ -3136,6 +3237,7 @@ class ProfileOwnerFinalityTests(unittest.TestCase):
         class Outer:
             def __init__(self, context, *_args):
                 self.context = context
+                self.channel = None
                 self.cleanup_claimed = False
                 self.confirmed = False
                 self.final = {"outcome": "ok"}
@@ -3150,7 +3252,7 @@ class ProfileOwnerFinalityTests(unittest.TestCase):
                 return b"fictional profile"
 
             def cleanup(self):
-                self.cleanup_claimed = self.confirmed = True
+                self.cleanup_claimed = self.confirmed = self.producers_confirmed = True
                 actions.append("cleanup")
 
         def restore():
@@ -3160,7 +3262,7 @@ class ProfileOwnerFinalityTests(unittest.TestCase):
 
         guard.restore_action = restore
         deadline = types.SimpleNamespace(expires_at=100.0, check=lambda: None)
-        with patch.object(owner.native, "Acquisition", _Acquisition), patch.object(owner, "_Outer", Outer), patch.object(owner.time, "monotonic_ns", return_value=1), patch.object(ios_profiles, "_profile_cancellation", return_value=guard):
+        with patch.object(owner.native, "Acquisition", _Acquisition), patch.object(owner, "_Outer", Outer), patch.object(owner.time, "monotonic_ns", return_value=1), patch.object(ios_profiles, "_profile_cancellation", return_value=(guard, True)):
             with self.assertRaises(KeyboardInterrupt):
                 owner.capture_profile(Path("/private/profile"), deadline, finality=finality)
         self.assertEqual(actions, ["cleanup", "restore"])
@@ -3174,6 +3276,7 @@ class ProfileOwnerFinalityTests(unittest.TestCase):
         class Outer:
             def __init__(self, context, *_args):
                 self.context = context
+                self.channel = None
                 self.cleanup_claimed = False
                 self.confirmed = False
                 self.final = {"outcome": "ok"}
@@ -3186,7 +3289,7 @@ class ProfileOwnerFinalityTests(unittest.TestCase):
                 return b"modeled late profile"
 
             def cleanup(self):
-                self.cleanup_claimed = self.confirmed = True
+                self.cleanup_claimed = self.confirmed = self.producers_confirmed = True
                 now[0] = self.context.run + owner.NANOSECOND
                 if now[0] >= self.context.hard:
                     raise AssertionError("model must settle inside original cleanup grace")
@@ -3208,7 +3311,8 @@ class ProfileOwnerFinalityTests(unittest.TestCase):
         class Outer:
             def __init__(self, context, *_args):
                 self.context = context
-                self.cleanup_claimed = self.confirmed = True
+                self.channel = None
+                self.cleanup_claimed = self.confirmed = self.producers_confirmed = True
                 self.final = {"outcome": "ok"}
                 self.safe_pump = lambda: None
                 _settled_child(context)

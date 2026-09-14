@@ -4,10 +4,12 @@ from __future__ import annotations
 import hashlib
 import os
 import plistlib
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -17,9 +19,23 @@ from mobile_release.inspection import InspectionDeadline
 from mobile_release.ios_profile_auth import cms_payload_and_certificates, verify_cms
 from mobile_release.ios_profile_trust import APPLE_ROOT_SHA256, apple_roots, pem_certificates, verify_profile_signer
 from mobile_release.ios_profiles import decode_authenticated_profile, read_profile_bytes
+from mobile_release._lifetime_evidence import ProfileCallEvidence
 
 from .ios_entitlement_helpers import modern_profile_bytes, profile, tlv
 from .ios_profile_helpers import framed_cms, pem, public_certificates, signed_cms, synthetic_identity
+
+
+@contextmanager
+def parser_only_evidence(test):
+    """A mocked authenticator proves parser order, NEVER a native lifetime."""
+    evidence = ProfileCallEvidence("decode")
+    try:
+        yield evidence
+    finally:
+        evidence._finish(primary=sys.exc_info()[1])
+        verdict = evidence.verdict()
+        test.assertTrue(verdict.fatal)
+        test.assertFalse(verdict.complete)
 
 
 class CMSFramingTests(unittest.TestCase):
@@ -90,20 +106,22 @@ class CMSFramingTests(unittest.TestCase):
         deadline = InspectionDeadline()
         for failed_call in (1, 2):
             seen = []
-            def authenticate(raw, *, deadline):
+            def authenticate(raw, *, deadline, cancellation, _evidence, _evidence_role):
                 seen.append(raw)
                 if len(seen) == failed_call:
                     raise ValidationError("fixed issuer rejection")
                 return outer
-            with patch("mobile_release.ios_profiles.authenticate_cms", side_effect=authenticate), patch("mobile_release.ios_der.decode_der_dictionary") as decode:
+            with parser_only_evidence(self) as evidence, patch("mobile_release.ios_profiles.authenticate_cms", side_effect=authenticate), patch("mobile_release.ios_der.decode_der_dictionary") as decode:
                 with self.assertRaisesRegex(ValidationError, "issuer rejection"):
-                    decode_authenticated_profile(b"original signed outer", deadline=deadline)
+                    decode_authenticated_profile(b"original signed outer", deadline=deadline, _evidence=evidence)
             decode.assert_not_called()
             self.assertEqual(seen, [b"original signed outer", inner][:failed_call])
-        with patch("mobile_release.ios_profiles.authenticate_cms", side_effect=[outer, inner]) as authentication:
-            self.assertEqual(decode_authenticated_profile(b"original signed outer", deadline=deadline)["UUID"], profile()["UUID"])
+        with parser_only_evidence(self) as evidence, patch("mobile_release.ios_profiles.authenticate_cms", side_effect=[outer, inner]) as authentication:
+            self.assertEqual(decode_authenticated_profile(b"original signed outer", deadline=deadline, _evidence=evidence)["UUID"], profile()["UUID"])
         self.assertEqual([call.args[0] for call in authentication.call_args_list], [b"original signed outer", inner])
         self.assertTrue(all(call.kwargs["deadline"] is deadline for call in authentication.call_args_list))
+        self.assertEqual([call.kwargs["_evidence_role"] for call in authentication.call_args_list], ["OUTER_CMS", "INNER_CMS"])
+        self.assertTrue(all(call.kwargs["_evidence"] is evidence for call in authentication.call_args_list))
 
     def test_regular_file_snapshot_rejects_links_special_empty_large_and_changed_files(self):
         with tempfile.TemporaryDirectory() as name:
@@ -126,6 +144,126 @@ class CMSFramingTests(unittest.TestCase):
                 return before
             with patch("mobile_release.ios_profiles.os.fstat", side_effect=change), self.assertRaisesRegex(ValidationError, "changed"):
                 read_profile_bytes(source)
+
+
+class ProfileCompositionTests(unittest.TestCase):
+    """Inert composition/failure controls, not native process evidence."""
+
+    def test_implicit_borrower_checks_cancellation_after_correlation_and_nested_load(self):
+        from mobile_release import ios_entitlements, ios_profiles
+        from mobile_release.cancellation import DefaultCancellation
+        from .test_lifetime_evidence import handler_model
+
+        outer = modern_profile_bytes(profile())
+        inner = plistlib.loads(outer)["DER-Encoded-Profile"]
+        for stage in ("correlate", "load"):
+            with self.subTest(stage=stage), handler_model():
+                guard = DefaultCancellation(ValidationError, "fixed restoration failure")
+                guard.install()
+                guard.activate()
+                evidence = ProfileCallEvidence("decode" if stage == "correlate" else "load")
+                try:
+                    if stage == "correlate":
+                        original = ios_entitlements.correlate_profile
+                        def cancelled_correlation(*args, **kwargs):
+                            result = original(*args, **kwargs)
+                            guard.cancelled = True
+                            return result
+                        with patch.object(ios_profiles, "authenticate_cms", side_effect=[outer, inner]) as auth, patch.object(ios_entitlements, "correlate_profile", side_effect=cancelled_correlation), self.assertRaises(KeyboardInterrupt):
+                            ios_profiles.decode_authenticated_profile(b"modeled CMS", _evidence=evidence)
+                        self.assertTrue(all(call.kwargs["cancellation"] is guard for call in auth.call_args_list))
+                    else:
+                        def cancelled_decode(*args, **kwargs):
+                            self.assertIs(kwargs["cancellation"], guard)
+                            guard.cancelled = True
+                            return profile()
+                        with patch.object(ios_profiles, "read_profile_bytes", return_value=b"modeled CMS"), patch.object(ios_profiles, "decode_authenticated_profile", side_effect=cancelled_decode), self.assertRaises(KeyboardInterrupt):
+                            ios_profiles.load_authenticated_profile(Path("/inert/profile"), _evidence=evidence)
+                    self.assertEqual(guard.handler_state, "ACTIVE")
+                    evidence._finish()
+                    self.assertTrue(evidence.verdict().fatal)  # Mocks never supplied owner receipts.
+                finally:
+                    guard.restore()
+
+    def test_normal_owned_decode_cannot_accept_missing_scheduled_owner_publication(self):
+        from .test_lifetime_evidence import handler_model
+
+        outer = modern_profile_bytes(profile())
+        inner = plistlib.loads(outer)["DER-Encoded-Profile"]
+        with handler_model(), patch("mobile_release.ios_profiles.authenticate_cms", side_effect=[outer, inner]):
+            with self.assertRaisesRegex(ValidationError, "resource cleanup could not be confirmed"):
+                decode_authenticated_profile(b"not authenticated")
+
+    def test_prior_unknown_admission_latches_the_actual_owner_before_any_read(self):
+        from mobile_release import ios_profiles
+        from mobile_release.cancellation import DefaultCancellation
+        from .test_lifetime_evidence import handler_model
+
+        blocker = SimpleNamespace(retained=True)
+        with handler_model(), patch.object(ios_profiles, "_PROFILE_RESOURCE_SCOPES", [blocker]), patch.object(ios_profiles.os, "open") as opened:
+            guard = DefaultCancellation(ValidationError, "fixed restoration failure")
+            guard.install()
+            guard.activate()
+            evidence = ProfileCallEvidence("read")
+            try:
+                with self.assertRaisesRegex(ValidationError, "ownership remains unresolved"):
+                    read_profile_bytes(Path("/inert/profile"), _evidence=evidence)
+                self.assertIs(evidence._guard, guard)
+                self.assertIs(evidence._blockers[0], blocker)
+                self.assertTrue(guard.lifetime_ledger.fatal)
+                evidence._finish()
+                self.assertTrue(evidence.verdict().blocked)
+                self.assertTrue(evidence.verdict().fatal)
+                opened.assert_not_called()
+            finally:
+                guard.restore()
+
+    def test_first_actual_interruption_survives_read_close_and_evidence_failure(self):
+        from mobile_release import ios_profiles
+        from .test_lifetime_evidence import handler_model
+
+        details = SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_size=1, st_dev=1,
+                                  st_ino=1, st_mtime_ns=1, st_ctime_ns=1)
+        for first in (KeyboardInterrupt("original interrupt"), SystemExit(27)):
+            with self.subTest(primary=type(first).__name__), handler_model(), patch.object(ios_profiles, "_PROFILE_RESOURCE_SCOPES", []), patch.object(ios_profiles, "_PROFILE_SCRATCH_LEASES", []), patch.object(ios_profiles.os, "lstat", return_value=details), patch.object(ios_profiles.os, "open", return_value=733), patch.object(ios_profiles.os, "fstat", return_value=details), patch.object(ios_profiles.os, "read", side_effect=first), patch.object(ios_profiles, "_close_profile_descriptor", side_effect=OSError("modeled close result lost")) as close:
+                evidence = ProfileCallEvidence("read")
+                with self.assertRaises(type(first)) as raised:
+                    read_profile_bytes(Path("/inert/profile"), _evidence=evidence)
+                self.assertIs(raised.exception, first)
+                close.assert_called_once_with(733)
+                evidence._finish(primary=first)
+                self.assertTrue(evidence.verdict().fatal)
+                self.assertIs(evidence._primary, first)
+
+    def test_late_inherited_results_close_only_the_child_fd_and_never_remove_scratch(self):
+        from mobile_release import ios_profiles
+        from mobile_release._profile_process import CaptureFinality
+
+        descriptor = ios_profiles._ProfileDescriptor()
+        def late_open(*_args, **_kwargs):
+            descriptor.pid -= 1  # Inert child-copy model, not a real fork.
+            return 733
+        with patch.object(ios_profiles.os, "open", side_effect=late_open), patch.object(ios_profiles.os, "close") as close, patch.object(ios_profiles, "_mark_fork_unsafe"):
+            with self.assertRaises(ValidationError):
+                descriptor.open("/inert/profile", os.O_RDONLY)
+            descriptor.after_fork_child()
+            close.assert_called_once_with(733)
+            self.assertFalse(descriptor.settled)
+
+        with patch.object(ios_profiles, "_PROFILE_SCRATCH_LEASES", []), patch.object(ios_profiles, "_PROFILE_RESOURCE_SCOPES", []):
+            scratch = ios_profiles.ScratchLease(CaptureFinality())
+            def late_directory(*_args, **_kwargs):
+                scratch.pid -= 1
+                return "/inert/parent/scratch"
+            with patch.object(ios_profiles.tempfile, "mkdtemp", side_effect=late_directory), patch.object(ios_profiles.os, "unlink") as unlink, patch.object(ios_profiles.os, "rmdir") as rmdir, patch.object(ios_profiles, "_mark_fork_unsafe"):
+                with self.assertRaises(ValidationError):
+                    scratch.acquire()
+                with self.assertRaises(ValidationError):
+                    scratch.cleanup()
+                self.assertEqual(scratch._created_name, "/inert/parent/scratch")
+                self.assertTrue(scratch.retained)
+                unlink.assert_not_called()
+                rmdir.assert_not_called()
 
 
 @unittest.skipUnless(sys.platform == "darwin", "production Apple profile policy requires macOS")
@@ -182,12 +320,16 @@ class NativeProfileAuthorityTests(unittest.TestCase):
             verify_profile_signer(signer, (signer, *public_certificates().values(), *apple_roots()))
 
     def test_complete_two_layer_synthetic_signature_succeeds_only_with_explicit_policy_seam(self):
-        # Keep REAL native crypto, both parsers, and complete DER/plist correlation.
-        def crypto(raw, *, deadline):
-            deadline.check()
-            return self.verify_in_new_directory(raw, deadline=deadline)
-        with patch("mobile_release.ios_profiles.authenticate_cms", side_effect=crypto), patch("mobile_release.ios_profile_auth.verify_profile_signer") as policy:
-            decoded = decode_authenticated_profile(self.signed)
+        # Keep REAL native crypto for both layers, then use their exact verified
+        # payloads for parser/correlation orchestration. Direct verify_cms is a
+        # native-crypto seam, not the isolated capture owner: never invent its
+        # lifetime receipts or nest its independent reads inside a decode ledger.
+        deadline = InspectionDeadline()
+        with patch("mobile_release.ios_profile_auth.verify_profile_signer") as policy:
+            outer = self.verify_in_new_directory(self.signed, deadline=deadline)
+            inner = self.verify_in_new_directory(plistlib.loads(outer)["DER-Encoded-Profile"], deadline=deadline)
+        with parser_only_evidence(self) as evidence, patch("mobile_release.ios_profiles.authenticate_cms", side_effect=[outer, inner]):
+            decoded = decode_authenticated_profile(self.signed, deadline=deadline, _evidence=evidence)
         self.assertEqual(decoded["Entitlements"], profile()["Entitlements"])
         self.assertEqual(policy.call_count, 2)
         # Same bytes through the real isolated worker/default policy MUST reject.
@@ -198,11 +340,10 @@ class NativeProfileAuthorityTests(unittest.TestCase):
         original = plistlib.loads(self.outer_payload)
         for inner in (self.inner_payload, original["DER-Encoded-Profile"].replace(b"com.example.reader", b"com.example.forged", 1)):
             changed = signed_cms(self.root, plistlib.dumps({**original, "DER-Encoded-Profile": inner}), "bad-inner-" + hashlib.sha256(inner).hexdigest()[:12])
-            def crypto(raw, *, deadline):
-                return self.verify_in_new_directory(raw, deadline=deadline)
-            with patch("mobile_release.ios_profiles.authenticate_cms", side_effect=crypto), patch("mobile_release.ios_profile_auth.verify_profile_signer") as policy:
+            with patch("mobile_release.ios_profile_auth.verify_profile_signer") as policy:
+                authenticated_outer = self.verify_in_new_directory(changed)
                 with self.assertRaises(ValidationError):
-                    decode_authenticated_profile(changed)
+                    self.verify_in_new_directory(plistlib.loads(authenticated_outer)["DER-Encoded-Profile"])
             self.assertEqual(policy.call_count, 1, "inner rejection must occur before its issuer-policy seam")
 
 

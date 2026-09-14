@@ -312,7 +312,7 @@ class NativeProfileSeam:
         self.failures = set()
         self.cms_calls = []
 
-    def authenticate_cms(self, content, *, deadline):
+    def authenticate_cms(self, content, *, deadline, cancellation=None):
         deadline.check()
         self.cms_calls.append(content)
         return content

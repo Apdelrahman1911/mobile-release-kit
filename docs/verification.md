@@ -43,18 +43,30 @@ defense in depth, not proof of server-side scheduling. Retain actual runner/imag
 metadata from the Actions job. Do not add container/service/self-hosted fallbacks.
 
 Both native jobs have a 60-minute job timeout and read-only contents permissions.
-The separate protected status job `test` succeeds only when **both** predecessors
-actually succeed; failed, cancelled, skipped, unavailable or queued is not success.
+The full workflow additionally runs the finite local-signing matrix described
+below. The protected status job `test` requires the Linux and macOS platform jobs,
+the complete matrix job set, and a successful proof reduction; failed, cancelled,
+skipped, unavailable or queued is not success.
 Never bypass branch protection or dispatch release/Store workflows for testing.
 
 For an intermediate macOS-only correction, manual `verification_target: macos`
-omits Linux but runs the **same complete macOS catalog and owner path**. Only a
-manual macOS selection can omit Linux; Actions compares its string value without
-case sensitivity. Missing, empty or nonmatching values do not omit Linux. Its
+omits Linux but runs the **same complete macOS catalog and owner path**. The other
+partial selection, `signing-adapter`, runs only the two-OS smoke scope below.
+Actions compares these string values without case sensitivity. Missing, empty or
+nonmatching values do not omit Linux. A partial dispatch's
 aggregate `test` deliberately **fails** because skipped Linux is not a
 pass. This supplies platform-specific candidate evidence, never full verification
 or merge authority. Event/target-specific concurrency separates partial dispatches
 from full PR/main/manual runs.
+
+For fail-fast signing integration, manual `verification_target: signing-adapter`
+runs exactly four fixed signing methods in both source and installed wheel on
+each disposable Linux/macOS runner. It omits the full platform catalogs and
+32-cell matrix; its protected aggregate intentionally cannot pass. Results are
+labelled `adapter-only`, have no matrix-proof/reducer authority, and cannot replace
+the full verification required for delivery. Arbitrary test selectors are not
+supported. The ordinary owner path, source/package checks, original finality and
+cleanup requirements are unchanged.
 
 Publish intermediate candidates to a task-owned branch without an open PR and
 explicitly dispatch that reviewed ref; verify the actual source commit, workflow,
@@ -65,6 +77,38 @@ normal protected delivery and actual main CI. Do not combine partial runs into a
 invented full result or count an unexecuted gate as passed.
 
 ## Small implementation and command authority
+
+### Required account-signing matrix
+
+`test-signing-matrix` selects exactly sixteen shards on each supported OS,
+maximum four concurrent cells. Each cell prepares only its required offline
+Python inputs, builds/freezes/inspects the same complete source and installed
+package, then invokes both phases through `verify_ci.py --scope signing-matrix`.
+This is a finite catalog, not permission to run arbitrary subsets or commands.
+The primary interpreter and complete native-provider admission remain required.
+The 420-second phase and 900-second pair cutoffs include finality, parsing,
+persisted-output accounting and compact proof publication. The original ordinary
+Session does not enable retained-domain disposal for a matrix phase.
+The adapter uses the same phase/pair cutoffs. Scope-specific preparation and
+teardown consume those endpoints; preceding offline-input/install/catalog gates
+remain under the unchanged aggregate deadline, not inside the 900-second pair.
+
+The fixed phase entry point accepts complete explicit execution metadata; it
+does not infer authority from inherited GitHub environment variables. The real
+case worker and production command owner drive durable before/partial/after cuts.
+Original custodian-fence observations identify actual reached operations, not
+simulated execution receipts or power-loss durability. Fresh recovery is subject
+to the production account hold, generation/fence and ownership checks.
+
+Only validated compact proofs leave the test domain before work disposal. The
+protected reducer checks every same-run candidate and exact source/test binding,
+rejects invalid later proofs, and reconciles the complete disjoint case union.
+An older successful cell may be reused only for its unchanged source/run scope;
+its producing attempt stays the original attempt. Partial/manual macOS runs
+which omit this matrix cannot satisfy the protected aggregate. See
+[local-signing verification](local-signing.md#verification) for coverage and limits.
+
+### Controller components
 
 The helpers under [`.github/scripts/`](../.github/scripts/) have separate roles:
 

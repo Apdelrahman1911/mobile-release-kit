@@ -14,6 +14,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from mobile_release import cli
@@ -82,7 +83,7 @@ def snapshot(root: Path) -> dict[str, tuple]:
 
 @contextlib.contextmanager
 def boundaries(callback):
-    """Instrument real IO boundaries, never replace a successful operation."""
+    """Instrument transaction-owned real IO, not the shared os module/Git IPC."""
     sequence = []
 
     def wrap(kind, function, label=lambda *args: ""):
@@ -104,7 +105,11 @@ def boundaries(callback):
     def open_file(path, flags, *args, **kwargs):
         return (created_open if flags & os.O_CREAT else real_open)(path, flags, *args, **kwargs)
 
+    # Replacing attributes on tx.os would patch the shared Python os module,
+    # misclassifying unrelated discovery/process-pipe writes as init mutations.
+    owned_os = SimpleNamespace(**vars(os))
     with contextlib.ExitStack() as stack:
+        stack.enter_context(patch.object(tx, "os", owned_os))
         stack.enter_context(patch.object(tx, "_rename_function", return_value=wrap(
             "rename", rename, lambda _sfd, source, _dfd, dest: f"{source}>{dest}")))
         stack.enter_context(patch.object(tx, "_fsync", wrap("fsync", tx._fsync)))
@@ -116,6 +121,38 @@ def boundaries(callback):
 
 
 class InitTransactionTests(unittest.TestCase):
+    def test_fault_instrumentation_owns_only_transaction_io_not_shared_os_calls(self) -> None:
+        callables = {name: getattr(os, name) for name in ("open", "write", "mkdir", "unlink", "rmdir")}
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "output"
+            with path.open("w+b") as handle:
+                read, write = os.pipe()
+                try:
+                    with boundaries(lambda *_: None) as events:
+                        self.assertIsNot(tx.os, os)
+                        self.assertEqual({name: getattr(os, name) for name in callables}, callables)
+                        os.write(write, b"pipe")
+                        self.assertEqual(os.read(read, 4), b"pipe")
+                        os.write(handle.fileno(), b"foreign")
+                        self.assertEqual(events, [])
+                        tx.os.write(handle.fileno(), b"owned")
+                        self.assertEqual(events, [{"kind": "write", "label": "", "success": True}])
+                    self.assertEqual(path.read_bytes(), b"foreignowned")
+                finally:
+                    os.close(read)
+                    os.close(write)
+            for when in ("before", "after"):
+                with self.subTest(when=when), path.open("w+b") as handle:
+                    def fail(_index, event, phase):
+                        if event["kind"] == "write" and phase == when:
+                            raise OSError(errno.ENOSPC, "actual transaction-boundary failure")
+
+                    with boundaries(fail), self.assertRaisesRegex(OSError, "transaction-boundary"):
+                        tx.os.write(handle.fileno(), b"actual")
+                    self.assertEqual(path.read_bytes(), b"actual" if when == "after" else b"")
+        self.assertIs(tx.os, os)
+        self.assertEqual({name: getattr(os, name) for name in callables}, callables)
+
     def assert_no_state(self, root: Path) -> None:
         self.assertFalse(any((root / name).exists() for name in tx.STATE_NAMES))
 

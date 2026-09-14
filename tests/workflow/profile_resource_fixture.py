@@ -31,6 +31,7 @@ from mobile_release import ios_profiles as profiles
 from mobile_release.cancellation import CleanupScope, DefaultCancellation
 from mobile_release.errors import ValidationError
 from mobile_release.inspection import InspectionDeadline
+from mobile_release._lifetime_evidence import ProfileCallEvidence
 from workflow.profile_process_fixture import (
     FixtureDriver, FixtureWorkspace, ProfileBindings, _assert_native_finality,
     assert_fixture_idle,
@@ -94,9 +95,9 @@ def driver(root: Path, mode: str, signum: int) -> dict:
     binding = ProfileBindings(root, "success")
 
     scope_line = anchor(target, "with scope:")
-    private_exit_line = anchor(profiles._ProfileCleanupScope.__exit__, "if self.claimed:")
-    base_exit_line = anchor(CleanupScope.__exit__, "if self.claimed:")
-    base_claimed_line = anchor(CleanupScope.__exit__, "try:")
+    private_exit_line = anchor(profiles._ProfileCleanupScope._exit_owned, "if self.claimed:")
+    base_exit_line = anchor(CleanupScope._exit_owned, "if self.claimed:")
+    base_claimed_line = anchor(CleanupScope._exit_owned, "if self.first_primary:")
     outer_cleanup_entry = anchor(owner._Outer.cleanup, "ctx = self.context")
     outer_cleanup_claimed = anchor(owner._Outer.cleanup, "cutoff = ctx.begin_cleanup()")
     outer_cleanup_dispatch = anchor(owner._Outer.run, "self.cleanup()")
@@ -382,13 +383,13 @@ def driver(root: Path, mode: str, signum: int) -> dict:
             return trace
         if area != "capture" and scopes:
             scope = scopes[0]
-            if (phase == "cleanup-prologue-systemexit" and frame.f_code is profiles._ProfileCleanupScope.__exit__.__code__
+            if (phase == "cleanup-prologue-systemexit" and frame.f_code is profiles._ProfileCleanupScope._exit_owned.__code__
                     and frame.f_locals["self"] is scope and frame.f_lineno == private_exit_line):
                 assert frame.f_locals["error"] is original and scope._primary_error is None
                 assert not scope.claimed and scope.cancellation.depth == 0
                 send(phase)  # Before the incoming SystemExit has been assigned.
             elif (phase in {"cleanup-entry", "cleanup-entry-repeat", "cleanup-claimed"}
-                    and frame.f_code is CleanupScope.__exit__.__code__ and frame.f_locals["self"] is scope
+                    and frame.f_code is CleanupScope._exit_owned.__code__ and frame.f_locals["self"] is scope
                     and frame.f_lineno == (base_claimed_line if phase == "cleanup-claimed" else base_exit_line)):
                 if phase == "cleanup-claimed":
                     assert scope.claimed
@@ -516,9 +517,10 @@ def driver(root: Path, mode: str, signum: int) -> dict:
             scope_ids = {id(item) for item in profiles._PROFILE_RESOURCE_SCOPES if item.retained}
             scratch_ids = {id(item) for item in profiles._PROFILE_SCRATCH_LEASES}
             retained_scratch_ids = {id(item) for item in profiles._PROFILE_SCRATCH_LEASES if item.retained}
-            # authenticate_cms checks these actual retained profile records
-            # before constructing cancellation/scope owners. Native _CUSTODY
-            # alone is not that entry veto and cannot admit this later probe.
+            # authenticate_cms attaches a resource-free evidence owner before
+            # this retained-record gate so the caller's abort latch receives
+            # the refusal too. No handler installation, scope or acquisition
+            # may follow. Native _CUSTODY alone is not that local entry veto.
             assert scope_ids or retained_scratch_ids, "missing actual retained profile entry veto"
             capture_ids = {id(item) for item in owner._CUSTODY if item.state == "UNKNOWN"}
             del held_error
@@ -536,12 +538,16 @@ def driver(root: Path, mode: str, signum: int) -> dict:
             assert (scope_ids & surviving_scope_ids) or (retained_scratch_ids & surviving_scratch_ids)
             assert scratch_ids <= {id(item) for item in profiles._PROFILE_SCRATCH_LEASES}
             assert capture_ids <= {id(item) for item in owner._CUSTODY if item.state == "UNKNOWN"}
-            with patch.object(profiles, "_profile_cancellation", side_effect=AssertionError("retained custody admitted another cancellation owner")) as cancellation_probe, patch.object(profiles.tempfile, "mkdtemp", side_effect=AssertionError("retained custody admitted scratch")) as scratch_probe, patch.object(native, "create", side_effect=AssertionError("retained custody admitted native child")) as child_probe:
+            refused = ProfileCallEvidence("authenticate")
+            with patch.object(DefaultCancellation, "install", side_effect=AssertionError("retained custody installed new handlers")) as cancellation_probe, patch.object(profiles.tempfile, "mkdtemp", side_effect=AssertionError("retained custody admitted scratch")) as scratch_probe, patch.object(native, "create", side_effect=AssertionError("retained custody admitted native child")) as child_probe:
                 try:
                     try:
-                        profiles.authenticate_cms(content, deadline=InspectionDeadline())
-                    except ValidationError:
-                        pass
+                        profiles.authenticate_cms(content, deadline=InspectionDeadline(), _evidence=refused)
+                    except ValidationError as error:
+                        refused._finish(primary=error)
+                        assert refused.verdict().fatal and refused.verdict().blocked
+                        assert any(id(item) in scope_ids | retained_scratch_ids for item in refused._blockers)
+                        assert refused._guard.lifetime_ledger.fatal
                     else:
                         raise AssertionError("retained ownership did not veto reuse")
                 finally:

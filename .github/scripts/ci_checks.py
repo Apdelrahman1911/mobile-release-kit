@@ -63,12 +63,20 @@ WHEEL_PATTERNS = (
     "test_native_process.py", "test_profile_process_owner.py", "test_default_cancellation.py",
     "test_profile_processes.py", "test_inspection_budget.py", "test_ios_profile_installation.py",
     "test_ios_profile_trust.py",
+    "test_local_signing.py", "test_local_signing_recovery.py", "test_local_signing_native.py",
+    "test_local_signing_composition.py", "test_owned_process.py", "test_owned_process_callers.py",
+    "test_owned_process_failures.py", "test_local_signing_failures.py", "test_local_signing_profile_identity.py",
+    "test_local_signing_persistent.py", "test_local_signing_matrix.py",
 )
 NATIVE_PATTERNS = (
     "test_ios_profile_authority.py", "test_ios_profile_trust.py",
     "test_ios_profile_installation.py", "test_default_cancellation.py",
     "test_profile_processes.py", "test_macho_native.py",
     "test_native_process.py", "test_profile_process_owner.py", "test_inspection_budget.py",
+    "test_local_signing.py", "test_local_signing_recovery.py", "test_local_signing_native.py",
+    "test_local_signing_composition.py", "test_owned_process.py", "test_owned_process_callers.py",
+    "test_owned_process_failures.py", "test_local_signing_failures.py", "test_local_signing_profile_identity.py",
+    "test_local_signing_persistent.py", "test_local_signing_matrix.py",
 )
 # Only this source-known class may run with the fixed native trust-service role.
 # A newly added method must not silently enlarge that role's callset.
@@ -142,6 +150,7 @@ PYTHON_POISON_PARTITIONS = tuple(name for name, _identifier in PYTHON_POISON_CAS
 PYTHON_POISON_IDS = tuple(identifier for _name, identifier in PYTHON_POISON_CASES)
 # Exact method identities, not a count, file-wide exemption or skip-message match.
 LINUX_MACOS_SKIPS = frozenset({
+    "unit.test_local_signing_native.SigningDarwinABITests.test_real_header_layout_and_local_volume_match_ctypes_without_private_state",
     "unit.test_ios_profile_authority.NativeProfileAuthorityTests.test_actual_signature_integrity_and_exact_signer_are_checked_before_policy",
     "unit.test_ios_profile_authority.NativeProfileAuthorityTests.test_complete_two_layer_synthetic_signature_succeeds_only_with_explicit_policy_seam",
     "unit.test_ios_profile_authority.NativeProfileAuthorityTests.test_default_policy_rejects_even_valid_signature_with_production_looking_fake_issuer",
@@ -840,7 +849,7 @@ def expected_python_ids(source_root: Path, selection: str = "full", *, deadline:
         result.extend(module_ids)
     _require(bool(result) and len(result) == len(set(result)), "TEST_EMPTY_OR_DUPLICATE_INVENTORY")
     if selection == "full":
-        _require(len(LINUX_MACOS_SKIPS) == 17 and LINUX_MACOS_SKIPS <= set(result), "TEST_NATIVE_INVENTORY_DRIFT")
+        _require(len(LINUX_MACOS_SKIPS) == 18 and LINUX_MACOS_SKIPS <= set(result), "TEST_NATIVE_INVENTORY_DRIFT")
     return tuple(sorted(result))
 
 

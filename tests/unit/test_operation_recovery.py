@@ -648,6 +648,27 @@ class IosOperationRecoveryTests(unittest.TestCase):
         authentication.assert_called_once(); prepare.assert_not_called(); mutate.assert_not_called()
         self.assertFalse(self.intent_path.exists())
 
+    def test_profile_cleanup_uncertainty_stops_actual_fresh_validation_before_any_store_access(self) -> None:
+        from mobile_release.owned_process import ProcessCleanupError, ProcessError
+
+        for error in (ProcessError("fictional group uncertainty", dispatched=True, contained=False),
+                      ProcessCleanupError("fictional cleanup uncertainty", dispatched=True)):
+            with self.subTest(error=type(error).__name__), \
+                 patch("mobile_release.ios.sys.platform", "darwin"), \
+                 patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), \
+                 patch("mobile_release.ios_profiles.authenticate_cms", side_effect=error) as authentication, \
+                 patch("mobile_release.ios.subprocess.run", side_effect=AssertionError("later native inspection ran")), \
+                 patch("mobile_release.cli.prepare_store_operation") as prepare, \
+                 patch("mobile_release.cli.execute_store_operation") as mutate, \
+                 self.assertRaises(ProcessError) as caught:
+                self.invoke("prepare-operation")
+            self.assertIs(caught.exception, error)
+            self.assertTrue(caught.exception.fatal)
+            authentication.assert_called_once()
+            prepare.assert_not_called()
+            mutate.assert_not_called()
+            self.assertFalse(self.intent_path.exists())
+
     def test_malformed_generic_resource_plist_stops_fresh_intent_before_signing_or_store(self) -> None:
         resource = "Resources/Extra/Info.plist"
         for archive, ipa in ((b'<plist><dict><key>discarded</key><string>archive-only</string></dict><dict/></plist>',

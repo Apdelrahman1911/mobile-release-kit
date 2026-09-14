@@ -14,7 +14,11 @@ from types import ModuleType
 ROOT = Path(__file__).resolve().parents[2]
 PATTERNS = ("test_ios_profile_authority.py", "test_ios_profile_trust.py", "test_ios_profile_installation.py",
             "test_default_cancellation.py", "test_profile_processes.py", "test_macho_native.py",
-            "test_native_process.py", "test_profile_process_owner.py", "test_inspection_budget.py")
+            "test_native_process.py", "test_profile_process_owner.py", "test_inspection_budget.py",
+            "test_local_signing.py", "test_local_signing_recovery.py", "test_local_signing_native.py",
+            "test_local_signing_composition.py", "test_owned_process.py", "test_owned_process_callers.py",
+            "test_owned_process_failures.py", "test_local_signing_failures.py", "test_local_signing_profile_identity.py",
+            "test_local_signing_persistent.py", "test_local_signing_matrix.py")
 PREREQUISITES = (
     ("openssl-version", ("/usr/bin/openssl", "version")),
     ("clang-discovery", ("/usr/bin/xcrun", "--find", "clang")),
@@ -70,6 +74,7 @@ POISON_PARTITIONS = (
 ISOLATED_PROFILE_PRODUCTS = frozenset({
     "mobile_release", "mobile_release._native_process", "mobile_release._profile_process",
     "mobile_release.ios_profiles", "mobile_release.cancellation", "mobile_release.errors", "mobile_release.inspection",
+    "mobile_release._lifetime_evidence",
 })
 ISOLATED_NEGATIVE_IMPORTS = (
     ("unit.test_native_process", ("unit",),
@@ -90,6 +95,7 @@ AUTHORITY_PRODUCT_MODULES = frozenset({
     "mobile_release", "mobile_release.cancellation", "mobile_release.ios_profiles",
     "mobile_release.ios_profile_auth", "mobile_release.ios_profile_trust",
     "mobile_release._native_process", "mobile_release._profile_process",
+    "mobile_release.errors", "mobile_release.inspection", "mobile_release._lifetime_evidence",
 })
 
 
@@ -221,6 +227,8 @@ def _authority_origins(package, *, tests_loaded=False) -> None:
         raise AssertionError("native authority lost its fixed package imports")
     for name, module in tuple(sys.modules.items()):
         if name == "mobile_release" or name.startswith("mobile_release."):
+            if name not in AUTHORITY_PRODUCT_MODULES:
+                raise AssertionError("native authority imported an ordinary caller/command module")
             _check_module_origin(name, module, package, package=name == "mobile_release")
         elif name == "unit" or name.startswith("unit."):
             if name not in AUTHORITY_UNIT_MODULES:

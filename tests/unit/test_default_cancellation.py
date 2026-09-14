@@ -26,6 +26,18 @@ from workflow.profile_process_fixture import (
 
 
 @contextmanager
+def inert_handlers():
+    """Exercise genuine install bookkeeping without changing a host handler."""
+    handlers = {signal.SIGINT: signal.default_int_handler, signal.SIGTERM: signal.SIG_DFL}
+    def install(signum, handler):
+        previous, handlers[signum] = handlers[signum], handler
+        return previous
+    with patch("mobile_release.cancellation.signal.getsignal", side_effect=handlers.__getitem__), \
+            patch("mobile_release.cancellation.signal.signal", side_effect=install):
+        yield handlers
+
+
+@contextmanager
 def resource_case():
     """Do not let a subTest swallow an adverse fixture result and admit work."""
     assert_fixture_idle()
@@ -121,9 +133,10 @@ class DefaultCancellationTests(unittest.TestCase):
                     raise cleanup_error
             scope = CleanupScope(guard, cleanup, owns_cancellation=True)
             expected = ValidationError if cleanup_fails else ValueError if body_fails else KeyboardInterrupt
-            with self.subTest(body=body_fails, cleanup=cleanup_fails), self.assertRaises(expected) as raised:
+            with inert_handlers(), self.subTest(body=body_fails, cleanup=cleanup_fails), self.assertRaises(expected) as raised:
                 try:
                     with scope:
+                        guard.install()
                         guard.activate()
                         if body_fails:
                             raise body_error
@@ -148,9 +161,10 @@ class DefaultCancellationTests(unittest.TestCase):
             calls.append("outer")
             self.assertEqual(guard.depth, 1)
         outer = CleanupScope(guard, outer_cleanup, owns_cancellation=True)
-        with self.assertRaises(KeyboardInterrupt):
+        with inert_handlers(), self.assertRaises(KeyboardInterrupt):
             try:
                 with outer:
+                    guard.install()
                     guard.activate()
             finally:
                 outer.__exit__(*exc_info())
@@ -159,19 +173,22 @@ class DefaultCancellationTests(unittest.TestCase):
     def test_restoration_attempts_every_handler_with_int_last_and_preserves_fixed_failure(self):
         for fail_at in (signal.SIGTERM, signal.SIGINT):
             guard = self.guard()
-            guard.previous = {signal.SIGINT: signal.default_int_handler, signal.SIGTERM: signal.SIG_DFL}
             calls = []
             def restore(signum, handler):
                 calls.append(signum)
                 if signum == fail_at:
                     raise OSError("private-native-canary")
+                previous, handlers[signum] = handlers[signum], handler
+                return previous
             scope = CleanupScope(guard, lambda: setattr(guard, "cancelled", True), owns_cancellation=True)
-            with self.subTest(fail_at=fail_at), patch("mobile_release.cancellation.signal.signal", side_effect=restore), self.assertRaisesRegex(CredentialError, "fixed restoration failure") as raised:
-                try:
-                    with scope:
-                        pass
-                finally:
-                    scope.__exit__(*exc_info())
+            with self.subTest(fail_at=fail_at), inert_handlers() as handlers:
+                guard.install()
+                with patch("mobile_release.cancellation.signal.signal", side_effect=restore), self.assertRaisesRegex(CredentialError, "fixed restoration failure") as raised:
+                    try:
+                        with scope:
+                            pass
+                    finally:
+                        scope.__exit__(*exc_info())
             self.assertNotIn("private-native-canary", str(raised.exception))
             self.assertEqual(calls, [signal.SIGTERM, signal.SIGINT])
 
@@ -180,9 +197,6 @@ class DefaultCancellationTests(unittest.TestCase):
                          {"read-restore-int", "source-restore-int", "capture-restore-int"})
         for selected in (signal.SIGTERM, signal.SIGINT):
             guard = self.guard()
-            guard.previous = {signal.SIGINT: signal.default_int_handler, signal.SIGTERM: signal.SIG_DFL}
-            guard.depth = 0
-            handlers = {signum: guard.interrupt for signum in guard.previous}
             calls, cleaned, registry = [], [], []
             original = KeyboardInterrupt("modeled final restoration return loss")
 
@@ -199,29 +213,32 @@ class DefaultCancellationTests(unittest.TestCase):
             # Entirely inert scope: no handler is installed, and no descriptor,
             # scratch, child or task exists. Replacing this model-only registry
             # does not release any real resource or previous retained owner.
-            with self.subTest(restored=selected), patch.object(profiles, "_PROFILE_RESOURCE_SCOPES", registry), patch("mobile_release.cancellation.signal.signal", side_effect=restore):
-                scope = profiles._ProfileCleanupScope(
-                    guard, lambda: cleaned.append(True), owns_cancellation=True, descriptors=(),
-                )
-                with self.assertRaises(KeyboardInterrupt) as raised:
-                    try:
-                        with scope:
-                            pass
-                    finally:
-                        scope.__exit__(*exc_info())
-                unknown = selected == signal.SIGINT
-                self.assertEqual(calls, [signal.SIGTERM, signal.SIGINT])
-                self.assertEqual(cleaned, [True])
-                self.assertEqual(handlers, guard.previous)
-                self.assertTrue(scope.claimed and scope._settled)
-                self.assertEqual(scope.retained, unknown)
-                self.assertEqual(registry, [scope] if unknown else [])
-                self.assertEqual(len(scope._cleanup_errors), int(unknown))
-                self.assertIs(scope._primary_error, raised.exception)
-                if unknown:
-                    self.assertIs(raised.exception, original)
-                else:
-                    self.assertTrue(guard.cancelled)
+            with self.subTest(restored=selected), inert_handlers() as handlers:
+                guard.install()
+                guard.activate()
+                with patch.object(profiles, "_PROFILE_RESOURCE_SCOPES", registry), patch("mobile_release.cancellation.signal.signal", side_effect=restore):
+                    scope = profiles._ProfileCleanupScope(
+                        guard, lambda: cleaned.append(True), owns_cancellation=True, descriptors=(),
+                    )
+                    with self.assertRaises(KeyboardInterrupt) as raised:
+                        try:
+                            with scope:
+                                pass
+                        finally:
+                            scope.__exit__(*exc_info())
+                    unknown = selected == signal.SIGINT
+                    self.assertEqual(calls, [signal.SIGTERM, signal.SIGINT])
+                    self.assertEqual(cleaned, [True])
+                    self.assertEqual(handlers, guard.previous)
+                    self.assertTrue(scope.claimed and scope._settled)
+                    self.assertEqual(scope.retained, unknown)
+                    self.assertEqual(registry, [scope] if unknown else [])
+                    self.assertEqual(len(scope._cleanup_errors), int(unknown))
+                    self.assertIs(scope._primary_error, raised.exception)
+                    if unknown:
+                        self.assertIs(raised.exception, original)
+                    else:
+                        self.assertTrue(guard.cancelled)
 
 
 @unittest.skipUnless(os.name == "posix", "profile resource ownership needs POSIX")

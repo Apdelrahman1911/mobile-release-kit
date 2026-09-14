@@ -21,15 +21,30 @@ All notable changes to Mobile Release Kit are documented here. The project follo
   original validation remains usable to reconcile already accepted builds after signing expiry.
 - Credential-free actual-lane cross-language contracts, failure-injection and workflow lifecycle
   tests, plus recovery/credential/upgrade documentation.
+- Persistent native-active signing crash/recovery verification with independent
+  fictional ownership, bounded Linux/macOS source/wheel shards, and mandatory
+  cross-cell reconciliation of actual executions, including partial CI reruns.
 
 ### Fixed
 
+- Serialize local signed-iOS preflight across an entire macOS account, before
+  credential/application work. Journal original ownership before native dispatch,
+  preserve unrelated keychain/profile state, contain owned synchronous workers
+  and add explicit locked status/recovery with resumable terminal cleanup. Borrow
+  exact signal guards and relinquish inherited fork/GC resources, including late
+  handle handoffs. Preserve fatal resource/handler failures across manual recovery,
+  independent cleanup and cancellation; retain original pending ownership without
+  replaying ambiguous work. Bind profile bytes, actual read identity and complete
+  observed metadata through admission/terminal recovery; preserve per-name conflicts
+  across cleanup owners without implicit retry, including ambiguous setup-stage
+  inspection/removal. Keep EEXIST borrowed cleanup role-exclusive. QA-004 outer materialization cleanup
+  remains separate and open.
 - Authenticate both provisioning-profile CMS signatures and the exact production
   Apple iOS profile issuer under pinned public roots, with offline native policy,
   isolated bounded workers, cancellation containment and exact-byte no-clobber
   local installation. Add required credential-free macOS/installed-wheel gates;
-  retain original accepted-candidate recovery. Local signing concurrency remains
-  separately tracked as QA-003, not fixed by atomic installation alone.
+  retain original accepted-candidate recovery. Atomic installation alone is not
+  the account lifetime lease provided by the separate local-signing correction.
 - Compare every iOS signed entitlement with its own modern DER profile grants using
   strict typed subsets and capability-specific wildcards. Inspect every native slice,
   reject profileless nested claims, malformed/duplicate encodings and stale certificate

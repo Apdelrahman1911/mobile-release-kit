@@ -31,7 +31,7 @@ _FIXTURE_METHODS = ("test_01_before", "test_02_subject", "test_03_after",
 _FIXTURE_IDS = tuple(f"{_FIXTURE_MODULE}.Fixture.{name}" for name in _FIXTURE_METHODS)
 _PROFILE_PRODUCT_FIXTURES = frozenset({
     "mobile_release", "mobile_release._native_process", "mobile_release._profile_process",
-    "mobile_release.ios_profiles", "mobile_release.cancellation", "mobile_release.errors", "mobile_release.inspection",
+    "mobile_release._lifetime_evidence", "mobile_release.ios_profiles", "mobile_release.cancellation", "mobile_release.errors", "mobile_release.inspection",
 })
 _ISOLATED_IMPORT_FIXTURES = (
     ("unit.test_native_process", ("unit",), frozenset({"unit", "unit.test_native_process"}),
@@ -286,30 +286,18 @@ class NativeProfileCITests(unittest.TestCase):
                 if failed is not None:
                     self.assertTrue(all(row["status"] == "UNEXECUTED" for row in report.rows[len(calls):]))
 
-    def test_protected_aggregate_always_runs_and_fails_for_any_unsuccessful_predecessor(self):
+    def test_native_source_and_wheel_catalog_follow_the_protected_platform_route(self):
+        from .test_ci_verification import NATIVE_TARGET_CONDITION
         workflow = load_workflow(Path(__file__).parents[2] / ".github/workflows/ci.yml")
         aggregate = workflow["jobs"]["test"]
-        self.assertEqual(set(aggregate["needs"]), {"test-linux", "test-native-profiles"})
-        self.assertEqual(aggregate["permissions"], {})
-        self.assertNotIn("continue-on-error", aggregate)
-        self.assertEqual(len(aggregate["steps"]), 1)
-        step = aggregate["steps"][0]
-        self.assertNotIn("if", step)
-        self.assertNotIn("continue-on-error", step)
-        self.assertEqual(step["env"], {"LINUX_RESULT": "${{ needs.test-linux.result }}", "NATIVE_RESULT": "${{ needs.test-native-profiles.result }}"})
-        self.assertEqual(step["run"], 'set -euo pipefail\n[[ "$LINUX_RESULT" == success && "$NATIVE_RESULT" == success ]]\n')
-        for linux, native in itertools.product(("success", "failure", "cancelled", "skipped", ""), repeat=2):
-            with self.subTest(linux=linux, native=native):
-                expected = linux == native == "success"
-                self.assertTrue(evaluate_condition(aggregate.get("if"), {}, success=expected,
-                                                   cancelled="cancelled" in (linux, native)))
-                result = subprocess.run(["bash", "-c", step["run"]], capture_output=True, timeout=5,
-                                        env={"PATH": os.environ["PATH"], "LINUX_RESULT": linux, "NATIVE_RESULT": native})
-                self.assertEqual(result.returncode == 0, expected)
+        # CIWorkflowIsolationTests executes the current three-result guard,
+        # including every unsuccessful predecessor; do not replay its old
+        # two-result shell matrix here. Retain this distinct native gate binding.
+        self.assertIn("test-native-profiles", aggregate["needs"])
         native_job = workflow["jobs"]["test-native-profiles"]
         self.assertEqual(native_job["runs-on"], "macos-26")
         self.assertEqual(native_job["permissions"], {"contents": "read"})
-        self.assertNotIn("if", native_job)
+        self.assertEqual(native_job["if"], NATIVE_TARGET_CONDITION)
         self.assertNotIn("continue-on-error", native_job)
         self.assertNotIn("environment", native_job)
         self.assertEqual(native_job["steps"][-1]["run"], coordinator_shell("macos"))
@@ -1518,7 +1506,8 @@ class NativeProfileCITests(unittest.TestCase):
         gate = run_native_profile_checks
         for wheel, fault in itertools.product((False, True), (
                 "none", "source-mix", "extra-package-path", "loader", "spec-origin", "package-name", "nested-package",
-                "missing-product", "missing-test", "unrelated-test", "ordinary-workflow", "late-search-path")):
+                "missing-product", "missing-test", "unrelated-test", "ordinary-workflow", "late-search-path",
+                "command-module", "ordinary-profile-caller")):
             with self.subTest(wheel=wheel, fault=fault):
                 runtime = _inert_authority_runtime(installed_wheel=wheel)
                 with patch.object(gate, "sys", runtime):
@@ -1553,6 +1542,9 @@ class NativeProfileCITests(unittest.TestCase):
                             "workflow", gate.ROOT / "tests/workflow", package=True)
                     elif fault == "late-search-path":
                         runtime.path.append("")
+                    elif fault in {"command-module", "ordinary-profile-caller"}:
+                        name = "mobile_release." + ("owned_process" if fault == "command-module" else "_profile_callers")
+                        runtime.modules[name] = _inert_origin_module(name, package)
                     if fault == "none":
                         gate._authority_origins(package, tests_loaded=True)
                         # The real unmodified worker derives its package parent

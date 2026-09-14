@@ -172,6 +172,8 @@ The authoritative schema is [`schemas/project.schema.json`](schemas/project.sche
 | `mobile-release preflight --offline` | no Store access | Run project checks and inspect unsigned release outputs/effective settings. |
 | `mobile-release preflight --signing` | local signing files | Sign and deeply verify final AAB/IPA outputs without uploading. |
 | `mobile-release preflight --online` | Store API credentials | Run a non-publishing access/uniqueness/destination check. Google uses a temporary edit that is always deleted without commit; Apple performs reads only. |
+| `mobile-release local-signing status` | none | Inspect sanitized account-local signing ownership; no native preference query or Store access. |
+| `mobile-release local-signing recover` | explicit account-idle confirmation | Reconcile original owned signing resources without rebuilding or Store mutation; see [local recovery](docs/local-signing.md). |
 | `mobile-release status` | none | Validate and summarize recorded evidence; it does not query either Store. |
 | `mobile-release explain` | none | Explain a finding or list the contract for a capability/stage. |
 
@@ -233,8 +235,10 @@ grants. Both profile CMS signatures and the production Apple issuer are independ
 verified with pinned public roots in isolated credential-free workers. See
 [entitlement validation](docs/ios-entitlements.md) and
 [profile authority](docs/ios-profile-authority.md) for the supported native policy,
-offline scope, recovery, required consumer rehearsal and separate local-signing
-concurrency blocker. These checks alone do not establish overall production readiness.
+offline scope, recovery and required consumer rehearsal. Local signed iOS builds
+use an [account-wide lease and recoverable ownership](docs/local-signing.md).
+QA-004 outer materialization/restoration remains a separate open blocker; these
+checks alone do not establish overall production readiness.
 
 Each candidate hashes a deterministic platform-scoped metadata archive: Android includes only
 `android/**`; iOS includes `ios/**`, `review/**`, and `testflight/**`. An unrelated platform's
@@ -280,6 +284,15 @@ checks. See
 required coverage, evidence and current limitations. Never dispatch a release
 workflow or use real Store/signing credentials to test this repository.
 
+The persistent local-signing matrix is also required: sixteen shards on each
+of Linux and macOS, with source and installed-wheel execution in every cell.
+The reviewed CI owner, not a raw fixture launcher, runs those phases under the
+original deadlines. Protected aggregation checks actual reached-cut inventories,
+package/test bindings and every candidate proof before accepting the full union.
+Unchanged successful cells from an earlier attempt of the same run/commit may
+be reused; a partial shard, green job alone or process snapshot is not full
+verification. See [matrix verification](docs/local-signing.md#verification).
+
 Workflow-contract tests reject mutable action references, inherited secrets, Store/OIDC authority
 in application-build jobs, build commands in Store jobs, missing hosted-runner runtime guards,
 Python import shadowing, signing material in promotion workflows, missing protected environments,
@@ -293,6 +306,7 @@ No shared-repository test uses a consumer credential or a real application/accou
 - [Credential and secret contract](docs/credentials.md)
 - [Release lifecycle](docs/lifecycle.md)
 - [Recovery and resumability](docs/recovery.md)
+- [Local signing ownership and recovery](docs/local-signing.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Upgrading pinned consumers](docs/upgrading.md)
 - [Repository verification](docs/verification.md)

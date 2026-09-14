@@ -186,7 +186,10 @@ channels and scratch have explicit owners; authentication capture borrows the
 outer guard until scratch cleanup finishes. A selector/descriptor failure cannot
 skip independent child, stream or scratch-finality accounting. Cancellation during
 restoration cannot return success; body errors survive successful cleanup, and
-cleanup or handler-restoration failures remain errors rather than being hidden by cancellation.
+cleanup or handler-restoration failures remain explicit lifetime failures. The first
+actual `KeyboardInterrupt`/`SystemExit` is preserved by identity; later cleanup
+uncertainty still latches a fatal sidecar and cannot authorize a retry or successful
+result. A late pending default signal vetoes only an otherwise normal return.
 
 This guard catches only default main-thread SIGINT/SIGTERM, installs SIGINT first
 and restores it last. It does not replace custom handlers or install handlers from
@@ -201,10 +204,18 @@ using pathname guesses. Ambiguous descriptor-close errors are not retried agains
 a potentially reused descriptor. End that process and inspect only its exact
 owned private residues before retrying; do not delete other profiles.
 
-**Separate open blocker QA-003:** overlapping local signing contexts still share
-global keychain settings and profile lifetime. Atomic installation alone is not
-a concurrency lease. Do not overlap local signing preflights; this is pending
-remediation, not an accepted production-readiness limitation.
+Profile readers and both CMS owners share the caller's exact guard and original
+deadline, including implicit main-thread borrowing. Fixed callers explicitly
+forward the guard when custom handlers or a worker thread mean there are no
+installed default-signal tokens. A reconciled creator observes only live stop
+facts through a one-use identity-bound view; it cannot call owner-thread guard
+APIs. Independent producer, native-resource, local-resource and handler facts
+remain separate. Missing expected owner publication or a prior UNKNOWN blocks
+acceptance even when a new invocation did not attempt a native process.
+
+Signed iOS build preflight has a separate [account-wide signing lease and
+recoverable command protocol](local-signing.md). Atomic profile installation or
+profile-process settlement alone is not that concurrency/recovery authority.
 
 **Separate open blocker QA-004:** the outer `materialize_build_inputs` scratch and
 client-file restoration do not yet use this cancellation-safe ownership. Default

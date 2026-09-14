@@ -1,7 +1,9 @@
-"""Real default signals at local profile ownership boundaries; no native calls.
+"""Real default signals at local profile ownership boundaries.
 
 The parent chooses the package under test (including an installed wheel). Every
 file/descriptor is fixture-owned, and cleanup assertions precede fallback.
+Signing effects are fictional; their commands use the genuine bounded owner.
+This fixture therefore requires the reviewed disposable verification boundary.
 """
 from __future__ import annotations
 
@@ -9,10 +11,12 @@ import base64
 import inspect
 import json
 import os
+import shutil
 import signal
+import stat
 import sys
 import tempfile
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -21,12 +25,29 @@ ROOT = Path(__file__).resolve().parents[2]
 if __name__ == "__main__":
     sys.path[:0] = [sys.argv.pop(1), str(ROOT / "tests")]
 
-from mobile_release import credentials
+from mobile_release import credentials, local_signing
 from mobile_release.cancellation import CleanupScope, DefaultCancellation
 from mobile_release.config import load_config
-from mobile_release.errors import CredentialError
+from mobile_release.owned_process import ProcessError
 from unit.helpers import ios_config, write_project
 from unit.ios_entitlement_helpers import profile
+from unit.local_signing_helpers import NativeSigningModel, fictional_signing_profile, model_result
+
+
+@contextmanager
+def completed_case_directory():
+    """Remove only a successful case, never finalize uncertain native work."""
+    root = Path(tempfile.mkdtemp(prefix="mrk-profile-signal-"))
+    before = root.lstat()
+    assert stat.S_ISDIR(before.st_mode) and stat.S_IMODE(before.st_mode) == 0o700
+    yield root
+    # Any exception keeps this namespace for the enclosing original verification
+    # owner. Normal return follows the assertions below, including real account
+    # recovery where needed; an error flag or a case-group receipt is not enough.
+    after = root.lstat()
+    assert (after.st_dev, after.st_ino, after.st_mode, after.st_uid) == (
+        before.st_dev, before.st_ino, before.st_mode, before.st_uid)
+    shutil.rmtree(root)
 
 
 def run_case(mode: str) -> dict:
@@ -43,11 +64,14 @@ def run_case(mode: str) -> dict:
     signals, reached, visits, cleanup_calls, target_scopes = [], [], [], [], []
     installation_code = credentials._temporary_profile_installation.__wrapped__.__code__
     signing_code = credentials._temporary_apple_signing_environment.__wrapped__.__code__
-    target_code = installation_code if standalone else signing_code
-    lines, first = inspect.getsourcelines(credentials._temporary_profile_installation if standalone else credentials._temporary_apple_signing_environment)
+    target_function = credentials._temporary_profile_installation if standalone else (
+        local_signing.local_signing_lease if mode in {"open-home", "partial-install", "restore-entry", "restore-active", "restore-term", "restore-int"}
+        else credentials._temporary_apple_signing_environment)
+    target_code = target_function.__wrapped__.__code__
+    lines, first = inspect.getsourcelines(target_function)
     owner_line = next(first + index for index, text in enumerate(lines) if text.strip() == "with scope:")
     yield_line = next(first + index for index, text in enumerate(lines) if text.strip().startswith("yield"))
-    lines, first = inspect.getsourcelines(CleanupScope.__exit__)
+    lines, first = inspect.getsourcelines(CleanupScope._exit_owned)
     exit_line = next(first + index for index, text in enumerate(lines) if "if self.claimed:" in text)
     lines, first = inspect.getsourcelines(DefaultCancellation.restore)
     restore_lines = {phase: next(first + index for index, text in enumerate(lines) if token in text)
@@ -89,7 +113,7 @@ def run_case(mode: str) -> dict:
                     send(mode)
             if target_scopes:
                 target = target_scopes[0]
-                if frame.f_code is CleanupScope.__exit__.__code__ and frame.f_locals["self"] is target and frame.f_lineno == exit_line:
+                if frame.f_code is CleanupScope._exit_owned.__code__ and frame.f_locals["self"] is target and frame.f_lineno == exit_line:
                     if mode == "cleanup-entry" and not reached:
                         send(mode)
                     elif mode == "partial-install" and len(signals) == 1:
@@ -123,9 +147,9 @@ def run_case(mode: str) -> dict:
                 send(mode, signal.SIGINT)
         return result
 
-    with tempfile.TemporaryDirectory(prefix="mrk-profile-signal-") as name:
-        home = Path(name)
-        private = home / "private"; private.mkdir()
+    with completed_case_directory() as root:
+        home = root / "home"; home.mkdir(mode=0o700)
+        private = root / "private"; private.mkdir(mode=0o700)
         p12, supplied = private / "fake.p12", private / "profile"
         p12.write_bytes(b"fictional p12; never an identity")
         supplied.write_bytes(b"fictional authenticated profile bytes")
@@ -163,12 +187,21 @@ def run_case(mode: str) -> dict:
                 send(mode)
             return result
 
-        def native(argv, **kwargs):
-            native_calls.append(argv)
-            if argv[0] == "openssl" and "-out" in argv:
-                Path(argv[argv.index("-out") + 1]).write_bytes(b"synthetic extracted material")
-            restores_search = argv[:2] == ["security", "list-keychains"] and "-s" in argv and argv[-1] == "/fictional/login.keychain-db"
-            if restores_search:
+        model = NativeSigningModel(home)
+        native_calls = model.calls
+        def restores_search(argv):
+            return (Path(argv[0]).name == "security" and argv[1] == "list-keychains" and "-s" in argv
+                    and argv[argv.index("-s") + 1:] == model.original["search"])
+
+        def native_result_policy(argv):
+            if mode == "cleanup-error-signal" and restores_search(argv):
+                # The genuine target produces this exit. A callback must never
+                # turn an already observed command result into another result.
+                return model_result(returncode=1)
+            return None
+
+        def after_native(argv, kwargs, result):
+            if restores_search(argv):
                 if mode == "body-repeat":
                     send("enclosing-cleanup", signal.SIGTERM)
                 elif mode == "unexpected-cleanup":
@@ -176,17 +209,18 @@ def run_case(mode: str) -> dict:
                     raise RuntimeError("synthetic native cleanup failure")
                 elif mode == "cleanup-error-signal":
                     send(mode)
-                    return SimpleNamespace(returncode=1, stdout="", stderr="")
             if not reached and ((mode == "mutation-create" and argv[1] == "create-keychain")
                     or (mode == "mutation-search" and argv[1] == "list-keychains" and "-s" in argv)
                     or (mode == "mutation-default" and argv[1] == "default-keychain" and "-s" in argv)):
                 send(mode, signal.SIGTERM)
-            output = '"/fictional/login.keychain-db"\n' if argv[1] in {"default-keychain", "list-keychains"} and "-s" not in argv else ""
-            return SimpleNamespace(returncode=0, stdout=output, stderr="")
+            return result
+        model.after = after_native
+        model.result_policy = native_result_policy
+        native = model
 
         try:
             with ExitStack() as stack:
-                stack.enter_context(patch("mobile_release.ios_profiles.decode_authenticated_profile", return_value=profile()))
+                stack.enter_context(patch.object(credentials, "_authenticated_signing_profile", side_effect=fictional_signing_profile))
                 stack.enter_context(patch.object(credentials, "_run_private", side_effect=native))
                 stack.enter_context(patch("mobile_release.cancellation.signal.signal", side_effect=change_handler))
                 if mode not in {*anchors, "handoff"}:
@@ -204,7 +238,7 @@ def run_case(mode: str) -> dict:
                         values = {"MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_BASE64": base64.b64encode(p12.read_bytes()).decode(),
                                   "MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_BASE64": base64.b64encode(supplied.read_bytes()).decode(),
                                   "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD": "fictional-password"}
-                        stack.enter_context(patch.object(credentials.Path, "home", return_value=home))
+                        stack.enter_context(patch.object(credentials, "local_signing_lease", side_effect=lambda **_kwargs: local_signing.local_signing_lease(home=home)))
                         context = credentials.materialize_build_inputs(config, values=values, platforms=("ios",), prepare_ios_signing=True)
                     else:
                         context = credentials._temporary_apple_signing_environment(
@@ -221,17 +255,28 @@ def run_case(mode: str) -> dict:
                     raise AssertionError("cancelled/failed signing reported success")
                 except KeyboardInterrupt as error:
                     references.append(error)
-                    assert mode != "unexpected-cleanup"
-                except RuntimeError as error:
+                    assert mode not in {"unexpected-cleanup", "cleanup-error-signal"}
+                except ProcessError as error:
                     references.append(error)
-                    assert mode == "unexpected-cleanup" and "synthetic native cleanup" in str(error)
-                except CredentialError as error:
-                    references.append(error)
-                    assert mode == "cleanup-error-signal" and "could not be completely cleaned up" in str(error)
+                    # Complete cleanup projects its actual fatal ledger instead
+                    # of exposing incidental callback text. A deferred signal
+                    # cannot replace the first owned-cleanup failure.
+                    assert mode in {"unexpected-cleanup", "cleanup-error-signal"}
+                    assert mode in reached and error.fatal
                 finally:
                     sys.settrace(None)
                     sys.setprofile(None)
             assert reached, "dangerous boundary was never reached"
+            if mode in {"unexpected-cleanup", "cleanup-error-signal"}:
+                status = local_signing.signing_status(home=home)
+                assert status["status"] == "pending", "ambiguous/failed cleanup must retain original authority"
+                if mode == "unexpected-cleanup":
+                    assert destination.is_file(), "ambiguous native consumers require retained profiles"
+                model.after = None
+                model.result_policy = None
+                recovered = local_signing.recover_signing(status["session"], local_signing.CONFIRMATION, home=home, runner=model)
+                assert recovered["status"] in {"recovered", "recovered-with-conflict"}
+            assert local_signing.signing_status(home=home)["status"] == "idle"
             assert not destination.exists()
             assert not list(destination.parent.iterdir()) if destination.parent.exists() else True
             for fd, device, inode in captured:
@@ -248,26 +293,23 @@ def run_case(mode: str) -> dict:
                           "cleanup-entry", "cleanup-dispatch", "restore-entry", "restore-active", "restore-term", "restore-int", "cleanup-error-signal"}:
                 assert any(argv[1] == "delete-keychain" for argv in native_calls)
             elif mode != "unexpected-cleanup":
-                assert not native_calls, "setup cancellation must precede keychain access"
+                assert all(call[1] in {"list-keychains", "default-keychain"} and "-s" not in call for call in native_calls), "early cancellation must precede shared mutation"
             if mode == "body-repeat":
                 assert len(signals) == 2
-                assert any(argv[:2] == ["security", "default-keychain"] and "-s" in argv and argv[-1] == "/fictional/login.keychain-db" for argv in native_calls)
+                assert any(argv[1] == "default-keychain" and "-s" in argv and argv[-1] == model.original["default"] for argv in native_calls)
             if mode == "partial-install":
                 assert len(signals) == 2 and not native_calls
             return {"mode": requested_mode, "boundaries": reached, "signalCount": len(signals), "cleanupAttempts": len(cleanup_calls),
                     "ownedFilesAndDescriptorsGoneBeforeFallback": True, "handlersRestored": True,
-                    "nativeBoundarySynthetic": True}
+                    "signingEffectsSynthetic": True, "nativeCallCount": len(native_calls),
+                    "commandReceiptsSynthetic": False}
         finally:
             sys.settrace(None)
             sys.setprofile(None)
-            # Exact fixture-owned fallback; never enumerate/close arbitrary FDs.
-            for fd, device, inode in captured:
-                try:
-                    details = real_fstat(fd)
-                    if (details.st_dev, details.st_ino) == (device, inode):
-                        real_close(fd)
-                except OSError:
-                    pass
+            # A failed assertion must not close a remembered FD that a live
+            # native owner may still need. The original verification domain
+            # disposes failed cases; successful cases proved all tracked FDs
+            # gone above, before dropping these observation-only references.
             references.clear()
 
 
