@@ -1772,6 +1772,7 @@ class NativeUploadValidationTest < Minitest::Test
 
       assert_native_order_failure_projection
       assert_native_setup_failure_projection
+      assert_adapter_fixed_timing_profile
       assert_adapter_parent_cutoff_composition
       assert_original_capture_settlement_projection
       assert_record_publication_lifecycle
@@ -2709,6 +2710,165 @@ class NativeUploadValidationTest < Minitest::Test
     end
   end
 
+  def assert_adapter_fixed_timing_profile
+    fixture = UploadProcessFixture
+    assert_equal [2, 5, 8, 15, 5, 30, 60], %i[DEADLINE READINESS_LIMIT CAPTURE_LIMIT DRIVER_LIMIT CLEANUP_LIMIT
+      WORKER_LIMIT OWNERSHIP_LIMIT].map { |name| fixture.const_get(name) }
+    assert_equal [10, 12, 18, 20, 25, 31], %i[ADAPTER_READINESS_LIMIT ADAPTER_RUN_LIMIT ADAPTER_CAPTURE_LIMIT
+      ADAPTER_MUTANT_RUN_LIMIT ADAPTER_COMPLETION_LIMIT ADAPTER_DRIVER_LIMIT].map { |name| fixture.const_get(name) }
+    assert_equal [15, 31, 31], %w[native ios android].map { |platform| fixture.driver_limit_seconds(platform) }
+
+    # Original initialization and the actual pre-acquisition event are pure
+    # here. No execute/task/observer installation or native operation occurs.
+    entry = lambda do |mode: "inherited", changes: {}, accepted: true|
+      times = {capture: 5_000_000_000, started: 5_200_000_000, now: 5_300_000_000, outer: 32_000_000_000}.merge(changes)
+      driver = fixture::AdapterDriver.new(@root, "ios", mode, {}, deadline_ns: times.fetch(:outer))
+      span = mode == "no-deadline" ? fixture::ADAPTER_MUTANT_RUN_LIMIT : fixture::ADAPTER_RUN_LIMIT
+      run = times.fetch(:started) + span * 1_000_000_000
+      slot = Struct.new(:run_deadline_ns, :hard_cleanup_deadline_ns).new(run, run + 5_000_000_000)
+      session = Struct.new(:capture_slot).new(slot)
+      driver.instance_variable_set(:@observation, Struct.new(:session).new(session))
+      driver.instance_variable_set(:@capture_started_ns, times.fetch(:capture))
+      driver.capture_initialized(session, times.fetch(:started))
+      assert_equal run, driver.observed.fetch("nativeRunDeadlineNs")
+      assert_equal times.fetch(:started) + 10_000_000_000, driver.instance_variable_get(:@readiness_deadline_ns)
+      body = []
+      enter = -> { driver.native_event(:run_enter, session); body << :original_native_body }
+      fixture.stub(:clock_ns, times.fetch(:now)) do
+        if accepted
+          enter.call
+          assert_equal [:original_native_body], body
+          assert_operator times.fetch(:started) + 17_000_000_000, :<, times.fetch(:capture) + 18_000_000_000
+          assert_operator times.fetch(:capture) + 18_000_000_000, :<, times.fetch(:started) + 20_000_000_000
+          assert_operator times.fetch(:started) + 26_000_000_000, :<, times.fetch(:outer)
+        else
+          error = assert_raises(fixture::Failure, &enter)
+          assert_equal ["setup-fixture-fault", "adapter preparation missed original entry budget"], [error.kind, error.message]
+          assert_empty body # The original TaskSlot owns the veto before its native body.
+        end
+      end
+      assert_equal [run, run + 5_000_000_000], [slot.run_deadline_ns, slot.hard_cleanup_deadline_ns]
+    end
+    %w[inherited real-deadline immediate-deadline no-deadline kill-startup kill-descendant].each { |mode| entry.call(mode: mode) }
+    entry.call(changes: {now: 5_999_999_999})
+    entry.call(changes: {outer: 31_200_000_001}) # More than the whole publication second remains.
+    [{now: 6_000_000_000}, {now: 6_000_000_001}, {now: 5_199_999_999},
+     {capture: 5_200_000_001}, {started: 6_000_000_000, now: 6_000_000_000},
+     {outer: 31_200_000_000}, {outer: 31_199_999_999}, {outer: 32_000_000_000.0}].each do |changes|
+      entry.call(changes: changes, accepted: false)
+    end
+
+    # Read already-retained C/K endpoints and original parent times only. Ties
+    # at original start are valid, readiness equality is not. Native hard-loss
+    # deliberately has a different RUN and never enters this adapter predicate.
+    evidence = fixture::ContainmentEvidence
+    custodian = {"runDeadlineNs" => 17_000_000_000, "hardDeadlineNs" => 22_000_000_000}
+    keeper = custodian.dup
+    prior = {"heldWriterAcquiredNs" => 5_000_000_000, "driverKillEntryNs" => 5_000_000_000}
+    %w[kill-startup kill-descendant].each do |mode|
+      assert evidence.adapter_hardloss_timely?(mode, custodian, keeper, prior)
+      assert evidence.adapter_hardloss_timely?(mode, custodian, keeper, prior.merge("driverKillEntryNs" => 14_999_999_999))
+      [prior.merge("heldWriterAcquiredNs" => 4_999_999_999), prior.merge("heldWriterAcquiredNs" => 5_000_000_001),
+       prior.merge("driverKillEntryNs" => 15_000_000_000), prior.merge("driverKillEntryNs" => 15_000_000_001),
+       prior.merge("driverKillEntryNs" => 5_000_000_000.0), prior.merge("heldWriterAcquiredNs" => true)].each do |bad|
+        refute evidence.adapter_hardloss_timely?(mode, custodian, keeper, bad)
+      end
+      [keeper.merge("runDeadlineNs" => 17_000_000_001), keeper.merge("hardDeadlineNs" => 22_000_000_001),
+       keeper.merge("runDeadlineNs" => 17_000_000_000.0), keeper.merge("hardDeadlineNs" => nil)].each do |bad|
+        refute evidence.adapter_hardloss_timely?(mode, custodian, bad, prior)
+      end
+      zero_start = {"runDeadlineNs" => 12_000_000_000, "hardDeadlineNs" => 17_000_000_000}
+      refute evidence.adapter_hardloss_timely?(mode, zero_start, zero_start, prior)
+      no_grace = custodian.merge("hardDeadlineNs" => 21_000_000_000)
+      refute evidence.adapter_hardloss_timely?(mode, no_grace, no_grace, prior)
+    end
+    assert evidence.adapter_hardloss_timely?("kill-native-setup", {}, {}, {})
+    assert_adapter_original_readiness_helpers
+  end
+
+  def assert_adapter_original_readiness_helpers
+    fixture = UploadProcessFixture
+    start, ready_cutoff, run_cutoff = 1_000_000_000, 11_000_000_000, 13_000_000_000
+    driver = fixture::AdapterDriver.new(@root, "ios", "inherited", {}, deadline_ns: 32_000_000_000)
+    pipes = [Object.new, Object.new]
+    leases = %i[stdout_read stderr_read].zip(pipes).to_h.transform_values { |io| Struct.new(:io).new(io) }
+    slot = Struct.new(:run_deadline_ns).new(run_cutoff)
+    session = Struct.new(:capture_slot, :leases).new(slot, leases)
+    driver.instance_variable_set(:@observation, Struct.new(:session).new(session))
+    driver.instance_variable_set(:@native_started_ns, start)
+    driver.instance_variable_set(:@readiness_deadline_ns, ready_cutoff)
+    now, reads = ready_cutoff - 1, 0
+    # Actual record return checks use the selected absolute deadline even if
+    # the bounded read itself crosses it. No real path is opened or inspected.
+    fixture.stub(:clock_ns, -> { now }) do
+      File.stub(:file?, true) do
+        reader = lambda do |path|
+          assert_equal File.join(@root, "inert.json"), path
+          reads += 1
+          "{}"
+        end
+        fixture::OwnedChild.stub(:bounded_file, reader) { assert_equal({}, driver.wait_record("inert.json")) }
+        reader = ->(_path) { reads += 1; now = ready_cutoff; "{}" }
+        fixture::OwnedChild.stub(:bounded_file, reader) { assert_raises(fixture::Failure) { driver.wait_record("inert.json") } }
+        assert_equal 2, reads
+        # Readiness is already exhausted, but later STATUS work still uses RUN.
+        fixture::OwnedChild.stub(:bounded_file, "{}") do
+          assert_equal({}, driver.wait_record("inert.json", kind: "descendant-alive", deadline_ns: run_cutoff))
+        end
+      end
+      %i[readiness status].each do |phase|
+        cutoff = phase == :readiness ? ready_cutoff : run_cutoff
+        now = cutoff - 20_000_001
+        select = lambda do |readers, writers, errors, seconds|
+          assert_equal [pipes, nil, nil, 0.02], [readers, writers, errors, seconds]
+          now += 20_000_000
+          nil
+        end
+        IO.stub(:select, select) do
+          driver.observe_inherited_block!(deadline_ns: cutoff)
+          assert driver.observed.fetch("inheritedPipeBlockObserved")
+        end
+        now = cutoff - 20_000_000
+        IO.stub(:select, ->(*) { flunk "pipe observation cannot enter without its complete interval" }) do
+          assert_raises(fixture::Failure) { driver.observe_inherited_block!(deadline_ns: cutoff) }
+        end
+      end
+      # The intentional loss wait is still the original RUN, not readiness.
+      sleeps = []
+      driver.define_singleton_method(:sleep) { |seconds| sleeps << seconds; now = run_cutoff }
+      now = ready_cutoff
+      error = assert_raises(fixture::Failure) { driver.wait_for_driver_loss }
+      assert_equal ["driver", "parent did not stop its actual reserved driver"], [error.kind, error.message]
+      assert_equal [0.01], sleeps
+      assert_equal run_cutoff, slot.run_deadline_ns
+    end
+
+    # Exercise actual watchdog construction/body with an inert TaskSlot double;
+    # no thread is started and no join/finality receipt is invented by this model.
+    watch = fixture::AdapterDriver.new(@root, "ios", "no-deadline", {}, deadline_ns: 32_000_000_000)
+    watch.instance_variable_set(:@capture_started_ns, start)
+    requested, body, writes = nil, nil, []
+    worker, control = Object.new, Object.new
+    worker.define_singleton_method(:start) { |&block| body = block; worker }
+    worker.define_singleton_method(:admit!) { true }
+    control.define_singleton_method(:close_writer) { writes << :original_writer }
+    watch.instance_variable_set(:@control, control)
+    now = start + 10_000_000_000
+    watch.define_singleton_method(:sleep) { |_seconds| now = start + 18_000_000_000 }
+    factory = ->(**keywords) { requested = keywords; worker }
+    fixture.stub(:clock_ns, -> { now }) do
+      MobileReleaseKit::NativeUploadProcess::TaskSlot.stub(:new, factory) { watch.start_watchdog }
+      assert_equal({caller: Thread.current, parent_slot: nil,
+        run_deadline_ns: start + 19_000_000_000, hard_cleanup_deadline_ns: start + 19_000_000_000}, requested)
+      assert_equal start + 18_000_000_000, watch.observed.fetch("watchdogDeadlineNs")
+      assert watch.observed.fetch("watchdogStarted")
+      assert_same true, body.call
+      assert_equal [:original_writer], writes
+      assert watch.observed.fetch("watchdogIntervened")
+      assert watch.observed.fetch("fallbackUsed")
+    end
+  end
+
   def assert_adapter_parent_cutoff_composition
     # The enclosing selector's acquisition veto stays live. These are actual
     # caller methods and real bound/FailureRecord code, not native receipts.
@@ -2722,29 +2882,36 @@ class NativeUploadValidationTest < Minitest::Test
     frame = {"validator_pid" => 103, "status_kind" => "exit", "status_code" => 0}
     %i[live omission].each do |route|
       %i[accepted not_live late expired].each do |condition|
-        now = condition == :expired ? run_ns : 11_500_000_000
+        readiness_ns = 10_000_000_000
+        bound = route == :live ? readiness_ns : run_ns
+        now = condition == :expired ? bound : bound - 500_000_000
         calls, actions = [], []
         driver = fixture::AdapterDriver.allocate
         control = Object.new
         control.define_singleton_method(:close_writer) { actions << :writer_closed }
         {observation: Struct.new(:session).new(session), observed: {}, base_mode: "leader-only",
-         release_ns: 10_000_000_000, descendant: marker, control: control}.each do |name, value|
+         native_started_ns: 1, readiness_deadline_ns: readiness_ns,
+         release_ns: readiness_ns, descendant: marker, control: control}.each do |name, value|
           driver.instance_variable_set(:"@#{name}", value)
         end
-        driver.define_singleton_method(:wait_record) do |name, kind:|
-          raise "unexpected inert omission record" unless name == "omitted-group-kill.json" && kind == "descendant-alive"
+        driver.define_singleton_method(:wait_record) do |name, kind:, deadline_ns:|
+          raise "unexpected inert omission record" unless name == "omitted-group-kill.json" && kind == "descendant-alive" && deadline_ns == run_ns
           {"version" => 1, "custodian" => 101, "keeper" => 102, "group" => 102, "signal" => "KILL"}
         end
-        driver.define_singleton_method(:observe_inherited_block!) { actions << :blocked }
+        driver.define_singleton_method(:observe_inherited_block!) do |deadline_ns:|
+          raise "later STATUS borrowed readiness cutoff" unless deadline_ns == run_ns
+          actions << :blocked
+        end
         observe = lambda do |pid, group, **keywords|
           calls << [pid, group, keywords]
           assert_equal [103, 102], [pid, group]
           assert_same parent, keywords.fetch(:parent_slot)
-          assert_equal %i[seconds parent_slot], keywords.keys
+          assert_equal route == :live ? %i[seconds parent_slot run_deadline_ns] : %i[seconds parent_slot], keywords.keys
+          assert_equal readiness_ns, keywords.fetch(:run_deadline_ns) if route == :live
           assert_equal condition == :expired ? 0.0 : 0.5, keywords.fetch(:seconds)
           # The real capture_command's zero-seconds rejection is checked below.
           raise fixture::Failure.new("process-observation", "invalid observation deadline") if condition == :expired
-          now = run_ns if condition == :late
+          now = bound if condition == :late
           condition != :not_live
         end
         fixture.stub(:clock_ns, -> { now }) do
@@ -2828,6 +2995,37 @@ class NativeUploadValidationTest < Minitest::Test
             assert_equal [10_500_000_000, 15_500_000_000, parent], captured
             assert_same offered, fixture.capture_command([], environment: {}, seconds: 3, deadline: Rational(run_ns, 1_000_000_000))
             assert_equal [run_ns, run_ns, nil], captured
+            # Absolute readiness caps RUN only, without a resampled relative
+            # deadline or converting readiness into the overall cleanup cap.
+            assert_same offered, fixture.capture_command([], environment: {}, seconds: 2,
+              parent_slot: parent, run_deadline_ns: 10_750_000_000)
+            assert_equal [10_750_000_000, 15_750_000_000, parent], captured
+            child = slot_class.new(caller: Thread.current, parent_slot: parent,
+              run_deadline_ns: captured[0], hard_cleanup_deadline_ns: captured[1])
+            assert_same parent.__send__(:failure_record), child.__send__(:failure_record)
+            first = IOError.new("original readiness observation failure")
+            now = 10_500_000_000
+            child.cancel!(error: first, reason_code: "io")
+            assert_same first, parent.first_error
+            assert_equal 15_500_000_000, child.cleanup_deadline_ns
+            now += 1
+            child.cancel!(error: Interrupt.new("later readiness cancellation"), reason_code: "cancelled")
+            assert_same first, parent.first_error
+            assert_equal 15_500_000_000, child.cleanup_deadline_ns
+            now = 10_000_000_000
+            parent = slot_class.new(caller: Thread.current, run_deadline_ns: run_ns, hard_cleanup_deadline_ns: hard_ns)
+            assert_same offered, fixture.capture_command([], environment: {}, seconds: 3,
+              parent_slot: parent, run_deadline_ns: 13_000_000_000)
+            assert_equal [run_ns, hard_ns, parent], captured
+            assert_same offered, fixture.capture_command([], environment: {}, seconds: 2,
+              parent_slot: parent, run_deadline_ns: 10_750_000_000, deadline: Rational(11, 1))
+            assert_equal [10_750_000_000, 11_000_000_000, parent], captured
+            [false, 0, now, now - 1, now.to_f, "11000000000"].each do |bad|
+              invalid = assert_raises(fixture::Failure) do
+                fixture.capture_command([], environment: {}, seconds: 2, parent_slot: parent, run_deadline_ns: bad)
+              end
+              assert_equal ["process-observation", "invalid observation deadline"], [invalid.kind, invalid.message]
+            end
             invalid = assert_raises(fixture::Failure) { fixture.capture_command([], environment: {}, seconds: 0, parent_slot: parent) }
             assert_equal ["process-observation", "invalid observation deadline"], [invalid.kind, invalid.message]
           end
@@ -2848,6 +3046,32 @@ class NativeUploadValidationTest < Minitest::Test
       refute slot.start_attempted?
       assert_nil slot.thread
       refute slot.unresolved?
+    end
+
+    # Exercise actual ready? -> state forwarding without a native child. The
+    # absent record is inert parser input, not actual process-death evidence.
+    fixture.stub(:process_observer_path, "/inert-observer") do
+      [nil, 11_000_000_000].each do |bound|
+        collector = lambda do |argv, **keywords|
+          assert_equal ["/inert-observer", "103"], argv
+          expected = {seconds: 2, environment: fixture::PROCESS_OBSERVER_LOCALE, parent_slot: parent}
+          expected[:run_deadline_ns] = bound if bound
+          assert_equal expected, keywords
+          ["MRK_PROCESS_V1 absent 103\n", "", 0]
+        end
+        fixture.stub(:capture_command, collector) do
+          # The parser still requires a nonroot observer identity. Supply inert
+          # numeric inputs here instead of depending on the local runner UID.
+          Process.stub(:uid, 501) do
+            Process.stub(:gid, 20) do
+              error = assert_raises(fixture::Failure) do
+                fixture.ready?(103, 102, parent_slot: parent, run_deadline_ns: bound)
+              end
+              assert_equal ["readiness", "fixture stopped before readiness"], [error.kind, error.message]
+            end
+          end
+        end
+      end
     end
   end
 
@@ -3570,7 +3794,7 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal "MRK_ADAPTER_FAILURE=", UploadProcessFixture::ADAPTER_FAILURE_PREFIX
     status_class = Struct.new(:exitstatus) # Already-read comparison data, not a Process::Status receipt.
     status = status_class.new(1)
-    start, cutoff = 100, 2_000_000_100
+    start, cutoff = 100, 12_000_000_100
     raw = result_keys.reject { |key| key == "cleanupErrorsEmpty" }.to_h { |key| [key, true] }
     raw.merge!("kind" => "fixture-cleanup", "errorClass" => "UploadProcessFixture::Failure",
       "error" => "actual ready timeout cause was not observed", "adapterErrorClass" => "MobileReleaseKit::ContractError",
@@ -3610,7 +3834,7 @@ class NativeUploadValidationTest < Minitest::Test
       assert packet.ascii_only?
       assert packet.frozen?
       assert_operator packet.bytesize, :<=, 4096
-      %w[private-marker 999887766 2000000100].each { |private_value| refute_includes packet, private_value }
+      %w[private-marker 999887766 12000000100].each { |private_value| refute_includes packet, private_value }
       refute_includes packet, raw.fetch("error")
     end
     project = lambda do |value, mode: "real-deadline", code: 1|
@@ -3653,6 +3877,8 @@ class NativeUploadValidationTest < Minitest::Test
       ["MobileReleaseKit::NativeUploadProcess::ProtocolError", "native capture protocol failure", "native-protocol-error", "native-protocol"],
       ["MobileReleaseKit::NativeUploadProcess::ProtocolError", "native capture deadline failure", "native-protocol-error", "other"],
       ["MobileReleaseKit::NativeProcessSpawn::Error", "native process close failure", "native-spawn-error", "spawn-close"],
+      ["UploadProcessFixture::Failure", "adapter preparation missed original entry budget", "fixture-error", "adapter-entry-budget"],
+      ["UploadProcessFixture::Failure", "adapter readiness missed original cutoff", "fixture-error", "adapter-readiness-budget"],
       ["UploadProcessFixture::Failure", "private-marker actual ready timeout cause was not observed", "fixture-error", "other"],
       ["private-marker", "private-marker", "other", "other"],
       [nil, nil, "none", "none"], [nil, "private-marker", "none", "invalid"],
@@ -3705,14 +3931,14 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal ["missing", "invalid"], row.values_at("firstTimeoutCutoff", "selectedTimeoutCutoff")
     assert_equal "invalid", project.call(raw.merge("nativeRunDeadlineNs" => start)).fetch("timingChecks").fetch("runSpanMatchesMode")
     assert_equal false, project.call(raw, mode: "no-deadline").fetch("timingChecks").fetch("runSpanMatchesMode")
-    assert_equal true, project.call(raw.merge("nativeRunDeadlineNs" => start + 10_000_000_000), mode: "no-deadline").fetch("timingChecks").fetch("runSpanMatchesMode")
+    assert_equal true, project.call(raw.merge("nativeRunDeadlineNs" => start + 20_000_000_000), mode: "no-deadline").fetch("timingChecks").fetch("runSpanMatchesMode")
     [[0, false], [-1, "invalid"], [1.0, "invalid"]].each do |count, expected_value|
       assert_equal expected_value, project.call(raw.merge("blockedDataWaits" => count)).fetch("timingChecks").fetch("blockedDataWaitsPositive")
     end
     [[start, true], [cutoff, false], [nil, "invalid"]].each do |time, expected_value|
       assert_equal expected_value, project.call(raw.merge("firstBlockedDataNs" => time)).fetch("timingChecks").fetch("firstBlockedDataWithinRun")
     end
-    [[8, false], [Float::INFINITY, "invalid"], [Float::NAN, "invalid"], [-1, "invalid"], [nil, "invalid"]].each do |seconds, expected_value|
+    [[18, false], [Float::INFINITY, "invalid"], [Float::NAN, "invalid"], [-1, "invalid"], [nil, "invalid"]].each do |seconds, expected_value|
       assert_equal expected_value, project.call(raw.merge("captureSeconds" => seconds)).fetch("timingChecks").fetch("captureWithinLimit")
     end
     with_slow = lambda do |value|
@@ -3988,8 +4214,11 @@ class NativeUploadValidationTest < Minitest::Test
       ["release", "validator-release"], ["owner:ready", "owner-publication"]]
     # Only fresh private receivers get these seams. Actual ready! executes;
     # every process/file/clock operation below it is inert, not a native receipt.
-    exercise = lambda do |mode: "leader-only", stop: nil, error: nil, ready: true|
-      driver = fixture::AdapterDriver.new(@root, "ios", mode, {})
+    readiness_cutoff = 50 + fixture::ADAPTER_READINESS_LIMIT * 1_000_000_000
+    exercise = lambda do |mode: "leader-only", stop: nil, error: nil, ready: true,
+                         initial_now: 100, advance_at: nil, advanced_now: nil|
+      now = initial_now
+      driver = fixture::AdapterDriver.new(@root, "ios", mode, {}, deadline_ns: 40_000_000_000)
       marker = {"kind" => mode == "kill-startup" ? "startup-wait" : "leader-ready", "pid" => 203, "group" => 202, "sid" => 201}
       fork = {"parent" => 203, "child" => 204, "group" => 202}
       stat = Struct.new(:dev, :ino, :mode, :uid, :gid, :rdev, :ftype, :nlink).new(1, 2, 0o10600, 3, 4, 0, "fifo", 1)
@@ -3999,7 +4228,7 @@ class NativeUploadValidationTest < Minitest::Test
         {stdout_read: lease, stderr_read: lease})
       dispatch = {"version" => 1, "pid" => 203, "group" => 202, "sid" => 201,
         "argv" => ["inert-adapter"], "environment" => {}, "cwd" => "inert-cwd", "sourceSha256" => "f" * 64}
-      {observation: Struct.new(:session).new(session), native_started_ns: 50,
+      {observation: Struct.new(:session).new(session), native_started_ns: 50, readiness_deadline_ns: readiness_cutoff,
         expected_argv: dispatch["argv"], expected_environment: dispatch["environment"], tooling: dispatch["cwd"],
         fake_source_sha: dispatch["sourceSha256"]}.each { |name, value| driver.instance_variable_set(:"@#{name}", value) }
       records = {"leader-ready.json" => marker, "startup-wait.json" => marker, "fork-return.json" => fork,
@@ -4008,6 +4237,7 @@ class NativeUploadValidationTest < Minitest::Test
       events, returned, escaped, published = [], nil, nil, Object.new
       note = lambda do |name|
         events << [name, driver.instance_variable_get(:@readiness_stage)]
+        now = advanced_now if name == advance_at
         raise error if name == stop || name == "driver-loss"
       end
       control = Object.new
@@ -4020,7 +4250,7 @@ class NativeUploadValidationTest < Minitest::Test
       driver.define_singleton_method(:publish_owner) { |phase| note.call("owner:#{phase}"); published }
       driver.define_singleton_method(:wait_for_driver_loss) { note.call("driver-loss") }
       write = ->(path, value) { note.call("release"); assert_equal File.join(@root, "release-validator.json"), path; assert_equal fork, value; true }
-      fixture.stub(:clock_ns, -> { 100 }) do
+      fixture.stub(:clock_ns, -> { now }) do
         fixture::OwnedChild.stub(:write_record, write) do
           begin
             returned = driver.ready!
@@ -4036,6 +4266,7 @@ class NativeUploadValidationTest < Minitest::Test
     assert_equal full, events
     assert_same published, returned
     assert_equal "ready-return", driver.instance_variable_get(:@readiness_stage)
+    assert_equal 50.fdiv(1_000_000_000), driver.observed.fetch("readinessSeconds")
     [IOError.new("marker"), Interrupt.new("observation"), StandardError.new("dispatch"), SystemExit.new(23)].each_with_index do |error, index|
       driver, events, returned, escaped = exercise.call(stop: full[index].first, error: error)
       assert_same error, escaped
@@ -4046,6 +4277,7 @@ class NativeUploadValidationTest < Minitest::Test
     driver, events, _, escaped = exercise.call(mode: "unready")
     assert_instance_of fixture::Failure, escaped
     assert_equal "readiness", escaped.kind
+    assert_equal "fixture deliberately never became ready", escaped.message
     assert_equal [["record:startup-wait.json", "startup-marker"]], events
     %w[kill-startup kill-descendant].each do |mode|
       error = Interrupt.new("inert driver loss")
@@ -4065,7 +4297,42 @@ class NativeUploadValidationTest < Minitest::Test
     assert_empty events
     assert_equal "native-ready", driver.instance_variable_get(:@readiness_stage)
 
-    driver = fixture::AdapterDriver.new(@root, "ios", "leader-only", {})
+    driver, events, returned, escaped, published = exercise.call(advance_at: "owner:ready", advanced_now: readiness_cutoff - 1)
+    assert_nil escaped
+    assert_same published, returned
+    assert_equal full, events
+    assert_operator driver.observed.fetch("readinessSeconds"), :<, fixture::ADAPTER_READINESS_LIMIT
+    # Early ready=true is deliberately not enough. Completion after descendant
+    # release or owner publication cannot start the watchdog/actual stdin close.
+    [["admission", full.take(4)], ["release", full.take(9)], ["owner:ready", full]].each do |boundary, expected_events|
+      [readiness_cutoff, readiness_cutoff + 1].each do |at|
+        driver, events, returned, escaped = exercise.call(advance_at: boundary, advanced_now: at)
+        assert_instance_of fixture::Failure, escaped
+        assert_equal ["readiness", "adapter readiness missed original cutoff"], [escaped.kind, escaped.message]
+        assert_nil returned
+        assert_equal expected_events, events
+        assert_equal boundary != "admission", driver.observed.fetch("ready", false)
+        refute driver.observed.key?("readinessSeconds")
+        refute_equal "ready-return", driver.instance_variable_get(:@readiness_stage)
+      end
+    end
+    driver, events, _, escaped = exercise.call(initial_now: readiness_cutoff)
+    assert_instance_of fixture::Failure, escaped
+    assert_empty events
+    refute driver.observed.fetch("ready", false)
+    driver, events, _, escaped = exercise.call(mode: "unready", advance_at: "record:startup-wait.json", advanced_now: readiness_cutoff)
+    assert_instance_of fixture::Failure, escaped
+    assert_equal "adapter readiness missed original cutoff", escaped.message
+    refute_equal "fixture deliberately never became ready", escaped.message
+    %w[kill-startup kill-descendant].each do |mode|
+      _, events, returned, escaped = exercise.call(mode: mode, advance_at: "owner:#{mode}", advanced_now: readiness_cutoff)
+      assert_instance_of fixture::Failure, escaped
+      assert_equal "adapter readiness missed original cutoff", escaped.message
+      assert_nil returned
+      refute events.any? { |name, _stage| name == "driver-loss" }
+    end
+
+    driver = fixture::AdapterDriver.new(@root, "ios", "leader-only", {}, deadline_ns: 40_000_000_000)
     observer = fixture::AdapterDriver::Observation.new(driver, native: nil, root: @root) # No install/session/native entry.
     assert_equal "not-entered", observer.snapshot_additions.fetch("readinessStage")
     raw_stage = "validator-live".dup
@@ -7195,7 +7462,7 @@ class NativeUploadValidationTest < Minitest::Test
           slot.define_singleton_method(name, &deny)
         end
         %i[timeout_error task_failure caller_failure receive_frame execute].each { |name| session.define_singleton_method(name, &deny) }
-        driver = UploadProcessFixture::AdapterDriver.new(@root, "ios", mode, {})
+        driver = UploadProcessFixture::AdapterDriver.new(@root, "ios", mode, {}, deadline_ns: 40_000_000_000)
         observer = UploadProcessFixture::AdapterDriver::Observation.new(driver, native: native, root: Object.new)
         driver.instance_variable_set(:@observation, observer)
         observer.instance_variable_set(:@session, session)
@@ -7341,7 +7608,7 @@ class NativeUploadValidationTest < Minitest::Test
         session = Struct.new(:capture_slot, :ready, :reserved).new(slot, {}, {})
         session.define_singleton_method(:primary_error) { state.fetch(:primary) }
         session.define_singleton_method(:cleanup_deadline_ns) { state.fetch(:cutoff) }
-        driver = UploadProcessFixture::AdapterDriver.new(@root, "ios", mode, {})
+        driver = UploadProcessFixture::AdapterDriver.new(@root, "ios", mode, {}, deadline_ns: 40_000_000_000)
         observer = UploadProcessFixture::AdapterDriver::Observation.new(driver, native: native, root: Object.new)
         driver.instance_variable_set(:@observation, observer)
         observer.instance_variable_set(:@session, session)

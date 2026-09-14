@@ -253,11 +253,11 @@ class NativeProfileCITests(unittest.TestCase):
         paths = fixture_paths(controller)
         steps = controller.catalog(paths, "macos", deadline=12345.0)
         suites = {
+            "ruby-ios_upload_validation": ("test_ios_upload_validation.rb", 32),
             "ruby-native-spawn": ("test_native_process_spawn.rb", 52),
             "ruby-native-owner": ("test_native_upload_process.rb", 52),
             "ruby-native-capture": ("test_native_upload_validation.rb", 21),
             "ruby-native-signal-observation": ("test_native_signal_observation.rb", 1),
-            "ruby-ios_upload_validation": ("test_ios_upload_validation.rb", 32),
             "ruby-android_upload_validation": ("test_android_upload_validation.rb", 32),
         }
         actual = [item for item in steps if item.id in suites]

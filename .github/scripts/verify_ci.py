@@ -300,7 +300,8 @@ ADAPTER_FAILURE_DRIVER_CODES = {
     "fixture-error": frozenset({
         *ADAPTER_FAILURE_OWNED_CODES,
         "missing", "invalid", "other", "source-size", "mutation-anchor", "capture-contract", "parser-contract",
-        "capture-clock-binding", "record-cutoff", "validator-marker", "validator-cutoff", "validator-live",
+        "capture-clock-binding", "adapter-entry-budget", "adapter-readiness-budget",
+        "record-cutoff", "validator-marker", "validator-cutoff", "validator-live",
         "descendant-marker", "descendant-cutoff", "descendant-live", "native-ready", "deliberately-unready",
         "dispatch-contract", "descendant-fork", "pipe-interval", "pipes-not-blocked", "watchdog-admission",
         "timeout-construction-count", "omission-binding", "omission-not-live", "native-unknown",
@@ -650,8 +651,8 @@ RUBY_SUITES = (
     ("ruby-supply-wif", "test_supply_wif.rb", 0),
 )
 NATIVE_RUBY_IDS = (
-    "ruby-native-spawn", "ruby-native-owner", "ruby-native-capture", "ruby-native-signal-observation",
-    "ruby-ios_upload_validation", "ruby-android_upload_validation",
+    "ruby-ios_upload_validation", "ruby-native-spawn", "ruby-native-owner", "ruby-native-capture",
+    "ruby-native-signal-observation", "ruby-android_upload_validation",
 )
 RUBY_PUBLIC_API_IDS = tuple(sorted((
     "NativeProcessSpawnTests#test_public_atomic_cloexec_duplication_uses_independent_creator_functions",

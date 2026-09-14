@@ -20,6 +20,18 @@ module UploadProcessFixture
   CLEANUP_LIMIT = 5
   WORKER_LIMIT = 30
   OWNERSHIP_LIMIT = 60
+  # Adapter-only synthetic controls: one original startup-inclusive RUN, never
+  # a fresh timeout at READY. Other native/setup/observer limits stay unchanged.
+  ADAPTER_READINESS_LIMIT = READINESS_LIMIT + 2 * DEADLINE + 1
+  ADAPTER_RUN_LIMIT = ADAPTER_READINESS_LIMIT + DEADLINE
+  ADAPTER_ENTRY_LIMIT = 1
+  ADAPTER_CAPTURE_LIMIT = ADAPTER_RUN_LIMIT + CLEANUP_LIMIT + ADAPTER_ENTRY_LIMIT
+  ADAPTER_MUTANT_RUN_LIMIT = ADAPTER_CAPTURE_LIMIT + DEADLINE
+  ADAPTER_SETUP_LIMIT = READINESS_LIMIT
+  ADAPTER_PUBLICATION_LIMIT = 1
+  ADAPTER_COMPLETION_LIMIT = [ADAPTER_RUN_LIMIT + CLEANUP_LIMIT,
+    ADAPTER_MUTANT_RUN_LIMIT + CLEANUP_LIMIT, ADAPTER_CAPTURE_LIMIT + CLEANUP_LIMIT].max
+  ADAPTER_DRIVER_LIMIT = ADAPTER_SETUP_LIMIT + ADAPTER_COMPLETION_LIMIT + ADAPTER_PUBLICATION_LIMIT
   OUTPUT_LIMIT = 32_768
   PROCESS_OBSERVER_KEY = "MOBILE_RELEASE_TEST_PROCESS_OBSERVER"
   # The owner fixes this before entry. Later configuration/canary changes must
@@ -156,6 +168,8 @@ module UploadProcessFixture
       "complete actual adapter capture contract changed" => "capture-contract",
       "actual adapter result parser call changed" => "parser-contract",
       "actual capture start/cutoff was not observed" => "capture-clock-binding",
+      "adapter preparation missed original entry budget" => "adapter-entry-budget",
+      "adapter readiness missed original cutoff" => "adapter-readiness-budget",
       "fixture record missed original capture cutoff" => "record-cutoff",
       "validator record is not bound" => "validator-marker",
       "validator original cutoff expired" => "validator-cutoff",
@@ -651,16 +665,19 @@ module UploadProcessFixture
   # Native, singly owned direct child; real stdout/stderr EOF precedes numeric
   # retirement. This path must not call state(): state itself uses this collector.
   # An explicit overall deadline also caps the ONE cleanup grace.
+  # A separate absolute RUN-only bound cannot be renewed by the later relative
+  # seconds sample and does not turn the work cutoff into the cleanup cutoff.
   def capture_command(argv, seconds: 2, environment: process_observer_environment,
-                      cwd: nil, root: nil, deadline: nil, parent_slot: nil)
+                      cwd: nil, root: nil, deadline: nil, parent_slot: nil, run_deadline_ns: nil)
     assert_domain_reusable!
     unless seconds.is_a?(Numeric) && seconds.finite? && seconds.positive? &&
-           (deadline.nil? || deadline.is_a?(Numeric) && deadline.finite?)
+           (deadline.nil? || deadline.is_a?(Numeric) && deadline.finite?) &&
+           (run_deadline_ns.nil? || run_deadline_ns.instance_of?(Integer) && run_deadline_ns > clock_ns)
       raise Failure.new("process-observation", "invalid observation deadline")
     end
     validate_capture_parent!(parent_slot) if parent_slot
     run_ns = [clock_ns + (seconds.to_r * 1_000_000_000).floor, deadline && (deadline.to_r * 1_000_000_000).floor,
-              parent_slot&.run_deadline_ns].compact.min
+              run_deadline_ns, parent_slot&.run_deadline_ns].compact.min
     hard_ns = [run_ns + CLEANUP_LIMIT * 1_000_000_000, deadline && (deadline.to_r * 1_000_000_000).floor,
                parent_slot&.hard_cleanup_deadline_ns].compact.min
     value = command_lifetime(parent_slot: parent_slot, hard_deadline_ns: hard_ns) do |scope|
@@ -1053,10 +1070,11 @@ module UploadProcessFixture
      "zombie" => :stopped, "absent" => :stopped}.fetch(value)
   end
 
-  def state(pid, group, seconds: 2, parent_slot: nil, deadline: nil)
+  def state(pid, group, seconds: 2, parent_slot: nil, deadline: nil, run_deadline_ns: nil)
     observer = process_observer_path
     custody = parent_slot ? {parent_slot: parent_slot} : {}
     custody[:deadline] = deadline unless deadline.nil?
+    custody[:run_deadline_ns] = run_deadline_ns unless run_deadline_ns.nil?
     if observer
       result = capture_command([observer, pid.to_s], seconds: seconds, environment: PROCESS_OBSERVER_LOCALE, **custody)
       observer_liveness(parse_process_observer(*result, pid, group))
@@ -1071,10 +1089,11 @@ module UploadProcessFixture
     state(pid, group) == :live
   end
 
-  def ready?(pid, group, seconds: 2, parent_slot: nil, deadline: nil)
+  def ready?(pid, group, seconds: 2, parent_slot: nil, deadline: nil, run_deadline_ns: nil)
     custody = {}
     custody[:parent_slot] = parent_slot if parent_slot
     custody[:deadline] = deadline unless deadline.nil?
+    custody[:run_deadline_ns] = run_deadline_ns unless run_deadline_ns.nil?
     value = state(pid, group, seconds: seconds, **custody)
     raise Failure.new("readiness", "fixture stopped before readiness") if value == :stopped
     value == :live # Valid indeterminate state proves neither readiness nor death.
@@ -1191,6 +1210,16 @@ module UploadProcessFixture
       MODES.include?(mode) && %w[ios android].include?(platform)
     end
     raise Failure.new("fixture-input", "unknown or mismatched fixture mode/platform/parameters") unless valid
+  end
+
+  # Both parent construction and child admission call this only after the full
+  # request validation. The fixed ownership CLI has its separate family bound.
+  def driver_limit_seconds(platform)
+    case platform
+    when "ios", "android" then ADAPTER_DRIVER_LIMIT
+    when "native" then DRIVER_LIMIT
+    else raise Failure.new("fixture-input", "unknown or mismatched fixture mode/platform/parameters")
+    end
   end
 
   def no_native_child?(_mode, owner, result, _proof)
@@ -1489,7 +1518,7 @@ module UploadProcessFixture
     slow_operands["captureSeconds"] = result["captureSeconds"] if slow_operands.instance_of?(Hash) && result.key?("captureSeconds")
     timing_checks = {
       "runSpanMatchesMode" => measure.call(%w[nativeStartedNs nativeRunDeadlineNs], timestamp) { |start, cutoff|
-        cutoff > start ? cutoff - start == (mode == "no-deadline" ? 10 : DEADLINE) * 1_000_000_000 : "invalid"
+        cutoff > start ? cutoff - start == (mode == "no-deadline" ? ADAPTER_MUTANT_RUN_LIMIT : ADAPTER_RUN_LIMIT) * 1_000_000_000 : "invalid"
       },
       "firstTimeoutCutoff" => cutoff_relation.call("firstTimeoutDecisionNs"),
       "selectedTimeoutCutoff" => cutoff_relation.call("selectedTimeoutNs"),
@@ -1497,7 +1526,7 @@ module UploadProcessFixture
       "firstBlockedDataWithinRun" => measure.call(%w[nativeStartedNs nativeRunDeadlineNs firstBlockedDataNs], timestamp) { |start, cutoff, first|
         cutoff > start ? first >= start && first < cutoff : "invalid"
       },
-      "captureWithinLimit" => measure.call(["captureSeconds"], duration) { |seconds| seconds < CAPTURE_LIMIT },
+      "captureWithinLimit" => measure.call(["captureSeconds"], duration) { |seconds| seconds < ADAPTER_CAPTURE_LIMIT },
       "slowCleanupAtLeastFour" => measure.call(["slowCleanupSeconds"], duration, operands: slow_operands) { |seconds| seconds >= 4 },
       "captureCoversSlowCleanup" => measure.call(%w[captureSeconds slowCleanupSeconds], duration, operands: slow_operands) { |capture, cleanup| capture >= cleanup },
       "slowCleanupWithinOriginalCutoff" => measure.call(%w[originalCleanupFinishedNs originalCleanupCutoffNs], timestamp,
@@ -1656,7 +1685,7 @@ module UploadProcessFixture
     cleanup_dispatch_matched = cleanup_owner_validated = cleanup_native_verdict = cleanup_known_dead = :missing
     cleanup_directory_matched = :missing
     cleanup_death_attempted = cleanup_death_completed = cleanup_removal_attempted = cleanup_removal_completed = false
-    run_ns = [clock_ns + DRIVER_LIMIT * 1_000_000_000, deadline_ns].compact.min
+    run_ns = [clock_ns + driver_limit_seconds(platform) * 1_000_000_000, deadline_ns].compact.min
     hard_ns = [run_ns + CLEANUP_LIMIT * 1_000_000_000, deadline_ns].compact.min
     accepted = lifetime(deadline_ns: hard_ns) do |scope|
       cleanup_frame = scope
@@ -3989,9 +4018,10 @@ module UploadProcessFixture
       end
     end
 
-    def initialize(directory, platform, mode, parameters)
+    def initialize(directory, platform, mode, parameters, deadline_ns:)
       super(directory, mode)
       @platform, @base_mode = platform, mode.delete_suffix("-slow-cleanup")
+      @driver_deadline_ns = deadline_ns # The validated original parent cutoff, never a fresh allowance.
       @parameters = parameters.transform_keys(&:to_sym).merge(environment: {})
       @timeout_objects = []
       @readiness_stage = "not-entered"
@@ -4054,7 +4084,7 @@ module UploadProcessFixture
         end
         if @base_mode == "no-deadline"
           changes << ['@run_deadline_ns = started_ns + (max_seconds * NANOSECONDS).floor',
-                      '@run_deadline_ns = started_ns + 10 * NANOSECONDS # Test-only shared O/C/K bound.']
+                      "@run_deadline_ns = started_ns + #{ADAPTER_MUTANT_RUN_LIMIT} * NANOSECONDS # Test-only shared O/C/K bound."]
         elsif @base_mode == "immediate-deadline"
           changes << ['@stdin_close_returned = true', "@stdin_close_returned = true\n        raise timeout_error # Deliberately premature AFTER the real close."]
         end
@@ -4068,8 +4098,8 @@ module UploadProcessFixture
       @gate = @platform == "ios" ? MobileReleaseKit::IosUploadValidation : MobileReleaseKit::AndroidUploadValidation
       @native = MobileReleaseKit::NativeUploadValidation
       @gate.send(:remove_const, :MAX_SECONDS)
-      @gate.const_set(:MAX_SECONDS, DEADLINE)
-      @observed["adapterLimitSeconds"] = DEADLINE
+      @gate.const_set(:MAX_SECONDS, ADAPTER_RUN_LIMIT)
+      @observed["adapterLimitSeconds"] = ADAPTER_RUN_LIMIT
       if @base_mode == "leader-only"
         insertion = <<~RUBY
           require #{File.realpath(__FILE__).inspect}
@@ -4137,7 +4167,7 @@ module UploadProcessFixture
         "Current IPA signing/profile validation failed; no new upload is authorized (inspect the original IPA with credential-free preflight)" :
         "Current AAB signing/identity validation failed; no new upload is authorized (inspect the original AAB with credential-free preflight)"
       unless arguments == [@expected_environment, @expected_argv, @parameters.fetch(:tooling_directory)] &&
-             keywords == {max_seconds: DEADLINE, max_output_bytes: @gate::MAX_OUTPUT_BYTES, label: label, failure_message: failure}
+             keywords == {max_seconds: ADAPTER_RUN_LIMIT, max_output_bytes: @gate::MAX_OUTPUT_BYTES, label: label, failure_message: failure}
         raise Failure.new("fixture-input", "complete actual adapter capture contract changed")
       end
       @observed["adapterCallObserved"] = true
@@ -4158,11 +4188,12 @@ module UploadProcessFixture
     end
 
     def capture_initialized(session, started)
-      span = (@base_mode == "no-deadline" ? 10 : DEADLINE) * 1_000_000_000
+      span = (@base_mode == "no-deadline" ? ADAPTER_MUTANT_RUN_LIMIT : ADAPTER_RUN_LIMIT) * 1_000_000_000
       unless started.instance_of?(Integer) && session.capture_slot.run_deadline_ns == started + span
         raise Failure.new("fixture-source", "actual capture start/cutoff was not observed")
       end
       @native_started_ns = started
+      @readiness_deadline_ns = [started + ADAPTER_READINESS_LIMIT * 1_000_000_000, session.capture_slot.run_deadline_ns].min
       @observed["nativeStartedNs"] = started
       @observed["nativeRunDeadlineNs"] = session.capture_slot.run_deadline_ns
     end
@@ -4172,6 +4203,17 @@ module UploadProcessFixture
       when :execute_enter
         @native_frame = object
         @observed["captureEntered"] = true
+      when :run_enter
+        # This hook is inside the ORIGINAL capture TaskSlot, before native
+        # acquisition. Raising from initialize instead would strand its slot.
+        now = UploadProcessFixture.clock_ns
+        capture, started, cutoff = @capture_started_ns, @native_started_ns, @driver_deadline_ns
+        unless object.equal?(@observation.session) &&
+               [capture, started, cutoff, now].all? { |time| time.instance_of?(Integer) && time.positive? } &&
+               capture <= started && started <= now && now < capture + ADAPTER_ENTRY_LIMIT * 1_000_000_000 &&
+               started + (ADAPTER_COMPLETION_LIMIT + ADAPTER_PUBLICATION_LIMIT) * 1_000_000_000 < cutoff
+          raise Failure.new("setup-fixture-fault", "adapter preparation missed original entry budget")
+        end
       when :custodian_published
         publish_owner("launched")
       when :ready_before_stdin_close
@@ -4186,24 +4228,42 @@ module UploadProcessFixture
       @observation.session.capture_slot.run_deadline_ns - UploadProcessFixture.clock_ns
     end
 
-    def wait_record(name, kind: "readiness")
+    def readiness_time!
+      now = UploadProcessFixture.clock_ns
+      unless @native_started_ns.instance_of?(Integer) && @readiness_deadline_ns.instance_of?(Integer) &&
+             now >= @native_started_ns && now < @readiness_deadline_ns
+        raise Failure.new("readiness", "adapter readiness missed original cutoff")
+      end
+      now
+    end
+
+    def readiness_remaining_ns
+      @readiness_deadline_ns - readiness_time!
+    end
+
+    def wait_record(name, kind: "readiness", deadline_ns: @readiness_deadline_ns)
       loop do
-        remaining = run_remaining_ns
+        remaining = deadline_ns - UploadProcessFixture.clock_ns
         raise Failure.new(kind, "fixture record missed original capture cutoff") unless remaining.positive?
-        return JSON.parse(OwnedChild.bounded_file(path(name))) if File.file?(path(name))
+        if File.file?(path(name))
+          value = JSON.parse(OwnedChild.bounded_file(path(name)))
+          raise Failure.new(kind, "fixture record missed original capture cutoff") unless UploadProcessFixture.clock_ns < deadline_ns
+          return value
+        end
         sleep [remaining, 10_000_000].min / 1_000_000_000.0
       end
     end
 
     def live_marker!(marker, expected, label)
       raise Failure.new("readiness", "#{label} record is not bound") unless marker == expected
-      remaining = run_remaining_ns
+      remaining = readiness_remaining_ns
       raise Failure.new("readiness", "#{label} original cutoff expired") unless remaining.positive?
       session = @observation.session
       # Parent custody caps RUN and cleanup separately; RUN is not an overall deadline.
       live = UploadProcessFixture.ready?(marker.fetch("pid"), marker.fetch("group"),
-        seconds: [remaining / 1_000_000_000.0, 2].min, parent_slot: session.capture_slot)
-      raise Failure.new("readiness", "#{label} was not independently live before the original cutoff") unless live && run_remaining_ns.positive?
+        seconds: [remaining / 1_000_000_000.0, DEADLINE].min, parent_slot: session.capture_slot,
+        run_deadline_ns: @readiness_deadline_ns)
+      raise Failure.new("readiness", "#{label} was not independently live before the original cutoff") unless live && readiness_remaining_ns.positive?
     end
 
     def ready!
@@ -4211,10 +4271,12 @@ module UploadProcessFixture
       session = @observation.session
       ready = session.ready
       raise Failure.new("readiness", "actual native READY was not accepted") unless ready && session.reserved
+      readiness_time!
       kind = @mode == "kill-startup" ? "startup-wait" : "leader-ready"
       if @mode == "unready"
         @readiness_stage = "startup-marker"
         wait_record("startup-wait.json")
+        readiness_time!
         raise Failure.new("readiness", "fixture deliberately never became ready")
       end
       @readiness_stage = "validator-marker"
@@ -4229,12 +4291,15 @@ module UploadProcessFixture
       raise Failure.new("fixture-input", "actual validator dispatch contract changed") unless dispatch == expected_dispatch
       @observed["adapterDispatch"] = dispatch
       @readiness_stage = "control-admission"
+      readiness_time!
       @control.admitted!
+      readiness_time!
       @observed["ready"] = true
-      @observed["readinessSeconds"] = (UploadProcessFixture.clock_ns - @native_started_ns) / 1_000_000_000.0
       if @mode == "kill-startup"
         @readiness_stage = "startup-driver-loss"
+        readiness_time!
         publish_owner(@mode)
+        readiness_time!
         wait_for_driver_loss
       end
       unless %w[real-deadline immediate-deadline no-deadline].include?(@base_mode)
@@ -4259,16 +4324,22 @@ module UploadProcessFixture
         observe_inherited_block!
         if @mode == "kill-descendant"
           @readiness_stage = "descendant-driver-loss"
+          readiness_time!
           publish_owner(@mode)
+          readiness_time!
           wait_for_driver_loss
         end
         @readiness_stage = "validator-release"
-        @release_ns = UploadProcessFixture.clock_ns
+        @release_ns = readiness_time!
         OwnedChild.write_record(path("release-validator.json"), fork)
+        readiness_time!
         @observed["validatorReleasedNs"] = @release_ns
       end
       @readiness_stage = "owner-publication"
+      readiness_time!
       value = publish_owner("ready")
+      finished = readiness_time!
+      @observed["readinessSeconds"] = (finished - @native_started_ns) / 1_000_000_000.0
       @readiness_stage = "ready-return"
       value
     end
@@ -4280,14 +4351,14 @@ module UploadProcessFixture
       raise Failure.new("driver", "parent did not stop its actual reserved driver")
     end
 
-    def observe_inherited_block!
+    def observe_inherited_block!(deadline_ns: @readiness_deadline_ns)
       session = @observation.session
-      remaining = run_remaining_ns
-      raise Failure.new("readiness", "no original inherited-pipe observation interval") unless remaining > 20_000_000
       pipes = %i[stdout_read stderr_read].map { |role| session.leases.fetch(role).io }
       before = UploadProcessFixture.clock_ns
+      raise Failure.new("readiness", "no original inherited-pipe observation interval") unless deadline_ns - before > 20_000_000
       actual = IO.select(pipes, nil, nil, 0.02)
-      unless actual.nil? && UploadProcessFixture.clock_ns > before && run_remaining_ns.positive?
+      after = UploadProcessFixture.clock_ns
+      unless actual.nil? && after > before && after < deadline_ns
         raise Failure.new("readiness", "real inherited data pipes were not blocked")
       end
       @observed["inheritedPipeBlockObserved"] = true
@@ -4295,7 +4366,7 @@ module UploadProcessFixture
 
     def start_watchdog
       helper = MobileReleaseKit::NativeUploadProcess
-      at = @capture_started_ns + CAPTURE_LIMIT * 1_000_000_000
+      at = @capture_started_ns + ADAPTER_CAPTURE_LIMIT * 1_000_000_000
       @watchdog = helper::TaskSlot.new(caller: Thread.current, parent_slot: nil,
         run_deadline_ns: at + 1_000_000_000, hard_cleanup_deadline_ns: at + 1_000_000_000)
       @watchdog.start do
@@ -4374,7 +4445,8 @@ module UploadProcessFixture
       @observed["validatorReapedAfterRelease"] = frame["status_kind"] == "exit" && frame["status_code"] == 0 &&
         frame["validator_pid"] == session.ready.fetch("validator_pid") && UploadProcessFixture.clock_ns >= @release_ns
       return unless @base_mode == "leader-only" && !@omission_observed
-      omission = wait_record("omitted-group-kill.json", kind: "descendant-alive")
+      omission = wait_record("omitted-group-kill.json", kind: "descendant-alive",
+        deadline_ns: session.capture_slot.run_deadline_ns)
       unless omission == {"version" => 1, "custodian" => session.custodian_child.pid,
                          "keeper" => session.reserved.fetch("keeper_pid"), "group" => @descendant.fetch("group"), "signal" => "KILL"}
         raise Failure.new("fixture-source", "group cleanup omission was not bound")
@@ -4383,7 +4455,7 @@ module UploadProcessFixture
       alive = UploadProcessFixture.ready?(@descendant.fetch("pid"), @descendant.fetch("group"),
         seconds: [remaining / 1_000_000_000.0, 2].min, parent_slot: session.capture_slot)
       raise Failure.new("readiness", "omission did not leave a live original descendant") unless alive && run_remaining_ns.positive?
-      observe_inherited_block!
+      observe_inherited_block!(deadline_ns: session.capture_slot.run_deadline_ns)
       @omission_observed = true
       @observed["descendantLiveAfterOmittedCleanup"] = true
       @observed["fallbackAfterObservation"] = @observed["fallbackUsed"] = true
@@ -4434,7 +4506,7 @@ module UploadProcessFixture
           raise Failure.new("readiness", "startup consumed the premature-timeout control interval")
         end
         unless @observed["firstTimeoutDecisionNs"] >= session.capture_slot.run_deadline_ns &&
-               @observed["blockedDataWaits"].positive? && @observed["captureSeconds"] < CAPTURE_LIMIT
+               @observed["blockedDataWaits"].positive? && @observed["captureSeconds"] < ADAPTER_CAPTURE_LIMIT
           raise Failure.new("elapsed-bound", "timeout decision preceded original bound or real blocked data interval")
         end
       else
@@ -4880,6 +4952,19 @@ module UploadProcessFixture
       end
     end
 
+    def self.adapter_hardloss_timely?(mode, custodian, keeper, prior)
+      return true unless %w[kill-startup kill-descendant].include?(mode)
+
+      run, hard = custodian.values_at("runDeadlineNs", "hardDeadlineNs")
+      keeper_run, keeper_hard = keeper.values_at("runDeadlineNs", "hardDeadlineNs")
+      held, killed = prior.values_at("heldWriterAcquiredNs", "driverKillEntryNs")
+      return false unless [run, hard, keeper_run, keeper_hard, held, killed].all? { |time| time.instance_of?(Integer) && time.positive? } &&
+        run == keeper_run && hard == keeper_hard && hard - run == CLEANUP_LIMIT * 1_000_000_000
+
+      started = run - ADAPTER_RUN_LIMIT * 1_000_000_000
+      started.positive? && started <= held && held <= killed && killed < started + ADAPTER_READINESS_LIMIT * 1_000_000_000
+    end
+
     def self.hardloss!(directory, mode, prior, held_writer, deadline_ns:)
       open_writer = lambda do
         held_writer.state == :open && !held_writer.io.closed? && held_writer.io.close_on_exec? &&
@@ -4890,7 +4975,11 @@ module UploadProcessFixture
       reports = bound_reports!(records, prior.fetch("manifest"), prior.fetch("identities"))
       c, k = reports.values_at("custodian", "keeper")
       graph = prior.fetch("identities")
-      unless c["parentPid"] == prior.fetch("driverPid") && k["parentPid"] == graph["custodian"] &&
+      # Parent may KILL after owner publication but before its post-write check.
+      # The existing C/K cutoffs bind the original adapter readiness interval;
+      # shared kill-native-setup evidence keeps its original unrelated profile.
+      unless adapter_hardloss_timely?(mode, c, k, prior) &&
+             c["parentPid"] == prior.fetch("driverPid") && k["parentPid"] == graph["custodian"] &&
              c["preArmNs"] >= prior.fetch("driverKillEntryNs") && k["preArmNs"] >= prior.fetch("driverKillEntryNs") &&
              reports.values.all? { |item| item["originalChild"]["actualOriginalWaitObserved"] &&
                item["originalChild"]["actualCreatorJoinObserved"] && item["omissions"] == [] } &&
@@ -5322,7 +5411,7 @@ module UploadProcessFixture
       raise Failure.new("fixture-input", "ownership probe must use its fixed CLI")
     end
     cutoff, now = input["deadlineNs"], clock_ns
-    limit = ownership_mode ? OWNERSHIP_LIMIT : DRIVER_LIMIT
+    limit = ownership_mode ? OWNERSHIP_LIMIT : driver_limit_seconds(platform)
     unless cutoff.instance_of?(Integer) && cutoff > now && cutoff <= now + limit * 1_000_000_000
       raise Failure.new("fixture-input", "original driver cutoff is missing or expired")
     end
@@ -5347,8 +5436,9 @@ module UploadProcessFixture
     return HardLossNativeDriver.new(directory, mode).execute if mode == "kill-native-setup"
     return MissingCleanupDriver.new(directory, mode, deadline_ns: input.fetch("deadlineNs")).execute if mode == ContainmentEvidence::MISSING
     return NativeSetupDriver.new(directory, mode).execute if platform == "native"
-    return HardLossAdapterDriver.new(directory, platform, mode, input.fetch("parameters")).execute if ContainmentEvidence::HARD_LOSS.include?(mode)
-    AdapterDriver.new(directory, platform, mode, input.fetch("parameters")).execute
+    return HardLossAdapterDriver.new(directory, platform, mode, input.fetch("parameters"),
+      deadline_ns: input.fetch("deadlineNs")).execute if ContainmentEvidence::HARD_LOSS.include?(mode)
+    AdapterDriver.new(directory, platform, mode, input.fetch("parameters"), deadline_ns: input.fetch("deadlineNs")).execute
   end
 
   def ownership_driver(directory, mode)
@@ -5479,7 +5569,7 @@ module UploadProcessFixture
         refute value.fetch("pendingInterrupt"), value.inspect
         assert_empty value.fetch("cleanupErrors")
         assert value.fetch("adapterCallObserved"), value.inspect
-        assert_equal UploadProcessFixture::DEADLINE, value.fetch("adapterLimitSeconds")
+        assert_equal UploadProcessFixture::ADAPTER_RUN_LIMIT, value.fetch("adapterLimitSeconds")
       end
       value
     end
@@ -5524,7 +5614,7 @@ module UploadProcessFixture
       ["stdout", "stderr"].each { |role| assert_equal "fifo", child.fetch(role).fetch("type") }
       assert_operator value.fetch("validatorReleasedNs"), :<, value.fetch("commitQueuedNs")
       assert_operator value.fetch("commitQueuedNs"), :<, value.fetch("nativeRunDeadlineNs")
-      assert_operator value.fetch("readinessSeconds"), :<, UploadProcessFixture::DEADLINE
+      assert_operator value.fetch("readinessSeconds"), :<, UploadProcessFixture::ADAPTER_READINESS_LIMIT
       refute value.fetch("legacyRecordUsedForOwnership"), value.inspect
       refute value.fetch("fallbackUsed"), value.inspect
     end
@@ -5540,7 +5630,8 @@ module UploadProcessFixture
       # primary, not an assumed constructor/record or last-data-wait ordering.
       start, cutoff, decision = value.values_at("nativeStartedNs", "nativeRunDeadlineNs", "selectedTimeoutNs")
       [start, cutoff, decision, value.fetch("firstTimeoutDecisionNs")].each { |time| assert_instance_of Integer, time }
-      assert_equal UploadProcessFixture::DEADLINE * 1_000_000_000, cutoff - start
+      assert_equal UploadProcessFixture::ADAPTER_RUN_LIMIT * 1_000_000_000, cutoff - start
+      assert_operator value.fetch("readinessSeconds"), :<, UploadProcessFixture::ADAPTER_READINESS_LIMIT
       assert_operator decision, :>=, start
       assert_operator decision, premature ? :< : :>=, cutoff
       if premature
@@ -5558,7 +5649,7 @@ module UploadProcessFixture
       assert_original_timeout(value)
       assert value.fetch("deadBeforeFallback"), value.inspect
       refute value.fetch("fallbackUsed"), value.inspect
-      assert_operator value.fetch("captureSeconds"), :<, UploadProcessFixture::CAPTURE_LIMIT
+      assert_operator value.fetch("captureSeconds"), :<, UploadProcessFixture::ADAPTER_CAPTURE_LIMIT
     end
 
     def test_deadline_terminates_inherited_pipe_children_after_validator_parent_exits
@@ -5576,13 +5667,15 @@ module UploadProcessFixture
         assert_operator delay.fetch("endNs"), :<, value.fetch("nativeRunDeadlineNs")
         assert_operator delay.fetch("endNs") - delay.fetch("startNs"), :>=, 300_000_000
         assert_operator value.fetch("workerDelaySeconds"), :>=, 0.3
-        assert_equal UploadProcessFixture::DEADLINE * 1_000_000_000, value.fetch("nativeRunDeadlineNs") - value.fetch("nativeStartedNs")
+        assert_equal UploadProcessFixture::ADAPTER_RUN_LIMIT * 1_000_000_000, value.fetch("nativeRunDeadlineNs") - value.fetch("nativeStartedNs")
       end
     end
 
     def test_unready_fixture_fails_distinctly_and_stops_before_any_late_pid_record
       value = assert_complete_process_case("unready")
       assert_equal "readiness", value.fetch("kind")
+      assert_equal "fixture deliberately never became ready", value.fetch("error")
+      assert_equal "startup-marker", value.fetch("nativeObservation").fetch("readinessStage")
       assert value.fetch("captureEntered"), value.inspect
       refute value.fetch("ready"), value.inspect
       refute value.fetch("stdinClosedAfterReady"), value.inspect
@@ -5610,9 +5703,9 @@ module UploadProcessFixture
       assert no_deadline.fetch("watchdogIntervened"), no_deadline.inspect
       assert no_deadline.fetch("fallbackUsed"), no_deadline.inspect
       assert no_deadline.fetch("watchdogJoined"), no_deadline.inspect
-      assert_equal 10_000_000_000, no_deadline.fetch("nativeRunDeadlineNs") - no_deadline.fetch("nativeStartedNs")
-      assert_equal UploadProcessFixture::CAPTURE_LIMIT * 1_000_000_000, no_deadline.fetch("watchdogDeadlineNs") - no_deadline.fetch("captureStartedNs")
-      assert_operator no_deadline.fetch("captureSeconds"), :>=, UploadProcessFixture::CAPTURE_LIMIT
+      assert_equal UploadProcessFixture::ADAPTER_MUTANT_RUN_LIMIT * 1_000_000_000, no_deadline.fetch("nativeRunDeadlineNs") - no_deadline.fetch("nativeStartedNs")
+      assert_equal UploadProcessFixture::ADAPTER_CAPTURE_LIMIT * 1_000_000_000, no_deadline.fetch("watchdogDeadlineNs") - no_deadline.fetch("captureStartedNs")
+      assert_operator no_deadline.fetch("captureSeconds"), :>=, UploadProcessFixture::ADAPTER_CAPTURE_LIMIT
       copies = no_deadline.fetch("sourceCopies")
       outer = copies.find { |entry| entry.fetch("label") == "no-deadline-outer" }
       refute_nil outer
@@ -6024,7 +6117,8 @@ module UploadProcessFixture
         with_inert_contract_fixture do |fixture|
           initial = now = 10_000_000_000
           outer = outer_span && initial + outer_span
-          run_ns = [initial + DRIVER_LIMIT * 1_000_000_000, outer].compact.min
+          request_platform, request_mode = post_receipt ? %w[ios inherited] : %w[native native-setup-second-pipe]
+          run_ns = [initial + fixture.driver_limit_seconds(request_platform) * 1_000_000_000, outer].compact.min
           hard_ns = [run_ns + CLEANUP_LIMIT * 1_000_000_000, outer].compact.min
           primary = post_receipt ? Interrupt.new("synthetic original postreceipt interrupt") :
                     fault == :io_primary ? IOError.new("synthetic original active failure") :
@@ -6035,7 +6129,6 @@ module UploadProcessFixture
           publication_error = Interrupt.new("synthetic optional scalar publication interruption")
           cleanup_state = post_receipt ? {} : nil
           cleanup_state.freeze if post_receipt == :publication
-          request_platform, request_mode = post_receipt ? %w[ios inherited] : %w[native native-setup-second-pipe]
           metadata = nil
           removed, visited, starts, constructions, records, observations, events, masks = Array.new(8) { [] }
           observer_calls, signal_calls, settles, file_checks, original_reads = [], [], [], [], []
@@ -6604,6 +6697,7 @@ module UploadProcessFixture
         base = {"platform" => "native", "parameters" => {}, "mode" => mode, "deadlineNs" => cutoff}
         input, temporary = base.dup, directory
         reads, acquired, missing_acquired, writes, metadata_reads = 0, [], [], [], []
+        adapter_acquired, hardloss_acquired = [], []
         native = Object.new
         native.define_singleton_method(:execute) { :synthetic_driver_only }
         metadata = Struct.new(:uid, :mode, :kind, :nlink) { def directory? = kind == :directory }.
@@ -6626,7 +6720,8 @@ module UploadProcessFixture
           [Process, :spawn, forbidden], [Process, :fork, forbidden], [Process, :kill, forbidden],
           [NativeSignalProbe, :execute_driver, forbidden], [NativePrimaryProbe, :new, forbidden],
           [NativeOrderProbe, :new, forbidden], [HardLossNativeDriver, :new, forbidden],
-          [HardLossAdapterDriver, :new, forbidden], [AdapterDriver, :new, forbidden],
+          [HardLossAdapterDriver, :new, ->(*arguments, **keywords) { hardloss_acquired << [arguments, keywords]; native }],
+          [AdapterDriver, :new, ->(*arguments, **keywords) { adapter_acquired << [arguments, keywords]; native }],
           [MissingCleanupDriver, :new, ->(*arguments, **keywords) { missing_acquired << [arguments, keywords]; native }],
           [NativeSetupDriver, :new, ->(*arguments, **keywords) { assert_empty keywords; acquired << arguments; native }],
         ]
@@ -6674,6 +6769,26 @@ module UploadProcessFixture
           assert_equal 5, reads
           assert_equal [directory, directory, directory, directory], metadata_reads
           assert_equal [writes.first, writes.first], writes # Dispatch and missing constructor share the exact original D.
+          assert_empty adapter_acquired
+          assert_empty hardloss_acquired
+          adapter_cutoff = now + ADAPTER_DRIVER_LIMIT * 1_000_000_000
+          [["ios", "inherited"], ["android", "inherited"], ["ios", "kill-startup"], ["android", "kill-descendant"]].each do |platform, adapter_mode|
+            input = base.merge("platform" => platform, "mode" => adapter_mode, "deadlineNs" => adapter_cutoff)
+            assert_equal :synthetic_driver_only, fixture.driver(directory)
+            target = adapter_mode.start_with?("kill-") ? hardloss_acquired : adapter_acquired
+            assert_equal [[directory, platform, adapter_mode, {}], {deadline_ns: adapter_cutoff}], target.last
+            assert_equal adapter_cutoff, writes.last.last.fetch("deadlineNs")
+          end
+          input = input.merge("deadlineNs" => adapter_cutoff + 1)
+          previous = [writes.length, adapter_acquired.length, hardloss_acquired.length]
+          assert_raises(Failure) { fixture.driver(directory) }
+          assert_equal previous, [writes.length, adapter_acquired.length, hardloss_acquired.length]
+          family = base.merge("platform" => "ios", "mode" => "ownership-async",
+            "deadlineNs" => now + OWNERSHIP_LIMIT * 1_000_000_000)
+          assert_same family, fixture.validate_driver_input!(directory, family, ownership_mode: "ownership-async")
+          assert_raises(Failure) do
+            fixture.validate_driver_input!(directory, family.merge("deadlineNs" => family.fetch("deadlineNs") + 1), ownership_mode: "ownership-async")
+          end
         end
       end
     end

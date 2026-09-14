@@ -550,6 +550,50 @@ ceilings, not guarantees of a passing run. Other gates retain their shared-cutof
 behavior. The macOS authority capture and 2+2 prerequisite routing remain unchanged.
 These splits add no logical gates, jobs, builds, permission profiles or observers.
 
+On macOS the fixed iOS adapter gate runs immediately after the same native-tools,
+source ABI and compatibility prerequisites, before the other Ruby native gates.
+The remaining native gates keep their relative order; Linux order, all 51 Linux
+and 39 macOS gates, and every required partition remain unchanged. Earlier failure
+does not waive the still-unexecuted native gates.
+
+The synthetic adapter process controls use a separate fixed timing profile:
+10 seconds for complete readiness (the existing five-second startup allowance,
+two independently bounded two-second liveness observations and one second for
+markers/delay/publication), 12 seconds for the original startup-inclusive native
+RUN, the unchanged five-second cleanup grace, an 18-second capture watchdog,
+and a 20-second no-deadline mutant RUN. The adapter driver has 31 seconds:
+five for preparation, the maximum original completion window of 25 seconds
+(mutant RUN20 + cleanup5), and one for result/publication. None is restarted at
+READY; the real timeout still needs positive actual data blocking, and the
+premature control must execute after actual READY/stdin close but before RUN.
+Generic native/setup driver15, worker30, ownership-family60, adapter gate300 and
+aggregate3300 remain unchanged. Production adapter `MAX_SECONDS` stays3600.
+
+The independent capture timer C starts before the native initializer's original
+time T. Admission at the original capture task's pre-acquisition entry requires
+`C <= T <= now < C+1s` and `T+26s < E`, where E is the original validated driver
+RUN endpoint, also capped by any supplied outer deadline. Thus ordinary native
+hard `T+17s < C+18s` watchdog, and mutant hard `T+25s` leaves more than the whole
+one-second publication reserve before E. For an uncapped driver, T must be less
+than five seconds after original driver start. Missing those bounds fails the
+control through original task/caller cleanup; no initializer-return shortcut
+may strand a constructed task, renew a deadline or invent finality.
+
+One readiness cutoff `min(T+10s, original RUN)` covers markers, both liveness
+observations, actual inherited-pipe blocking, release and complete owner
+publication. Early `ready=true` is not complete readiness. Nested collectors
+receive an absolute RUN-only cap and retain their original parent custody and
+bounded cleanup; later STATUS/omission observations still use original RUN.
+Hard-loss adapter proofs additionally bind the original parent writer-acquisition
+and driver-kill times to the existing equal C/K RUN/hard reports, requiring
+`T <= writer acquired <= driver kill < T+10s`. This closes late owner-publication
+acceptance without a new observer or receipt; the shared native-setup hard-loss
+branch is unchanged. Deliberate-unready must reach its actual startup marker and
+the exact deliberate rejection. Late readiness, unactivated mutants, missing
+waits/EOFs, retained UNKNOWN and exhausted gate budgets remain failures, regardless
+of how much cleanup time elapsed. The fixed limits are not guarantees that all
+cases' worst-case durations fit a gate or that an arbitrarily stalled host passes.
+
 Before any next part, the existing Session must establish the preceding original
 capture's actual wait, stream EOFs, domain finality/disposal and `ensure_idle`.
 Each part retains its own result and byte accounting. Success and failure parsers
@@ -928,8 +972,9 @@ group KILL, actual later absence and complete original helper/outer finality.
 Finite backend-error codes remain in successful per-case summaries. Neither a
 permission error nor a recovered cleanup establishes the kernel's initial cause.
 
-The slow-cleanup fixture uses the original two-second run, five-second cleanup
-grace and eight-second capture watchdog. Only an eligible direct original-body
+The adapter slow-cleanup fixture uses the same fixed startup-inclusive 12-second
+RUN, unchanged five-second cleanup grace and 18-second capture watchdog. Only an
+eligible direct original-body
 observation can hand the already-selected timeout object into the existing run
 ensure; nested writes and entered cleanup cannot consume that one-shot. A body
 that reaches ensure naturally needs no handoff. The four-second delay never

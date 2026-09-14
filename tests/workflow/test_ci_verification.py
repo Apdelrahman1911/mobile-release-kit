@@ -1231,9 +1231,9 @@ class CIControllerContractTests(unittest.TestCase):
                       "native-process-abi-wheel", *compatibility_wheel, "wheel-smoke", "wheel-consumer",
                       "ruby-packaged-capture-wheel", "python-wheel", "source-integrity"),
             "macos": (*before, "native-tools", "native-process-abi-source", *compatibility_source,
-                      "ruby-native-spawn", "ruby-native-owner", "ruby-native-capture",
+                      "ruby-ios_upload_validation", "ruby-native-spawn", "ruby-native-owner", "ruby-native-capture",
                       "ruby-native-signal-observation",
-                      "ruby-ios_upload_validation", "ruby-android_upload_validation", "ruby-packaged-capture-source",
+                      "ruby-android_upload_validation", "ruby-packaged-capture-source",
                       "native-profile-source", *wheel, "native-process-abi-wheel", *compatibility_wheel,
                       "wheel-smoke", "wheel-consumer", "ruby-packaged-capture-wheel", "native-profile-wheel", "source-integrity"),
         }
@@ -1245,6 +1245,9 @@ class CIControllerContractTests(unittest.TestCase):
                 self.assertEqual(len(steps), 51 if platform == "linux" else 39)
                 if platform == "macos":
                     ids = tuple(step.id for step in steps)
+                    for prerequisite in ("native-tools", "native-process-abi-source", *compatibility_source):
+                        self.assertLess(ids.index(prerequisite), ids.index("ruby-ios_upload_validation"))
+                    self.assertLess(ids.index("ruby-ios_upload_validation"), ids.index("ruby-native-spawn"))
                     for gate in ("ruby-native-capture", "ruby-native-signal-observation",
                                  "ruby-ios_upload_validation", "ruby-android_upload_validation"):
                         self.assertLess(ids.index("native-tools"), ids.index(gate))
