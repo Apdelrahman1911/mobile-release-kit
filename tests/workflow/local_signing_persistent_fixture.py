@@ -1054,21 +1054,21 @@ def recovery_flow(root: Path, trace: Trace, *, manual="none", expected_preferenc
     return output
 
 
-def recover_final(root: Path, *, expected_preferences=None) -> dict:
+def recover_final(root: Path, *, expected_preferences=None, trace_factory=Trace) -> dict:
     run_worker(root, "final-automatic", lambda: recovery_flow(
-        root, Trace(root, "final-automatic"), expected_preferences=expected_preferences),
+        root, trace_factory(root, "final-automatic"), expected_preferences=expected_preferences),
         timeout=worker_timeout("automatic-recovery"))
     automatic = json.loads((root / "final-automatic.json").read_bytes())
     if automatic["refused"] is None:
         outcome = {"automatic": automatic["result"]["status"], "manual": None}
     else:
         run_worker(root, "final-no-resolution", lambda: recovery_flow(
-            root, Trace(root, "final-no-resolution"), manual="observe", expected_preferences=expected_preferences),
+            root, trace_factory(root, "final-no-resolution"), manual="observe", expected_preferences=expected_preferences),
             timeout=worker_timeout("manual-recovery"))
         unresolved = json.loads((root / "final-no-resolution.json").read_bytes())
         assert unresolved["refused"] is not None
         run_worker(root, "final-owner-resolution", lambda: recovery_flow(
-            root, Trace(root, "final-owner-resolution"), manual="resolve", expected_preferences=expected_preferences),
+            root, trace_factory(root, "final-owner-resolution"), manual="resolve", expected_preferences=expected_preferences),
             timeout=worker_timeout("manual-recovery"))
         resolved = json.loads((root / "final-owner-resolution.json").read_bytes())
         assert resolved["refused"] is None

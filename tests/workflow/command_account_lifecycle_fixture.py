@@ -308,8 +308,8 @@ def fresh_recovery(root, trace_factory):
         assert actual_root == root and name == "final-automatic"
         return original(actual_root, name, lambda: fence.result_worker(actual_root, name, task), **kwargs)
 
-    with patch.object(persistent, "Trace", new=trace_factory), patch.object(persistent, "run_worker", new=guarded_worker):
-        result = persistent.recover_final(root)
+    with patch.object(persistent, "run_worker", new=guarded_worker):
+        result = persistent.recover_final(root, trace_factory=trace_factory)
     assert result == {"automatic": "recovered", "manual": None}
     fresh = fence.read_report(root, "final-automatic.json")
     assert fresh["refused"] is None and str(root) not in persistent._CASE_RECOVERY_DEBT

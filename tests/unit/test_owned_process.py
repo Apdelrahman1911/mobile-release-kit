@@ -450,6 +450,149 @@ class CommandContractTests(unittest.TestCase):
         with patch.object(command, "_send", side_effect=AssertionError("no stop after observed WORK_DONE")):
             custodian._stop_anchor()
 
+    def test_anchor_signal_failure_preserves_original_wait_and_settlement(self):
+        for missing in (None, "wait", "eof", "group-done"):
+            with self.subTest(missing=missing):
+                owner = self._inert_no_child_anchor()
+                ctx = owner.ctx
+                owner.downstream = self.wire(ctx)
+                owner.downstream.reader.number, owner.downstream.writer.number = 105, 106
+                # This is an inert original-child model, not a native child or
+                # a receipt usable as evidence outside this ordering test.
+                child = SimpleNamespace(numeric_retired=False, wait_state="OWNED", receipt=None)
+                receipt = SimpleNamespace(status_kind="signal", status_code=signal.SIGKILL)
+                ctx.child_acquisition._child, ctx.child_acquisition._attempted = child, True
+                owner.create_route.queue()
+                owner.create_route.attempt()
+                first, signal_error = ValueError("original pre-ready failure"), PermissionError("inert group signal")
+                clock, events = [time.monotonic_ns()], []
+
+                def terminate():
+                    self.assertFalse(child.numeric_retired)
+                    self.assertEqual(child.wait_state, "OWNED")
+                    self.assertEqual(owner.downstream.writer.state, "CLOSED")
+                    events.append("terminate")
+                    raise signal_error
+
+                def retire_numeric():
+                    self.assertFalse(child.numeric_retired)
+                    child.numeric_retired = True
+                    events.append("retire")
+
+                def poll_wait():
+                    self.assertIs(ctx.child_acquisition.child, child)
+                    self.assertTrue(child.numeric_retired)
+                    self.assertIsNone(child.receipt)
+                    events.append("wait")
+                    if missing == "wait":
+                        clock[0] = endpoint
+                        return None  # Original cutoff expires without a receipt.
+                    child.receipt, child.wait_state = receipt, "WAITED"
+                    return receipt
+
+                owner.group.terminate = Mock(side_effect=terminate)
+                child.retire_numeric, child.poll_wait = Mock(side_effect=retire_numeric), Mock(side_effect=poll_wait)
+
+                def after_parent_read(pending):
+                    if not pending:
+                        self.assertEqual([tag for tag, _body in written], [command.Tag.WORK_DONE])
+                        self.assertTrue(owner._local_producers())
+                        events.append("group-eof" if missing == "group-done" else "group-done")
+
+                frames = [] if missing == "group-done" else [(command.Tag.GROUP_DONE, command._scalar(ctx.nonce))]
+                with self._inert_anchor_transport(owner, frames, clock=clock, after_read=after_parent_read) as written:
+                    ctx.record(first)
+                    endpoint = ctx.cutoff()
+                    clock[0] += 1_000_000  # Later cleanup cannot renew the original failure's grace.
+                    parent_read, parent_write = command.os.read, command.os.write
+
+                    def read(descriptor, maximum):
+                        if descriptor == owner.downstream.reader.number:
+                            self.assertTrue(child.numeric_retired)
+                            events.append("worker-pending" if missing == "eof" else "worker-eof")
+                            if missing == "eof":
+                                clock[0] = endpoint
+                                raise BlockingIOError()
+                            return b""
+                        return parent_read(descriptor, maximum)
+
+                    def write(descriptor, content):
+                        tag = command.Tag(content[0])
+                        if tag is command.Tag.WORK_DONE:
+                            self.assertIs(owner.wait, child.receipt)
+                            self.assertTrue(owner._local_producers())
+                            self.assertFalse(owner.group_done)
+                        elif tag is command.Tag.TERMINAL:
+                            self.assertTrue(owner.group_done and owner.group.retired)
+                        events.append(tag.name)
+                        return parent_write(descriptor, content)
+
+                    with patch.object(command.os, "read", side_effect=read), \
+                         patch.object(command.os, "write", side_effect=write):
+                        code = owner.finish()
+
+                owner.group.terminate.assert_called_once_with()
+                child.retire_numeric.assert_called_once_with()
+                child.poll_wait.assert_called_once_with()
+                self.assertEqual(events[:3], ["terminate", "retire", "wait"])
+                self.assertIs(ctx.primary, first)
+                self.assertIn(signal_error, ctx.secondary)
+                self.assertTrue(ctx.stopped and ctx.launch_retired)
+                self.assertEqual(ctx.cutoff(), endpoint)
+                self.assertTrue(owner.create_route.retired and owner.run_route.retired)
+                self.assertFalse(owner.run_route.attempted)
+                self.assertEqual(owner.downstream.eof, missing != "eof")
+                for lease in (owner.downstream.reader, owner.downstream.writer, owner.upstream.writer,
+                              *owner.mapping.values()):
+                    self.assertEqual((lease.state, lease.calls), ("CLOSED", 1))
+                if missing == "wait":
+                    self.assertIsNone(owner.wait)
+                    self.assertIsNone(child.receipt)
+                    self.assertTrue(ctx.cleanup_unknown)
+                else:
+                    self.assertIs(owner.wait, receipt)
+                    self.assertIs(owner.wait, child.receipt)
+                if missing is None:
+                    self.assertEqual(code, command.HELPER_FAILED)
+                    self.assertFalse(ctx.cleanup_unknown)
+                    self.assertEqual(ctx.secondary, [signal_error])
+                    self.assertTrue(owner.group_done and owner.group.retired and owner._local_producers())
+                    self.assertEqual(events, ["terminate", "retire", "wait", "worker-eof", "WORK_DONE",
+                                              "group-done", "TERMINAL"])
+                    self.assertEqual([tag for tag, _body in written], [command.Tag.WORK_DONE, command.Tag.TERMINAL])
+                    self.assertEqual(written[0][1], written[1][1])
+                    fields = command._settlement_fields(written[0][1], ctx)
+                    self.assertTrue(fields["producer"] and fields["create"] and fields["moved"])
+                    self.assertFalse(fields["no_child"] or fields["run"] or fields["armed"])
+                    self.assertEqual(fields["wait"], {"kind": "signal", "code": signal.SIGKILL})
+                else:
+                    self.assertEqual(code, command.HELPER_UNKNOWN)
+                    self.assertFalse(owner.group_done)
+                    self.assertEqual([tag for tag, _body in written],
+                                     [command.Tag.WORK_DONE] if missing == "group-done" else [])
+                    self.assertEqual(owner._local_producers(), missing == "group-done")
+
+    def test_unmoved_anchor_signal_failure_cannot_admit_wait_or_settlement(self):
+        owner = self._inert_no_child_anchor()
+        owner.moved = False
+        owner.ctx.child_acquisition._child = SimpleNamespace()
+        owner.ctx.child_acquisition._attempted = True
+        first, signal_error = ValueError("original unmapped failure"), PermissionError("inert group signal")
+        owner.group.terminate = Mock(side_effect=signal_error)
+        with patch.object(owner, "body", side_effect=first), \
+             patch.object(command, "_wait_original") as wait, patch.object(command, "_send") as send:
+            code = owner.run()
+        self.assertEqual(code, command.HELPER_UNKNOWN)
+        owner.group.terminate.assert_called_once_with()
+        wait.assert_not_called()
+        send.assert_not_called()
+        self.assertIs(owner.ctx.primary, first)
+        self.assertIn(signal_error, owner.ctx.secondary)
+        self.assertTrue(owner.ctx.cleanup_unknown)
+        self.assertFalse(owner.moved or owner.group.retired or owner.group_done)
+        self.assertIsNone(owner.wait)
+        self.assertIsNone(owner.work_done)
+
     def test_anchor_settlement_requires_original_group_done_and_unrenewed_cutoff(self):
         for case in ("eof", "stop-eof", "truncated", "expiry-after-read", "already-expired"):
             with self.subTest(case=case):

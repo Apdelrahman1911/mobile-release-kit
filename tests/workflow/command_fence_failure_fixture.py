@@ -430,8 +430,8 @@ def run_case(root, selected):
             assert actual_root == root and name == "final-automatic"
             return original_worker_owner(actual_root, name, lambda: result_worker(actual_root, name, task), **kwargs)
 
-        with patch.object(persistent, "Trace", RecoveryTrace), patch.object(persistent, "run_worker", guarded_worker):
-            result = persistent.recover_final(root)
+        with patch.object(persistent, "run_worker", guarded_worker):
+            result = persistent.recover_final(root, trace_factory=RecoveryTrace)
         assert result == {"automatic": "recovered", "manual": None}
         fresh = read_report(root, "final-automatic.json")
         assert fresh["refused"] is None and fresh["before"]["controls"]["state.json"]["value"] == original["held"]["state"]

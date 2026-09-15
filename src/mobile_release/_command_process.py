@@ -2311,7 +2311,13 @@ class _Anchor:
                 self.group.terminate()
                 return HELPER_UNKNOWN
             if ctx.primary is not None:
-                self.group.terminate()
+                try:
+                    self.group.terminate()
+                except BaseException as error:
+                    # A still owns W's original wait independently of this
+                    # failed signal. C must prove G absent before GROUP_DONE;
+                    # neither this error nor W's wait substitutes for that proof.
+                    ctx.record(error)
             if self.wait is None:
                 self.wait = _wait_original(ctx, self.child, self._worker_frames)
             if wire is not None:
