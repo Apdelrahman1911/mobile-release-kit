@@ -159,9 +159,9 @@ class PreparationContractsTests(unittest.TestCase):
         self.opener_factory.side_effect = None
         self.opener_factory.return_value = SimpleNamespace(open=open_data)
 
-    def prepare(self, name="inputs", platform="linux"):
+    def prepare(self, name="inputs", platform="linux", *, scope="platform"):
         return self.prep.prepare_inputs(source_root=self.source, destination=self.root / name,
-                                        platform=platform, deadline=self.deadline)
+                                        platform=platform, deadline=self.deadline, scope=scope)
 
     def download(self, reply, name="download", *, data=b"fixed data"):
         asset = {"name": "synthetic", "version": "1", "url": "https://files.pythonhosted.org/synthetic",
@@ -310,6 +310,28 @@ class PreparationContractsTests(unittest.TestCase):
         self.assertEqual(outside.read_bytes(), original)
         self.assertEqual(marker.read_bytes(), b'{"status":"PASS"}\n')
         self.opener_factory.assert_not_called()
+
+    def test_matrix_preparation_is_exact_python_only_data_with_the_same_pinned_validation(self):
+        self.synthetic_source()
+        for scope, platform in ((scope, platform) for scope in ("signing-matrix", "signing-adapter")
+                                for platform in ("linux", "macos")):
+            with self.subTest(scope=scope, platform=platform):
+                self.requests.clear()
+                destination = scope + "-" + platform
+                result = self.prepare(destination, platform, scope=scope)
+                self.assertEqual(len(result["files"]), 13)  # Nine wheels, three requirements, original inventory.
+                self.assertEqual(len(self.requests), 9)
+                self.assertTrue(all(request.full_url.startswith("https://files.pythonhosted.org/")
+                                    for request, _timeout in self.requests))
+                self.assertTrue(all(result[name] is None for name in ("gems", "bundler", "actionlint", "actionlint_archive")))
+                self.assertEqual({path.name for path in (self.root / destination).iterdir()}, {"python", "inputs.json"})
+                self.assertEqual(result["requirements"], {group: f"python/{group}-requirements.txt" for group in GROUPS})
+        for scope in ("unknown", "", None, True):
+            self.requests.clear()
+            with self.subTest(scope=scope), self.assertRaisesRegex(self.prep.PreparationError, "invalid_preparation_scope"):
+                self.prepare("never-created", scope=scope)
+            self.assertEqual(self.requests, [])
+            self.assertFalse((self.root / "never-created").exists())
 
     def test_stream_hash_size_response_origin_and_headers_fail_closed_and_close(self):
         url = "https://files.pythonhosted.org/synthetic"

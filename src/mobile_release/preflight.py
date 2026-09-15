@@ -23,6 +23,7 @@ from .credentials import (
     resolve_credential_values,
     scrub_credential_capabilities,
     store_lane_environment,
+    store_material_prerequisite_findings,
     validate_signing_material,
     validate_store_material,
 )
@@ -34,10 +35,12 @@ from .discovery import (
     selected_ios_container,
     selected_ios_scheme,
 )
-from .errors import CredentialError, ValidationError
+from .errors import CredentialError, MobileReleaseError, ValidationError
 from .ios import run_ios_build, validate_ipa, validate_xcarchive
 from .ios_artifacts import inspect_ios_artifact_set, snapshot_ios_artifacts
 from .metadata import metadata_findings
+from .local_signing import SigningLease, local_signing_lease
+from .owned_process import OUTPUT_LIMIT, ProcessError, run_owned
 from .reporting import FAILING_STATUSES, Finding, Report, Status
 from .stores import online_preflight_findings
 
@@ -54,7 +57,7 @@ def _normalized_fingerprint(value: str | None) -> str | None:
     return value.replace(":", "") if value else None
 
 
-def _xcode_toolchain_finding() -> Finding:
+def _xcode_toolchain_finding(*, execution_source=None) -> Finding:
     if sys.platform != "darwin" or not shutil.which("xcodebuild"):
         return Finding(
             "ios.xcode-toolchain",
@@ -64,15 +67,18 @@ def _xcode_toolchain_finding() -> Finding:
             remediation=f"Run iOS preflight with Xcode {XCODE_VERSION} ({XCODE_BUILD}).",
         )
     try:
-        result = subprocess.run(
+        result = run_owned(
             ["xcodebuild", "-version"],
-            env=scrub_credential_capabilities(os.environ),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            environ=scrub_credential_capabilities(os.environ),
+            capture=True,
+            output_limit=OUTPUT_LIMIT,
             timeout=30,
-            check=False,
+            execution_scope=None if execution_source is None else execution_source.new_scope(),
         )
+    except ProcessError as error:
+        if error.fatal:
+            raise
+        result = None
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         result = None
     expected = f"Xcode {XCODE_VERSION}\nBuild version {XCODE_BUILD}"
@@ -93,8 +99,8 @@ def _xcode_toolchain_finding() -> Finding:
     )
 
 
-def _effective_android_identity_finding(config: ReleaseConfig) -> Finding:
-    discovered = discover_project(config.root)
+def _effective_android_identity_finding(config: ReleaseConfig, *, execution_source=None) -> Finding:
+    discovered = discover_project(config.root, include_git=False)
     module = selected_android_module(config, discovered)
     wrapper = config.root / "gradlew"
     if not module or wrapper.is_symlink() or not wrapper.is_file():
@@ -150,7 +156,7 @@ gradle.projectsEvaluated {
             init_script = Path(temporary) / "identity.init.gradle"
             init_script.write_text(script, encoding="utf-8")
             task = f"{module}:tasks" if module != ":" else ":tasks"
-            result = subprocess.run(
+            result = run_owned(
                 [
                     str(wrapper),
                     "--no-daemon",
@@ -161,13 +167,16 @@ gradle.projectsEvaluated {
                     task,
                 ],
                 cwd=config.root,
-                env=environment,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                environ=environment,
+                capture=True,
+                output_limit=OUTPUT_LIMIT,
                 timeout=10 * 60,
-                check=False,
+                execution_scope=None if execution_source is None else execution_source.new_scope(),
             )
+    except ProcessError as error:
+        if error.fatal:
+            raise
+        result = None
     except (OSError, subprocess.TimeoutExpired, ConfigurationError):
         result = None
     identities: list[tuple[str, str]] = []
@@ -207,9 +216,9 @@ gradle.projectsEvaluated {
 
 
 def _xcode_application_identities(
-    config: ReleaseConfig, *, configuration: str
+    config: ReleaseConfig, *, configuration: str, execution_source=None,
 ) -> tuple[set[str], str | None]:
-    discovered = discover_project(config.root)
+    discovered = discover_project(config.root, include_git=False)
     container = selected_ios_container(config, discovered)
     scheme = selected_ios_scheme(config, discovered)
     if not container or not scheme:
@@ -219,7 +228,7 @@ def _xcode_application_identities(
         return set(), "configured Xcode container is missing"
     flag = "-workspace" if container[0] == "workspace" else "-project"
     try:
-        result = subprocess.run(
+        result = run_owned(
             [
                 "xcodebuild",
                 flag,
@@ -232,13 +241,16 @@ def _xcode_application_identities(
                 "-json",
             ],
             cwd=config.root,
-            env=scrub_credential_capabilities(os.environ),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            environ=scrub_credential_capabilities(os.environ),
+            capture=True,
+            output_limit=OUTPUT_LIMIT,
             timeout=5 * 60,
-            check=False,
+            execution_scope=None if execution_source is None else execution_source.new_scope(),
         )
+    except ProcessError as error:
+        if error.fatal:
+            raise
+        return set(), "xcodebuild settings query failed or timed out"
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired, ConfigurationError):
         return set(), "xcodebuild settings query failed or timed out"
     if result.returncode:
@@ -262,7 +274,7 @@ def _xcode_application_identities(
     return identities, None
 
 
-def _effective_ios_identity_finding(config: ReleaseConfig) -> Finding:
+def _effective_ios_identity_finding(config: ReleaseConfig, *, execution_source=None) -> Finding:
     if sys.platform != "darwin" or not shutil.which("xcodebuild"):
         return Finding(
             "ios.debug-identity.effective",
@@ -282,15 +294,18 @@ def _effective_ios_identity_finding(config: ReleaseConfig) -> Finding:
             }
         )
         try:
-            prepared = subprocess.run(
+            prepared = run_owned(
                 list(prepare),
                 cwd=config.root,
-                env=environment,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                environ=environment,
+                capture=False,
                 timeout=10 * 60,
-                check=False,
+                execution_scope=None if execution_source is None else execution_source.new_scope(),
             )
+        except ProcessError as error:
+            if error.fatal:
+                raise
+            prepared = None
         except (FileNotFoundError, OSError, subprocess.TimeoutExpired, ConfigurationError):
             prepared = None
         if prepared is None or prepared.returncode:
@@ -300,10 +315,12 @@ def _effective_ios_identity_finding(config: ReleaseConfig) -> Finding:
                 "The configured Xcode preparation command failed before identity proof.",
                 category="identity",
             )
-    debug_ids, debug_error = _xcode_application_identities(config, configuration="Debug")
-    archive_ids, archive_error = _xcode_application_identities(
-        config, configuration=ios.get("archiveConfiguration", "Release")
-    )
+    debug_ids, debug_error = _xcode_application_identities(config, configuration="Debug", execution_source=execution_source)
+    archive_ids, archive_error = (set(), "Debug identity proof failed")
+    if not debug_error and len(debug_ids) == 1:
+        archive_ids, archive_error = _xcode_application_identities(
+            config, configuration=ios.get("archiveConfiguration", "Release"), execution_source=execution_source,
+        )
     store_identity = ios.get("bundleId")
     if debug_error or archive_error or len(debug_ids) != 1 or len(archive_ids) != 1:
         return Finding(
@@ -332,14 +349,16 @@ def _effective_ios_identity_finding(config: ReleaseConfig) -> Finding:
 
 
 def effective_identity_findings(
-    config: ReleaseConfig, platforms: Iterable[str]
+    config: ReleaseConfig, platforms: Iterable[str], *, execution_source=None,
 ) -> list[Finding]:
     findings: list[Finding] = []
     for platform in platforms:
         if platform == "android" and config.platform_enabled("android"):
-            findings.append(_effective_android_identity_finding(config))
+            findings.append(_effective_android_identity_finding(config, execution_source=execution_source))
         elif platform == "ios" and config.platform_enabled("ios"):
-            findings.append(_effective_ios_identity_finding(config))
+            findings.append(_effective_ios_identity_finding(config, execution_source=execution_source))
+        if findings and findings[-1].status in FAILING_STATUSES:
+            break
     return findings
 
 
@@ -524,7 +543,7 @@ def _platform_policy_findings(config: ReleaseConfig, platform: str) -> list[Find
     return findings
 
 
-def doctor(config: ReleaseConfig, platforms: Iterable[str] | None = None) -> Report:
+def doctor(config: ReleaseConfig, platforms: Iterable[str] | None = None, *, execution_source=None) -> Report:
     report = Report("doctor", context={"config": str(config.path), "root": str(config.root)})
     selected = tuple(platforms if platforms is not None else config.enabled_platforms)
     try:
@@ -545,9 +564,9 @@ def doctor(config: ReleaseConfig, platforms: Iterable[str] | None = None) -> Rep
             remediation="Fix the single committed version source before building.",
         )
 
-    discovered = discover_project(config.root)
+    discovered = discover_project(config.root, execution_source=execution_source)
     report.context["discovery"] = discovered
-    report.context["git"] = git_context(config.root).as_dict()
+    report.context["git"] = discovered["git"]
     if not selected:
         report.add(
             "platform.none",
@@ -682,7 +701,7 @@ def doctor(config: ReleaseConfig, platforms: Iterable[str] | None = None) -> Rep
                 category="identity",
                 remediation="Run buildful preflight on macOS so Xcode can prove effective identities.",
             )
-        report.extend([_xcode_toolchain_finding()])
+        report.extend([_xcode_toolchain_finding(execution_source=execution_source)])
 
     gitignore = config.root / ".gitignore"
     ignored = False
@@ -708,6 +727,7 @@ def run_project_checks(
     phase: str,
     *,
     environ: Mapping[str, str] | None = None,
+    execution_source=None,
 ) -> list[Finding]:
     findings: list[Finding] = []
     execution_environment = (
@@ -742,18 +762,19 @@ def run_project_checks(
                     category="project-check",
                 )
             )
-            continue
+            break
         try:
-            result = subprocess.run(
+            result = run_owned(
                 expanded,
                 cwd=config.root,
-                env=execution_environment,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                environ=execution_environment,
+                capture=False,
                 timeout=30 * 60,
-                check=False,
+                execution_scope=None if execution_source is None else execution_source.new_scope(),
             )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as error:
+        except (ProcessError, FileNotFoundError, subprocess.TimeoutExpired, OSError) as error:
+            if isinstance(error, ProcessError) and error.fatal:
+                raise
             findings.append(
                 Finding(
                     f"project-check.{phase}.{index}",
@@ -763,7 +784,7 @@ def run_project_checks(
                     details={"errorType": type(error).__name__},
                 )
             )
-            continue
+            break
         findings.append(
             Finding(
                 f"project-check.{phase}.{index}",
@@ -773,6 +794,8 @@ def run_project_checks(
                 details={"exitCode": result.returncode},
             )
         )
+        if result.returncode:
+            break
     if not findings:
         findings.append(
             Finding(
@@ -846,10 +869,58 @@ def preflight(
     credentials_from_env: bool = False,
     require_tools: bool = False,
 ) -> Report:
+    selected = tuple(platforms)
+    arguments = dict(mode=mode, platforms=selected, run_builds=run_builds, artifacts=artifacts,
+                     credentials_file=credentials_file, credentials_from_env=credentials_from_env,
+                     require_tools=require_tools)
+    try:
+        if mode == "signing" and run_builds and "ios" in selected and config.platform_enabled("ios"):
+            # Admission precedes doctor, private validation, application checks,
+            # preparation and all builds, even across distinct consumer projects.
+            with local_signing_lease() as lease:
+                return _preflight(config, **arguments, signing_lease=lease)
+        return _preflight(config, **arguments)
+    except ProcessError as error:
+        report = Report(command=f"preflight --{mode}")
+        report.add("preflight.process-lifetime", Status.FAIL,
+                   "A command did not complete safely or its resource cleanup could not be confirmed.",
+                   category="lifecycle",
+                   remediation="End this invocation and establish that its exact workers/resources are idle before retrying. "
+                   "If local-signing status reports pending ownership, follow the original session recovery guide; "
+                   "an early command failure does not create a recoverable signing session.")
+        return _stop_preflight(report, "Further commands, private validation and builds were not executed.")
+    except CredentialError as error:
+        if mode != "signing" or not run_builds or "ios" not in selected or not config.platform_enabled("ios"):
+            raise
+        report = Report(command="preflight --signing")
+        report.add("ios.local-signing-lease", Status.FAIL, str(error), category="signing",
+                   remediation="Wait for the account owner, or use mobile-release local-signing status and the recovery guide.")
+        return report
+
+
+def _stop_preflight(report: Report, message: str) -> Report:
+    report.add("preflight.early-exit", Status.SKIP, message, category="lifecycle")
+    return report
+
+
+def _preflight(
+    config: ReleaseConfig,
+    *,
+    mode: str,
+    platforms: Iterable[str],
+    run_builds: bool,
+    artifacts: Mapping[str, Path] | None = None,
+    credentials_file: Path | None = None,
+    credentials_from_env: bool = False,
+    require_tools: bool = False,
+    signing_lease: SigningLease | None = None,
+) -> Report:
     if mode not in {"offline", "signing", "online"}:
         raise ValidationError(f"unsupported preflight mode: {mode}")
     selected = tuple(platforms)
-    report = doctor(config, selected)
+    execution_source = None if signing_lease is None else signing_lease.execution_source()
+    cancellation = None if signing_lease is None else signing_lease.cancellation
+    report = doctor(config, selected, execution_source=execution_source)
     report.command = f"preflight --{mode}"
     invalid = set(selected) - set(config.enabled_platforms)
     if invalid:
@@ -860,6 +931,13 @@ def preflight(
             category="configuration",
         )
     report.extend(metadata_findings(config, platforms=selected))
+    if (invalid or not selected) and mode == "online":
+        report.add("store.online.gate", Status.SKIP,
+                   "Non-publishing Store API checks were skipped because the platform selection is invalid.",
+                   category="store-access")
+        return report
+    if not report.ok and mode != "online":
+        return _stop_preflight(report, "Application checks, credentials and builds were skipped because initial checks failed.")
     credential_values = resolve_credential_values(
         config,
         credentials_file=credentials_file,
@@ -906,10 +984,11 @@ def preflight(
         )
     else:
         report.extend(
-            run_project_checks(config, "preflight", environ=project_check_environment)
+            run_project_checks(config, "preflight", environ=project_check_environment, execution_source=execution_source)
         )
     if (
-        run_builds
+        mode != "online"
+        and run_builds
         and config.section("source").get("projectReadTokenRequired")
         and not credential_values.get("MOBILE_RELEASE_PROJECT_READ_TOKEN")
     ):
@@ -923,6 +1002,8 @@ def preflight(
                 "candidate environment; static checks remain credential-free."
             ),
         )
+    if not report.ok and mode != "online":
+        return _stop_preflight(report, "Private validation and builds were skipped because preflight checks failed.")
     credential_checks: list[Finding] = []
     if mode in {"signing", "online"}:
         credential_checks.extend(
@@ -936,15 +1017,31 @@ def preflight(
             )
         )
         report.extend(credential_checks)
+    if not report.ok and mode != "online":
+        return _stop_preflight(report, "Private validation and builds were skipped because credential prerequisites failed.")
+    if mode == "online":
+        # Nonfatal signing/build/metadata diagnostics are independent of a
+        # read-only ownership query. Query credentials/identity/version are not.
+        prerequisites = store_material_prerequisite_findings(values=store_credential_values, platforms=selected)
+        credential_checks.extend(prerequisites)
+        report.extend(prerequisites)
+        blockers = _online_query_blockers(config, selected, credential_checks)
+        if release is None:
+            blockers.append("version.source")
+        if blockers:
+            report.add("store.online.gate", Status.SKIP,
+                       "Non-publishing Store API checks were skipped because prerequisites are incomplete: "
+                       + ", ".join(sorted(set(blockers))), category="store-access")
+            return report
     if mode == "signing":
         material_checks = validate_signing_material(
-            config, values=build_credential_values, platforms=selected
+            config, values=build_credential_values, platforms=selected, execution_source=execution_source, cancellation=cancellation,
         )
         credential_checks.extend(material_checks)
         report.extend(material_checks)
     elif mode == "online":
         material_checks = validate_store_material(
-            config, values=store_credential_values, platforms=selected
+            config, values=store_credential_values, platforms=selected, execution_source=execution_source, cancellation=cancellation,
         )
         credential_checks.extend(material_checks)
         report.extend(material_checks)
@@ -971,6 +1068,8 @@ def preflight(
                         config=config, release=release, platforms=selected
                     )
                 )
+        except ProcessError:
+            raise
         except CredentialError as error:
             report.add("store.online.materialization", Status.FAIL, str(error), category="store-access")
         return report
@@ -981,7 +1080,7 @@ def preflight(
             if name == "MOBILE_RELEASE_PROJECT_READ_TOKEN"
         }
         with _credential_environment(identity_values):
-            report.extend(effective_identity_findings(config, selected))
+            report.extend(effective_identity_findings(config, selected, execution_source=execution_source))
     if not report.ok:
         report.add(
             "preflight.early-exit",
@@ -1038,6 +1137,7 @@ def preflight(
                     values=platform_values,
                     platforms=(platform,),
                     prepare_ios_signing=mode == "signing" and platform == "ios",
+                    signing_lease=signing_lease,
                 )
                 if mode == "signing"
                 else nullcontext(
@@ -1055,17 +1155,25 @@ def preflight(
                     ):
                         if platform == "android":
                             collected.update(
-                                run_android_build(config, signed=mode == "signing")
+                                run_android_build(config, signed=mode == "signing", execution_source=execution_source)
                             )
                         else:
-                            collected.update(run_ios_build(config, signed=mode == "signing"))
-            except (CredentialError, ValidationError) as error:
+                            collected.update(run_ios_build(config, signed=mode == "signing",
+                                                           signing_session=signing_lease.active if signing_lease is not None else None,
+                                                           execution_source=execution_source))
+            except ProcessError as error:
+                if error.fatal:
+                    raise
+                report.add(f"{platform}.build", Status.FAIL, str(error), category="build")
+                return _stop_preflight(report, "Remaining platforms and artifact checks were skipped after a build or cleanup failure; completed outputs are retained but not validated.")
+            except (MobileReleaseError, OSError) as error:
                 report.add(
                     f"{platform}.build",
                     Status.FAIL,
                     str(error),
                     category="build",
                 )
+                return _stop_preflight(report, "Remaining platforms and artifact checks were skipped after a build or cleanup failure; completed outputs are retained but not validated.")
 
     if "android" in selected and "android-aab" in collected:
         android = config.section("android")
@@ -1088,7 +1196,7 @@ def preflight(
             }
         )
         report.extend(
-            run_project_checks(config, "androidArtifact", environ=artifact_environment)
+            run_project_checks(config, "androidArtifact", environ=artifact_environment, execution_source=execution_source)
         )
     elif "android" in selected and not run_builds:
         report.add(
@@ -1132,7 +1240,7 @@ def preflight(
             )
         if ipa:
             try:
-                with snapshot_ios_artifacts(collected) as snapshot:
+                with snapshot_ios_artifacts(collected, cancellation=cancellation) as snapshot:
                     if archive:
                         inspect_ios_artifact_set(snapshot, expected_bundle_id=ios["bundleId"],
                                                  release=release, symbols_policy=symbols_policy)
@@ -1145,6 +1253,7 @@ def preflight(
                         expected_team_id=ios["teamId"], expected_fingerprint=ios.get("distributionCertificateSha256"),
                         release=release, require_tools=require_tools or mode == "signing",
                         deadline=snapshot.deadline,
+                        cancellation=snapshot.cancellation,
                     ))
                     snapshot.deadline.check()
                     artifact_environment = artifact_validation_environment(os.environ)
@@ -1158,13 +1267,16 @@ def preflight(
                         artifact_environment["MOBILE_RELEASE_DSYM_PATH"] = str(symbol_archive / "dSYMs")
                     if report.ok:
                         snapshot.deadline.check()
-                        report.extend(run_project_checks(config, "iosArtifact", environ=artifact_environment))
+                        report.extend(run_project_checks(config, "iosArtifact", environ=artifact_environment,
+                                                         execution_source=execution_source))
                     snapshot.assert_unchanged()
                     if archive:
                         report.add("ios.artifacts.correspondence", Status.PASS,
                                    "IPA/archive native images, resources and every present retained dSYM correspond; nested symbol completeness is a separate requirement.",
                                    category="ios-artifact")
             except ValidationError as error:
+                if isinstance(error, ProcessError) and error.fatal:
+                    raise
                 report.add("ios.artifacts.correspondence", Status.FAIL, str(error), category="ios-artifact")
             if mode == "signing" and symbols_policy == "required":
                 report.add("ios.symbols.upload", Status.BLOCKED,

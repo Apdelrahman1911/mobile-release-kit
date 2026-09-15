@@ -28,6 +28,7 @@ import time
 import tomllib
 import traceback
 from typing import Callable
+from types import MappingProxyType
 
 
 AGGREGATE_SECONDS = 3300
@@ -98,6 +99,57 @@ PROFILE_FIXTURE_FAILURE_FILES = (
     *("src/mobile_release/" + name + ".py" for name in
       ("_profile_process", "_native_process", "ios_profiles", "inspection", "errors")),
 )
+COMMAND_ACCOUNT_FAILURE_PREFIX = "MRK_C_FENCE_FIXTURE_FAILURE="
+COMMAND_ACCOUNT_FAILURE_ID = (
+    "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests."
+    "test_prepared_no_target_original_fence_and_same_lease_cleanup"
+)
+COMMAND_ACCOUNT_FAILURE_IDS = frozenset({
+    COMMAND_ACCOUNT_FAILURE_ID,
+    "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests."
+    "test_prepared_input_withdrawal_c_loss_fresh_prefix_recovery",
+    "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests."
+    "test_original_hold_survives_true_parent_loss_and_is_absent_from_worker_map",
+})
+COMMAND_CASE_FAILURE_ID = (
+    "unit.test_owned_process.OwnedProcessTests."
+    "test_guarded_worker_tail_and_report_loss_preserve_original_outcomes"
+)
+COMMAND_CASE_MODE_PREFIX = "MRK_OWNED_COMMAND_MODE="
+COMMAND_CASE_MODES = (
+    "body-return", "body-systemexit", "report-format-error", "reject-zero", "reject-eagain", "reject-error",
+    "reject-full", "reject-partial", "arm-missing", "arm-partial", "post-map-pre-ready",
+)
+COMMAND_ACCOUNT_FAILURE_CATEGORIES = {
+    "AssertionError": "assertion-error", "ValueError": "value-error", "TypeError": "type-error",
+    "KeyError": "key-error", "IndexError": "index-error", "AttributeError": "attribute-error",
+    "NameError": "name-error", "UnboundLocalError": "name-error", "RuntimeError": "runtime-error",
+    "RecursionError": "recursion-error", "MemoryError": "memory-error", "OSError": "os-error",
+    "BlockingIOError": "os-error", "BrokenPipeError": "os-error", "ChildProcessError": "os-error",
+    "FileExistsError": "os-error", "FileNotFoundError": "os-error", "InterruptedError": "os-error",
+    "IsADirectoryError": "os-error", "NotADirectoryError": "os-error", "PermissionError": "os-error",
+    "ProcessLookupError": "os-error", "TimeoutError": "os-error", "ImportError": "import-error",
+    "ModuleNotFoundError": "import-error", "KeyboardInterrupt": "interrupt", "SystemExit": "system-exit",
+    "Exception": "exception", "BaseException": "base-exception",
+    "ExceptionGroup": "exception-group", "BaseExceptionGroup": "base-exception-group",
+    "ProcessError": "process-error", "ProcessCleanupError": "process-cleanup-error",
+    "ProcessOutcomeUnknown": "process-outcome-unknown", "ProcessInterrupted": "interrupt",
+    "NativeProcessError": "native-process-error", "CredentialError": "credential-error",
+    "SigningBusy": "signing-busy", "SigningPending": "signing-pending",
+}
+COMMAND_ACCOUNT_FAILURE_FILES = {
+    **{name + ".py": "tests/workflow/" + name + ".py" for name in (
+        "test_command_account_lifecycle", "command_account_lifecycle_fixture", "command_bootstrap_fixture",
+        "command_fence_failure_fixture", "local_signing_persistent_fixture", "local_signing_case_owner",
+        "local_signing_bridge", "local_signing_model_target", "profile_process_fixture",
+    )},
+    "local_signing_persistent.py": "tests/unit/local_signing_persistent.py",
+    **{name + ".py": "src/mobile_release/" + name + ".py" for name in (
+        "local_signing", "owned_process", "_command_process", "_native_process", "cancellation", "errors",
+    )},
+}
+COMMAND_FAILURE_FILES = (*COMMAND_ACCOUNT_FAILURE_FILES.values(),
+                         "tests/unit/test_owned_process.py", "src/mobile_release/_lifetime_evidence.py")
 FIXTURE_BOOTSTRAP_FAILURE_PREFIX = "MRK_FIXTURE_BOOTSTRAP_FAILURE="
 FIXTURE_BOOTSTRAP_FAILURE_CONDITIONS = {
     "configuration": ("directory_read", "record_read", "record_parse", "record_schema",
@@ -587,7 +639,44 @@ PYTHON_POISON_PARTITIONS = (
     "poison-system-exit-cleanup-failure",
     "poison-system-exit-restore-failure",
     "poison-system-exit-cleanup-and-restore-failure",
+    "poison-signing-launcher-loss",
+    "poison-command-preguard-127",
+    "poison-command-guarded-import",
+    "poison-command-fence-pending-create-before",
+    "poison-command-fence-pending-create-after",
+    "poison-command-fence-pending-write-partial",
+    "poison-command-fence-pending-write-after",
+    "poison-command-fence-data-fsync-after",
+    "poison-command-fence-pending-close-after",
+    "poison-command-fence-final-link-after",
+    "poison-command-fence-directory-fsync-after",
+    "poison-command-fence-pending-close-lost-return",
+    "poison-command-fence-final-link-lost-return",
+    "poison-command-fence-foreign-pending-collision",
+    "poison-command-prepared-prefix-input-loss",
+    "poison-command-account-hold-parent-loss",
+    "poison-signing-foreign-mixed-handlers",
+    "poison-profile-authenticator-publication",
+    "poison-recovery-profile-cleanup",
+    "poison-profile-authentication-order",
+    "poison-profile-setup-unlink",
+    "poison-profile-collision",
+    "poison-profile-partial-handler-install",
+    "poison-profile-cleanup-observer",
+    "poison-profile-fstat",
+    "poison-profile-fsync-cleanup",
+    "poison-profile-replacement",
+    "poison-profile-directory-close",
+    "poison-signing-content-conflict",
+    "poison-signing-profile-identity-conflict",
+    "poison-command-source-close",
+    "poison-command-source-profile-conflict",
 )
+PYTHON_FRESH_PARTITIONS = (
+    "fresh-command-account-prepared",
+    "fresh-model-command-bridge",
+)
+PYTHON_SINGLETON_PARTITIONS = PYTHON_POISON_PARTITIONS + PYTHON_FRESH_PARTITIONS
 RUBY_OWNER_POISON_PARTITIONS = (
     ("custodian-preoffer-close", "NativeUploadRoleTest#test_native_custodian_preoffer_close_fault_cannot_claim_settled_failure"),
     ("custodian-postoffer-tail", "NativeUploadRoleTest#test_native_custodian_postoffer_tail_fault_downgrades_intended_two_to_unknown_one"),
@@ -627,7 +716,7 @@ RUBY_NATIVE_CAPTURE_BUDGETS = (
 RUBY_NATIVE_CAPTURE_SHARED_SECONDS = 10
 RUBY_PARTITION_CONTRACTS = (
     ("ruby-native-owner", "test_native_upload_process.rb", 52, 44, 120, None),
-    ("ruby-native-capture", "test_native_upload_validation.rb", 21, 17, 310, "NativeUploadValidationTest"),
+    ("ruby-native-capture", "test_native_upload_validation.rb", 22, 18, 310, "NativeUploadValidationTest"),
     ("ruby-ios_upload_validation", "test_ios_upload_validation.rb", 32, 23, 300, "IosUploadValidationTest"),
     ("ruby-android_upload_validation", "test_android_upload_validation.rb", 32, 23, 300, "AndroidUploadValidationTest"),
 )
@@ -711,6 +800,15 @@ _WHEEL = (
     "wheel-copy", "wheel-build", "wheel-inspect", "wheel-environment", "wheel-pip",
     "wheel-install", "wheel-freeze", "wheel-pip-check",
 )
+MATRIX_PHASE_SECONDS = 420
+MATRIX_PAIR_SECONDS = 900
+MATRIX_PERSISTED_LIMIT = 256 * 1024**2  # Same whole-attempt bound as original Session captures.
+MATRIX_PHASE_FILES = frozenset({"catalog.json", "matrix-result.json", "results.jsonl.gz"})
+_MATRIX_GATES = (
+    "source-copy", "source-environment", "source-dependencies", "editable-install",
+    "source-freeze", "source-pip-check", *_WHEEL, "local-signing-matrix", "source-integrity",
+)
+_ADAPTER_GATES = tuple("local-signing-adapter" if name == "local-signing-matrix" else name for name in _MATRIX_GATES)
 
 
 class VerificationError(RuntimeError):
@@ -794,7 +892,66 @@ class NativeABIState:
     phases: dict[str, tuple[object, object, object]] = dataclasses.field(default_factory=dict)
 
 
-def required_gate_ids(platform: str) -> tuple[str, ...]:
+@dataclasses.dataclass(frozen=True)
+class MatrixSelection:
+    """Frozen finite workflow values, never inherited by the clean subject env."""
+    repository: str
+    commit: str
+    run_id: str
+    attempt: int
+    job: str
+    operating_system: str
+    shard: int
+    destination: Path
+
+    def metadata(self) -> dict:
+        return {"kind": "github", "repository": self.repository, "commit": self.commit,
+                "runId": self.run_id, "attempt": self.attempt, "job": self.job}
+
+
+@dataclasses.dataclass(frozen=True)
+class SigningAdapterSelection:
+    repository: str
+    commit: str
+    run_id: str
+    attempt: int
+    job: str
+    operating_system: str
+
+    def metadata(self) -> dict:
+        return {"kind": "github", "repository": self.repository, "commit": self.commit,
+                "runId": self.run_id, "attempt": self.attempt, "job": self.job}
+
+
+@dataclasses.dataclass(frozen=True)
+class SigningAdapterDiagnostic:
+    """Pre-admitted DATA projection scope, not a callback or execution grant."""
+    phase: str
+    identifiers: tuple[str, ...]
+    files: tuple[str, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class SigningMatrixDiagnostic:
+    """Source-selected matrix DATA scope; separate from fixed adapter or proof."""
+    phase: str
+    operating_system: str
+    shard: int
+    identifiers: tuple[str, ...]
+    regression_ids: tuple[str, ...]
+    files: tuple[str, ...]
+    child_bindings: tuple = ()
+
+
+def required_gate_ids(platform: str, scope: str = "platform") -> tuple[str, ...]:
+    if platform not in {"linux", "macos"}:
+        raise VerificationError("UNSUPPORTED_PLATFORM")
+    if scope == "signing-matrix":
+        return _MATRIX_GATES
+    if scope == "signing-adapter":
+        return _ADAPTER_GATES
+    if scope != "platform":
+        raise VerificationError("UNSUPPORTED_VERIFICATION_SCOPE")
     if platform == "linux":
         return (*_BEFORE_TESTS, "native-process-abi-source", *COMPATIBILITY_SOURCE_GATES,
                 "python-full", *(row[0] for row in RUBY_SUITES), "ruby-packaged-capture-source",
@@ -803,7 +960,7 @@ def required_gate_ids(platform: str) -> tuple[str, ...]:
                 "python-wheel", "source-integrity")
     if platform == "macos":
         return (*_BEFORE_TESTS, "native-tools", "native-process-abi-source", *COMPATIBILITY_SOURCE_GATES,
-                *NATIVE_RUBY_IDS, "ruby-packaged-capture-source", "native-profile-source",
+                "native-profile-source", *NATIVE_RUBY_IDS, "ruby-packaged-capture-source",
                 *_WHEEL, "native-process-abi-wheel", *COMPATIBILITY_WHEEL_GATES,
                 "wheel-smoke", "wheel-consumer", "ruby-packaged-capture-wheel",
                 "native-profile-wheel", "source-integrity")
@@ -881,13 +1038,9 @@ def packaged_ruby_argv(paths: Paths, phase: str, *, deadline: float) -> tuple[st
         "--capture-deadline", repr(deadline), "--verbose", "--name", filter_)))
 
 
-def catalog(paths: Paths, platform: str, *, deadline: float) -> tuple[Step, ...]:
+def catalog(paths: Paths, platform: str, *, deadline: float, scope: str = "platform") -> tuple[Step, ...]:
     """Finite data-only dispatch; materialization/launches belong to the caller."""
-    required_gate_ids(platform)
-    if (paths.source / "src/mobile_release/local_signing.py").exists():
-        # The separate QA-003 patch needs its complete native-active matrix.
-        # Refuse it until that issue deliberately integrates its own catalog.
-        raise VerificationError("LOCAL_SIGNING_MATRIX_REQUIRES_CATALOG_AMENDMENT")
+    required_gate_ids(platform, scope)
     if type(deadline) is not float or not math.isfinite(deadline):
         raise VerificationError("INVALID_DEADLINE")
     pairs = compatibility_paths(paths)
@@ -912,6 +1065,8 @@ def catalog(paths: Paths, platform: str, *, deadline: float) -> tuple[Step, ...]
     for name in ("source-copy", "source-freeze", "wheel-copy", "wheel-inspect", "wheel-freeze",
                  "wheel-consumer", "source-integrity"):
         operation(name)
+    steps["local-signing-matrix"] = Step("local-signing-matrix", kind="matrix", seconds=MATRIX_PAIR_SECONDS)
+    steps["local-signing-adapter"] = Step("local-signing-adapter", kind="signing-adapter", seconds=MATRIX_PAIR_SECONDS)
     for phase in ("source", "wheel"):
         name = "native-process-abi-" + phase
         steps[name] = Step(name, kind="native-abi", seconds=300)
@@ -980,7 +1135,7 @@ def catalog(paths: Paths, platform: str, *, deadline: float) -> tuple[Step, ...]
     installed_env["BUNDLE_GEMFILE"] = str(paths.work / "wheel-venv/share/mobile-release-kit/Gemfile")
     steps["ruby-packaged-capture-wheel"] = dataclasses.replace(
         steps["ruby-packaged-capture-wheel"], env=tuple(sorted(installed_env.items())))
-    return tuple(steps[name] for name in required_gate_ids(platform))
+    return tuple(steps[name] for name in required_gate_ids(platform, scope))
 
 
 def ruby_literal_tests(path: Path) -> int:
@@ -1095,9 +1250,10 @@ def ruby_capture_argv(paths: Paths, gate: str, partition: str, *, deadline: floa
             str(paths.source / "tests/workflow" / filename), "--verbose", "--name", filter_)
 
 
-def execute_pipeline(steps: tuple[Step, ...], perform: Callable[[Step], CheckResult], *, platform: str) -> Report:
+def execute_pipeline(steps: tuple[Step, ...], perform: Callable[[Step], CheckResult], *, platform: str,
+                     scope: str = "platform") -> Report:
     """A recorder seam tests dispatch/failure semantics without starting workers."""
-    if tuple(step.id for step in steps) != required_gate_ids(platform):
+    if tuple(step.id for step in steps) != required_gate_ids(platform, scope):
         raise VerificationError("REQUIRED_GATE_INVENTORY")
     rows = [{"id": step.id, "status": "UNEXECUTED"} for step in steps]
     error = None
@@ -1115,9 +1271,9 @@ def execute_pipeline(steps: tuple[Step, ...], perform: Callable[[Step], CheckRes
             error = exc.code if isinstance(exc, VerificationError) else "CHECK_EXECUTION_FAILED"
             rows[index].update(status="FAIL", error=error)
             if not isinstance(exc, VerificationError):
-                frames = traceback.extract_tb(exc.__traceback__)
-                rows[index]["location"] = [Path(frames[-1].filename).name, frames[-1].lineno] if frames else []
-                rows[index]["exception"] = type(exc).__name__
+                # Keep the original sanitized errno/callsite without replacing
+                # the pipeline's execution-failure code with the generic one.
+                rows[index].update(error_details(exc), error=error)
             break
     return Report(error is None, tuple(rows), error)
 
@@ -1336,12 +1492,18 @@ def copy_build(source: Path, destination: Path, inventory: dict, uid: int, gid: 
         os.chown(directory, uid, gid)
 
 
-def validate_inputs(root: Path, value: dict, *, deadline: float) -> dict:
+def validate_inputs(root: Path, value: dict, *, deadline: float, scope: str = "platform") -> dict:
     """Validate only the live return of the original DATA producer, not inputs.json."""
     files = value["files"]
     expected = {item["path"]: item for item in files}
-    if len(expected) != len(files) or not 100 <= len(files) <= 150:
+    valid_count = (len(files) == 13 if scope in {"signing-matrix", "signing-adapter"} else
+                   100 <= len(files) <= 150 if scope == "platform" else False)
+    if len(expected) != len(files) or not valid_count:
         raise VerificationError("INPUT_INVENTORY_BOUND")
+    if scope in {"signing-matrix", "signing-adapter"} and (value["actionlint"] is not None or value["gems"] is not None
+                                      or value["bundler"] is not None
+                                      or any(name != "inputs.json" and not name.startswith("python/") for name in expected)):
+        raise VerificationError("MATRIX_INPUT_INVENTORY")
     actual = set()
     for directory, dirs, names in os.walk(root, followlinks=False, onerror=walk_error):
         check_clock(deadline)
@@ -1447,9 +1609,26 @@ def minitest_records(stdout: str, expected: tuple[str, ...], *, deadline: float 
                        "adverse_records_omitted": known_adverse - len(adverse_records)}
 
 
-def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, deadline: float | None = None) -> CheckResult:
+def _python_prebound_expectations(step: Step, platform: str, checks, expected: tuple[str, ...]) -> tuple[str, ...]:
+    """Only the closed Linux gate may reuse its admitted immutable snapshot."""
+    if (platform != "linux" or step.id not in {"python-full", "python-wheel"}
+            or type(expected) is not tuple or not expected or any(type(value) is not str for value in expected)
+            or tuple(sorted(set(expected))) != expected):
+        raise VerificationError("PYTHON_PREBOUND_EXPECTATIONS")
+    healthy = step.parser == "check" and step.native_partition == "all"
+    singleton = step.parser == "native" and step.native_partition in PYTHON_SINGLETON_PARTITIONS
+    if (not (healthy or singleton) or singleton and
+            (len(expected) != 1 or (step.native_partition, expected[0]) not in checks.PYTHON_SINGLETON_CASES)):
+        raise VerificationError("PYTHON_PREBOUND_EXPECTATIONS")
+    return expected
+
+
+def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, deadline: float | None = None,
+                  _python_expected: tuple[str, ...] | None = None) -> CheckResult:
     if deadline is not None:
         check_clock(deadline)
+    if _python_expected is not None:
+        _python_prebound_expectations(step, platform, checks, _python_expected)
     if (not result.ok or type(result.returncode) is not int or result.returncode != 0
             or result.waited is not True or result.stdout_eof is not True or result.stderr_eof is not True
             or result.domain_finality is not True or result.primary_error is not None or result.cleanup_errors):
@@ -1477,7 +1656,8 @@ def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, de
     elif step.parser == "native":
         if any(line.startswith(NATIVE_DIAGNOSTIC_PREFIX) for line in (stdout + "\n" + stderr).splitlines()):
             raise VerificationError("NATIVE_FAILURE_DIAGNOSTIC_ON_SUCCESS")
-        expected = checks.native_partition_ids(paths.source, step.native_partition, deadline=deadline)
+        expected = (_python_expected if _python_expected is not None else
+                    checks.native_partition_ids(paths.source, step.native_partition, deadline=deadline))
         footers = re.findall(r"(?m)^Ran (\d+) tests? in [0-9.]+s\s*$", stderr)
         if footers != [str(len(expected))] or not re.search(r"(?m)^OK\s*$", stderr) or "skipped" in stderr:
             raise VerificationError("NATIVE_PYTHON_RESULT")
@@ -1504,14 +1684,15 @@ def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, de
         # independently verifies expected complete identities after real finality.
         if step.id in ("python-full", "python-wheel"):
             selection = "full" if step.id == "python-full" else "wheel"
-            expected = checks.python_capture_ids(paths.source, selection, "healthy", deadline=deadline)
+            expected = (_python_expected if _python_expected is not None else
+                        checks.python_capture_ids(paths.source, selection, "healthy", deadline=deadline))
             tests = summary.get("tests")
             if (type(tests) is not list
                     or any(type(row) is not dict or set(row) != {"id", "outcome"}
                            or type(row["id"]) is not str or type(row["outcome"]) is not str for row in tests)
                     or tuple(sorted(row["id"] for row in tests)) != expected):
                 raise VerificationError("PYTHON_COMPLETION_INVENTORY")
-            allowed = checks.linux_allowed_skips() if platform == "linux" and selection == "full" else frozenset()
+            allowed = (set(expected) & checks.linux_allowed_skips()) if platform == "linux" else frozenset()
             skips = {row["id"] for row in tests if row["outcome"] == "skip"}
             if skips != allowed or any(row["outcome"] not in ("ok", "skip") for row in tests):
                 raise VerificationError("PYTHON_UNEXPECTED_SKIP_OR_FAILURE")
@@ -1569,6 +1750,488 @@ def python_failure_callbacks(data: object, expected: tuple[str, ...]) -> list[di
             return None
         result.append({"id": identifier, "outcome": outcome, "category": category, "errno": number})
     return result
+
+
+def python_progress_scope(expected: tuple[str, ...]) -> MappingProxyType:
+    """Prebind renderings before capture; no diagnostic-time source acquisition."""
+    renderings = {}
+    ambiguous = set()
+    for identifier in expected:
+        if (type(identifier) is not str or len(identifier) > 384 or not re.fullmatch(
+                r"(?:[A-Za-z_][A-Za-z0-9_]*\.){2,}[A-Za-z_][A-Za-z0-9_]*\.test_[A-Za-z0-9_]+", identifier)):
+            continue
+        owner, method = identifier.rsplit(".", 1)
+        for display in (owner, identifier):
+            header = f"{method} ({display})".encode("ascii")
+            if header in renderings and renderings[header] != identifier:
+                ambiguous.add(header)
+            renderings[header] = identifier
+    return MappingProxyType({header: identifier for header, identifier in renderings.items() if header not in ambiguous})
+
+
+def python_failure_progress(raw: bytes, scope: MappingProxyType) -> dict | None:
+    """Bounded lexical observations, never a body/coverage/finality receipt.
+
+    Only original stderr and already-bound source IDs are inspected, even after
+    timeout. No deadline is renewed and no file, import or process is consulted.
+    """
+    if type(raw) is not bytes or type(scope) is not MappingProxyType:
+        return None
+    byte_limit, line_limit, candidate_limit = 256 * 1024, 2048, 1024
+    offset = max(0, len(raw) - byte_limit)
+    tail = raw[offset:]
+    dropped_partial_line = bool(offset and raw[offset - 1] != 10)
+    if dropped_partial_line:
+        end = tail.find(b"\n")
+        tail = tail[end + 1:] if end >= 0 else b""
+    terminated = tail.endswith(b"\n")
+    lines = tail.rsplit(b"\n", line_limit + 1) if tail else []
+    if terminated:
+        lines.pop()
+    lines_truncated = len(lines) > line_limit
+    lines = lines[-line_limit:]
+    value = {"semantics": "reported-unittest-lines-only", "bytes_examined": min(len(raw), byte_limit),
+             "byte_limit": byte_limit, "byte_truncated": bool(offset),
+             "dropped_partial_line": dropped_partial_line, "lines_examined": len(lines),
+             "line_limit": line_limit, "lines_truncated": lines_truncated,
+             "oversized_lines": 0, "last_observed_start": None, "last_observed_outcome": None}
+    outcomes = {b"ok": "ok", b"FAIL": "FAIL", b"ERROR": "ERROR",
+                b"expected failure": "expected failure", b"unexpected success": "unexpected success"}
+    for index, line in enumerate(lines):
+        if len(line) > candidate_limit:
+            value["oversized_lines"] += 1
+            continue
+        closed = index != len(lines) - 1 or terminated
+        if closed and line.endswith(b"\r"):
+            line = line[:-1]
+        identifier = scope.get(line)
+        outcome = None
+        if identifier is None:
+            header, separator, token = line.partition(b" ... ")
+            if not separator or token and (not closed or token not in outcomes):
+                continue
+            identifier = scope.get(header)
+            outcome = outcomes.get(token) if closed else None
+        if identifier is not None:
+            value["last_observed_start"] = {"id": identifier}
+            if outcome is not None:
+                value["last_observed_outcome"] = {"id": identifier, "outcome": outcome}
+    return value
+
+
+def signing_adapter_failure(raw: bytes, scope: SigningAdapterDiagnostic, *, deadline: float) -> dict | None:
+    """Already-captured stderr only, including on UNKNOWN; never reads files."""
+    check_clock(deadline)
+    try:
+        if (type(raw) is not bytes or not 0 < len(raw) <= 65536 or type(scope) is not SigningAdapterDiagnostic
+                or scope.phase not in {"source", "wheel"}):
+            return None
+        marker = b"MRK_SIGNING_ADAPTER_FAILURE="
+        required = {"schema", "phase", "testId", "layer", "outcome", "category", "locations"}
+        categories = {"none", "os-error", "assertion-error", "value-error", "type-error", "memory-error", "exception", "base-exception"}
+
+        def locations_valid(locations, maximum):
+            return (type(locations) is list and len(locations) <= maximum
+                    and all(type(location) is dict and set(location) == {"file", "line"}
+                            and type(location["file"]) is str and location["file"] in scope.files
+                            and type(location["line"]) is int and 0 < location["line"] < 1_000_000
+                            for location in locations))
+
+        def progress_valid(progress):
+            # Independent closed parser: never imports the subject's fixture code.
+            if (type(progress) is not dict or set(progress) != {"case", "owner", "service"}
+                    or type(progress["case"]) is not str or progress["case"] not in {
+                        "healthy", "crash", "deadline", "query", "seed", "inventory",
+                        "final-automatic", "final-no-resolution", "final-owner-resolution",
+                        "semantic-main", "semantic-resolution"}):
+                return False
+            owner, service = progress["owner"], progress["service"]
+            commands = {"begin", "run-owned", "target-return", "service-joined", "model-return"}
+            for record, stages, fields in ((owner, commands | {"task-entered", "task-returned", "result-write-returned",
+                                            "recovery-check", "recovery-busy", "recovery-ready"},
+                                           {"command", "elapsedMs", "completed", "totalMs", "maxMs"}),
+                                          (service, {"HELLO", "BEGIN", "EFFECT", "END", "DONE", "EOF"},
+                                           {"command", "elapsedMs"})):
+                if record is not None and (type(record) is not dict or set(record) != fields | {"stage"}
+                        or type(record["stage"]) is not str or record["stage"] not in stages
+                        or any(type(record[key]) is not int or not 0 <= record[key] < 1 << 31 for key in fields)):
+                    return False
+            if owner is not None and (owner["completed"] > owner["command"] or owner["maxMs"] > owner["totalMs"]
+                    or not owner["completed"] and (owner["maxMs"] or owner["totalMs"])
+                    or owner["stage"] in commands and not owner["command"]
+                    or owner["stage"] == "model-return" and not owner["completed"]):
+                return False
+            return service is None or (owner is not None and 0 < service["command"] == owner["command"])
+
+        observations, layers = [], set()
+        for line in raw.splitlines(keepends=True):
+            check_clock(deadline)
+            if not line.startswith(marker):
+                continue
+            if len(line) > 2048 or not line.endswith(b"\n") or len(observations) == 2:
+                return None
+            try:
+                value = strict_json(line[len(marker):-1].decode("ascii"))
+            except (UnicodeError, ValueError, VerificationError, RecursionError):
+                return None
+            if (type(value) is not dict or not required <= set(value) <= required | {"related", "case", "targetResult", "progress"}
+                    or type(value["schema"]) is not int or value["schema"] != 1
+                    or value["phase"] != scope.phase or type(value["testId"]) is not str
+                    or value["testId"] not in scope.identifiers
+                    or type(value["layer"]) is not str or value["layer"] not in {"worker", "unittest"}
+                    or value["layer"] in layers or type(value["outcome"]) is not str
+                    or value["outcome"] not in {"error", "failure", "expected-failure", "unexpected-success", "skip"}
+                    or value["layer"] == "worker" and value["outcome"] != "error"
+                    or type(value["category"]) is not str or value["category"] not in categories
+                    or (value["outcome"] in {"unexpected-success", "skip"}) != (value["category"] == "none")
+                    or not locations_valid(value["locations"], 4)):
+                return None
+            if value["category"] == "none" and value["locations"]:
+                return None
+            if "progress" in value and (value["layer"] != "unittest"
+                    or value["outcome"] not in {"error", "failure", "expected-failure"}
+                    or not progress_valid(value["progress"])):
+                return None
+            if "related" in value:
+                related = value["related"]
+                if type(related) is not list or not 1 <= len(related) <= 3 or value["category"] == "none":
+                    return None
+                routes = set()
+                for row in related:
+                    if (type(row) is not dict or set(row) != {"via", "category", "locations"}
+                            or type(row["category"]) is not str or row["category"] not in categories - {"none"}
+                            or not locations_valid(row["locations"], 2)
+                            or type(row["via"]) is not list or not 1 <= len(row["via"]) <= 7
+                            or not all(type(link) is str for link in row["via"])):
+                        return None
+                    route = tuple(row["via"])
+                    if (route in routes or (route == ("command-first",)
+                            and (value["layer"] != "worker" or routes))
+                            or route != ("command-first",) and not all(link in {"context", "cause"} for link in route)):
+                        return None
+                    routes.add(route)
+            if "case" in value:
+                case = value["case"]
+                if (value["layer"] != "unittest" or type(case) is not dict
+                        or set(case) != {"expectedExit", "workerExit", "anchorExit", "terminalParsed", "anchorExpired"}
+                        or type(case["expectedExit"]) is not int or case["expectedExit"] not in {0, 73, -9}
+                        or any(status is not None and (type(status) is not int or not -128 <= status <= 255)
+                               for status in (case["workerExit"], case["anchorExit"]))
+                        or type(case["terminalParsed"]) is not bool
+                        or (case["workerExit"] is not None) != case["terminalParsed"]
+                        or (type(case["anchorExpired"]) is not bool if case["terminalParsed"] else case["anchorExpired"] is not None)):
+                    return None
+            if "targetResult" in value:
+                target = value["targetResult"]
+                if (value["layer"] != "worker" or type(target) is not dict
+                        or set(target) != {"returncode", "stderrKind", "locations"}
+                        or type(target["returncode"]) is not int or not -128 <= target["returncode"] <= 255
+                        or type(target["stderrKind"]) is not str or target["stderrKind"] not in {"empty", "traceback-frames", "unavailable"}
+                        or not locations_valid(target["locations"], 2)
+                        or bool(target["locations"]) != (target["stderrKind"] == "traceback-frames")):
+                    return None
+            if observations and value["testId"] != observations[0]["testId"]:
+                return None
+            canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii")
+            if canonical != line[len(marker):-1]:
+                return None
+            layers.add(value["layer"])
+            observations.append(value)
+        return {"schema": 1, "observations": observations} if observations else None
+    finally:
+        check_clock(deadline)  # Optional diagnostics cannot renew the original phase endpoint.
+
+
+def signing_adapter_phase_failure(raw: bytes, scope: SigningAdapterDiagnostic, *, deadline: float) -> dict | None:
+    """Independent optional phase DATA; never changes original capture finality."""
+    check_clock(deadline)
+    try:
+        if (type(raw) is not bytes or not 0 < len(raw) <= 65536 or type(scope) is not SigningAdapterDiagnostic
+                or scope.phase not in {"source", "wheel"}):
+            return None
+        marker = b"MRK_SIGNING_ADAPTER_PHASE_FAILURE="
+        stages = {"admission", "imports", "inventory", "suite", "postconditions", "origins", "publication"}
+        categories = {"os-error", "assertion-error", "value-error", "type-error", "memory-error", "exception", "base-exception"}
+        files = {"tests/workflow/run_local_signing_matrix.py", "tests/workflow/local_signing_matrix_contract.py"}
+        observation = None
+        for line in raw.splitlines(keepends=True):
+            check_clock(deadline)
+            if not line.startswith(marker):
+                continue
+            if len(line) > 2048 or not line.endswith(b"\n") or observation is not None:
+                return None
+            try:
+                value = strict_json(line[len(marker):-1].decode("ascii"))
+            except (UnicodeError, ValueError, VerificationError, RecursionError):
+                return None
+            if (type(value) is not dict or set(value) != {"schema", "phase", "stage", "category", "locations"}
+                    or type(value["schema"]) is not int or value["schema"] != 1
+                    or type(value["phase"]) is not str or value["phase"] != scope.phase
+                    or type(value["stage"]) is not str or value["stage"] not in stages
+                    or type(value["category"]) is not str or value["category"] not in categories
+                    or type(value["locations"]) is not list or len(value["locations"]) > 4
+                    or any(type(location) is not dict or set(location) != {"file", "line"}
+                           or type(location["file"]) is not str or location["file"] not in files
+                           or type(location["line"]) is not int or not 0 < location["line"] < 1_000_000
+                           for location in value["locations"])):
+                return None
+            canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii")
+            if canonical != line[len(marker):-1]:
+                return None
+            observation = value
+        return observation
+    finally:
+        check_clock(deadline)
+
+
+def _signing_matrix_diagnostic_scope(scope) -> bool:
+    return (type(scope) is SigningMatrixDiagnostic
+            and type(scope.phase) is str and scope.phase in {"source", "wheel"}
+            and type(scope.operating_system) is str and scope.operating_system in {"ubuntu-24.04", "macos-26"}
+            and type(scope.shard) is int and 0 <= scope.shard < 48
+            and type(scope.identifiers) is tuple and 0 < len(scope.identifiers) <= 512
+            and all(type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) for value in scope.identifiers)
+            and len(set(scope.identifiers)) == len(scope.identifiers)
+            and type(scope.regression_ids) is tuple
+            and all(type(value) is str and value in scope.identifiers for value in scope.regression_ids)
+            and len(set(scope.regression_ids)) == len(scope.regression_ids)
+            and type(scope.files) is tuple and len(scope.files) <= 512
+            and all(type(value) is str and len(value) <= 256 and re.fullmatch(
+                r"(?:tests|\.github/scripts|src/mobile_release)/(?:[A-Za-z_][A-Za-z0-9_-]*/)*[A-Za-z_][A-Za-z0-9_-]*\.py",
+                value) for value in scope.files)
+            and len(set(scope.files)) == len(scope.files)
+            and _signing_matrix_child_bindings(scope))
+
+
+def _signing_matrix_child_bindings(scope) -> bool:
+    if type(scope.child_bindings) is not tuple or len(scope.child_bindings) > len(scope.identifiers):
+        return False
+    seen = set()
+    steps = {"healthy", "seed", "recovery", "semantic-main", "semantic-resolution"}
+    for row in scope.child_bindings:
+        if (type(row) is not tuple or len(row) != 3 or type(row[0]) is not str
+                or row[0] not in scope.identifiers or row[0] in seen or type(row[1]) is not str
+                or row[1] not in {"profile-signal", "semantic-worker"}
+                or type(row[2]) is not tuple or not row[2]
+                or any(type(value) is not str or not 0 < len(value) <= 64 for value in row[2])
+                or len(set(row[2])) != len(row[2])):
+            return False
+        if (row[1] == "profile-signal" and (row[0] not in scope.regression_ids or len(row[2]) != 1)
+                or row[1] == "semantic-worker" and (row[0] in scope.regression_ids or not set(row[2]) <= steps)):
+            return False
+        seen.add(row[0])
+    return True
+
+
+def signing_matrix_progress(raw: bytes, scope: SigningMatrixDiagnostic, *, deadline: float,
+                            failed_capture: bool = False) -> dict | None:
+    """Strict optional original-phase prefix, never a case/cleanup receipt.
+
+    Success allows only this canonical transcript (including an empty prefix).
+    A failed original may additionally have unrelated trailing stderr: stop at
+    its first non-progress line, without projecting that text or scanning for
+    a later apparent marker. Both paths only examine returned immutable bytes.
+    """
+    check_clock(deadline)
+    try:
+        if (type(raw) is not bytes or len(raw) > 65536 or type(failed_capture) is not bool
+                or not _signing_matrix_diagnostic_scope(scope)):
+            return None
+        if not raw:
+            return {"eventCount": 0, "lastEvent": None}
+        if len(scope.identifiers) > 32 or not failed_capture and len(raw) > 16 * 1024:
+            return None
+        marker = b"MRK_SIGNING_MATRIX_PROGRESS="
+        count = total = elapsed = 0
+        last = None
+        for line in raw.splitlines(keepends=True):
+            check_clock(deadline)
+            if not line.startswith(marker):
+                return {"eventCount": count, "lastEvent": last} if failed_capture and count else None
+            if count >= 64 or len(line) > 256 or not line.endswith(b"\n"):
+                return None
+            total += len(line)
+            if total > 16 * 1024:
+                return None
+            try:
+                value = strict_json(line[len(marker):-1].decode("ascii"))
+            except (UnicodeError, ValueError, VerificationError, RecursionError):
+                return None
+            index, half = divmod(count, 2)
+            if (type(value) is not dict
+                    or set(value) != {"schema", "phase", "caseId", "ordinal", "event", "elapsedMs"}
+                    or type(value["schema"]) is not int or value["schema"] != 1
+                    or type(value["phase"]) is not str or value["phase"] != scope.phase
+                    or index >= len(scope.identifiers)
+                    or type(value["caseId"]) is not str or value["caseId"] != scope.identifiers[index]
+                    or type(value["ordinal"]) is not int or value["ordinal"] != index + 1
+                    or type(value["event"]) is not str
+                    or value["event"] != ("helper-start", "helper-returned")[half]
+                    or type(value["elapsedMs"]) is not int or not elapsed <= value["elapsedMs"] <= 420_000):
+                return None
+            canonical = json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                   ensure_ascii=True, allow_nan=False).encode("ascii")
+            if canonical != line[len(marker):-1]:
+                return None
+            count += 1
+            elapsed, last = value["elapsedMs"], value
+        return {"eventCount": count, "lastEvent": last}
+    finally:
+        check_clock(deadline)
+
+
+def signing_matrix_failure(raw: bytes, scope: SigningMatrixDiagnostic, *, deadline: float) -> dict | None:
+    """Independently validate already-captured failure DATA, including UNKNOWN."""
+    check_clock(deadline)
+    try:
+        if type(raw) is not bytes or not 0 < len(raw) <= 65536 or not _signing_matrix_diagnostic_scope(scope):
+            return None
+        marker = b"MRK_SIGNING_MATRIX_FAILURE="
+        worker_marker = b"MRK_SIGNING_MATRIX_WORKER_FAILURE="
+        stages = {"admission", "helper", "typed-result", "persist", "cleanup", "postconditions", "publication"}
+        categories = {"os-error", "assertion-error", "value-error", "type-error", "memory-error", "exception", "base-exception"}
+
+        def valid_locations(value):
+            return (type(value) is list and len(value) <= 4
+                    and all(type(row) is dict and set(row) == {"file", "line"}
+                            and type(row["file"]) is str and row["file"] in scope.files
+                            and type(row["line"]) is int and 0 < row["line"] < 1_000_000 for row in value))
+
+        bindings = {identifier: (role, selectors) for identifier, role, selectors in scope.child_bindings}
+
+        def worker_binding(identifier):
+            if identifier in scope.regression_ids:
+                return "regression-worker", ("regression",)
+            value = bindings.get(identifier)
+            return value if value is not None and value[0] == "semantic-worker" else None
+
+        def valid_original(value):
+            return (type(value) is dict and set(value) == {"category", "locations"}
+                    and type(value["category"]) is str and value["category"] in categories
+                    and valid_locations(value["locations"]) and len(value["locations"]) <= 2)
+
+        def valid_profile(value, identifier):
+            binding = bindings.get(identifier)
+            return (type(value) is dict and binding is not None and binding[0] == "profile-signal"
+                    and set(value) == {"role", "returncode", "stdoutBytes", "stderrBytes", "stderrKind", "locations"}
+                    and value["role"] == "profile-signal" and type(value["returncode"]) is int
+                    and -128 <= value["returncode"] <= 255 and value["returncode"] != 0
+                    and all(type(value[key]) is int and 0 <= value[key] <= 65536
+                            for key in ("stdoutBytes", "stderrBytes"))
+                    and type(value["stderrKind"]) is str
+                    and value["stderrKind"] in {"empty", "stderr-reported", "unavailable"}
+                    and (value["stderrBytes"] == 0) == (value["stderrKind"] == "empty")
+                    and valid_locations(value["locations"]) and len(value["locations"]) <= 2
+                    and bool(value["locations"]) == (value["stderrKind"] == "stderr-reported")
+                    and (value["stderrKind"] != "stderr-reported" or value["stderrBytes"] <= 8192))
+
+        observed = worker = None
+        worker_bytes = worker_locations = 0
+        for line in raw.splitlines(keepends=True):
+            check_clock(deadline)
+            is_worker = line.startswith(worker_marker)
+            if not is_worker and not line.startswith(marker):
+                continue
+            prefix = worker_marker if is_worker else marker
+            if (len(line) > (1536 if is_worker else 2048) or not line.endswith(b"\n")
+                    or observed is not None or is_worker and worker is not None):
+                return None
+            try:
+                value = strict_json(line[len(prefix):-1].decode("ascii"))
+            except (UnicodeError, ValueError, VerificationError, RecursionError):
+                return None
+            if is_worker:
+                common = {"schema", "phase", "caseId", "step", "category", "locations"}
+                if (type(value) is not dict or not common <= set(value)
+                        or type(value["schema"]) is not int or value["schema"] not in {1, 2}
+                        or type(value["phase"]) is not str or value["phase"] != scope.phase
+                        or type(value["caseId"]) is not str or value["caseId"] not in scope.identifiers
+                        or type(value["step"]) is not str
+                        or type(value["category"]) is not str or value["category"] not in categories
+                        or not valid_locations(value["locations"])):
+                    return None
+                binding = worker_binding(value["caseId"])
+                if binding is None or value["step"] not in binding[1]:
+                    return None
+                worker_locations = len(value["locations"])
+                if value["schema"] == 1:
+                    if (set(value) != common or binding[0] != "semantic-worker"
+                            or len(line) > 768 or worker_locations > 2):
+                        return None
+                else:
+                    if (set(value) != common | {"role", "originalGFailure", "child"}
+                            or binding[0] != "regression-worker" or value["role"] != "regression-worker"):
+                        return None
+                    original, child = value["originalGFailure"], value["child"]
+                    if original is not None:
+                        if not valid_original(original):
+                            return None
+                        worker_locations += len(original["locations"])
+                    if child is not None:
+                        if original is None or not valid_profile(child, value["caseId"]):
+                            return None
+                        worker_locations += len(child["locations"])
+                    if worker_locations > 4:
+                        return None
+                canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+                                       allow_nan=False).encode("ascii")
+                if canonical != line[len(prefix):-1]:
+                    return None
+                worker, worker_bytes = value, len(line)
+                continue
+            if (type(value) is not dict
+                    or set(value) != {"schema", "phase", "caseId", "stage", "category", "locations", "originalGFailure", "child"}
+                    or type(value["schema"]) is not int or value["schema"] != 2
+                    or type(value["phase"]) is not str or value["phase"] != scope.phase
+                    or (value["caseId"] is not None and (type(value["caseId"]) is not str
+                                                       or value["caseId"] not in scope.identifiers))
+                    or type(value["stage"]) is not str or value["stage"] not in stages
+                    or value["stage"] in {"helper", "typed-result", "cleanup"} and value["caseId"] is None
+                    or value["stage"] in {"admission", "postconditions", "publication"} and value["caseId"] is not None
+                    or type(value["category"]) is not str or value["category"] not in categories
+                    or not valid_locations(value["locations"])):
+                return None
+            if value["originalGFailure"] is not None:
+                return None  # The original G traceback now belongs only to W.
+            binding = worker_binding(value["caseId"])
+            semantic = binding is not None and binding[0] == "semantic-worker"
+            regression = value["stage"] == "helper" and value["caseId"] in scope.regression_ids
+            # Source-prebound quotas survive missing optional tuple/W data.
+            if semantic and (len(line) > 1280 or len(value["locations"]) > 2):
+                return None
+            if regression and (len(line) > 512 or value["locations"]):
+                return None
+            child = value["child"]
+            total_locations = len(value["locations"])
+            if child is not None:
+                if (type(child) is not dict or binding is None or value["stage"] != "helper"
+                        or type(child.get("role")) is not str or child["role"] != binding[0]):
+                    return None
+                if (set(child) != {"role", "step", "expectedExit", "workerExit", "anchorExit", "terminalParsed", "anchorExpired"}
+                        or type(child["step"]) is not str or child["step"] not in binding[1]
+                        or type(child["expectedExit"]) is not int
+                        or child["expectedExit"] not in ({0} if regression else {0, 73, -9})
+                        or any(child[key] is not None and (type(child[key]) is not int or not -128 <= child[key] <= 255)
+                               for key in ("workerExit", "anchorExit"))
+                        or type(child["terminalParsed"]) is not bool
+                        or (child["workerExit"] is not None) != child["terminalParsed"]
+                        or (type(child["anchorExpired"]) is not bool if child["terminalParsed"]
+                            else child["anchorExpired"] is not None)):
+                    return None
+            if worker is not None:
+                if (not (semantic or regression) or child is None or child["role"] != binding[0]
+                        or worker["caseId"] != value["caseId"] or worker["step"] != child["step"]):
+                    return None
+                total_locations += worker_locations
+            if total_locations > 4 or len(line) + worker_bytes > 2048:
+                return None
+            canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii")
+            if canonical != line[len(marker):-1]:
+                return None
+            observed = value
+        return {**observed, "workerFailure": worker} if observed is not None and worker is not None else observed
+    finally:
+        check_clock(deadline)  # Only the caller's already-bound endpoint, never renewed here.
 
 
 def python_storage_profile(data: object) -> dict | None:
@@ -1656,6 +2319,93 @@ def _profile_failure_for_callbacks(raw: bytes, callbacks: list[dict], *, deadlin
                 diagnostic["mode"] in PROFILE_FIXTURE_FAILURE_CALLBACK_MODES[row["id"]] for row in eligible):
             return diagnostic
     return None
+
+
+def command_account_failure(raw: bytes, *, deadline: float | None = None) -> dict | None:
+    """Existing worker marker only; no private report read or custody claim."""
+    data = _fixture_failure_record(raw, COMMAND_ACCOUNT_FAILURE_PREFIX, 2048, deadline=deadline,
+                                   canonical_fields=("category", "frames"))
+    if (type(data) is not dict or type(data["category"]) is not str
+            or data["category"] not in COMMAND_ACCOUNT_FAILURE_CATEGORIES
+            or type(data["frames"]) is not list or len(data["frames"]) > 12):
+        return None
+    locations = []
+    for frame in data["frames"]:
+        if (type(frame) is not list or len(frame) != 2 or type(frame[0]) is not str
+                or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,127}\.py", frame[0]) is None
+                or type(frame[1]) is not int or not 0 < frame[1] < 1_000_000):
+            return None
+        # The emitter records basenames, not authenticated source origins.
+        # Unknown/stdlib/private names are omitted, never echoed or resolved.
+        name = COMMAND_ACCOUNT_FAILURE_FILES.get(frame[0])
+        if name is not None:
+            locations.append({"file": name, "line": frame[1]})
+    if deadline is not None:
+        check_clock(deadline)
+    return {"category": COMMAND_ACCOUNT_FAILURE_CATEGORIES[data["category"]], "locations": locations}
+
+
+def _command_account_failure_for_callbacks(raw: bytes, callbacks: list[dict], *,
+                                           deadline: float | None = None) -> dict | None:
+    """Only source-validated adverse account-case callbacks are eligible."""
+    if any(row["id"] in COMMAND_ACCOUNT_FAILURE_IDS and row["outcome"] in {"error", "failure"}
+           for row in callbacks):
+        return command_account_failure(raw, deadline=deadline)
+    return None
+
+
+def command_failure_context(raw: bytes, callbacks: list[dict], paths: Paths, phase: str, *,
+                            mode_output: bytes = b"", deadline: float | None = None) -> dict:
+    """Optional captured-text attribution, never a source or finality receipt.
+
+    The filename map uses only frozen controller paths and fixed source names.
+    No source lookup, traceback/linecache read, import or subject acquisition
+    follows a failed original. A matching header is still only reported text.
+    """
+    try:
+        if deadline is not None:
+            check_clock(deadline)
+        eligible = {row["id"] for row in callbacks if row["outcome"] in {"error", "failure"}}
+        if (not eligible.intersection(COMMAND_ACCOUNT_FAILURE_IDS | {COMMAND_CASE_FAILURE_ID})
+                or type(raw) is not bytes or len(raw) > 8 * 1024**2
+                or type(mode_output) is not bytes or len(mode_output) > 8 * 1024**2
+                or phase not in {"source", "wheel"}):
+            return {}
+        package = (paths.work / "source-build/src/mobile_release" if phase == "source"
+                   else paths.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
+        filenames = {str(package / name.removeprefix("src/mobile_release/"))
+                     if name.startswith("src/mobile_release/") else str(paths.source / name): name
+                     for name in COMMAND_FAILURE_FILES}
+        locations = []
+        pattern = (r'  File "([^"\r\n]{1,1024})", line ([1-9][0-9]{0,5}), '
+                   r'in (?:<module>|[A-Za-z_][A-Za-z0-9_]*)\r?\n')
+        for line in raw.splitlines(keepends=True):
+            if deadline is not None:
+                check_clock(deadline)
+            if len(locations) < 16:
+                match = re.fullmatch(pattern, line.decode("utf-8", "replace"))
+                if match is not None and match[1] in filenames:
+                    locations.append({"file": filenames[match[1]], "line": int(match[2])})
+        # Modes use stdout so they cannot split unittest's stderr success line.
+        # Never combine the two streams to invent cross-stream ordering.
+        mode_count, valid_modes = 0, True
+        prefix = COMMAND_CASE_MODE_PREFIX.encode("ascii")
+        for line in mode_output.splitlines(keepends=True) if COMMAND_CASE_FAILURE_ID in eligible else ():
+            if deadline is not None:
+                check_clock(deadline)
+            if line.startswith(prefix):
+                if (not valid_modes or mode_count >= len(COMMAND_CASE_MODES)
+                        or line != prefix + COMMAND_CASE_MODES[mode_count].encode("ascii") + b"\n"):
+                    valid_modes = False
+                else:
+                    mode_count += 1
+        result = {"command_failure_locations": locations} if locations else {}
+        if valid_modes and mode_count:
+            result["command_case_mode"] = COMMAND_CASE_MODES[mode_count - 1]
+        return result
+    finally:
+        if deadline is not None:
+            check_clock(deadline)
 
 
 def fixture_bootstrap_failure(raw: bytes, *, deadline: float | None = None) -> dict | None:
@@ -2205,24 +2955,57 @@ def require_original_finality(result) -> None:
 
 
 def original_native_capture(session, argv, paths: Paths, rows: list[dict], name: str, *,
-                            deadline: float, seconds: int, env: dict, output_limit: int = 65536):
+                            deadline: float, seconds: int, env: dict, output_limit: int = 65536,
+                            cpu_seconds: int = 180, signing_adapter_diagnostic: SigningAdapterDiagnostic | None = None,
+                            signing_matrix_diagnostic: SigningMatrixDiagnostic | None = None,
+                            signing_matrix_pair_deadline: float | None = None):
     """One original ordinary capture plus idle closure under the same cutoff.
 
     Never synthesize/merge CapturedRun objects. Semantic parsing follows this
     function; even later rejection retains the original wait/EOF facts.
+    Only an already-failed matrix capture may project returned bytes under its
+    prebound enclosing pair endpoint. Native work and idle never use that time.
     """
     check_clock(deadline)
+    if signing_matrix_pair_deadline is not None and signing_matrix_diagnostic is None:
+        raise VerificationError("SIGNING_MATRIX_DIAGNOSTIC_SCOPE")
+    if signing_adapter_diagnostic is not None:
+        scope = signing_adapter_diagnostic
+        if (type(scope) is not SigningAdapterDiagnostic or scope.phase not in {"source", "wheel"}
+                or scope.phase != name or type(scope.identifiers) is not tuple or len(scope.identifiers) != 5
+                or type(scope.files) is not tuple or not scope.files
+                or "--adapter-phase" not in argv
+                or str(paths.source / "tests/workflow/run_local_signing_matrix.py") not in argv):
+            raise VerificationError("SIGNING_ADAPTER_DIAGNOSTIC_SCOPE")
+    if signing_matrix_diagnostic is not None:
+        scope = signing_matrix_diagnostic
+        arguments = tuple(map(str, argv))
+        if (signing_adapter_diagnostic is not None or not _signing_matrix_diagnostic_scope(scope)
+                or scope.phase != name or "--adapter-phase" in arguments
+                or arguments.count(str(paths.source / "tests/workflow/run_local_signing_matrix.py")) != 1):
+            raise VerificationError("SIGNING_MATRIX_DIAGNOSTIC_SCOPE")
+        for option, expected in (("--phase", scope.phase), ("--os", scope.operating_system),
+                                 ("--shard", str(scope.shard)), ("--deadline", repr(deadline))):
+            if (arguments.count(option) != 1 or arguments.index(option) + 1 == len(arguments)
+                    or arguments[arguments.index(option) + 1] != expected):
+                raise VerificationError("SIGNING_MATRIX_DIAGNOSTIC_SCOPE")
+        if (type(signing_matrix_pair_deadline) is not float or not math.isfinite(signing_matrix_pair_deadline)
+                or deadline > signing_matrix_pair_deadline
+                or not 0 < signing_matrix_pair_deadline - time.monotonic() <= MATRIX_PAIR_SECONDS):
+            raise VerificationError("SIGNING_MATRIX_DIAGNOSTIC_DEADLINE")
     session.ensure_idle(deadline=deadline)
     row = {"stage": name, "status": "RUNNING"}
     rows.append(row)
     result = session.run(list(map(str, argv)), cwd=paths.work, env=env, seconds=seconds,
-                         cpu_seconds=180, output_limit=output_limit, profile="ordinary", absolute_deadline=deadline)
+                         cpu_seconds=cpu_seconds, output_limit=output_limit, profile="ordinary",
+                         absolute_deadline=deadline, dispose_retained_domain=False)
     row["capture"] = capture_observations(result)
     primary = None
     try:
         require_original_finality(result)
     except BaseException as exc:
         primary = exc
+    capture_failed = primary is not None
     try:
         session.ensure_idle(deadline=deadline)
     except BaseException as exc:
@@ -2232,6 +3015,40 @@ def original_native_capture(session, argv, paths: Paths, rows: list[dict], name:
             row["idle_error"] = error_details(exc)
     if primary is not None:
         row["status"] = "FAIL"
+        if signing_adapter_diagnostic is not None:
+            try:
+                diagnostic = signing_adapter_failure(result.stderr, signing_adapter_diagnostic, deadline=deadline)
+                if diagnostic is not None:
+                    row["adapter_failure"] = diagnostic
+                    if result.ok is False:
+                        callbacks = [{"id": item["testId"], "outcome": item["outcome"]}
+                                     for item in diagnostic["observations"] if item["layer"] == "unittest"]
+                        account = _command_account_failure_for_callbacks(result.stderr, callbacks, deadline=deadline)
+                        if account is not None:
+                            row["command_account_failure"] = account
+            except BaseException:
+                row["diagnostic_error"] = {"error": "SIGNING_ADAPTER_DIAGNOSTIC_UNAVAILABLE"}
+            try:
+                phase_diagnostic = signing_adapter_phase_failure(result.stderr, signing_adapter_diagnostic, deadline=deadline)
+                if phase_diagnostic is not None:
+                    row["adapter_phase_failure"] = phase_diagnostic
+            except BaseException:
+                row["phase_diagnostic_error"] = {"error": "SIGNING_ADAPTER_PHASE_DIAGNOSTIC_UNAVAILABLE"}
+        if signing_matrix_diagnostic is not None and capture_failed:
+            try:
+                diagnostic = signing_matrix_failure(result.stderr, signing_matrix_diagnostic,
+                                                    deadline=signing_matrix_pair_deadline)
+                if diagnostic is not None:
+                    row["matrix_failure"] = diagnostic
+            except BaseException:
+                row["matrix_diagnostic_error"] = {"error": "SIGNING_MATRIX_DIAGNOSTIC_UNAVAILABLE"}
+            try:
+                progress = signing_matrix_progress(result.stderr, signing_matrix_diagnostic,
+                                                   deadline=signing_matrix_pair_deadline, failed_capture=True)
+                if progress is not None and progress["eventCount"]:
+                    row["matrix_progress"] = progress
+            except BaseException:
+                row["matrix_progress_error"] = {"error": "SIGNING_MATRIX_PROGRESS_UNAVAILABLE"}
         raise primary
     check_clock(deadline)
     row["status"] = "FINALIZED"
@@ -2344,9 +3161,32 @@ def native_ruby_observation(raw: bytes, paths: Paths, *, phase: str, bundled: bo
             "helper_sha256": data["helper_sha256"], "feature_sha256": feature_hashes}
 
 
+def _native_entry_failure_locations(text: str, entry: Path, *, deadline: float | None = None) -> list:
+    """Reported frames from one prebound entry, not execution or failure authority."""
+    if deadline is not None:
+        check_clock(deadline)
+    locations = []
+    if entry.is_absolute():
+        pattern = (r'(?m)^  File "' + re.escape(str(entry))
+                   + r'", line ([1-9][0-9]{0,5}), in (?:<module>|[A-Za-z_][A-Za-z0-9_]*)\r?$')
+        for match in re.finditer(pattern, text):
+            if deadline is not None:
+                check_clock(deadline)
+            locations.append(["tests/workflow/run_native_profile_checks.py", int(match[1])])
+            del locations[:-8]
+    if deadline is not None:
+        check_clock(deadline)
+    return locations
+
+
 def failure_details(result, step: Step | None = None, paths: Paths | None = None,
-                    *, checks=None, deadline: float | None = None, platform: str | None = None) -> dict:
+                    *, checks=None, deadline: float | None = None, platform: str | None = None,
+                    _python_expected: tuple[str, ...] | None = None) -> dict:
     """Public-safe observations only; never forward raw child diagnostics."""
+    if _python_expected is not None:
+        if step is None or checks is None:
+            raise VerificationError("PYTHON_PREBOUND_EXPECTATIONS")
+        _python_prebound_expectations(step, platform, checks, _python_expected)
     value = capture_observations(result)
     # These are fixed source file/line and exception-class observations, not
     # raw exceptions, fixture logs, private paths, environment or signing data.
@@ -2354,6 +3194,18 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
     value["locations"] = [[name, int(line)] for name, line in re.findall(
         r'File "[^"\r\n]*/(ci_sandbox\.py|ci_checks\.py)", line ([0-9]{1,6})', text)][-8:]
     value["exception_types"] = re.findall(r"(?m)^([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception)):", text)[-8:]
+    if (result.ok is False and step is not None and paths is not None and step.parser == "native"
+            and step.id in {"native-profile-source", "native-profile-wheel"}):
+        try:
+            locations = _native_entry_failure_locations(text,
+                paths.source / "tests/workflow/run_native_profile_checks.py", deadline=deadline)
+            if locations:
+                value["native_entry_locations"] = locations
+        except Exception:
+            # Optional attribution must not replace the original capture failure.
+            # Expiry still consumes the same original deadline, never a new one.
+            if deadline is not None:
+                check_clock(deadline)
     for line in result.stdout.decode("utf-8", "replace").splitlines():
         if not line.startswith("MRK_CHECK_RESULT=") or len(line) > 256 * 1024:
             continue
@@ -2380,14 +3232,24 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                     and data.get("check") == step.id and data.get("ok") is False
                     and "failure_callbacks" in detail):
                 try:
-                    expected = checks.python_capture_ids(paths.source,
-                        "full" if step.id == "python-full" else "wheel", "healthy", deadline=deadline)
+                    if deadline is not None:
+                        check_clock(deadline)
+                    expected = (_python_expected if _python_expected is not None else
+                        checks.python_capture_ids(paths.source,
+                            "full" if step.id == "python-full" else "wheel", "healthy", deadline=deadline))
                     callbacks = python_failure_callbacks(detail["failure_callbacks"], expected)
                     if callbacks is not None:
                         value["failure_callbacks"] = callbacks
                         diagnostic = _profile_failure_for_callbacks(result.stderr, callbacks, deadline=deadline)
                         if diagnostic is not None:
                             value["profile_fixture_failure"] = diagnostic
+                        if result.ok is False:
+                            account = _command_account_failure_for_callbacks(result.stderr, callbacks, deadline=deadline)
+                            if account is not None:
+                                value["command_account_failure"] = account
+                            value.update(command_failure_context(result.stderr, callbacks, paths,
+                                "source" if step.id == "python-full" else "wheel",
+                                mode_output=result.stdout, deadline=deadline))
                 except Exception:
                     # Optional diagnostics must not replace the original failure.
                     # Do not absorb expiry of the original aggregate timer.
@@ -2504,7 +3366,7 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
     if (step is not None and paths is not None and checks is not None
             and (step.id in {"native-profile-source", "native-profile-wheel"}
                  or step.id in {"python-full", "python-wheel"} and step.parser == "native"
-                 and step.native_partition in PYTHON_POISON_PARTITIONS)):
+                 and step.native_partition in PYTHON_SINGLETON_PARTITIONS)):
         stderr = result.stderr.decode("utf-8", "replace")
         lowered = stderr.lower()
         # These fixed tokens are observations of captured text, not diagnoses
@@ -2530,6 +3392,13 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                     profile = _profile_failure_for_callbacks(result.stderr, diagnostic["records"], deadline=deadline)
                     if profile is not None:
                         value["profile_fixture_failure"] = profile
+                    if result.ok is False:
+                        account = _command_account_failure_for_callbacks(result.stderr, diagnostic["records"], deadline=deadline)
+                        if account is not None:
+                            value["command_account_failure"] = account
+                        value.update(command_failure_context(result.stderr, diagnostic["records"], paths,
+                            "source" if step.id in {"python-full", "native-profile-source"} else "wheel",
+                            mode_output=result.stdout, deadline=deadline))
         except Exception:
             if deadline is not None:
                 check_clock(deadline)
@@ -2557,7 +3426,7 @@ def make_layout(paths: Paths, session, *, deadline: float) -> None:
     os.chown(paths.work, 0, 0)
     os.chmod(paths.work, 0o755)
     for name in ("source-venv", "wheel-venv", "bundler", "bundle", "gem-cache",
-                 "bundle-config", "bundle-home", "wheels", "checks", "native-process-abi", "ruby-negative"):
+                 "bundle-config", "bundle-home", "wheels", "checks", "native-process-abi", "ruby-negative", "signing-matrix", "signing-adapter"):
         check_clock(deadline)
         path = paths.work / name
         path.mkdir(mode=0o700)
@@ -3038,6 +3907,36 @@ def perform_compatibility_gate(step: Step, paths: Paths, session, checks, platfo
         return CheckResult(False, details, exc.code if isinstance(exc, VerificationError) else "NATIVE_COMPATIBILITY_GATE_FAILURE")
 
 
+def pending_signing_delegation(checks, source: Path, operating_system: str, inventories: dict,
+                               details: dict, code: str, *, deadline: float, _metadata=None) -> tuple[str, ...]:
+    """Source-only pending obligations, never appended to executed-test receipts."""
+    check_clock(deadline)
+    if _metadata is None:
+        _metadata = checks.signing_regression_metadata(source, operating_system, deadline=deadline)
+    if type(_metadata) is not tuple or len(_metadata) != 2:
+        raise VerificationError(code)
+    delegated, requirements = _metadata
+    if (type(delegated) is not tuple or not delegated or any(type(value) is not str for value in delegated)
+            or tuple(sorted(set(delegated))) != delegated or type(requirements) is not MappingProxyType
+            or tuple(requirements) != delegated or inventories["delegated"] != delegated):
+        raise VerificationError(code)
+    parts = []
+    for method, identifiers in requirements.items():
+        if (type(identifiers) is not tuple or not identifiers
+                or any(type(value) is not str or not value.startswith("G/" + method + "/") for value in identifiers)
+                or tuple(sorted(set(identifiers))) != identifiers):
+            raise VerificationError(code)
+        parts.extend(identifiers)
+    if len(parts) != len(set(parts)):
+        raise VerificationError(code)
+    details.update(source_obligation_count=len(inventories["all"]),
+        pending_delegation={"methods": list(delegated),
+                            "requirements": {method: list(parts) for method, parts in requirements.items()}},
+        coverage="partial-until-layered-matrix")
+    check_clock(deadline)
+    return delegated
+
+
 def perform_native_gate(step: Step, paths: Paths, session, checks,
                         platform: str, *, deadline: float) -> CheckResult:
     """Authority, healthy and literal singleton originals share one logical cutoff.
@@ -3049,7 +3948,7 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
     started = time.monotonic()
     details = {"stage": "contract", "partitions": [
         {"partition": name, "status": "UNEXECUTED"}
-        for name in ("authority", "ordinary", *PYTHON_POISON_PARTITIONS)
+        for name in ("authority", "ordinary", *PYTHON_SINGLETON_PARTITIONS)
     ]}
     active = None
     originals = []  # Root each original capture through the complete logical proof.
@@ -3074,12 +3973,15 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
         check_capacity(paths.work, 64 * 1024**2)
         details["stage"] = "inventory"
         inventories = {name: checks.native_partition_ids(paths.source, name, deadline=cutoff)
-                       for name in ("all", "authority", "ordinary", *PYTHON_POISON_PARTITIONS)}
-        joined = tuple(identifier for row in details["partitions"] for identifier in inventories[row["partition"]])
+                       for name in ("all", "delegated", "authority", "ordinary", *PYTHON_SINGLETON_PARTITIONS)}
+        delegated = pending_signing_delegation(checks, paths.source, "macos-26", inventories, details,
+                                               "NATIVE_PARTITION_UNION", deadline=cutoff)
+        joined = tuple(identifier for row in details["partitions"] for identifier in inventories[row["partition"]]) + delegated
         if (any(type(ids) is not tuple or not ids or tuple(sorted(set(ids))) != ids
                 for ids in inventories.values())
                 or len(inventories["authority"]) != 5
-                or any(len(inventories[name]) != 1 for name in PYTHON_POISON_PARTITIONS)
+                or tuple(name for name, _identifier in checks.PYTHON_SINGLETON_CASES) != PYTHON_SINGLETON_PARTITIONS
+                or any(inventories[name] != (identifier,) for name, identifier in checks.PYTHON_SINGLETON_CASES)
                 or len(joined) != len(set(joined)) or tuple(sorted(joined)) != inventories["all"]):
             raise VerificationError("NATIVE_PARTITION_UNION")
         details["stage"] = "package"
@@ -3097,9 +3999,10 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
             session.ensure_idle(deadline=cutoff)
             authority = partition == "authority"
             poison = partition in PYTHON_POISON_PARTITIONS
+            singleton = partition in PYTHON_SINGLETON_PARTITIONS
             part = dataclasses.replace(step, native_partition=partition,
-                argv=(str(python), "-I", *(("-S",) if authority or poison else ()), "-B", str(entry),
-                      *((f"--{partition}-{phase}",) if poison else ("--" + partition, *tail))),
+                argv=(str(python), "-I", *(("-S",) if authority or singleton else ()), "-B", str(entry),
+                      *((f"--{partition}-{phase}",) if singleton else ("--" + partition, *tail))),
                 cwd=paths.work / f"native-authority-{phase}" if authority else step.cwd,
                 env=() if authority else step.env)
             row["status"] = "RUNNING"
@@ -3113,7 +4016,7 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
             try:
                 require_original_finality(value)
                 parsed = parse_capture(part, value, paths, platform, checks, deadline=cutoff)
-                if poison:
+                if singleton:
                     row["runtime"] = native_python_observation(value.stdout, paths, minor=11, phase=phase,
                         executable=python, prefix=paths.python.parent.parent)
             except BaseException as exc:
@@ -3142,7 +4045,8 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
             completed.extend(observed)
         details["stage"] = "union"
         check_clock(cutoff)
-        if tuple(sorted(completed)) != inventories["all"] or len(completed) != len(set(completed)):
+        if (tuple(sorted(completed + list(delegated))) != inventories["all"]
+                or len(completed) + len(delegated) != len(set(completed) | set(delegated))):
             raise VerificationError("NATIVE_PARTITION_UNION")
         details.update(stage="complete", tests=len(completed), completed=sorted(completed))
         check_clock(cutoff)
@@ -3156,7 +4060,7 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
 
 def perform_python_gate(step: Step, paths: Paths, session, checks,
                         platform: str, *, deadline: float) -> CheckResult:
-    """Healthy Linux full/wheel plus fixed original ordinary singleton domains.
+    """Fixed original Linux singleton domains, then healthy full/wheel discovery.
 
     The full healthy capture keeps its exact admitted aggregate-deadline argv
     and storage profile. The original gate cutoff is an independent, tighter
@@ -3164,7 +4068,7 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
     """
     started = time.monotonic()
     details = {"stage": "contract", "partitions": [
-        {"partition": name, "status": "UNEXECUTED"} for name in ("healthy", *PYTHON_POISON_PARTITIONS)
+        {"partition": name, "status": "UNEXECUTED"} for name in (*PYTHON_SINGLETON_PARTITIONS, "healthy")
     ]}
     active = None
     originals = []
@@ -3186,13 +4090,24 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
         check_clock(cutoff)
         check_capacity(paths.work, 64 * 1024**2)
         details["stage"] = "inventory"
-        inventories = {name: checks.python_capture_ids(paths.source, selection, name, deadline=cutoff)
-                       for name in ("all", "healthy", *PYTHON_POISON_PARTITIONS)}
-        joined = tuple(identifier for row in details["partitions"] for identifier in inventories[row["partition"]])
-        if (any(type(ids) is not tuple or not ids or tuple(sorted(set(ids))) != ids for ids in inventories.values())
-                or any(len(inventories[name]) != 1 for name in PYTHON_POISON_PARTITIONS)
+        snapshot = checks.python_capture_snapshot(paths.source, selection, deadline=cutoff)
+        check_clock(cutoff)
+        if type(snapshot) is not tuple or len(snapshot) != 2:
+            raise VerificationError("PYTHON_CAPTURE_UNION")
+        inventories, metadata = snapshot
+        if (type(inventories) is not MappingProxyType or type(metadata) is not tuple or len(metadata) != 2
+                or set(inventories) != {"all", "delegated", "healthy", *PYTHON_SINGLETON_PARTITIONS}
+                or any(type(ids) is not tuple or not ids or any(type(value) is not str for value in ids)
+                       or tuple(sorted(set(ids))) != ids for ids in inventories.values())):
+            raise VerificationError("PYTHON_CAPTURE_UNION")
+        delegated = pending_signing_delegation(checks, paths.source, "ubuntu-24.04", inventories, details,
+                                               "PYTHON_CAPTURE_UNION", deadline=cutoff, _metadata=metadata)
+        joined = tuple(identifier for row in details["partitions"] for identifier in inventories[row["partition"]]) + delegated
+        if (tuple(name for name, _identifier in checks.PYTHON_SINGLETON_CASES) != PYTHON_SINGLETON_PARTITIONS
+                or any(inventories[name] != (identifier,) for name, identifier in checks.PYTHON_SINGLETON_CASES)
                 or len(joined) != len(set(joined)) or tuple(sorted(joined)) != inventories["all"]):
             raise VerificationError("PYTHON_CAPTURE_UNION")
+        progress_scope = python_progress_scope(inventories["healthy"])
         details["stage"] = "package"
         package = (paths.work / "source-build/src/mobile_release" if phase == "source"
                    else paths.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
@@ -3218,7 +4133,8 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
             primary = None
             try:
                 require_original_finality(value)
-                parsed = parse_capture(part, value, paths, platform, checks, deadline=cutoff)
+                parsed = parse_capture(part, value, paths, platform, checks, deadline=cutoff,
+                                       _python_expected=inventories[partition])
                 if not healthy:
                     row["runtime"] = native_python_observation(value.stdout, paths, minor=11, phase=phase,
                         executable=python, prefix=paths.python.parent.parent)
@@ -3232,9 +4148,14 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
                 else:
                     row["idle_error"] = error_details(exc)
             if primary is not None:
+                if healthy:
+                    try:
+                        row["python_progress"] = python_failure_progress(value.stderr, progress_scope)
+                    except BaseException as exc:
+                        row["python_progress_error"] = error_details(exc)
                 try:
                     row["capture"] = failure_details(value, part, paths, checks=checks,
-                        deadline=cutoff, platform=platform)
+                        deadline=cutoff, platform=platform, _python_expected=inventories[partition])
                 except BaseException as exc:
                     row["diagnostic_error"] = error_details(exc)
                 raise primary
@@ -3250,7 +4171,8 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
             completed.extend(observed)
         details["stage"] = "union"
         check_clock(cutoff)
-        if tuple(sorted(completed)) != inventories["all"] or len(completed) != len(set(completed)):
+        if (tuple(sorted(completed + list(delegated))) != inventories["all"]
+                or len(completed) + len(delegated) != len(set(completed) | set(delegated))):
             raise VerificationError("PYTHON_CAPTURE_UNION")
         details.update(stage="complete", tests=len(completed), completed=sorted(completed))
         check_clock(cutoff)
@@ -3555,8 +4477,379 @@ def perform_packaged_ruby_gate(step: Step, paths: Paths, session, checks, platfo
         return CheckResult(False, details, exc.code if isinstance(exc, VerificationError) else "PACKAGED_RUBY_GATE_FAILURE")
 
 
+def charge_matrix_bytes(session, count: int) -> None:
+    """Charge surviving private evidence/public proof to the original attempt."""
+    if (type(count) is not int or count < 0 or type(session.persisted_bytes) is not int
+            or session.persisted_bytes < 0):
+        raise VerificationError("MATRIX_PERSISTED_ACCOUNTING")
+    session.persisted_bytes += count  # Already-persisted bytes never disappear on failure/disposal.
+    if session.persisted_bytes > MATRIX_PERSISTED_LIMIT:
+        raise VerificationError("MATRIX_PERSISTED_OUTPUT_BOUND")
+
+
+def finalized_matrix_outputs(directory: Path, session, *, deadline: float) -> dict:
+    """Called only after the actual capture and same-cutoff Session idle proof."""
+    from itertools import islice
+    check_clock(deadline)
+    parent = directory.lstat()
+    if (not stat.S_ISDIR(parent.st_mode) or stat.S_IMODE(parent.st_mode) != 0o700
+            or parent.st_uid != session.uid):
+        raise VerificationError("MATRIX_PHASE_OUTPUT_STATE")
+    with os.scandir(directory) as entries:
+        names = [entry.name for entry in islice(entries, len(MATRIX_PHASE_FILES) + 1)]
+    if set(names) != MATRIX_PHASE_FILES or len(names) != len(MATRIX_PHASE_FILES):
+        raise VerificationError("MATRIX_PHASE_OUTPUT_INVENTORY")
+    count = 0
+    for name in names:
+        check_clock(deadline)
+        info = (directory / name).lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != session.uid
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_size < 0 or info.st_size > 64 * 1024**2):
+            raise VerificationError("MATRIX_PHASE_OUTPUT_STATE")
+        count += info.st_size
+    charge_matrix_bytes(session, count)
+    freeze_tree(directory, deadline=deadline)
+    return {"files": len(names), "bytes": count, "original_finality_before_read": True}
+
+
+def matrix_phase_argv(paths: Paths, selection: MatrixSelection, phase: str, *, deadline: float) -> tuple[str, ...]:
+    if phase not in {"source", "wheel"} or type(selection) is not MatrixSelection:
+        raise VerificationError("MATRIX_PHASE_SELECTION")
+    package = (paths.work / "source-build/src/mobile_release" if phase == "source" else
+               paths.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
+    return tuple(map(str, (
+        paths.source_python if phase == "source" else paths.wheel_python, "-I", "-S", "-B",
+        paths.source / "tests/workflow/run_local_signing_matrix.py", "--phase", phase,
+        "--package-root", package, "--output", paths.work / "signing-matrix" / phase,
+        "--shard", selection.shard, "--deadline", repr(deadline), "--os", selection.operating_system,
+        "--repository", selection.repository, "--commit", selection.commit, "--run-id", selection.run_id,
+        "--run-attempt", selection.attempt, "--job", selection.job,
+    )))
+
+
+def parse_matrix_phase(result, phase: str, scope: dict, package: Path, shard: int, *,
+                       diagnostic: SigningMatrixDiagnostic, deadline: float) -> dict | None:
+    check_clock(deadline)
+    require_original_finality(result)
+    if (not _signing_matrix_diagnostic_scope(diagnostic) or diagnostic.phase != phase
+            or diagnostic.shard != shard or diagnostic.operating_system != scope.get("os")):
+        raise VerificationError("MATRIX_PHASE_DIAGNOSTIC_SCOPE")
+    progress = signing_matrix_progress(result.stderr, diagnostic, deadline=deadline)
+    prefix = b"MRK_MATRIX_PHASE="
+    if (progress is None or type(result.stdout) is not bytes or not result.stdout.startswith(prefix)
+            or not result.stdout.endswith(b"\n") or result.stdout.count(b"\n") != 1 or len(result.stdout) > 65536):
+        raise VerificationError("MATRIX_PHASE_CAPTURE_RECORD")
+    record = strict_json(result.stdout[len(prefix):-1].decode("ascii"))
+    expected = {"schema": 2, "phase": phase, "shard": shard, "scope": scope,
+                "status": "phase-finished", "productionRoot": str(package)}
+    # Python mapping equality aliases True/1/1.0 even in nested scope fields.
+    # These child records must preserve the exact admitted JSON field types.
+    if (json.dumps(record, sort_keys=True, allow_nan=False)
+            != json.dumps(expected, sort_keys=True, allow_nan=False)):
+        raise VerificationError("MATRIX_PHASE_CAPTURE_BINDING")
+    check_clock(deadline)
+    return progress if progress["eventCount"] else None
+
+
+def publish_matrix_proof(selection: MatrixSelection, proof: dict, contract, session, *, deadline: float) -> dict:
+    """Only validated compact proof survives work disposal; never raw evidence."""
+    check_clock(deadline)
+    destination = selection.destination
+    if (destination.name != "proof.json" or destination.parent.name != "signing-matrix-proof"
+            or not destination.is_absolute()
+            or destination.parent.parent.resolve(strict=True) != destination.parent.parent):
+        raise VerificationError("MATRIX_PROOF_DESTINATION")
+    content = contract.canonical(proof) + b"\n"
+    if not 0 < len(content) <= contract.MAX_PROOF_BYTES:
+        raise VerificationError("MATRIX_PROOF_BOUND")
+    if session.persisted_bytes + len(content) > MATRIX_PERSISTED_LIMIT:
+        raise VerificationError("MATRIX_PERSISTED_OUTPUT_BOUND")
+    destination.parent.mkdir(mode=0o700)  # Never overwrite an earlier attempt/path.
+    directory = descriptor = None
+    primary = None
+    cleanup_errors = []
+    try:
+        directory = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        parent_state = os.fstat(directory)
+        named_parent = destination.parent.lstat()
+        if (not stat.S_ISDIR(parent_state.st_mode) or parent_state.st_uid != 0
+                or stat.S_IMODE(parent_state.st_mode) != 0o700
+                or (named_parent.st_dev, named_parent.st_ino, named_parent.st_mode, named_parent.st_uid)
+                   != (parent_state.st_dev, parent_state.st_ino, parent_state.st_mode, parent_state.st_uid)):
+            raise VerificationError("MATRIX_PROOF_DIRECTORY_STATE")
+        descriptor = os.open(destination.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                             0o600, dir_fd=directory)
+        original = os.fstat(descriptor)
+        view = memoryview(content)
+        while view:
+            check_clock(deadline)
+            count = os.write(descriptor, view[:65536])
+            if type(count) is not int or not 0 < count <= min(65536, len(view)):
+                raise VerificationError("MATRIX_PROOF_SHORT_WRITE")
+            view = view[count:]
+        os.fsync(descriptor)
+        os.fchmod(descriptor, 0o644)  # Explicit sanitized upload, accessible to the runner user.
+        current = os.fstat(descriptor)
+        if (not stat.S_ISREG(current.st_mode) or current.st_nlink != 1 or current.st_size != len(content)
+                or current.st_uid != 0 or (current.st_dev, current.st_ino) != (original.st_dev, original.st_ino)):
+            raise VerificationError("MATRIX_PROOF_FILE_STATE")
+        # Controller umask is 077. mkdir(0755) alone would leave a root-only
+        # directory and the unprivileged upload step could not read the proof.
+        # Only this newly created, bound directory and compact public file are
+        # made readable; neither private work nor raw captures are published.
+        os.fchmod(directory, 0o755)
+        os.fsync(directory)
+        named_parent = destination.parent.lstat()
+        if ((named_parent.st_dev, named_parent.st_ino, named_parent.st_uid)
+                != (parent_state.st_dev, parent_state.st_ino, parent_state.st_uid)
+                or stat.S_IMODE(named_parent.st_mode) != 0o755):
+            raise VerificationError("MATRIX_PROOF_DIRECTORY_STATE")
+        check_clock(deadline)
+    except BaseException as error:
+        primary = error
+    finally:
+        if descriptor is not None:
+            try:
+                charge_matrix_bytes(session, os.fstat(descriptor).st_size)
+            except BaseException as error:
+                cleanup_errors.append(error)
+        for owned in (descriptor, directory):
+            if owned is not None:
+                try:
+                    close_owned(owned)
+                except BaseException as error:
+                    cleanup_errors.append(error)
+    if primary is not None:
+        if cleanup_errors:
+            primary._matrix_proof_cleanup_errors = tuple(cleanup_errors)
+            primary.add_note("independent matrix proof accounting/close failures: " +
+                             ",".join(type(error).__name__ for error in cleanup_errors))
+        raise primary
+    if cleanup_errors:
+        raise BaseExceptionGroup("matrix proof accounting or close unconfirmed", cleanup_errors)
+    check_clock(deadline)
+    return {"name": contract.artifact_name(proof["scope"], selection.shard),
+            "bytes": len(content), "sha256": hashlib.sha256(content).hexdigest(),
+            "private_raw_outputs_published": False}
+
+
+def perform_matrix_gate(step: Step, paths: Paths, session, checks, platform: str,
+                        selection: MatrixSelection | None, *, deadline: float) -> CheckResult:
+    # All phase preparation, finality, idle, parsing, reinspection and proof
+    # publication consume these originals. No elapsed-time-only acceptance.
+    pair_deadline = min(deadline, time.monotonic() + MATRIX_PAIR_SECONDS)
+    rows, captures = [], []
+    details = {"phases": rows, "phase_seconds": MATRIX_PHASE_SECONDS, "pair_seconds": MATRIX_PAIR_SECONDS}
+    try:
+        if step.id != "local-signing-matrix" or step.kind != "matrix" or type(selection) is not MatrixSelection:
+            raise VerificationError("MATRIX_GATE_SELECTION")
+        if (selection.operating_system != {"linux": "ubuntu-24.04", "macos": "macos-26"}[platform]
+                or type(selection.shard) is not int or not 0 <= selection.shard < 48):
+            raise VerificationError("MATRIX_GATE_HOST_OR_SHARD")
+        contract = _module(paths.source / "tests/workflow", "local_signing_matrix_contract")
+        scope = contract.scope_from_metadata(selection.metadata(), selection.operating_system, producer=True)
+        check_clock(pair_deadline)
+        session.ensure_idle(deadline=pair_deadline)
+        package_files = contract.package_manifest(paths.source / "src/mobile_release", deadline=pair_deadline)
+        definitions = contract.definitions_manifest(paths.source, deadline=pair_deadline)
+        package_sha, definitions_sha = contract.digest(package_files), contract.digest(definitions)
+        # Admission is source-defined before either original starts. Child
+        # output can demonstrate this exact union, never choose its own work.
+        catalog = contract.layered_catalog()
+        definition = catalog.definition(selection.operating_system)
+        catalog_sha = contract.digest(definition)
+        expected = list(catalog.expected_ids(selection.operating_system))
+        selected = list(catalog.shard_ids(selection.operating_system, selection.shard))
+        expected_coverage = catalog.coverage(selection.operating_system, selected)
+        regression_ids = tuple(identifier for identifier in selected
+                               if catalog.case(identifier, selection.operating_system).kind == "regression")
+        child_bindings = contract.diagnostic_child_bindings(selection.operating_system, selection.shard,
+                                                            deadline=pair_deadline)
+        diagnostic_files = tuple(sorted(
+            {name for name in definitions if name.endswith(".py")}
+            | {"src/mobile_release/" + name for name in package_files if name.endswith(".py")}))
+        phases = {}
+        for phase in ("source", "wheel"):
+            phase_deadline = min(pair_deadline, time.monotonic() + MATRIX_PHASE_SECONDS)
+            check_clock(phase_deadline)
+            check_capacity(paths.work, 128 * 1024**2)
+            package = (paths.work / "source-build/src/mobile_release" if phase == "source" else
+                       paths.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
+            binding = checks.inspect_native_package(paths.source, package, deadline=phase_deadline)
+            env = dict(environment(paths, platform))
+            if phase == "wheel":
+                env["PATH"] = str(paths.wheel_python.parent) + ":" + env["PATH"]
+                env["MOBILE_RELEASE_TEST_PYTHON"] = str(paths.wheel_python)
+            diagnostic = SigningMatrixDiagnostic(phase, selection.operating_system, selection.shard,
+                                                 tuple(selected), regression_ids, diagnostic_files, child_bindings)
+            capture = original_native_capture(session, matrix_phase_argv(paths, selection, phase, deadline=phase_deadline),
+                paths, rows, phase, deadline=phase_deadline, seconds=MATRIX_PHASE_SECONDS,
+                env=env, output_limit=65536, cpu_seconds=300,
+                signing_matrix_diagnostic=diagnostic, signing_matrix_pair_deadline=pair_deadline)
+            captures.append(capture)  # Retain originals through pair acceptance/publication.
+            progress = parse_matrix_phase(capture, phase, scope, package, selection.shard,
+                                          diagnostic=diagnostic, deadline=phase_deadline)
+            if progress is not None:
+                rows[-1]["matrix_progress"] = progress
+            output = paths.work / "signing-matrix" / phase
+            rows[-1]["outputs"] = finalized_matrix_outputs(output, session, deadline=phase_deadline)
+            observed_catalog = strict_json(read_regular(output / "catalog.json", deadline=phase_deadline,
+                                                       maximum=16 * 1024**2).decode("utf-8"))
+            if contract.canonical(observed_catalog) != contract.canonical(definition):
+                raise VerificationError("MATRIX_SOURCE_CATALOG_CHANGED")
+            observed = strict_json(read_regular(output / "matrix-result.json", deadline=phase_deadline,
+                                                 maximum=16 * 1024**2).decode("utf-8"))
+            required = {"schemaVersion", "shard", "scope", "expectedCaseIds", "executedCaseIds", "catalogSha256",
+                        "packageSha256", "definitionsSha256", "coverage", "productionRoot", "elapsed",
+                        "allExactChildrenReapedAndGroupsAbsent", "allCasePathsRemoved"}
+            if (type(observed) is not dict or set(observed) != required
+                    or type(observed["schemaVersion"]) is not int or observed["schemaVersion"] != 2
+                    or type(observed["shard"]) is not int or observed["shard"] != selection.shard
+                    or type(observed["productionRoot"]) is not str or observed["productionRoot"] != str(package)
+                    or contract.canonical(observed["scope"]) != contract.canonical(scope)
+                    or type(observed["elapsed"]) not in (int, float) or not math.isfinite(observed["elapsed"])
+                    or not 0 <= observed["elapsed"] <= MATRIX_PHASE_SECONDS):
+                raise VerificationError("MATRIX_PHASE_RESULT_BINDING")
+            contract.validate_ids(observed["expectedCaseIds"], "inventoried cases")
+            contract.validate_ids(observed["executedCaseIds"], "actual cases")
+            if (observed["expectedCaseIds"] != expected or observed["executedCaseIds"] != selected
+                    or observed["catalogSha256"] != catalog_sha
+                    or contract.canonical(observed["coverage"]) != contract.canonical(expected_coverage)):
+                raise VerificationError("MATRIX_SOURCE_DEFINED_UNION")
+            phases[phase] = {key: observed[key] for key in (
+                "executedCaseIds", "catalogSha256", "packageSha256", "definitionsSha256", "coverage",
+                "allExactChildrenReapedAndGroupsAbsent", "allCasePathsRemoved")}
+            phases[phase]["resultsSha256"] = contract.validate_actual_results(
+                read_regular(output / "results.jsonl.gz", deadline=phase_deadline, maximum=contract.MAX_RESULTS_BYTES),
+                selected, operating_system=selection.operating_system, deadline=phase_deadline)
+            contract.validate_phase(phases[phase], expected, selection.shard, package_sha, definitions_sha, phase,
+                                    operating_system=selection.operating_system)
+            checks.inspect_native_package(paths.source, package, deadline=phase_deadline)
+            check_clock(phase_deadline)
+            rows[-1].update(status="PASS", package=binding, executed=len(observed["executedCaseIds"]))
+        check_clock(pair_deadline)
+        if (len(captures) != 2 or captures[0] is captures[1]
+                or contract.package_manifest(paths.source / "src/mobile_release", deadline=pair_deadline) != package_files
+                or contract.definitions_manifest(paths.source, deadline=pair_deadline) != definitions):
+            raise VerificationError("MATRIX_ORIGINAL_PAIR_OR_SOURCE_CHANGED")
+        session.ensure_idle(deadline=pair_deadline)
+        proof = {"schemaVersion": 2, "scope": scope, "shard": selection.shard, "catalogSha256": catalog_sha,
+                 "expectedCaseIds": expected, "expectedSha256": contract.digest(expected), **phases}
+        contract.validate_proof(proof, contract.artifact_name(scope, selection.shard), scope, package_sha, definitions_sha)
+        details["proof"] = publish_matrix_proof(selection, proof, contract, session, deadline=pair_deadline)
+        check_clock(pair_deadline)
+        details["scope"] = "partial; one of forty-eight shards on one of two required platforms"
+        return CheckResult(True, details)
+    except BaseException as exc:
+        if rows and rows[-1]["status"] in {"RUNNING", "FINALIZED"}:
+            rows[-1]["status"] = "FAIL"
+        details["failure"] = error_details(exc)
+        return CheckResult(False, details, exc.code if isinstance(exc, VerificationError) else "MATRIX_GATE_FAILURE")
+
+
+def signing_adapter_argv(paths: Paths, selection: SigningAdapterSelection, phase: str, *, deadline: float) -> tuple[str, ...]:
+    if type(selection) is not SigningAdapterSelection or phase not in {"source", "wheel"}:
+        raise VerificationError("SIGNING_ADAPTER_PHASE_SELECTION")
+    package = (paths.work / "source-build/src/mobile_release" if phase == "source" else
+               paths.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
+    return tuple(map(str, (
+        paths.source_python if phase == "source" else paths.wheel_python, "-I", "-S", "-B",
+        paths.source / "tests/workflow/run_local_signing_matrix.py", "--adapter-phase", phase,
+        "--package-root", package, "--output", paths.work / "signing-adapter" / phase,
+        "--deadline", repr(deadline), "--os", selection.operating_system,
+        "--repository", selection.repository, "--commit", selection.commit, "--run-id", selection.run_id,
+        "--run-attempt", selection.attempt, "--job", selection.job,
+    )))
+
+
+def finalized_adapter_output(directory: Path, session, *, deadline: float) -> dict:
+    """No surviving fixture DATA is accepted by this fixed five-method smoke."""
+    check_clock(deadline)
+    info = directory.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != session.uid
+            or stat.S_IMODE(info.st_mode) != 0o700):
+        raise VerificationError("SIGNING_ADAPTER_OUTPUT_DIRECTORY")
+    # The actual original capture and outer idle proof precede this inspection.
+    # A leftover path is failure/retention, not something this parser cleans up.
+    with os.scandir(directory) as entries:
+        if next(entries, None) is not None:
+            raise VerificationError("SIGNING_ADAPTER_RETAINED_OUTPUT")
+    charge_matrix_bytes(session, 0)  # Original capture bytes were charged by Session.
+    freeze_tree(directory, deadline=deadline)
+    check_clock(deadline)
+    return {"files": 0, "bytes": 0, "original_finality_before_read": True}
+
+
+def perform_signing_adapter_gate(step: Step, paths: Paths, session, checks, platform: str,
+                                selection: SigningAdapterSelection | None, *, deadline: float) -> CheckResult:
+    # Original 420/900 limits begin at this pair gate, not at the separately
+    # bounded offline-input/environment/build gates in the unchanged aggregate.
+    pair_deadline = min(deadline, time.monotonic() + MATRIX_PAIR_SECONDS)
+    rows, captures = [], []
+    details = {"status": "adapter-only", "phases": rows,
+               "phase_seconds": MATRIX_PHASE_SECONDS, "pair_seconds": MATRIX_PAIR_SECONDS,
+               "matrix_proof": False, "private_raw_outputs_published": False}
+    try:
+        if step.id != "local-signing-adapter" or step.kind != "signing-adapter" or type(selection) is not SigningAdapterSelection:
+            raise VerificationError("SIGNING_ADAPTER_GATE_SELECTION")
+        if selection.operating_system != {"linux": "ubuntu-24.04", "macos": "macos-26"}[platform]:
+            raise VerificationError("SIGNING_ADAPTER_GATE_HOST")
+        contract = _module(paths.source / "tests/workflow", "local_signing_matrix_contract")
+        scope = contract.adapter_scope_from_metadata(selection.metadata(), selection.operating_system)
+        expected = contract.adapter_test_ids(paths.source, deadline=pair_deadline)
+        session.ensure_idle(deadline=pair_deadline)
+        packages = contract.package_manifest(paths.source / "src/mobile_release", deadline=pair_deadline)
+        definitions = contract.definitions_manifest(paths.source, deadline=pair_deadline)
+        diagnostic_files = tuple(sorted((*contract.ADAPTER_FAILURE_TEST_FILES,
+            *("src/mobile_release/" + relative for relative in packages if relative.endswith(".py")))))
+        for phase in ("source", "wheel"):
+            phase_deadline = min(pair_deadline, time.monotonic() + MATRIX_PHASE_SECONDS)
+            check_clock(phase_deadline)
+            check_capacity(paths.work, 128 * 1024**2)
+            package = (paths.work / "source-build/src/mobile_release" if phase == "source" else
+                       paths.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
+            binding = checks.inspect_native_package(paths.source, package, deadline=phase_deadline)
+            env = dict(environment(paths, platform))
+            if phase == "wheel":
+                env["PATH"] = str(paths.wheel_python.parent) + ":" + env["PATH"]
+                env["MOBILE_RELEASE_TEST_PYTHON"] = str(paths.wheel_python)
+            capture = original_native_capture(session,
+                signing_adapter_argv(paths, selection, phase, deadline=phase_deadline), paths, rows, phase,
+                deadline=phase_deadline, seconds=MATRIX_PHASE_SECONDS, env=env, output_limit=65536, cpu_seconds=300,
+                signing_adapter_diagnostic=SigningAdapterDiagnostic(phase, expected, diagnostic_files))
+            captures.append(capture)
+            if capture.stderr:
+                raise VerificationError("SIGNING_ADAPTER_UNEXPECTED_STDERR")
+            record = native_runtime_record(capture.stdout, "MRK_SIGNING_ADAPTER_PHASE=")
+            contract.validate_adapter_record(record, scope, phase, package)
+            rows[-1]["outputs"] = finalized_adapter_output(paths.work / "signing-adapter" / phase,
+                                                           session, deadline=phase_deadline)
+            checks.inspect_native_package(paths.source, package, deadline=phase_deadline)
+            check_clock(phase_deadline)
+            rows[-1].update(status="PASS", package=binding, executed_ids=list(expected), origins=record["origins"])
+        if (len(captures) != 2 or captures[0] is captures[1]
+                or contract.package_manifest(paths.source / "src/mobile_release", deadline=pair_deadline) != packages
+                or contract.definitions_manifest(paths.source, deadline=pair_deadline) != definitions):
+            raise VerificationError("SIGNING_ADAPTER_ORIGINAL_PAIR_OR_SOURCE_CHANGED")
+        session.ensure_idle(deadline=pair_deadline)
+        check_clock(pair_deadline)
+        return CheckResult(True, details)
+    except BaseException as exc:
+        if rows and rows[-1]["status"] in {"RUNNING", "FINALIZED"}:
+            rows[-1]["status"] = "FAIL"
+        details["failure"] = error_details(exc)
+        return CheckResult(False, details, exc.code if isinstance(exc, VerificationError) else "SIGNING_ADAPTER_GATE_FAILURE")
+
+
 def perform_step(step: Step, paths: Paths, session, checks, inventory: dict,
-                 platform: str, *, deadline: float, native_abi: NativeABIState | None = None) -> CheckResult:
+                 platform: str, *, deadline: float, native_abi: NativeABIState | None = None,
+                 matrix: MatrixSelection | None = None,
+                 signing_adapter: SigningAdapterSelection | None = None) -> CheckResult:
+    if step.id == "local-signing-matrix":
+        return perform_matrix_gate(step, paths, session, checks, platform, matrix, deadline=deadline)
+    if step.id == "local-signing-adapter":
+        return perform_signing_adapter_gate(step, paths, session, checks, platform, signing_adapter, deadline=deadline)
     if step.id in {"native-process-abi-source", "native-process-abi-wheel"}:
         return perform_native_abi_gate(step, paths, session, checks, platform, native_abi, deadline=deadline)
     if step.id in {*COMPATIBILITY_SOURCE_GATES, *COMPATIBILITY_WHEEL_GATES}:
@@ -3658,12 +4951,91 @@ def error_details(exc: BaseException) -> dict:
     return details
 
 
+def public_summary_projection(report: dict) -> dict:
+    """Schema2 removes only checked, redundant completion lists; schema1 stays intact.
+
+    ``summary.tests`` expands to sorted test IDs, and ``partitions`` expands to
+    their duplicate-free sorted completion union. Delegated obligations are not
+    executed completions. This presentation step never grants a passing result.
+    """
+    if (type(report) is not dict or type(report.get("schema")) is not int or report["schema"] != 1
+            or type(report.get("rows")) is not list):
+        raise VerificationError("PUBLIC_SUMMARY_PROJECTION")
+
+    def completed(value: dict) -> list[str]:
+        ids = value.get("completed")
+        if ("completed_from" in value or type(ids) is not list or not ids
+                or any(type(identifier) is not str or not identifier for identifier in ids)
+                or type(value.get("tests")) is not int or value["tests"] != len(ids)
+                or ids != sorted(set(ids))):
+            raise VerificationError("PUBLIC_SUMMARY_PROJECTION")
+        return ids
+
+    rows, seen = [], set()
+    for row in report["rows"]:
+        if type(row) is not dict or type(row.get("id")) is not str:
+            raise VerificationError("PUBLIC_SUMMARY_PROJECTION")
+        gate = row["id"]
+        if gate not in ("python-full", "python-wheel", "native-profile-source", "native-profile-wheel"):
+            rows.append(row)
+            continue
+        if gate in seen or type(row.get("status")) is not str:
+            raise VerificationError("PUBLIC_SUMMARY_PROJECTION")
+        seen.add(gate)
+        if row["status"] in ("FAIL", "RUNNING", "UNEXECUTED"):
+            rows.append(row)  # Keep incomplete/failed diagnostics verbatim.
+            continue
+        details = row.get("details")
+        if (row["status"] != "PASS" or type(details) is not dict
+                or type(details.get("stage")) is not str or details["stage"] != "complete"
+                or "failure" in details or type(details.get("partitions")) is not list):
+            raise VerificationError("PUBLIC_SUMMARY_PROJECTION")
+        expected = ((*PYTHON_SINGLETON_PARTITIONS, "healthy") if gate in ("python-full", "python-wheel")
+                    else ("authority", "ordinary", *PYTHON_SINGLETON_PARTITIONS))
+        partitions = details["partitions"]
+        if (any(type(part) is not dict or type(part.get("partition")) is not str for part in partitions)
+                or tuple(part["partition"] for part in partitions) != expected):
+            raise VerificationError("PUBLIC_SUMMARY_PROJECTION")
+        projected, joined = [], []
+        for part in partitions:
+            if type(part.get("status")) is not str or part["status"] != "PASS":
+                raise VerificationError("PUBLIC_SUMMARY_PROJECTION")
+            ids = completed(part)
+            joined.extend(ids)
+            if part["partition"] == "healthy":
+                summary = part.get("summary")
+                if (type(summary) is not dict or set(summary) != {"check", "ok", "tests", "details"}
+                        or type(summary["check"]) is not str or summary["check"] != gate
+                        or summary["ok"] is not True or type(summary["details"]) is not dict
+                        or type(summary["tests"]) is not list
+                        or any(type(test) is not dict or set(test) != {"id", "outcome"}
+                               or type(test["id"]) is not str or type(test["outcome"]) is not str
+                               or test["outcome"] not in ("ok", "skip") for test in summary["tests"])):
+                    raise VerificationError("PUBLIC_SUMMARY_PROJECTION")
+                summary_ids = [test["id"] for test in summary["tests"]]
+                if len(summary_ids) != len(set(summary_ids)) or ids != sorted(summary_ids):
+                    raise VerificationError("PUBLIC_SUMMARY_PROJECTION")
+                part = dict(part)
+                del part["completed"]
+                part["completed_from"] = "summary.tests"
+            projected.append(part)
+        if len(joined) != len(set(joined)) or completed(details) != sorted(joined):
+            raise VerificationError("PUBLIC_SUMMARY_PROJECTION")
+        details = dict(details, partitions=projected)
+        del details["completed"]
+        details["completed_from"] = "partitions"
+        rows.append(dict(row, details=details))
+    return dict(report, schema=2, rows=rows)
+
+
 def publish_summary(path: Path, report: dict, *, runner_temp: Path, deadline: float) -> None:
     check_clock(deadline)
     if (path.resolve(strict=True) != path or not path.is_relative_to(runner_temp)
             or not re.fullmatch(r"step_summary_[A-Za-z0-9_-]+", path.name)):
         raise VerificationError("SUMMARY_DESTINATION")
-    encoded = json.dumps(report, sort_keys=True, ensure_ascii=True, allow_nan=False).encode("ascii")
+    encoded = json.dumps(public_summary_projection(report), sort_keys=True, ensure_ascii=True,
+                         allow_nan=False, separators=(",", ":")).encode("ascii")
+    check_clock(deadline)
     if len(encoded) > 768 * 1024:
         raise VerificationError("PUBLIC_SUMMARY_BOUND")
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -3748,6 +5120,10 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("commit", "run-id", "run-attempt", "image"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--java-home", type=Path)
+    parser.add_argument("--scope", choices=("platform", "signing-matrix", "signing-adapter"), default="platform")
+    parser.add_argument("--repository")
+    parser.add_argument("--job", choices=("test-signing-matrix", "test-signing-adapter"))
+    parser.add_argument("--shard", type=int, choices=range(48))
     args = parser.parse_args(argv)
     start = time.monotonic()
     deadline = start + AGGREGATE_SECONDS
@@ -3769,6 +5145,24 @@ def main(argv: list[str] | None = None) -> int:
         runner_home = canonical_directory(args.runner_home)
         runner_temp = canonical_directory(args.runner_temp)
         summary = args.summary.resolve(strict=True)
+        matrix = signing_adapter = None
+        if args.scope == "signing-matrix":
+            if (type(args.repository) is not str
+                    or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repository)
+                    or args.job != "test-signing-matrix" or type(args.shard) is not int):
+                raise VerificationError("MATRIX_WORKFLOW_BINDING")
+            matrix = MatrixSelection(args.repository, args.commit, args.run_id, int(args.run_attempt), args.job,
+                                     "ubuntu-24.04" if args.platform == "linux" else "macos-26", args.shard,
+                                     runner_temp / "signing-matrix-proof/proof.json")
+        elif args.scope == "signing-adapter":
+            if (type(args.repository) is not str
+                    or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repository)
+                    or args.job != "test-signing-adapter" or args.shard is not None):
+                raise VerificationError("SIGNING_ADAPTER_WORKFLOW_BINDING")
+            signing_adapter = SigningAdapterSelection(args.repository, args.commit, args.run_id, int(args.run_attempt),
+                args.job, "ubuntu-24.04" if args.platform == "linux" else "macos-26")
+        elif any(value is not None for value in (args.repository, args.job, args.shard)):
+            raise VerificationError("UNEXPECTED_MATRIX_SELECTION")
         python, ruby = args.python.resolve(strict=True), args.ruby.resolve(strict=True)
         if python != Path(sys.executable).resolve() or python.parent.name != "bin" or ruby.parent.name != "bin":
             raise VerificationError("TRUSTED_RUNTIME_BINDING")
@@ -3803,12 +5197,13 @@ def main(argv: list[str] | None = None) -> int:
                                   tool_prefixes=prefixes, compatibility_runtimes=compatibility, deadline=deadline)
         paths = Paths(root / "source", session.work, root / "inputs", python, ruby, java_home=java,
                       compatibility_runtimes=compatibility)
-        steps = catalog(paths, args.platform, deadline=deadline)
+        steps = catalog(paths, args.platform, deadline=deadline, scope=args.scope)
+        report["scope"] = args.scope
         report["rows"] = [{"id": step.id, "status": "UNEXECUTED"} for step in steps]
         report["phase"] = "input-preparation"
         produced = prepare.prepare_inputs(source_root=paths.source, destination=paths.inputs,
-                                          platform=args.platform, deadline=deadline)
-        report["inputs"] = validate_inputs(paths.inputs, produced, deadline=deadline)
+                                          platform=args.platform, deadline=deadline, scope=args.scope)
+        report["inputs"] = validate_inputs(paths.inputs, produced, deadline=deadline, scope=args.scope)
         report["phase"] = "native-admission"
         session.admit()
         report["admission"] = session.admission_results
@@ -3822,9 +5217,9 @@ def main(argv: list[str] | None = None) -> int:
         def perform(step):
             print("MRK_CI_GATE=" + step.id, flush=True)
             return perform_step(step, paths, session, checks, inventory, args.platform,
-                                deadline=deadline, native_abi=native_abi)
+                                deadline=deadline, native_abi=native_abi, matrix=matrix, signing_adapter=signing_adapter)
 
-        result = execute_pipeline(steps, perform, platform=args.platform)
+        result = execute_pipeline(steps, perform, platform=args.platform, scope=args.scope)
         report["rows"] = list(result.rows)
         if not result.ok:
             raise VerificationError(result.error or "PIPELINE_FAILED")

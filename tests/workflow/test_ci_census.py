@@ -223,21 +223,22 @@ class CICensusTests(unittest.TestCase):
         seams = (("list", "/proc/42/task", 1), ("read", "/proc/42/task/42/stat", 1),
                  ("read", "/proc/42/task/42/status", 1), ("read", "/proc/42/task/42/stat", 2),
                  ("list", "/proc/42/task", 2))
-        for seam in seams:
-            with self.subTest(seam=seam):
-                tree, clock = _ProcTree(), _Clock()
-                error = FileNotFoundError(errno.ENOENT, "synthetic enumerated entry disappeared")
-                tree.hook = _fault(*seam, error)
-                with _pure(self.module, tree, clock), patch.object(
-                        self.module, "_linux_snapshot", wraps=self.module._linux_snapshot) as reader:
-                    with self.assertRaises(self.module._CensusUnstable) as raised:
-                        self.module._snapshot("linux", deadline=10.0)
-                self.assertIs(raised.exception.__cause__, error)
-                reader.assert_called_once_with(deadline=10.0)
-                self.assertEqual(tree.counts[("read", "/proc/41/task/41/stat")], 2)
-                self.assertEqual(tree.counts[("read", "/proc/41/task/41/status")], 1)
-                self.assertEqual(tree.counts[("list", "/proc")], 1)
-                self.assertEqual(clock.sleeps, [])
+        for number in (errno.ENOENT, errno.ESRCH):
+            for seam in seams:
+                with self.subTest(errno=number, seam=seam):
+                    tree, clock = _ProcTree(), _Clock()
+                    error = OSError(number, "synthetic enumerated entry disappeared")
+                    tree.hook = _fault(*seam, error)
+                    with _pure(self.module, tree, clock), patch.object(
+                            self.module, "_linux_snapshot", wraps=self.module._linux_snapshot) as reader:
+                        with self.assertRaises(self.module._CensusUnstable) as raised:
+                            self.module._snapshot("linux", deadline=10.0)
+                    self.assertIs(raised.exception.__cause__, error)
+                    reader.assert_called_once_with(deadline=10.0)
+                    self.assertEqual(tree.counts[("read", "/proc/41/task/41/stat")], 2)
+                    self.assertEqual(tree.counts[("read", "/proc/41/task/41/status")], 1)
+                    self.assertEqual(tree.counts[("list", "/proc")], 1)
+                    self.assertEqual(clock.sleeps, [])
 
     def test_membership_empty_task_and_valid_birth_churn_are_typed(self):
         cases = (
@@ -259,7 +260,7 @@ class CICensusTests(unittest.TestCase):
                 self.assertEqual(clock.sleeps, [])
 
     def test_unknown_malformed_and_oversized_observations_are_fatal(self):
-        def check(name, hook, expected=None):
+        def check(name, hook, expected=None, *, admission=False, unread=None):
             with self.subTest(case=name):
                 tree, clock = _ProcTree(), _Clock()
                 tree.hook = hook
@@ -267,18 +268,27 @@ class CICensusTests(unittest.TestCase):
                 with _pure(self.module, tree, clock), patch.object(
                         self.module, "_linux_snapshot", wraps=self.module._linux_snapshot) as reader:
                     with self.assertRaises(kind) as raised:
-                        self.module._snapshot("linux", deadline=10.0, retry_churn=True)
+                        if admission:
+                            self.module._domain("linux", 60001, collision=True, admission=True, deadline=10.0)
+                        else:
+                            self.module._snapshot("linux", deadline=10.0, retry_churn=True)
                 if expected is not None:
                     self.assertIs(raised.exception, expected)
                 else:
                     self.assertIs(type(raised.exception), self.module.SessionError)
                 self.assertNotIsInstance(raised.exception, self.module._CensusUnstable)
-                reader.assert_called_once_with(deadline=10.0)
+                options = {"admission_uid": 60001} if admission else {}
+                reader.assert_called_once_with(deadline=10.0, **options)
                 self.assertEqual(clock.sleeps, [])
+                if unread is not None:
+                    self.assertNotIn(unread, tree.events)
 
-        for count in (1, 2):
-            error = FileNotFoundError(errno.ENOENT, "synthetic root inventory unavailable")
-            check(f"root-enoent-{count}", _fault("list", "/proc", count, error), error)
+        for number in (errno.ENOENT, errno.ESRCH):
+            for count in (1, 2):
+                error = OSError(number, "synthetic root inventory unavailable")
+                check(("root", number, count), _fault("list", "/proc", count, error), error)
+                check(("admission-root", number, count), _fault("list", "/proc", count, error), error,
+                      admission=True)
         for operation, path, count in (("list", "/proc/42/task", 1),
                                       ("read", "/proc/42/task/42/status", 1),
                                       ("read", "/proc/42/task/42/stat", 2),
@@ -288,9 +298,14 @@ class CICensusTests(unittest.TestCase):
                 check((operation, path, count, number), _fault(operation, path, count, error), error)
         for error in (FileNotFoundError(errno.EIO, "not ENOENT"),
                       FileNotFoundError("no errno is not ENOENT"),
+                      ProcessLookupError(errno.EIO, "not ESRCH"),
+                      ProcessLookupError("no errno is not ESRCH"),
+                      OSError(float(errno.ENOENT), "noninteger errno is not ENOENT"),
+                      OSError(float(errno.ESRCH), "noninteger errno is not ESRCH"),
                       RuntimeError("synthetic unknown observation failure"),
                       KeyboardInterrupt("synthetic cancellation")):
-            check(type(error).__name__, _fault("read", "/proc/42/task/42/status", 1, error), error)
+            check((type(error).__name__, getattr(error, "errno", None)),
+                  _fault("read", "/proc/42/task/42/status", 1, error), error)
 
         good_uid, good_gid = b"Uid:\t0 0 0 0\n", b"Gid:\t0 0 0 0\n"
         invalid_statuses = [good_uid, good_gid, good_uid * 2 + good_gid,
@@ -337,30 +352,94 @@ class CICensusTests(unittest.TestCase):
         for path, count in (("/proc/42/task/42/stat", 1), ("/proc/42/task/42/stat", 2),
                             ("/proc/42/task/42/status", 1)):
             check(("metadata-size", path, count), _fault("read", path, count, b"x" * 65537))
+        # Each completed read is validated before a later disappearing file can
+        # hide its malformed/overbound bytes inside a retryable census failure.
+        for leaf, raw in (("stat", _stat(42, "unknown")), ("stat", _stat(42, 1 << 64)),
+                          ("stat", b"x" * 65537), ("status", good_uid),
+                          ("status", _status((1 << 32,) * 4, (0,) * 4)),
+                          ("status", b"x" * 65537)):
+            target = ("read", f"/proc/42/task/42/{leaf}", 1)
+            unread = ("read", "/proc/42/task/42/status", 1) if leaf == "stat" else (
+                "read", "/proc/42/task/42/stat", 2)
+            for number in (errno.ENOENT, errno.ESRCH):
+                def malformed_then_disappear(operation, path, count, value=raw):
+                    if (operation, path, count) == target:
+                        return value
+                    if (operation, path, count) == unread:
+                        raise OSError(number, "synthetic later disappearance")
+                    return _DEFAULT
+
+                check(("admission-validation-before-next-read", leaf, len(raw), number),
+                      malformed_then_disappear, admission=True, unread=unread)
+        for error in (OSError(errno.EACCES, "synthetic admission permission failure"),
+                      OSError(errno.EIO, "synthetic admission I/O failure"),
+                      KeyboardInterrupt("synthetic admission cancellation")):
+            check(("admission-fatal", type(error).__name__),
+                  _fault("read", "/proc/42/task/42/status", 1, error), error, admission=True)
         check("process-count", _fault("list", "/proc", 1, range(1, 32770)))
         # PID41's already observed row plus 131072 more threads exceeds the
         # aggregate bound even though this single task directory does not.
         check("aggregate-thread-count", _fault("list", "/proc/42/task", 1, range(1, 131073)))
 
     def test_finality_retry_restarts_from_a_fresh_complete_root(self):
-        tree, clock = _ProcTree(), _Clock()
+        for number in (errno.ENOENT, errno.ESRCH):
+            with self.subTest(errno=number):
+                tree, clock = _ProcTree(), _Clock()
 
-        def disappear(operation, path, count):
-            if (operation, path, count) == ("list", "/proc/42/task", 1):
-                tree.reset({(43, 43): ((7, 8, 9, 10), (11, 12, 13, 14), 4301, "S")})
-                raise FileNotFoundError(errno.ENOENT, "synthetic first-pass churn")
-            return _DEFAULT
+                def disappear(operation, path, count):
+                    if (operation, path, count) == ("list", "/proc/42/task", 1):
+                        tree.reset({(43, 43): ((7, 8, 9, 10), (11, 12, 13, 14), 4301, "S")})
+                        raise OSError(number, "synthetic first-pass churn")
+                    return _DEFAULT
 
-        tree.hook = disappear
-        with _pure(self.module, tree, clock), patch.object(
-                self.module, "_linux_snapshot", wraps=self.module._linux_snapshot) as reader:
-            rows = self.module._snapshot("linux", deadline=5.0, retry_churn=True)
-        self.assertEqual(rows, {(43, 43): ((7, 8, 9, 10), (11, 12, 13, 14), 4301)})
-        self.assertEqual(tree.counts[("read", "/proc/41/task/41/status")], 1)
-        self.assertEqual(tree.counts[("read", "/proc/43/task/43/status")], 1)
-        self.assertEqual(tree.counts[("list", "/proc")], 3)
-        self.assertEqual([call.kwargs for call in reader.call_args_list], [{"deadline": 5.0}] * 2)
-        self.assertEqual(clock.sleeps, [0.01])
+                tree.hook = disappear
+                with _pure(self.module, tree, clock), patch.object(
+                        self.module, "_linux_snapshot", wraps=self.module._linux_snapshot) as reader:
+                    rows = self.module._snapshot("linux", deadline=5.0, retry_churn=True)
+                self.assertEqual(rows, {(43, 43): ((7, 8, 9, 10), (11, 12, 13, 14), 4301)})
+                self.assertEqual(tree.counts[("read", "/proc/41/task/41/status")], 1)
+                self.assertEqual(tree.counts[("read", "/proc/43/task/43/status")], 1)
+                self.assertEqual(tree.counts[("list", "/proc")], 3)
+                self.assertEqual([call.kwargs for call in reader.call_args_list], [{"deadline": 5.0}] * 2)
+                self.assertEqual(clock.sleeps, [0.01])
+
+        for churn in ("root-membership", "thread-membership", errno.ENOENT, errno.ESRCH):
+            with self.subTest(admission_churn=churn):
+                tree, clock, completed = _ProcTree(), _Clock(), []
+                original = self.module._snapshot
+
+                def changed_root(operation, path, count):
+                    event = (operation, path, count)
+                    seam = (("list", "/proc", 2) if churn == "root-membership" else
+                            ("list", "/proc/42/task", 2) if churn == "thread-membership" else
+                            ("read", "/proc/42/task/42/status", 1))
+                    if event == seam:
+                        tree.reset({(43, 43): ((7, 8, 9, 10), (11, 12, 13, 14), 4301, "S")})
+                        if type(churn) is int:
+                            raise OSError(churn, "synthetic admission read churn")
+                        return [43] if churn == "root-membership" else [422]
+                    return _DEFAULT
+
+                def snapshot(*args, **kwargs):
+                    rows = original(*args, **kwargs)
+                    completed.append(rows)
+                    return rows
+
+                tree.hook = changed_root
+                with _pure(self.module, tree, clock), patch.object(
+                        self.module, "_linux_snapshot", wraps=self.module._linux_snapshot) as reader, patch.object(
+                        self.module, "_snapshot", side_effect=snapshot) as router:
+                    self.assertEqual(self.module._domain("linux", 60001, collision=True,
+                                                        admission=True, deadline=5.0), set())
+                self.assertEqual(completed, [{(43, 43): ((7, 8, 9, 10), (11, 12, 13, 14), 4301)}] * 2)
+                self.assertEqual([call.kwargs for call in reader.call_args_list],
+                                 [{"deadline": 5.0, "admission_uid": 60001}] * 3)
+                self.assertEqual([call.kwargs for call in router.call_args_list],
+                                 [{"deadline": 5.0, "retry_churn": True, "admission_uid": 60001}] * 2)
+                self.assertEqual(tree.counts[("list", "/proc")], 6 if churn == "root-membership" else 5)
+                self.assertEqual(tree.counts[("read", "/proc/41/task/41/status")], 1)
+                self.assertEqual(tree.counts[("read", "/proc/43/task/43/status")], 2)
+                self.assertEqual(clock.sleeps, [0.01])
 
     def test_finality_retry_has_eight_attempts_and_one_absolute_deadline(self):
         for succeeds in (True, False):
@@ -378,6 +457,46 @@ class CICensusTests(unittest.TestCase):
                         self.assertIs(raised.exception, failures[-1])
                 self.assertEqual([call.kwargs for call in reader.call_args_list], [{"deadline": 10.0}] * 8)
                 self.assertEqual(clock.sleeps, [0.01] * 7)
+
+        for outcome in ("success", "first-pass-exhausted", "second-pass-exhausted"):
+            with self.subTest(admission_passes=outcome):
+                tree, clock = _ProcTree(), _Clock()
+                first = [self.module._CensusUnstable(f"first pass {i}") for i in range(8)]
+                second = [self.module._CensusUnstable(f"second pass {i}") for i in range(8)]
+                steps = first if outcome == "first-pass-exhausted" else (
+                    first[:7] + [{}] + second[:7] + ([{}] if outcome == "success" else second[7:]))
+                reader = Mock(side_effect=steps)
+                with _pure(self.module, tree, clock, _linux_snapshot=reader):
+                    if outcome == "success":
+                        self.assertEqual(self.module._domain("linux", 60001, collision=True,
+                                                            admission=True, deadline=10.0), set())
+                    else:
+                        with self.assertRaises(self.module._CensusUnstable) as raised:
+                            self.module._domain("linux", 60001, collision=True, admission=True, deadline=10.0)
+                        self.assertIs(raised.exception, steps[-1])
+                self.assertEqual([call.kwargs for call in reader.call_args_list],
+                                 [{"deadline": 10.0, "admission_uid": 60001}] * len(steps))
+                self.assertEqual(clock.sleeps, [0.01] * (7 if outcome == "first-pass-exhausted" else 14))
+
+        for phase in ("first-backoff", "second-returned-late"):
+            with self.subTest(admission_deadline=phase):
+                tree, clock = _ProcTree(), _Clock()
+                cutoff = 0.005 if phase == "first-backoff" else 1.0
+
+                def observe(*, deadline, admission_uid):
+                    if phase == "first-backoff":
+                        raise self.module._CensusUnstable("synthetic admission backoff")
+                    if reader.call_count == 2:
+                        clock.now = deadline
+                    return {}
+
+                reader = Mock(side_effect=observe)
+                with _pure(self.module, tree, clock, _linux_snapshot=reader):
+                    with self.assertRaises(self.module.DeadlineExpired):
+                        self.module._domain("linux", 60001, collision=True, admission=True, deadline=cutoff)
+                self.assertEqual([call.kwargs for call in reader.call_args_list],
+                                 [{"deadline": cutoff, "admission_uid": 60001}] * (1 if phase == "first-backoff" else 2))
+                self.assertEqual(clock.sleeps, [cutoff] if phase == "first-backoff" else [])
 
         for phase in ("already-expired", "metadata-read", "root-recheck", "backoff", "returned-late"):
             with self.subTest(deadline_phase=phase):
@@ -426,6 +545,8 @@ class CICensusTests(unittest.TestCase):
                 with _pure(self.module, tree, clock, _linux_snapshot=reader):
                     with self.assertRaises(self.module.SessionError):
                         self.module._snapshot("linux", deadline=cutoff, retry_churn=True)
+                    with self.assertRaises(self.module.SessionError):
+                        self.module._domain("linux", 60001, collision=True, admission=True, deadline=cutoff)
                 reader.assert_not_called()
                 self.assertEqual(tree.events, [])
                 self.assertEqual(clock.sleeps, [])
@@ -446,25 +567,139 @@ class CICensusTests(unittest.TestCase):
                 self.assertEqual(clock.sleeps, [])
 
     def test_collision_is_strict_and_finality_unions_two_complete_passes(self):
-        tree, clock, uid = _ProcTree(), _Clock(), 60001
-        tree.rows[(41, 41)] = ((0, 0, 0, uid), (0,) * 4, 4101, "Z")
+        uid = 60001
+        for number in (errno.ENOENT, errno.ESRCH):
+            with self.subTest(collision_churn_errno=number):
+                tree, clock = _ProcTree(), _Clock()
+                tree.rows[(41, 41)] = ((0, 0, 0, uid), (0,) * 4, 4101, "Z")
+                error = OSError(number, "synthetic collision-view churn")
 
-        def collision_churn(operation, path, count):
-            if (operation, path, count) == ("list", "/proc/42/task", 1):
-                tree.reset({})  # A hypothetical retry would erase the observed collision.
-                raise FileNotFoundError(errno.ENOENT, "synthetic collision-view churn")
-            return _DEFAULT
+                def collision_churn(operation, path, count):
+                    if (operation, path, count) == ("list", "/proc/42/task", 1):
+                        tree.reset({})  # A hypothetical retry would erase the observed collision.
+                        raise error
+                    return _DEFAULT
 
-        tree.hook = collision_churn
-        with _pure(self.module, tree, clock), patch.object(
-                self.module, "_linux_snapshot", wraps=self.module._linux_snapshot) as reader, patch.object(
-                self.module, "_snapshot", wraps=self.module._snapshot) as router:
-            with self.assertRaises(self.module._CensusUnstable):
-                self.module._domain("linux", uid, collision=True, deadline=10.0)
-        reader.assert_called_once_with(deadline=10.0)
-        router.assert_called_once_with("linux", deadline=10.0, retry_churn=False)
-        self.assertEqual(tree.counts[("read", "/proc/41/task/41/status")], 1)
+                tree.hook = collision_churn
+                with _pure(self.module, tree, clock), patch.object(
+                        self.module, "_linux_snapshot", wraps=self.module._linux_snapshot) as reader, patch.object(
+                        self.module, "_snapshot", wraps=self.module._snapshot) as router:
+                    with self.assertRaises(self.module._CensusUnstable) as raised:
+                        self.module._domain("linux", uid, collision=True, deadline=10.0)
+                self.assertIs(raised.exception.__cause__, error)
+                reader.assert_called_once_with(deadline=10.0)
+                router.assert_called_once_with("linux", deadline=10.0, retry_churn=False)
+                self.assertEqual(tree.counts[("read", "/proc/41/task/41/status")], 1)
+                self.assertEqual(clock.sleeps, [])
+
+        # Admission alone may resnapshot unrelated churn. A fully parsed UID
+        # or GID collision is terminal BEFORE the next read, in every slot.
+        for field in ("uid", "gid"):
+            for index in range(4):
+                for later in (errno.ENOENT, errno.ESRCH, "root-churn"):
+                    with self.subTest(admission_collision=(field, index, later)):
+                        tree, clock = _ProcTree(), _Clock()
+                        ids = tuple(uid if position == index else 0 for position in range(4))
+                        tree.rows[(41, 41)] = (ids, (0,) * 4, 4101, "S") if field == "uid" else (
+                            (0,) * 4, ids, 4101, "S")
+                        seam = ("list", "/proc", 2) if later == "root-churn" else (
+                            "read", "/proc/41/task/41/stat", 2)
+
+                        def erase_collision(operation, path, count):
+                            if (operation, path, count) == seam:
+                                tree.reset({})
+                                if type(later) is int:
+                                    raise OSError(later, "synthetic collision followed by disappearance")
+                                return []
+                            return _DEFAULT
+
+                        tree.hook = erase_collision
+                        with _pure(self.module, tree, clock), patch.object(
+                                self.module, "_linux_snapshot", wraps=self.module._linux_snapshot) as reader:
+                            with self.assertRaises(self.module.SessionError) as raised:
+                                self.module._domain("linux", uid, collision=True, admission=True, deadline=10.0)
+                        self.assertIs(type(raised.exception), self.module.SessionError)
+                        self.assertEqual(str(raised.exception), "reserved numeric identity collision during admission")
+                        reader.assert_called_once_with(deadline=10.0, admission_uid=uid)
+                        self.assertEqual(tree.counts[("read", "/proc/41/task/41/stat")], 1)
+                        self.assertEqual(tree.counts[("read", "/proc/41/task/41/status")], 1)
+                        self.assertNotIn(seam, tree.events)
+                        self.assertEqual(clock.sleeps, [])
+
+        bad_routes = [{"uid": value} for value in (None, True, "60001", 60001.0, -1, 0, 59999, 65000)]
+        bad_routes += [{"platform": "darwin"}, {"platform": "unknown"}, {"collision": False},
+                       {"collision": 1}, {"admission": None}, {"admission": 1}, {"admission": "yes"}]
+        for replacement in bad_routes:
+            with self.subTest(invalid_admission_route=replacement):
+                tree, clock, mac = _ProcTree(), _Clock(), Mock()
+                options = {"platform": "linux", "uid": uid, "collision": True,
+                           "admission": True, "deadline": 10.0, **replacement}
+                with _pure(self.module, tree, clock, _mac_snapshot=mac):
+                    with self.assertRaises(self.module.SessionError):
+                        self.module._domain(**options)
+                self.assertEqual(tree.events, [])
+                self.assertEqual(clock.sleeps, [])
+                mac.assert_not_called()
+
+        tree, clock, mac = _ProcTree(), _Clock(), Mock()
+        with _pure(self.module, tree, clock, _mac_snapshot=mac):
+            for invalid in (True, "60001", 60001.0, -1, 0, 59999, 65000):
+                with self.subTest(invalid_admission_identity=invalid):
+                    with self.assertRaises(self.module.SessionError):
+                        self.module._linux_snapshot(deadline=10.0, admission_uid=invalid)
+                    with self.assertRaises(self.module.SessionError):
+                        self.module._snapshot("linux", deadline=10.0, retry_churn=True, admission_uid=invalid)
+            for platform, retry in (("linux", False), ("darwin", True)):
+                with self.assertRaises(self.module.SessionError):
+                    self.module._snapshot(platform, deadline=10.0, retry_churn=retry, admission_uid=uid)
+            with self.assertRaises(self.module.SessionError):
+                self.module._linux_snapshot(admission_uid=uid)
+        self.assertEqual(tree.events, [])
         self.assertEqual(clock.sleeps, [])
+        mac.assert_not_called()
+
+        # Exercise the actual Session.admit callsite and real census route. NSS,
+        # immutable-tree/headroom work and the first native preparation are
+        # inert seams; no constructor, sysctl, process, chown or tool runs.
+        for case in ("unrelated-churn", "collision"):
+            with self.subTest(actual_admit_route=case):
+                tree, clock, session = _ProcTree(), _Clock(), _session(self.module)
+                session.source, session.inputs = PurePosixPath("/synthetic/source"), PurePosixPath("/synthetic/inputs")
+                session.admitted = session.closed = session._busy = False
+                session.failure = None
+                session._headroom = Mock()
+                boundary = RuntimeError("synthetic stop before native preparation")
+                session._prepare_userns_boundary = Mock(side_effect=boundary)
+                if case == "collision":
+                    tree.rows[(41, 41)] = ((0,) * 4, (0, 0, 0, uid), 4101, "S")
+                else:
+                    tree.hook = _fault("list", "/proc", 2, [41])
+                nss, readonly, notes = Mock(return_value=b"MRK_NSS_ABSENT\n"), Mock(), Mock(return_value=[])
+                with _pure(self.module, tree, clock, _small_command=nss, _readonly_tree=readonly,
+                           _exception_notes=notes), patch.object(
+                        self.module, "_domain", wraps=self.module._domain) as route, patch.object(
+                        self.module, "_linux_snapshot", wraps=self.module._linux_snapshot) as reader:
+                    with self.assertRaises(RuntimeError) as raised:
+                        session.admit()
+                route.assert_called_once_with("linux", uid, collision=True, deadline=10.0, admission=True)
+                nss.assert_called_once_with([str(session.python), "-I", "-S", "-B", str(session.entry),
+                                             "--nss", str(uid)], deadline=10.0)
+                self.assertEqual([call.args for call in readonly.call_args_list], [(session.source,), (session.inputs,)])
+                notes.assert_called_once_with(raised.exception)
+                self.assertFalse(session.admitted)
+                self.assertFalse(session._admitting)
+                if case == "collision":
+                    self.assertIs(type(raised.exception), self.module.SessionError)
+                    session._prepare_userns_boundary.assert_not_called()
+                    self.assertEqual(reader.call_count, 1)
+                    self.assertEqual(clock.sleeps, [])
+                else:
+                    self.assertIs(raised.exception, boundary)
+                    session._prepare_userns_boundary.assert_called_once_with()
+                    self.assertEqual([call.kwargs for call in reader.call_args_list],
+                                     [{"deadline": 10.0, "admission_uid": uid}] * 3)
+                    self.assertEqual(tree.counts[("list", "/proc")], 6)
+                    self.assertEqual(clock.sleeps, [0.01])
 
         tree, clock = _ProcTree(), _Clock()
         positive = {(41, 411): ((0, 0, 0, uid), (0,) * 4, 4111)}

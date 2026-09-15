@@ -13,6 +13,7 @@ from typing import Any
 from .config import ReleaseConfig, ReleaseVersion
 from .credentials import artifact_validation_environment
 from .discovery import discover_project, selected_android_module
+from .owned_process import run_owned
 from .errors import ValidationError
 from .reporting import Finding, Status
 from .tooling import canonical_external_path, recreate_private_build_directory
@@ -248,7 +249,7 @@ def _verify_jar_signature(path: Path) -> bool | None:
     return True
 
 
-def _canonicalize_aab_signature(path: Path) -> None:
+def _canonicalize_aab_signature(path: Path, *, execution_source=None) -> None:
     """Re-sign the final copy so JAR stream and central-directory views agree."""
 
     required = (
@@ -278,7 +279,7 @@ def _canonicalize_aab_signature(path: Path) -> None:
     ):
         signing_environment[name] = os.environ[name]
     try:
-        result = subprocess.run(
+        result = run_owned(
             [
                 "jarsigner",
                 "-keystore",
@@ -290,12 +291,10 @@ def _canonicalize_aab_signature(path: Path) -> None:
                 str(path),
                 os.environ["MOBILE_RELEASE_ANDROID_KEY_ALIAS"],
             ],
-            env=signing_environment,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            environ=signing_environment,
+            capture=True,
             timeout=120,
-            check=False,
+            execution_scope=None if execution_source is None else execution_source.new_scope(),
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as error:
         raise ValidationError("jarsigner could not canonicalize the final AAB signature") from error
@@ -481,8 +480,8 @@ def _copy_unique(pattern: str, destination: Path, *, required: bool) -> Path | N
     return destination
 
 
-def run_android_build(config: ReleaseConfig, *, signed: bool) -> dict[str, Path]:
-    discovered = discover_project(config.root)
+def run_android_build(config: ReleaseConfig, *, signed: bool, execution_source=None) -> dict[str, Path]:
+    discovered = discover_project(config.root, include_git=False)
     module = selected_android_module(config, discovered)
     if not module:
         raise ValidationError("Android application module is ambiguous; configure android.module")
@@ -501,14 +500,13 @@ def run_android_build(config: ReleaseConfig, *, signed: bool) -> dict[str, Path]
     env["MOBILE_RELEASE_VERSION_NAME"] = release.name
     env["MOBILE_RELEASE_BUILD_NUMBER"] = str(release.build)
     try:
-        result = subprocess.run(
+        result = run_owned(
             [str(wrapper), "--no-daemon", "--stacktrace", task],
             cwd=config.root,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            environ=env,
+            capture=False,
             timeout=45 * 60,
-            check=False,
+            execution_scope=None if execution_source is None else execution_source.new_scope(),
         )
     except (subprocess.TimeoutExpired, OSError) as error:
         raise ValidationError("Android release build exceeded 45 minutes") from error
@@ -530,7 +528,7 @@ def run_android_build(config: ReleaseConfig, *, signed: bool) -> dict[str, Path]
         raise ValidationError("normalized AAB destination must not be a symlink")
     shutil.copy2(bundle_source, aab)
     if signed:
-        _canonicalize_aab_signature(aab)
+        _canonicalize_aab_signature(aab, execution_source=execution_source)
     result_paths = {"android-aab": aab}
     mapping = module_dir / "build/outputs/mapping" / variant / "mapping.txt"
     mapping = config.project_path(str(mapping))

@@ -109,6 +109,9 @@ class _World:
 
     def fstat(self, descriptor):
         row = self.fds[descriptor]
+        if row["kind"] == "account_hold":
+            return types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=os.getuid(),
+                                         st_dev=2, st_ino=row["inode"], st_rdev=0)
         return types.SimpleNamespace(st_mode=stat.S_IFIFO if row["kind"] == "pipe" else stat.S_IFCHR,
                                      st_dev=2, st_ino=row["inode"], st_rdev=row["rdev"])
 
@@ -189,6 +192,174 @@ class _World:
 
 
 class NativeProcessTests(unittest.TestCase):
+    @staticmethod
+    def account_source(world):
+        from mobile_release.local_signing import _AccountFDSlot
+
+        original = world.allocate("account_hold", os.O_RDONLY)
+        owner = types.SimpleNamespace(owner_thread=threading.current_thread(), cancellation=object(),
+                                      identity={"device": 2, "inode": world.fds[original]["inode"]})
+        owner._hold_slot = _AccountFDSlot(owner)
+        owner._hold_slot._begin_open()
+        owner._hold_slot._publish(original)
+        owner.assert_owner = lambda: owner._hold_slot.fileno()
+        return owner, m._issue_locked_account_source(owner), original
+
+    def test_account_hold_duplicate_preregisters_custody_and_releases_original_slot_only_after_return(self):
+        world = _World()
+        with world.installed():
+            owner, source, original = self.account_source(world)
+            io = world.owner()
+            observed = []
+
+            def duplicate(descriptor, _command, minimum):
+                self.assertEqual(descriptor, original)
+                self.assertEqual(io.leases[-1].state, "ACQUIRING")
+                self.assertIn(io, owner._hold_slot._borrowers)
+                observed.append(io.leases[-1])
+                return world.allocate("account_hold", os.O_RDONLY,
+                                      inode=source.identity[1], minimum=minimum)
+
+            world.overrides["duplicate"] = duplicate
+            hold = io.export_account_hold(source, command_nonce=b"a" * 16)
+            self.assertEqual(observed, [hold])
+            self.assertFalse(owner._hold_slot._borrowers)
+            self.assertEqual(hold.account_binding.identity, source.identity)
+            self.assertEqual(hold.account_binding.command_nonce, b"a" * 16)
+            self.assertNotEqual(hold.fileno(), original)
+            hold.close()
+            self.assertEqual(set(world.fds), {original})
+            self.assertEqual(owner._hold_slot.fileno(), original)
+
+    def test_missing_account_duplicate_return_retains_original_borrow_without_retry(self):
+        from mobile_release.owned_process import ProcessCleanupError
+
+        world = _World()
+        with world.installed():
+            owner, source, original = self.account_source(world)
+            io = world.owner()
+            error = MemoryError("fictional lost atomic duplicate return")
+
+            def lost(descriptor, _command, minimum):
+                world.allocate("account_hold", os.O_RDONLY, inode=source.identity[1], minimum=minimum)
+                raise error
+
+            world.overrides["duplicate"] = lost
+            with self.assertRaises(MemoryError) as caught:
+                io.export_account_hold(source, command_nonce=b"b" * 16)
+            self.assertIs(caught.exception, error)
+            self.assertEqual(io.leases[-1].state, "UNKNOWN")
+            self.assertIn(io, owner._hold_slot._borrowers)
+            self.assertTrue(io.cleanup_unknown)
+            with self.assertRaises(ProcessCleanupError):
+                owner._hold_slot.close_once()
+            self.assertIn(original, world.fds)
+            self.assertFalse(any(event[0] == "close" for event in world.events))
+
+    def test_account_hold_is_not_a_profile_map_and_command_permit_is_exact_one_shot(self):
+        world = _World()
+        with world.installed():
+            owner, source, original = self.account_source(world)
+            io, creation = world.owner(), world.owner()
+            hold = io.export_account_hold(source, command_nonce=b"c" * 16)
+            sources = list(world.sources(io, 8))
+            sources[5] = hold
+            _, sources[6] = io.pipe()
+            _, sources[7] = io.pipe()
+            plain = world.spec(tuple(sources))
+            with self.assertRaises(m.NativeProcessError):
+                m.create(creation, plain)
+            self.assertFalse(creation.attempted)
+            creation = world.owner()
+            recipe = dict(role="C", command_nonce=b"c" * 16, executable=plain.executable,
+                          argv=plain.argv, env=plain.env, fd_sources=plain.fd_sources)
+            permit = m._issue_command_map(creation, **recipe)
+            spec = m.SpawnSpec(plain.executable, plain.argv, plain.env, plain.fd_sources, command_map=permit)
+            child = m.create(creation, spec)
+            self.assertGreater(child.pid, 0)
+            with self.assertRaises(m.NativeProcessError):
+                m.create(world.owner(), spec)
+            self.assertIn(original, world.fds)
+            wrong = world.owner()
+            wrong_permit = m._issue_command_map(wrong, **{**recipe, "role": "W"})
+            with self.assertRaises(m.NativeProcessError):
+                m.create(wrong, m.SpawnSpec(plain.executable, plain.argv, plain.env,
+                                           plain.fd_sources, command_map=wrong_permit))
+            self.assertFalse(wrong.attempted)
+
+    def test_fixed_account_adoption_requires_its_original_c_or_a_bootstrap(self):
+        world = _World()
+        with world.installed():
+            original = world.allocate("account_hold", os.O_RDONLY, flags=0)
+            world.fds[5] = world.fds.pop(original)
+            io = world.owner()
+            bootstrap = m._issue_command_bootstrap(role="C", command_nonce=b"d" * 16,
+                                                   parent_pid=100, parent_session=100, parent_group=100,
+                                                   account_binding=(os.getuid(), 2, world.fds[5]["inode"]))
+            hold = io.adopt_account_hold(bootstrap, binding=bootstrap.account_binding)
+            self.assertEqual(hold.fileno(), 5)
+            self.assertEqual(world.fds[5]["flags"], 1)
+            with self.assertRaises(m.NativeProcessError):
+                world.owner().adopt_account_hold(bootstrap, binding=bootstrap.account_binding)
+            with self.assertRaises(m.NativeProcessError):
+                m._issue_command_bootstrap(role="W", command_nonce=b"d" * 16,
+                                           parent_pid=100, parent_session=100, parent_group=100,
+                                           account_binding=(os.getuid(), 2, world.fds[5]["inode"]))
+            hold.close()
+            self.assertFalse(world.fds)
+
+    def test_inherited_closed_descriptor_is_inert_and_open_copy_closes_once_without_recorder(self):
+        owner = m.Acquisition(failure_recorder=lambda error: self.fail("inherited recorder called"))
+        closed, opened = m.FDLease(owner), m.FDLease(owner)
+        closed._state = "CLOSED"
+        opened._state, opened._fd = "OPEN", 123
+        pid = os.getpid()
+        with patch.object(m.os, "getpid", return_value=pid + 1), \
+             patch.object(m.os, "close") as close, patch.object(m, "_FORK_UNSAFE", False):
+            closed._relinquish_inherited()
+            self.assertFalse(m._FORK_UNSAFE)
+            opened._relinquish_inherited()
+            opened._relinquish_inherited()
+            close.assert_called_once_with(123)
+            self.assertEqual(opened.state, "INHERITED_CLOSED")
+
+    def test_pipe_return_in_modeled_child_retires_both_published_copies_before_parent_callbacks(self):
+        # No fork, descriptors or native calls: two actual model-returned FDs
+        # cross the same production publication boundary as a late child copy.
+        world = _World()
+        original_pid = os.getpid()
+        current_pid = [original_pid]
+        returned, closed = [], []
+
+        def pipe_return():
+            descriptors = world.pipe()
+            returned.extend(descriptors)
+            current_pid[0] = original_pid + 1
+            return descriptors
+
+        def close_copy(descriptor):
+            closed.append(descriptor)
+            del world.fds[descriptor]
+
+        def owner_check():
+            self.assertEqual(current_pid[0], original_pid, "inherited parent check was called")
+
+        with world.installed(), patch.object(m.os, "getpid", side_effect=lambda: current_pid[0]), \
+                patch.object(m.os, "pipe", side_effect=pipe_return), \
+                patch.object(m.os, "close", side_effect=close_copy), patch.object(m, "_FORK_UNSAFE", False):
+            acquisition = world.owner(owner_check, recorder=lambda _error: self.fail("inherited recorder called"))
+            with self.assertRaises(m.NativeProcessError):
+                acquisition.pipe()
+            self.assertEqual(len(returned), 2)
+            self.assertEqual(closed, returned)
+            self.assertEqual([lease._original_fd for lease in acquisition.leases], returned)
+            self.assertEqual([lease.state for lease in acquisition.leases], ["INHERITED_CLOSED"] * 2)
+            self.assertFalse(world.fds)
+            self.assertFalse(m._FORK_UNSAFE)
+            with self.assertRaises(m.NativeProcessError):
+                acquisition._check_origin()
+            self.assertEqual(closed, returned)  # A second refusal does not retry closes.
+
     def test_import_has_no_native_acquisition_or_implicit_reaper(self):
         source = Path(m.__file__).read_text(encoding="utf-8")
         probe = types.ModuleType("mobile_release._native_process_import_probe")

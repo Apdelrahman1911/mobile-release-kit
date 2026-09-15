@@ -204,6 +204,13 @@ It may permit unsigned Release assembly for `preflight --offline`, but it must f
 
 The Xcode Archive action remains Release and uses the application’s existing manual-signing configuration. The shared candidate workflow installs the configured P12/profile into an ephemeral keychain and passes explicit signing/export settings. Signed validation requires the retained archive and exported IPA together: all native images, bundle/resource inventories, and every present dSYM must correspond. Fresh Store preparation repeats this check independently. Export disables Swift-symbol stripping and thinning; see [iOS artifact correspondence](ios-artifacts.md) for supported layouts, symbol-coverage boundaries, and recovery rules.
 
+Local signed iOS build preflight acquires an account-wide lease before private or
+application work. Use a non-root macOS login account on local APFS/HFS+ storage;
+do not override its home or overlap other account-signing tools. Toolkit overlap
+fails safely; interrupted state has an explicit [local recovery procedure](local-signing.md).
+Preparation/build commands must finish their signing work synchronously. Do not
+leave detached background consumers or stop other tasks' shared build services.
+
 The shared credential contract owns exactly one provisioning profile and maps export options
 only for the configured main application Bundle ID. If an archive contains an extension, watch app,
 or another target with its own Bundle ID/profile, the application must provide a bounded

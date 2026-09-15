@@ -18,13 +18,17 @@ from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from sys import exc_info
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
-from .cancellation import CleanupScope as _ProfileCleanup, DefaultCancellation as _ProfileCancellation
+from .cancellation import CleanupScope as _ProfileCleanup, DefaultCancellation as _ProfileCancellation, cancellation_owner
 from .config import ConfigurationError, ReleaseConfig
 from .errors import CredentialError, ValidationError
-from .reporting import Finding, Status
+from .reporting import FAILING_STATUSES, Finding, Status
 from .tooling import canonical_external_path
+from .local_signing import SigningLease, _same_file_state, local_signing_lease
+from .owned_process import ProcessCleanupError, ProcessError, preserve_lifetime_error, run_owned
+from ._lifetime_evidence import ProfileCallEvidence
+from ._profile_callers import consume_profile_evidence, fatal_cancellation_error, first_primary_context
 
 STAGES = ("candidate", "external-testing", "production")
 ENVIRONMENT_NAMES = {
@@ -824,20 +828,20 @@ def _materialize(
 
 
 def _run_private(
-    argv: list[str], *, environ: Mapping[str, str], timeout: int = 30
+    argv: list[str], *, environ: Mapping[str, str], timeout: int = 30,
+    cancellation: _ProfileCancellation | None = None, on_start: Callable[[int], None] | None = None,
+    cwd: Path | None = None, capture: bool = True, cleanup: bool = False,
+    execution_source=None, execution_scope=None, journal_binding=None,
 ) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(
-            argv,
-            env=dict(environ),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as error:
-        raise CredentialError(f"credential validation tool failed or timed out: {argv[0]}") from error
+    if execution_source is not None and execution_scope is not None:
+        raise ProcessError("choose an account source or a selected command scope, not both")
+    if journal_binding is not None and execution_scope is None:
+        raise ProcessError("journalled command needs its original selected scope")
+    if execution_source is not None:
+        execution_scope = execution_source.new_scope()
+    return run_owned(argv, environ=environ, timeout=timeout, cancellation=cancellation,
+                     on_start=on_start, cwd=cwd, capture=capture, cleanup=cleanup,
+                     execution_scope=execution_scope, journal_binding=journal_binding)
 
 
 def _close_profile_descriptor(descriptor: int) -> None:
@@ -845,8 +849,10 @@ def _close_profile_descriptor(descriptor: int) -> None:
     # effect even when it raises. Retrying could close a reused foreign handle.
     try:
         os.close(descriptor)
-    except OSError:
-        raise CredentialError("local profile descriptor cleanup could not be confirmed; end this process before retrying") from None
+    except OSError as error:
+        raise preserve_lifetime_error(ProcessCleanupError(
+            "local profile descriptor cleanup could not be confirmed; end this process before retrying",
+        ), previous=error) from None
 
 
 def _open_profile_directory(home: Path) -> tuple[Path, int]:
@@ -864,6 +870,7 @@ def _open_profile_directory(home: Path) -> tuple[Path, int]:
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor = child = None
+    creator_pid = os.getpid()
     current = resolved_home
     try:
         try:
@@ -871,6 +878,8 @@ def _open_profile_directory(home: Path) -> tuple[Path, int]:
         except OSError as error:
             raise CredentialError("the local home directory could not be opened safely") from error
         for component in ("Library", "MobileDevice", "Provisioning Profiles"):
+            if creator_pid != os.getpid():
+                raise CredentialError("inherited profile-directory acquisition cannot continue")
             try:
                 os.mkdir(component, mode=0o700, dir_fd=descriptor)
             except FileExistsError:
@@ -899,7 +908,7 @@ def _open_profile_directory(home: Path) -> tuple[Path, int]:
         raise
 
 
-def _read_regular_at(directory_descriptor: int, name: str) -> bytes:
+def _read_regular_at(directory_descriptor: int, name: str) -> tuple[bytes, os.stat_result]:
     flags = os.O_RDONLY | os.O_NONBLOCK
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -907,16 +916,15 @@ def _read_regular_at(directory_descriptor: int, name: str) -> bytes:
     try:
         descriptor = os.open(name, flags, dir_fd=directory_descriptor)
         details = os.fstat(descriptor)
-        if not stat.S_ISREG(details.st_mode) or details.st_size > MAX_PRIVATE_MATERIAL_SIZE:
+        if not stat.S_ISREG(details.st_mode) or not 0 <= details.st_size <= MAX_PRIVATE_MATERIAL_SIZE:
             raise CredentialError("provisioning-profile destination is not a regular file")
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             content = handle.read(MAX_PRIVATE_MATERIAL_SIZE + 1)
         after = os.fstat(descriptor)
-        if len(content) != details.st_size or any(
-            getattr(details, key) != getattr(after, key) for key in ("st_size", "st_mtime_ns", "st_ctime_ns")
-        ):
+        if (len(content) != details.st_size or not _same_file_state(details, after)
+                or not _same_file_state(details, os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False))):
             raise CredentialError("provisioning-profile destination changed while being inspected")
-        return content
+        return content, details
     finally:
         if descriptor is not None:
             closing, descriptor = descriptor, None
@@ -926,19 +934,23 @@ def _read_regular_at(directory_descriptor: int, name: str) -> bytes:
 @contextmanager
 def _temporary_profile_installation(
     content: bytes, profile_uuid: str, home: Path, *, cancellation: _ProfileCancellation | None = None,
+    observer: Callable | None = None, reserved_stage: str | None = None, retain: Callable[[], bool] | None = None,
+    on_conflict: Callable[[], None] | None = None,
 ):
     """Install already-authenticated exact bytes without clobbering another file.
 
-    Inode ownership is not a multi-context lifetime lease: local signing's shared
-    keychain/profile concurrency is separately tracked as QA-003.
+    The signing caller holds the account lease, journals write-before-use events,
+    and can retain resources after genuinely ambiguous in-flight native work.
     """
     if (type(profile_uuid) is not str or not PROFILE_UUID_RE.fullmatch(profile_uuid)
             or type(content) is not bytes or not 0 < len(content) <= MAX_PRIVATE_MATERIAL_SIZE):
         raise CredentialError("authenticated provisioning profile identity is invalid")
-    owns_cancellation = cancellation is None
-    cancellation = cancellation if cancellation is not None else _ProfileCancellation(
-        CredentialError, "local signing cancellation handlers could not be restored",
+    if reserved_stage is not None and not re.fullmatch(r"\.mobile-release-profile-[0-9a-f]{32}", reserved_stage):
+        raise CredentialError("invalid reserved profile stage")
+    cancellation, owns_cancellation = cancellation_owner(cancellation,
+        ProcessCleanupError, "local signing cancellation handlers could not be restored",
     )
+    owner_pid = os.getpid()
     directory = descriptor = None
     name = f"{profile_uuid}.mobileprovision"
     stage = None
@@ -947,123 +959,268 @@ def _temporary_profile_installation(
     attempted = False
     linked = False
     failed_cleanup = False
+    snapshot_failed = False
+    reused_identity = None
+    conflicts: set[str] = set()
 
-    def file_identity(filename: str):
-        details = os.stat(filename, dir_fd=directory, follow_symlinks=False)
-        return (details.st_dev, details.st_ino) if stat.S_ISREG(details.st_mode) else None
+    def conflict(filename: str) -> None:
+        nonlocal failed_cleanup
+        # Preserve this observation even before ExitStack registers our owner.
+        # Other original-owned names/handles remain independently cleanable.
+        failed_cleanup = True
+        conflicts.add(filename)
+        if on_conflict is not None:
+            on_conflict()
 
-    def cleanup() -> None:
-        nonlocal directory, failed_cleanup
+    def event(phase: str, **values) -> None:
+        if owner_pid != os.getpid():
+            raise CredentialError("inherited profile installer cannot mutate parent resources")
+        if observer is not None:
+            observer(phase, **values)
+
+    def close_copies() -> None:
+        nonlocal directory, descriptor
         try:
-            if attempted and identity is not None:
-                try:
-                    current_identity = file_identity(name)
-                    if current_identity == identity:
-                        if _read_regular_at(directory, name) == content:
-                            os.unlink(name, dir_fd=directory)
-                        else:
-                            failed_cleanup = True
-                    elif linked:
-                        failed_cleanup = True  # Preserve an intervening replacement.
-                except FileNotFoundError:
-                    pass
-                except (OSError, CredentialError):
-                    failed_cleanup = True
-            if stage is not None and created:
-                if identity is None:
-                    failed_cleanup = True  # Empty private residue, not a guessed unlink.
-                else:
-                    try:
-                        if file_identity(stage) == identity:
-                            os.unlink(stage, dir_fd=directory)
-                        else:
-                            failed_cleanup = True
-                    except FileNotFoundError:
-                        pass
-                    except OSError:
-                        failed_cleanup = True
+            if descriptor is not None:
+                closing, descriptor = descriptor, None
+                _close_profile_descriptor(closing)
         finally:
             if directory is not None:
                 closing, directory = directory, None
-                try:
-                    _close_profile_descriptor(closing)
-                except CredentialError:
-                    failed_cleanup = True
+                _close_profile_descriptor(closing)
+
+    def file_state(filename: str) -> os.stat_result | None:
+        if owner_pid != os.getpid():
+            raise CredentialError("inherited profile installer has no file authority")
+        details = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+        if owner_pid != os.getpid():
+            raise CredentialError("inherited profile installer has no file authority")
+        return details if stat.S_ISREG(details.st_mode) else None
+
+    def file_identity(details: os.stat_result | None) -> tuple[int, int] | None:
+        return None if details is None else (details.st_dev, details.st_ino)
+
+    def snapshot(filename: str) -> tuple[bytes, os.stat_result]:
+        nonlocal snapshot_failed
+        if filename in conflicts:
+            raise CredentialError("provisioning-profile observation already failed; preserve it for explicit recovery")
+        try:
+            return _read_regular_at(directory, filename)
+        except ProcessError as error:
+            # This raw reader's owned close raises a direct typed error; it has
+            # no handler-restoration envelope. An ordinary missing-file error
+            # chained to a prior body failure is NOT a new snapshot failure.
+            if error.fatal:
+                # Even a first/racing read can fail before reused/owned identity
+                # is set. Unwind may close raw handles, not retry or resolve it.
+                snapshot_failed = True
+            raise
+        except FileNotFoundError:
+            raise  # Initial/owned absence is not a failed resource lifetime.
+        except (OSError, CredentialError):
+            conflict(filename)
+            raise
+
+    def require_current(filename: str, details: os.stat_result) -> None:
+        try:
+            current = file_state(filename)
+        except OSError:
+            conflict(filename)
+            raise
+        if not _same_file_state(details, current):
+            conflict(filename)
+            raise CredentialError("provisioning profile changed after inspection; preserve it for explicit recovery")
+
+    def cleanup() -> None:
+        nonlocal directory, failed_cleanup
+        if owner_pid != os.getpid():
+            close_copies()
+            return
+        try:
+            # Retention covers uncertain files, never our raw write handles or
+            # failure reporting. A return here would skip the final error check.
+            if not snapshot_failed and (retain is None or not retain()):
+                if reused_identity is not None and name not in conflicts:
+                    try:
+                        before = file_state(name)
+                        if file_identity(before) != reused_identity:
+                            conflict(name)
+                        else:
+                            observed_content, observed = snapshot(name)
+                            if (observed_content != content or not _same_file_state(before, observed)
+                                    or not _same_file_state(observed, file_state(name))):
+                                conflict(name)
+                    except (OSError, CredentialError) as error:
+                        if isinstance(error, ProcessError) and error.fatal:
+                            raise
+                        conflict(name)  # Not owned; preserve replacement/deletion.
+                # EEXIST reuse has already checked the LAST borrowed observation.
+                # Do not inspect it again as an unrelated owned-stage identity.
+                if attempted and identity is not None and reused_identity is None and name not in conflicts:
+                    try:
+                        before = file_state(name)
+                        if file_identity(before) == identity:
+                            observed_content, observed = snapshot(name)
+                            if (observed_content == content and _same_file_state(before, observed)
+                                    and _same_file_state(observed, file_state(name))):
+                                os.unlink(name, dir_fd=directory)
+                            else:
+                                conflict(name)
+                        elif linked:
+                            conflict(name)  # Preserve an intervening replacement.
+                    except FileNotFoundError:
+                        pass
+                    except (OSError, CredentialError) as error:
+                        if isinstance(error, ProcessError) and error.fatal:
+                            raise
+                        conflict(name)
+                if stage is not None and created and stage not in conflicts:
+                    if identity is None:
+                        conflict(stage)  # Empty private residue, not a guessed unlink.
+                    else:
+                        try:
+                            before = file_state(stage)
+                            if file_identity(before) == identity and _same_file_state(before, file_state(stage)):
+                                os.unlink(stage, dir_fd=directory)
+                            else:
+                                conflict(stage)
+                        except FileNotFoundError:
+                            pass
+                        except OSError:
+                            conflict(stage)
+                if directory is not None:
+                    os.fsync(directory)
+                if not failed_cleanup:
+                    event("resolved")
+        finally:
+            close_copies()
         if failed_cleanup:
             raise CredentialError(
                 "temporary provisioning profile changed or could not be cleaned up safely; "
                 "end this process and inspect its owned private staging files before retrying"
             )
 
-    scope = _ProfileCleanup(cancellation, cleanup, owns_cancellation=owns_cancellation)
+    scope = _ProfileCleanup(cancellation, cleanup, owns_cancellation=owns_cancellation, fork_cleanup=close_copies,
+                            first_primary=True)
     try:
-        with scope:
-            if owns_cancellation:
-                cancellation.install()
-                cancellation.activate()
-            with cancellation.deferred():
-                _, directory = _open_profile_directory(home)
-                cancellation.check()
-                try:
-                    existing = _read_regular_at(directory, name)
-                except FileNotFoundError:
-                    existing = None
-                cancellation.check()
-                if existing is not None:
-                    if existing != content:
-                        raise CredentialError("a different provisioning profile is already installed with the same UUID")
-                else:
-                    stage = f".mobile-release-profile-{secrets.token_hex(16)}"
+        try:
+            with scope:
+                if owns_cancellation:
+                    cancellation.install()
+                    cancellation.activate()
+                with cancellation.deferred():
+                    _, directory = _open_profile_directory(home)
+                    cancellation.check()
                     try:
-                        descriptor = os.open(stage, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
-                        created = True
-                        details = os.fstat(descriptor)
-                        identity = (details.st_dev, details.st_ino)
-                        cancellation.check()
-                        with os.fdopen(descriptor, "wb", closefd=False) as handle:
-                            handle.write(content)
-                            handle.flush()
-                            os.fsync(descriptor)
-                    finally:
-                        if descriptor is not None:
-                            # Initial fstat can fail before any bytes are written.
-                            # Only this still-owned FD can recover deletion authority.
-                            if identity is None:
+                        existing = snapshot(name)
+                    except FileNotFoundError:
+                        existing = None
+                    cancellation.check()
+                    event("inspected")
+                    if existing is not None:
+                        if existing[0] != content:
+                            raise CredentialError("a different provisioning profile is already installed with the same UUID")
+                        require_current(name, existing[1])
+                        reused_identity = file_identity(existing[1])
+                        event("reused", identity=reused_identity)
+                    else:
+                        stage = reserved_stage or f".mobile-release-profile-{secrets.token_hex(16)}"
+                        event("stage-intent")
+                        try:
+                            descriptor = os.open(stage, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+                            created = True
+                            details = os.fstat(descriptor)
+                            identity = (details.st_dev, details.st_ino)
+                            event("stage-created", identity=identity)
+                            cancellation.check()
+                            with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                                handle.write(content)
+                                handle.flush()
+                                os.fsync(descriptor)
+                        finally:
+                            if descriptor is not None:
+                                # Initial fstat can fail before any bytes are written.
+                                # Only this still-owned FD can recover deletion authority.
                                 try:
-                                    details = os.fstat(descriptor)
-                                    identity = (details.st_dev, details.st_ino)
-                                except OSError:
-                                    failed_cleanup = True
-                            closing, descriptor = descriptor, None
-                            try:
-                                _close_profile_descriptor(closing)
-                            except CredentialError:
-                                failed_cleanup = True
-                    if failed_cleanup:
-                        raise CredentialError("private provisioning-profile descriptor cleanup could not be confirmed")
+                                    if identity is None:
+                                        try:
+                                            details = os.fstat(descriptor)
+                                            identity = (details.st_dev, details.st_ino)
+                                            event("stage-created", identity=identity)
+                                        except OSError:
+                                            failed_cleanup = True
+                                finally:
+                                    # A failed identity checkpoint is not permission
+                                    # to abandon the already acquired descriptor.
+                                    closing, descriptor = descriptor, None
+                                    _close_profile_descriptor(closing)
+                        if failed_cleanup:
+                            raise CredentialError("private provisioning-profile descriptor cleanup could not be confirmed")
+                        cancellation.check()
+                        # Arm ownership before the syscall: interruption after a successful
+                        # link must still remove our file, never a pre-existing destination.
+                        attempted = True
+                        event("link-intent")
+                        try:
+                            os.link(stage, name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+                            linked = True
+                        except FileExistsError:
+                            existing = snapshot(name)
+                            if existing[0] != content:
+                                raise CredentialError("a different provisioning profile appeared during installation") from None
+                            require_current(name, existing[1])
+                            linked = file_identity(existing[1]) == identity
+                            if not linked:
+                                reused_identity = file_identity(existing[1])
+                        os.fsync(directory)
+                        if not linked:
+                            event("reused", identity=reused_identity)
+                        event("linked", owned=linked)
+                        cancellation.check()
+                        try:
+                            before = file_state(stage)
+                            if file_identity(before) != identity:
+                                conflict(stage)
+                                raise CredentialError("private provisioning-profile staging file was replaced")
+                            require_current(stage, before)
+                            os.unlink(stage, dir_fd=directory)
+                        except FileNotFoundError:
+                            # Known owned absence still aborts admission, but is
+                            # not an ambiguous stat/unlink result. An earlier
+                            # require_current conflict remains latched, if any.
+                            raise
+                        except OSError:
+                            # Entry can fail before ExitStack registers us. Keep
+                            # this name conflicted even if unlink took effect;
+                            # neither cleanup owner may implicitly retry it.
+                            conflict(stage)
+                            raise
+                        stage = None
+                        os.fsync(directory)
+                        event("stage-removed")
+                        cancellation.check()
+                    # Our own stage unlink changes nlink/ctime. Obtain a FRESH
+                    # bounded snapshot, but never reselect its admitted identity.
+                    final_content, final_state = snapshot(name)
+                    expected_identity = identity if linked else reused_identity
+                    if final_content != content or file_identity(final_state) != expected_identity:
+                        conflict(name)
+                        raise CredentialError("provisioning profile changed before signing admission")
+                    require_current(name, final_state)
                     cancellation.check()
-                    # Arm ownership before the syscall: interruption after a successful
-                    # link must still remove our file, never a pre-existing destination.
-                    attempted = True
-                    try:
-                        os.link(stage, name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
-                        linked = True
-                    except FileExistsError:
-                        if _read_regular_at(directory, name) != content:
-                            raise CredentialError("a different provisioning profile appeared during installation") from None
-                        linked = file_identity(name) == identity
-                    cancellation.check()
-                    if file_identity(stage) != identity:
-                        raise CredentialError("private provisioning-profile staging file was replaced")
-                    os.unlink(stage, dir_fd=directory)
-                    stage = None
-                    cancellation.check()
-            yield
-    except OSError:
-        raise CredentialError("provisioning profile could not be installed safely") from None
-    finally:
-        # Normal with-exit dispatch precedes __exit__'s protected frame.
-        scope.__exit__(*exc_info())
+                yield
+        finally:
+            # Normal with-exit dispatch precedes __exit__'s protected frame.
+            scope.__exit__(*exc_info())
+    except BaseException as error:
+        fatal = fatal_cancellation_error(
+            error, cancellation, "local profile cleanup is unconfirmed; end this process before retrying",
+        )
+        if fatal is not None:
+            raise fatal from None
+        if isinstance(error, OSError):
+            raise CredentialError("provisioning profile could not be installed safely") from None
+        raise
 
 
 def _utc_datetime(value: datetime) -> datetime:
@@ -1081,226 +1238,234 @@ def _parse_certificate_datetime(value: str) -> datetime:
     return _utc_datetime(parsed)
 
 
-@contextmanager
-def _temporary_apple_signing_environment(
-    *, p12: Path, password: str, profile: Path, directory: Path, home: Path | None = None
-):
-    """Install validated Apple material temporarily without exposing it in output."""
-
+def _signing_profile_identity(profile_payload: dict) -> str:
+    """Pure current-validity/UUID policy, after profile lifetime consumption."""
     from .ios import _profile_validity
-    from .ios_profiles import decode_authenticated_profile, read_profile_bytes
 
-    # Authenticate ONE snapshot before inspecting or mutating user keychains.
-    # A later replacement of the supplied path cannot change installed bytes.
     try:
-        supplied = read_profile_bytes(profile)
-        profile_payload = decode_authenticated_profile(supplied)
         _profile_validity(profile_payload)
+    except ProcessError:
+        raise
     except ValidationError as error:
         raise CredentialError(str(error)) from None
     profile_uuid = profile_payload.get("UUID")
     if not isinstance(profile_uuid, str) or not PROFILE_UUID_RE.fullmatch(profile_uuid):
         raise CredentialError("provisioning profile UUID is missing or invalid")
+    return profile_uuid
 
-    env = scrub_credential_capabilities(os.environ)
-    env["MOBILE_RELEASE_LOCAL_P12_PASSWORD"] = password
-    keychain = directory / "signing.keychain-db"
-    certificate = directory / "signing-certificate.pem"
-    chain_certificates = directory / "signing-chain.pem"
-    private_key = directory / "signing-private-key.pem"
-    keychain_password = secrets.token_hex(32)
-    original_default = ""
-    original_keychains: list[str] = []
-    created_keychain = False
-    changed_keychain_search = False
-    changed_default = False
-    installed_profile = ExitStack()
 
-    def require(argv: list[str], action: str) -> subprocess.CompletedProcess[str]:
-        result = _run_private(argv, environ=env)
-        if result.returncode:
-            raise CredentialError(f"could not {action} for local Apple signing preflight")
-        return result
+def _authenticated_signing_profile(profile: Path, *, cancellation: _ProfileCancellation) -> tuple[bytes, dict]:
+    """Authenticate one original snapshot before creating account-session authority."""
+    from .inspection import InspectionDeadline
+    from .ios_profiles import decode_authenticated_profile, read_profile_bytes
 
-    def extract(arguments: list[str], action: str) -> None:
-        base = [
-            "openssl",
-            "pkcs12",
-            "-in",
-            str(p12),
-            *arguments,
-            "-passin",
-            "env:MOBILE_RELEASE_LOCAL_P12_PASSWORD",
-        ]
-        result = _run_private(base, environ=env)
-        if result.returncode:
-            result = _run_private(
-                ["openssl", "pkcs12", "-legacy", *base[2:]], environ=env
-            )
-        if result.returncode:
-            raise CredentialError(f"could not {action} for local Apple signing preflight")
-
-    def cleanup_signing() -> None:
-        cleanup_failed = False
-
-        def cleanup(argv: list[str]) -> bool:
-            try:
-                return _run_private(argv, environ=env).returncode == 0
-            except CredentialError:
-                return False
-
-        try:
-            if changed_keychain_search:
-                cleanup_failed = not cleanup(
-                    ["security", "list-keychains", "-d", "user", "-s", *original_keychains]
-                ) or cleanup_failed
-            if changed_default and original_default:
-                cleanup_failed = not cleanup(
-                    ["security", "default-keychain", "-d", "user", "-s", original_default]
-                ) or cleanup_failed
-            if created_keychain:
-                cleanup_failed = not cleanup(
-                    ["security", "delete-keychain", str(keychain)]
-                ) or cleanup_failed
-        finally:
-            try:
-                installed_profile.close()
-            except (CredentialError, OSError):
-                cleanup_failed = True
-        if cleanup_failed:
-            raise CredentialError("local Apple signing material could not be completely cleaned up")
-
-    cancellation = _ProfileCancellation(
-        CredentialError, "local signing cancellation handlers could not be restored",
-    )
-    scope = _ProfileCleanup(cancellation, cleanup_signing, owns_cancellation=True)
+    deadline = InspectionDeadline()
+    evidence = ProfileCallEvidence(operation="load")
+    primary = None
     try:
-        with scope:
-            cancellation.install()
-            cancellation.activate()
-            with cancellation.deferred():
-                installed_profile.enter_context(_temporary_profile_installation(
-                    supplied, profile_uuid, home or Path.home(), cancellation=cancellation,
-                ))
-            default_result = require(
-                ["security", "default-keychain", "-d", "user"],
-                "inspect the default keychain",
-            )
-            original_default = default_result.stdout.strip().strip('"')
-            if not original_default:
-                raise CredentialError("the current default keychain could not be identified")
-            list_result = require(
-                ["security", "list-keychains", "-d", "user"],
-                "inspect the keychain search list",
-            )
-            original_keychains = [
-                quoted or bare
-                for quoted, bare in re.findall(
-                    r'"([^"\r\n]+)"|([^\s"]+)', list_result.stdout
-                )
-            ]
-            with cancellation.deferred():
-                require(
-                    ["security", "create-keychain", "-p", keychain_password, str(keychain)],
-                    "create an ephemeral keychain",
-                )
-                created_keychain = True
-            require(
-                ["security", "set-keychain-settings", "-lut", "21600", str(keychain)],
-                "configure the ephemeral keychain",
-            )
-            require(
-                ["security", "unlock-keychain", "-p", keychain_password, str(keychain)],
-                "unlock the ephemeral keychain",
-            )
-            extract(
-                ["-clcerts", "-nokeys", "-out", str(certificate)],
-                "extract the Apple distribution certificate",
-            )
-            extract(
-                ["-nocerts", "-nodes", "-out", str(private_key)],
-                "extract the Apple distribution private key",
-            )
-            extract(
-                ["-cacerts", "-nokeys", "-out", str(chain_certificates)],
-                "extract the Apple distribution certificate chain",
-            )
-            private_key.chmod(0o600)
-            require(
-                [
-                    "security",
-                    "import",
-                    str(private_key),
-                    "-k",
-                    str(keychain),
-                    "-T",
-                    "/usr/bin/codesign",
-                    "-T",
-                    "/usr/bin/security",
-                ],
-                "import the Apple distribution identity",
-            )
-            require(
-                [
-                    "security",
-                    "import",
-                    str(certificate),
-                    "-k",
-                    str(keychain),
-                    "-T",
-                    "/usr/bin/codesign",
-                    "-T",
-                    "/usr/bin/security",
-                ],
-                "import the Apple distribution certificate",
-            )
-            if (
-                chain_certificates.is_file()
-                and b"-----BEGIN CERTIFICATE-----" in chain_certificates.read_bytes()
-            ):
-                require(
-                    [
-                        "security",
-                        "import",
-                        str(chain_certificates),
-                        "-k",
-                        str(keychain),
-                        "-T",
-                        "/usr/bin/codesign",
-                        "-T",
-                        "/usr/bin/security",
-                    ],
-                    "import the Apple distribution certificate chain",
-                )
-            require(
-                [
-                    "security",
-                    "set-key-partition-list",
-                    "-S",
-                    "apple-tool:,apple:,codesign:",
-                    "-s",
-                    "-k",
-                    keychain_password,
-                    str(keychain),
-                ],
-                "authorize codesign to use the ephemeral keychain",
-            )
-            with cancellation.deferred():
-                require(
-                    ["security", "list-keychains", "-d", "user", "-s", str(keychain)],
-                    "activate the ephemeral keychain",
-                )
-                changed_keychain_search = True
-            with cancellation.deferred():
-                require(
-                    ["security", "default-keychain", "-d", "user", "-s", str(keychain)],
-                    "select the ephemeral keychain",
-                )
-                changed_default = True
+        supplied = read_profile_bytes(profile, cancellation=cancellation, deadline=deadline, _evidence=evidence)
+        profile_payload = decode_authenticated_profile(supplied, cancellation=cancellation, deadline=deadline, _evidence=evidence)
+    except BaseException as error:
+        primary = error
+    consume_profile_evidence(evidence, primary=primary,
+                             message="local Apple profile lifetime is unconfirmed; end this invocation")
+    if primary is not None:
+        if isinstance(primary, ProcessError):
+            raise primary
+        if isinstance(primary, ValidationError):
+            raise CredentialError(str(primary)) from None
+        raise primary
+    _signing_profile_identity(profile_payload)
+    deadline.check()
+    return supplied, profile_payload
 
-            yield {"MOBILE_RELEASE_IOS_PROFILE_SPECIFIER": profile_uuid}
-    finally:
-        scope.__exit__(*exc_info())
+
+@contextmanager
+def _temporary_apple_signing_environment(
+    *, p12: Path, password: str, profile: Path, directory: Path, home: Path | None = None,
+    lease: SigningLease | None = None,
+    cancellation: _ProfileCancellation | None = None,
+):
+    """Lease all account-global resources; keep ambiguous work recoverable."""
+
+    lease_context = local_signing_lease(home=home, cancellation=cancellation) if lease is None else nullcontext(lease)
+    with lease_context as owner:
+        owner._admit_execution()
+        if owner.active is not None:
+            raise CredentialError("this account lease already has an active signing context")
+        if cancellation is not None and cancellation is not owner.cancellation:
+            raise CredentialError("Apple material cancellation owner differs from its account lease")
+        cancellation = owner.cancellation
+        # One genuine profile call finishes before any native account read.
+        supplied, profile_payload = _authenticated_signing_profile(profile, cancellation=cancellation)
+        profile_uuid = profile_payload["UUID"]
+
+        env = scrub_credential_capabilities(os.environ)
+        env.update(HOME=str(owner.home), MOBILE_RELEASE_LOCAL_P12_PASSWORD=password)
+        certificate = directory / "signing-certificate.pem"
+        chain_certificates = directory / "signing-chain.pem"
+        private_key = directory / "signing-private-key.pem"
+        keychain_password = secrets.token_hex(32)
+        installed_profile = ExitStack()
+        profile_conflict = False
+        session = owner.session()
+        session.bind_runner(_run_private, environment=env)
+        keychain = session.keychain
+        creator_pid = os.getpid()
+
+        def require(argv: list[str], action: str, kind: str) -> subprocess.CompletedProcess[str]:
+            result = session.run(argv, kind=kind)
+            if result.returncode:
+                raise CredentialError(f"could not {action} for local Apple signing preflight")
+            return result
+
+        def extract(arguments: list[str], action: str) -> None:
+            base = ["openssl", "pkcs12", "-in", str(p12), *arguments,
+                    "-passin", "env:MOBILE_RELEASE_LOCAL_P12_PASSWORD"]
+            result = session.run(base, kind="extract")
+            # Only a fully completed native nonzero allows the legacy-format
+            # fallback. An ambiguous command is not automatically reissued.
+            if result.returncode < 0:
+                raise ProcessError("Apple extraction was interrupted; it cannot be retried", dispatched=True)
+            if result.returncode > 0:
+                result = session.run(["openssl", "pkcs12", "-legacy", *base[2:]], kind="extract")
+            if result.returncode < 0:
+                raise ProcessError("Apple legacy extraction was interrupted; no further extraction is allowed", dispatched=True)
+            if result.returncode:
+                raise CredentialError(f"could not {action} for local Apple signing preflight")
+
+        def retain_profile() -> bool:
+            return (session.unresolved or cancellation.lifetime_ledger.fatal
+                    or (session.state is not None and session.state["inflight"] is not None))
+
+        def preserve_profile_conflict() -> None:
+            nonlocal profile_conflict
+            profile_conflict = True  # No I/O; also active before installer registration.
+
+        def cleanup_signing() -> None:
+            primary = exc_info()[1]
+            if creator_pid != os.getpid():
+                return  # Child copies have been closed, never remove parent resources.
+            # ExitStack.close() may detach a callback exception from the body.
+            # Retain ALL earlier facts, even before a later failure makes them fatal.
+            observed = preserve_lifetime_error(ProcessError(
+                "local Apple signing resource cleanup is unconfirmed; end this process before retrying",
+            ), previous=primary)
+            cleanup_failed = False
+            first_failure: BaseException | None = None
+
+            def quarantine() -> None:
+                if cancellation.lifetime_ledger.fatal or observed.fatal:
+                    session.unresolved = True
+
+            def failed(error: BaseException) -> None:
+                nonlocal cleanup_failed, first_failure
+                cleanup_failed = True
+                if first_failure is None:
+                    first_failure = error
+                preserve_lifetime_error(observed, previous=error)
+                if observed.fatal:
+                    cancellation.lifetime_ledger._abort(error)
+                quarantine()
+
+            quarantine()  # Before either registered owner can inspect retention.
+            session.cleaning = True
+            try:
+                try:
+                    if session.fd is not None:
+                        try:
+                            if session.state is not None and session.state["inflight"] is not None:
+                                if not session.journal_failed and not session.unresolved:
+                                    try:
+                                        session.finish_original_command_if_settled()
+                                    except BaseException as error:
+                                        failed(error)
+                            if session.state is not None and not session.journal_failed and not retain_profile():
+                                try:
+                                    session.cleanup_native()
+                                except BaseException as error:
+                                    failed(error)
+                        finally:
+                            try:
+                                installed_profile.close()
+                            except BaseException as error:
+                                failed(error)
+                        # These are additional reconciliation/finalization, not
+                        # the already-registered independent cleanup above.
+                        if not observed.fatal and not retain_profile() and not session.journal_failed and not profile_conflict:
+                            if session.intent is None or session.state is None:
+                                cleanup_failed = session.cleanup_unstarted_initialization() or cleanup_failed
+                            else:
+                                try:
+                                    session.cleanup_profile()
+                                    cleanup_failed = session.finish() or cleanup_failed
+                                except BaseException as error:
+                                    failed(error)
+                        else:
+                            cleanup_failed = True
+                finally:
+                    try:
+                        session.close()  # Only descriptors; residual authority stays private/on disk.
+                    except BaseException as error:
+                        failed(error)
+            except BaseException as error:
+                failed(error)
+                if isinstance(first_failure, (KeyboardInterrupt, SystemExit)):
+                    raise first_failure
+                if observed.fatal:
+                    raise observed from None
+                raise
+            if isinstance(first_failure, (KeyboardInterrupt, SystemExit)):
+                raise first_failure
+            if observed.fatal:
+                raise observed from None
+            if cleanup_failed:
+                raise CredentialError("local Apple signing cleanup failed or observed a conflict; run mobile-release local-signing status before retrying")
+
+        scope = _ProfileCleanup(cancellation, cleanup_signing, owns_cancellation=False, fork_cleanup=session.close,
+                                first_primary=True)
+        try:
+            try:
+                with scope:
+                    session.open(create=True)
+                    session.prepare(supplied, profile_uuid)
+                    with cancellation.deferred():
+                        installed_profile.enter_context(_temporary_profile_installation(
+                            supplied, profile_uuid, owner.home, cancellation=cancellation,
+                            observer=session.profile_event, reserved_stage=session.intent["profile"]["stage"], retain=retain_profile,
+                            on_conflict=preserve_profile_conflict,
+                        ))
+                    require(["security", "create-keychain", "-p", keychain_password, str(keychain)],
+                            "create an ephemeral keychain", "create")
+                    require(["security", "set-keychain-settings", "-lut", "21600", str(keychain)],
+                            "configure the ephemeral keychain", "settings")
+                    require(["security", "unlock-keychain", "-p", keychain_password, str(keychain)],
+                            "unlock the ephemeral keychain", "unlock")
+                    extract(["-clcerts", "-nokeys", "-out", str(certificate)], "extract the Apple distribution certificate")
+                    extract(["-nocerts", "-nodes", "-out", str(private_key)], "extract the Apple distribution private key")
+                    extract(["-cacerts", "-nokeys", "-out", str(chain_certificates)], "extract the Apple distribution certificate chain")
+                    private_key.chmod(0o600)
+                    for path, action in ((private_key, "identity"), (certificate, "certificate"), (chain_certificates, "certificate chain")):
+                        if path == chain_certificates and (not path.is_file() or b"-----BEGIN CERTIFICATE-----" not in path.read_bytes()):
+                            continue
+                        require(["security", "import", str(path), "-k", str(keychain), "-T", "/usr/bin/codesign", "-T", "/usr/bin/security"],
+                                f"import the Apple distribution {action}", "import")
+                    require(["security", "set-key-partition-list", "-S", "apple-tool:,apple:,codesign:", "-s", "-k", keychain_password, str(keychain)],
+                            "authorize codesign to use the ephemeral keychain", "partition")
+                    session.activate()
+                    cancellation.check()
+                    yield {"MOBILE_RELEASE_IOS_PROFILE_SPECIFIER": profile_uuid}
+            finally:
+                scope.__exit__(*exc_info())
+        except BaseException as error:
+            fatal = fatal_cancellation_error(
+                error, cancellation, "local Apple signing cleanup is unconfirmed; end this process before retrying",
+            )
+            if fatal is not None:
+                raise fatal from None
+            if isinstance(error, OSError):
+                raise CredentialError("local Apple signing state could not be prepared or retained safely; inspect local-signing status") from None
+            raise
 
 
 def _fingerprint_from_text(text: str) -> str | None:
@@ -1309,7 +1474,7 @@ def _fingerprint_from_text(text: str) -> str | None:
 
 
 def _validate_android_material(
-    config: ReleaseConfig, values: Mapping[str, str], directory: Path
+    config: ReleaseConfig, values: Mapping[str, str], directory: Path, *, execution_source=None, cancellation: _ProfileCancellation | None = None,
 ) -> Finding:
     keystore = _materialize(
         values,
@@ -1357,6 +1522,7 @@ def _validate_android_material(
             "MOBILE_RELEASE_ANDROID_KEY_PASSWORD",
         ],
         environ=env,
+        execution_source=execution_source, cancellation=cancellation,
     )
     output = result.stdout + result.stderr
     if result.returncode or "PrivateKeyEntry" not in output:
@@ -1414,7 +1580,7 @@ def _validate_android_material(
 
 
 def _validate_p8(
-    config: ReleaseConfig, values: Mapping[str, str], directory: Path
+    config: ReleaseConfig, values: Mapping[str, str], directory: Path, *, execution_source=None, cancellation: _ProfileCancellation | None = None,
 ) -> Finding:
     p8 = _materialize(
         values,
@@ -1434,10 +1600,12 @@ def _validate_p8(
     result = _run_private(
         ["openssl", "pkey", "-in", str(p8), "-check", "-noout"],
         environ=scrub_credential_capabilities(os.environ),
+        execution_source=execution_source, cancellation=cancellation,
     )
     public = _run_private(
         ["openssl", "pkey", "-in", str(p8), "-pubout", "-text_pub", "-noout"],
         environ=scrub_credential_capabilities(os.environ),
+        execution_source=execution_source, cancellation=cancellation,
     )
     output = public.stdout + public.stderr
     if (
@@ -1460,7 +1628,7 @@ def _validate_p8(
 
 
 def _validate_apple_signing_material(
-    config: ReleaseConfig, values: Mapping[str, str], directory: Path
+    config: ReleaseConfig, values: Mapping[str, str], directory: Path, *, execution_source=None, cancellation: _ProfileCancellation | None = None,
 ) -> list[Finding]:
     from .ios import _profile_validity
     from .ios_profiles import load_authenticated_profile
@@ -1493,10 +1661,21 @@ def _validate_apple_signing_material(
             )
         )
         return findings
+    evidence = ProfileCallEvidence(operation="load")
+    primary = None
     try:
-        payload = load_authenticated_profile(profile)
+        payload = load_authenticated_profile(profile, cancellation=cancellation, _evidence=evidence)
+    except BaseException as error:
+        primary = error
+    consume_profile_evidence(evidence, primary=primary,
+                             message="Apple material profile lifetime is unconfirmed; end this invocation")
+    try:
+        if primary is not None:
+            raise primary
         _profile_validity(payload)
-    except ValidationError:
+    except ValidationError as error:
+        if isinstance(error, ProcessError) and error.fatal:
+            raise
         return [Finding(
             "credential-material.apple-profile", Status.INVALID,
             "Apple profile issuer, modern signed content or current validity could not be verified; "
@@ -1509,12 +1688,17 @@ def _validate_apple_signing_material(
 
     def extract_pkcs12(arguments: list[str]) -> subprocess.CompletedProcess[str]:
         command = ["openssl", "pkcs12", "-in", str(p12), *arguments]
-        result = _run_private(command, environ=env)
-        if result.returncode:
+        result = _run_private(command, environ=env, execution_source=execution_source, cancellation=cancellation)
+        if result.returncode < 0:
+            raise ProcessError("Apple extraction was interrupted; it cannot be retried", dispatched=True)
+        if result.returncode > 0:
             result = _run_private(
                 ["openssl", "pkcs12", "-legacy", "-in", str(p12), *arguments],
                 environ=env,
+                execution_source=execution_source, cancellation=cancellation,
             )
+        if result.returncode < 0:
+            raise ProcessError("Apple legacy extraction was interrupted; no further extraction is allowed", dispatched=True)
         return result
 
     extract = extract_pkcs12(
@@ -1566,6 +1750,7 @@ def _validate_apple_signing_material(
             "extendedKeyUsage",
         ],
         environ=env,
+        execution_source=execution_source, cancellation=cancellation,
     )
     fingerprint = _fingerprint_from_text(certificate_check.stdout + certificate_check.stderr)
     expected = config.section("ios").get("distributionCertificateSha256", "").replace(":", "").lower()
@@ -1593,10 +1778,12 @@ def _validate_apple_signing_material(
     cert_public_result = _run_private(
         ["openssl", "x509", "-in", str(certificate), "-pubkey", "-noout", "-out", str(certificate_public)],
         environ=env,
+        execution_source=execution_source, cancellation=cancellation,
     )
     key_public_result = _run_private(
         ["openssl", "pkey", "-in", str(private_key), "-pubout", "-out", str(key_public)],
         environ=env,
+        execution_source=execution_source, cancellation=cancellation,
     )
     keys_match = (
         cert_public_result.returncode == 0
@@ -1731,6 +1918,8 @@ def validate_signing_material(
     *,
     values: Mapping[str, str],
     platforms: Iterable[str],
+    execution_source=None,
+    cancellation: _ProfileCancellation | None = None,
 ) -> list[Finding]:
     findings: list[Finding] = []
     for name in PRIVATE_CREDENTIAL_PATH_NAMES & values.keys():
@@ -1743,18 +1932,33 @@ def validate_signing_material(
                     category="credentials",
                 )
             ]
-    with tempfile.TemporaryDirectory(prefix="mobile-release-credentials-") as temporary:
+    with first_primary_context(tempfile.TemporaryDirectory(prefix="mobile-release-credentials-"),
+                               cancellation=cancellation, expose_owner=True) as (temporary, cancellation):
         directory = Path(temporary)
         directory.chmod(0o700)
         for platform in platforms:
             try:
+                platform_findings = []
                 if platform == "android":
-                    findings.append(_validate_android_material(config, values, directory))
+                    platform_findings.append(_validate_android_material(config, values, directory,
+                                                                        execution_source=execution_source, cancellation=cancellation))
                 elif platform == "ios":
-                    findings.extend(_validate_apple_signing_material(config, values, directory))
+                    platform_findings.extend(_validate_apple_signing_material(config, values, directory,
+                                                                             execution_source=execution_source, cancellation=cancellation))
+                findings.extend(platform_findings)
+                if any(item.status in FAILING_STATUSES for item in platform_findings):
+                    break
                 firebase = _validate_firebase_material(config, values, directory, platform)
                 if firebase:
                     findings.append(firebase)
+                    if firebase.status in FAILING_STATUSES:
+                        break
+            except ProcessError as error:
+                if error.fatal:
+                    raise
+                findings.append(Finding(f"credential-material.{platform}", Status.INVALID,
+                                        str(error), category="credentials"))
+                break
             except (CredentialError, OSError) as error:
                 findings.append(
                     Finding(
@@ -1764,7 +1968,21 @@ def validate_signing_material(
                         category="credentials",
                     )
                 )
+                break
     return findings
+
+
+def store_material_prerequisite_findings(
+    *, values: Mapping[str, str], platforms: Iterable[str],
+) -> list[Finding]:
+    """Cheap absence diagnostics, with no credential read or native operation."""
+    if "android" in platforms and not values.get("GOOGLE_APPLICATION_CREDENTIALS"):
+        return [Finding(
+            "credential-material.google-adc", Status.MISSING,
+            "Local Google Store preflight requires explicit Application Default Credentials.",
+            category="credentials",
+        )]
+    return []
 
 
 def validate_store_material(
@@ -1772,9 +1990,13 @@ def validate_store_material(
     *,
     values: Mapping[str, str],
     platforms: Iterable[str],
+    execution_source=None,
+    cancellation: _ProfileCancellation | None = None,
 ) -> list[Finding]:
-    findings: list[Finding] = []
     selected = set(platforms)
+    findings = store_material_prerequisite_findings(values=values, platforms=selected)
+    if findings:
+        return findings
     for name in PRIVATE_CREDENTIAL_PATH_NAMES & values.keys():
         if error := _private_path_error(values[name], config.root):
             return [
@@ -1785,12 +2007,18 @@ def validate_store_material(
                     category="credentials",
                 )
             ]
-    with tempfile.TemporaryDirectory(prefix="mobile-release-store-credentials-") as temporary:
+    with first_primary_context(tempfile.TemporaryDirectory(prefix="mobile-release-store-credentials-"),
+                               cancellation=cancellation, expose_owner=True) as (temporary, cancellation):
         directory = Path(temporary)
         directory.chmod(0o700)
         if "ios" in selected:
             try:
-                findings.append(_validate_p8(config, values, directory))
+                findings.append(_validate_p8(config, values, directory, execution_source=execution_source, cancellation=cancellation))
+            except ProcessError as error:
+                if error.fatal:
+                    raise
+                findings.append(Finding("credential-material.apple-p8", Status.INVALID,
+                                        str(error), category="credentials"))
             except (CredentialError, OSError) as error:
                 findings.append(
                     Finding(
@@ -1800,38 +2028,30 @@ def validate_store_material(
                         category="credentials",
                     )
                 )
+            if any(item.status in FAILING_STATUSES for item in findings):
+                return findings
         if "android" in selected:
-            adc = values.get("GOOGLE_APPLICATION_CREDENTIALS")
-            if not adc:
-                findings.append(
-                    Finding(
-                        "credential-material.google-adc",
-                        Status.MISSING,
-                        "Local Google Store preflight requires explicit Application Default Credentials.",
-                        category="credentials",
-                    )
+            adc = values["GOOGLE_APPLICATION_CREDENTIALS"]
+            error = _private_path_error(adc, config.root)
+            try:
+                payload = json.loads(Path(adc).read_text(encoding="utf-8")) if not error else None
+                valid = isinstance(payload, dict) and payload.get("type") in {
+                    "external_account",
+                    "service_account",
+                    "authorized_user",
+                }
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                valid = False
+            findings.append(
+                Finding(
+                    "credential-material.google-adc",
+                    Status.PASS if valid else Status.INVALID,
+                    "Explicit Google ADC credential configuration is structurally valid."
+                    if valid
+                    else "Explicit Google ADC credential configuration is missing or malformed.",
+                    category="credentials",
                 )
-            else:
-                error = _private_path_error(adc, config.root)
-                try:
-                    payload = json.loads(Path(adc).read_text(encoding="utf-8")) if not error else None
-                    valid = isinstance(payload, dict) and payload.get("type") in {
-                        "external_account",
-                        "service_account",
-                        "authorized_user",
-                    }
-                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                    valid = False
-                findings.append(
-                    Finding(
-                        "credential-material.google-adc",
-                        Status.PASS if valid else Status.INVALID,
-                        "Explicit Google ADC credential configuration is structurally valid."
-                        if valid
-                        else "Explicit Google ADC credential configuration is missing or malformed.",
-                        category="credentials",
-                    )
-                )
+            )
     return findings
 
 
@@ -1895,10 +2115,29 @@ def materialize_build_inputs(
     values: Mapping[str, str],
     platforms: Iterable[str],
     prepare_ios_signing: bool = False,
+    signing_lease: SigningLease | None = None,
+    cancellation: _ProfileCancellation | None = None,
 ):
     """Materialize configured client files temporarily and restore the exact prior tree."""
 
+    if signing_lease is not None:
+        if cancellation is not None and cancellation is not signing_lease.cancellation:
+            raise CredentialError("build material cancellation owner differs from its account lease")
+        signing_lease._admit_execution()
+        cancellation = signing_lease.cancellation
     selected = set(platforms)
+    if prepare_ios_signing and "ios" in selected and signing_lease is None:
+        # Standalone signed callers need the same early account admission as
+        # preflight. Retain its exact guard/lease through all outer cleanup.
+        with local_signing_lease(cancellation=cancellation) as owner:
+            with materialize_build_inputs(
+                config, values=values, platforms=selected, prepare_ios_signing=True,
+                signing_lease=owner, cancellation=owner.cancellation,
+            ) as materialized:
+                yield materialized
+        return
+    if signing_lease is not None and prepare_ios_signing and "ios" in selected and signing_lease.active is not None:
+        raise CredentialError("this account lease already has an active signing context")
     for name in PRIVATE_CREDENTIAL_PATH_NAMES & values.keys():
         if error := _private_path_error(values[name], config.root):
             raise CredentialError(error)
@@ -1906,8 +2145,9 @@ def materialize_build_inputs(
     material_paths: dict[str, str] = {}
     build_environment: dict[str, str] = {}
     with (
-        tempfile.TemporaryDirectory(prefix="mobile-release-build-inputs-") as temporary,
-        _restore_build_targets(backups),
+        first_primary_context(tempfile.TemporaryDirectory(prefix="mobile-release-build-inputs-"),
+                              cancellation=cancellation, expose_owner=True) as (temporary, cancellation),
+        first_primary_context(_restore_build_targets(backups), cancellation=cancellation),
     ):
         directory = Path(temporary)
         directory.chmod(0o700)
@@ -1965,7 +2205,8 @@ def materialize_build_inputs(
                 "google-services.json",
                 project_root=config.root,
             )
-            module = selected_android_module(config, discover_project(config.root))
+            module = selected_android_module(config, discover_project(config.root, include_git=False, cancellation=cancellation,
+                execution_source=None if signing_lease is None else signing_lease.execution_source()))
             if not source or not module:
                 raise CredentialError("Android Firebase material or application module is unavailable")
             module_relative = module.lstrip(":").replace(":", "/")
@@ -2048,6 +2289,8 @@ def materialize_build_inputs(
                 password=password,
                 profile=Path(profile_value),
                 directory=directory,
+                lease=signing_lease,
+                cancellation=cancellation,
             )
 
         with signing_context as signing_updates:

@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import hashlib
 import plistlib
+import stat
 import struct
 import types
 import zipfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 TEAM = "ABCDE12345"
 BUNDLE = "com.example.reader"
@@ -299,8 +302,9 @@ def modernize_ipa_fixture(path: Path) -> None:
 class NativeProfileSeam:
     """Fake native app signing, preserving actual bytes, parsers and inventory.
 
-    Entitlement-content tests must separately patch authenticate_cms with the
-    explicit method below. These fixtures do NOT establish Apple issuer trust.
+    profile_authentication replaces only native payload capture, preserving the
+    real profile scopes and local cleanup. No native producer is started; these
+    fixtures establish neither Apple issuer trust nor native process finality.
     """
     def __init__(self):
         self.claims = {}
@@ -311,9 +315,74 @@ class NativeProfileSeam:
         self.extracted = []
         self.failures = set()
         self.cms_calls = []
+        self.cms_captures = []
 
-    def authenticate_cms(self, content, *, deadline):
+    @staticmethod
+    def _no_native_attempt(finality):
+        from mobile_release._profile_process import CaptureFinality
+
+        assert type(finality) is CaptureFinality
+        assert finality.state == "NO_PRODUCERS" and finality._owner is None and not finality._begun
+        assert finality.native_attempt == "NOT_ATTEMPTED" and finality.validator_dispatch == "NOT_SENT"
+        assert finality.producer_settled and finality.native_resources_settled and not finality.blocked
+
+    def capture_profile(self, directory, deadline, *, cancellation, finality):
+        from mobile_release._lifetime_evidence import ProfileCallEvidence
+
+        self._no_native_attempt(finality)
         deadline.check()
+        cancellation.check()
+        scratch = finality._scratch
+        assert scratch._finality is finality and scratch.path == directory and scratch.state == "OWNED"
+        assert scratch._source.state == "CLOSED" and scratch._source.settled
+        evidence = cancellation.lifetime_ledger._profile
+        assert type(evidence) is ProfileCallEvidence and evidence._guard is cancellation
+        bindings = [item for item in evidence._bindings.values() if item.finality is finality]
+        assert len(bindings) == 1
+        binding = bindings[0]
+        assert binding.role in ("OUTER_CMS", "INNER_CMS") and binding.scratch is scratch
+        assert binding.guard is cancellation and binding.scope._scratch is scratch
+        assert binding.descriptors is binding.scope._descriptors
+        self.cms_captures.append({"directory": directory, "deadline": deadline, "finality": finality,
+                                  "scratch": scratch, "guard": cancellation, "evidence": evidence,
+                                  "binding": binding, "descriptors": binding.descriptors})
+        source = directory / "cms.der"
+        before = source.lstat()
+        assert stat.S_ISREG(before.st_mode) and stat.S_IMODE(before.st_mode) == 0o600 and before.st_nlink == 1
+        content = source.read_bytes()
+        after = source.lstat()
+        assert len(content) == before.st_size
+        assert all(getattr(before, key) == getattr(after, key) for key in
+                   ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns"))
+        return self.authenticate_cms(content, deadline=deadline, cancellation=cancellation)
+
+    @contextmanager
+    def profile_authentication(self):
+        first = len(self.cms_captures)
+        with patch("mobile_release.ios_profiles._capture_profile", side_effect=self.capture_profile) as capture:
+            try:
+                yield capture
+            finally:
+                # Read original owner records after real cleanup, including a
+                # failing payload callback. Never publish/repair native receipts.
+                for record in self.cms_captures[first:]:
+                    finality, scratch, binding = record["finality"], record["scratch"], record["binding"]
+                    self._no_native_attempt(finality)
+                    assert finality._scratch is scratch and scratch._finality is finality
+                    assert record["evidence"]._bindings[binding.role] is binding
+                    assert binding.scope.cancellation is record["guard"] and binding.scope._scratch is scratch
+                    assert binding.scope._descriptors is record["descriptors"]
+                    assert scratch.state == "REMOVED" and not scratch.retained
+                    assert all(descriptor.settled for descriptor in record["descriptors"])
+                    assert binding.scope.lifetime_local_settled
+                    assert binding.scope.lifetime_handler_state in ("RESTORED", "BORROWED_VALID")
+                    assert not record["directory"].exists() and not record["directory"].is_symlink()
+
+    def authenticate_cms(self, content, *, deadline, cancellation=None):
+        """Fictional decoded payload only, never a production authenticator."""
+        deadline.check()
+        if cancellation is not None:
+            cancellation.check()
         self.cms_calls.append(content)
         return content
 

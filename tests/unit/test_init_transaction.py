@@ -14,10 +14,12 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from mobile_release import cli
 from mobile_release import init_transaction as tx
+from mobile_release.discovery import GitContext
 from mobile_release.errors import ValidationError
 
 
@@ -82,7 +84,7 @@ def snapshot(root: Path) -> dict[str, tuple]:
 
 @contextlib.contextmanager
 def boundaries(callback):
-    """Instrument real IO boundaries, never replace a successful operation."""
+    """Instrument transaction-owned real IO, not the shared os module/Git IPC."""
     sequence = []
 
     def wrap(kind, function, label=lambda *args: ""):
@@ -104,7 +106,11 @@ def boundaries(callback):
     def open_file(path, flags, *args, **kwargs):
         return (created_open if flags & os.O_CREAT else real_open)(path, flags, *args, **kwargs)
 
+    # Replacing attributes on tx.os would patch the shared Python os module,
+    # misclassifying unrelated discovery/process-pipe writes as init mutations.
+    owned_os = SimpleNamespace(**vars(os))
     with contextlib.ExitStack() as stack:
+        stack.enter_context(patch.object(tx, "os", owned_os))
         stack.enter_context(patch.object(tx, "_rename_function", return_value=wrap(
             "rename", rename, lambda _sfd, source, _dfd, dest: f"{source}>{dest}")))
         stack.enter_context(patch.object(tx, "_fsync", wrap("fsync", tx._fsync)))
@@ -116,6 +122,38 @@ def boundaries(callback):
 
 
 class InitTransactionTests(unittest.TestCase):
+    def test_fault_instrumentation_owns_only_transaction_io_not_shared_os_calls(self) -> None:
+        callables = {name: getattr(os, name) for name in ("open", "write", "mkdir", "unlink", "rmdir")}
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "output"
+            with path.open("w+b") as handle:
+                read, write = os.pipe()
+                try:
+                    with boundaries(lambda *_: None) as events:
+                        self.assertIsNot(tx.os, os)
+                        self.assertEqual({name: getattr(os, name) for name in callables}, callables)
+                        os.write(write, b"pipe")
+                        self.assertEqual(os.read(read, 4), b"pipe")
+                        os.write(handle.fileno(), b"foreign")
+                        self.assertEqual(events, [])
+                        tx.os.write(handle.fileno(), b"owned")
+                        self.assertEqual(events, [{"kind": "write", "label": "", "success": True}])
+                    self.assertEqual(path.read_bytes(), b"foreignowned")
+                finally:
+                    os.close(read)
+                    os.close(write)
+            for when in ("before", "after"):
+                with self.subTest(when=when), path.open("w+b") as handle:
+                    def fail(_index, event, phase):
+                        if event["kind"] == "write" and phase == when:
+                            raise OSError(errno.ENOSPC, "actual transaction-boundary failure")
+
+                    with boundaries(fail), self.assertRaisesRegex(OSError, "transaction-boundary"):
+                        tx.os.write(handle.fileno(), b"actual")
+                    self.assertEqual(path.read_bytes(), b"actual" if when == "after" else b"")
+        self.assertIs(tx.os, os)
+        self.assertEqual({name: getattr(os, name) for name in callables}, callables)
+
     def assert_no_state(self, root: Path) -> None:
         self.assertFalse(any((root / name).exists() for name in tx.STATE_NAMES))
 
@@ -147,9 +185,37 @@ class InitTransactionTests(unittest.TestCase):
                 workspace.rename(workspace.fd, "a", workspace.fd, "new")
                 self.assertEqual((root / "new").stat().st_ino, a)
 
+    def test_preview_retains_git_metadata_and_static_proposal_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            fixture(root, platforms=("android", "ios"))
+            before = snapshot(root)
+            git = GitContext(
+                repository="example/consumer", repository_id="123456",
+                commit="b" * 40, tree="c" * 40, ref="refs/heads/main",
+                branch="main", dirty=False,
+            )
+            with patch("mobile_release.discovery.git_context", return_value=git) as provider:
+                code, output, error = invoke(["init", "--root", str(root)])
+            self.assertEqual(code, 0, error)
+            provider.assert_called_once_with(root, execution_source=None, cancellation=None)
+            report = json.loads(output)
+            self.assertEqual(set(report), {"discovery", "proposedConfiguration"})
+            self.assertEqual(report["discovery"]["git"], git.as_dict())
+            self.assertEqual(snapshot(root), before)
+            with patch("mobile_release.discovery.git_context", side_effect=AssertionError("static proposal must not query Git")):
+                discovered, proposed = cli._init_proposal(root, include_git=False)
+            self.assertEqual(discovered, {key: value for key, value in report["discovery"].items() if key != "git"})
+            self.assertEqual(proposed, report["proposedConfiguration"])
+            self.assertEqual(snapshot(root), before)
+
     def test_single_combined_platforms_and_idempotent_force_preserve_existing_files(self) -> None:
         for platforms in (("android",), ("ios",), ("android", "ios")):
-            with self.subTest(platforms=platforms), tempfile.TemporaryDirectory() as temporary:
+            with (
+                self.subTest(platforms=platforms),
+                tempfile.TemporaryDirectory() as temporary,
+                patch("mobile_release.discovery.git_context", side_effect=AssertionError("apply must not query Git")),
+            ):
                 root = Path(temporary).resolve()
                 args = fixture(root, force=True, platforms=platforms)
                 code, output, error = invoke(args)

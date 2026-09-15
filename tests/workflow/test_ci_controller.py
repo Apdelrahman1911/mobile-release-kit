@@ -87,7 +87,7 @@ def minitest_fixture(identifiers):
 
 _RUBY_PARTITION_FIXTURES = (
     ("ruby-native-owner", "test_native_upload_process.rb", 52, 44, 120, None),
-    ("ruby-native-capture", "test_native_upload_validation.rb", 21, 17, 310, "NativeUploadValidationTest"),
+    ("ruby-native-capture", "test_native_upload_validation.rb", 22, 18, 310, "NativeUploadValidationTest"),
     ("ruby-ios_upload_validation", "test_ios_upload_validation.rb", 32, 23, 300, "IosUploadValidationTest"),
     ("ruby-android_upload_validation", "test_android_upload_validation.rb", 32, 23, 300, "AndroidUploadValidationTest"),
 )
@@ -371,7 +371,7 @@ class NativeProcessCIIntegrationTests(unittest.TestCase):
         # workflow-directory observation, including the packaged argv cases.
         with patch.object(controller, "ruby_expected_ids", side_effect=lambda source, gate:
                           catalog_ids.get(gate, ("CatalogFixture#test_other",))) as source, \
-                patch.object(Path, "exists", return_value=False) as exists, \
+                patch.object(Path, "exists", side_effect=AssertionError("catalog must not probe runtime paths")) as exists, \
                 patch.object(Path, "glob", return_value=()) as glob:
             for platform in ("linux", "macos"):
                 steps = {step.id: step for step in controller.catalog(paths, platform, deadline=1000.0)}
@@ -379,7 +379,7 @@ class NativeProcessCIIntegrationTests(unittest.TestCase):
                     self.assertEqual((steps[gate].seconds, steps[gate].expected_tests), (seconds, total))
                 for gate in ("ruby-native-spawn", "ruby-native-signal-observation"):
                     self.assertEqual(steps[gate].seconds, 180)
-            self.assertEqual(exists.call_count, 2)
+            exists.assert_not_called()
             self.assertEqual(glob.call_count, 4)
             self.assertTrue({"ruby-packaged-capture-source", "ruby-packaged-capture-wheel"}
                             <= {call.args[1] for call in source.call_args_list})
@@ -1921,10 +1921,8 @@ class CICoordinatorResultTests(unittest.TestCase):
                 'MRK_CHECK_RESULT={"details":{},"details":{}}\n'
                 'MRK_CHECK_RESULT={"details":null}\n'
                 'MRK_CHECK_RESULT={"details":{"error":NaN}}\n')
-        captured = SimpleNamespace(returncode=7, waited=True, stdout_eof=True, stderr_eof=True,
-                                   domain_finality=True, timed_out=False, cancelled=False,
-                                   stdout=text.encode(), stderr=b"",
-                                   persisted=(len(text), 0), duration=0.2, primary_error="command exited 7", cleanup_errors=())
+        captured = native_capture_fixture(ok=False, returncode=7, stdout=text.encode(),
+                                          stderr=b"", duration=0.2, primary_error="command exited 7")
         details = controller.failure_details(captured, step, paths)
         self.assertEqual(details["returncode"], 7)
         self.assertEqual(details["failed_tests"], sorted([known, assertion]))
@@ -1951,7 +1949,7 @@ class CICoordinatorResultTests(unittest.TestCase):
             "ruby-native-spawn": ("test_native_process_spawn.rb", {"NativeProcessSpawnTests"}, 52),
             "ruby-native-owner": ("test_native_upload_process.rb",
                                   {"NativeUploadProtocolTest", "NativeUploadTaskSlotTest", "NativeUploadRoleTest"}, 52),
-            "ruby-native-capture": ("test_native_upload_validation.rb", {"NativeUploadValidationTest"}, 21),
+            "ruby-native-capture": ("test_native_upload_validation.rb", {"NativeUploadValidationTest"}, 22),
             "ruby-native-signal-observation": ("test_native_signal_observation.rb", {"NativeSignalObservationTest"}, 1),
             "ruby-play_store": ("test_play_store.rb", {"PreservingSupplyUploaderTests"}, 35),
             "ruby-play_lanes": ("test_play_lanes.rb", {"PlayReleaseLanesTest", "BoundedPlayImageTest"}, 46),
@@ -2051,17 +2049,18 @@ class CICoordinatorResultTests(unittest.TestCase):
                 for mutated in mutations:
                     with self.assertRaisesRegex(controller.VerificationError, "MINITEST_COMPLETION_INVENTORY"):
                         controller.parse_capture(gates[gate], capture(mutated), paths, "linux", None)
-        # QA-003 is a separate source patch with additional native obligations.
-        # Its mere presence cannot silently inherit this smaller fixed matrix.
-        with tempfile.TemporaryDirectory(prefix="mrk-ci-catalog-boundary-") as temporary:
-            other_source = Path(temporary).resolve()
-            sentinel = other_source / "src/mobile_release/local_signing.py"
-            sentinel.parent.mkdir(parents=True)
-            sentinel.write_bytes(b"raise AssertionError('data-only fixture must never be imported')\n")
-            for platform in ("linux", "macos"):
-                with self.subTest(unintegrated_source=platform), self.assertRaisesRegex(
-                        controller.VerificationError, "LOCAL_SIGNING_MATRIX_REQUIRES_CATALOG_AMENDMENT"):
-                    controller.catalog(dataclasses.replace(paths, source=other_source), platform, deadline=20.0)
+        # Matrix activation is an explicit finite catalog, not inheritance from
+        # the historical platform-only verifier and not an arbitrary-step CLI.
+        for platform in ("linux", "macos"):
+            matrix = controller.catalog(paths, platform, deadline=20.0, scope="signing-matrix")
+            self.assertEqual(tuple(step.id for step in matrix), controller.required_gate_ids(platform, "signing-matrix"))
+            self.assertEqual(sum(step.kind == "matrix" for step in matrix), 1)
+            self.assertFalse({"bundler", "bundle-install", "python-full", "python-wheel", "native-profile-source"}
+                             & {step.id for step in matrix})
+            for scope in (None, True, "unknown", "SIGNING-MATRIX", ""):
+                with self.subTest(platform=platform, scope=scope), self.assertRaisesRegex(
+                        controller.VerificationError, "UNSUPPORTED_VERIFICATION_SCOPE"):
+                    controller.catalog(paths, platform, deadline=20.0, scope=scope)
 
     def test_final_report_preserves_upstream_status_and_publishes_finality_before_finishing(self):
         controller = controller_module()
@@ -2196,6 +2195,186 @@ class CICoordinatorResultTests(unittest.TestCase):
                 self.assertEqual(report["error"], "AGGREGATE_DEADLINE")
                 self.assertEqual(events, [("close", True), ("publish", 20.0), ("finish",)])
 
+    def test_public_summary_projection_is_lossless_bounded_and_refuses_conflicting_evidence(self):
+        controller = controller_module()
+        gates = ("python-full", "python-wheel", "native-profile-source", "native-profile-wheel")
+
+        def gate_fixture(gate, healthy_count=1316):
+            python = gate in gates[:2]
+            names = ((*controller.PYTHON_SINGLETON_PARTITIONS, "healthy") if python else
+                     ("authority", "ordinary", *controller.PYTHON_SINGLETON_PARTITIONS))
+            partitions = []
+            for name in names:
+                count = healthy_count if name == "healthy" else 5 if name == "authority" else 180 if name == "ordinary" else 1
+                ids = [f"workflow.synthetic_{name.replace('-', '_')}.PublicationContract."
+                       f"test_preserves_original_completion_and_lifecycle_evidence_{number:04d}" for number in range(count)]
+                part = {"partition": name, "status": "PASS", "tests": count, "completed": ids,
+                        "capture": {"synthetic": True, "returncode": 0, "waited": True, "stdout_eof": True,
+                                    "stderr_eof": True, "domain_finality": True, "persisted": [73, 47], "seconds": 0.01}}
+                if name == "healthy":
+                    part["summary"] = {"check": gate, "ok": True,
+                        "tests": [{"id": identifier, "outcome": "skip" if number % 100 == 0 else "ok"}
+                                  for number, identifier in reversed(list(enumerate(ids)))],
+                        "details": {"failure_callbacks": [], "storage_profile": {"synthetic": True},
+                                    "source_provenance": {"synthetic": True, "digest": "a" * 64}}}
+                else:
+                    part["runtime"] = {"synthetic": True, "phase": gate, "version": [3, 11, 1]}
+                partitions.append(part)
+            completed = sorted(identifier for part in partitions for identifier in part["completed"])
+            delegated = ["workflow.synthetic.Delegated.test_requires_separate_matrix"]
+            return {"id": gate, "status": "PASS", "details": {
+                "stage": "complete", "tests": len(completed), "completed": completed, "partitions": partitions,
+                "package": {"synthetic": True, "phase": gate, "digest": "b" * 64},
+                "source_obligation_count": len(completed) + len(delegated),
+                "pending_delegation": {"methods": delegated, "requirements": {delegated[0]: ["G/" + delegated[0] + "/fixture"]}},
+                "coverage": "partial-until-layered-matrix"}}
+
+        clock = SimpleNamespace(value=12.0)
+        with tempfile.TemporaryDirectory(prefix="mrk-ci-public-summary-") as temporary, \
+                patch.object(controller, "time", SimpleNamespace(monotonic=lambda: clock.value)):
+            root = Path(temporary).resolve()
+
+            def publish(value, name):
+                path = root / ("step_summary_" + name)
+                path.write_bytes(b"")
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    controller.publish_summary(path, value, runner_temp=root, deadline=20.0)
+                self.assertTrue(output.getvalue().startswith("MRK_CI_RESULT="))
+                self.assertEqual(output.getvalue().count("\n"), 1)
+                encoded = output.getvalue().removeprefix("MRK_CI_RESULT=").removesuffix("\n").encode("ascii")
+                self.assertEqual(path.read_bytes(), b"## Mobile Release Kit isolated verification\n\n```json\n" + encoded + b"\n```\n")
+                public = json.loads(encoded)
+                self.assertEqual(encoded, json.dumps(public, sort_keys=True, ensure_ascii=True,
+                                                     allow_nan=False, separators=(",", ":")).encode("ascii"))
+                self.assertLessEqual(len(encoded), 768 * 1024)
+                return public
+
+            def reject(value, name, code="PUBLIC_SUMMARY_PROJECTION"):
+                original = copy.deepcopy(value)
+                path = root / ("step_summary_" + name)
+                path.write_bytes(b"")
+                opened = Mock(side_effect=AssertionError("refused publication must not open output"))
+                facade = SimpleNamespace(open=opened, O_WRONLY=os.O_WRONLY, O_APPEND=os.O_APPEND,
+                                         O_NOFOLLOW=os.O_NOFOLLOW, O_NONBLOCK=os.O_NONBLOCK)
+                output = io.StringIO()
+                with patch.object(controller, "os", facade), redirect_stdout(output), \
+                        self.assertRaisesRegex(controller.VerificationError, code):
+                    controller.publish_summary(path, value, runner_temp=root, deadline=20.0)
+                opened.assert_not_called()
+                self.assertEqual(output.getvalue(), "")
+                self.assertEqual(path.read_bytes(), b"")
+                self.assertEqual(value, original)
+
+            report = report_fixture()
+            report.update(finality=True, persisted_capture_bytes=480, seconds=0.25)
+            report["rows"].extend(gate_fixture(gate) for gate in gates)
+            original = copy.deepcopy(report)
+            # Synthetic ordinary-sized full/wheel summaries; no copied private
+            # report, actual test execution, or Linux substitute for native proof.
+            for row in report["rows"][1:3]:
+                self.assertLess(len(json.dumps(row["details"]["partitions"][-1]["summary"])), 256 * 1024)
+            for separators in ((", ", ": "), (",", ":")):
+                self.assertGreater(len(json.dumps(report, sort_keys=True, ensure_ascii=True, allow_nan=False,
+                                                  separators=separators).encode("ascii")), 768 * 1024)
+            public = publish(report, "large")
+            self.assertEqual(public["schema"], 2)
+            reconstructed = copy.deepcopy(public)
+            reconstructed["schema"] = 1
+            for row in reconstructed["rows"][1:]:
+                details = row["details"]
+                self.assertEqual(details.pop("completed_from"), "partitions")
+                joined = []
+                for part in details["partitions"]:
+                    if part["partition"] == "healthy":
+                        self.assertNotIn("completed", part)
+                        self.assertEqual(part.pop("completed_from"), "summary.tests")
+                        part["completed"] = sorted(test["id"] for test in part["summary"]["tests"])
+                    else:
+                        self.assertNotIn("completed_from", part)
+                    self.assertEqual(part["tests"], len(part["completed"]))
+                    joined.extend(part["completed"])
+                self.assertNotIn("completed", details)
+                details["completed"] = sorted(joined)
+                self.assertEqual(len(joined), len(set(joined)))
+                self.assertEqual(details["tests"], len(joined))
+                self.assertTrue(set(joined).isdisjoint(details["pending_delegation"]["methods"]))
+            self.assertEqual(reconstructed, original)  # IDs, outcomes, captures and every other field.
+            self.assertEqual(report, original)
+
+            failed = report_fixture(False)
+            failed.update(finality=False, cleanup_errors=[{"synthetic": True, "error": "FIXTURE_CLEANUP_FAILURE"}])
+            failed["rows"] = [
+                {"id": "python-full", "status": "FAIL", "error": "FIXTURE_FAILURE", "details": {
+                    "stage": "healthy", "failure": {"error": "FIXTURE_FAILURE", "diagnostic": "retain me"},
+                    "partitions": [{"partition": "completed-before-failure", "status": "PASS", "tests": 1,
+                                    "completed": ["workflow.synthetic.test_finished"], "capture": {"synthetic": True}},
+                                   {"partition": "healthy", "status": "FAIL", "python_progress": {"synthetic": True},
+                                    "capture": {"stdout_bytes": 17, "stderr_bytes": 23}}]}},
+                {"id": "native-profile-source", "status": "UNEXECUTED"},
+                {"id": "python-wheel", "status": "RUNNING", "details": {"stage": "inventory"}},
+                {"id": "fixture-unrelated", "status": "PASS", "details": {
+                    "stage": "complete", "tests": 1, "completed": ["unrelated"], "capture": {"synthetic": True}}}]
+            failed_original = copy.deepcopy(failed)
+            self.assertEqual(publish(failed, "failed"), dict(failed_original, schema=2))
+            self.assertEqual(failed, failed_original)
+
+            small = report_fixture()
+            small["rows"] = [gate_fixture("python-full", healthy_count=2)]
+            detail_path = ("rows", 0, "details")
+            healthy_path = (*detail_path, "partitions", -1)
+            healthy = small["rows"][0]["details"]["partitions"][-1]
+            completion = small["rows"][0]["details"]["completed"]
+            mutations = (
+                ("summary_duplicate", (*healthy_path, "summary", "tests", 1, "id"), healthy["summary"]["tests"][0]["id"]),
+                ("summary_id_type", (*healthy_path, "summary", "tests", 0, "id"), 7),
+                ("summary_outcome", (*healthy_path, "summary", "tests", 0, "outcome"), True),
+                ("summary_list_type", (*healthy_path, "summary", "tests"), tuple(healthy["summary"]["tests"])),
+                ("summary_pass_type", (*healthy_path, "summary", "ok"), 1),
+                ("healthy_count", (*healthy_path, "tests"), 3),
+                ("partition_count_type", (*detail_path, "partitions", 0, "tests"), True),
+                ("healthy_ids", (*healthy_path, "completed"), ["synthetic.a", "synthetic.b"]),
+                ("healthy_reference", (*healthy_path, "completed_from"), "summary.tests"),
+                ("gate_reference", (*detail_path, "completed_from"), "partitions"),
+                ("gate_duplicate", (*detail_path, "completed"), [completion[0], *completion[:-1]]),
+                ("gate_union", (*detail_path, "completed"), [*completion[:-1], "zzz.synthetic.other"]),
+                ("gate_count", (*detail_path, "tests"), len(completion) + 1),
+                ("partition_state", (*detail_path, "partitions", 0, "status"), "UNEXECUTED"),
+                ("partition_inventory", (*detail_path, "partitions", 0, "partition"), "unknown"),
+                ("gate_state", (*detail_path, "stage"), "union"),
+                ("already_projected", ("schema",), 2),
+                ("duplicate_gate", ("rows",), [small["rows"][0], small["rows"][0]]),
+            )
+            for name, keys, value in mutations:
+                with self.subTest(inconsistent_evidence=name):
+                    mutated = copy.deepcopy(small)
+                    target = mutated
+                    for key in keys[:-1]:
+                        target = target[key]
+                    target[keys[-1]] = value
+                    reject(mutated, name)
+            native_overlap = report_fixture()
+            native_overlap["rows"] = [gate_fixture("native-profile-source")]
+            details = native_overlap["rows"][0]["details"]
+            details["partitions"][1]["completed"][0] = details["partitions"][0]["completed"][0]
+            details["partitions"][1]["completed"].sort()
+            # Even a self-consistent gate count/set must not hide two partitions
+            # claiming the same original method as separately completed.
+            details["completed"] = sorted({identifier for part in details["partitions"] for identifier in part["completed"]})
+            details["tests"] = len(details["completed"])
+            reject(native_overlap, "native_overlap")
+            oversized = report_fixture(False)
+            oversized["diagnostic"] = "x" * (768 * 1024)
+            reject(oversized, "nonredundant_bound", "PUBLIC_SUMMARY_BOUND")
+
+            def late_encoding(*args, **kwargs):
+                encoded = json.dumps(*args, **kwargs)
+                clock.value = 20.0
+                return encoded
+
+            with patch.object(controller, "json", SimpleNamespace(dumps=late_encoding)):
+                reject(report_fixture(), "encoding_deadline", "AGGREGATE_DEADLINE")
+
     def test_summary_write_sync_close_and_print_aftereffects_are_bounded_by_original_deadline(self):
         controller = controller_module()
         with tempfile.TemporaryDirectory(prefix="mrk-ci-summary-") as temporary:
@@ -2259,6 +2438,840 @@ class CICoordinatorResultTests(unittest.TestCase):
                     self.assertEqual(any(line.startswith("MRK_CI_RESULT=") for line in emitted), phase in {"none", "print"})
                     if phase != "none":
                         self.assertEqual(report["error"], "AGGREGATE_DEADLINE")
+
+
+class SigningMatrixControllerTests(unittest.TestCase):
+    """Original-capture doubles and tiny private DATA; no Session or native tool."""
+
+    def rig(self):
+        from . import local_signing_matrix_contract as contract
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        rig = SimpleNamespace(controller=controller, paths=paths, clock=10.0, events=[], captures=[],
+                              changes={}, catalog_changes={}, capture_changes={}, publish_advance=0.0, inspect_advance=0.0,
+                              idle_error=False, actual_error=False)
+        rig.selection = controller.MatrixSelection("example/mobile-release-kit", "1" * 40, "1234", 1,
+            "test-signing-matrix", "ubuntu-24.04", 0, Path("/fixture/signing-matrix-proof/proof.json"))
+        rig.scope = contract.scope_from_metadata(rig.selection.metadata(), rig.selection.operating_system, producer=True)
+        catalog = contract.layered_catalog()
+        rig.definition = catalog.definition(rig.selection.operating_system)
+        rig.catalog_sha = contract.digest(rig.definition)
+        rig.expected = list(catalog.expected_ids(rig.selection.operating_system))
+        rig.selected = list(catalog.shard_ids(rig.selection.operating_system, rig.selection.shard))
+        rig.coverage = catalog.coverage(rig.selection.operating_system, rig.selected)
+        rig.contract = SimpleNamespace(**vars(contract))
+        rig.contract.package_manifest = lambda *_args, **_kwargs: {"package": "bound"}
+        rig.contract.definitions_manifest = lambda *_args, **_kwargs: {"definitions": "bound"}
+        rig.package_sha = contract.digest({"package": "bound"})
+        rig.definitions_sha = contract.digest({"definitions": "bound"})
+        rig.step = controller.Step("local-signing-matrix", kind="matrix", seconds=900)
+
+        def run(argv, **options):
+            phase = argv[argv.index("--phase") + 1]
+            rig.events.append(("run", phase, tuple(argv), options))
+            package = paths.work / ("source-build/src/mobile_release" if phase == "source" else
+                                     "wheel-venv/lib/python3.11/site-packages/mobile_release")
+            value = {"schema": 2, "phase": phase, "shard": 0, "scope": rig.scope,
+                     "status": "phase-finished", "productionRoot": str(package)}
+            capture = native_capture_fixture(stdout=b"MRK_MATRIX_PHASE=" + contract.canonical(value) + b"\n",
+                                             **rig.capture_changes.get(phase, {}))
+            rig.captures.append(capture)
+            rig.clock += 1.0
+            return capture
+
+        def idle(*, deadline):
+            rig.events.append(("idle", deadline))
+            if rig.idle_error and rig.captures:
+                raise OSError("original domain idle unavailable")
+
+        def inspect(source, package, *, deadline):
+            rig.events.append(("inspect", package, deadline))
+            rig.clock += rig.inspect_advance
+            return {"immutable": True}
+
+        def read(path, *, deadline, maximum):
+            rig.events.append(("read", path.name, deadline))
+            if path.name == "results.jsonl.gz":
+                return b"inert compressed-input double"
+            phase = path.parent.name
+            if path.name == "catalog.json":
+                return contract.canonical({**rig.definition, **rig.catalog_changes.get(phase, {})})
+            value = {"schemaVersion": 2, "shard": 0, "scope": rig.scope,
+                     "expectedCaseIds": rig.expected, "executedCaseIds": rig.selected,
+                     "catalogSha256": rig.catalog_sha, "packageSha256": rig.package_sha,
+                     "definitionsSha256": rig.definitions_sha, "coverage": rig.coverage, "elapsed": 1.0,
+                     "productionRoot": str(paths.work / ("source-build/src/mobile_release" if phase == "source" else
+                                                          "wheel-venv/lib/python3.11/site-packages/mobile_release")),
+                     "allExactChildrenReapedAndGroupsAbsent": True, "allCasePathsRemoved": True}
+            return contract.canonical({**value, **rig.changes.get(phase, {})})
+
+        def actual(_data, expected, *, operating_system, deadline):
+            rig.events.append(("actual", tuple(expected), deadline, operating_system))
+            if rig.actual_error:
+                raise ValueError("actual reached cut differs")
+            return contract.digest("actual cut bytes")
+
+        def finalized(path, session, *, deadline):
+            rig.events.append(("finalized", path, deadline))
+            return {"files": 3, "bytes": 17, "original_finality_before_read": True}
+
+        def publish(selection, proof, selected_contract, session, *, deadline):
+            rig.events.append(("publish", deadline, proof))
+            rig.clock += rig.publish_advance
+            return {"private_raw_outputs_published": False}
+
+        rig.contract.validate_actual_results = actual
+        rig.session = SimpleNamespace(run=run, ensure_idle=idle, persisted_bytes=0, uid=1234)
+        rig.checks = SimpleNamespace(inspect_native_package=inspect)
+
+        @contextmanager
+        def scope():
+            with patch.multiple(controller, time=SimpleNamespace(monotonic=lambda: rig.clock),
+                                _module=Mock(return_value=rig.contract), check_capacity=Mock(), read_regular=read,
+                                finalized_matrix_outputs=finalized, publish_matrix_proof=publish), \
+                    patch.object(contract, "time", SimpleNamespace(monotonic=lambda: rig.clock)):
+                yield
+        rig.scope_context = scope
+        return rig
+
+    def execute(self, rig):
+        with rig.scope_context():
+            return rig.controller.perform_matrix_gate(rig.step, rig.paths, rig.session, rig.checks,
+                                                       "linux", rig.selection, deadline=2000.0)
+
+    def progress(self, rig, *, events=1, phase="source"):
+        """Canonical public DATA, not an original capture or a result receipt."""
+        return b"".join(b"MRK_SIGNING_MATRIX_PROGRESS=" + rig.contract.canonical({
+            "schema": 1, "phase": phase, "caseId": rig.selected[index // 2], "ordinal": index // 2 + 1,
+            "event": ("helper-start", "helper-returned")[index % 2], "elapsedMs": index}) + b"\n"
+            for index in range(events))
+
+    def test_optional_progress_preserves_all_original_proofs_and_rejects_unknown_success_stderr(self):
+        for mode in ("prefix", "complete", "unknown-stderr", "failure-marker", "missing-cleanup", "missing-original-wait"):
+            with self.subTest(mode=mode):
+                rig = self.rig()
+                rig.capture_changes["source"] = {"stderr": self.progress(
+                    rig, events=2 * len(rig.selected) if mode == "complete" else 1)}
+                if mode == "unknown-stderr":
+                    rig.capture_changes["source"]["stderr"] += b"PRIVATE unrecognized stderr\n"
+                if mode == "failure-marker":
+                    rig.capture_changes["source"]["stderr"] += b"MRK_SIGNING_MATRIX_FAILURE={}\n"
+                if mode == "missing-cleanup":
+                    rig.changes["source"] = {"allCasePathsRemoved": False}
+                if mode == "missing-original-wait":
+                    rig.capture_changes["source"].update(waited=False, domain_finality=False)
+                result = self.execute(rig)
+                self.assertEqual(result.ok, mode in {"prefix", "complete"})
+                self.assertEqual(len(rig.captures), 2 if result.ok else 1)
+                if result.ok:
+                    count = 2 * len(rig.selected) if mode == "complete" else 1
+                    self.assertEqual(result.details["phases"][0]["matrix_progress"]["eventCount"], count)
+                    self.assertEqual(len([event for event in rig.events if event[0] == "actual"]), 2)
+                    self.assertTrue(any(event[0] == "publish" for event in rig.events))
+                else:
+                    self.assertFalse(any(event[0] == "publish" for event in rig.events))
+                    if mode != "missing-cleanup":
+                        self.assertFalse(any(event[0] in {"read", "finalized", "actual"} for event in rig.events))
+                self.assertNotIn("PRIVATE", json.dumps(result.details))
+
+    def test_only_failed_original_matrix_bytes_use_the_prebound_pair_after_phase_expiry(self):
+        for mode in ("phase-expired", "pair-expired", "parser-error", "positive-expired"):
+            with self.subTest(mode=mode):
+                rig = self.rig()
+                rig.capture_changes["source"] = {"stderr": self.progress(rig)}
+                if mode != "positive-expired":
+                    rig.capture_changes["source"].update(ok=False, returncode=None, waited=False, stdout_eof=False,
+                        stderr_eof=False, domain_finality=False, timed_out=True, primary_error="command deadline expired")
+                original_run, original_idle = rig.session.run, rig.session.ensure_idle
+
+                def run(*args, **kwargs):
+                    value = original_run(*args, **kwargs)
+                    rig.clock = 910.0 if mode == "pair-expired" else 431.0
+                    return value
+
+                def idle(*, deadline):
+                    original_idle(deadline=deadline)
+                    rig.controller.check_clock(deadline)
+
+                rig.session.run, rig.session.ensure_idle = run, idle
+                parser = (patch.object(rig.controller, "signing_matrix_progress", side_effect=RuntimeError("PRIVATE parser"))
+                          if mode == "parser-error" else nullcontext())
+                with parser:
+                    result = self.execute(rig)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error, "AGGREGATE_DEADLINE" if mode == "positive-expired" else "COMMAND_EXIT_OR_FINALITY")
+                self.assertEqual(len(rig.captures), 1)
+                row = result.details["phases"][0]
+                self.assertEqual("matrix_progress" in row, mode == "phase-expired")
+                self.assertEqual("matrix_progress_error" in row, mode in {"pair-expired", "parser-error"})
+                if mode != "positive-expired":
+                    self.assertIsNone(row["capture"]["returncode"])
+                    for name in ("waited", "stdout_eof", "stderr_eof", "domain_finality"):
+                        self.assertIs(row["capture"][name], False)
+                    self.assertIn("idle_error", row)
+                run_index = next(index for index, event in enumerate(rig.events) if event[0] == "run")
+                options = rig.events[run_index][3]
+                self.assertEqual((options["seconds"], options["absolute_deadline"]), (420, 430.0))
+                self.assertEqual([event for event in rig.events[run_index + 1:] if event[0] == "idle"], [("idle", 430.0)])
+                self.assertFalse(any(event[0] in {"read", "inspect", "actual", "finalized", "publish"}
+                                     for event in rig.events[run_index + 1:]))
+                self.assertNotIn("PRIVATE", json.dumps(result.details))
+
+    def test_matrix_pair_admission_is_finite_specific_and_diagnostics_preserve_the_identical_primary(self):
+        rig = self.rig()
+        controller = rig.controller
+        diagnostic = controller.SigningMatrixDiagnostic("source", "ubuntu-24.04", 0, tuple(rig.selected), (), ())
+        argv = controller.matrix_phase_argv(rig.paths, rig.selection, "source", deadline=20.0)
+        with rig.scope_context():
+            for pair in (None, True, float("nan"), float("inf"), 19.0, 911.0):
+                with self.subTest(pair=pair), self.assertRaisesRegex(controller.VerificationError,
+                                                                    "SIGNING_MATRIX_DIAGNOSTIC_DEADLINE"):
+                    controller.original_native_capture(rig.session, argv, rig.paths, [], "source",
+                        deadline=20.0, seconds=420, env={}, signing_matrix_diagnostic=diagnostic,
+                        signing_matrix_pair_deadline=pair)
+            with self.assertRaisesRegex(controller.VerificationError, "SIGNING_MATRIX_DIAGNOSTIC_SCOPE"):
+                controller.original_native_capture(rig.session, argv, rig.paths, [], "source",
+                    deadline=20.0, seconds=420, env={}, signing_matrix_pair_deadline=30.0)
+            self.assertEqual(rig.events, [])
+            original = ValueError("PRIVATE original failure")
+            rows = []
+            with patch.object(controller, "require_original_finality", side_effect=original), \
+                    patch.object(controller, "signing_matrix_failure", side_effect=RuntimeError("PRIVATE diagnostic")) as failure, \
+                    patch.object(controller, "signing_matrix_progress", side_effect=RuntimeError("PRIVATE progress")) as progress, \
+                    self.assertRaises(ValueError) as caught:
+                controller.original_native_capture(rig.session, argv, rig.paths, rows, "source",
+                    deadline=20.0, seconds=420, env={}, signing_matrix_diagnostic=diagnostic,
+                    signing_matrix_pair_deadline=30.0)
+            self.assertIs(caught.exception, original)
+            self.assertEqual(failure.call_args.kwargs, {"deadline": 30.0})
+            self.assertEqual(progress.call_args.kwargs, {"deadline": 30.0, "failed_capture": True})
+            self.assertEqual(rows[0]["status"], "FAIL")
+            self.assertNotIn("PRIVATE", json.dumps(rows))
+
+    def test_two_original_ordinary_captures_share_fixed_cutoffs_and_publish_after_finality(self):
+        rig = self.rig()
+        result = self.execute(rig)
+        self.assertTrue(result.ok, result.details)
+        self.assertEqual(len(rig.captures), 2)
+        self.assertIsNot(rig.captures[0], rig.captures[1])
+        runs = [event for event in rig.events if event[0] == "run"]
+        self.assertEqual([event[1] for event in runs], ["source", "wheel"])
+        self.assertEqual([event[3]["absolute_deadline"] for event in runs], [430.0, 431.0])
+        for _, phase, argv, options in runs:
+            self.assertEqual(options["profile"], "ordinary")
+            self.assertIs(options["dispose_retained_domain"], False)
+            self.assertEqual(options["seconds"], 420)
+            self.assertIn("-I", argv)
+            self.assertIn("-S", argv)
+            self.assertIn("-B", argv)
+            self.assertEqual(argv[argv.index("--phase") + 1], phase)
+            self.assertEqual(argv[argv.index("--repository") + 1], rig.selection.repository)
+            self.assertFalse(any(key.startswith("GITHUB_") for key in options["env"]))
+        publication = next(index for index, event in enumerate(rig.events) if event[0] == "publish")
+        self.assertEqual(rig.events[publication - 1], ("idle", 910.0))
+        self.assertEqual(rig.events[publication][1], 910.0)
+        proof = rig.events[publication][2]
+        self.assertEqual(proof["schemaVersion"], 2)
+        self.assertEqual(proof["catalogSha256"], rig.catalog_sha)
+        self.assertEqual(proof["expectedCaseIds"], rig.expected)
+        self.assertTrue(all(event[1] == tuple(rig.selected) and event[3] == rig.selection.operating_system
+                            for event in rig.events if event[0] == "actual"))
+        first_read = next(index for index, event in enumerate(rig.events) if event[0] == "read")
+        self.assertEqual(rig.events[first_read - 2], ("idle", 430.0))
+        self.assertTrue(result.details["proof"]["private_raw_outputs_published"] is False)
+
+    def test_original_failure_or_unknown_cannot_read_outputs_or_dispatch_wheel(self):
+        for change in ({"domain_finality": False}, {"waited": False}, {"stdout_eof": False}, {"timed_out": True},
+                       {"cancelled": True}, {"cleanup_errors": ("inert close unknown",)}, {"returncode": 73}):
+            with self.subTest(change=change):
+                rig = self.rig()
+                rig.capture_changes["source"] = change
+                result = self.execute(rig)
+                self.assertFalse(result.ok)
+                self.assertEqual(len(rig.captures), 1)
+                self.assertFalse(any(event[0] in {"read", "finalized", "publish"} for event in rig.events))
+        rig = self.rig()
+        rig.idle_error = True
+        self.assertFalse(self.execute(rig).ok)
+        self.assertEqual(len(rig.captures), 1)
+        self.assertFalse(any(event[0] in {"read", "publish"} for event in rig.events))
+
+    def test_source_proof_contradiction_or_actual_cut_mismatch_stops_before_wheel(self):
+        for changes in ({"packageSha256": "f" * 64}, {"definitionsSha256": "f" * 64},
+                        {"allCasePathsRemoved": False}, {"allExactChildrenReapedAndGroupsAbsent": False},
+                        {"executedCaseIds": []}, {"shard": True}, {"extra": True},
+                        {"schemaVersion": 1}, {"schemaVersion": 2.0}, {"catalogSha256": "f" * 64},
+                        {"coverage": {}}, {"expectedCaseIds": []}, {"elapsed": True}, {"elapsed": -1},
+                        {"elapsed": 421}, {"scope": "legacy-partial"}):
+            with self.subTest(changes=changes):
+                rig = self.rig()
+                rig.changes["source"] = changes
+                self.assertFalse(self.execute(rig).ok)
+                self.assertEqual(len(rig.captures), 1)
+                self.assertFalse(any(event[0] == "publish" for event in rig.events))
+        rig = self.rig()
+        rig.actual_error = True
+        self.assertFalse(self.execute(rig).ok)
+        self.assertEqual(len(rig.captures), 1)
+        for phase in ("source", "wheel"):
+            with self.subTest(catalog_phase=phase):
+                rig = self.rig()
+                rig.catalog_changes[phase] = {"assignment": list(reversed(rig.definition["assignment"]))}
+                result = self.execute(rig)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error, "MATRIX_SOURCE_CATALOG_CHANGED")
+                self.assertEqual(len(rig.captures), 1 if phase == "source" else 2)
+                self.assertFalse(any(event[0] == "publish" for event in rig.events))
+        for attempt in (True, 1.0):
+            rig = self.rig()
+            rig.changes["source"] = {"scope": {**rig.scope, "attempt": attempt}}
+            self.assertEqual(self.execute(rig).error, "MATRIX_PHASE_RESULT_BINDING")
+
+    def test_finalized_output_requires_exact_private_original_files_and_accounts_all_bytes(self):
+        controller = controller_module()
+        for change in (None, "extra", "missing", "file-mode", "directory-mode", "link", "hardlink", "owner"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory(prefix="mrk-matrix-output-inert-") as temporary:
+                root = Path(temporary)
+                root.chmod(0o700)
+                for name in controller.MATRIX_PHASE_FILES:
+                    (root / name).write_bytes(b"synthetic")
+                    (root / name).chmod(0o600)
+                selected = root / "catalog.json"
+                if change == "extra": (root / "undeclared").write_bytes(b"not ignored")
+                if change == "missing": selected.unlink()
+                if change == "file-mode": selected.chmod(0o644)
+                if change == "directory-mode": root.chmod(0o755)
+                if change == "link":
+                    selected.unlink()
+                    selected.symlink_to(root / "matrix-result.json")
+                if change == "hardlink":
+                    selected.unlink()
+                    os.link(root / "matrix-result.json", selected)
+                session = SimpleNamespace(uid=os.getuid() + (1 if change == "owner" else 0), persisted_bytes=37)
+                with patch.object(controller, "freeze_tree") as freeze, \
+                        patch.object(controller, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+                    if change is None:
+                        actual = controller.finalized_matrix_outputs(root, session, deadline=20.0)
+                        self.assertEqual(actual, {"files": 3, "bytes": 27, "original_finality_before_read": True})
+                        self.assertEqual(session.persisted_bytes, 64)
+                        freeze.assert_called_once_with(root, deadline=20.0)
+                    else:
+                        with self.assertRaises(controller.VerificationError):
+                            controller.finalized_matrix_outputs(root, session, deadline=20.0)
+                        self.assertEqual(session.persisted_bytes, 37)
+                        freeze.assert_not_called()
+
+    def test_preparation_and_final_proof_publication_consume_original_cutoffs(self):
+        rig = self.rig()
+        rig.inspect_advance = 421.0
+        result = self.execute(rig)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error, "AGGREGATE_DEADLINE")
+        self.assertFalse(rig.captures)
+        rig = self.rig()
+        rig.publish_advance = 899.0
+        result = self.execute(rig)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error, "AGGREGATE_DEADLINE")
+        self.assertEqual(len(rig.captures), 2)
+
+    def test_small_public_proof_survives_private_work_disposal_and_umask(self):
+        from . import local_signing_matrix_contract as contract
+        controller = controller_module()
+        real_lstat, real_fstat = Path.lstat, os.fstat
+        def root_view(info):
+            return SimpleNamespace(**{**{name: getattr(info, name) for name in
+                ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size")}, "st_uid": 0})
+        # Only ownership observations are inert. Actual chmod/fsync/close act on
+        # these tiny private task-owned DATA files; no chown or privilege exists.
+        native = SimpleNamespace(**vars(os))
+        native.fstat = lambda fd: root_view(real_fstat(fd))
+        with tempfile.TemporaryDirectory(prefix="mrk-public-matrix-proof-") as temporary:
+            root = Path(temporary).resolve()
+            proof = {"scope": {"os": "ubuntu-24.04", "attempt": 1}, "public": "compact synthetic DATA"}
+            selection = controller.MatrixSelection("example/repository", "1" * 40, "1", 1,
+                "test-signing-matrix", "ubuntu-24.04", 0, root / "signing-matrix-proof/proof.json")
+            session = SimpleNamespace(persisted_bytes=37)
+            original_umask = os.umask(0o077)
+            try:
+                with patch.object(controller, "os", native), patch.object(controller, "time", SimpleNamespace(monotonic=lambda: 10.0)), \
+                        patch.object(Path, "lstat", lambda path, **kw: root_view(real_lstat(path, **kw))):
+                    value = controller.publish_matrix_proof(selection, proof, contract, session, deadline=20.0)
+                    with self.assertRaises(FileExistsError):
+                        controller.publish_matrix_proof(selection, proof, contract, session, deadline=20.0)
+                self.assertEqual(stat.S_IMODE(selection.destination.parent.stat().st_mode), 0o755)
+                self.assertEqual(stat.S_IMODE(selection.destination.stat().st_mode), 0o644)
+                data = selection.destination.read_bytes()
+                self.assertEqual(json.loads(data), proof)
+                self.assertEqual(value["bytes"], len(data))
+                self.assertEqual(session.persisted_bytes, 37 + len(data))
+                self.assertFalse(value["private_raw_outputs_published"])
+            finally:
+                os.umask(original_umask)
+        session = SimpleNamespace(persisted_bytes=controller.MATRIX_PERSISTED_LIMIT)
+        with self.assertRaisesRegex(controller.VerificationError, "OUTPUT_BOUND"):
+            controller.charge_matrix_bytes(session, 1)
+        self.assertEqual(session.persisted_bytes, controller.MATRIX_PERSISTED_LIMIT + 1)
+
+
+class SigningAdapterControllerTests(unittest.TestCase):
+    """Inert original captures exercise only the fixed adapter controller path."""
+
+    def diagnostic(self, rig, **changes):
+        value = {"schema": 1, "phase": "source", "testId": rig.contract.ADAPTER_TEST_IDS[0], "layer": "unittest",
+                 "outcome": "error", "category": "value-error",
+                 "locations": [{"file": "tests/unit/test_local_signing_persistent.py", "line": 123}]}
+        value.update(changes)
+        return b"MRK_SIGNING_ADAPTER_FAILURE=" + rig.contract.canonical(value) + b"\n"
+
+    def test_progress_parser_independently_rejects_private_fields_and_stale_service_generation(self):
+        from . import local_signing_matrix_contract as emitter
+        rig = self.rig()
+        scope = rig.controller.SigningAdapterDiagnostic("source", rig.contract.ADAPTER_TEST_IDS,
+                                                        rig.contract.ADAPTER_FAILURE_TEST_FILES)
+        progress = {"case": "inventory", "owner": {"stage": "run-owned", "command": 4, "elapsedMs": 321,
+                    "completed": 3, "totalMs": 222, "maxMs": 111},
+                    "service": {"stage": "EOF", "command": 4, "elapsedMs": 320}}
+        with patch.object(rig.controller, "time", SimpleNamespace(monotonic=lambda: 10.0)), \
+                patch.object(emitter, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+            parse = lambda data: rig.controller.signing_adapter_failure(data, scope, deadline=20.0)
+            self.assertEqual(parse(self.diagnostic(rig, progress=progress))["observations"][0]["progress"], progress)
+            # Exercise the actual emitter and independent parser together. A
+            # newly declared case must not silently lose its failure evidence.
+            try:
+                raise ValueError("PRIVATE diagnostic sentinel")
+            except ValueError as failure:
+                error = (type(failure), failure, failure.__traceback__)
+            context = (scope.phase, scope.identifiers[0], (("/inert/adapter.py", scope.files[0]),))
+            for name in emitter.ADAPTER_PROGRESS_CASES:
+                with self.subTest(emitted_case=name):
+                    output = io.StringIO()
+                    actual_progress = {**progress, "case": name}
+                    with patch.object(emitter, "sys", SimpleNamespace(stderr=output)):
+                        emitted = emitter.emit_adapter_failure(context, "unittest", "error", error,
+                            deadline=20.0, progress=actual_progress)
+                    self.assertIsNotNone(emitted)
+                    raw = output.getvalue().encode("ascii")
+                    self.assertNotIn(b"PRIVATE", raw)
+                    self.assertEqual(parse(raw)["observations"][0]["progress"], actual_progress)
+            # Feed invalid DATA to the parser, not merely to the producer's
+            # own validator: exact finite names remain independently checked.
+            self.assertIsNone(parse(self.diagnostic(rig, progress={**progress, "case": "semantic-main-extra"})))
+            unavailable = {"case": "inventory", "owner": None, "service": None}
+            self.assertEqual(parse(self.diagnostic(rig, progress=unavailable))["observations"][0]["progress"], unavailable)
+            for key, value in (("case", "/PRIVATE/path"), ("case", True), ("owner", None), ("service", [])):
+                self.assertIsNone(parse(self.diagnostic(rig, progress={**progress, key: value})))
+            for role, fields in (("owner", {"completed": True}), ("owner", {"elapsedMs": 1 << 31}),
+                                 ("owner", {"command": 0}), ("owner", {"maxMs": 223}),
+                                 ("owner", {"completed": 0}), ("owner", {"argv": "PRIVATE"}),
+                                 ("service", {"command": True}), ("service", {"command": 3}),
+                                 ("service", {"elapsedMs": 1.0}), ("service", {"stage": "PRIVATE"}),
+                                 ("service", {"pid": 123})):
+                with self.subTest(role=role, fields=fields):
+                    bad = {**progress, role: {**progress[role], **fields}}
+                    self.assertIsNone(parse(self.diagnostic(rig, progress=bad)))
+            self.assertIsNone(parse(self.diagnostic(rig, progress={**progress, "message": "PRIVATE"})))
+            self.assertIsNone(parse(self.diagnostic(rig, layer="worker", progress=progress)))
+            self.assertIsNone(parse(self.diagnostic(rig, outcome="skip", category="none", locations=[], progress=progress)))
+            raw = self.diagnostic(rig, progress=progress)
+            self.assertIsNone(parse(raw.replace(b'"command":4', b'"command":4,"command":4', 1)))
+
+    def test_failure_parser_is_closed_bounded_and_cannot_project_private_or_ambiguous_data(self):
+        rig = self.rig()
+        scope = rig.controller.SigningAdapterDiagnostic("source", rig.contract.ADAPTER_TEST_IDS,
+                                                        rig.contract.ADAPTER_FAILURE_TEST_FILES)
+        raw = self.diagnostic(rig)
+        with patch.object(rig.controller, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+            parse = lambda value: rig.controller.signing_adapter_failure(value, scope, deadline=20.0)
+            observed = parse(b"PRIVATE uncaught exception /PRIVATE/source.py\n" + raw)
+            self.assertEqual(observed["observations"][0]["testId"], rig.contract.ADAPTER_TEST_IDS[0])
+            self.assertNotIn("PRIVATE", json.dumps(observed))
+            pair = self.diagnostic(rig, layer="worker") + raw
+            self.assertEqual([value["layer"] for value in parse(pair)["observations"]], ["worker", "unittest"])
+            related = {"via": ["context"], "category": "os-error", "locations": [{"file": scope.files[0], "line": 9}]}
+            first = {**related, "via": ["command-first"]}
+            case = {"expectedExit": 0, "workerExit": -9, "anchorExit": 0, "terminalParsed": True, "anchorExpired": True}
+            target = {"returncode": 1, "stderrKind": "traceback-frames", "locations": related["locations"]}
+            expanded = self.diagnostic(rig, layer="worker", related=[first, related], targetResult=target) + self.diagnostic(rig, case=case)
+            observed = parse(expanded)["observations"]
+            self.assertEqual(observed[0]["related"], [first, related])
+            self.assertEqual(observed[0]["targetResult"], target)
+            self.assertEqual(observed[1]["case"], case)
+            unknown = {"expectedExit": 0, "workerExit": None, "anchorExit": None, "terminalParsed": False, "anchorExpired": None}
+            self.assertEqual(parse(self.diagnostic(rig, case=unknown))["observations"][0]["case"], unknown)
+            for changes in ({"schema": True}, {"phase": "wheel"}, {"testId": "PRIVATE.foreign"},
+                            {"layer": "other"}, {"category": "PrivateException"}, {"outcome": "passed"},
+                            {"message": "PRIVATE"}, {"locations": [{"file": "/PRIVATE/test_local_signing_persistent.py", "line": 1}]},
+                            {"locations": [{"file": scope.files[0], "line": True}]},
+                            {"locations": [{"file": scope.files[0], "line": 1.0}]},
+                            {"locations": [{"file": scope.files[0], "line": 1}] * 5},
+                            {"layer": "worker", "outcome": "skip", "category": "none", "locations": []}):
+                with self.subTest(changes=changes):
+                    self.assertIsNone(parse(self.diagnostic(rig, **changes)))
+            for bad in ([], [related] * 2, [related] * 4, [{**related, "via": []}],
+                        [{**related, "via": ["context"] * 8}], [{**related, "via": [True]}],
+                        [{**related, "via": ["PRIVATE"]}], [{**related, "via": ["context", "command-first"]}],
+                        [{**related, "message": "PRIVATE"}], [{**related, "category": "none"}],
+                        [{**related, "locations": [{"file": "/PRIVATE/error.py", "line": 9}]}],
+                        [{**related, "locations": [{"file": scope.files[0], "line": True}]}],
+                        [{**related, "locations": related["locations"] * 3}], [related, first]):
+                with self.subTest(related=bad):
+                    self.assertIsNone(parse(self.diagnostic(rig, layer="worker", related=bad)))
+            self.assertIsNone(parse(self.diagnostic(rig, related=[first])))
+            self.assertIsNone(parse(self.diagnostic(rig, layer="worker", case=case)))
+            for change in ({"expectedExit": True}, {"expectedExit": 0.0}, {"expectedExit": 1},
+                           {"workerExit": True}, {"workerExit": -9.0}, {"workerExit": 256},
+                           {"anchorExit": False}, {"anchorExit": -129}, {"terminalParsed": 1},
+                           {"terminalParsed": False}, {"workerExit": None}, {"anchorExpired": None},
+                           {"anchorExpired": 1}, {"extra": "PRIVATE"}):
+                with self.subTest(case=change):
+                    self.assertIsNone(parse(self.diagnostic(rig, case={**case, **change})))
+            self.assertIsNone(parse(self.diagnostic(rig, case={**unknown, "anchorExpired": False})))
+            for kind in ("empty", "unavailable"):
+                value = {"returncode": 0, "stderrKind": kind, "locations": []}
+                self.assertEqual(parse(self.diagnostic(rig, layer="worker", targetResult=value))["observations"][0]["targetResult"], value)
+            self.assertIsNone(parse(self.diagnostic(rig, targetResult=target)))
+            for change in ({"returncode": True}, {"returncode": 1.0}, {"returncode": -129}, {"returncode": 256},
+                           {"stderrKind": "PRIVATE"}, {"stderrKind": "empty"}, {"stderrKind": "unavailable"},
+                           {"locations": []}, {"locations": target["locations"] * 3},
+                           {"locations": [{"file": "/PRIVATE/file.py", "line": 1}]},
+                           {"locations": [{"file": scope.files[0], "line": True}]},
+                           {"message": "PRIVATE"}):
+                with self.subTest(target=change):
+                    self.assertIsNone(parse(self.diagnostic(rig, layer="worker", targetResult={**target, **change})))
+            for malformed in (raw + raw, pair + raw, raw[:-1], b"x" * 65537,
+                              b"MRK_SIGNING_ADAPTER_FAILURE=" + b" " * 2048 + b"\n",
+                              raw.replace(b'"schema":1', b'"schema":1,"schema":1'),
+                              self.diagnostic(rig, layer="worker", testId=rig.contract.ADAPTER_TEST_IDS[1]) + raw):
+                with self.subTest(malformed=malformed[:32]):
+                    self.assertIsNone(parse(malformed))
+
+    def test_diagnostics_preserve_original_failure_unknown_and_cutoff_without_reads_or_wheel(self):
+        for mode in ("failure", "unknown", "parser-error", "expired", "diagnostic-on-zero"):
+            with self.subTest(mode=mode):
+                rig = self.rig()
+                related = [{"via": ["command-first"], "category": "os-error",
+                            "locations": [{"file": "tests/unit/test_local_signing_persistent.py", "line": 31}]}]
+                case = {"expectedExit": 0, "workerExit": None if mode == "unknown" else 91,
+                        "anchorExit": None if mode == "unknown" else 0,
+                        "terminalParsed": mode != "unknown", "anchorExpired": None if mode == "unknown" else False}
+                target = {"returncode": 0, "stderrKind": "unavailable", "locations": []}
+                rig.capture_changes["source"] = {"stderr": self.diagnostic(rig, layer="worker", related=related, targetResult=target)
+                                                 + self.diagnostic(rig, case=case)}
+                if mode != "diagnostic-on-zero":
+                    rig.capture_changes["source"].update(ok=False, returncode=91)
+                if mode == "unknown":
+                    rig.capture_changes["source"].update(waited=False, domain_finality=False, stdout_eof=False)
+                    rig.idle_error = True
+                if mode == "expired":
+                    original_idle = rig.session.ensure_idle
+                    def idle(*, deadline):
+                        original_idle(deadline=deadline)
+                        if rig.captures:
+                            rig.clock = deadline + 1.0
+                    rig.session.ensure_idle = idle
+                parsing = patch.object(rig.controller, "signing_adapter_failure", side_effect=RuntimeError("PRIVATE parser error")) \
+                    if mode == "parser-error" else nullcontext()
+                with parsing:
+                    result = self.execute(rig)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error, "SIGNING_ADAPTER_UNEXPECTED_STDERR" if mode == "diagnostic-on-zero"
+                                 else "COMMAND_EXIT_OR_FINALITY")
+                self.assertEqual(len(rig.captures), 1)
+                run_index = next(index for index, event in enumerate(rig.events) if event[0] == "run")
+                self.assertFalse(any(event[0] in {"inspect", "read", "output", "finalized", "publish"}
+                                     for event in rig.events[run_index + 1:]))
+                row = result.details["phases"][0]
+                self.assertEqual(row["status"], "FAIL")
+                if mode in {"failure", "unknown"}:
+                    self.assertEqual([item["layer"] for item in row["adapter_failure"]["observations"]], ["worker", "unittest"])
+                    self.assertEqual(row["adapter_failure"]["observations"][0]["related"], related)
+                    self.assertEqual(row["adapter_failure"]["observations"][0]["targetResult"], target)
+                    self.assertEqual(row["adapter_failure"]["observations"][1]["case"], case)
+                    if mode == "unknown":
+                        self.assertFalse(row["capture"]["domain_finality"])
+                        self.assertIn("idle_error", row)
+                elif mode != "diagnostic-on-zero":
+                    self.assertEqual(row["diagnostic_error"], {"error": "SIGNING_ADAPTER_DIAGNOSTIC_UNAVAILABLE"})
+                    self.assertNotIn("adapter_failure", row)
+                self.assertNotIn("PRIVATE", json.dumps(result.details))
+
+    def test_account_marker_requires_failed_exact_prepared_callback_without_weakening_finality(self):
+        marker = (b'\nMRK_C_FENCE_FIXTURE_FAILURE={"category":"AssertionError",'
+                  b'"frames":[["command_account_lifecycle_fixture.py",192],["PRIVATE.py",7]]}\n')
+        for mode in ("failure", "unknown", "unrelated", "worker-only", "no-callback", "on-success", "malformed", "parser-error"):
+            with self.subTest(mode=mode):
+                rig = self.rig()
+                identifier = rig.contract.ADAPTER_TEST_IDS[-1]
+                callback = self.diagnostic(rig, testId=rig.contract.ADAPTER_TEST_IDS[0] if mode == "unrelated" else identifier,
+                                           layer="worker" if mode == "worker-only" else "unittest")
+                raw = (marker[:-1] if mode == "malformed" else marker) + (b"" if mode == "no-callback" else callback)
+                rig.capture_changes["source"] = {"stderr": raw}
+                if mode != "on-success":
+                    rig.capture_changes["source"].update(ok=False, returncode=91)
+                if mode == "unknown":
+                    rig.capture_changes["source"].update(waited=False, domain_finality=False, stdout_eof=False)
+                    rig.idle_error = True
+                parser = (patch.object(rig.controller, "command_account_failure", side_effect=RuntimeError("PRIVATE parser"))
+                          if mode == "parser-error" else nullcontext())
+                with parser:
+                    result = self.execute(rig)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error, "SIGNING_ADAPTER_UNEXPECTED_STDERR" if mode == "on-success"
+                                 else "COMMAND_EXIT_OR_FINALITY")
+                self.assertEqual(len(rig.captures), 1)
+                row = result.details["phases"][0]
+                if mode in {"failure", "unknown"}:
+                    self.assertEqual(row["command_account_failure"], {"category": "assertion-error", "locations": [
+                        {"file": "tests/workflow/command_account_lifecycle_fixture.py", "line": 192}]})
+                else:
+                    self.assertNotIn("command_account_failure", row)
+                if mode == "unknown":
+                    self.assertFalse(row["capture"]["domain_finality"])
+                run_index = next(index for index, event in enumerate(rig.events) if event[0] == "run")
+                self.assertFalse(any(event[0] in {"inspect", "read", "output", "finalized", "publish"}
+                                     for event in rig.events[run_index + 1:]))
+                self.assertNotIn("PRIVATE", json.dumps(result.details))
+
+    def test_child_phase_scope_rejects_bool_and_float_attempt_aliases_in_both_roles(self):
+        matrix = SigningMatrixControllerTests().rig()
+        adapter = self.rig()
+        package = matrix.paths.work / "source-build/src/mobile_release"
+        matrix_record = {"schema": 2, "phase": "source", "shard": 0, "scope": matrix.scope,
+                         "status": "phase-finished", "productionRoot": str(package)}
+        adapter_record = {"schema": "mrk-signing-adapter-phase-v2", "phase": "source", "scope": adapter.scope,
+                          "status": "adapter-only", "productionRoot": str(package), "testsRun": 5,
+                          "startedIds": list(adapter.contract.ADAPTER_TEST_IDS),
+                          "successfulIds": list(adapter.contract.ADAPTER_TEST_IDS),
+                          "origins": adapter.origins, "casePathsRemoved": True}
+        def parse_matrix(value):
+            capture = native_capture_fixture(stdout=b"MRK_MATRIX_PHASE=" + matrix.contract.canonical(value) + b"\n")
+            diagnostic = matrix.controller.SigningMatrixDiagnostic("source", "ubuntu-24.04", 0,
+                                                                    tuple(matrix.selected), (), ())
+            with patch.object(matrix.controller, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+                matrix.controller.parse_matrix_phase(capture, "source", matrix.scope, package, 0,
+                                                      diagnostic=diagnostic, deadline=20.0)
+        parse_matrix(matrix_record)
+        adapter.contract.validate_adapter_record(adapter_record, adapter.scope, "source", package)
+        for attempt in (True, 1.0):
+            with self.subTest(attempt=repr(attempt)):
+                changed = {**matrix_record, "scope": {**matrix.scope, "attempt": attempt}}
+                with self.assertRaisesRegex(matrix.controller.VerificationError, "MATRIX_PHASE_CAPTURE_BINDING"):
+                    parse_matrix(changed)
+                changed = {**adapter_record, "scope": {**adapter.scope, "attempt": attempt}}
+                with self.assertRaisesRegex(ValueError, "adapter record binding"):
+                    adapter.contract.validate_adapter_record(changed, adapter.scope, "source", package)
+
+    def rig(self):
+        rig = SigningMatrixControllerTests().rig()
+        controller = rig.controller
+        rig.step = controller.Step("local-signing-adapter", kind="signing-adapter", seconds=900)
+        rig.selection = controller.SigningAdapterSelection("example/mobile-release-kit", "1" * 40, "1234", 1,
+                                                          "test-signing-adapter", "ubuntu-24.04")
+        rig.scope = rig.contract.adapter_scope_from_metadata(rig.selection.metadata(), "ubuntu-24.04")
+        rig.contract.adapter_test_ids = Mock(return_value=rig.contract.ADAPTER_TEST_IDS)
+        parent = {name: "__init__.py" if name == "mobile_release" else name.split(".")[-1] + ".py"
+                  for name in ("mobile_release", "mobile_release.local_signing", "mobile_release.owned_process",
+                               "mobile_release._native_process")}
+        rig.origins = {"parent": parent, "commandWorker": {**parent, "mobile_release._command_process": "_command_process.py"}}
+        def run(argv, **options):
+            phase = argv[argv.index("--adapter-phase") + 1]
+            rig.events.append(("run", phase, tuple(argv), options))
+            package = rig.paths.work / ("source-build/src/mobile_release" if phase == "source" else
+                                        "wheel-venv/lib/python3.11/site-packages/mobile_release")
+            record = {"schema": "mrk-signing-adapter-phase-v2", "phase": phase, "scope": rig.scope,
+                      "status": "adapter-only", "productionRoot": str(package), "testsRun": 5,
+                      "startedIds": list(rig.contract.ADAPTER_TEST_IDS), "successfulIds": list(rig.contract.ADAPTER_TEST_IDS),
+                      "origins": rig.origins, "casePathsRemoved": True, **rig.changes.get(phase, {})}
+            capture = native_capture_fixture(stdout=b"MRK_SIGNING_ADAPTER_PHASE=" + rig.contract.canonical(record) + b"\n",
+                                             **rig.capture_changes.get(phase, {}))
+            rig.captures.append(capture)
+            rig.clock += 1.0
+            return capture
+        rig.session.run = run
+        return rig
+
+    def execute(self, rig):
+        def output(path, session, *, deadline):
+            rig.events.append(("output", path, deadline))
+            if rig.actual_error:
+                raise rig.controller.VerificationError("SIGNING_ADAPTER_RETAINED_OUTPUT")
+            return {"files": 0, "bytes": 0, "original_finality_before_read": True}
+        with rig.scope_context(), patch.object(rig.controller, "finalized_adapter_output", side_effect=output):
+            return rig.controller.perform_signing_adapter_gate(rig.step, rig.paths, rig.session, rig.checks,
+                                                               "linux", rig.selection, deadline=2000.0)
+
+    def test_finite_catalog_original_capture_pair_and_no_full_proof(self):
+        rig = self.rig()
+        for platform in ("linux", "macos"):
+            names = rig.controller.required_gate_ids(platform, "signing-adapter")
+            self.assertEqual(names, tuple("local-signing-adapter" if name == "local-signing-matrix" else name
+                                         for name in rig.controller.required_gate_ids(platform, "signing-matrix")))
+            self.assertNotIn("python-full", names)
+        result = self.execute(rig)
+        self.assertTrue(result.ok, result.details)
+        self.assertEqual(result.details["status"], "adapter-only")
+        self.assertIs(result.details["matrix_proof"], False)
+        self.assertEqual(len(rig.captures), 2)
+        self.assertIsNot(rig.captures[0], rig.captures[1])
+        for row in result.details["phases"]:
+            self.assertEqual(row["origins"], rig.origins)
+            self.assertNotIn("mobile_release._command_process", row["origins"]["parent"])
+            self.assertIn("mobile_release._command_process", row["origins"]["commandWorker"])
+        runs = [event for event in rig.events if event[0] == "run"]
+        self.assertEqual([event[3]["absolute_deadline"] for event in runs], [430.0, 431.0])
+        for _, phase, argv, options in runs:
+            self.assertEqual(options["profile"], "ordinary")
+            self.assertIs(options["dispose_retained_domain"], False)
+            self.assertNotIn("--shard", argv)
+            self.assertEqual(argv[argv.index("--job") + 1], "test-signing-adapter")
+            output_index = next(index for index, event in enumerate(rig.events)
+                                if event[0] == "output" and event[1].name == phase)
+            self.assertEqual(rig.events[output_index - 1], ("idle", options["absolute_deadline"]))
+        self.assertFalse(any(event[0] == "publish" for event in rig.events))
+        truncated = self.rig()
+        truncated.contract.adapter_test_ids = Mock(return_value=truncated.contract.ADAPTER_TEST_IDS[:4])
+        rejected = self.execute(truncated)
+        self.assertFalse(rejected.ok)
+        self.assertEqual(rejected.error, "SIGNING_ADAPTER_DIAGNOSTIC_SCOPE")
+        self.assertEqual(truncated.captures, [])
+
+    def test_source_failure_missing_duplicate_skip_retained_output_or_late_preparation_stops_wheel(self):
+        origins = self.rig().origins
+        for changes in ({"successfulIds": []}, {"successfulIds": ["wrong"] * 5}, {"testsRun": True},
+                        {"testsRun": 4}, {"startedIds": list(self.rig().contract.ADAPTER_TEST_IDS[:4]),
+                                          "successfulIds": list(self.rig().contract.ADAPTER_TEST_IDS[:4]), "testsRun": 4},
+                        {"casePathsRemoved": False}, {"status": "complete"}, {"origins": {}},
+                        {"schema": "mrk-signing-adapter-phase-v1"}, {"origins": origins["parent"]},
+                        {"origins": {"parent": origins["parent"]}},
+                        {"origins": {**origins, "unknown": origins["commandWorker"]}},
+                        {"origins": {**origins, "commandWorker": origins["parent"]}},
+                        {"origins": {**origins, "parent": {**origins["parent"], "mobile_release": ".py"}}},
+                        {"origins": {**origins, "commandWorker": {
+                            **origins["commandWorker"], "mobile_release._command_process": "../_command_process.py"}}},
+                        {"origins": {**origins, "parent": {**origins["parent"], "mobile_release.optional": "/foreign.py"}}},
+                        {"productionRoot": "/wrong/phase/mobile_release"}, {"phase": "wheel"},
+                        {"startedIds": list(self.rig().contract.ADAPTER_TEST_IDS) + ["duplicate"]}):
+            with self.subTest(changes=changes):
+                rig = self.rig()
+                rig.changes["source"] = changes
+                self.assertFalse(self.execute(rig).ok)
+                self.assertEqual(len(rig.captures), 1)
+        for changes in ({"waited": False}, {"domain_finality": False}, {"returncode": 73}, {"stdout_eof": False}):
+            with self.subTest(capture=changes):
+                rig = self.rig()
+                rig.capture_changes["source"] = changes
+                self.assertFalse(self.execute(rig).ok)
+                self.assertFalse(any(event[0] == "output" for event in rig.events))
+                self.assertEqual(len(rig.captures), 1)
+        rig = self.rig()
+        rig.actual_error = True
+        self.assertFalse(self.execute(rig).ok)
+        self.assertEqual(len(rig.captures), 1)
+        rig = self.rig()
+        rig.inspect_advance = 421.0
+        self.assertFalse(self.execute(rig).ok)
+        self.assertFalse(rig.captures)
+
+
+class SigningAdapterPhaseControllerTests(unittest.TestCase):
+    """Independent phase DATA parsing; every capture/Session remains inert."""
+
+    def packet(self, rig, **changes):
+        value = {"schema": 1, "phase": "source", "stage": "postconditions", "category": "value-error",
+                 "locations": [{"file": "tests/workflow/run_local_signing_matrix.py", "line": 246}]}
+        value.update(changes)
+        return b"MRK_SIGNING_ADAPTER_PHASE_FAILURE=" + rig.contract.canonical(value) + b"\n"
+
+    def test_actual_phase_emitter_and_independent_parser_are_closed_bounded_and_private(self):
+        from . import local_signing_matrix_contract as emitter
+        rig = SigningAdapterControllerTests().rig()
+        scope = rig.controller.SigningAdapterDiagnostic("source", rig.contract.ADAPTER_TEST_IDS,
+                                                        rig.contract.ADAPTER_FAILURE_TEST_FILES)
+        context = ("source", 20.0, (("/fixed/phase.py", "tests/workflow/run_local_signing_matrix.py"),
+                                    ("/fixed/contract.py", "tests/workflow/local_signing_matrix_contract.py")))
+        namespace = {}
+        exec(compile("def fail():\n    raise ValueError('PRIVATE phase message')\n", context[2][0][0], "exec"), namespace)
+        try:
+            namespace["fail"]()
+        except ValueError as exception:
+            error = (type(exception), exception, exception.__traceback__)
+        with patch.object(rig.controller, "time", SimpleNamespace(monotonic=lambda: 10.0)), \
+                patch.object(emitter, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+            parse = lambda raw: rig.controller.signing_adapter_phase_failure(raw, scope, deadline=20.0)
+            for stage in emitter.ADAPTER_PHASE_FAILURE_STAGES:
+                output = io.StringIO()
+                with patch.object(emitter, "sys", SimpleNamespace(stderr=output)):
+                    emitted = emitter.emit_adapter_phase_failure(context, stage, error)
+                self.assertIsNotNone(emitted)
+                observed = parse(output.getvalue().encode("ascii"))
+                self.assertEqual(observed, emitted)
+                self.assertEqual(observed["locations"], [{"file": context[2][0][1], "line": 2}])
+                self.assertNotIn("PRIVATE", output.getvalue())
+            for changes in ({"schema": True}, {"schema": 2}, {"phase": "wheel"}, {"stage": "postconditions-extra"},
+                            {"stage": True}, {"category": "none"}, {"category": "PrivateError"},
+                            {"message": "PRIVATE"}, {"testId": scope.identifiers[0]}, {"locations": {}},
+                            {"locations": [{"file": scope.files[0], "line": 1}]},
+                            {"locations": [{"file": "/PRIVATE/run_local_signing_matrix.py", "line": 1}]},
+                            {"locations": [{"file": context[2][0][1], "line": True}]},
+                            {"locations": [{"file": context[2][0][1], "line": 0}]},
+                            {"locations": [{"file": context[2][0][1], "line": 1_000_000}]},
+                            {"locations": [{"file": context[2][0][1], "line": 1, "text": "PRIVATE"}]},
+                            {"locations": [{"file": context[2][0][1], "line": 1}] * 5}):
+                with self.subTest(changes=changes):
+                    self.assertIsNone(parse(self.packet(rig, **changes)))
+            raw = self.packet(rig)
+            for invalid in (raw + raw, raw[:-1], raw.replace(b'"schema":1', b'"schema":1,"schema":1'),
+                            raw.replace(b'{', b'{ ', 1), b"MRK_SIGNING_ADAPTER_PHASE_FAILURE=" + b" " * 2048 + b"\n",
+                            b"x" * 65537, bytearray(raw)):
+                self.assertIsNone(parse(invalid))
+            self.assertEqual(parse(b"PRIVATE unrelated stderr\n" + raw), json.loads(raw.split(b"=", 1)[1]))
+            worker = SigningAdapterControllerTests().diagnostic(rig, layer="worker",
+                locations=[{"file": context[2][0][1], "line": 2}])
+            self.assertIsNone(rig.controller.signing_adapter_failure(worker, scope, deadline=20.0))
+        with patch.object(rig.controller, "time", SimpleNamespace(monotonic=lambda: 20.0)):
+            with self.assertRaisesRegex(rig.controller.VerificationError, "AGGREGATE_DEADLINE"):
+                rig.controller.signing_adapter_phase_failure(self.packet(rig), scope, deadline=20.0)
+
+    def test_phase_and_worker_projections_are_independent_and_never_change_original_failure(self):
+        adapter = SigningAdapterControllerTests()
+        for mode in ("both", "bad-phase", "bad-worker", "phase-parser-error", "worker-parser-error", "unknown", "zero"):
+            with self.subTest(mode=mode):
+                rig = adapter.rig()
+                worker = adapter.diagnostic(rig, layer="worker")
+                phase = self.packet(rig)
+                if mode == "bad-phase":
+                    phase = self.packet(rig, message="PRIVATE")
+                elif mode == "bad-worker":
+                    worker = adapter.diagnostic(rig, layer="worker", message="PRIVATE")
+                rig.capture_changes["source"] = {"stderr": worker + phase}
+                if mode != "zero":
+                    rig.capture_changes["source"].update(ok=False, returncode=1)
+                if mode == "unknown":
+                    rig.capture_changes["source"].update(waited=False, stdout_eof=False, domain_finality=False)
+                    rig.idle_error = True
+                phase_parser = patch.object(rig.controller, "signing_adapter_phase_failure", side_effect=RuntimeError("PRIVATE")) \
+                    if mode == "phase-parser-error" else nullcontext()
+                worker_parser = patch.object(rig.controller, "signing_adapter_failure", side_effect=RuntimeError("PRIVATE")) \
+                    if mode == "worker-parser-error" else nullcontext()
+                with phase_parser, worker_parser:
+                    result = adapter.execute(rig)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error, "SIGNING_ADAPTER_UNEXPECTED_STDERR" if mode == "zero" else "COMMAND_EXIT_OR_FINALITY")
+                self.assertEqual(len(rig.captures), 1)
+                run = next(index for index, event in enumerate(rig.events) if event[0] == "run")
+                self.assertFalse(any(event[0] in {"inspect", "read", "output", "finalized", "publish"}
+                                     for event in rig.events[run + 1:]))
+                row = result.details["phases"][0]
+                self.assertEqual(row["status"], "FAIL")
+                self.assertEqual("adapter_failure" in row, mode not in {"bad-worker", "worker-parser-error", "zero"})
+                self.assertEqual("adapter_phase_failure" in row, mode not in {"bad-phase", "phase-parser-error", "zero"})
+                if "adapter_phase_failure" in row:
+                    self.assertEqual(row["adapter_phase_failure"]["stage"], "postconditions")
+                if mode == "unknown":
+                    self.assertFalse(row["capture"]["domain_finality"])
+                    self.assertIn("idle_error", row)
+                self.assertNotIn("PRIVATE", json.dumps(result.details))
 
 
 if __name__ == "__main__":

@@ -139,7 +139,7 @@ class CliBuildTests(unittest.TestCase):
 
             with (
                 patch("mobile_release.preflight.discover_project", return_value=discovered),
-                patch("mobile_release.preflight.subprocess.run", side_effect=run_gradle),
+                patch("mobile_release.preflight.run_owned", side_effect=run_gradle),
             ):
                 finding = _effective_android_identity_finding(config)
 
@@ -519,7 +519,10 @@ class CliBuildTests(unittest.TestCase):
                 _timeout: int,
                 *,
                 environment_overrides: dict[str, str] | None = None,
+                signing_session=None, execution_source=None,
             ) -> None:
+                self.assertIsNone(signing_session)
+                self.assertIsNone(execution_source)
                 commands.append(argv)
                 overrides.append(environment_overrides or {})
                 archive_index = argv.index("-archivePath") + 1 if "-archivePath" in argv else None
@@ -551,7 +554,7 @@ class CliBuildTests(unittest.TestCase):
             stale.write_text("stale mapping\n", encoding="utf-8")
 
             def fake_run(*_args: object, **kwargs: object) -> object:
-                captured_environment.update(kwargs["env"])
+                captured_environment.update(kwargs["environ"])
                 bundle = root / "app/build/outputs/bundle/release/app-release.aab"
                 bundle.parent.mkdir(parents=True)
                 with zipfile.ZipFile(bundle, "w") as archive:
@@ -562,7 +565,7 @@ class CliBuildTests(unittest.TestCase):
 
             with patch.dict(os.environ, {"GITHUB_RUN_NUMBER": "999999"}, clear=False), patch(
                 "mobile_release.android.discover_project", return_value=discovered
-            ), patch("mobile_release.android.subprocess.run", side_effect=fake_run):
+            ), patch("mobile_release.android.run_owned", side_effect=fake_run):
                 artifacts = run_android_build(config, signed=False)
             self.assertEqual(captured_environment["MOBILE_RELEASE_VERSION_NAME"], "1.2.3")
             self.assertEqual(captured_environment["MOBILE_RELEASE_BUILD_NUMBER"], "42")
@@ -604,7 +607,7 @@ class CliBuildTests(unittest.TestCase):
                         archive.writestr("base/manifest/AndroidManifest.xml", b"x")
                         archive.writestr("base/dex/classes.dex", b"x")
                 else:
-                    signing_environment.update(kwargs["env"])
+                    signing_environment.update(kwargs["environ"])
                 return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
             signing = {
@@ -616,7 +619,7 @@ class CliBuildTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, signing, clear=False),
                 patch("mobile_release.android.discover_project", return_value=discovered),
-                patch("mobile_release.android.subprocess.run", side_effect=fake_run),
+                patch("mobile_release.android.run_owned", side_effect=fake_run),
             ):
                 run_android_build(config, signed=True)
 
@@ -641,6 +644,7 @@ class CliBuildTests(unittest.TestCase):
             root = Path(temporary)
             config = load_config(write_project(root, ios_config(), platform="ios"))
             commands: list[list[str]] = []
+            session = types.SimpleNamespace(assert_owner=lambda: None)
 
             def fake_run(
                 argv: list[str],
@@ -648,7 +652,10 @@ class CliBuildTests(unittest.TestCase):
                 _timeout: int,
                 *,
                 environment_overrides: dict[str, str] | None = None,
+                signing_session=None, execution_source=None,
             ) -> None:
+                self.assertIs(signing_session, session)
+                self.assertIsNone(execution_source)
                 self.assertEqual(
                     environment_overrides,
                     {
@@ -678,7 +685,7 @@ class CliBuildTests(unittest.TestCase):
             ), patch.dict(sys.modules, {"plistlib": fake_plist}), patch(
                 "mobile_release.ios.sys.platform", "darwin"
             ), patch("mobile_release.ios._run_checked", side_effect=fake_run):
-                run_ios_build(config, signed=True)
+                run_ios_build(config, signed=True, signing_session=session)
             self.assertIs(export_options["stripSwiftSymbols"], False)
             self.assertEqual(export_options["thinning"], "<none>")
             archive_command = commands[0]
@@ -845,8 +852,9 @@ class CliBuildTests(unittest.TestCase):
             captured: dict[str, str] = {}
 
             def fake_checks(
-                _config: object, phase: str, *, environ: dict[str, str]
+                _config: object, phase: str, *, environ: dict[str, str], execution_source=None
             ) -> list[Finding]:
+                self.assertIsNone(execution_source)
                 if phase == "androidArtifact":
                     captured.update(environ)
                 return []
@@ -892,7 +900,7 @@ class CliBuildTests(unittest.TestCase):
             sentinel = tracked / "keep.txt"
             sentinel.write_text("keep\n", encoding="utf-8")
             (root / ".mobile-release").symlink_to(tracked, target_is_directory=True)
-            with patch("mobile_release.android.subprocess.run") as run:
+            with patch("mobile_release.android.run_owned") as run:
                 with self.assertRaisesRegex(ValidationError, "symbolic link"):
                     run_android_build(config, signed=False)
             self.assertFalse(
@@ -1011,11 +1019,11 @@ class CliBuildTests(unittest.TestCase):
         )
         with patch("mobile_release.preflight.sys.platform", "darwin"), patch(
             "mobile_release.preflight.shutil.which", return_value="/usr/bin/xcodebuild"
-        ), patch("mobile_release.preflight.subprocess.run", return_value=exact):
+        ), patch("mobile_release.preflight.run_owned", return_value=exact):
             self.assertEqual(_xcode_toolchain_finding().status, Status.PASS)
         with patch("mobile_release.preflight.sys.platform", "darwin"), patch(
             "mobile_release.preflight.shutil.which", return_value="/usr/bin/xcodebuild"
-        ), patch("mobile_release.preflight.subprocess.run", return_value=mismatch):
+        ), patch("mobile_release.preflight.run_owned", return_value=mismatch):
             self.assertEqual(_xcode_toolchain_finding().status, Status.FAIL)
 
     def test_store_adapter_uses_pinned_ruby_lane_runner(self) -> None:
@@ -1414,8 +1422,9 @@ class CliBuildTests(unittest.TestCase):
             captured_environment: dict[str, str] = {}
 
             def fake_project_checks(
-                _config: object, _phase: str, *, environ: dict[str, str]
+                _config: object, _phase: str, *, environ: dict[str, str], execution_source=None
             ) -> list[object]:
+                self.assertIsNone(execution_source)
                 captured_environment.update(environ)
                 return []
 

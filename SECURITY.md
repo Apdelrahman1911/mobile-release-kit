@@ -45,9 +45,12 @@ The final public-release decision is intentionally outside automation.
   Native workers require independent parent-liveness/deadline/process-group containment
   and no inherited Store/signing capabilities; see the process-ownership contract below.
   This is offline issuance, not live revocation status;
-  see [profile authority](docs/ios-profile-authority.md). The separately confirmed QA-003
-  global local-signing concurrency blocker remains open; atomic profile installation is not
-  a lifetime lease and does not justify a READY verdict. QA-004 also remains open:
+  see [profile authority](docs/ios-profile-authority.md). Signed iOS build preflight holds an
+  account-wide private lease before credential/application work. Original locked-descriptor
+  loans, durable command generations and original-custodian settlement fences constrain
+  recovery; a recorded PID or current filename cannot authorize it. Uncertain ownership is
+  preserved, not reset by loading a journal; see [local recovery](docs/local-signing.md).
+  Atomic profile installation alone is not a lifetime lease. QA-004 remains open:
   default cancellation can interrupt outer build-input scratch/client restoration.
   Inner profile/signing/native-resource ownership does not cover that outer owner.
 - Historical Android recovery retains authenticated original signing/identity evidence rather than
@@ -167,8 +170,9 @@ They require genuine enclosing-domain disposal, not a newly acquired observer.
 
 These are implementation and verification requirements, not a native pass or an
 overall READY verdict. Required source/installed-platform evidence remains
-separate from fixture readiness and VM disposal. QA-003 signing lifetime and
-QA-004 outer restoration remain independent open blockers.
+separate from fixture readiness and VM disposal. The account-signing lifetime
+uses its own command owner and durable recovery protocol; it cannot borrow a
+profile decoder's finality or prove QA-004 outer restoration safe.
 
 ## Supply-chain rules
 

@@ -135,8 +135,12 @@ See [profile authority](ios-profile-authority.md) for exact policy/offline limit
 No evidence/schema version changes are introduced by this gate. Existing accepted
 candidates remain bound to their original validation/toolkit and exact bytes;
 finish/reconcile them under that pin rather than repinning, resealing or re-signing.
-The separate local-signing concurrency blocker QA-003 must also be resolved before
-claiming complete production readiness.
+Local signed iOS builds now require a real non-root macOS account and local APFS/HFS+
+home with one account-wide signing lease. Overlap fails before private/application
+work; pending original ownership requires `local-signing status` and explicit
+[owner recovery](local-signing.md). Do not migrate/delete the private journal or
+change toolkit versions during a pending session. No release schema changes.
+QA-004 outer materialization cleanup remains a separate readiness blocker.
 
 ## Rollback
 

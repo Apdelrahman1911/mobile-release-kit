@@ -23,6 +23,7 @@ from .errors import ValidationError
 from .inspection import InspectionDeadline
 from .ios_entitlements import load_plist_dictionary, typed_value
 from .macho import MACHO_MAGICS, MachOSlice, inspect_macho
+from ._profile_callers import first_primary_context
 
 MAX_FILES = 100_000
 MAX_DEPTH = 64
@@ -203,6 +204,7 @@ class IOSArtifactSnapshot:
     temporary: Path
     deadline: InspectionDeadline
     unpacked: dict[str, Path] = field(default_factory=dict)
+    cancellation: object | None = None
 
     def assert_unchanged(self) -> None:
         self.deadline.check()
@@ -231,7 +233,7 @@ class IOSArtifactSnapshot:
 
 
 @contextmanager
-def snapshot_ios_artifacts(artifacts: Mapping[str, Path]) -> Iterator[IOSArtifactSnapshot]:
+def snapshot_ios_artifacts(artifacts: Mapping[str, Path], *, cancellation=None) -> Iterator[IOSArtifactSnapshot]:
     """Only the yielded private copies may be passed to native/content checks.
 
     Compare the originals again before sealing or uploading. This defends against
@@ -239,7 +241,8 @@ def snapshot_ios_artifacts(artifacts: Mapping[str, Path]) -> Iterator[IOSArtifac
     """
     deadline = InspectionDeadline()
     selected = {name: path for name, path in artifacts.items() if name in IOS_ARTIFACT_NAMES}
-    with tempfile.TemporaryDirectory(prefix="mobile-release-ios-snapshot-") as directory:
+    with first_primary_context(tempfile.TemporaryDirectory(prefix="mobile-release-ios-snapshot-"),
+                               cancellation=cancellation, expose_owner=True) as (directory, cancellation):
         temporary = Path(directory)
         copies, bindings = {}, {}
         for name, path in selected.items():
@@ -250,7 +253,7 @@ def snapshot_ios_artifacts(artifacts: Mapping[str, Path]) -> Iterator[IOSArtifac
             bindings[name] = _input(path, copies[name], deadline=deadline)
             if name == "ios-ipa":
                 _require(isinstance(bindings[name], _File), "IPA must be a regular ZIP file")
-        snapshot = IOSArtifactSnapshot(copies, selected, bindings, temporary, deadline)
+        snapshot = IOSArtifactSnapshot(copies, selected, bindings, temporary, deadline, cancellation=cancellation)
         deadline.check()
         yield snapshot
 

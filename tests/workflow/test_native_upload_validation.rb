@@ -1805,9 +1805,6 @@ class NativeUploadValidationTest < Minitest::Test
         assert_equal 1, driver.fault_count
         assert driver.frame_published
       end
-      assert_late_final_deadline_choreography
-      assert_slow_cleanup_choreography
-
       # Only the actual readiness algorithm runs here. Restoring file/clock/sleep
       # seams supply no child, wait receipt, real IO or native readiness proof.
       readiness_stat_class = Struct.new(:dev, :ino, :mode, :uid, :gid, :rdev, :ftype, :nlink, :size) do
@@ -1900,6 +1897,13 @@ class NativeUploadValidationTest < Minitest::Test
         readiness.call([[bytes, size]], expected: ["diagnostic", message], change: change)
       end
       readiness.call([[nil, 0]], expected: nil, read_error: IOError.new("original readiness read failure"))
+    end
+  end
+
+  def test_deadline_and_slow_cleanup_choreography_preserve_original_bounds
+    with_acquisition_veto do
+      assert_late_final_deadline_choreography
+      assert_slow_cleanup_choreography
     end
   end
 
@@ -3963,6 +3967,7 @@ class NativeUploadValidationTest < Minitest::Test
           "validator" => {"state" => "reaped", "status_kind" => "signal", "status_code" => 9}},
         "tasks" => [{"role" => "capture", "state" => "attempted"}, {"role" => "creator", "state" => "not_started"}],
         "slowCleanup" => slow_keys.to_h { |key| [key, key != "delayFailed"] }.merge("slowCleanupSeconds" => 4.0,
+          "delayStartedNs" => 2_000_000_000, "delayFinishedNs" => 6_000_000_000,
           "originalCleanupFinishedNs" => 6_000_000_000, "originalCleanupCutoffNs" => 7_000_000_000)),
       "nativeStartedNs" => start, "nativeRunDeadlineNs" => cutoff, "firstTimeoutDecisionNs" => cutoff - 1,
       "selectedTimeoutNs" => cutoff, "blockedDataWaits" => 2, "firstBlockedDataNs" => start + 1,
@@ -4110,9 +4115,23 @@ class NativeUploadValidationTest < Minitest::Test
       row = project.call(with_slow.call(slow_snapshot.merge("slowCleanupSeconds" => duration))).fetch("timingChecks")
       assert_equal ["invalid", "invalid"], row.values_at("slowCleanupAtLeastFour", "captureCoversSlowCleanup")
     end
-    [[6_999_999_999, true], [7_000_000_000, false], [7_000_000_001, false], [nil, "invalid"], [1.0, "invalid"]].each do |finish, relation|
-      row = project.call(with_slow.call(slow_snapshot.merge("originalCleanupFinishedNs" => finish))).fetch("timingChecks")
-      assert_equal relation, row.fetch("slowCleanupWithinOriginalCutoff")
+    [{"originalCleanupFinishedNs" => 2_000_000_000}, {"delayFinishedNs" => 6_999_999_999}].each do |change|
+      row = project.call(with_slow.call(slow_snapshot.merge(change))).fetch("timingChecks")
+      assert_equal true, row.fetch("slowCleanupWithinOriginalCutoff")
+    end
+    [{"originalCleanupFinishedNs" => 1_999_999_999}, {"originalCleanupFinishedNs" => 6_000_000_001},
+     {"delayFinishedNs" => 5_999_999_999}, {"delayFinishedNs" => 7_000_000_000},
+     {"delayStartedNs" => 6_000_000_001}].each do |change|
+      row = project.call(with_slow.call(slow_snapshot.merge(change))).fetch("timingChecks")
+      assert_equal false, row.fetch("slowCleanupWithinOriginalCutoff")
+    end
+    %w[delayStartedNs originalCleanupFinishedNs delayFinishedNs originalCleanupCutoffNs].each do |key|
+      row = project.call(with_slow.call(slow_snapshot.reject { |name, _| name == key })).fetch("timingChecks")
+      assert_equal "missing", row.fetch("slowCleanupWithinOriginalCutoff")
+      [nil, 1.0, true, 0].each do |invalid|
+        row = project.call(with_slow.call(slow_snapshot.merge(key => invalid))).fetch("timingChecks")
+        assert_equal "invalid", row.fetch("slowCleanupWithinOriginalCutoff")
+      end
     end
     slow_keys.each do |key|
       assert_equal false, project.call(with_slow.call(slow_snapshot.merge(key => false))).fetch("slowChecks").fetch(key)
@@ -8159,15 +8178,18 @@ class NativeUploadValidationTest < Minitest::Test
       # direct handoff above, or natural loop completion after its already
       # recorded timeout, without another direct observation. These inert
       # models retain that timeout; neither creates a replacement or a receipt.
-      [false, true].each do |handoff|
+      [false, true].product([10_000_000, 1_500_000_000, 4_000_000_000, 4_400_000_000]).each do |handoff, cleanup_ns|
         m = model.call
         driver, observer, state = m.values_at(:driver, :observer, :state)
         cutoff, primary, selected = state.values_at(:cutoff, :primary) + [m.fetch(:selected)]
+        entry_ns = state.fetch(:now)
+        remaining_ns = [4_000_000_000 - cleanup_ns, 0].max
         cleanups, sleeps = [], []
         sleeper = lambda do |seconds|
           sleeps << seconds
-          assert_equal 4, seconds
-          state[:now] += 4_000_000_000
+          assert_equal [:original], cleanups # Native cleanup is never held behind padding.
+          assert_equal remaining_ns.fdiv(1_000_000_000), seconds
+          state[:now] += remaining_ns
         end
         returned = nil
         UploadProcessFixture.stub(:clock_ns, -> { state.fetch(:now) }) do
@@ -8186,8 +8208,10 @@ class NativeUploadValidationTest < Minitest::Test
               ensure
                 m.fetch(:invoke).call(:finish_task_ownership) do
                   cleanups << :original
+                  assert_empty sleeps
+                  assert_equal entry_ns, state.fetch(:now)
                   assert_equal :observed, observe.call(m) # Entered cleanup cannot supply a missing handoff.
-                  state[:now] += 10_000_000
+                  state[:now] += cleanup_ns
                   :cleaned
                 end
               end
@@ -8195,7 +8219,7 @@ class NativeUploadValidationTest < Minitest::Test
           end
         end
         assert_equal handoff ? :original_timeout_handled : :original_body_returned, returned
-        assert_equal [4], sleeps
+        assert_equal remaining_ns.positive? ? [remaining_ns.fdiv(1_000_000_000)] : [], sleeps
         assert_equal [:original], cleanups
         assert_equal cutoff, state.fetch(:cutoff)
         assert_same primary, state.fetch(:primary)
@@ -8205,13 +8229,28 @@ class NativeUploadValidationTest < Minitest::Test
         snapshot = observer.snapshot_additions
         slow = snapshot.fetch("slowCleanup")
         assert_equal handoff, slow.fetch("handoffPerformed")
+        assert_equal entry_ns, slow.fetch("delayStartedNs")
+        assert_equal entry_ns + cleanup_ns, slow.fetch("originalCleanupFinishedNs")
+        assert_equal entry_ns + [cleanup_ns, 4_000_000_000].max, slow.fetch("delayFinishedNs")
+        assert_equal [cleanup_ns, 4_000_000_000].max.fdiv(1_000_000_000), slow.fetch("slowCleanupSeconds")
         assert_nil driver.validate_slow_cleanup_snapshot!(snapshot)
+        next unless cleanup_ns == 10_000_000 # Strict snapshot mutations need no equivalent repeats.
         malformed = [slow.reject { |key, _| key == "handoffPerformed" }]
         [nil, 0, "false"].each { |value| malformed << slow.merge("handoffPerformed" => value) }
         {"delayFailed" => true, "delayFinished" => false, "originalCleanupCalled" => false,
-         "slowCleanupSeconds" => 3.99, "originalCleanupFinishedNs" => cutoff}.each do |key, value|
+         "slowCleanupSeconds" => 3.99, "originalCleanupFinishedNs" => cutoff, "delayFinishedNs" => cutoff}.each do |key, value|
           malformed << slow.merge(key => value)
         end
+        %w[delayStartedNs originalCleanupFinishedNs delayFinishedNs originalCleanupCutoffNs].each do |key|
+          malformed << slow.reject { |name, _| name == key }
+          [nil, 1.0, true, 0].each { |value| malformed << slow.merge(key => value) }
+        end
+        malformed.concat([
+          slow.merge("originalCleanupFinishedNs" => entry_ns - 1),
+          slow.merge("originalCleanupFinishedNs" => slow.fetch("delayFinishedNs") + 1),
+          slow.merge("delayFinishedNs" => entry_ns + 3_999_999_999),
+          slow.merge("slowCleanupSeconds" => 99),
+        ])
         malformed.each do |facts|
           assert_raises(UploadProcessFixture::Failure) { driver.validate_slow_cleanup_snapshot!("slowCleanup" => facts) }
         end
@@ -8248,61 +8287,80 @@ class NativeUploadValidationTest < Minitest::Test
 
       # Each mode uses fresh inert state. Clock/sleep failures cannot suppress
       # the original cleanup call, even when the failure recorder itself raises.
-      cases = %i[complete guard cleanup_cutoff first_clock sleep sleep_after_four delay_clock cleanup_clock recording failure_recording original_cleanup oversleep nested_entry]
+      cases = %i[complete guard cleanup_cutoff first_clock cleanup_clock padding_clock record_clock delay_clock
+        sleep sleep_after_four short_sleep oversleep late_native late_tail recording recording_late guard_recording
+        failure_recording original_cleanup original_cleanup_clock original_cleanup_recording
+        original_cleanup_failure_recording nested_entry]
       cases.each do |fault|
         m = model.call("immediate-deadline-slow-cleanup")
         driver, observer, state = m.values_at(:driver, :observer, :state)
-        state[:cutoff] = state[:now] + 4_250_000_000 if fault == :guard
+        state[:cutoff] = state[:now] + 4_250_000_000 if %i[guard guard_recording].include?(fault)
         original_cutoff = state[:cutoff]
+        original_fails = fault.to_s.start_with?("original_cleanup")
+        recorder_fails = %i[failure_recording guard_recording original_cleanup_failure_recording].include?(fault)
         clock_calls, sleeps, cleanups = 0, [], []
         failure, recording_failure, cleanup_failure = IOError.new("delay failure"), IOError.new("recording failure"), IOError.new("original cleanup failure")
         m.fetch(:session).define_singleton_method(:cleanup_deadline_ns) { raise failure } if fault == :cleanup_cutoff
         now = lambda do
           clock_calls += 1
-          fail_at = {first_clock: 1, delay_clock: 2, cleanup_clock: 3}[fault]
+          fail_at = {first_clock: 1, cleanup_clock: 2, padding_clock: 3, record_clock: 4, delay_clock: 5,
+            original_cleanup_clock: 2, original_cleanup_failure_recording: 2}[fault]
           raise failure if fail_at == clock_calls
+          state[:now] = original_cutoff if fault == :late_tail && clock_calls == 5
           state.fetch(:now)
         end
         sleeper = lambda do |seconds|
           sleeps << seconds
-          assert_equal 4, seconds
+          assert_equal [:original], cleanups
+          assert_equal 3.99, seconds # Original cleanup has already consumed 10ms.
           raise failure if %i[sleep failure_recording].include?(fault)
           if fault == :nested_entry
             assert_raises(UploadProcessFixture::Failure) do
               m.fetch(:invoke).call(:finish_task_ownership) { cleanups << :unexpected_nested_cleanup }
             end
           end
-          state[:now] += fault == :oversleep ? 5_000_000_000 : 4_000_000_000
+          state[:now] += if fault == :oversleep then 4_990_000_000
+                        elsif fault == :short_sleep then 3_989_999_999
+                        else 3_990_000_000
+                        end
           raise failure if fault == :sleep_after_four
         end
         original = lambda do
           cleanups << :original
+          assert_empty sleeps
           assert observer.instance_variable_get(:@slow_cleanup_entered)
           assert_equal :observed, observe.call(m) # Entered cleanup cannot consume the handoff.
-          state[:now] += 10_000_000
-          raise cleanup_failure if fault == :original_cleanup
+          state[:now] += fault == :late_native ? 5_000_000_000 : 10_000_000
+          raise cleanup_failure if original_fails
           :cleaned
         end
         action = -> { run.call(m) { m.fetch(:invoke).call(:finish_task_ownership, &original) } }
         written = driver.observed.method(:[]=)
         writer = lambda do |key, value|
-          raise recording_failure if fault == :recording && key == "cleanupSeconds"
+          if key == "cleanupSeconds"
+            raise recording_failure if %i[recording original_cleanup_recording].include?(fault)
+            state[:now] = original_cutoff if fault == :recording_late
+          end
           written.call(key, value)
         end
         perform = lambda do
-          if fault == :failure_recording
-            observer.stub(:remember_slow_failure, ->(_error) { raise recording_failure }) do
-              assert_same recording_failure, assert_raises(IOError) { action.call }
-            end
-          elsif fault == :original_cleanup
+          if original_fails
             assert_same cleanup_failure, assert_raises(IOError) { action.call }
+          elsif recorder_fails
+            assert_same recording_failure, assert_raises(IOError) { action.call }
           else
             assert_equal :cleaned, action.call
           end
         end
         UploadProcessFixture.stub(:clock_ns, now) do
           observer.stub(:sleep, sleeper) do
-            driver.observed.stub(:[]=, writer) { perform.call }
+            driver.observed.stub(:[]=, writer) do
+              if recorder_fails
+                observer.stub(:remember_slow_failure, ->(_error) { raise recording_failure }) { perform.call }
+              else
+                perform.call
+              end
+            end
           end
         end
         assert_equal [:original], cleanups
@@ -8313,9 +8371,10 @@ class NativeUploadValidationTest < Minitest::Test
         slow = snapshot.fetch("slowCleanup")
         assert snapshot.frozen? && slow.frozen?
         assert slow.fetch("delayEntered") && slow.fetch("originalCleanupCalled")
-        assert_equal fault != :original_cleanup, slow.fetch("originalCleanupFinished")
-        assert_equal !%i[complete original_cleanup oversleep].include?(fault), slow.fetch("delayFailed")
-        assert_equal [], sleeps if %i[guard cleanup_cutoff first_clock].include?(fault)
+        assert_equal !original_fails, slow.fetch("originalCleanupFinished")
+        assert_equal fault != :complete, slow.fetch("delayFailed")
+        assert_equal fault == :complete, slow.fetch("delayFinished")
+        assert_equal [], sleeps if original_fails || %i[guard guard_recording cleanup_cutoff first_clock cleanup_clock padding_clock late_native].include?(fault)
         refute slow.key?("slowCleanupSeconds") if %i[cleanup_cutoff first_clock delay_clock].include?(fault)
         assert_operator slow.fetch("slowCleanupSeconds"), :>=, 4 if fault == :sleep_after_four
         if fault == :complete

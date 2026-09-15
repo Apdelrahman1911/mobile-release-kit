@@ -43,18 +43,48 @@ defense in depth, not proof of server-side scheduling. Retain actual runner/imag
 metadata from the Actions job. Do not add container/service/self-hosted fallbacks.
 
 Both native jobs have a 60-minute job timeout and read-only contents permissions.
-The separate protected status job `test` succeeds only when **both** predecessors
-actually succeed; failed, cancelled, skipped, unavailable or queued is not success.
+The full workflow additionally runs the finite local-signing matrix described
+below. The protected status job `test` requires the Linux and macOS platform jobs,
+the complete matrix job set, and a successful proof reduction; failed, cancelled,
+skipped, unavailable or queued is not success.
 Never bypass branch protection or dispatch release/Store workflows for testing.
 
+For an intermediate Linux correction, manual `verification_target: linux` runs
+the **same complete Linux source/wheel catalog and owner path**, without macOS or
+matrix jobs. The disposable hosted VM is required; a Linux OS or root access on
+the shared VPS does not admit the native/process suite or controller there.
 For an intermediate macOS-only correction, manual `verification_target: macos`
-omits Linux but runs the **same complete macOS catalog and owner path**. Only a
-manual macOS selection can omit Linux; Actions compares its string value without
-case sensitivity. Missing, empty or nonmatching values do not omit Linux. Its
-aggregate `test` deliberately **fails** because skipped Linux is not a
-pass. This supplies platform-specific candidate evidence, never full verification
+omits Linux but runs the **same complete macOS catalog and owner path**. The
+partial selection, `signing-adapter`, runs only the two-OS smoke scope below.
+`signing-adapter-macos` selects the identical source/wheel smoke on macOS only
+when a Darwin-only change does not invalidate previously recorded Linux evidence.
+It does not supply fresh Linux evidence or satisfy the full protected gate.
+`signing-adapter-linux` selects that same fixed source/wheel smoke on Linux only
+for focused Linux diagnosis; it supplies no macOS or full-platform evidence.
+`signing-matrix-canary` runs exactly seven source/wheel cells: Linux shards 0, 20
+and 28, and macOS shards 0, 1, 12 and 37. These probe each OS's largest planned
+command and worker counts plus the selected materialized cancellation, PREPARED
+no-dispatch and unrecorded-create recovery cases. They qualify capacity and
+integration, not full verification, and cannot satisfy the protected aggregate.
+Actions compares these string values without case sensitivity. The UI default is
+`full`; missing, empty or nonmatching dispatched values select no prerequisite
+job, not an implicit full fallback. A partial dispatch's aggregate `test`
+deliberately **fails** because any skipped Linux, macOS or matrix prerequisite
+is not a pass. Linux-only success is Linux evidence, not complete CI success.
+This supplies platform-specific candidate evidence, never full verification
 or merge authority. Event/target-specific concurrency separates partial dispatches
 from full PR/main/manual runs.
+
+For fail-fast signing integration, manual `verification_target: signing-adapter`
+runs exactly five fixed signing methods in both source and installed wheel on
+each disposable Linux/macOS runner. It omits the full platform catalogs and
+96-cell matrix; its protected aggregate intentionally cannot pass. Results are
+labelled `adapter-only`, have no matrix-proof/reducer authority, and cannot replace
+the full verification required for delivery. Arbitrary test selectors are not
+supported. The ordinary owner path, source/package checks, original finality and
+cleanup requirements are unchanged. The fifth method is the existing positive
+PREPARED/no-target case, including the original C fence and same-lease cleanup;
+the original four methods and their order are retained.
 
 Publish intermediate candidates to a task-owned branch without an open PR and
 explicitly dispatch that reviewed ref; verify the actual source commit, workflow,
@@ -65,6 +95,58 @@ normal protected delivery and actual main CI. Do not combine partial runs into a
 invented full result or count an unexecuted gate as passed.
 
 ## Small implementation and command authority
+
+### Required account-signing matrix
+
+Full verification's `test-signing-matrix` selects exactly forty-eight shards on each supported OS,
+maximum twenty concurrent cells on independent disposable VMs, subject to provider,
+account and OS-specific quotas. Each cell prepares only its required offline
+Python inputs, builds/freezes/inspects the same complete source and installed
+package, then invokes both phases through `verify_ci.py --scope signing-matrix`.
+This is a finite catalog, not permission to run arbitrary subsets or commands.
+The primary interpreter and complete native-provider admission remain required.
+The 420-second phase and 900-second pair cutoffs include finality, parsing,
+persisted-output accounting and compact proof publication. The original ordinary
+Session does not enable retained-domain disposal for a matrix phase.
+Optional progress contains only bound case IDs, ordinals, helper start/return
+and elapsed milliseconds, with fixed event/byte limits. A helper return is not
+case completion or cleanup evidence. Successful phases reject arbitrary stderr;
+they may contain only an empty or strictly ordered canonical progress prefix.
+After an original capture failure, diagnostics may inspect its returned bytes
+under the already-bound pair cutoff, never extend native work or infer finality.
+The adapter uses the same phase/pair cutoffs. Scope-specific preparation and
+teardown consume those endpoints; preceding offline-input/install/catalog gates
+remain under the unchanged aggregate deadline, not inside the 900-second pair.
+
+The fixed phase entry point accepts complete explicit execution metadata; it
+does not infer authority from inherited GitHub environment variables. The real
+case worker and production command owner drive durable before/partial/after cuts.
+Original custodian-fence observations identify actual reached operations, not
+simulated execution receipts or power-loss durability. Fresh recovery is subject
+to the production account hold, generation/fence and ownership checks.
+
+The version-2 catalog combines 17 primitive components, 131 semantic cases and
+160 Linux/170 Darwin delegated original-regression executions. The ordinary
+Python/native gates retain their complete source method inventory but report
+84 Linux/86 Darwin methods separately as pending delegation, never as executed
+passes. All required variants and the 18 semantic contributions must reconcile
+in the full matrix. The source-defined OS assignment is identical for source and
+wheel. Planning weights alone do not qualify the 420-second workload capacity.
+
+After original capture finality, the controller checks the exact three-file
+private output inventory, charges every retained byte and independently compares
+`catalog.json`, `matrix-result.json` and the bounded typed `results.jsonl.gz`
+against that source authority. Persisted result data cannot confer finality.
+
+Only validated compact proofs leave the test domain before work disposal. The
+protected reducer checks every same-run candidate and exact source/test binding,
+rejects invalid later proofs, and reconciles the complete disjoint case union.
+An older successful cell may be reused only for its unchanged source/run scope;
+its producing attempt stays the original attempt. Partial/manual macOS runs
+which omit this matrix cannot satisfy the protected aggregate. See
+[local-signing verification](local-signing.md#verification) for coverage and limits.
+
+### Controller components
 
 The helpers under [`.github/scripts/`](../.github/scripts/) have separate roles:
 
@@ -245,8 +327,8 @@ order in both source and installed-wheel forms: `openssl-version`,
 `clang-discovery`, `dsymutil-discovery`, then `system-code`.
 
 Source and installed-wheel gates each require the original authority capture,
-the healthy ordinary capture and every selected fixed intentional-UNKNOWN
-singleton under ordinary policy. Their exact disjoint method union must be
+the healthy ordinary capture and every selected fixed singleton under ordinary
+policy: intentional-UNKNOWN controls and clean raw-fork prerequisites. Their exact disjoint method union must be
 complete, with no skips; the [isolation contract](#intentional-unknown-test-isolation)
 and source catalog determine the parts, not a historical capture count.
 Each original capture retains its own wait, EOF, exit, domain finality/disposal,
@@ -431,12 +513,13 @@ inventory; it does not waive the product behaviors that inventory was meant to t
 | Platform | Required gate families |
 |---|---|
 | Linux | Offline source installation; ABI/runtime compatibility gates; full Python discovery; all listed Ruby suites, including native/iOS/Android descendant regressions and actual packaged capture; Fastfile validation; first-party/template actionlint; real JDK signer checks; wheel build/inspection/install/smoke/consumer and selected installed-wheel Python checks; source integrity. |
-| macOS | Offline source installation; exact Xcode 26.3/native tools; ABI/runtime compatibility gates; all fixed Ruby primitive/helper/capture/adapter suites and separate native signal-observation proof; source native-profile gate; wheel build/inspection/install/smoke/consumer, including actual installed Ruby capture; installed-wheel native-profile gate; source integrity. |
+| macOS | Offline source installation; exact Xcode 26.3/native tools; ABI/runtime compatibility gates; source native-profile gate; all fixed Ruby primitive/helper/capture/adapter suites and separate native signal-observation proof; wheel build/inspection/install/smoke/consumer, including actual installed Ruby capture; installed-wheel native-profile gate; source integrity. |
 
-The macOS Ruby gates depend on ordinary admission, including the admitted
-process observer, but not profile-authority admission, so run before the source
-native-profile gate. The source catalog selects **51 Linux gates and 39 macOS
-gates**; these are required inventory counts, not completed or passing runs.
+The macOS Ruby and source native-profile gates have no inter-suite dependency;
+both retain their own admission. The native-profile gate runs first after source
+ABI/compatibility so Python failures surface before the Ruby suites. The source
+catalog selects **51 Linux gates and 39 macOS gates**; these are required inventory
+counts, not completed or passing runs.
 Every selected gate remains required and any failure stops later gates. Recompute
 inventories when source changes; historical native totals cannot stand in for
 the complete current source-derived method identities and outcomes.
@@ -531,6 +614,16 @@ and literal runner inventories define the exact IDs and order. Their disjoint
 union must cover each approved selection exactly once; a global method total
 does not authorize expanding an installed-wheel selection or pooling negatives.
 
+Two positive raw-fork prerequisites also run in separate fresh interpreter
+captures: the prepared-no-target account lifetime and the real model-command
+bridge. A warm test interpreter can retain genuine completed command histories
+whose inherited native state is correctly quarantined after fork. These clean
+cases keep all original assertions and ordinary cleanup: they do **not** belong
+to the poison catalog, cannot request retained-domain disposal, and must prove
+original finality, idle state and the exact singleton result before acceptance.
+The complete source/wheel/native union includes both; no test is skipped, and
+all partitions share the original logical-gate deadline.
+
 Python singletons retain separate finite primitive, profile and default/resource
 family import closures, with exact selected source or actual installed-wheel
 origins. The primitive runner does not gain workflow imports from another family.
@@ -539,7 +632,7 @@ There is no generic caller-supplied method selector or broad workflow import gra
 All parts retain one fixed gate endpoint: 900 seconds for the affected Python
 gates, 120 for the Ruby owner, 310 for native capture and 300 for each adapter,
 always clamped to the original 3300-second job endpoint. Native capture additionally
-caps its healthy 17-test partition at 180 seconds and each of its four fixed singletons
+caps its healthy 18-test partition at 180 seconds and each of its four fixed singletons
 at 30 seconds, including preparation, capture, result parsing and finality. Each
 singleton keeps its original 15-second driver and 5-second cleanup limits; another 10 seconds
 is bounded outer framework/startup/result/finality headroom, not a native deadline
@@ -550,11 +643,13 @@ ceilings, not guarantees of a passing run. Other gates retain their shared-cutof
 behavior. The macOS authority capture and 2+2 prerequisite routing remain unchanged.
 These splits add no logical gates, jobs, builds, permission profiles or observers.
 
-On macOS the fixed iOS adapter gate runs immediately after the same native-tools,
-source ABI and compatibility prerequisites, before the other Ruby native gates.
-The remaining native gates keep their relative order; Linux order, all 51 Linux
-and 39 macOS gates, and every required partition remain unchanged. Earlier failure
-does not waive the still-unexecuted native gates.
+On macOS the source native-profile gate runs immediately after native-tools,
+source ABI and compatibility prerequisites, then the fixed iOS adapter and other
+Ruby native gates retain their relative order. Linux runs its fixed 74 singleton
+Python partitions before the healthy source/wheel capture to expose small failures
+earlier. Name-based profiles, poison-only disposal, original finality and idle,
+all 51 Linux and 39 macOS gates, every partition and the original aggregate cutoffs
+remain mandatory. Earlier failure leaves later work explicitly unexecuted.
 
 The synthetic adapter process controls use a separate fixed timing profile:
 10 seconds for complete readiness (the existing five-second startup allowance,
@@ -861,6 +956,20 @@ attempt, not transferable execution permissions. Retain the workflow/run URL and
 actual Actions job outcome; a late publication failure invalidates an earlier
 success-shaped summary. Later gates after failure stay `UNEXECUTED`.
 
+Public reports use schema 2 without changing the original in-memory gate records.
+Successful Python/native gates omit only exactly checked duplicate completion
+lists: `completed_from: summary.tests` expands to the sorted IDs of that
+partition's retained test/outcome records; `completed_from: partitions` expands
+to the duplicate-free sorted union of its partitions' completion IDs (expanding
+the first reference where present). Counts must match, every partition must have
+passed, and delegated matrix obligations remain separate. Every observed test ID
+and outcome, original capture/finality result, failure diagnostic and source
+binding remains present. Failed and unexecuted rows are not abbreviated. These
+references are lossless presentation, not new validation authority or permission
+to reuse another run's evidence. Compact JSON retains the unchanged 768 KiB public
+bound; inconsistent references, excess nonredundant output or a publication error
+still fail the job. A gate-start log line alone is never a passing gate result.
+
 Failure diagnostics may identify the fixed ACL attribute or whitelisted Ruby
 startup tokens from already captured stderr. They disclose no raw ACL entries,
 messages or paths. Ruby tokens are observations, not proof of an operating-system
@@ -1057,9 +1166,14 @@ RUN, unchanged five-second cleanup grace and 18-second capture watchdog. Only an
 eligible direct original-body
 observation can hand the already-selected timeout object into the existing run
 ensure; nested writes and entered cleanup cannot consume that one-shot. A body
-that reaches ensure naturally needs no handoff. The four-second delay never
-renews the cutoff or substitutes for actual blocked
-waiting. Original cleanup is called once even if the delay guard or sleep fails;
+that reaches ensure naturally needs no handoff. Original native cleanup runs
+promptly, before padding the same wrapper to its original entry plus four seconds.
+Only the remaining interval is slept; cleanup already taking four seconds needs
+no further delay. Native cleanup and the padded wrapper must both finish, in
+order, strictly before the same original cleanup cutoff. This preserves the
+native cleanup budget rather than spending its first four seconds asleep.
+The padding never renews that cutoff or substitutes for actual blocked waiting.
+Original cleanup is called once even if a clock, delay guard or sleep fails;
 a separate fixture failure latch rejects that failure even when the earlier
 timeout remains primary and native cleanup settles. Duration alone cannot prove
 the delay succeeded. Immediate-timeout controls must still reject premature
@@ -1083,6 +1197,14 @@ above; standalone `all` retains the original command order. Optional fixed
 stderr-token labels report observed text, not a proven operating-system cause.
 Diagnostic failure preserves the original failure, and any failure marker prevents
 native success acceptance.
+
+The three account-lifecycle cases and guarded-command-tail case can additionally
+report at most16 exact-path-matched, first-party relative traceback locations.
+The guarded case reports only its last complete, ordered fixed-mode stdout marker,
+emitted before acquisition without splitting unittest's stderr success line.
+Messages, source excerpts, locals and raw paths stay private.
+These are captured-text observations, not authenticated source/finality evidence;
+malformed optional attribution never clears the original failure or its deadline.
 
 An AIA comparison failure may additionally publish a closed original-parent
 observation after successful capture/finality and responder close/join. It includes

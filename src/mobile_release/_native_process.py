@@ -20,7 +20,10 @@ import sys
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from .local_signing import SigningLease
 
 
 _MAX_ELEMENT = 8 * 1024
@@ -30,6 +33,158 @@ _MAX_CONFIGURATION = 128 * 1024
 _MAX_LEASES = 64
 _MAX_PID = (1 << 31) - 1
 _CHILD_KEY = object()
+_ACCOUNT_KEY = object()
+_COMMAND_KEY = object()
+_FORK_UNSAFE = False
+
+
+class LockedAccountSource:
+    """Original locked description, rooted in its account owner's one FD slot."""
+
+    def __init__(self, lease: SigningLease, *, _key: object) -> None:
+        _require(_key is _ACCOUNT_KEY, "account source issuer differs")
+        self._lease, self._slot = lease, lease._hold_slot
+        self._pid, self._thread = os.getpid(), threading.current_thread()
+        self._guard = lease.cancellation
+        self._uid = os.getuid()
+        self._identity = (lease.identity["device"], lease.identity["inode"])
+        self._retired = False
+
+    @property
+    def uid(self) -> int:
+        return self._uid
+
+    @property
+    def identity(self) -> tuple[int, int]:
+        return self._identity
+
+    def _check(self) -> None:
+        if self._pid != os.getpid():
+            self._slot.relinquish_inherited()
+            raise NativeProcessError("account source belongs to another process")
+        _require(not self._retired and threading.current_thread() is self._thread
+                 and self._lease.owner_thread is self._thread
+                 and self._lease._hold_slot is self._slot
+                 and self._lease.cancellation is self._guard,
+                 "account source ownership ended")
+        self._lease.assert_owner()
+        self._slot.fileno()
+
+    def retire(self) -> None:
+        self._retired = True
+
+
+def _issue_locked_account_source(lease: SigningLease) -> LockedAccountSource:
+    # Sole production caller is SigningLease.acquire, after original flock and
+    # namespace admission. This is package provenance, not an in-process sandbox.
+    lease.assert_owner()
+    _require(lease.owner_thread is threading.current_thread(), "account source owner differs")
+    return LockedAccountSource(lease, _key=_ACCOUNT_KEY)
+
+
+class AccountHoldBinding:
+    def __init__(self, *, uid: int, identity: tuple[int, int], command_nonce: bytes,
+                 origin: object, _key: object) -> None:
+        _require(_key is _ACCOUNT_KEY, "account hold issuer differs")
+        _require(type(uid) is int and uid == os.getuid()
+                 and type(identity) is tuple and len(identity) == 2
+                 and all(type(value) is int and 0 <= value < 2**64 for value in identity)
+                 and identity[1] > 0 and type(command_nonce) is bytes and len(command_nonce) == 16,
+                 "account hold binding differs")
+        self._uid, self._identity, self._nonce = uid, identity, command_nonce
+        self._origin, self._pid = origin, os.getpid()
+
+    @property
+    def uid(self) -> int:
+        return self._uid
+
+    @property
+    def identity(self) -> tuple[int, int]:
+        return self._identity
+
+    @property
+    def command_nonce(self) -> bytes:
+        return self._nonce
+
+
+class CommandBootstrapMap:
+    """Issued by the fixed entry after its original private-map admission."""
+
+    def __init__(self, *, role: str, command_nonce: bytes, parent_pid: int,
+                 parent_session: int, parent_group: int, fd_map_version: int,
+                 account_binding: tuple[int, int, int] | None, _key: object) -> None:
+        _require(_key is _COMMAND_KEY and role in ("C", "A", "W")
+                 and type(command_nonce) is bytes and len(command_nonce) == 16
+                 and type(fd_map_version) is int and fd_map_version == 1
+                 and all(type(value) is int and 0 < value <= _MAX_PID
+                         for value in (parent_pid, parent_session, parent_group)),
+                 "command bootstrap binding differs")
+        self.role, self.command_nonce = role, command_nonce
+        self._parent = parent_pid, parent_session, parent_group
+        self._pid, self._hold_adopted = os.getpid(), False
+        self._account_binding = None
+        if account_binding is not None:
+            _require(role in ("C", "A") and type(account_binding) is tuple
+                     and len(account_binding) == 3, "command account map differs")
+            uid, device, inode = account_binding
+            self._account_binding = AccountHoldBinding(
+                uid=uid, identity=(device, inode), command_nonce=command_nonce,
+                origin=self, _key=_ACCOUNT_KEY,
+            )
+
+    @property
+    def account_binding(self) -> AccountHoldBinding | None:
+        return self._account_binding
+
+
+def _issue_command_bootstrap(*, role: str, command_nonce: bytes, parent_pid: int,
+                             parent_session: int, parent_group: int, fd_map_version: int = 1,
+                             account_binding: tuple[int, int, int] | None = None) -> CommandBootstrapMap:
+    return CommandBootstrapMap(role=role, command_nonce=command_nonce, parent_pid=parent_pid,
+                               parent_session=parent_session, parent_group=parent_group,
+                               fd_map_version=fd_map_version, account_binding=account_binding,
+                               _key=_COMMAND_KEY)
+
+
+class CommandMapPermit:
+    def __init__(self, acquisition: Acquisition, *, role: str, command_nonce: bytes,
+                 executable: str, argv: tuple[str, ...], env: tuple[tuple[str, str], ...],
+                 fd_sources: tuple[FDLease, ...], _key: object) -> None:
+        _require(_key is _COMMAND_KEY and type(acquisition) is Acquisition
+                 and role in ("C", "A", "W") and type(command_nonce) is bytes
+                 and len(command_nonce) == 16 and len(fd_sources) == 8,
+                 "command map permit differs")
+        self._acquisition, self._role, self._nonce = acquisition, role, command_nonce
+        self._recipe = executable, argv, env
+        self._sources, self._pid, self._used = fd_sources, os.getpid(), False
+
+    def _consume(self, acquisition: Acquisition, spec: SpawnSpec) -> None:
+        _require(self._pid == os.getpid() and not self._used
+                 and self._acquisition is acquisition
+                 and self._recipe == (spec.executable, spec.argv, spec.env)
+                 and len(spec.fd_sources) == 8
+                 and all(left is right for left, right in zip(self._sources, spec.fd_sources)),
+                 "command map permit is unavailable")
+        self._used = True  # Irreversible before any duplication effect.
+        for index, source in enumerate(spec.fd_sources):
+            _require(source._kind == ("null" if index < 3 else "pipe")
+                     if index != 5 else source._kind in ("null", "account_hold"),
+                     "command descriptor role differs")
+            if source._kind == "account_hold":
+                binding = source.account_binding
+                _require(index == 5 and self._role in ("C", "A")
+                         and type(binding) is AccountHoldBinding
+                         and binding._pid == os.getpid() and binding.command_nonce == self._nonce,
+                         "command account hold role differs")
+
+
+def _issue_command_map(acquisition: Acquisition, *, role: str, command_nonce: bytes,
+                       executable: str, argv: tuple[str, ...], env: tuple[tuple[str, str], ...],
+                       fd_sources: tuple[FDLease, ...]) -> CommandMapPermit:
+    # Only the fixed command engine's _command_spec selects this recipe.
+    return CommandMapPermit(acquisition, role=role, command_nonce=command_nonce,
+                            executable=executable, argv=argv, env=env,
+                            fd_sources=fd_sources, _key=_COMMAND_KEY)
 
 
 class NativeProcessError(RuntimeError):
@@ -58,6 +213,7 @@ class SpawnSpec:
     argv: tuple[str, ...]
     env: tuple[tuple[str, str], ...]
     fd_sources: tuple[FDLease, ...]
+    command_map: CommandMapPermit | None = None
 
     def __post_init__(self) -> None:
         path = _string(self.executable)
@@ -89,6 +245,8 @@ class SpawnSpec:
         _require(type(self.fd_sources) is tuple and len(self.fd_sources) in (3, 8)
                  and all(type(source) is FDLease for source in self.fd_sources),
                  "native child descriptor map differs")
+        _require(self.command_map is None or type(self.command_map) is CommandMapPermit,
+                 "native command map permit differs")
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,6 +478,7 @@ class Acquisition:
     def __init__(self, *, failure_recorder: Callable[[BaseException], None] | None = None) -> None:
         _require(failure_recorder is None or callable(failure_recorder),
                  "native acquisition failure recorder differs")
+        self._pid = os.getpid()
         self._failure_recorder = failure_recorder
         self._first_error: BaseException | None = None
         self._recorder_error: BaseException | None = None
@@ -344,8 +503,32 @@ class Acquisition:
         self._cleanup_errors: list[str] = []
         self._interruption: BaseException | None = None
 
+    def _check_origin(self) -> None:
+        if self._pid != os.getpid():
+            self._relinquish_inherited()
+            raise NativeProcessError("native acquisition belongs to another process")
+
+    @property
+    def origin_pid(self) -> int:
+        return self._pid
+
+    def _relinquish_inherited(self) -> None:
+        """Child copies only: no inherited callback, mutex, wait or destruction."""
+        if self._pid == os.getpid():
+            return
+        global _FORK_UNSAFE
+        self._launch_retired = True
+        if self._attempted or self._child is not None or self._active_calls or self._create_running:
+            _FORK_UNSAFE = True
+        if self._child is not None:
+            self._child._numeric_retired = True
+            self._child._wait_state = "INHERITED"
+        for lease in self._leases:
+            lease._relinquish_inherited()
+
     def grant(self, creator: threading.Thread, check: Callable[[], None]) -> None:
-        _require(not self._grant_used and not self._launch_retired
+        self._check_origin()
+        _require(not _FORK_UNSAFE and not self._grant_used and not self._launch_retired
                  and isinstance(creator, threading.Thread) and callable(check),
                  "native acquisition grant differs")
         self._creator, self._check_callback = creator, check
@@ -398,6 +581,9 @@ class Acquisition:
         promotes a later interruption by class.  Keep the bound owner through
         late creator return and every later owned close/wait.
         """
+        if self._pid != os.getpid():
+            self._relinquish_inherited()
+            return
         recording_failure: BaseException | None = None
         try:
             if self._failure_recorder is not None:
@@ -421,6 +607,9 @@ class Acquisition:
                 self._remember("failure_record", recording_failure)
 
     def _remember(self, code: str, error: BaseException | None = None) -> None:
+        if self._pid != os.getpid():
+            self._relinquish_inherited()
+            return
         self._resource_unknown = True
         self.close_launch()
         if self._interruption is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
@@ -434,7 +623,8 @@ class Acquisition:
                 self._interruption = recording_error
 
     def _check(self) -> None:
-        _require(self._grant_used and not self._launch_retired
+        self._check_origin()
+        _require(not _FORK_UNSAFE and self._grant_used and not self._launch_retired
                  and threading.current_thread() is self._creator,
                  "native acquisition launch is closed")
         assert self._check_callback is not None
@@ -446,6 +636,7 @@ class Acquisition:
             if self._interruption is None and isinstance(error, (KeyboardInterrupt, SystemExit)):
                 self._interruption = error
             raise
+        self._check_origin()
         _require(not self._launch_retired, "native acquisition launch is closed")
 
     def _runtime(self) -> _Native:
@@ -468,6 +659,7 @@ class Acquisition:
 
     def _invoke(self, name: str, function: Callable[..., Any], *arguments: Any,
                 roots: tuple[Any, ...] = (), mutating: bool = True) -> Any:
+        self._check_origin()
         call = _Call(name, roots)
         self._calls.append(call)
         self._active_calls += 1
@@ -492,6 +684,7 @@ class Acquisition:
             self._active_calls -= 1
 
     def _new_lease(self) -> FDLease:
+        self._check_origin()
         _require(len(self._leases) < _MAX_LEASES, "native descriptor inventory exceeds its bound")
         lease = FDLease(self)
         self._leases.append(lease)
@@ -507,8 +700,12 @@ class Acquisition:
             _require(type(descriptors) is tuple and len(descriptors) == 2
                      and all(type(fd) is int and 0 <= fd <= _MAX_PID for fd in descriptors)
                      and descriptors[0] != descriptors[1], "native pipe publication differs")
-            reader._publish(descriptors[0], native, os.O_RDONLY, "pipe")
-            writer._publish(descriptors[1], native, os.O_WRONLY, "pipe")
+            # Publish the COMPLETE genuine return before an origin check can
+            # retire inherited copies. Otherwise reader's child rejection can
+            # strand the positively returned writer in its ACQUIRING slot.
+            reader._publish_known(descriptors[0], native, os.O_RDONLY, "pipe")
+            writer._publish_known(descriptors[1], native, os.O_WRONLY, "pipe")
+            self._check_origin()
             reader._validate()
             writer._validate()
             return reader, writer
@@ -574,12 +771,85 @@ class Acquisition:
             raise
         return lease
 
+    def export_account_hold(self, source: LockedAccountSource, *, command_nonce: bytes) -> FDLease:
+        """Duplicate the original locked OFD on its real account-owner thread."""
+        self._check_origin()
+        _require(type(source) is LockedAccountSource, "account source type differs")
+        source._check()
+        native = self._runtime()
+        lease = self._new_lease()  # Publication/borrow roots precede fcntl.
+        binding = AccountHoldBinding(uid=source.uid, identity=source.identity,
+                                     command_nonce=command_nonce, origin=source, _key=_ACCOUNT_KEY)
+        lease._account_binding = binding
+        borrowed = False
+        use_returned = False
+        try:
+            descriptor = source._slot._borrow(self)
+            borrowed = True
+            lease._state = "ACQUIRING"
+            result = self._invoke("account_hold_duplicate", native.call, "fcntl", descriptor,
+                                  native.abi.constants["F_DUPFD_CLOEXEC"], 8,
+                                  roots=(source, source._slot, lease, binding))
+            use_returned = True
+            if type(result) is int and result == -1:
+                lease._state = "NEW"
+                raise NativeProcessError("account hold duplication failed")
+            _require(type(result) is int and 8 <= result <= _MAX_PID and result != descriptor,
+                     "account hold publication differs")
+            lease._publish(result, native, os.O_RDONLY, "account_hold")
+            self._check_origin()
+            lease._validate()
+            source._check()
+            return lease
+        except BaseException as error:
+            self._record_error(error)
+            self.close_launch()
+            if lease._state == "ACQUIRING":
+                lease._state = "UNKNOWN"
+                self._remember("account_hold_publication", error)
+            raise
+        finally:
+            # A missing native return retains the original borrower/root. A
+            # known duplicate has independent native custody; no creator ever
+            # borrows the account's raw original descriptor directly.
+            if borrowed and use_returned and self._pid == os.getpid():
+                source._slot._release(self)
+
+    def adopt_account_hold(self, bootstrap: CommandBootstrapMap, *, binding: AccountHoldBinding) -> FDLease:
+        self._check_origin()
+        _require(type(bootstrap) is CommandBootstrapMap and bootstrap._pid == os.getpid()
+                 and bootstrap.role in ("C", "A") and not bootstrap._hold_adopted
+                 and type(binding) is AccountHoldBinding and binding is bootstrap.account_binding
+                 and binding._origin is bootstrap and binding._pid == os.getpid()
+                 and all(lease._original_fd != 5 for lease in self._leases),
+                 "inherited account hold admission differs")
+        native = self._runtime()
+        lease = self._new_lease()
+        bootstrap._hold_adopted = True
+        lease._account_binding = binding
+        changing = False
+        try:
+            lease._publish(5, native, os.O_RDONLY, "account_hold")
+            lease._validate(require_cloexec=False)
+            self._check()
+            changing = True
+            self._invoke("account_hold_cloexec", os.set_inheritable, 5, False, roots=(lease, bootstrap))
+            lease._validate()
+            return lease
+        except BaseException as error:
+            self._record_error(error)
+            self.close_launch()
+            if changing:
+                self._remember("account_hold_cloexec", error)
+            raise
+
 
 class FDLease:
     """An explicitly published raw FD.  No __del__, implicit close or retry."""
 
     def __init__(self, owner: Acquisition) -> None:
         self._owner = owner
+        self._pid = os.getpid()
         self._native: _Native | None = None
         self._fd: int | None = None
         self._original_fd: int | None = None
@@ -589,6 +859,39 @@ class FDLease:
         self._validated = False
         self._state = "NEW"
         self._borrowers: set[Acquisition] = set()
+        self._account_binding: AccountHoldBinding | None = None
+
+    @property
+    def account_binding(self) -> AccountHoldBinding | None:
+        return self._account_binding
+
+    @property
+    def origin_pid(self) -> int:
+        return self._pid
+
+    def _check_origin(self) -> None:
+        if self._pid != os.getpid():
+            self._relinquish_inherited()
+            raise NativeProcessError("native descriptor belongs to another process")
+
+    def _relinquish_inherited(self) -> None:
+        if self._pid == os.getpid():
+            return
+        global _FORK_UNSAFE
+        if self._state in ("NEW", "CLOSED", "INHERITED_CLOSED"):
+            return
+        if self._state != "OPEN" or self._fd is None:
+            _FORK_UNSAFE = True
+            return  # No publication/unknown close grants a numerical retry.
+        descriptor = self._fd
+        self._fd, self._validated, self._state = None, False, "INHERITED_CLOSE_IN_FLIGHT"
+        try:
+            os.close(descriptor)
+        except BaseException:
+            self._state = "INHERITED_UNKNOWN"
+            _FORK_UNSAFE = True
+        else:
+            self._state = "INHERITED_CLOSED"
 
     @property
     def state(self) -> str:
@@ -598,13 +901,20 @@ class FDLease:
     def unknown(self) -> bool:
         return self._state in ("ACQUIRING", "CLOSE_IN_FLIGHT", "UNKNOWN")
 
-    def _publish(self, fd: int, native: _Native, access: int, kind: str) -> None:
+    def _publish_known(self, fd: int, native: _Native, access: int, kind: str) -> None:
+        # Only the fixed acquisition's genuine returned value reaches here.
+        # This field publication performs no validation/parent-owner callback.
         _require(self._state in ("NEW", "ACQUIRING"), "native descriptor publication was repeated")
         self._fd = self._original_fd = fd
         self._native, self._access, self._kind = native, access, kind
         self._state = "OPEN"
 
+    def _publish(self, fd: int, native: _Native, access: int, kind: str) -> None:
+        self._publish_known(fd, native, access, kind)
+        self._check_origin()  # Includes a positively published late child copy.
+
     def _validate(self, *, require_cloexec: bool = True) -> None:
+        self._check_origin()
         _require(self._state == "OPEN" and self._fd is not None and self._native is not None,
                  "native descriptor is not owned")
         fd, native = self._fd, self._native
@@ -619,14 +929,24 @@ class FDLease:
                  "native descriptor access or inheritance differs")
         if self._kind == "pipe":
             _require(stat.S_ISFIFO(info.st_mode), "native pipe type differs")
+        elif self._kind == "account_hold":
+            binding = self._account_binding
+            _require(type(binding) is AccountHoldBinding and binding._pid == os.getpid()
+                     and stat.S_ISDIR(info.st_mode) and info.st_uid == binding.uid == os.getuid()
+                     and stat.S_IMODE(info.st_mode) == 0o700
+                     and (info.st_dev, info.st_ino) == binding.identity and self._access == os.O_RDONLY,
+                     "native account hold identity differs")
         else:
+            _require(self._kind == "null", "native descriptor kind differs")
             null = self._owner._invoke("null_stat", os.stat, "/dev/null", mutating=False)
             _require(stat.S_ISCHR(info.st_mode) and stat.S_ISCHR(null.st_mode)
                      and info.st_rdev == null.st_rdev, "native null device differs")
+        self._check_origin()
         self._identity = info.st_dev, info.st_ino
         self._validated = require_cloexec
 
     def fileno(self) -> int:
+        self._check_origin()
         _require(self._state == "OPEN" and self._validated and self._fd is not None,
                  "native descriptor lease is unavailable")
         return self._fd
@@ -636,9 +956,11 @@ class FDLease:
         self._borrowers.add(owner)
 
     def _release(self, owner: Acquisition) -> None:
+        self._check_origin()
         self._borrowers.discard(owner)
 
     def close(self) -> None:
+        self._check_origin()
         if self._state in ("NEW", "CLOSED"):
             return
         _require(self._state == "OPEN" and self._fd is not None and self._native is not None
@@ -663,6 +985,7 @@ class Child:
     def __init__(self, acquisition: Acquisition, *, _key: object) -> None:
         _require(_key is _CHILD_KEY, "native child cannot be synthesized")
         self._acquisition = acquisition
+        self._origin_pid = os.getpid()
         self._pid: int | None = None
         self._numeric_retired = False
         self._wait_state = "UNPUBLISHED"
@@ -671,6 +994,7 @@ class Child:
 
     @property
     def pid(self) -> int:
+        self._acquisition._check_origin()
         _require(self._pid is not None and self._wait_state != "UNPUBLISHED",
                  "native child publication is unavailable")
         return self._pid
@@ -691,6 +1015,7 @@ class Child:
         self._numeric_retired = True
 
     def poll_wait(self) -> WaitReceipt | None:
+        self._acquisition._check_origin()
         if self._wait_state == "REAPED":
             assert self._receipt is not None
             return self._receipt
@@ -707,6 +1032,7 @@ class Child:
         self._wait_state = "WAIT_IN_FLIGHT"
         try:
             result = os.waitpid(self._pid, os.WNOHANG)
+            self._acquisition._check_origin()
             _require(self._wait_state == "WAIT_IN_FLIGHT" and type(result) is tuple and len(result) == 2
                      and type(result[0]) is int and type(result[1]) is int,
                      "native child wait publication differs")
@@ -837,6 +1163,11 @@ def _update(acquisition: Acquisition, prepared: _Prepared, container: _Container
 def _prepare(acquisition: Acquisition, spec: SpawnSpec) -> _Prepared:
     acquisition._check()
     _require(type(spec) is SpawnSpec, "native spawn specification differs")
+    if spec.command_map is not None:
+        spec.command_map._consume(acquisition, spec)
+    else:
+        _require(all(source._kind in ("pipe", "null") for source in spec.fd_sources),
+                 "account hold requires an original command map permit")
     native = acquisition._runtime()
     _waitability(acquisition, native)
     prepared = _Prepared(native)
@@ -875,6 +1206,7 @@ def _prepare(acquisition: Acquisition, spec: SpawnSpec) -> _Prepared:
                      and all(other._original_fd != descriptor for other in prepared.duplicates[:-1]),
                      "native duplicate descriptor publication differs")
             duplicate._publish(descriptor, native, source._access, source._kind)
+            duplicate._account_binding = source._account_binding
             duplicate._validate()
         except BaseException as error:
             acquisition._record_error(error)
@@ -904,6 +1236,7 @@ def _prepare(acquisition: Acquisition, spec: SpawnSpec) -> _Prepared:
 
 def _close_transients(acquisition: Acquisition) -> BaseException | None:
     """Called only by the returned native creator; never from a cutoff observer."""
+    acquisition._check_origin()
     first: BaseException | None = None
     prepared = acquisition._prepared
     if prepared is not None:
@@ -976,6 +1309,7 @@ def create(acquisition: Acquisition, spec: SpawnSpec) -> Child:
                                       prepared.path, c.byref(prepared.actions.storage),
                                       None if prepared.attributes is None else c.byref(prepared.attributes.storage),
                                       prepared.argv, prepared.env, roots=(prepared,))
+        acquisition._check_origin()
         _require(type(result) is int and result == 0
                  and type(prepared.pid.value) is int and 0 < prepared.pid.value <= _MAX_PID,
                  "native child creation receipt is unavailable")

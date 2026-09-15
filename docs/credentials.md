@@ -219,16 +219,33 @@ Nested apps/extensions use their own profiles; profileless code cannot borrow
 an enclosing app's grants. Profile issuance verification is read-only/offline;
 profile dates and application certificate dates still need to be current for new
 uploads. See [iOS entitlements](ios-entitlements.md) and
-[profile authority](ios-profile-authority.md), including the separate pending
-QA-003 local-signing concurrency and QA-004 outer materialization-cleanup
-corrections. Do not overlap local signing contexts. Inner signing/profile cleanup
-alone does not prove decoded scratch removal or client-file restoration.
+[profile authority](ios-profile-authority.md). Local signed iOS builds acquire a
+persistent account-wide lease before private/application work; overlap fails safely
+before global mutation. Pending ownership needs [local signing recovery](local-signing.md),
+not lock/journal deletion. QA-004 outer materialization cleanup remains open:
+inner signing/profile cleanup alone does not prove decoded scratch removal or
+client-file restoration.
 
 Online preflight proves that the configured Google or Apple API credential can authenticate and see the intended Store application. Provider authentication is the authority for API-key suitability; a Base64 format check is not.
+
+Online ownership queries can run for an **unverified**, but not explicitly
+**blocked**, identity despite unrelated build/signing/metadata diagnostics. The
+complete query identity, committed version and Store credentials must still be
+available; failed material validation stops the query. Missing local ADC is a
+static diagnostic, not permission to read other private inputs. Online checks
+never execute application-owned checks or builds. Unconfirmed process/resource
+cleanup stops every mode; an independent query PASS cannot clear other failures.
 
 After signing, it verifies the final AAB/IPA independently and records only public identity evidence and artifact hashes.
 
 ## Cleanup and logs
+
+Local profile checks correlate bytes and the same observed file identity/metadata,
+including after the bounded reader closes. Identical bytes do not prove ownership.
+An observed installer conflict preserves that name and leaves its original signing
+session pending, instead of letting outer cleanup retry it implicitly. Establish
+account quiescence and use [explicit local recovery](local-signing.md); never delete
+unknown stages or journals. Safely absent owned files require no deletion.
 
 - Install cleanup handlers before decoding or importing anything.
 - Use a mode-`0700` temporary directory and mode-`0600` files.
@@ -240,8 +257,11 @@ After signing, it verifies the final AAB/IPA independently and records only publ
 
 The profile/signing/authentication owners protect default main-thread signal
 cleanup entry and resource handoff; cleanup is attempted once, not retried after
-an ambiguous descriptor close. Cancellation cannot turn a cleanup failure into
-success. Custom handlers, worker-thread cancellation and hard termination retain
+an ambiguous descriptor close. Neither cancellation nor manual recheck can turn
+a fatal cleanup failure into success or authorize same-invocation retry. End the
+failed process, establish exact-owner quiescence and recover the original remaining
+session; a terminal close failure can already have removed it. Custom handlers,
+worker-thread cancellation and hard termination retain
 host semantics. **QA-004 remains open:** cancellation at outer build-input scratch
 or client-target restoration can leave material behind. Verify the exact owned
 paths and original client configuration before retrying; do not delete broad

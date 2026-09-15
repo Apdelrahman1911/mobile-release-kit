@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +9,7 @@ from typing import Any, Iterable
 
 from .config import ReleaseConfig
 from .init_transaction import STATE_NAMES, is_state_name
+from .owned_process import OUTPUT_LIMIT, ProcessError, run_owned
 
 IGNORED_PARTS = {
     *STATE_NAMES,
@@ -47,46 +47,53 @@ class GitContext:
         }
 
 
-def _run(root: Path, argv: list[str]) -> str | None:
+def _run(root: Path, argv: list[str], *, execution_source=None, cancellation=None) -> str | None:
+    # Local import keeps credentials' static project-selection dependency acyclic.
+    from .credentials import scrub_credential_capabilities
+
     try:
-        result = subprocess.run(
+        result = run_owned(
             argv,
             cwd=root,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            environ=scrub_credential_capabilities(os.environ),
+            capture=True,
+            output_limit=OUTPUT_LIMIT,
             timeout=10,
-            check=False,
+            execution_scope=None if execution_source is None else execution_source.new_scope(),
+            cancellation=cancellation,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+    except ProcessError as error:
+        if error.fatal:
+            raise
         return None
     if result.returncode != 0:
         return None
     return result.stdout.strip()
 
 
-def git_context(root: Path, environ: dict[str, str] | None = None) -> GitContext:
+def git_context(root: Path, environ: dict[str, str] | None = None, *, execution_source=None, cancellation=None) -> GitContext:
     env = environ if environ is not None else os.environ
     repository = env.get("GITHUB_REPOSITORY")
     if not repository:
-        remote = _run(root, ["git", "config", "--get", "remote.origin.url"])
+        remote = _run(root, ["git", "config", "--get", "remote.origin.url"], execution_source=execution_source, cancellation=cancellation)
         if remote:
             match = re.search(r"(?:github\.com[:/])([^/]+/[^/]+?)(?:\.git)?$", remote)
             repository = match.group(1) if match else None
     # The checked-out object is authoritative. GITHUB_SHA is validated against
     # it by the mutation guard; never let an environment value invent source
     # provenance for a different local tree.
-    checked_out_commit = _run(root, ["git", "rev-parse", "HEAD"])
+    checked_out_commit = _run(root, ["git", "rev-parse", "HEAD"], execution_source=execution_source, cancellation=cancellation)
     commit = checked_out_commit or env.get("GITHUB_SHA")
     tree = _run(
         root,
         ["git", "rev-parse", f"{commit}^{{tree}}"]
         if commit
         else ["git", "rev-parse", "HEAD^{tree}"],
+        execution_source=execution_source, cancellation=cancellation,
     )
-    branch = env.get("GITHUB_REF_NAME") or _run(root, ["git", "branch", "--show-current"])
+    branch = env.get("GITHUB_REF_NAME") or _run(root, ["git", "branch", "--show-current"], execution_source=execution_source, cancellation=cancellation)
     ref = env.get("GITHUB_REF") or (f"refs/heads/{branch}" if branch else None)
-    status = _run(root, ["git", "status", "--porcelain=v1", "--untracked-files=normal"])
+    status = _run(root, ["git", "status", "--porcelain=v1", "--untracked-files=normal"], execution_source=execution_source, cancellation=cancellation)
     dirty = None if status is None else bool(status)
     return GitContext(
         repository=repository,
@@ -330,7 +337,7 @@ def discover_version_source(root: Path) -> dict[str, str]:
     return {}
 
 
-def discover_project(root: Path) -> dict[str, Any]:
+def discover_project(root: Path, *, include_git: bool = True, execution_source=None, cancellation=None) -> dict[str, Any]:
     root = root.resolve()
     result: dict[str, Any] = {"root": str(root)}
     result.update(discover_version_source(root))
@@ -340,7 +347,8 @@ def discover_project(root: Path) -> dict[str, Any]:
         result["android"] = android
     if ios:
         result["ios"] = ios
-    result["git"] = git_context(root).as_dict()
+    if include_git:
+        result["git"] = git_context(root, execution_source=execution_source, cancellation=cancellation).as_dict()
     return result
 
 

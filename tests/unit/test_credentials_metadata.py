@@ -7,9 +7,12 @@ import subprocess
 import tempfile
 import unittest
 import zipfile
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from mobile_release._profile_callers import first_primary_context
 from mobile_release.config import load_config
 from mobile_release.credentials import (
     _open_profile_directory,
@@ -65,7 +68,7 @@ class CredentialMetadataTests(unittest.TestCase):
                 def __exit__(self, *_args: object) -> None:
                     return None
 
-            with patch.dict(
+            with first_primary_context(nullcontext(), expose_owner=True) as (_, guard), patch.dict(
                 os.environ, {"MOBILE_RELEASE_IOS_PROFILE_SPECIFIER": ""}, clear=False
             ), patch(
                 "mobile_release.credentials._temporary_apple_signing_environment",
@@ -77,6 +80,8 @@ class CredentialMetadataTests(unittest.TestCase):
                         values=values,
                         platforms=("ios",),
                         prepare_ios_signing=True,
+                        signing_lease=SimpleNamespace(cancellation=guard, active=None,
+                                                      _admit_execution=lambda: None),
                     ):
                         self.fail("signing context unexpectedly entered")
             self.assertEqual(target.read_bytes(), b"original-private-client")
@@ -236,8 +241,10 @@ class CredentialMetadataTests(unittest.TestCase):
     def test_local_apple_signing_material_is_installed_and_cleaned_ephemerally(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            home = root / "home"
+            home.mkdir(mode=0o700)
             private = root / "private"
-            private.mkdir()
+            private.mkdir(mode=0o700)
             p12 = private / "distribution.p12"
             profile = private / "profile.mobileprovision"
             p12.write_bytes(b"p12")
@@ -245,23 +252,12 @@ class CredentialMetadataTests(unittest.TestCase):
             profile_uuid = "12345678-1234-1234-1234-1234567890AB"
             calls: list[list[str]] = []
 
-            def fake_private_run(
-                argv: list[str], *, environ: object, timeout: int = 30
-            ) -> subprocess.CompletedProcess[str]:
-                del environ, timeout
-                calls.append(argv)
-                stdout = ""
-                if argv[0] == "openssl" and "-out" in argv:
-                    Path(argv[argv.index("-out") + 1]).write_text(
-                        "extracted\n", encoding="utf-8"
-                    )
-                if argv[1:4] == ["default-keychain", "-d", "user"] and "-s" not in argv:
-                    stdout = '"/tmp/login.keychain-db"\n'
-                elif argv[1:4] == ["list-keychains", "-d", "user"] and "-s" not in argv:
-                    stdout = '"/tmp/login.keychain-db" "/tmp/secondary.keychain-db"\n'
-                return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+            from .local_signing_helpers import NativeSigningModel, fictional_signing_profile
+            model = NativeSigningModel(home)
+            calls = model.calls
+            fake_private_run = model
 
-            with patch("mobile_release.ios_profiles.decode_authenticated_profile", return_value=fictional_profile()), patch(
+            with patch("mobile_release.credentials._authenticated_signing_profile", side_effect=fictional_signing_profile), patch(
                 "mobile_release.credentials._run_private", side_effect=fake_private_run
             ):
                 with _temporary_apple_signing_environment(
@@ -269,10 +265,10 @@ class CredentialMetadataTests(unittest.TestCase):
                     password="private-password",
                     profile=profile,
                     directory=private,
-                    home=root,
+                    home=home,
                 ) as updates:
                     installed = (
-                        root
+                        home
                         / "Library/MobileDevice/Provisioning Profiles"
                         / f"{profile_uuid}.mobileprovision"
                     )
@@ -298,7 +294,7 @@ class CredentialMetadataTests(unittest.TestCase):
             )
             self.assertEqual(
                 restored_search[-2:],
-                ["/tmp/login.keychain-db", "/tmp/secondary.keychain-db"],
+                model.original["search"],
             )
 
     def test_apple_profile_install_rejects_symlinked_parent_directory(self) -> None:

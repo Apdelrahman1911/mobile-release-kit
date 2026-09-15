@@ -13,8 +13,14 @@ from types import ModuleType
 
 ROOT = Path(__file__).resolve().parents[2]
 PATTERNS = ("test_ios_profile_authority.py", "test_ios_profile_trust.py", "test_ios_profile_installation.py",
-            "test_default_cancellation.py", "test_profile_processes.py", "test_macho_native.py",
-            "test_native_process.py", "test_profile_process_owner.py", "test_inspection_budget.py")
+            "test_ios_entitlements.py", "test_operation_recovery.py", "test_default_cancellation.py",
+            "test_profile_processes.py", "test_macho_native.py",
+            "test_native_process.py", "test_profile_process_owner.py", "test_inspection_budget.py",
+            "test_local_signing.py", "test_local_signing_recovery.py", "test_local_signing_native.py",
+            "test_local_signing_composition.py", "test_owned_process.py", "test_owned_process_callers.py",
+            "test_owned_process_failures.py", "test_local_signing_failures.py", "test_local_signing_profile_identity.py",
+            "test_local_signing_persistent.py", "test_local_signing_matrix.py", "test_local_signing_owner_loss.py",
+            "test_command_loader_loss.py", "test_command_fence_failure.py", "test_local_signing_attempts.py", "test_command_account_lifecycle.py")
 PREREQUISITES = (
     ("openssl-version", ("/usr/bin/openssl", "version")),
     ("clang-discovery", ("/usr/bin/xcrun", "--find", "clang")),
@@ -66,11 +72,53 @@ POISON_PARTITIONS = (
     ("poison-system-exit-cleanup-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_cleanup_failure"),
     ("poison-system-exit-restore-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_restore_failure"),
     ("poison-system-exit-cleanup-and-restore-failure", "unit.test_default_cancellation.ProfileScratchFinalityTests.test_unknown_system_exit_cleanup_and_restore_failure"),
+    ("poison-signing-launcher-loss", "workflow.test_local_signing_owner_loss.SigningLauncherLossTests.test_real_launcher_death_uses_original_anchor_cleanup_and_requires_domain_disposal"),
+    ("poison-command-preguard-127", "workflow.test_command_loader_loss.CommandLoaderLossTests.test_preguard_normal_127_never_becomes_a_command_result"),
+    ("poison-command-guarded-import", "workflow.test_command_loader_loss.CommandLoaderLossTests.test_guarded_import_failure_requires_original_domain_disposal"),
+    ("poison-command-fence-pending-create-before", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_loss_pending_create_before"),
+    ("poison-command-fence-pending-create-after", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_loss_pending_create_after"),
+    ("poison-command-fence-pending-write-partial", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_loss_pending_write_partial"),
+    ("poison-command-fence-pending-write-after", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_loss_pending_write_after"),
+    ("poison-command-fence-data-fsync-after", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_loss_data_fsync_after"),
+    ("poison-command-fence-pending-close-after", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_loss_pending_close_after"),
+    ("poison-command-fence-final-link-after", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_loss_final_link_after"),
+    ("poison-command-fence-directory-fsync-after", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_loss_directory_fsync_after"),
+    ("poison-command-fence-pending-close-lost-return", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_pending_close_lost_return"),
+    ("poison-command-fence-final-link-lost-return", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_final_link_lost_return"),
+    ("poison-command-fence-foreign-pending-collision", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_foreign_pending_collision"),
+    ("poison-command-prepared-prefix-input-loss", "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests.test_prepared_input_withdrawal_c_loss_fresh_prefix_recovery"),
+    ("poison-command-account-hold-parent-loss", "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests.test_original_hold_survives_true_parent_loss_and_is_absent_from_worker_map"),
+    ("poison-signing-foreign-mixed-handlers", "unit.test_local_signing_composition.SigningCompositionTests.test_foreign_and_mixed_signal_owners_are_never_silently_overwritten_or_borrowed"),
+    ("poison-profile-authenticator-publication", "unit.test_ios_entitlements.SignedEntitlementInventoryTests.test_mocked_authenticator_without_owner_publication_remains_fatal"),
+    ("poison-recovery-profile-cleanup", "unit.test_operation_recovery.IosOperationRecoveryTests.test_profile_cleanup_uncertainty_stops_actual_fresh_validation_before_any_store_access"),
+    ("poison-profile-authentication-order", "unit.test_ios_profile_authority.CMSFramingTests.test_profile_requires_both_authentications_in_order_then_complete_correlation"),
+    ("poison-profile-setup-unlink", "unit.test_ios_profile_installation.ProfileInstallationTests.test_ambiguous_setup_stage_unlink_is_not_implicitly_retried_or_resolved"),
+    ("poison-profile-collision", "unit.test_ios_profile_installation.ProfileInstallationTests.test_collision_symlink_fifo_and_invalid_input_never_overwrite_existing_state"),
+    ("poison-profile-partial-handler-install", "unit.test_ios_profile_installation.ProfileInstallationTests.test_custom_handlers_worker_threads_and_partial_handler_registration_preserve_host_state"),
+    ("poison-profile-cleanup-observer", "unit.test_ios_profile_installation.ProfileInstallationTests.test_fallible_cleanup_observers_never_abandon_actual_owned_handles"),
+    ("poison-profile-fstat", "unit.test_ios_profile_installation.ProfileInstallationTests.test_initial_fstat_failure_recovers_only_from_owned_fd_or_reports_empty_private_residue"),
+    ("poison-profile-fsync-cleanup", "unit.test_ios_profile_installation.ProfileInstallationTests.test_partial_write_flush_fsync_and_link_failures_leave_no_owned_files"),
+    ("poison-profile-replacement", "unit.test_ios_profile_installation.ProfileInstallationTests.test_replacement_or_edit_is_preserved_and_failed_cleanup_cannot_report_success"),
+    ("poison-profile-directory-close", "unit.test_ios_profile_installation.ProfileInstallationTests.test_retained_normal_body_cannot_hide_directory_close_uncertainty"),
+    ("poison-signing-content-conflict", "unit.test_local_signing_failures.SigningFailureTests.test_ordinary_content_conflict_keeps_safe_predispatch_cleanup"),
+    ("poison-signing-profile-identity-conflict", "unit.test_local_signing_profile_identity.ProfileIdentityTests.test_direct_installer_preserves_all_real_owned_and_borrowed_conflicts"),
+    ("poison-command-source-close", "unit.test_owned_process.CommandSourceOwnerTests.test_failed_close_latches_before_diagnostics_and_attempts_each_independent_slot_once"),
+    ("poison-command-source-profile-conflict", "unit.test_owned_process.CommandSourceOwnerTests.test_original_profile_conflict_close_revokes_even_without_session_failure_flags"),
 )
+# These successful raw-fork fixtures require a fresh interpreter before their
+# first native command, not permission to retain UNKNOWN custody on return.
+FRESH_PARTITIONS = (
+    ("fresh-command-account-prepared", "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests.test_prepared_no_target_original_fence_and_same_lease_cleanup"),
+    ("fresh-model-command-bridge", "unit.test_local_signing_persistent.PersistentSigningTests.test_one_real_model_command_bridge_finishes_before_success"),
+)
+SINGLETON_PARTITIONS = POISON_PARTITIONS + FRESH_PARTITIONS
 ISOLATED_PROFILE_PRODUCTS = frozenset({
     "mobile_release", "mobile_release._native_process", "mobile_release._profile_process",
     "mobile_release.ios_profiles", "mobile_release.cancellation", "mobile_release.errors", "mobile_release.inspection",
+    "mobile_release._lifetime_evidence",
 })
+# Historical private names are retained; these fixed families serve both
+# intentional-UNKNOWN proofs and clean fresh-interpreter prerequisites.
 ISOLATED_NEGATIVE_IMPORTS = (
     ("unit.test_native_process", ("unit",),
      frozenset({"unit", "unit.test_native_process"}),
@@ -82,6 +130,144 @@ ISOLATED_NEGATIVE_IMPORTS = (
      frozenset({"unit", "unit.test_default_cancellation", "workflow", "workflow.profile_resource_fixture",
                 "workflow.profile_process_fixture", "workflow.process_fixture"}),
      ISOLATED_PROFILE_PRODUCTS),
+    ("workflow.test_local_signing_owner_loss", ("workflow",),
+     frozenset({"workflow", "workflow.test_local_signing_owner_loss", "workflow.local_signing_launcher_loss_fixture",
+                "workflow.local_signing_case_owner", "workflow.local_signing_matrix_contract", "workflow.local_signing_matrix_diagnostic",
+                "workflow.profile_process_fixture", "workflow.process_fixture"}),
+     frozenset({"mobile_release", "mobile_release._native_process"})),
+    ("workflow.test_command_loader_loss", ("workflow",),
+     frozenset({"workflow", "workflow.test_command_loader_loss", "workflow.command_bootstrap_fixture",
+                "workflow.profile_process_fixture", "workflow.process_fixture"}),
+     frozenset({"mobile_release", "mobile_release._native_process", "mobile_release._command_process",
+                "mobile_release.owned_process", "mobile_release.cancellation", "mobile_release._lifetime_evidence",
+                "mobile_release.errors"})),
+    ("workflow.test_command_fence_failure", ("workflow", "unit"),
+     frozenset({"workflow", "workflow.test_command_fence_failure", "workflow.command_bootstrap_fixture",
+                "workflow.command_fence_failure_fixture", "workflow.local_signing_case_owner",
+                "workflow.local_signing_matrix_contract", "workflow.local_signing_matrix_diagnostic",
+                "workflow.local_signing_persistent_fixture", "workflow.local_signing_workload",
+                "workflow.profile_process_fixture", "workflow.process_fixture", "unit",
+                "unit.local_signing_persistent", "unit.ios_entitlement_helpers", "unit.local_signing_helpers"}),
+     frozenset({"mobile_release", "mobile_release._native_process", "mobile_release._command_process",
+                "mobile_release.owned_process", "mobile_release.cancellation", "mobile_release._lifetime_evidence",
+                "mobile_release.errors", "mobile_release.local_signing", "mobile_release._profile_callers",
+                "mobile_release.credentials", "mobile_release.config", "mobile_release.reporting",
+                "mobile_release.tooling"})),
+    ("workflow.test_command_account_lifecycle", ("workflow", "unit"),
+     frozenset({"workflow", "workflow.test_command_account_lifecycle", "workflow.command_bootstrap_fixture",
+                "workflow.command_fence_failure_fixture", "workflow.command_account_lifecycle_fixture", "workflow.local_signing_case_owner",
+                "workflow.local_signing_matrix_contract", "workflow.local_signing_matrix_diagnostic",
+                "workflow.local_signing_persistent_fixture", "workflow.local_signing_workload",
+                "workflow.profile_process_fixture", "workflow.process_fixture", "unit",
+                "unit.local_signing_persistent", "unit.ios_entitlement_helpers", "unit.local_signing_helpers"}),
+     frozenset({"mobile_release", "mobile_release._native_process", "mobile_release._command_process",
+                "mobile_release.owned_process", "mobile_release.cancellation", "mobile_release._lifetime_evidence",
+                "mobile_release.errors", "mobile_release.local_signing", "mobile_release._profile_callers",
+                "mobile_release.credentials", "mobile_release.config", "mobile_release.reporting",
+                "mobile_release.tooling"})),
+    ("unit.test_local_signing_persistent", ("workflow", "unit"),
+     frozenset({"unit", "unit.ios_entitlement_helpers", "unit.local_signing_helpers", "unit.local_signing_persistent",
+                "unit.test_local_signing_persistent", "workflow", "workflow.local_signing_bridge",
+                "workflow.local_signing_case_owner", "workflow.local_signing_matrix_contract",
+                "workflow.local_signing_matrix_diagnostic", "workflow.local_signing_persistent_fixture",
+                "workflow.local_signing_semantic_catalog", "workflow.local_signing_semantic_fixture",
+                "workflow.local_signing_workload"}),
+     frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
+                "mobile_release._profile_callers", "mobile_release.cancellation", "mobile_release.config",
+                "mobile_release.credentials", "mobile_release.errors", "mobile_release.local_signing",
+                "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.tooling"})),
+    ("unit.test_local_signing_composition", ("workflow", "unit"),
+     frozenset({"unit", "unit.helpers", "unit.ios_entitlement_helpers", "unit.local_signing_helpers",
+                "unit.local_signing_persistent", "unit.test_local_signing_composition", "workflow",
+                "workflow.local_signing_regression_catalog"}),
+     frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
+                "mobile_release._profile_callers", "mobile_release.android", "mobile_release.cancellation",
+                "mobile_release.cli", "mobile_release.config", "mobile_release.credentials", "mobile_release.discovery",
+                "mobile_release.errors", "mobile_release.init_transaction", "mobile_release.inspection",
+                "mobile_release.ios", "mobile_release.ios_artifacts", "mobile_release.ios_entitlements",
+                "mobile_release.ios_profiles", "mobile_release.local_signing", "mobile_release.macho",
+                "mobile_release.metadata", "mobile_release.owned_process", "mobile_release.preflight",
+                "mobile_release.provenance", "mobile_release.reporting", "mobile_release.stores",
+                "mobile_release.tooling", "mobile_release.workflow"})),
+    ("unit.test_ios_entitlements", ("unit",),
+     frozenset({"unit", "unit.ios_artifact_helpers", "unit.ios_entitlement_helpers", "unit.test_ios_entitlements"}),
+     frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
+                "mobile_release._profile_callers", "mobile_release.cancellation", "mobile_release.config",
+                "mobile_release.credentials", "mobile_release.discovery", "mobile_release.errors",
+                "mobile_release.init_transaction", "mobile_release.inspection", "mobile_release.ios",
+                "mobile_release.ios_der", "mobile_release.ios_entitlements", "mobile_release.ios_plist_binary",
+                "mobile_release.ios_profiles", "mobile_release.local_signing", "mobile_release.owned_process",
+                "mobile_release.reporting", "mobile_release.tooling"})),
+    ("unit.test_operation_recovery", ("unit",),
+     frozenset({"unit", "unit.evidence_helpers", "unit.helpers", "unit.ios_artifact_helpers",
+                "unit.ios_entitlement_helpers", "unit.test_operation_recovery"}),
+     frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
+                "mobile_release._profile_callers", "mobile_release._profile_process", "mobile_release.android",
+                "mobile_release.cancellation", "mobile_release.cli", "mobile_release.config", "mobile_release.credentials",
+                "mobile_release.discovery", "mobile_release.errors", "mobile_release.init_transaction",
+                "mobile_release.inspection", "mobile_release.ios", "mobile_release.ios_artifacts", "mobile_release.ios_der",
+                "mobile_release.ios_entitlements", "mobile_release.ios_plist_binary", "mobile_release.ios_profiles",
+                "mobile_release.local_signing", "mobile_release.macho", "mobile_release.metadata",
+                "mobile_release.owned_process", "mobile_release.preflight", "mobile_release.provenance",
+                "mobile_release.reporting", "mobile_release.stores", "mobile_release.tooling", "mobile_release.workflow"})),
+    ("unit.test_ios_profile_authority", ("unit",),
+     frozenset({"unit", "unit.ios_entitlement_helpers", "unit.ios_profile_helpers", "unit.test_ios_profile_authority"}),
+     frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
+                "mobile_release.cancellation", "mobile_release.errors", "mobile_release.inspection",
+                "mobile_release.ios_der", "mobile_release.ios_entitlements", "mobile_release.ios_plist_binary",
+                "mobile_release.ios_profile_auth", "mobile_release.ios_profile_trust", "mobile_release.ios_profiles"})),
+    ("unit.test_ios_profile_installation", ("workflow", "unit"),
+     frozenset({"unit", "unit.helpers", "unit.ios_entitlement_helpers", "unit.local_signing_workspace",
+                "unit.test_ios_profile_installation", "workflow", "workflow.local_signing_regression_catalog",
+                "workflow.local_signing_workload"}),
+     frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
+                "mobile_release._profile_callers", "mobile_release.cancellation", "mobile_release.config",
+                "mobile_release.credentials", "mobile_release.errors", "mobile_release.local_signing",
+                "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.tooling"})),
+    ("unit.test_local_signing_failures", ("workflow", "unit"),
+     frozenset({"unit", "unit.ios_entitlement_helpers", "unit.local_signing_algorithm_helpers",
+                "unit.local_signing_helpers", "unit.local_signing_persistent", "unit.local_signing_workspace",
+                "unit.test_local_signing_failures", "workflow", "workflow.local_signing_regression_catalog",
+                "workflow.local_signing_workload"}),
+     frozenset({"mobile_release", "mobile_release._command_process", "mobile_release._lifetime_evidence",
+                "mobile_release._native_process", "mobile_release._profile_callers", "mobile_release.android",
+                "mobile_release.cancellation", "mobile_release.cli", "mobile_release.config", "mobile_release.credentials",
+                "mobile_release.discovery", "mobile_release.errors", "mobile_release.init_transaction",
+                "mobile_release.inspection", "mobile_release.ios", "mobile_release.ios_artifacts",
+                "mobile_release.ios_entitlements", "mobile_release.local_signing", "mobile_release.macho",
+                "mobile_release.metadata", "mobile_release.owned_process", "mobile_release.preflight",
+                "mobile_release.provenance", "mobile_release.reporting", "mobile_release.stores",
+                "mobile_release.tooling", "mobile_release.workflow"})),
+    ("unit.test_local_signing_profile_identity", ("workflow", "unit"),
+     frozenset({"unit", "unit.ios_entitlement_helpers", "unit.local_signing_algorithm_helpers",
+                "unit.local_signing_helpers", "unit.local_signing_persistent", "unit.local_signing_workspace",
+                "unit.test_local_signing_failures", "unit.test_local_signing_profile_identity", "workflow",
+                "workflow.local_signing_regression_catalog", "workflow.local_signing_workload"}),
+     frozenset({"mobile_release", "mobile_release._command_process", "mobile_release._lifetime_evidence",
+                "mobile_release._native_process", "mobile_release._profile_callers", "mobile_release.android",
+                "mobile_release.cancellation", "mobile_release.cli", "mobile_release.config", "mobile_release.credentials",
+                "mobile_release.discovery", "mobile_release.errors", "mobile_release.init_transaction",
+                "mobile_release.inspection", "mobile_release.ios", "mobile_release.ios_artifacts",
+                "mobile_release.ios_entitlements", "mobile_release.local_signing", "mobile_release.macho",
+                "mobile_release.metadata", "mobile_release.owned_process", "mobile_release.preflight",
+                "mobile_release.provenance", "mobile_release.reporting", "mobile_release.stores",
+                "mobile_release.tooling", "mobile_release.workflow"})),
+    ("unit.test_owned_process", ("unit",),
+     frozenset({"unit", "unit.test_owned_process"}),
+     frozenset({"mobile_release", "mobile_release._command_process", "mobile_release._lifetime_evidence",
+                "mobile_release._native_process", "mobile_release._profile_callers", "mobile_release.cancellation",
+                "mobile_release.config", "mobile_release.credentials", "mobile_release.errors", "mobile_release.local_signing",
+                "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.tooling"})),
+)
+# These selected methods reach fixed lazy dependencies. Own them before the
+# singleton proof; never import the rest of a family just because it is allowed.
+ISOLATED_NEGATIVE_PRIMES = (
+    ("unit.test_ios_entitlements", ("mobile_release.ios_profiles", "mobile_release.ios_plist_binary")),
+    ("unit.test_operation_recovery", ("mobile_release.ios_profiles", "mobile_release._profile_process",
+                                      "mobile_release.ios_der", "mobile_release.ios_plist_binary")),
+    ("unit.test_ios_profile_authority", ("mobile_release.ios_der", "mobile_release.ios_entitlements",
+                                         "mobile_release.ios_plist_binary")),
+    ("unit.test_owned_process", ("mobile_release.credentials",)),
 )
 AUTHORITY_UNIT_MODULES = frozenset({
     "unit", "unit.test_ios_profile_authority", "unit.ios_profile_helpers", "unit.ios_entitlement_helpers",
@@ -90,6 +276,10 @@ AUTHORITY_PRODUCT_MODULES = frozenset({
     "mobile_release", "mobile_release.cancellation", "mobile_release.ios_profiles",
     "mobile_release.ios_profile_auth", "mobile_release.ios_profile_trust",
     "mobile_release._native_process", "mobile_release._profile_process",
+    "mobile_release.errors", "mobile_release.inspection", "mobile_release._lifetime_evidence",
+})
+AUTHORITY_DEFERRED_PRODUCT_MODULES = frozenset({
+    "mobile_release.ios_der", "mobile_release.ios_entitlements", "mobile_release.ios_plist_binary",
 })
 
 
@@ -214,13 +404,23 @@ def _fixed_package(name, directory) -> None:
         raise
 
 
-def _authority_origins(package, *, tests_loaded=False) -> None:
+def _authority_origins(package, *, tests_loaded=False, tests_completed=False) -> None:
+    if (type(tests_loaded) is not bool or type(tests_completed) is not bool
+            or tests_completed and not tests_loaded):
+        raise AssertionError("native authority origin phase differs from its fixed lifecycle")
     _authority_runtime()
+    # The admitted two-layer decode loads these parsers lazily. They are not
+    # startup imports, and no command/caller module gains their lifetime grant.
+    allowed = AUTHORITY_PRODUCT_MODULES | (AUTHORITY_DEFERRED_PRODUCT_MODULES if tests_loaded else frozenset())
     required = AUTHORITY_PRODUCT_MODULES | (AUTHORITY_UNIT_MODULES if tests_loaded else {"unit"})
+    if tests_completed:
+        required |= AUTHORITY_DEFERRED_PRODUCT_MODULES
     if not required <= sys.modules.keys():
         raise AssertionError("native authority lost its fixed package imports")
     for name, module in tuple(sys.modules.items()):
         if name == "mobile_release" or name.startswith("mobile_release."):
+            if name not in allowed:
+                raise AssertionError("native authority imported an ordinary caller/command module")
             _check_module_origin(name, module, package, package=name == "mobile_release")
         elif name == "unit" or name.startswith("unit."):
             if name not in AUTHORITY_UNIT_MODULES:
@@ -400,12 +600,12 @@ def run_compatibility(*, minor: int, phase: str, operation: str) -> int:
 
 def _isolated_negative_contract(partition: str) -> tuple:
     """Only the literal singleton's fixed module family can own its bootstrap."""
-    if type(partition) is not str or partition not in dict(POISON_PARTITIONS):
-        raise AssertionError("isolated negative differs from its fixed entrypoint")
-    identifier = dict(POISON_PARTITIONS)[partition]
+    if type(partition) is not str or partition not in dict(SINGLETON_PARTITIONS):
+        raise AssertionError("isolated singleton differs from its fixed entrypoint")
+    identifier = dict(SINGLETON_PARTITIONS)[partition]
     matches = [row for row in ISOLATED_NEGATIVE_IMPORTS if row[0] == identifier.rsplit(".", 2)[0]]
     if len(matches) != 1:
-        raise AssertionError("isolated negative lacks its fixed module family")
+        raise AssertionError("isolated singleton lacks its fixed module family")
     _module, packages, test_modules, product_modules = matches[0]
     return identifier, packages, test_modules, product_modules
 
@@ -413,8 +613,8 @@ def _isolated_negative_contract(partition: str) -> tuple:
 def _isolated_negative_origins(partition: str, phase: str, package: Path) -> dict:
     """Measure only this literal family's origins, before its single proof.
 
-    This is separate from compatibility/authority loaders: admitting the two
-    profile fixture families never admits workflow imports to primitive2.
+    This is separate from compatibility/authority loaders: admitting an
+    ordinary fixture family never admits workflow imports to primitive2.
     """
     _isolated_compatibility_runtime(11)
     _identifier, _packages, test_modules, product_modules = _isolated_negative_contract(partition)
@@ -422,12 +622,12 @@ def _isolated_negative_origins(partition: str, phase: str, package: Path) -> dic
             or sys.executable != str(ROOT.parent / f"work/{phase}-venv/bin/python")
             or package != (ROOT.parent / "work/source-build/src/mobile_release" if phase == "source"
                            else ROOT.parent / "work/wheel-venv/lib/python3.11/site-packages/mobile_release")):
-        raise AssertionError("isolated negative origin phase differs from its fixed root")
+        raise AssertionError("isolated singleton origin phase differs from its fixed root")
     required = test_modules | product_modules
     loaded = {name for name in sys.modules if name in {"mobile_release", "unit", "workflow"}
               or name.startswith(("mobile_release.", "unit.", "workflow."))}
     if loaded != required:
-        raise AssertionError("isolated negative imports differ from its fixed family")
+        raise AssertionError("isolated singleton imports differ from its fixed family")
     origins = {}
     for name in sorted(required):
         product = name in product_modules
@@ -451,56 +651,64 @@ def _isolated_reporting_bindings(partition: str) -> tuple:
     A poison proof may leave uncertain resources rooted. After it returns, the
     runner only compares these pre-owned bindings and reports through its
     inherited streams; it must not acquire a replacement fixture or file owner.
+    Clean singletons use the same reporting limit, but must complete their own
+    normal cleanup; this data never authorizes retained-domain disposal.
     """
     _identifier, _packages, test_modules, product_modules = _isolated_negative_contract(partition)
     required = test_modules | product_modules
     loaded = {name for name in sys.modules if name in {"mobile_release", "unit", "workflow"}
               or name.startswith(("mobile_release.", "unit.", "workflow."))}
     if loaded != required:
-        raise AssertionError("isolated negative module bindings differ from its fixed family")
+        raise AssertionError("isolated singleton module bindings differ from its fixed family")
     bindings = []
     for name, module in tuple(sys.modules.items()):
         if name in required:
             if type(module) is not ModuleType:
-                raise AssertionError("isolated negative lost an original module binding")
+                raise AssertionError("isolated singleton lost an original module binding")
             values = module.__dict__
             spec = values.get("__spec__")
             if type(spec) is not importlib.machinery.ModuleSpec or type(spec.loader) is not importlib.machinery.SourceFileLoader:
-                raise AssertionError("isolated negative lost its original source loader")
+                raise AssertionError("isolated singleton lost its original source loader")
             bindings.append((name, module, spec, spec.loader, id(module), id(spec), id(spec.loader),
                              values.get("__name__"), values.get("__package__"), values.get("__file__"),
                              id(values.get("__loader__")), spec.name, spec.origin, spec.loader.name, spec.loader.path,
                              tuple(values.get("__path__", ())),
                              None if spec.submodule_search_locations is None else tuple(spec.submodule_search_locations)))
     if {row[0] for row in bindings} != required:
-        raise AssertionError("isolated negative module binding count differs")
+        raise AssertionError("isolated singleton module binding count differs")
     return (tuple(sorted(bindings)), tuple(sys.path), tuple(sys.meta_path), tuple(sys.path_hooks),
             sys.executable, sys.base_prefix, sys.base_exec_prefix, sys.prefix, sys.exec_prefix,
             sys.stdout, id(sys.stdout), sys.stderr, id(sys.stderr))
 
 
 def run_isolated_negative(*, partition: str, phase: str) -> int:
-    """One fixed intentional-UNKNOWN method; fresh ordinary Session owns disposal."""
-    if (type(partition) is not str or partition not in dict(POISON_PARTITIONS)
+    """One fixed method in a fresh ordinary Session, not a cleanup exemption.
+
+    Only the controller's original poison catalog permits retained-domain
+    disposal. A clean prerequisite must retain ordinary complete finality.
+    """
+    if (type(partition) is not str or partition not in dict(SINGLETON_PARTITIONS)
             or type(phase) is not str or phase not in {"source", "wheel"}):
-        raise AssertionError("isolated negative differs from its fixed entrypoint")
+        raise AssertionError("isolated singleton differs from its fixed entrypoint")
     _isolated_compatibility_runtime(11)
     if (sys.platform not in {"linux", "darwin"}
             or sys.executable != str(ROOT.parent / f"work/{phase}-venv/bin/python")
             or any(name in {"mobile_release", "unit", "workflow"}
                    or name.startswith(("mobile_release.", "unit.", "workflow.")) for name in sys.modules)):
-        raise AssertionError("isolated negative requires its original fresh phase interpreter")
+        raise AssertionError("isolated singleton requires its original fresh phase interpreter")
     package = (ROOT.parent / "work/source-build/src/mobile_release" if phase == "source"
                else ROOT.parent / "work/wheel-venv/lib/python3.11/site-packages/mobile_release")
     identifier, packages, _test_modules, _products = _isolated_negative_contract(partition)
     expected = _expected_native_ids(partition)
     if expected != (identifier,):
-        raise AssertionError("isolated negative source inventory is not its literal singleton")
+        raise AssertionError("isolated singleton source inventory is not its literal singleton")
     _fixed_package("mobile_release", package)
     importlib.import_module("mobile_release._native_process")
     for name in packages:
         _fixed_package(name, ROOT / "tests" / name)
     suite = _selected_suite(expected)
+    for name in dict(ISOLATED_NEGATIVE_PRIMES).get(identifier.rsplit(".", 2)[0], ()):
+        importlib.import_module(name)
     metadata = _isolated_negative_origins(partition, phase, package)
     bindings = _isolated_reporting_bindings(partition)
     state = {"failed": False, "records": []}
@@ -510,7 +718,7 @@ def run_isolated_negative(*, partition: str, phase: str) -> int:
         # Only pre-owned, in-memory reporting follows the proof. In particular
         # do not call an origin checker that resolves paths or import new code.
         if _isolated_reporting_bindings(partition) != bindings:
-            raise AssertionError("isolated negative changed its pre-owned reporting bindings")
+            raise AssertionError("isolated singleton changed its pre-owned reporting bindings")
         success = result.wasSuccessful() and not result.skipped and not state["failed"] and result.testsRun == 1
         _emit_runtime(metadata, sys.stdout)
     except BaseException as error:
@@ -592,6 +800,7 @@ def _publish_failure(phase: str, records: list[dict], original: BaseException | 
 
 
 def _result_class(expected, state):
+    expected_ids = frozenset(expected)
     allowed = _diagnostic_ids(expected)
 
     class Result(unittest.TextTestResult):
@@ -599,7 +808,36 @@ def _result_class(expected, state):
             if state["failed"]:
                 self.stop()
                 raise AssertionError("a native adverse callback prohibits a later test")
-            super().startTest(test)
+            # TextTestResult writes a partial header here. Native stderr during
+            # the body could split it from the later success token, so retain
+            # only the documented bookkeeping until the final callback.
+            try:
+                unittest.TestResult.startTest(self, test)
+            except BaseException:
+                state["failed"] = True
+                self.stop()
+                raise
+
+        def addSuccess(self, test):
+            try:
+                if state["failed"]:
+                    raise AssertionError("a native adverse callback prohibits later success")
+                unittest.TestResult.addSuccess(self, test)
+                identifier = test.id()
+                if type(identifier) is not str or identifier not in expected_ids or len(identifier) > 512:
+                    raise AssertionError("native success differs from the exact expected test IDs")
+                method = identifier.rsplit(".", 1)[-1]
+                line = f"\n{method} ({identifier}) ... ok\n"
+                written = self.stream.write(line)
+                if type(written) is not int or written != len(line):
+                    raise OSError("native success write was incomplete")
+                self.stream.flush()
+            except BaseException:
+                # Written bytes cannot be retracted. Failure/stop and the
+                # original exception prevent them from becoming gate evidence.
+                state["failed"] = True
+                self.stop()
+                raise
 
         def record_native(self, test, outcome, error=None):
             state["failed"] = True
@@ -688,7 +926,7 @@ def run(*, installed_wheel=False, partition="all") -> int:
             _publish_failure("prerequisite", records, error)
             raise
     expected = _expected_native_ids(partition)
-    if partition == "all" and any(identifier in expected for _name, identifier in POISON_PARTITIONS):
+    if partition == "all" and any(identifier in expected for _name, identifier in SINGLETON_PARTITIONS):
         raise AssertionError("mixed native discovery requires the original healthy and singleton Session captures")
     if package is not None:
         _fixed_package("mobile_release", package)
@@ -731,7 +969,7 @@ def run(*, installed_wheel=False, partition="all") -> int:
             print("FAIL: required native verification must not contain skipped tests", file=sys.stderr)
         success = result.wasSuccessful() and not result.skipped and not state["failed"] and result.testsRun == len(expected)
         if success and package is not None:
-            _authority_origins(package, tests_loaded=True)
+            _authority_origins(package, tests_loaded=True, tests_completed=True)
         elif success and partition == "ordinary":
             _ordinary_product_origins(installed_wheel)
     except BaseException as error:
@@ -753,10 +991,10 @@ def main(arguments) -> int:
     if type(arguments) not in {list, tuple} or any(type(argument) is not str for argument in arguments):
         raise SystemExit("usage: run_native_profile_checks.py [--authority|--ordinary] [--installed-wheel]")
     isolated = {(f"--{partition}-{phase}",): (partition, phase)
-                for partition, _identifier in POISON_PARTITIONS for phase in ("source", "wheel")}
-    poison = isolated.get(tuple(arguments))
-    if poison is not None:
-        partition, phase = poison
+                for partition, _identifier in SINGLETON_PARTITIONS for phase in ("source", "wheel")}
+    singleton = isolated.get(tuple(arguments))
+    if singleton is not None:
+        partition, phase = singleton
         return run_isolated_negative(partition=partition, phase=phase)
     compatibility = {
         (f"--abi-3{minor}-{phase}",): (minor, phase, "declaration")

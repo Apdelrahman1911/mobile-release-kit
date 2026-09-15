@@ -10,15 +10,17 @@ import os
 import stat
 import sys
 import tempfile
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from sys import exc_info
-from types import FrameType, TracebackType
+from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
-from .cancellation import CleanupScope, DefaultCancellation
+from .cancellation import CleanupScope, DefaultCancellation, _FORK_RESOURCES, _mark_fork_unsafe, cancellation_owner
 from .errors import ValidationError
 from .inspection import InspectionDeadline
+from ._lifetime_evidence import ProfileCallEvidence
 
 if TYPE_CHECKING:
     from ._profile_process import CaptureFinality
@@ -66,27 +68,9 @@ def completed_content(frame: bytes) -> bytes:
     raise ValidationError(AUTHENTICATION_ERROR + "; missing or malformed private completion frame")
 
 
-class _ProfileCancellation(DefaultCancellation):
-    """Extend only the fixed profile cleanup dispatcher, never acquisition/work."""
-
-    def interrupt(self, signum: int, frame: FrameType | None) -> None:
-        # Preserve DefaultCancellation's latch/depth semantics. The profile-only
-        # wrapper has an entered prologue before the actual base cleanup frame;
-        # a signal there must not replace its still-incoming original exception.
-        already_cancelled = self.cancelled
-        self.cancelled = True
-        if self.depth or already_cancelled:
-            return
-        while frame is not None:
-            if frame.f_code in (CleanupScope.__exit__.__code__, _ProfileCleanupScope.__exit__.__code__):
-                return
-            frame = frame.f_back
-        raise KeyboardInterrupt
-
-
-def _profile_cancellation() -> DefaultCancellation:
-    return _ProfileCancellation(
-        ValidationError, "Apple profile cancellation handlers could not be restored; no upload is authorized",
+def _profile_cancellation(requested: DefaultCancellation | None = None) -> tuple[DefaultCancellation, bool]:
+    return cancellation_owner(
+        requested, ValidationError, "Apple profile cancellation handlers could not be restored; no upload is authorized",
     )
 
 
@@ -103,31 +87,70 @@ class _ProfileDescriptor:
     """One profile-local raw FD attempt; its containing lease/scope roots it."""
 
     def __init__(self) -> None:
+        self.pid = os.getpid()
+        self.owner_thread = threading.current_thread()
         self.state = "UNACQUIRED"
         self.number: int | None = None
         self.retired_number: int | None = None
+        self._child_close_claimed = False
+        _FORK_RESOURCES.add(self)
+
+    def after_fork_child(self) -> None:
+        if self.pid == os.getpid():
+            return
+        # A late open return is published in the same preregistered slot. The
+        # child hook can revisit it, but never replay a consumed/unknown close.
+        if self.state in ("CLOSING", "UNKNOWN", "INHERITED_UNKNOWN"):
+            self.state = "INHERITED_UNKNOWN"
+            self._child_close_claimed = True
+            _mark_fork_unsafe()
+            return
+        if self.state == "ACQUIRING" and self.number is None:
+            _mark_fork_unsafe()
+        self.state = "INHERITED"
+        if type(self.number) is int and self.number >= 0 and not self._child_close_claimed:
+            number, self.number = self.number, None
+            self._child_close_claimed = True
+            try:
+                os.close(number)  # Only this positively published child copy.
+            except BaseException:
+                self.state = "INHERITED_UNKNOWN"
+                _mark_fork_unsafe()
+
+    def _check_origin(self) -> None:
+        if self.pid != os.getpid():
+            self.after_fork_child()
+            raise ValidationError(_PROFILE_DESCRIPTOR_ERROR)
+        if self.owner_thread is not threading.current_thread():
+            raise ValidationError(_PROFILE_DESCRIPTOR_ERROR)
 
     @property
     def settled(self) -> bool:
-        return self.state in ("UNACQUIRED", "CLOSED")
+        return self.pid == os.getpid() and self.state in ("UNACQUIRED", "CLOSED")
 
     def open(self, path: Path | str, flags: int, mode: int = 0o600, *, dir_fd: int | None = None) -> int:
+        self._check_origin()
         if self.state != "UNACQUIRED":
             raise ValidationError(_PROFILE_DESCRIPTOR_ERROR)
         self.state = "ACQUIRING"
         try:
             self.number = os.open(path, flags, mode, dir_fd=dir_fd)
+            self._check_origin()
             if type(self.number) is not int or self.number < 0:
                 raise ValidationError(_PROFILE_DESCRIPTOR_ERROR)
             self.state = "OWNED"
             return self.number
         except BaseException:
+            if self.pid != os.getpid():
+                self.after_fork_child()
+                raise ValidationError(_PROFILE_DESCRIPTOR_ERROR) from None
             # A published exact descriptor can still be closed once. A missing
             # result after entering open is NOT a positive no-acquisition proof.
             self.state = "OWNED" if type(self.number) is int and self.number >= 0 else "UNKNOWN"
             raise
 
     def close(self) -> None:
+        self._check_origin()
         if self.settled:
             return
         if self.state != "OWNED" or type(self.number) is not int or self.number < 0:
@@ -144,12 +167,13 @@ class _ProfileDescriptor:
         self.state = "CLOSED"
 
 
-def _require_profile_scratch_available() -> None:
+def _require_profile_scratch_available(evidence: ProfileCallEvidence | None = None) -> None:
     """No reset/retry path may silently abandon unresolved local ownership."""
-    if any(lease.retained for lease in _PROFILE_SCRATCH_LEASES) or any(
-        scope.retained for scope in _PROFILE_RESOURCE_SCOPES
-    ):
-        raise ValidationError(_PROFILE_REUSE_ERROR)
+    for record in (*_PROFILE_SCRATCH_LEASES, *_PROFILE_RESOURCE_SCOPES):
+        if record.retained:
+            if evidence is not None:
+                evidence._block(record)
+            raise ValidationError(_PROFILE_REUSE_ERROR)
 
 
 class _ProfileCleanupScope(CleanupScope):
@@ -163,7 +187,8 @@ class _ProfileCleanupScope(CleanupScope):
     def __init__(
         self, cancellation: DefaultCancellation, cleanup: Callable[[], None], *,
         owns_cancellation: bool, descriptors: tuple[_ProfileDescriptor, ...],
-        scratch: ScratchLease | None = None,
+        scratch: ScratchLease | None = None, evidence: ProfileCallEvidence | None = None,
+        evidence_role: str = "READER", finality: CaptureFinality | None = None,
     ) -> None:
         self._action = cleanup
         self._restore_owned = owns_cancellation
@@ -173,18 +198,61 @@ class _ProfileCleanupScope(CleanupScope):
         self._cleanup_errors: list[tuple[str, BaseException]] = []
         self._retained = False
         self._settled = False
+        self._inherited_unknown = False
         # The profile callback collects restoration errors too, while the base
         # frame continues to protect cleanup. Do not restore the guard twice.
-        super().__init__(cancellation, self._cleanup_all, owns_cancellation=False)
+        super().__init__(cancellation, self._cleanup_all, owns_cancellation=False,
+                         fork_cleanup=self._relinquish_profile)
         _PROFILE_RESOURCE_SCOPES.append(self)
+        if evidence is not None:
+            evidence._bind(self, guard=cancellation, role=evidence_role,
+                           owns_cancellation=owns_cancellation, descriptors=descriptors,
+                           scratch=scratch, finality=finality)
+
+    def _relinquish_profile(self) -> None:
+        if self.pid == os.getpid():
+            return
+        self._inherited_unknown = self._inherited_unknown or self._retained
+        for descriptor in self._descriptors:
+            try:
+                descriptor.after_fork_child()
+                self._inherited_unknown |= descriptor.state == "INHERITED_UNKNOWN"
+            except BaseException:
+                self._inherited_unknown = True
+        if self._scratch is not None:
+            try:
+                self._scratch.after_fork_child()
+                self._inherited_unknown |= self._scratch.retained
+            except BaseException:
+                self._inherited_unknown = True
+        if self._inherited_unknown:
+            _mark_fork_unsafe()
+
+    @property
+    def lifetime_local_settled(self) -> bool:
+        return self.pid == os.getpid() and self._settled and not self.retained
+
+    @property
+    def lifetime_handler_state(self) -> str:
+        if self.pid != os.getpid() or not self._settled:
+            return "UNKNOWN"
+        state = self.cancellation.handler_state
+        if self._restore_owned:
+            return "RESTORED" if state == "RESTORED" else "UNKNOWN"
+        return "BORROWED_VALID" if state in ("ACTIVE", "RESTORED") else "UNKNOWN"
 
     @property
     def retained(self) -> bool:
+        if self.pid != os.getpid():
+            return self._inherited_unknown
         return (self._retained or (self.claimed and not self._settled)
                 or any(item.state == "UNKNOWN" for item in self._descriptors)
                 or (self._scratch is not None and self._scratch.retained))
 
     def _record_cleanup(self, message: str, error: BaseException, *, uncertain: bool = True) -> None:
+        if self.pid != os.getpid():
+            self._relinquish_profile()
+            raise ValidationError(_PROFILE_SCOPE_ERROR)
         if uncertain:
             self._retained = True
         if self._primary_error is None:
@@ -200,12 +268,18 @@ class _ProfileCleanupScope(CleanupScope):
             self._retained = True
 
     def attempt(self, message: str, action: Callable[[], None]) -> None:
+        if self.pid != os.getpid():
+            self._relinquish_profile()
+            raise ValidationError(_PROFILE_SCOPE_ERROR)
         try:
             action()
         except BaseException as error:
             self._record_cleanup(message, error)
 
     def _cleanup_all(self) -> None:
+        if self.pid != os.getpid():
+            self._relinquish_profile()
+            raise ValidationError(_PROFILE_SCOPE_ERROR)
         try:
             self.attempt(_PROFILE_SCOPE_ERROR, self._action)
             if any(not item.settled for item in self._descriptors):
@@ -221,6 +295,9 @@ class _ProfileCleanupScope(CleanupScope):
                     "Apple profile cancellation handlers could not be restored; no upload is authorized",
                     self.cancellation.restore,
                 )
+        if self.pid != os.getpid():
+            self._relinquish_profile()
+            raise ValidationError(_PROFILE_SCOPE_ERROR)
         self._settled = True
         # Keep retirement inside the base protected dispatch too. An exception
         # in a later outer finally must not replace the recorded primary or
@@ -234,7 +311,7 @@ class _ProfileCleanupScope(CleanupScope):
         if self._restore_owned:
             self.cancellation.check()
 
-    def __exit__(
+    def _exit_owned(
         self, exception_type: type[BaseException] | None, error: BaseException | None,
         traceback: TracebackType | None,
     ) -> bool:
@@ -243,7 +320,7 @@ class _ProfileCleanupScope(CleanupScope):
         if self._primary_error is None and error is not None:
             self._primary_error = error
         try:
-            return super().__exit__(exception_type, error, traceback)
+            return super()._exit_owned(exception_type, error, traceback)
         except BaseException as late_error:
             if self._primary_error is None:
                 self._primary_error = late_error
@@ -269,6 +346,7 @@ class ScratchLease:
 
     def __init__(self, finality: CaptureFinality) -> None:
         _require_profile_scratch_available()
+        self.pid = os.getpid()
         self._finality = finality
         self._state = "UNACQUIRED"
         self._created_name: str | None = None
@@ -281,26 +359,53 @@ class ScratchLease:
         self._errors: list[BaseException] = []
         finality.bind_scratch(self)  # Custody only; NEVER advance producer state.
         _PROFILE_SCRATCH_LEASES.append(self)
+        _FORK_RESOURCES.add(self)
+
+    def after_fork_child(self) -> None:
+        if self.pid == os.getpid():
+            return
+        unknown = self._state in ("ACQUIRING", "REMOVING", "UNKNOWN", "INHERITED_UNKNOWN")
+        for descriptor in (self._source, self._parent_descriptor, self._directory_descriptor):
+            try:
+                descriptor.after_fork_child()
+                unknown |= descriptor.state == "INHERITED_UNKNOWN"
+            except BaseException:
+                unknown = True
+        # A parent's directory is never a child cleanup target, including a
+        # mkdtemp result delivered after the hook. Preserve its private name.
+        self._state = "INHERITED_UNKNOWN" if unknown else "INHERITED"
+        if unknown:
+            _mark_fork_unsafe()
+
+    def _check_origin(self) -> None:
+        if self.pid != os.getpid():
+            self.after_fork_child()
+            raise ValidationError(_PROFILE_SCRATCH_ERROR)
 
     @property
     def path(self) -> Path | None:
+        self._check_origin()
         return self._path
 
     @property
     def state(self) -> str:
+        if self.pid != os.getpid():
+            return "INHERITED"
         return self._state
 
     @property
     def retained(self) -> bool:
-        return (self._state == "UNKNOWN" or any(item.state == "UNKNOWN" for item in
+        return (self._state in ("UNKNOWN", "INHERITED_UNKNOWN") or any(item.state in ("UNKNOWN", "INHERITED_UNKNOWN") for item in
                 (self._source, self._parent_descriptor, self._directory_descriptor)))
 
     def acquire(self) -> Path:
+        self._check_origin()
         if self._state != "UNACQUIRED":
             raise ValidationError(_PROFILE_SCRATCH_ERROR)
         self._state = "ACQUIRING"
         try:
             self._created_name = tempfile.mkdtemp(prefix="mobile-release-profile-auth-")
+            self._check_origin()
             self._path = Path(self._created_name)
             if not self._path.is_absolute():
                 raise ValidationError(_PROFILE_SCRATCH_ERROR)
@@ -314,6 +419,9 @@ class ScratchLease:
             self._state = "OWNED"
             return self._path
         except BaseException as error:
+            if self.pid != os.getpid():
+                self.after_fork_child()
+                raise ValidationError(_PROFILE_SCRATCH_ERROR) from None
             self._state = "UNKNOWN"
             self._errors.append(error)
             if isinstance(error, (KeyboardInterrupt, SystemExit, ValidationError)):
@@ -321,6 +429,7 @@ class ScratchLease:
             raise ValidationError(_PROFILE_SCRATCH_ERROR) from None
 
     def cleanup(self) -> None:
+        self._check_origin()
         if self._state == "REMOVED":
             return
         if (not self._finality.cleanup_allowed
@@ -359,6 +468,7 @@ class ScratchLease:
             # unlink never follows a symlink and refuses directories. Unexpected
             # entries make rmdir fail; do not add a recursive walk or repair.
             for name in _PROFILE_SCRATCH_FILES:
+                self._check_origin()
                 try:
                     os.unlink(name, dir_fd=directory_fd)
                 except FileNotFoundError:
@@ -369,6 +479,7 @@ class ScratchLease:
             # POSIX offers no atomic inode-conditional rmdir. These checks and
             # bound descriptors require cooperative same-UID namespace ownership;
             # they do not claim safety against a hostile concurrent replacer.
+            self._check_origin()
             os.rmdir(self._path.name, dir_fd=parent_fd)
         except BaseException as error:
             failure = error
@@ -383,6 +494,7 @@ class ScratchLease:
                     self._errors.append(error)
                     if failure is None:
                         failure = error
+        self._check_origin()
         if failure is not None:
             self._state = "UNKNOWN"
             if isinstance(failure, (KeyboardInterrupt, SystemExit, ValidationError)):
@@ -392,29 +504,73 @@ class ScratchLease:
         _PROFILE_SCRATCH_LEASES.remove(self)
 
 
-def read_profile_bytes(path: Path, *, maximum: int = MAX_PROFILE_BYTES) -> bytes:
+def _profile_evidence(evidence: ProfileCallEvidence | None, operation: str) -> tuple[ProfileCallEvidence, bool]:
+    if evidence is None:
+        return ProfileCallEvidence(operation=operation), True
+    if type(evidence) is not ProfileCallEvidence:
+        raise ValidationError(_PROFILE_SCOPE_ERROR)
+    return evidence, False
+
+
+def _finish_profile_evidence(evidence: ProfileCallEvidence, owned: bool, primary: BaseException | None) -> None:
+    if not owned:
+        return  # The caller may still have a read→decode or load obligation.
+    if evidence._pid != os.getpid():
+        _mark_fork_unsafe()
+        if primary is None:
+            raise ValidationError(_PROFILE_SCOPE_ERROR)
+        return
+    evidence._finish(primary=primary)
+    if primary is None and evidence.verdict().fatal:
+        raise ValidationError(_PROFILE_SCOPE_ERROR)
+
+
+def _profile_entry(
+    requested: ProfileCallEvidence | None, operation: str, cancellation: DefaultCancellation | None,
+) -> tuple[ProfileCallEvidence, bool, DefaultCancellation, bool]:
+    evidence, owns_evidence = _profile_evidence(requested, operation)
+    guard, owns_guard = _profile_cancellation(cancellation)
+    try:
+        # Admission refusal must latch the actual caller's lifetime owner too.
+        # This attachment acquires no resources and installs no handlers.
+        evidence._bind_guard(guard)
+        _require_profile_scratch_available(evidence)
+    except BaseException:
+        _finish_profile_evidence(evidence, owns_evidence, exc_info()[1])
+        raise
+    return evidence, owns_evidence, guard, owns_guard
+
+
+def read_profile_bytes(
+    path: Path, *, maximum: int = MAX_PROFILE_BYTES, deadline: InspectionDeadline | None = None,
+    cancellation: DefaultCancellation | None = None, _evidence: ProfileCallEvidence | None = None,
+) -> bytes:
     """Take one bounded no-follow snapshot with explicit raw descriptor ownership."""
-    if type(maximum) is not int or not 0 < maximum <= MAX_PROFILE_BYTES:
-        raise ValidationError("provisioning input read bound is invalid")
-    _require_profile_scratch_available()
+    evidence, owns_evidence, guard, owns_guard = _profile_entry(_evidence, "read", cancellation)
+    deadline = deadline if deadline is not None else InspectionDeadline()
     descriptor = _ProfileDescriptor()
-    cancellation = _profile_cancellation()
 
     def cleanup() -> None:
         scope.attempt(_PROFILE_DESCRIPTOR_ERROR, descriptor.close)
 
-    scope = _ProfileCleanupScope(cancellation, cleanup, owns_cancellation=True, descriptors=(descriptor,))
+    scope = _ProfileCleanupScope(guard, cleanup, owns_cancellation=owns_guard,
+                                 descriptors=(descriptor,), evidence=evidence, evidence_role="READER")
     try:
         with scope:
-            cancellation.install()
-            cancellation.activate()
+            if owns_guard:
+                guard.install()
+                guard.activate()
+            deadline.check()
+            guard.check()
+            if type(maximum) is not int or not 0 < maximum <= MAX_PROFILE_BYTES:
+                raise ValidationError("provisioning input read bound is invalid")
             # Reject ordinary invalid paths before any FD attempt. The later
             # no-follow open/fstat still establishes the actual read identity;
             # an open that was attempted but never published remains UNKNOWN.
             entry = os.lstat(path)
             if not stat.S_ISREG(entry.st_mode) or not 0 < entry.st_size <= maximum:
                 raise ValidationError("provisioning input must be a nonempty bounded regular file")
-            with cancellation.deferred():
+            with guard.deferred():
                 descriptor.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
             before = os.fstat(descriptor.number)
             if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= maximum:
@@ -423,7 +579,8 @@ def read_profile_bytes(path: Path, *, maximum: int = MAX_PROFILE_BYTES) -> bytes
                 raise ValidationError("provisioning input changed while being inspected")
             content = bytearray()
             while len(content) <= maximum:
-                cancellation.check()
+                deadline.check()
+                guard.check()
                 chunk = os.read(descriptor.number, min(64 * 1024, maximum + 1 - len(content)))
                 if not chunk:
                     break
@@ -432,11 +589,19 @@ def read_profile_bytes(path: Path, *, maximum: int = MAX_PROFILE_BYTES) -> bytes
             attributes = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
             if len(content) != before.st_size or any(getattr(before, key) != getattr(after, key) for key in attributes):
                 raise ValidationError("provisioning input changed while being inspected")
-            return bytes(content)
+            result = bytes(content)
     except OSError:
         raise ValidationError("provisioning input could not be read safely") from None
     finally:
-        scope.__exit__(*exc_info())
+        try:
+            scope.__exit__(*exc_info())
+        finally:
+            _finish_profile_evidence(evidence, owns_evidence, exc_info()[1])
+    # Only an otherwise normal path reaches acceptance, after EVERY local
+    # cleanup/handler obligation. A borrower's pending signal still vetoes bytes.
+    deadline.check()
+    guard.check()
+    return result
 
 
 def profile_environment(directory: Path) -> dict[str, str]:
@@ -460,23 +625,23 @@ def _capture_profile(
     if finality.state != "FINALIZED":
         raise ValidationError("Apple profile worker cleanup could not be confirmed; no upload is authorized")
     deadline.check()
-    if cancellation is not None:
-        cancellation.check()
+    # The actual owner retains the implicitly borrowed guard too. Never
+    # re-resolve a replacement or omit None-borrowed cancellation at this gate.
+    if finality._owner is None or finality._owner.cancellation is None:
+        raise ValidationError(_PROFILE_SCOPE_ERROR)
+    finality._owner.cancellation.check()
     if type(result) is not bytes or not 0 < len(result) <= MAX_PROFILE_BYTES:
         raise ValidationError(AUTHENTICATION_ERROR)
     return result
 
 
-def authenticate_cms(content: bytes, *, deadline: InspectionDeadline) -> bytes:
-    deadline.check()
-    if type(content) is not bytes or not 0 < len(content) <= MAX_PROFILE_BYTES:
-        raise ValidationError("provisioning CMS input exceeds its supported bounds")
-    if sys.platform != "darwin":
-        raise ValidationError("Apple provisioning-profile authentication requires macOS")
+def authenticate_cms(
+    content: bytes, *, deadline: InspectionDeadline, cancellation: DefaultCancellation | None = None,
+    _evidence: ProfileCallEvidence | None = None, _evidence_role: str = "OUTER_CMS",
+) -> bytes:
     from ._profile_process import CaptureFinality
 
-    _require_profile_scratch_available()
-    cancellation = _profile_cancellation()
+    evidence, owns_evidence, guard, owns_guard = _profile_entry(_evidence, "authenticate", cancellation)
     finality = CaptureFinality()
     scratch = ScratchLease(finality)
     descriptor = scratch._source
@@ -488,64 +653,129 @@ def authenticate_cms(content: bytes, *, deadline: InspectionDeadline) -> bytes:
     # Capture borrows this exact guard through source/scratch cleanup. UNKNOWN
     # stays rooted even if the owner raises or the caller discards the exception.
     scope = _ProfileCleanupScope(
-        cancellation, cleanup, owns_cancellation=True,
+        guard, cleanup, owns_cancellation=owns_guard,
         descriptors=(descriptor, scratch._directory_descriptor, scratch._parent_descriptor), scratch=scratch,
+        evidence=evidence, evidence_role=_evidence_role, finality=finality,
     )
     try:
         with scope:
-            cancellation.install()
-            cancellation.activate()
+            if owns_guard:
+                guard.install()
+                guard.activate()
             deadline.check()
-            cancellation.check()
-            with cancellation.deferred():
+            guard.check()
+            if type(content) is not bytes or not 0 < len(content) <= MAX_PROFILE_BYTES:
+                raise ValidationError("provisioning CMS input exceeds its supported bounds")
+            if sys.platform != "darwin":
+                raise ValidationError("Apple provisioning-profile authentication requires macOS")
+            with guard.deferred():
                 directory = scratch.acquire()
             deadline.check()
-            cancellation.check()
-            with cancellation.deferred():
+            guard.check()
+            with guard.deferred():
                 descriptor.open(
                     directory / "cms.der", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
                 )
             remaining = memoryview(content)
             while remaining:
                 deadline.check()
-                cancellation.check()
+                guard.check()
                 chunk = remaining[:64 * 1024]
                 count = os.write(descriptor.number, chunk)
                 if not 0 < count <= len(chunk):
                     raise ValidationError("Apple profile private input could not be written completely")
                 remaining = remaining[count:]
-            with cancellation.deferred():
+            with guard.deferred():
                 descriptor.close()
             deadline.check()
-            cancellation.check()
-            result = _capture_profile(directory, deadline, cancellation=cancellation, finality=finality)
+            guard.check()
+            result = _capture_profile(directory, deadline, cancellation=guard, finality=finality)
             deadline.check()
-            cancellation.check()
-        # Scratch/FD/handler cleanup cannot turn an expired inspection into a
-        # returned authorization. Never replace or renew the original deadline.
-        deadline.check()
-        cancellation.check()
-        return result
+            guard.check()
     except OSError:
         raise ValidationError("Apple profile private input could not be prepared safely") from None
     finally:
-        scope.__exit__(*exc_info())
+        try:
+            scope.__exit__(*exc_info())
+        finally:
+            _finish_profile_evidence(evidence, owns_evidence, exc_info()[1])
+    # Neither normal with dispatch nor the unconditional backup finally may
+    # occur after this final acceptance gate.
+    deadline.check()
+    guard.check()
+    return result
 
 
-def decode_authenticated_profile(content: bytes, *, deadline: InspectionDeadline | None = None) -> dict[str, Any]:
+def _no_profile_cleanup() -> None:
+    """LOAD/DECODE own local/handler obligations, never an extra process slot."""
+
+
+def decode_authenticated_profile(
+    content: bytes, *, deadline: InspectionDeadline | None = None,
+    cancellation: DefaultCancellation | None = None, _evidence: ProfileCallEvidence | None = None,
+) -> dict[str, Any]:
     from .ios_der import decode_der_dictionary
     from .ios_entitlements import correlate_profile, load_plist_dictionary
 
+    evidence, owns_evidence, guard, owns_guard = _profile_entry(_evidence, "decode", cancellation)
     deadline = deadline if deadline is not None else InspectionDeadline()
-    outer = load_plist_dictionary(authenticate_cms(content, deadline=deadline), deadline=deadline)
-    encoded = outer.get("DER-Encoded-Profile")
-    if type(encoded) is not bytes or not 0 < len(encoded) <= MAX_PROFILE_BYTES:
-        raise ValidationError("modern iOS profile requires its authoritative DER-Encoded-Profile; legacy-only profiles are unsupported")
-    authoritative = decode_der_dictionary(authenticate_cms(encoded, deadline=deadline), profile=True, deadline=deadline)
-    return correlate_profile(outer, authoritative, deadline=deadline)
-
-
-def load_authenticated_profile(path: Path, *, deadline: InspectionDeadline | None = None) -> dict[str, Any]:
-    deadline = deadline if deadline is not None else InspectionDeadline()
+    scope = _ProfileCleanupScope(guard, _no_profile_cleanup, owns_cancellation=owns_guard,
+                                 descriptors=(), evidence=evidence, evidence_role="DECODE")
+    try:
+        with scope:
+            if owns_guard:
+                guard.install()
+                guard.activate()
+            deadline.check()
+            guard.check()
+            evidence._expect("OUTER_CMS")
+            outer = load_plist_dictionary(authenticate_cms(
+                content, deadline=deadline, cancellation=guard, _evidence=evidence,
+                _evidence_role="OUTER_CMS",
+            ), deadline=deadline)
+            encoded = outer.get("DER-Encoded-Profile")
+            if type(encoded) is not bytes or not 0 < len(encoded) <= MAX_PROFILE_BYTES:
+                raise ValidationError("modern iOS profile requires its authoritative DER-Encoded-Profile; legacy-only profiles are unsupported")
+            evidence._expect("INNER_CMS")
+            authoritative = decode_der_dictionary(authenticate_cms(
+                encoded, deadline=deadline, cancellation=guard, _evidence=evidence,
+                _evidence_role="INNER_CMS",
+            ), profile=True, deadline=deadline)
+            result = correlate_profile(outer, authoritative, deadline=deadline)
+    finally:
+        try:
+            scope.__exit__(*exc_info())
+        finally:
+            _finish_profile_evidence(evidence, owns_evidence, exc_info()[1])
     deadline.check()
-    return decode_authenticated_profile(read_profile_bytes(path), deadline=deadline)
+    guard.check()
+    return result
+
+
+def load_authenticated_profile(
+    path: Path, *, deadline: InspectionDeadline | None = None,
+    cancellation: DefaultCancellation | None = None, _evidence: ProfileCallEvidence | None = None,
+) -> dict[str, Any]:
+    evidence, owns_evidence, guard, owns_guard = _profile_entry(_evidence, "load", cancellation)
+    deadline = deadline if deadline is not None else InspectionDeadline()
+    scope = _ProfileCleanupScope(guard, _no_profile_cleanup, owns_cancellation=owns_guard,
+                                 descriptors=(), evidence=evidence, evidence_role="LOAD")
+    try:
+        with scope:
+            if owns_guard:
+                guard.install()
+                guard.activate()
+            deadline.check()
+            guard.check()
+            evidence._expect("READER")
+            content = read_profile_bytes(path, deadline=deadline, cancellation=guard, _evidence=evidence)
+            evidence._expect("DECODE")
+            result = decode_authenticated_profile(content, deadline=deadline, cancellation=guard, _evidence=evidence)
+    finally:
+        try:
+            scope.__exit__(*exc_info())
+        finally:
+            _finish_profile_evidence(evidence, owns_evidence, exc_info()[1])
+    deadline.check()
+    guard.check()
+    return result

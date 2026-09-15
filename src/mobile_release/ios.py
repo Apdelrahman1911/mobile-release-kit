@@ -13,15 +13,21 @@ import zipfile
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .config import ReleaseConfig, ReleaseVersion
 from .credentials import artifact_validation_environment
 from .discovery import discover_project, selected_ios_container, selected_ios_scheme
+from .owned_process import ProcessError
+from ._lifetime_evidence import ProfileCallEvidence
+from ._profile_callers import consume_profile_evidence, first_primary_context
 from .errors import ValidationError
 from .inspection import InspectionDeadline
 from .reporting import FAILING_STATUSES, Finding, Status
 from .tooling import recreate_private_build_directory
+
+if TYPE_CHECKING:
+    from .local_signing import SigningSession
 
 MAX_ENTRY_SIZE = 1024 * 1024 * 1024
 MAX_TOTAL_SIZE = 4 * 1024 * 1024 * 1024
@@ -200,12 +206,22 @@ def _validated_ipa_entries(path: Path, *, deadline: InspectionDeadline | None = 
     return archive, entries
 
 
-def _profile_details(path: Path, *, deadline: InspectionDeadline | None = None) -> dict[str, Any] | None:
+def _profile_details(path: Path, *, deadline: InspectionDeadline | None = None, cancellation=None) -> dict[str, Any] | None:
     if sys.platform != "darwin":
         return None
     from .ios_profiles import load_authenticated_profile
 
-    return load_authenticated_profile(path, deadline=deadline)
+    evidence = ProfileCallEvidence(operation="load")
+    primary = None
+    try:
+        profile = load_authenticated_profile(path, deadline=deadline, cancellation=cancellation, _evidence=evidence)
+    except BaseException as error:
+        primary = error
+    consume_profile_evidence(evidence, primary=primary,
+                             message="embedded profile lifetime is unconfirmed; end this invocation")
+    if primary is not None:
+        raise primary
+    return profile
 
 
 def _code_executable(code_path: Path, *, deadline: InspectionDeadline) -> Path | None:
@@ -389,6 +405,7 @@ def _nested_codesign_identities(
     *,
     _validity_intervals: list[SigningValidityInterval] | None = None,
     deadline: InspectionDeadline | None = None,
+    cancellation=None,
 ) -> list[tuple[Path, str, str]] | None:
     if sys.platform != "darwin" or not shutil.which("codesign") or not shutil.which("openssl"):
         return None
@@ -482,6 +499,7 @@ def _nested_codesign_identities(
                 signer_fingerprint=fingerprint,
                 _validity_intervals=_validity_intervals,
                 deadline=deadline,
+                cancellation=cancellation,
             )
         elif code_path not in profiled_executables:
             entitlements = _codesign_entitlements(code_path, deadline=deadline)
@@ -555,6 +573,7 @@ def _validate_nested_bundle_security(
     signer_fingerprint: str,
     _validity_intervals: list[SigningValidityInterval] | None = None,
     deadline: InspectionDeadline | None = None,
+    cancellation=None,
 ) -> None:
     """Bind a nested app/extension to its signer, profile, team, and release entitlements."""
 
@@ -591,7 +610,7 @@ def _validate_nested_bundle_security(
         raise ValidationError(
             f"nested application lacks a safe embedded provisioning profile: {code_path.name}"
         )
-    profile = _profile_details(profile_path, deadline=deadline)
+    profile = _profile_details(profile_path, deadline=deadline, cancellation=cancellation)
     if profile is None:
         raise ValidationError(
             f"nested provisioning profile could not be inspected: {code_path.name}"
@@ -654,6 +673,7 @@ def _validate_ipa(
     require_tools: bool = False,
     _validity_intervals: list[SigningValidityInterval] | None = None,
     deadline: InspectionDeadline | None = None,
+    cancellation=None,
 ) -> list[Finding]:
     from .ios_entitlements import MAX_PLIST_BYTES, load_plist_dictionary, validate_profile_entitlements
 
@@ -663,176 +683,178 @@ def _validate_ipa(
         archive, entries = _validated_ipa_entries(path, deadline=deadline)
     except ValidationError as error:
         return [Finding("ios.ipa.structure", Status.FAIL, str(error), category="ios-artifact")]
-    try:
-        plist_entries = [
-            entry
-            for entry in entries
-            if re.fullmatch(r"Payload/[^/]+\.app/Info\.plist", entry.filename)
-        ]
-        if len(plist_entries) != 1:
-            raise ValidationError(f"IPA must contain exactly one application; found {len(plist_entries)}")
-        app_prefix = plist_entries[0].filename.removesuffix("Info.plist")
-        if plist_entries[0].file_size > MAX_PLIST_BYTES:
-            raise ValidationError("IPA Info.plist exceeds its bound")
-        info = load_plist_dictionary(archive.read(plist_entries[0]), deadline=deadline)
-        expectations = {
-            "CFBundleIdentifier": expected_bundle_id,
-            "CFBundleShortVersionString": release.name,
-            "CFBundleVersion": str(release.build),
-        }
-        for key, expected in expectations.items():
-            if str(info.get(key)) != expected:
-                raise ValidationError(f"IPA {key} does not match the configured release value")
-        executable = info.get("CFBundleExecutable")
-        if not isinstance(executable, str) or not executable:
-            raise ValidationError("IPA Info.plist lacks CFBundleExecutable")
-        executable_entry = next(
-            (entry for entry in entries if entry.filename == f"{app_prefix}{executable}"), None
-        )
-        if executable_entry is None or executable_entry.file_size == 0:
-            raise ValidationError("IPA application executable is missing or empty")
-        if not any(entry.filename == f"{app_prefix}_CodeSignature/CodeResources" for entry in entries):
-            raise ValidationError("IPA application signature resources are missing")
-        profile_entry = next(
-            (entry for entry in entries if entry.filename == f"{app_prefix}embedded.mobileprovision"),
-            None,
-        )
-        if profile_entry is None:
-            raise ValidationError("IPA embedded provisioning profile is missing")
-        findings.append(
-            Finding(
-                "ios.ipa.structure",
-                Status.PASS,
-                "IPA identity, version, executable, signature resources, and profile are present.",
-                category="ios-artifact",
+    with first_primary_context(archive, cancellation=cancellation, expose_owner=True) as (_archive, cancellation):
+        try:
+            plist_entries = [
+                entry
+                for entry in entries
+                if re.fullmatch(r"Payload/[^/]+\.app/Info\.plist", entry.filename)
+            ]
+            if len(plist_entries) != 1:
+                raise ValidationError(f"IPA must contain exactly one application; found {len(plist_entries)}")
+            app_prefix = plist_entries[0].filename.removesuffix("Info.plist")
+            if plist_entries[0].file_size > MAX_PLIST_BYTES:
+                raise ValidationError("IPA Info.plist exceeds its bound")
+            info = load_plist_dictionary(archive.read(plist_entries[0]), deadline=deadline)
+            expectations = {
+                "CFBundleIdentifier": expected_bundle_id,
+                "CFBundleShortVersionString": release.name,
+                "CFBundleVersion": str(release.build),
+            }
+            for key, expected in expectations.items():
+                if str(info.get(key)) != expected:
+                    raise ValidationError(f"IPA {key} does not match the configured release value")
+            executable = info.get("CFBundleExecutable")
+            if not isinstance(executable, str) or not executable:
+                raise ValidationError("IPA Info.plist lacks CFBundleExecutable")
+            executable_entry = next(
+                (entry for entry in entries if entry.filename == f"{app_prefix}{executable}"), None
             )
-        )
-
-        with tempfile.TemporaryDirectory(prefix="mobile-release-ipa-") as temporary_string:
-            temporary = Path(temporary_string)
-            archive.extractall(temporary)
-            deadline.check()
-            app_path = temporary / app_prefix.rstrip("/")
-            profile_path = app_path / "embedded.mobileprovision"
-            profile = _profile_details(profile_path, deadline=deadline)
-            profile_fingerprints: set[str] | None = None
-            if profile is None:
-                findings.append(
-                    Finding(
-                        "ios.ipa.profile",
-                        Status.FAIL if require_tools else Status.SKIP,
-                        "Provisioning-profile inspection requires macOS security tooling.",
-                        category="ios-artifact",
-                    )
-                )
-            else:
-                entitlements = profile.get("Entitlements", {})
-                if not isinstance(entitlements, dict):
-                    raise ValidationError("profile entitlements have an invalid structure")
-                app_identifier = entitlements.get("application-identifier")
-                teams = profile.get("TeamIdentifier", [])
-                if app_identifier != f"{expected_team_id}.{expected_bundle_id}":
-                    raise ValidationError("profile application-identifier does not match team and bundle")
-                if type(teams) is not list or teams != [expected_team_id]:
-                    raise ValidationError("profile TeamIdentifier does not match configuration")
-                if entitlements.get("get-task-allow") is not False:
-                    raise ValidationError("profile permits debugger attachment")
-                if entitlements.get("beta-reports-active") is not True:
-                    raise ValidationError("profile is not enabled for App Store/TestFlight distribution")
-                if profile.get("ProvisionedDevices") or profile.get("ProvisionsAllDevices"):
-                    raise ValidationError("profile is not an App Store distribution profile")
-                interval = _profile_validity(profile)
-                if _validity_intervals is not None:
-                    _validity_intervals.append(interval)
-                profile_fingerprints = _profile_certificate_fingerprints(profile)
-                findings.append(
-                    Finding(
-                        "ios.ipa.profile",
-                        Status.PASS,
-                        "Embedded App Store profile matches the approved app and team.",
-                        category="ios-artifact",
-                    )
-                )
-
-            entitlements = _codesign_entitlements(app_path, deadline=deadline)
-            if entitlements is None:
-                findings.append(
-                    Finding(
-                        "ios.ipa.entitlements",
-                        Status.FAIL if require_tools else Status.SKIP,
-                        "Signed-entitlement inspection requires macOS codesign.",
-                        category="ios-artifact",
-                    )
-                )
-            elif (
-                entitlements.get("application-identifier")
-                != f"{expected_team_id}.{expected_bundle_id}"
-                or entitlements.get("com.apple.developer.team-identifier") != expected_team_id
-                or ("get-task-allow" in entitlements and entitlements["get-task-allow"] is not False)
-            ):
-                raise ValidationError(
-                    "application signed entitlements do not match the approved team/bundle release policy"
-                )
-            else:
-                if profile is not None:
-                    validate_profile_entitlements(
-                        entitlements, profile.get("Entitlements", {}), deadline=deadline,
-                    )
-                findings.append(
-                    Finding(
-                        "ios.ipa.entitlements",
-                        Status.PASS if profile is not None else (Status.FAIL if require_tools else Status.SKIP),
-                        "All signed application entitlements fit the authoritative profile-content allowlist."
-                        if profile is not None else "Complete entitlement comparison requires the embedded profile.",
-                        category="ios-artifact",
-                    )
-                )
-
-            fingerprint = _codesign_fingerprint(
-                app_path, temporary, _validity_intervals=_validity_intervals, deadline=deadline,
+            if executable_entry is None or executable_entry.file_size == 0:
+                raise ValidationError("IPA application executable is missing or empty")
+            if not any(entry.filename == f"{app_prefix}_CodeSignature/CodeResources" for entry in entries):
+                raise ValidationError("IPA application signature resources are missing")
+            profile_entry = next(
+                (entry for entry in entries if entry.filename == f"{app_prefix}embedded.mobileprovision"),
+                None,
             )
-            if fingerprint is None:
-                findings.append(
-                    Finding(
-                        "ios.ipa.signer",
-                        Status.FAIL if require_tools else Status.SKIP,
-                        "Deep code-signing inspection requires macOS codesign and openssl.",
-                        category="ios-artifact",
+            if profile_entry is None:
+                raise ValidationError("IPA embedded provisioning profile is missing")
+            findings.append(
+                Finding(
+                    "ios.ipa.structure",
+                    Status.PASS,
+                    "IPA identity, version, executable, signature resources, and profile are present.",
+                    category="ios-artifact",
+                )
+            )
+
+            with first_primary_context(tempfile.TemporaryDirectory(prefix="mobile-release-ipa-"), cancellation=cancellation) as temporary_string:
+                temporary = Path(temporary_string)
+                archive.extractall(temporary)
+                deadline.check()
+                app_path = temporary / app_prefix.rstrip("/")
+                profile_path = app_path / "embedded.mobileprovision"
+                profile = _profile_details(profile_path, deadline=deadline, cancellation=cancellation)
+                profile_fingerprints: set[str] | None = None
+                if profile is None:
+                    findings.append(
+                        Finding(
+                            "ios.ipa.profile",
+                            Status.FAIL if require_tools else Status.SKIP,
+                            "Provisioning-profile inspection requires macOS security tooling.",
+                            category="ios-artifact",
+                        )
                     )
-                )
-            elif expected_fingerprint and fingerprint != expected_fingerprint.replace(":", "").lower():
-                raise ValidationError("IPA signer does not match the approved distribution certificate")
-            elif profile_fingerprints is not None and fingerprint not in profile_fingerprints:
-                raise ValidationError(
-                    "IPA signer certificate is not authorized by the embedded provisioning profile"
-                )
-            else:
-                nested_identities = _nested_codesign_identities(
+                else:
+                    entitlements = profile.get("Entitlements", {})
+                    if not isinstance(entitlements, dict):
+                        raise ValidationError("profile entitlements have an invalid structure")
+                    app_identifier = entitlements.get("application-identifier")
+                    teams = profile.get("TeamIdentifier", [])
+                    if app_identifier != f"{expected_team_id}.{expected_bundle_id}":
+                        raise ValidationError("profile application-identifier does not match team and bundle")
+                    if type(teams) is not list or teams != [expected_team_id]:
+                        raise ValidationError("profile TeamIdentifier does not match configuration")
+                    if entitlements.get("get-task-allow") is not False:
+                        raise ValidationError("profile permits debugger attachment")
+                    if entitlements.get("beta-reports-active") is not True:
+                        raise ValidationError("profile is not enabled for App Store/TestFlight distribution")
+                    if profile.get("ProvisionedDevices") or profile.get("ProvisionsAllDevices"):
+                        raise ValidationError("profile is not an App Store distribution profile")
+                    interval = _profile_validity(profile)
+                    if _validity_intervals is not None:
+                        _validity_intervals.append(interval)
+                    profile_fingerprints = _profile_certificate_fingerprints(profile)
+                    findings.append(
+                        Finding(
+                            "ios.ipa.profile",
+                            Status.PASS,
+                            "Embedded App Store profile matches the approved app and team.",
+                            category="ios-artifact",
+                        )
+                    )
+
+                entitlements = _codesign_entitlements(app_path, deadline=deadline)
+                if entitlements is None:
+                    findings.append(
+                        Finding(
+                            "ios.ipa.entitlements",
+                            Status.FAIL if require_tools else Status.SKIP,
+                            "Signed-entitlement inspection requires macOS codesign.",
+                            category="ios-artifact",
+                        )
+                    )
+                elif (
+                    entitlements.get("application-identifier")
+                    != f"{expected_team_id}.{expected_bundle_id}"
+                    or entitlements.get("com.apple.developer.team-identifier") != expected_team_id
+                    or ("get-task-allow" in entitlements and entitlements["get-task-allow"] is not False)
+                ):
+                    raise ValidationError(
+                        "application signed entitlements do not match the approved team/bundle release policy"
+                    )
+                else:
+                    if profile is not None:
+                        validate_profile_entitlements(
+                            entitlements, profile.get("Entitlements", {}), deadline=deadline,
+                        )
+                    findings.append(
+                        Finding(
+                            "ios.ipa.entitlements",
+                            Status.PASS if profile is not None else (Status.FAIL if require_tools else Status.SKIP),
+                            "All signed application entitlements fit the authoritative profile-content allowlist."
+                            if profile is not None else "Complete entitlement comparison requires the embedded profile.",
+                            category="ios-artifact",
+                        )
+                    )
+
+                fingerprint = _codesign_fingerprint(
                     app_path, temporary, _validity_intervals=_validity_intervals, deadline=deadline,
                 )
-                if nested_identities is None:
-                    raise ValidationError(
-                        "nested code identity inspection requires macOS codesign and openssl"
-                    )
-                for nested_path, team_id, nested_fingerprint in nested_identities:
-                    if team_id != expected_team_id or nested_fingerprint != fingerprint:
-                        raise ValidationError(
-                            "nested code signer/team does not match the approved application: "
-                            f"{nested_path.name}"
+                if fingerprint is None:
+                    findings.append(
+                        Finding(
+                            "ios.ipa.signer",
+                            Status.FAIL if require_tools else Status.SKIP,
+                            "Deep code-signing inspection requires macOS codesign and openssl.",
+                            category="ios-artifact",
                         )
-                findings.append(
-                    Finding(
-                        "ios.ipa.signer",
-                        Status.PASS,
-                        "IPA and every bounded nested-code identity match the approved signer/team.",
-                        category="ios-artifact",
                     )
-                )
-        deadline.check()
-    except ValidationError as error:
-        findings.append(Finding("ios.ipa.validation", Status.FAIL, str(error), category="ios-artifact"))
-    finally:
-        archive.close()
+                elif expected_fingerprint and fingerprint != expected_fingerprint.replace(":", "").lower():
+                    raise ValidationError("IPA signer does not match the approved distribution certificate")
+                elif profile_fingerprints is not None and fingerprint not in profile_fingerprints:
+                    raise ValidationError(
+                        "IPA signer certificate is not authorized by the embedded provisioning profile"
+                    )
+                else:
+                    nested_identities = _nested_codesign_identities(
+                        app_path, temporary, _validity_intervals=_validity_intervals, deadline=deadline,
+                        cancellation=cancellation,
+                    )
+                    if nested_identities is None:
+                        raise ValidationError(
+                            "nested code identity inspection requires macOS codesign and openssl"
+                        )
+                    for nested_path, team_id, nested_fingerprint in nested_identities:
+                        if team_id != expected_team_id or nested_fingerprint != fingerprint:
+                            raise ValidationError(
+                                "nested code signer/team does not match the approved application: "
+                                f"{nested_path.name}"
+                            )
+                    findings.append(
+                        Finding(
+                            "ios.ipa.signer",
+                            Status.PASS,
+                            "IPA and every bounded nested-code identity match the approved signer/team.",
+                            category="ios-artifact",
+                        )
+                    )
+            deadline.check()
+        except ValidationError as error:
+            if isinstance(error, ProcessError) and error.fatal:
+                raise  # Unconfirmed cleanup cannot become an ordinary diagnostic.
+            findings.append(Finding("ios.ipa.validation", Status.FAIL, str(error), category="ios-artifact"))
     return findings
 
 
@@ -845,6 +867,7 @@ def validate_ipa(
     release: ReleaseVersion,
     require_tools: bool = False,
     deadline: InspectionDeadline | None = None,
+    cancellation=None,
 ) -> list[Finding]:
     """Validate the final IPA against current-time signing/profile policy."""
 
@@ -856,6 +879,7 @@ def validate_ipa(
         release=release,
         require_tools=require_tools,
         deadline=deadline,
+        cancellation=cancellation,
     )
 
 
@@ -868,6 +892,7 @@ def validate_ipa_current_signing(
     release: ReleaseVersion,
     require_tools: bool = True,
     deadline: InspectionDeadline | None = None,
+    cancellation=None,
 ) -> tuple[list[Finding], SigningValidityInterval | None]:
     """Perform every IPA check and retain the intersection of validated dates.
 
@@ -885,6 +910,7 @@ def validate_ipa_current_signing(
         require_tools=require_tools,
         _validity_intervals=intervals,
         deadline=deadline,
+        cancellation=cancellation,
     )
     if any(item.status in FAILING_STATUSES or item.status == Status.SKIP for item in findings):
         return findings, None
@@ -901,12 +927,12 @@ def validate_ipa_current_signing(
     return findings, interval
 
 
-def ipa_signing_evidence(path: Path, *, deadline: InspectionDeadline | None = None) -> dict[str, str]:
+def ipa_signing_evidence(path: Path, *, deadline: InspectionDeadline | None = None, cancellation=None) -> dict[str, str]:
     """Extract public signing/profile identity from a previously validated IPA."""
 
     deadline = deadline if deadline is not None else InspectionDeadline()
     archive, entries = _validated_ipa_entries(path, deadline=deadline)
-    try:
+    with first_primary_context(archive, cancellation=cancellation, expose_owner=True) as (_archive, cancellation):
         profile_entries = [
             item
             for item in entries
@@ -922,14 +948,14 @@ def ipa_signing_evidence(path: Path, *, deadline: InspectionDeadline | None = No
         if len(plist_entries) != 1:
             raise ValidationError("IPA must contain exactly one application")
         app_prefix = plist_entries[0].filename.removesuffix("Info.plist")
-        with tempfile.TemporaryDirectory(prefix="mobile-release-profile-") as temporary_string:
+        with first_primary_context(tempfile.TemporaryDirectory(prefix="mobile-release-profile-"), cancellation=cancellation) as temporary_string:
             temporary = Path(temporary_string)
             archive.extractall(temporary)
             deadline.check()
             app_path = temporary / app_prefix.rstrip("/")
             profile_path = app_path / "embedded.mobileprovision"
             profile_path.write_bytes(archive.read(profile_entries[0]))
-            profile = _profile_details(profile_path, deadline=deadline)
+            profile = _profile_details(profile_path, deadline=deadline, cancellation=cancellation)
             signer_fingerprint = _codesign_fingerprint(app_path, temporary, deadline=deadline)
         if profile is None:
             raise ValidationError("iOS signing evidence extraction requires macOS security tooling")
@@ -967,8 +993,6 @@ def ipa_signing_evidence(path: Path, *, deadline: InspectionDeadline | None = No
             .isoformat()
             .replace("+00:00", "Z"),
         }
-    finally:
-        archive.close()
 
 
 def validate_xcarchive(
@@ -1014,29 +1038,31 @@ def _run_checked(
     timeout: int,
     *,
     environment_overrides: dict[str, str] | None = None,
+    signing_session: SigningSession | None = None,
+    execution_source=None,
 ) -> None:
+    from .owned_process import run_owned
+
     environment = os.environ.copy()
     environment.update(environment_overrides or {})
-    try:
-        result = subprocess.run(
-            argv,
-            cwd=root,
-            env=environment,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=timeout,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as error:
-        raise ValidationError(f"command failed or timed out: {argv[0]}") from error
+    if signing_session is None:
+        result = run_owned(argv, cwd=root, environ=environment, capture=False, timeout=timeout,
+                           execution_scope=None if execution_source is None else execution_source.new_scope())
+    else:
+        result = signing_session.run(argv, kind="build", cwd=root, environ=environment, capture=False, timeout=timeout)
     if result.returncode:
         raise ValidationError(f"command failed with exit {result.returncode}: {argv[0]}")
 
 
-def run_ios_build(config: ReleaseConfig, *, signed: bool) -> dict[str, Path]:
+def run_ios_build(config: ReleaseConfig, *, signed: bool, signing_session: SigningSession | None = None,
+                  execution_source=None) -> dict[str, Path]:
     if sys.platform != "darwin":
         raise ValidationError("iOS archive/export requires a macOS host")
-    discovered = discover_project(config.root)
+    if signed:
+        if signing_session is None:
+            raise ValidationError("signed iOS builds require an active account signing session")
+        signing_session.assert_owner()
+    discovered = discover_project(config.root, include_git=False)
     container = selected_ios_container(config, discovered)
     scheme = selected_ios_scheme(config, discovered)
     if not container:
@@ -1046,8 +1072,9 @@ def run_ios_build(config: ReleaseConfig, *, signed: bool) -> dict[str, Path]:
     ios = config.section("ios")
     release = config.release_version()
     if prepare := ios.get("prepareCommand"):
-        _run_checked(list(prepare), config.root, 10 * 60)
-        discovered = discover_project(config.root)
+        _run_checked(list(prepare), config.root, 10 * 60, signing_session=signing_session,
+                     execution_source=execution_source)
+        discovered = discover_project(config.root, include_git=False)
         container = selected_ios_container(config, discovered)
         if not container:
             raise ValidationError("iOS preparation command did not produce the configured Xcode container")
@@ -1098,6 +1125,8 @@ def run_ios_build(config: ReleaseConfig, *, signed: bool) -> dict[str, Path]:
         config.root,
         60 * 60,
         environment_overrides=build_environment,
+        signing_session=signing_session,
+        execution_source=execution_source,
     )
     archive = config.project_path(str(archive))
     _validate_generated_tree(archive, label="generated xcarchive")
@@ -1148,6 +1177,8 @@ def run_ios_build(config: ReleaseConfig, *, signed: bool) -> dict[str, Path]:
         config.root,
         30 * 60,
         environment_overrides=build_environment,
+        signing_session=signing_session,
+        execution_source=execution_source,
     )
     export_dir = config.project_path(str(export_dir))
     _validate_generated_tree(export_dir, label="iOS export directory")

@@ -561,6 +561,91 @@ class CISandboxPureTests(unittest.TestCase):
         with self.assertRaises(dataclasses.FrozenInstanceError):
             result.waited = False
 
+    def test_capture_diagnostics_are_closed_bounded_and_match_controller(self):
+        # Parse the existing controller's pure projection, never import or run
+        # another controller. The literal counterpart must not drift silently.
+        names = {"CAPTURE_ERROR_CODE_LIMIT", "_CAPTURE_ERROR_MESSAGES", "_CAPTURE_EXCEPTION_PREFIXES",
+                 "_capture_error_code"}
+
+        def projection(path):
+            selected = {}
+            for node in ast.parse(path.read_text(encoding="utf-8")).body:
+                name = (node.name if isinstance(node, ast.FunctionDef) else
+                        node.targets[0].id if isinstance(node, ast.Assign) and len(node.targets) == 1
+                        and isinstance(node.targets[0], ast.Name) else None)
+                if name in names:
+                    self.assertNotIn(name, selected)
+                    selected[name] = ast.dump(node, include_attributes=False)
+            self.assertEqual(set(selected), names)
+            return selected
+
+        self.assertEqual(projection(ROOT / ".github/scripts/ci_sandbox.py"),
+                         projection(ROOT / ".github/scripts/verify_ci.py"))
+        self.assertEqual(self.module.CAPTURE_ERROR_CODE_LIMIT, 32)
+        private = "PRIVATE_CAPTURE_DIAGNOSTIC_CANARY"
+
+        class Unformattable:
+            def __str__(self):
+                raise AssertionError("capture diagnostics may not format an arbitrary reason")
+
+        unknown = Unformattable()
+        many = tuple("capture close OSError" if index % 2 else private for index in range(80))
+        samples = (
+            (None, (), None, []),
+            ("command/original aggregate deadline expired", ("reserved identity did not reach finality",),
+             "TIMEOUT", ["DOMAIN_FINALITY"]),
+            ("finality exceeded original command cutoff", ("reserved identity census DeadlineExpired",),
+             "FINALITY_TIMEOUT", ["DOMAIN_CENSUS"]),
+            ("collection OSError: " + private + " /private/secret pid=4242", many, "UNCLASSIFIED",
+             ["CAPTURE_CLOSE" if index % 2 else "UNCLASSIFIED" for index in range(32)]),
+            ("collection " + private, ("reserved identity census " + private,), "COLLECTION", ["DOMAIN_CENSUS"]),
+            (unknown, (unknown,), "UNCLASSIFIED", ["UNCLASSIFIED"]),
+        )
+        session = session_double(self.module)
+        session.failure, session.admitted = "earlier immutable failure", False
+        stdout = ("finality exceeded original command cutoff\n" + private + "\n").encode()
+        stderr = ("reserved identity census OSError\n" + private + "\n").encode()
+        with patch.multiple(self.module, os=SimpleNamespace(), subprocess=SimpleNamespace(),
+                            socket=SimpleNamespace(), signal=SimpleNamespace(), time=SimpleNamespace(),
+                            _domain=Mock(side_effect=AssertionError("capture projection cannot observe processes"))), \
+             patch.object(session, "_run", side_effect=AssertionError("capture projection cannot launch a command")), \
+             patch.object(Path, "read_bytes", side_effect=AssertionError("only the original captured bytes are available")), \
+             patch.object(Path, "read_text", side_effect=AssertionError("projection cannot read provider files")), \
+             patch.object(Path, "stat", side_effect=AssertionError("projection cannot inspect provider metadata")), \
+             patch.object(Path, "resolve", side_effect=AssertionError("projection cannot resolve provider paths")):
+            for index, (reason, errors, primary_code, cleanup_codes) in enumerate(samples):
+                with self.subTest(capture_projection=index):
+                    result = self.module.CapturedRun(stdout, stderr, 0, True, True, True, reason is None,
+                        index in {1, 2}, False, 1.23456, reason, errors, (len(stdout), len(stderr)))
+                    before = tuple(getattr(result, field.name) for field in dataclasses.fields(result))
+                    with patch.object(self.module, "_capture_error_code", wraps=self.module._capture_error_code) as classify:
+                        row = session._note_capture("inert-control", result)
+                    self.assertEqual([call.args[0] for call in classify.call_args_list],
+                                     [*errors[:32], *([] if reason is None else [reason])])
+                    self.assertEqual(row["primary_error_code"], primary_code)
+                    self.assertEqual(row["cleanup_error_codes"], cleanup_codes)
+                    self.assertEqual((row["cleanup_error_count"], row["cleanup_error_codes_omitted"]),
+                                     (len(errors), max(0, len(errors) - 32)))
+                    self.assertEqual(row["error_count"], len(errors) + (reason is not None))
+                    self.assertEqual(row["seconds"], 1.235)
+                    self.assertFalse(row["ok"])
+                    self.assertEqual(row["subject_ok"], result.ok)
+                    self.assertEqual(row["domain_finality"], result.domain_finality)
+                    self.assertEqual(row["timed_out"], result.timed_out)
+                    self.assertIs(row, session.admission_results[-1])
+                    public = json.dumps(row)
+                    self.assertLess(len(public), 4096)
+                    for hidden in (private, "/private/", "4242", "OSError", "DeadlineExpired"):
+                        self.assertNotIn(hidden, public)
+                    row["primary_error_code"] = None
+                    row["cleanup_error_codes"].clear()
+                    row["persisted"][0] = 0
+                    self.assertEqual(tuple(getattr(result, field.name) for field in dataclasses.fields(result)), before)
+                    self.assertIs(result.cleanup_errors, errors)
+                    self.assertEqual(session.failure, "earlier immutable failure")
+                    self.assertFalse(session.admitted or session.domain_finality)
+                    self.assertEqual(session.cleanup_errors, [])
+
     def test_first_failure_and_original_aggregate_guard_never_reset(self):
         session = session_double(self.module)
         with patch.object(self.module, "time", SimpleNamespace(monotonic=lambda: 0.0)):
@@ -2250,7 +2335,7 @@ class CISandboxPureTests(unittest.TestCase):
             with self.subTest(platform=platform, groups=groups):
                 fstat = Mock(side_effect=DescriptorBoundary)
                 fake_os = SimpleNamespace(getuid=lambda: uid, geteuid=lambda: uid,
-                                          getgid=lambda: gid, getegid=lambda: gid, fstat=fstat)
+                                          getgid=lambda: gid, getegid=lambda: gid, fstat=fstat, environ={})
                 with patch.dict(sys.modules, {"ctypes": None}), \
                      patch.multiple(self.module, os=fake_os, socket=SimpleNamespace(),
                                     subprocess=SimpleNamespace(), signal=SimpleNamespace(),
@@ -2654,11 +2739,11 @@ class CISandboxPureTests(unittest.TestCase):
         helper = (ROOT / ".github/scripts/ci_sandbox.py").read_text(encoding="utf-8")
         imports = ("import dataclasses", "import errno", "import grp", "import hashlib", "import importlib.util",
             "import json", "import math", "import os", "from pathlib import Path", "import pwd", "import re",
-            "import resource", "import secrets", "import selectors", "import signal", "import socket", "import stat",
-            "import subprocess", "import sys", "import time")
+            "import resource", "import secrets", "import select", "import selectors", "import signal", "import socket", "import stat",
+            "import subprocess", "import sys", "import termios", "import time", "import tty")
         future = "from __future__ import annotations"
         tokens = ["MRK_NATIVE_PYTHON_BOOT", *(f"MRK_NATIVE_IMPORT_{index:02}_{edge}"
-            for index in range(1, 21) for edge in ("BEFORE", "AFTER")), "MRK_NATIVE_PYTHON_DONE"]
+            for index in range(1, 24) for edge in ("BEFORE", "AFTER")), "MRK_NATIVE_PYTHON_DONE"]
         expected = "".join(token + "\n" for token in tokens).encode("ascii")
 
         def shape(node):
@@ -2670,11 +2755,11 @@ class CISandboxPureTests(unittest.TestCase):
             actual_imports = [node for node in source_tree.body if isinstance(node, (ast.Import, ast.ImportFrom))]
             fixed_imports = ast.parse(future + "\n" + "\n".join(imports)).body
             self.assertEqual([shape(node) for node in actual_imports], [shape(node) for node in fixed_imports])
-            self.assertEqual(len(program_tree.body), 63)
+            self.assertEqual(len(program_tree.body), 72)
             self.assertEqual(shape(program_tree.body[0]), shape(fixed_imports[0]))
-            prints = [program_tree.body[1], *(node for index in range(20)
+            prints = [program_tree.body[1], *(node for index in range(23)
                 for node in (program_tree.body[2 + 3 * index], program_tree.body[4 + 3 * index])), program_tree.body[-1]]
-            self.assertEqual([shape(program_tree.body[3 + 3 * index]) for index in range(20)],
+            self.assertEqual([shape(program_tree.body[3 + 3 * index]) for index in range(23)],
                              [shape(node) for node in fixed_imports[1:]])
             for node, token in zip(prints, tokens, strict=True):
                 self.assertEqual(shape(node), shape(ast.parse(f'print("{token}", flush=True)').body[0]))
@@ -2683,7 +2768,7 @@ class CISandboxPureTests(unittest.TestCase):
         literal_contract(program, helper)
         self.assertEqual(self.module._NATIVE_STARTUP_CASES, ("startup-true", "startup-python"))
         self.assertEqual(self.module._NATIVE_STARTUP_STDOUT, expected)
-        self.assertEqual(len(expected.splitlines()), 42)
+        self.assertEqual(len(expected.splitlines()), 48)
         self.assertLess(len(expected), 2048)
         assignments = {node.targets[0].id: node.value for node in ast.parse(helper).body
             if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)}
@@ -2718,7 +2803,7 @@ class CISandboxPureTests(unittest.TestCase):
 
         lines = expected.splitlines(keepends=True)
         stages = ["no-body-marker", "body", *(f"{edge}-import-{index:02}"
-            for index in range(1, 21) for edge in ("before", "after")), "imports-finished"]
+            for index in range(1, 24) for edge in ("before", "after")), "imports-finished"]
         self.assertEqual(len(stages), len(lines) + 1)
         for count, stage in enumerate(stages):
             with self.subTest(native_startup_exact_prefix=count):
@@ -7401,6 +7486,114 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertEqual(metadata_seen, [])
                     self.assertFalse(any(n["name"] == "ruby-path-metadata" for n in session.admission_results))
 
+    def test_collector_admission_budgets_preserve_each_platform_control(self):
+        # Exercise the actual preflight caller, but all effects and captures
+        # are inert. No native admission or process cleanup is claimed here.
+        for platform, case in ((p, c) for p in ("linux", "darwin") for c in ("valid", "unknown-finality")):
+            with self.subTest(collector_admission=(platform, case)):
+                session = session_double(self.module, platform)
+                session.admitted, session._admitting = False, True
+                if platform == "darwin":
+                    session.runner_home = Path("/Users/runner")
+                    session.ruby_prefix = session.runner_home / "tools/ruby"
+                    session.ruby = session.ruby_prefix / "bin/ruby"
+                    session._home_state = {"listener": object()}
+                created, controls = [], []
+
+                class Endpoint:
+                    def __init__(self, family, kind):
+                        self.family, self.type = family, kind
+                        self.settimeout, self.bind, self.listen, self.connect, self.close = (Mock() for _ in range(5))
+                        self.getsockname = Mock(return_value=("127.0.0.1" if family == 2 else "::1", 42000 + len(created)))
+                        self.accept = Mock(return_value=(SimpleNamespace(close=Mock()), ("synthetic-peer", 1)))
+                        self.sendto = Mock(return_value=len(b"owned-control"))
+                        self.recv = Mock(return_value=b"owned-control")
+                        created.append(self)
+
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, *_exception):
+                        self.close()
+
+                base = [str(session.python), "-I", "-S", "-B", str(session.entry)]
+                budgets = {"positive": 10, "nonzero": 10, "missing-footer": 10, "streams": 10,
+                           "over-limit": 10, "timeout": 0.4, "cancel": 10,
+                           "held-pipe": 10 if platform == "linux" else 0.4}
+
+                def capture(argv, **kwargs):
+                    primary, code, timed_out, cancelled, finality = None, 0, False, False, True
+                    stderr = b""
+                    if argv[:6] == [*base, "--probe"]:
+                        self.assertEqual(kwargs, {"cwd": session.work, "env": {}, "seconds": 30, "latch": False})
+                        stdout = b"MRK_NATIVE_ISOLATION_OK\n"
+                    elif argv[0] == str(session.ruby):
+                        self.assertEqual(kwargs, {"cwd": session.work, "env": {}, "seconds": 10, "latch": False})
+                        stdout = b"MRK_RUBY_NUMERIC_OK\n"
+                    else:
+                        self.assertEqual(argv[:-1], [*base, "--fixture"])
+                        name = argv[-1]
+                        self.assertEqual(name, tuple(budgets)[len(controls)])
+                        controls.append(name)
+                        self.assertEqual(kwargs, {"cwd": session.work, "env": {}, "seconds": budgets[name],
+                            "output_limit": 1024, "latch": False, "cancel_after": 0.15 if name == "cancel" else None})
+                        stdout = b"PASS\n" if name in {"positive", "nonzero"} else b""
+                        if name == "nonzero":
+                            code, primary = 7, "command exited 7"
+                        elif name == "streams":
+                            stdout, stderr = b"out\n", b"err\n"
+                        elif name == "over-limit":
+                            stdout, primary = b"x" * 1024, "per-stream or whole-attempt persisted-output limit"
+                        elif name == "timeout" or name == "held-pipe" and platform == "darwin":
+                            timed_out, primary = True, "command/original aggregate deadline expired"
+                        elif name == "cancel":
+                            cancelled, primary = True, "command cancellation"
+                        if name == "held-pipe" and case == "unknown-finality":
+                            finality = False
+                    return self.module.CapturedRun(stdout, stderr, code, True, True, True, finality,
+                        timed_out, cancelled, 0.1, primary, (), (len(stdout), len(stderr)))
+
+                def read_positive(path):
+                    self.assertEqual(path, session.outside_write)
+                    return b"MRK_POSITIVE_WRITE\n"
+
+                with ExitStack() as stack:
+                    stack.enter_context(patch.multiple(self.module,
+                        os=SimpleNamespace(chown=Mock(), readlink=lambda _: "synthetic-namespace", fsencode=os.fsencode),
+                        socket=SimpleNamespace(AF_INET=2, AF_INET6=10, SOCK_STREAM=1, SOCK_DGRAM=2, socket=Endpoint),
+                        subprocess=SimpleNamespace(), signal=SimpleNamespace(), time=SimpleNamespace(),
+                        _small_command=Mock(return_value=b"MRK_OUTSIDE_WRITE_POSITIVE\n"),
+                        _outside_network_empty=Mock(), _home_socket_empty=Mock(),
+                        _domain=Mock(side_effect=AssertionError("routing fixture cannot observe native processes"))))
+                    methods = {name: stack.enter_context(patch.object(session, name, Mock())) for name in (
+                        "ensure_idle", "_assert_userns_boundary", "_home_positive_control", "_ruby_path_metadata",
+                        "_signal_preflight", "_retained_domain_preflight", "_owner_loss_preflight")}
+                    stack.enter_context(patch.object(session, "_run", side_effect=capture))
+                    stack.enter_context(patch.object(Path, "read_bytes", read_positive))
+                    stack.enter_context(patch.object(Path, "chmod", Mock()))
+                    for method in ("stat", "resolve", "open"):
+                        stack.enter_context(patch.object(Path, method,
+                            side_effect=AssertionError("routing fixture cannot access provider files")))
+                    if case == "valid":
+                        session._preflight()
+                    else:
+                        with self.assertRaises(BaseExceptionGroup) as caught:
+                            session._preflight()
+                        self.assertEqual(len(caught.exception.exceptions), 1)
+                        self.assertIsInstance(caught.exception.exceptions[0], self.module.SessionError)
+                        self.assertEqual(str(caught.exception.exceptions[0]), "collector admission case failed: held-pipe")
+                self.assertEqual(controls, list(budgets))
+                self.assertEqual(len(created), 8)
+                for endpoint in created:
+                    endpoint.close.assert_called_once_with()
+                for name in ("_retained_domain_preflight", "_owner_loss_preflight"):
+                    self.assertEqual(methods[name].call_count, int(case == "valid"))
+                self.assertEqual(methods["_signal_preflight"].call_count, int(platform == "darwin"))
+                held = next(row for row in session.admission_results if row["name"] == "held-pipe")
+                self.assertEqual(held["ok"], case == "valid")
+                self.assertEqual(held["subject_ok"], case == "valid" and platform == "linux")
+                self.assertFalse(session.admitted)
+
     def test_collection_keeps_streams_separate_waits_and_persists_short_writes(self):
         rig = _Collection(self.module, stdout=(b"out-1", b"out-2"), stderr=(b"err-1",))
         rig.write_step = 2
@@ -9853,7 +10046,7 @@ class CISandboxPureTests(unittest.TestCase):
                  patch.multiple(self.module, os=SimpleNamespace(getuid=lambda: uid, geteuid=lambda: uid,
                                     getgid=lambda: gid, getegid=lambda: gid, fstat=inherited,
                                     getresuid=lambda: (uid, uid, uid), getresgid=lambda: (gid, gid, gid),
-                                    readlink=namespace, listdir=root_entries, setuid=regain),
+                                    readlink=namespace, listdir=root_entries, setuid=regain, environ={}),
                                 socket=SimpleNamespace(), subprocess=SimpleNamespace(), signal=SimpleNamespace(),
                                 _process_groups=Mock(return_value=[] if platform == "linux" else [gid]),
                                 _probe_provider_boundaries=Mock(side_effect=boundary)), \
@@ -10729,8 +10922,9 @@ class CISandboxPureTests(unittest.TestCase):
                     events.append(("nss",))
                     return b"unobserved\n" if case == "nss-bad" else b"MRK_NSS_ABSENT\n"
 
-                def domain(platform, uid, *, collision=False, deadline):
+                def domain(platform, uid, *, collision=False, deadline, admission=False):
                     self.assertEqual((platform, uid, deadline), ("linux", session.uid, session.deadline))
+                    self.assertIs(admission, collision)
                     self.module._remaining(deadline)
                     events.append(("domain", collision))
                     return {4242} if case == "collision" and collision else set()

@@ -1536,8 +1536,10 @@ module UploadProcessFixture
       "captureWithinLimit" => measure.call(["captureSeconds"], duration) { |seconds| seconds < ADAPTER_CAPTURE_LIMIT },
       "slowCleanupAtLeastFour" => measure.call(["slowCleanupSeconds"], duration, operands: slow_operands) { |seconds| seconds >= 4 },
       "captureCoversSlowCleanup" => measure.call(%w[captureSeconds slowCleanupSeconds], duration, operands: slow_operands) { |capture, cleanup| capture >= cleanup },
-      "slowCleanupWithinOriginalCutoff" => measure.call(%w[originalCleanupFinishedNs originalCleanupCutoffNs], timestamp,
-        operands: slow_operands) { |finished, cutoff| finished < cutoff },
+      "slowCleanupWithinOriginalCutoff" => measure.call(%w[delayStartedNs originalCleanupFinishedNs delayFinishedNs originalCleanupCutoffNs], timestamp,
+        operands: slow_operands) { |started, native_finished, wrapper_finished, cutoff|
+          started <= native_finished && native_finished <= wrapper_finished && wrapper_finished < cutoff
+        },
     }
     {"resultKind" => kind, "retainedDriverErrorCategory" => category.call("errorClass"),
       "retainedDriverErrorCode" => error_code, "adapterErrorCategory" => category.call("adapterErrorClass"),
@@ -3945,60 +3947,99 @@ module UploadProcessFixture
 
       def finish_slow_cleanup(object)
         @slow_delay_entered = true
-        slept = false
-        value = nil
-        begin
+        value = original_error = recording_error = nil
+        # A fixture recorder is not allowed to replace the original cleanup's
+        # exception, or prevent the unconditional original call below.
+        record_failure = lambda do |error|
+          @slow_delay_failed = true
           begin
-            @slow_cleanup_cutoff_ns = object.__send__(:cleanup_deadline_ns)
-            @slow_delay_started_ns = UploadProcessFixture.clock_ns
-            unless @slow_cleanup_cutoff_ns.instance_of?(Integer) && @slow_delay_started_ns.instance_of?(Integer) &&
-                   @slow_delay_started_ns.positive? && @slow_cleanup_cutoff_ns - @slow_delay_started_ns > 4_250_000_000
-              raise Failure.new("readiness", "slow cleanup lacks original bound")
-            end
-            @slow_guard_passed = true
-            sleep 4
-            slept = true
-          rescue Exception => error
-            @slow_delay_failed = true # Even error-recording failure cannot conceal the failed delay.
             remember_slow_failure(error)
-          ensure
-            begin
-              @slow_delay_finished_ns = UploadProcessFixture.clock_ns
-              if @slow_delay_started_ns
-                unless @slow_delay_finished_ns.instance_of?(Integer) && @slow_delay_started_ns.instance_of?(Integer) &&
-                       @slow_delay_finished_ns >= @slow_delay_started_ns
-                  raise Failure.new("fixture-observation", "slow cleanup clock was not monotonic")
-                end
-                @slow_delay_seconds = (@slow_delay_finished_ns - @slow_delay_started_ns) / 1_000_000_000.0
-              end
-              @slow_delay_finished = slept && !@slow_delay_failed
-            rescue Exception => error
-              @slow_delay_failed = true
-              remember_slow_failure(error)
-            end
+          rescue Exception => later
+            recording_error ||= later
           end
+        end
+        begin
+          @slow_cleanup_cutoff_ns = object.__send__(:cleanup_deadline_ns)
+          @slow_delay_started_ns = UploadProcessFixture.clock_ns
+          unless @slow_cleanup_cutoff_ns.instance_of?(Integer) && @slow_delay_started_ns.instance_of?(Integer) &&
+                 @slow_delay_started_ns.positive? && @slow_cleanup_cutoff_ns - @slow_delay_started_ns > 4_250_000_000
+            raise Failure.new("readiness", "slow cleanup lacks original bound")
+          end
+          @slow_guard_passed = true
+        rescue Exception => error
+          record_failure.call(error)
         ensure
-          # This is the ORIGINAL cleanup, once, even if the guard, sleep, either
-          # clock sample or the fixture's own recording code unwinds above.
+          # Do not spend four of the runtime's five cleanup seconds asleep
+          # before CANCEL/channel progress and the actual original child wait.
+          # Guard/clock/recording failures still cannot suppress this call.
           @slow_original_cleanup_called = true
           begin
             value = yield
             @slow_original_cleanup_finished = true
+          rescue Exception => error
+            original_error = error
           ensure
             begin
               @slow_cleanup_finished_ns = UploadProcessFixture.clock_ns
               unless @slow_cleanup_finished_ns.instance_of?(Integer) && @slow_cleanup_finished_ns.positive?
                 raise Failure.new("fixture-observation", "slow cleanup clock was not observed")
               end
-              if @slow_delay_started_ns.instance_of?(Integer)
-                @driver.observed["cleanupSeconds"] = (@slow_cleanup_finished_ns - @slow_delay_started_ns) / 1_000_000_000.0
-              end
             rescue Exception => error
-              @slow_delay_failed = true
-              remember_slow_failure(error)
+              record_failure.call(error)
             end
           end
         end
+
+        padded = false
+        begin
+          if @slow_guard_passed && @slow_original_cleanup_finished && !@slow_delay_failed
+            now = UploadProcessFixture.clock_ns
+            unless now.instance_of?(Integer) && @slow_delay_started_ns <= @slow_cleanup_finished_ns &&
+                   @slow_cleanup_finished_ns <= now && now < @slow_cleanup_cutoff_ns
+              raise Failure.new("fixture-observation", "slow cleanup original timing was not proved")
+            end
+            # ONE absolute wrapper-entry target, not a fresh four-second sleep
+            # after cleanup. Native work taking four seconds needs no padding.
+            remaining = @slow_delay_started_ns + 4_000_000_000 - now
+            sleep(remaining.fdiv(1_000_000_000)) if remaining.positive?
+            padded = true
+          end
+        rescue Exception => error
+          record_failure.call(error)
+        ensure
+          begin
+            measured = UploadProcessFixture.clock_ns
+            unless measured.instance_of?(Integer) && @slow_delay_started_ns.instance_of?(Integer) &&
+                   @slow_delay_started_ns.positive? && measured >= @slow_delay_started_ns
+              raise Failure.new("fixture-observation", "slow cleanup clock was not monotonic")
+            end
+            @driver.observed["cleanupSeconds"] = (measured - @slow_delay_started_ns).fdiv(1_000_000_000)
+          rescue Exception => error
+            record_failure.call(error)
+          ensure
+            # The authoritative wrapper stamp follows the ordinary diagnostic
+            # publication too; a late/failed recorder cannot donate tail time.
+            begin
+              @slow_delay_finished_ns = UploadProcessFixture.clock_ns
+              unless @slow_delay_finished_ns.instance_of?(Integer) && @slow_delay_started_ns.instance_of?(Integer) &&
+                     @slow_delay_started_ns.positive? && @slow_delay_finished_ns >= @slow_delay_started_ns
+                raise Failure.new("fixture-observation", "slow cleanup clock was not monotonic")
+              end
+              @slow_delay_seconds = (@slow_delay_finished_ns - @slow_delay_started_ns).fdiv(1_000_000_000)
+              unless @slow_cleanup_finished_ns.instance_of?(Integer) && @slow_cleanup_cutoff_ns.instance_of?(Integer) &&
+                     measured.instance_of?(Integer) && measured <= @slow_delay_finished_ns &&
+                     @slow_delay_started_ns <= @slow_cleanup_finished_ns && @slow_cleanup_finished_ns <= @slow_delay_finished_ns &&
+                     @slow_delay_finished_ns < @slow_cleanup_cutoff_ns && @slow_delay_finished_ns - @slow_delay_started_ns >= 4_000_000_000
+                raise Failure.new("fixture-observation", "slow cleanup original timing was not proved")
+              end
+              @slow_delay_finished = padded && !@slow_delay_failed
+            rescue Exception => error
+              record_failure.call(error)
+            end
+          end
+        end
+        raise original_error if original_error
+        raise recording_error if recording_error
         value
       end
 
@@ -4067,9 +4108,12 @@ module UploadProcessFixture
              %w[delayEntered delayGuardPassed delayFinished originalCleanupCalled originalCleanupFinished].all? { |key| slow[key].equal?(true) }
         raise Failure.new("fixture-observation", "slow cleanup observation failed")
       end
-      duration, finished, cutoff = slow.values_at("slowCleanupSeconds", "originalCleanupFinishedNs", "originalCleanupCutoffNs")
+      duration, started, native_finished, wrapper_finished, cutoff = slow.values_at(
+        "slowCleanupSeconds", "delayStartedNs", "originalCleanupFinishedNs", "delayFinishedNs", "originalCleanupCutoffNs")
       unless (duration.instance_of?(Integer) || duration.instance_of?(Float)) && duration.finite? && duration >= 4 &&
-             finished.instance_of?(Integer) && cutoff.instance_of?(Integer) && finished.positive? && finished < cutoff
+             [started, native_finished, wrapper_finished, cutoff].all? { |stamp| stamp.instance_of?(Integer) && stamp.positive? } &&
+             started <= native_finished && native_finished <= wrapper_finished && wrapper_finished < cutoff &&
+             wrapper_finished - started >= 4_000_000_000 && duration == (wrapper_finished - started).fdiv(1_000_000_000)
         raise Failure.new("fixture-observation", "slow cleanup original timing was not proved")
       end
     end

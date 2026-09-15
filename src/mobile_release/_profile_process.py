@@ -29,7 +29,8 @@ from pathlib import Path
 from typing import Any
 
 from . import _native_process as native
-from .cancellation import DefaultCancellation
+from . import cancellation as cancellation_state
+from .cancellation import DefaultCancellation, _FORK_RESOURCES, _mark_fork_unsafe
 from .errors import ValidationError
 from .inspection import InspectionDeadline
 
@@ -313,6 +314,24 @@ class Decoder:
 
 _CUSTODY: list[CaptureFinality] = []
 _CUSTODY_LOCK = threading.Lock()
+_CUSTODY_PID = os.getpid()
+
+
+def _custody_lock() -> Any:
+    """A fork child must never enter a lock copied from another process.
+
+    Old records remain rooted and non-authoritative. Replacing the child's
+    copied lock is not settlement of any parent's resources; an active copied
+    capture independently latches the child's no-new-work boundary.
+    """
+    global _CUSTODY_LOCK, _CUSTODY_PID
+    pid = os.getpid()
+    if _CUSTODY_PID != pid:
+        _CUSTODY_LOCK = threading.Lock()
+        _CUSTODY_PID = pid
+        for item in tuple(_CUSTODY):
+            item.after_fork_child()
+    return _CUSTODY_LOCK
 
 
 class CaptureFinality:
@@ -322,15 +341,84 @@ class CaptureFinality:
     Only the real capture owner calls the private state transitions below.
     """
     def __init__(self) -> None:
+        self._pid = os.getpid()
         self._state = "NO_PRODUCERS"
         self._scratch: object | None = None
         self._owner: _Context | None = None
         self._begun = False
+        self._producer_settled = True
+        self._native_resources_settled = True
+        self._native_attempt = "NOT_ATTEMPTED"
+        self._validator_dispatch = "NOT_SENT"
+        self._lifetime_published = True  # Resource-free, before capture admission.
+        self._admission_blocker: CaptureFinality | None = None
+        _FORK_RESOURCES.add(self)
+
+    def after_fork_child(self) -> None:
+        if self._pid == os.getpid():
+            return
+        if self._state in ("ACTIVE", "UNKNOWN"):
+            _mark_fork_unsafe()
+        self._state = "INHERITED"
+        self._producer_settled = self._native_resources_settled = False
+        self._native_attempt = self._validator_dispatch = "UNKNOWN"
+        if self._owner is not None:
+            self._owner.after_fork_child()
+
+    def _check_origin(self) -> None:
+        if self._pid != os.getpid():
+            self.after_fork_child()
+            raise ValidationError(CLEANUP_ERROR)
+
+    @property
+    def producer_settled(self) -> bool:
+        return self._pid == os.getpid() and self._lifetime_published and self._producer_settled
+
+    @property
+    def native_resources_settled(self) -> bool:
+        return self._pid == os.getpid() and self._lifetime_published and self._native_resources_settled
+
+    @property
+    def native_attempt(self) -> str:
+        return self._native_attempt if self._pid == os.getpid() and self._lifetime_published else "UNKNOWN"
+
+    @property
+    def validator_dispatch(self) -> str:
+        return self._validator_dispatch if self._pid == os.getpid() and self._lifetime_published else "UNKNOWN"
+
+    @property
+    def blocked(self) -> bool:
+        return self._pid != os.getpid() or self._admission_blocker is not None
+
+    def _publish_lifetime(self, owner: _Outer | None) -> None:
+        self._check_origin()
+        ctx = self._owner
+        _require(self._begun and ctx is not None, CLEANUP_ERROR)
+        ctx._check_origin()
+        no_attempt = _task_child_record(ctx)["state"] == "not_attempted"
+        self._native_attempt = ("NOT_ATTEMPTED" if no_attempt else
+                                "ATTEMPT_ARMED" if ctx.child_acquisition.attempted else "UNKNOWN")
+        self._native_resources_settled = ctx.resources_confirmed()
+        # Real descendant proof is deliberately independent from local IO
+        # cleanup. It NEVER relaxes _finish/cleanup_allowed or scratch removal.
+        self._producer_settled = no_attempt or (owner is not None and owner.producers_confirmed)
+        channel = owner.channel if owner is not None else None
+        if channel is not None and "RUN" in channel.write_attempted:
+            self._validator_dispatch = "RUN_ATTEMPT_ARMED"
+        elif no_attempt or (ctx.launch_closed and owner is not None and owner.producers_confirmed
+                            and channel is not None and channel.writer_closed
+                            and not channel.write_in_flight and not channel.write_failed):
+            self._validator_dispatch = "NOT_SENT"
+        else:
+            self._validator_dispatch = "UNKNOWN"
+        self._lifetime_published = True
 
     @property
     def state(self) -> str:
         # An exceptional tail cannot leave a discarded ACTIVE owner reusable.
         # This read never manufactures finality; only _finish can do that.
+        if self._pid != os.getpid():
+            return "INHERITED"
         if self._state == "ACTIVE" and self._owner is not None and self._owner.exited:
             return "UNKNOWN"
         return self._state
@@ -340,28 +428,39 @@ class CaptureFinality:
         return self.state in ("NO_PRODUCERS", "FINALIZED")
 
     def bind_scratch(self, lease: object) -> None:
+        self._check_origin()
         _require(not self._begun and self._scratch is None and lease is not None, CLEANUP_ERROR)
         self._scratch = lease
 
     def _begin(self, owner: _Context) -> None:
-        with _CUSTODY_LOCK:
-            _require(not self._begun and self._state == "NO_PRODUCERS"
-                     and not any(item.state == "UNKNOWN" for item in _CUSTODY), CLEANUP_ERROR)
+        self._check_origin()
+        owner._check_origin()
+        with _custody_lock():
+            _require(not self._begun and self._state == "NO_PRODUCERS", CLEANUP_ERROR)
+            for item in _CUSTODY:
+                if item.state in ("UNKNOWN", "INHERITED"):
+                    self._admission_blocker = item
+                    raise ValidationError(CLEANUP_ERROR)
             self._owner = owner
             self._begun = True
             self._state = "ACTIVE"
+            self._producer_settled = self._native_resources_settled = False
+            self._native_attempt = self._validator_dispatch = "UNKNOWN"
+            self._lifetime_published = False
             _CUSTODY.append(self)
 
     def _unknown(self) -> None:
+        self._check_origin()
         self._state = "UNKNOWN"
-        with _CUSTODY_LOCK:
+        with _custody_lock():
             if self not in _CUSTODY:
                 _CUSTODY.append(self)
 
     def _finish(self, *, no_producers: bool = False) -> None:
+        self._check_origin()
         _require(self._begun and self._state == "ACTIVE", CLEANUP_ERROR)
         self._state = "NO_PRODUCERS" if no_producers else "FINALIZED"
-        with _CUSTODY_LOCK:
+        with _custody_lock():
             if self in _CUSTODY:
                 _CUSTODY.remove(self)
 
@@ -441,6 +540,8 @@ def _configuration(directory: Path, deadlines: _Deadlines, role: str) -> dict[st
 class _Context:
     def __init__(self, role: str, run: int, hard: int, *, cancellation: DefaultCancellation | None = None,
                  parent_pid: int | None = None) -> None:
+        _require(not cancellation_state._FORK_UNSAFE, CLEANUP_ERROR)
+        self.pid = os.getpid()
         self.role, self.run, self.hard = role, run, hard
         self.cancellation, self.parent_pid = cancellation, parent_pid
         self.owner = threading.current_thread()
@@ -471,10 +572,35 @@ class _Context:
         self.signal_epoch = 0
         self._helper_offer: tuple[int, tuple[int, int], int, _Channel, str] | None = None
         self._helper_terminal_armed = False
+        _FORK_RESOURCES.add(self)
+
+    def after_fork_child(self) -> None:
+        if self.pid == os.getpid():
+            return
+        # No inherited lock, Event, recorder, wait, signal or helper callback.
+        # An active/unknown native lifetime cannot become a fresh child owner.
+        if self.cleanup_unknown or (not self.exited and
+                                    (self.tasks or self.io.leases or self.child_acquisition.attempted)):
+            _mark_fork_unsafe()
+        self.launch_closed = self.cancelled = True
+        for task in self.tasks:
+            task.launch_retired, task.launch = True, False
+            task.stop_view = None
+        for acquisition in (self.io, self.child_acquisition):
+            try:
+                acquisition._relinquish_inherited()
+            except BaseException:
+                _mark_fork_unsafe()
+
+    def _check_origin(self) -> None:
+        if self.pid != os.getpid():
+            self.after_fork_child()
+            raise ValidationError(CLEANUP_ERROR)
 
     def record(self, error: BaseException, reason: str = "lifecycle", *, cleanup: bool = False) -> None:
         # The actual recording boundary, not exception-class priority or an
         # inferred timestamp, decides which already-observed error was first.
+        self._check_origin()
         with self.lock:
             if isinstance(error, (KeyboardInterrupt, SystemExit)) and self.interruption is None:
                 self.interruption = error
@@ -507,6 +633,9 @@ class _Context:
         class-priority override. Any collector/retirement uncertainty is rooted
         UNKNOWN. Pure fallback slots preserve evidence even if diagnostics fail.
         """
+        if self.pid != os.getpid():
+            self.after_fork_child()
+            return
         self.cleanup_unknown = self.cancelled = self.launch_closed = True
         try:
             with self.lock:
@@ -542,6 +671,7 @@ class _Context:
         # The synchronous leaf recorder already owns first-error ordering. This
         # reconciliation also retains a later swallowed *actual* interruption;
         # it never backdates, synthesizes or gives its class blanket priority.
+        self._check_origin()
         for acquisition in (self.io, self.child_acquisition):
             interruption = acquisition.interruption
             if interruption is not None and id(interruption) not in self.observed_interruptions:
@@ -552,35 +682,41 @@ class _Context:
                 self.cleanup_unknown = True
 
     def retire_launch(self) -> None:
+        self._check_origin()
         self.launch_closed = True
         self.child_acquisition.close_launch()
         for task in tuple(self.tasks):
             task.close_launch()
 
     def begin_cleanup(self) -> int:
+        self._check_origin()
         if self.cleanup_limit is None:
             self.cleanup_limit = min(self.hard, time.monotonic_ns() + CLEANUP_SECONDS * NANOSECOND)
         return self.cleanup_limit
 
     def cleanup_cutoff(self, original: int) -> int:
+        self._check_origin()
         return min(original, self.cleanup_limit or original, self.failure_limit or original)
 
     def control_cutoff(self, original: int) -> int:
         # A success-ready C may have completed descendant cleanup long before a
         # later withheld-COMMIT failure. Its failure report gets the ONE actual
         # first-failure grace, not a reopened numeric descendant-cleanup loop.
+        self._check_origin()
         return min(original, self.failure_limit or original, self.hard)
 
     def offer_terminal(self, intended: int, epoch: tuple[int, int], cutoff: int,
                        channel: _Channel, kind: str) -> tuple[int, tuple[int, int], int, _Channel, str]:
         # Preserve the original pre-offer proof exactly once. Neither the tail
         # nor the interpreter handoff may replace it with a fresher epoch/time.
+        self._check_origin()
         _require(self._helper_offer is None and not self._helper_terminal_armed, CLEANUP_ERROR)
         offer = intended, epoch, cutoff, channel, kind
         self._helper_offer = offer
         return offer
 
     def helper_handoff(self, saved: int) -> int:
+        self._check_origin()
         try:
             offer = self._helper_offer
             if (type(saved) is not int or saved not in (HELPER_SETTLED, HELPER_FAILED)
@@ -599,6 +735,9 @@ class _Context:
             return HELPER_UNKNOWN
 
     def helper_signal(self, _signum: int, _frame: Any) -> None:
+        if self.pid != os.getpid():
+            self.after_fork_child()
+            return
         if self._helper_terminal_armed:
             # Only our own helper exits, only with the fixed unconfirmed code.
             # No locks, diagnostics, exception injection or cleanup in this arm.
@@ -608,6 +747,7 @@ class _Context:
         self.cancelled = True
 
     def observe_helper_latches(self) -> None:
+        self._check_origin()
         if self.primary is None:
             try:
                 self.check()
@@ -617,6 +757,7 @@ class _Context:
     def terminal_code(self, intended: int, epoch: tuple[int, int], cutoff: int, channel: _Channel, kind: str) -> int:
         # 1 is also the interpreter's ordinary unexpected-exception exit: it
         # can NEVER masquerade as a positively settled lifecycle failure (2).
+        self._check_origin()
         if (intended not in (HELPER_SETTLED, HELPER_FAILED)
                 or not self.resources_confirmed() or kind not in channel.sent or channel.write_failed or channel.write_in_flight
                 or not channel.writer_closed or time.monotonic_ns() >= self.control_cutoff(cutoff)
@@ -627,6 +768,7 @@ class _Context:
         return intended if epoch == (self.error_epoch, self.signal_epoch) else HELPER_UNKNOWN
 
     def cancel_frame(self, frame: dict[str, Any]) -> BaseException:
+        self._check_origin()
         _require(frame["cleanup_deadline_ns"] <= self.hard)
         error = ValidationError(TIMEOUT if frame["reason_code"] == "deadline" else ERROR)
         self.record(error, frame["reason_code"])
@@ -635,6 +777,8 @@ class _Context:
         return error
 
     def check(self) -> None:
+        self._check_origin()
+        _require(threading.current_thread() is self.owner, ERROR)
         if self.primary is not None:
             raise self.primary
         if self.cancellation is not None:
@@ -647,9 +791,11 @@ class _Context:
             raise ValidationError(TIMEOUT)
 
     def start_io(self) -> None:
+        self._check_origin()
         self.io.grant(self.owner, self.check)
 
     def close(self, lease: Any) -> None:
+        self._check_origin()
         if id(lease) in self.closed:
             return
         # Publication of retirement precedes even a potentially consuming close.
@@ -661,6 +807,7 @@ class _Context:
             self.record(error, "io", cleanup=True)
 
     def close_all(self, *, exclude: tuple[Any, ...] = ()) -> None:
+        self._check_origin()
         protected = {id(lease) for lease in (*self.lifetime, *exclude)}
         for task in self.tasks:
             if not task.joined:
@@ -671,12 +818,52 @@ class _Context:
         self.io.close_launch()
 
     def resources_confirmed(self, *, exclude: tuple[Any, ...] = ()) -> bool:
+        self._check_origin()
         protected = {id(lease) for lease in (*self.lifetime, *exclude)}
         return (not self.cleanup_unknown and self.io.settled and not self.io.cleanup_unknown
                 and self.child_acquisition.settled and not self.child_acquisition.cleanup_unknown
                 and all(id(lease) in protected or id(lease) in self.closed for lease in self.io.leases)
                 and all(task.joined and task.acquisition.settled and not task.acquisition.cleanup_unknown
                         for task in self.tasks))
+
+
+class _CreatorStopView:
+    """Read live stop facts for one reconciled native creator, never own a guard."""
+
+    def __init__(self, slot: TaskSlot, grant: object) -> None:
+        ctx = slot.context
+        ctx.check()
+        _require(slot.actual is slot.returned is slot.constructed and slot.actual is not None, ERROR)
+        self.pid, self.context, self.owner = ctx.pid, ctx, ctx.owner
+        self.creator, self.slot, self.acquisition = slot.actual, slot, slot.acquisition
+        self.run, self.guard, self.grant = ctx.run, ctx.cancellation, grant
+
+    def check(self) -> None:
+        # The origin check precedes locks/normal common-error accounting even
+        # after an at-fork hook has already relinquished earlier child copies.
+        ctx, slot = self.context, self.slot
+        ctx._check_origin()
+        _require(self.pid == os.getpid() and threading.current_thread() is self.creator
+                 and ctx.owner is self.owner and ctx.run == self.run
+                 and slot.context is ctx and slot.acquisition is self.acquisition
+                 and slot.actual is slot.returned is slot.constructed is self.creator
+                 and slot.grant_identity is self.grant and slot.stop_view is self
+                 and slot.launch and not slot.launch_retired and not slot.joined and not slot.body_done
+                 and not ctx.launch_closed and not self.acquisition.launch_retired
+                 and self.owner.is_alive(), ERROR)
+        if ctx.primary is not None:
+            raise ctx.primary
+        if self.guard is not None:
+            _require(type(self.guard) is DefaultCancellation and ctx.cancellation is self.guard
+                     and self.guard.pid == self.pid and self.guard.owner_thread is self.owner, ERROR)
+            if self.guard.cancelled:
+                raise KeyboardInterrupt
+        if ctx.parent_pid is not None and os.getppid() != ctx.parent_pid:
+            raise ValidationError(ERROR)
+        if ctx.cancelled:
+            raise ValidationError(ERROR)
+        if time.monotonic_ns() >= self.run:
+            raise ValidationError(TIMEOUT)
 
 
 class TaskSlot:
@@ -696,18 +883,26 @@ class TaskSlot:
         self.result: Any = None
         self.published = threading.Event()
         self.granted = threading.Event()
+        self.grant_identity: object | None = None
+        self.stop_view: _CreatorStopView | None = None
 
     def close_launch(self) -> None:
+        self.context._check_origin()
         self.launch_retired = True
         self.launch = False
         self.acquisition.close_launch()
         self.granted.set()
 
     def _check(self) -> None:
-        _require(self.launch and not self.launch_retired and self.context.owner.is_alive(), ERROR)
-        self.context.check()
+        self.context._check_origin()
+        _require(self.stop_view is not None, ERROR)
+        self.stop_view.check()
 
     def _contained_error(self, error: BaseException) -> None:
+        if self.context.pid != os.getpid():
+            self.context.after_fork_child()
+            self.error = self.error if self.error is not None else error
+            return
         try:
             self.context.record(error, "creation")
         except BaseException as recording_error:
@@ -744,6 +939,7 @@ class TaskSlot:
             self.body_done = True
 
     def _owned_body(self) -> None:
+        self.context._check_origin()
         try:
             self.actual = threading.current_thread()
             self.published.set()
@@ -761,6 +957,9 @@ class TaskSlot:
         except BaseException as error:
             self._contained_error(error)
         finally:
+            if self.context.pid != os.getpid():
+                self.context.after_fork_child()
+                return
             try:
                 self.context.collect_native()
             except BaseException as error:
@@ -770,6 +969,7 @@ class TaskSlot:
     def start(self) -> None:
         # This slot already belongs to the context before Thread.start can create
         # a task.  No native/FD acquisition can precede actual-ref reconciliation.
+        self.context._check_origin()
         try:
             self.constructed = threading.Thread(target=self._body, name="mrk-profile-creator", daemon=False)
             self.constructed.start()
@@ -781,11 +981,14 @@ class TaskSlot:
             raise
 
     def reconcile_and_grant(self) -> bool:
+        self.context._check_origin()
         if self.actual is None:
             return False
         _require(self.returned is self.actual and self.actual is self.constructed, ERROR)
         self.context.check()
-        _require(not self.launch_retired, ERROR)
+        _require(not self.launch_retired and self.grant_identity is None, ERROR)
+        self.grant_identity = object()
+        self.stop_view = _CreatorStopView(self, self.grant_identity)
         self.launch = True
         self.acquisition.grant(self.actual, self._check)
         _role_event(self.context.role, "task_granted", task=self)
@@ -793,6 +996,7 @@ class TaskSlot:
         return True
 
     def join_once(self, deadline_ns: int) -> bool:
+        self.context._check_origin()
         if self.joined:
             return True
         # A lost Thread.start return can still reconcile the actual self-published
@@ -859,6 +1063,7 @@ def _pause(deadline_ns: int, channels: tuple[_Channel, ...] = (), extra_read: tu
 
 class _Channel:
     def __init__(self, context: _Context, reader: Any, writer: Any, incoming: str, outgoing: str) -> None:
+        context._check_origin()
         self.context, self.reader, self.writer = context, reader, writer
         self.incoming, self.outgoing = incoming, outgoing
         self.decoder = Decoder(incoming)
@@ -877,6 +1082,7 @@ class _Channel:
             os.set_blocking(lease.fileno(), False)
 
     def send(self, kind: str, **fields: Any) -> None:
+        self.context._check_origin()
         _require(not self.writer_closed)
         frame = {"v": 1, "type": kind, **fields}
         packet = Protocol.encode(frame)
@@ -888,9 +1094,11 @@ class _Channel:
         self.pending.append((frame, memoryview(packet)))
 
     def send_frame(self, frame: dict[str, Any]) -> None:
+        self.context._check_origin()
         self.send(frame["type"], **{key: value for key, value in frame.items() if key not in ("v", "type")})
 
     def _unknown_write(self, error: BaseException) -> None:
+        self.context._check_origin()
         try:
             self.context.record(error, "io", cleanup=True)
         except BaseException as recording_error:
@@ -901,6 +1109,7 @@ class _Channel:
             self.close_writer()
 
     def flush(self, *, deadline_ns: int | None = None) -> None:
+        self.context._check_origin()
         if self.writer_closed:
             return
         if self.write_in_flight or self.write_failed:
@@ -966,6 +1175,7 @@ class _Channel:
                 raise
 
     def read(self) -> None:
+        self.context._check_origin()
         if self.eof or self.reader_closed:
             return
         try:
@@ -981,19 +1191,23 @@ class _Channel:
                         edge=self.incoming)
 
     def pump(self) -> None:
+        self.context._check_origin()
         self.flush()
         self.read()
 
     def take(self) -> list[dict[str, Any]]:
+        self.context._check_origin()
         frames, self.frames = self.frames, []
         return frames
 
     def close_writer(self) -> None:
+        self.context._check_origin()
         if not self.writer_closed:
             self.writer_closed = True
             self.context.close(self.writer)
 
     def close_reader(self) -> None:
+        self.context._check_origin()
         if not self.reader_closed:
             self.reader_closed = True
             self.context.close(self.reader)
@@ -1002,6 +1216,7 @@ class _Channel:
 class _GroupReservation:
     """G routing backed by C's original, deliberately unreaped K child."""
     def __init__(self, context: _Context, keeper: Any) -> None:
+        context._check_origin()
         self.context, self.keeper = context, keeper
         self._id = keeper.pid
         self._retired = False
@@ -1020,11 +1235,13 @@ class _GroupReservation:
         return self._absent
 
     def _check(self) -> None:
+        self.context._check_origin()
         _require(not self.retired and not self.keeper.numeric_retired
                  and _integer(self.id, PID_LIMIT) and self.keeper.pid == self.id, CLEANUP_ERROR)
         _require(time.monotonic_ns() < self.context.cleanup_cutoff(self.context.hard), CLEANUP_ERROR)
 
     def request(self, signum: int) -> bool:
+        self.context._check_origin()
         _require(type(signum) is int and signum in (0, signal.SIGKILL), CLEANUP_ERROR)
         self._check()
         _role_event(self.context.role, "group_request", group=self, signum=signum)
@@ -1039,6 +1256,7 @@ class _GroupReservation:
             return True  # Presence/EPERM is never evidence of absence.
 
     def retire(self, *, absent: bool) -> None:
+        self.context._check_origin()
         if self.retired:
             _require(not absent or self.absent, CLEANUP_ERROR)
             return
@@ -1055,6 +1273,7 @@ def _receipt_record(receipt: Any) -> dict[str, Any]:
 
 
 def _task_child_record(context: _Context) -> dict[str, Any]:
+    context._check_origin()
     task = context.tasks[0] if context.tasks else None
     acq = context.child_acquisition
     if acq.child is not None and acq.child.receipt is not None:
@@ -1070,6 +1289,7 @@ def _wait_child(context: _Context, child: Any, deadline_ns: int, pump: Callable[
                 *, phase: str, single_turn: bool = False) -> Any | None:
     # No direct numeric request exists after this boundary, even if the first
     # WNOHANG call consumes status and its publication is subsequently lost.
+    context._check_origin()
     def stopped() -> bool:
         _require(child.wait_state in ("OWNED", "POLLABLE", "REAPED")
                  and context.child_acquisition.settled and not context.child_acquisition.cleanup_unknown,
@@ -1125,6 +1345,7 @@ def _wait_child(context: _Context, child: Any, deadline_ns: int, pump: Callable[
 
 
 def _settle_tasks(context: _Context, pump: Callable[[], None]) -> None:
+    context._check_origin()
     for task in context.tasks:
         try:
             task.close_launch()
@@ -1149,6 +1370,7 @@ def _settle_tasks(context: _Context, pump: Callable[[], None]) -> None:
 
 
 def _validate_configuration(frame: dict[str, Any], context: _Context) -> Path:
+    context._check_origin()
     from .ios_profiles import MAX_COMPLETION_BYTES, profile_environment
     _require(frame["role"] == context.role and frame["capture_kind"] == "profile"
              and frame["run_deadline_ns"] == context.run
@@ -1171,6 +1393,7 @@ def _validate_configuration(frame: dict[str, Any], context: _Context) -> Path:
 
 
 def _helper_map(context: _Context) -> dict[int, Any]:
+    context._check_origin()
     import fcntl
     null = os.stat(os.devnull)
     for descriptor, access in ((0, os.O_RDONLY), (1, os.O_WRONLY), (2, os.O_WRONLY)):
@@ -1226,6 +1449,7 @@ def _flush_until(channel: _Channel, deadline_ns: int, pump: Callable[[], None], 
 
 class _Custodian:
     def __init__(self, context: _Context, descriptors: dict[int, Any]) -> None:
+        context._check_origin()
         self.context, self.descriptors = context, descriptors
         self.outer = _Channel(context, descriptors[3], descriptors[4], "o_to_c", "c_to_o")
         self.payload = descriptors[6]
@@ -1249,6 +1473,7 @@ class _Custodian:
         self.cleanup_claimed = False
 
     def pump_outer(self) -> None:
+        self.context._check_origin()
         ctx = self.context
         if ctx.cancelled and ctx.primary is None:
             ctx.record(ValidationError(ERROR), "cancelled")
@@ -1291,6 +1516,7 @@ class _Custodian:
                 ctx.record(ValidationError(ERROR), "parent_lost")
 
     def pump_keeper(self) -> None:
+        self.context._check_origin()
         channel, ctx = self.keeper_channel, self.context
         if channel is None:
             return
@@ -1363,10 +1589,12 @@ class _Custodian:
                 ctx.record(ValidationError(CLEANUP_ERROR), "lifecycle", cleanup=True)
 
     def pump(self) -> None:
+        self.context._check_origin()
         self.pump_outer()
         self.pump_keeper()
 
     def safe_pump(self) -> None:
+        self.context._check_origin()
         for method in (self.pump_outer, self.pump_keeper):
             try:
                 method()
@@ -1374,6 +1602,7 @@ class _Custodian:
                 self.context.record(error, "protocol", cleanup=True)
 
     def work(self) -> None:
+        self.context._check_origin()
         ctx = self.context
         self.outer.send_frame(_hello())
         while not self.admitted:
@@ -1407,6 +1636,7 @@ class _Custodian:
             self.pump(); ctx.check(); _pause(ctx.run, (self.outer, self.keeper_channel))
 
     def cleanup_descendants(self) -> None:
+        self.context._check_origin()
         ctx = self.context
         _require(not self.cleanup_claimed, CLEANUP_ERROR)
         self.cleanup_claimed = True
@@ -1483,11 +1713,13 @@ class _Custodian:
     def retire_routes(self) -> None:
         # Even an interrupted cleanup dispatch permanently relinquishes the
         # entire numeric route before any final report or helper unwinding.
+        self.context._check_origin()
         self.routes_retired = True
         if self.group is not None and not self.group.retired:
             self.group.retire(absent=False)
 
     def write_payload(self) -> None:
+        self.context._check_origin()
         from .ios_profiles import COMPLETION_MARKER, completion_frame, read_profile_bytes
         ctx = self.context
         assert self.directory is not None
@@ -1512,6 +1744,7 @@ class _Custodian:
         ctx.check()
 
     def retire_outer_control(self) -> bool:
+        self.context._check_origin()
         ctx, channel = self.context, self.outer
         stopped = False
 
@@ -1573,6 +1806,7 @@ class _Custodian:
         return stopped
 
     def run(self) -> int:
+        self.context._check_origin()
         ctx = self.context
         try:
             self.work()
@@ -1655,6 +1889,7 @@ class _Custodian:
 
 class _Keeper:
     def __init__(self, context: _Context, descriptors: dict[int, Any]) -> None:
+        context._check_origin()
         self.context, self.descriptors = context, descriptors
         self.channel = _Channel(context, descriptors[3], descriptors[4], "c_to_k", "k_to_c")
         self.group_id = os.getpid()
@@ -1669,6 +1904,7 @@ class _Keeper:
         self.receipt: Any = None
 
     def pump(self) -> None:
+        self.context._check_origin()
         ctx = self.context
         if ctx.cancelled and ctx.primary is None:
             ctx.record(ValidationError(ERROR), "cancelled")
@@ -1706,12 +1942,14 @@ class _Keeper:
             ctx.record(ValidationError(ERROR), "parent_lost")
 
     def safe_pump(self) -> None:
+        self.context._check_origin()
         try:
             self.pump()
         except BaseException as error:
             self.context.record(error, "protocol", cleanup=True)
 
     def move_out(self, *, positive: bool) -> None:
+        self.context._check_origin()
         ctx = self.context
         _require(os.getpid() == self.group_id and os.getsid(0) == ctx.parent_pid
                  and os.getpgrp() == self.group_id and os.getppid() == ctx.parent_pid, ERROR)
@@ -1737,6 +1975,7 @@ class _Keeper:
             _role_event(ctx.role, "empty_group_moved", group_id=self.group_id, keeper_pgid=os.getpgrp())
 
     def work(self) -> None:
+        self.context._check_origin()
         ctx = self.context
         self.channel.send_frame(_hello())
         while not self.run_granted:
@@ -1760,6 +1999,7 @@ class _Keeper:
 
     def fallback_group(self) -> None:
         """Own-pinned EOF/deadline fallback, never the C group we joined."""
+        self.context._check_origin()
         ctx = self.context
         if self.group_retired:
             return
@@ -1806,6 +2046,7 @@ class _Keeper:
             ctx.record(ValidationError(CLEANUP_ERROR), "lifecycle", cleanup=True)
 
     def run(self) -> int:
+        self.context._check_origin()
         ctx = self.context
         try:
             self.work()
@@ -1969,6 +2210,7 @@ def helper_main(argv: list[str] | None = None) -> int:
 
 class _Outer:
     def __init__(self, context: _Context, directory: Path, deadlines: _Deadlines) -> None:
+        context._check_origin()
         self.context, self.directory, self.deadlines = context, directory, deadlines
         self.channel: _Channel | None = None
         self.payload: Any = None
@@ -1986,9 +2228,11 @@ class _Outer:
         self.content: bytes | None = None
         self.receipt: Any = None
         self.confirmed = self.no_producers = False
+        self.producers_confirmed = False
         self.cleanup_claimed = False
 
     def read_payload(self) -> None:
+        self.context._check_origin()
         from .ios_profiles import MAX_COMPLETION_BYTES
         if self.payload is None or self.payload_eof or id(self.payload) in self.context.closed:
             return
@@ -2007,6 +2251,7 @@ class _Outer:
                 self.context.record(ValidationError("authenticated profile content exceeds its safety bound"), "io")
 
     def retire_control_writer(self) -> None:
+        self.context._check_origin()
         channel, ctx = self.channel, self.context
         if not self.control_retiring or channel is None or channel.writer_closed:
             return
@@ -2023,6 +2268,7 @@ class _Outer:
             channel.close_writer()
 
     def process_frames(self) -> None:
+        self.context._check_origin()
         channel, ctx = self.channel, self.context
         if channel is None or self.child is None:
             return
@@ -2094,6 +2340,7 @@ class _Outer:
         self.retire_control_writer()
 
     def pump(self) -> None:
+        self.context._check_origin()
         if self.channel is not None:
             self.channel.pump()
         self.read_payload()
@@ -2102,6 +2349,7 @@ class _Outer:
     def safe_pump(self) -> None:
         # Independent sources continue draining even after a malformed peer or a
         # failed data read. Neither path can turn a partial result into success.
+        self.context._check_origin()
         if self.channel is not None:
             try:
                 self.channel.pump()
@@ -2114,6 +2362,7 @@ class _Outer:
             self.context.record(error, "io", cleanup=True)
 
     def work(self) -> None:
+        self.context._check_origin()
         from .ios_profiles import AUTHENTICATION_ERROR, completed_content, profile_environment
         ctx = self.context
         metadata = self.directory.lstat()
@@ -2168,6 +2417,7 @@ class _Outer:
         ctx.check()
 
     def cleanup(self) -> None:
+        self.context._check_origin()
         ctx = self.context
         _require(not self.cleanup_claimed, CLEANUP_ERROR)
         self.cleanup_claimed = True
@@ -2205,14 +2455,18 @@ class _Outer:
         ctx.close_all()
         record = _task_child_record(ctx)
         self.no_producers = record["state"] == "not_attempted"
-        self.confirmed = (ctx.resources_confirmed() and
-                          (self.no_producers or
-                           (self.receipt is not None and self.receipt.status_kind == "exit"
-                            and self.control_retiring and self.final is not None and self.final["cleanup"] == "confirmed"
-                            and self.receipt.status_code == (HELPER_FAILED if self.final["outcome"] == "failed" else HELPER_SETTLED)
-                            and channel is not None and channel.eof and self.payload_eof)))
+        self.producers_confirmed = (
+            self.no_producers or
+            (self.receipt is not None and self.receipt.status_kind == "exit"
+             and self.control_retiring and self.final is not None and self.final["cleanup"] == "confirmed"
+             and self.receipt.status_code == (HELPER_FAILED if self.final["outcome"] == "failed" else HELPER_SETTLED)
+             and channel is not None and channel.eof and not channel.decoder.failed
+             and channel.decoder.ended and self.payload_eof)
+        )
+        self.confirmed = ctx.resources_confirmed() and self.producers_confirmed
 
     def run(self) -> bytes | None:
+        self.context._check_origin()
         try:
             self.work()
         except BaseException as error:
@@ -2250,10 +2504,10 @@ def capture_profile(directory: Path, deadline: InspectionDeadline, *, cancellati
     A borrowed cancellation guard remains installed through outer scratch cleanup.
     """
     from .ios_profiles import _profile_cancellation, _require_profile_scratch_available
+    origin_pid = os.getpid()
     _require_profile_scratch_available()
     _require(type(finality) is CaptureFinality and isinstance(directory, Path), CLEANUP_ERROR)
-    owns_guard = cancellation is None
-    guard = _profile_cancellation() if cancellation is None else cancellation
+    guard, owns_guard = _profile_cancellation(cancellation)
     context: _Context | None = None
     owner: _Outer | None = None
     primary: BaseException | None = None
@@ -2277,6 +2531,11 @@ def capture_profile(directory: Path, deadline: InspectionDeadline, *, cancellati
             owner = _Outer(context, directory, deadlines)
             result = owner.run()
         except BaseException as error:
+            if origin_pid != os.getpid():
+                if context is not None:
+                    context.after_fork_child()
+                finality.after_fork_child()
+                raise ValidationError(CLEANUP_ERROR) from None
             if context is not None:
                 try:
                     context.record(error, _failure_reason(error))
@@ -2284,6 +2543,11 @@ def capture_profile(directory: Path, deadline: InspectionDeadline, *, cancellati
                     context.contain_target_error(error, recording_error)
             primary = error
         finally:
+            if origin_pid != os.getpid():
+                if context is not None:
+                    context.after_fork_child()
+                finality.after_fork_child()
+                raise ValidationError(CLEANUP_ERROR) from None
             # Every independent obligation is attempted even if another dispatch
             # raises. Numeric cleanup is claimed once; joins/close-once slots
             # retain their original endpoint and never infer a missing receipt.
@@ -2322,6 +2586,7 @@ def capture_profile(directory: Path, deadline: InspectionDeadline, *, cancellati
                             primary = error
             if context is not None and finality._owner is context and finality._begun:
                 try:
+                    finality._publish_lifetime(owner)
                     no_producers = _task_child_record(context)["state"] == "not_attempted"
                     confirmed = (context.resources_confirmed() and not context.cleanup_unknown
                                  and (owner.confirmed if owner is not None else no_producers))
