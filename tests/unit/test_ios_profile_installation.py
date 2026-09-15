@@ -205,7 +205,7 @@ class ProfileInstallationTests(unittest.TestCase):
 
     def test_replacement_or_edit_is_preserved_and_failed_cleanup_cannot_report_success(self):
         for replace in (False, True):
-            with self.subTest(replace=replace), self.assertRaisesRegex(CredentialError, "changed or could not"):
+            with self.subTest(replace=replace), self.assertRaises(ProcessError) as raised:
                 with self.install():
                     if replace:
                         foreign = self.directory / "foreign"
@@ -213,11 +213,23 @@ class ProfileInstallationTests(unittest.TestCase):
                         foreign.replace(self.destination)
                     else:
                         self.destination.write_bytes(b"foreign-profile")
+            # The public projection retains the cleanup abort, not the inner
+            # cleanup message. No native producer was admitted by this installer.
+            self.assertIs(type(raised.exception), ProcessError)
+            self.assertIs(raised.exception.fatal, True)
+            self.assertIs(raised.exception.contained, True)
+            self.assertIs(raised.exception.cleanup_complete, False)
+            self.assertIs(raised.exception.dispatched, False)
             self.assertEqual(self.destination.read_bytes(), b"foreign-profile")
             self.destination.unlink()
         context = self.install(); context.__enter__()
-        with patch("mobile_release.credentials.os.unlink", side_effect=PermissionError("injected")), self.assertRaisesRegex(CredentialError, "could not"):
+        with patch("mobile_release.credentials.os.unlink", side_effect=PermissionError("injected")), self.assertRaises(ProcessError) as raised:
             context.__exit__(None, None, None)
+        self.assertIs(type(raised.exception), ProcessError)
+        self.assertIs(raised.exception.fatal, True)
+        self.assertIs(raised.exception.contained, True)
+        self.assertIs(raised.exception.cleanup_complete, False)
+        self.assertIs(raised.exception.dispatched, False)
         self.assertEqual(self.destination.read_bytes(), self.content)
 
     def test_initial_fstat_failure_recovers_only_from_owned_fd_or_reports_empty_private_residue(self):
@@ -237,16 +249,23 @@ class ProfileInstallationTests(unittest.TestCase):
             with self.subTest(persistent=persistent), patch("mobile_release.credentials.os.open", side_effect=opening), patch("mobile_release.credentials.os.fstat", side_effect=stating):
                 with self.assertRaises(CredentialError) as raised:
                     with self.install(): self.fail("unregistered inode entered")
-            self.assertTrue(descriptors)
+            self.assertEqual(len(descriptors), 1)
+            self.assertEqual(len(calls), 2 if persistent else 1)  # Injected failures, not total fstat calls.
             for descriptor in descriptors:
                 with self.assertRaises(OSError): real_fstat(descriptor)
             if persistent:
-                self.assertIn("could not be cleaned up safely", str(raised.exception))
+                self.assertIs(type(raised.exception), ProcessError)
+                self.assertIs(raised.exception.fatal, True)
+                self.assertIs(raised.exception.contained, True)
+                self.assertIs(raised.exception.cleanup_complete, False)
+                self.assertIs(raised.exception.dispatched, False)
                 residues = list(self.directory.iterdir())
                 self.assertEqual(len(residues), 1)
                 self.assertEqual(residues[0].read_bytes(), b"")
                 self.assertEqual(stat.S_IMODE(residues[0].stat().st_mode), 0o600)
                 residues[0].unlink()  # Exact fixture-owned fallback AFTER observing reported residue.
+            else:
+                self.assertIs(type(raised.exception), CredentialError)
             self.assert_no_files()
 
     def test_fdopen_failure_cleans_registered_stage_and_stage_collision_never_claims_foreign_file(self):
