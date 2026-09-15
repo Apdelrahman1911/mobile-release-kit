@@ -1788,10 +1788,16 @@ class CIControllerContractTests(unittest.TestCase):
         paths = fixture_paths(controller)
         identifier = ("workflow.test_command_account_lifecycle.CommandAccountLifecycleTests."
                       "test_prepared_no_target_original_fence_and_same_lease_cleanup")
+        account_ids = (identifier,
+            "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests."
+            "test_prepared_input_withdrawal_c_loss_fresh_prefix_recovery",
+            "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests."
+            "test_original_hold_survives_true_parent_loss_and_is_absent_from_worker_map")
         unrelated = "unit.synthetic.Other.test_case"
         self.assertEqual(controller.COMMAND_ACCOUNT_FAILURE_ID, identifier)
-        checks = SimpleNamespace(python_capture_ids=lambda *_, **__: (identifier, unrelated),
-                                 native_partition_ids=lambda *_, **__: (identifier, unrelated))
+        self.assertEqual(controller.COMMAND_ACCOUNT_FAILURE_IDS, frozenset(account_ids))
+        checks = SimpleNamespace(python_capture_ids=lambda *_, **__: (*account_ids, unrelated),
+                                 native_partition_ids=lambda *_, **__: (*account_ids, unrelated))
         callback = {"id": identifier, "outcome": "failure", "category": "assertion-error", "errno": None}
         packet = {"category": "AssertionError", "frames": [["command_account_lifecycle_fixture.py", 192],
                   ["contextlib.py", 144], ["PRIVATE.py", 123], ["local_signing.py", 1170]]}
@@ -1825,28 +1831,33 @@ class CIControllerContractTests(unittest.TestCase):
             with self.subTest(raw=repr(raw[:80])):
                 self.assertIsNone(controller.command_account_failure(raw, deadline=1000.0))
 
-        def capture(records, gate, *, raw=marker, ok=False, finality=True, phase="tests"):
+        def capture(records, native, gate, *, raw=marker, ok=False, finality=True, phase="tests"):
             envelope = ({"schema": 1, "phase": phase, "records": [{**row, "returncode": None} for row in records]}
-                        if gate.startswith("native-") else
+                        if native else
                         {"check": gate, "ok": False, "details": {"error": "TEST_OUTCOME_COUNT", "failure_callbacks": records}})
-            prefix = controller.NATIVE_DIAGNOSTIC_PREFIX if gate.startswith("native-") else "MRK_CHECK_RESULT="
+            prefix = controller.NATIVE_DIAGNOSTIC_PREFIX if native else "MRK_CHECK_RESULT="
             stdout = (prefix + json.dumps(envelope) + "\n").encode()
             return SimpleNamespace(ok=ok, returncode=0 if ok else 1, waited=True, stdout_eof=True, stderr_eof=True,
                 domain_finality=finality, timed_out=False, cancelled=False, stdout=stdout, stderr=raw,
                 persisted=(len(stdout), len(raw)), duration=0.1,
                 primary_error=None if ok else "command exited 1", cleanup_errors=())
 
-        for gate in ("python-full", "python-wheel", "native-profile-source", "native-profile-wheel"):
-            step = controller.Step(gate, parser="native" if gate.startswith("native-") else "check")
+        routes = [(gate, "native" if gate.startswith("native-") else "check", "all") for gate in
+                  ("python-full", "python-wheel", "native-profile-source", "native-profile-wheel")]
+        routes += [(gate, "native", "poison-command-prepared-prefix-input-loss")
+                   for gate in ("python-full", "python-wheel")]
+        for gate, parser, partition in routes:
+            step = controller.Step(gate, parser=parser, native_partition=partition)
             def details(records, **options):
-                return controller.failure_details(capture(records, gate, **options), step, paths,
+                return controller.failure_details(capture(records, parser == "native", gate, **options), step, paths,
                                                   checks=checks, deadline=1000.0)
-            for finality in (False, True):
-                observed = details([callback], finality=finality)
-                self.assertEqual(observed["command_account_failure"], expected)
-                self.assertEqual(observed["returncode"], 1)
-                self.assertIs(observed["domain_finality"], finality)
-                self.assertNotIn("PRIVATE", json.dumps(observed))
+            for account_id in account_ids:
+                for finality in (False, True):
+                    observed = details([{**callback, "id": account_id}], finality=finality)
+                    self.assertEqual(observed["command_account_failure"], expected)
+                    self.assertEqual(observed["returncode"], 1)
+                    self.assertIs(observed["domain_finality"], finality)
+                    self.assertNotIn("PRIVATE", json.dumps(observed))
             for rows, options in (([], {}), ([callback], {"ok": True}), ([callback], {"raw": marker[:-1]}),
                                   ([{**callback, "id": unrelated}], {}), ([{**callback, "id": "PRIVATE"}], {}),
                                   ([{**callback, "outcome": "expected-failure"}], {}),
@@ -1857,12 +1868,153 @@ class CIControllerContractTests(unittest.TestCase):
             self.assertEqual(observed["returncode"], 1)
             self.assertNotIn("command_account_failure", observed)
             self.assertNotIn("PRIVATE", json.dumps(observed))
-            if gate.startswith("native-"):
+            if parser == "native":
                 self.assertNotIn("command_account_failure", details([callback], phase="prerequisite"))
         with patch.object(controller.time, "monotonic", return_value=1000.0):
             for raw in (marker, marker[:-1]):
                 with self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
                     controller.command_account_failure(raw, deadline=1000.0)
+
+    def test_command_failure_context_keeps_exact_phase_paths_and_fixed_mode_prefix_only(self):
+        import ast
+        controller = controller_module()
+        self.enterContext(patch.object(controller.time, "monotonic", return_value=999.0))
+        paths = fixture_paths(controller)
+        identifier = ("unit.test_owned_process.OwnedProcessTests."
+                      "test_guarded_worker_tail_and_report_loss_preserve_original_outcomes")
+        modes = ("body-return", "body-systemexit", "report-format-error", "reject-zero", "reject-eagain", "reject-error",
+                 "reject-full", "reject-partial", "arm-missing", "arm-partial", "post-map-pre-ready")
+        self.assertEqual(controller.COMMAND_CASE_FAILURE_ID, identifier)
+        self.assertEqual(controller.COMMAND_CASE_MODES, modes)
+        tree = ast.parse((ROOT / "tests/unit/test_owned_process.py").read_text())
+        method, = (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+                   and node.name == identifier.rsplit(".", 1)[1])
+        literals = {node.targets[0].id: ast.literal_eval(node.value) for node in method.body
+                    if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)}
+        loop, = (node for node in method.body if isinstance(node, ast.For))
+        actual_modes = tuple(value for node in loop.iter.elts for value in
+                             (literals[node.value.id] if isinstance(node, ast.Starred) else (node.value,)))
+        self.assertEqual(actual_modes, modes)
+        # Execute only the two exact pre-acquisition emitter statements, never
+        # the native test body, against real unittest success framing.
+        emitters = loop.body[:2]
+        expected_emitters = ast.parse('sys.stdout.write("\\nMRK_OWNED_COMMAND_MODE=" + mode + "\\n")\nsys.stdout.flush()').body
+        self.assertEqual([ast.dump(node) for node in emitters], [ast.dump(node) for node in expected_emitters])
+        program = compile(ast.Module(body=emitters, type_ignores=[]), "<inert-command-mode-emitter>", "exec")
+        native_stdout, native_stderr = io.StringIO(), io.StringIO()
+        def emit(_test):
+            for mode in modes:
+                exec(program, {"sys": SimpleNamespace(stdout=native_stdout, stderr=native_stderr), "mode": mode})
+        fixture = type("OwnedProcessTests", (unittest.TestCase,), {
+            "__module__": "unit.test_owned_process", identifier.rsplit(".", 1)[1]: emit})
+        completed = unittest.TextTestRunner(stream=native_stderr, verbosity=2, descriptions=False).run(
+            unittest.TestSuite((fixture(identifier.rsplit(".", 1)[1]),)))
+        self.assertTrue(completed.wasSuccessful())
+        self.assertEqual(completed.testsRun, 1)
+        captured = SimpleNamespace(ok=True, returncode=0, waited=True, stdout_eof=True, stderr_eof=True,
+            domain_finality=True, primary_error=None, cleanup_errors=(), duration=0.01,
+            stdout=native_stdout.getvalue().encode(), stderr=native_stderr.getvalue().encode())
+        parsed = controller.parse_capture(controller.Step("native-profile-source", parser="native"), captured,
+            paths, "macos", SimpleNamespace(native_partition_ids=lambda *_, **__: (identifier,)), deadline=1000.0)
+        self.assertTrue(parsed.ok)
+        self.assertEqual(parsed.details["completed"], [identifier])
+        callback = {"id": identifier, "outcome": "failure", "category": "assertion-error", "errno": None}
+        private = "PRIVATE_COMMAND_FAILURE_CANARY"
+        marker = lambda mode: b"MRK_OWNED_COMMAND_MODE=" + mode.encode() + b"\n"
+        frame = lambda path, line: f'  File "{path}", line {line}, in {private}\n'.encode()
+        relative = "tests/unit/test_owned_process.py"
+        for phase in ("source", "wheel"):
+            package = paths.work / ("source-build/src/mobile_release" if phase == "source" else
+                                    "wheel-venv/lib/python3.11/site-packages/mobile_release")
+            wrong = paths.work / ("source-build/src/mobile_release" if phase == "wheel" else
+                                  "wheel-venv/lib/python3.11/site-packages/mobile_release")
+            headers = (frame(paths.source / relative, 1463)
+                       + frame(package / "_command_process.py", 3240).replace(b"\n", b"\r\n"))
+            rejected = (frame("/other/" + relative, 81), frame(relative, 82),
+                        frame(package / "PRIVATE.py", 83), frame(wrong / "_command_process.py", 84),
+                        frame(paths.source / relative, 0), frame(paths.source / relative, "01"),
+                        frame(paths.source / relative, 1_000_000), frame(paths.source / relative, 2).lstrip(),
+                        frame(paths.source / relative, 3).replace(b"\n", b" trailing\n"),
+                        frame(paths.source / relative, 4)[:-1])
+            expected = [{"file": relative, "line": 1463}, {"file": "src/mobile_release/_command_process.py", "line": 3240}]
+            output = marker(modes[0]) + marker(modes[1])
+            raw = (b"test_guarded ... \n" + headers
+                   + b"    private_source('" + private.encode() + b"')\nAssertionError: /private/signing\n")
+            observed = controller.command_failure_context(raw, [callback], paths, phase,
+                                                          mode_output=output, deadline=1000.0)
+            self.assertEqual(observed, {"command_failure_locations": expected, "command_case_mode": modes[1]})
+            for hidden in (private, str(paths.source), "/private/signing", "private_source"):
+                self.assertNotIn(hidden, json.dumps(observed))
+            for bad in rejected:
+                self.assertEqual(controller.command_failure_context(bad, [callback], paths, phase, deadline=1000.0), {})
+            bounded = controller.command_failure_context(headers * 20, [callback], paths, phase, deadline=1000.0)
+            self.assertEqual(bounded, {"command_failure_locations": expected * 8})
+            self.assertEqual(controller.command_failure_context(raw, [], paths, phase, deadline=1000.0), {})
+            for bad in (marker(modes[1]), marker(modes[0]) * 2, marker(modes[0]) + marker(modes[2]),
+                        marker(modes[0])[:-1], marker(modes[0]).replace(b"\n", b"\r\n"), marker("PRIVATE"),
+                        marker(modes[0]) + marker("PRIVATE"), b"".join(map(marker, modes)) + marker(modes[-1])):
+                result = controller.command_failure_context(headers, [callback], paths, phase,
+                                                            mode_output=bad, deadline=1000.0)
+                self.assertEqual(result, {"command_failure_locations": expected})
+            for count in range(1, len(modes) + 1):
+                result = controller.command_failure_context(b"", [callback], paths, phase,
+                    mode_output=b"".join(map(marker, modes[:count])), deadline=1000.0)
+                self.assertEqual(result, {"command_case_mode": modes[count - 1]})
+            self.assertEqual(controller.command_failure_context(output, [callback], paths, phase,
+                mode_output=headers, deadline=1000.0), {})  # Never swap stderr/source with stdout/modes.
+            for excluded in ({**callback, "id": "unit.synthetic.Other.test_case"},
+                             {**callback, "outcome": "skip"}, {**callback, "outcome": "expected-failure"}):
+                self.assertEqual(controller.command_failure_context(raw, [excluded], paths, phase, deadline=1000.0), {})
+            account = {**callback, "id": controller.COMMAND_ACCOUNT_FAILURE_ID}
+            self.assertEqual(controller.command_failure_context(raw, [account], paths, phase,
+                             mode_output=output, deadline=1000.0),
+                             {"command_failure_locations": expected})
+        for bad in (bytearray(b""), b"x" * (8 * 1024**2 + 1)):
+            self.assertEqual(controller.command_failure_context(bad, [callback], paths, "source", deadline=1000.0), {})
+            self.assertEqual(controller.command_failure_context(b"", [callback], paths, "source",
+                mode_output=bad, deadline=1000.0), {})
+
+    def test_command_failure_context_never_replaces_original_result_or_cutoff(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        identifier = controller.COMMAND_CASE_FAILURE_ID
+        callback = {"id": identifier, "outcome": "failure", "category": "assertion-error", "errno": None, "returncode": None}
+        checks = SimpleNamespace(native_partition_ids=lambda *_, **__: (identifier,))
+        text = f'  File "{paths.source / "tests/unit/test_owned_process.py"}", line 1463, in test_case\n'.encode()
+        stdout = ("MRK_OWNED_COMMAND_MODE=body-return\n" + controller.NATIVE_DIAGNOSTIC_PREFIX
+                  + json.dumps({"schema": 1, "phase": "tests", "records": [callback]}) + "\n").encode()
+        fields = dict(ok=False, returncode=1, waited=True, stdout_eof=True, stderr_eof=True, domain_finality=True,
+                      timed_out=False, cancelled=False, primary_error="command exited 1", cleanup_errors=(),
+                      stdout=stdout, stderr=text, persisted=(len(stdout), len(text)), duration=0.01)
+        step = controller.Step("native-profile-source", parser="native")
+        with patch.object(controller.time, "monotonic", return_value=999.0):
+            for changes in ({}, {"waited": False, "domain_finality": False, "cleanup_errors": ("stream close OSError",)}):
+                original = SimpleNamespace(**{**fields, **changes})
+                before = dict(vars(original))
+                result = controller.failure_details(original, step, paths, checks=checks, deadline=1000.0)
+                self.assertEqual(result["command_case_mode"], "body-return")
+                self.assertEqual(result["command_failure_locations"], [{"file": "tests/unit/test_owned_process.py", "line": 1463}])
+                self.assertEqual(vars(original), before)
+                for key, value in controller.capture_observations(original).items():
+                    self.assertEqual(result[key], value)
+                with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                    controller.require_original_finality(original)
+            with patch.object(controller, "command_failure_context", side_effect=ValueError("PRIVATE parser")):
+                result = controller.failure_details(SimpleNamespace(**fields), step, paths, checks=checks, deadline=1000.0)
+            self.assertEqual(result["returncode"], 1)
+            self.assertNotIn("command_failure_locations", result)
+            self.assertNotIn("PRIVATE", json.dumps(result))
+            with patch.object(controller, "command_failure_context") as diagnostic:
+                for ok in (True, None, 0):
+                    original = SimpleNamespace(**{**fields, "ok": ok, "returncode": 0, "primary_error": None})
+                    result = controller.failure_details(original, step, paths, checks=checks, deadline=1000.0)
+                    self.assertNotIn("command_failure_locations", result)
+                diagnostic.assert_not_called()
+        for ticks in ((1000.0,), (999.0, 1000.0), (999.0, 999.0, 1000.0)):
+            clock = iter(ticks)
+            with patch.object(controller.time, "monotonic", side_effect=lambda: next(clock, 1000.0)), \
+                    self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                controller.command_failure_context(text, [callback], paths, "source", deadline=1000.0)
 
     def test_native_storage_observations_require_exact_profile_and_original_finality(self):
         controller = controller_module()

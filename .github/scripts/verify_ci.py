@@ -104,6 +104,22 @@ COMMAND_ACCOUNT_FAILURE_ID = (
     "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests."
     "test_prepared_no_target_original_fence_and_same_lease_cleanup"
 )
+COMMAND_ACCOUNT_FAILURE_IDS = frozenset({
+    COMMAND_ACCOUNT_FAILURE_ID,
+    "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests."
+    "test_prepared_input_withdrawal_c_loss_fresh_prefix_recovery",
+    "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests."
+    "test_original_hold_survives_true_parent_loss_and_is_absent_from_worker_map",
+})
+COMMAND_CASE_FAILURE_ID = (
+    "unit.test_owned_process.OwnedProcessTests."
+    "test_guarded_worker_tail_and_report_loss_preserve_original_outcomes"
+)
+COMMAND_CASE_MODE_PREFIX = "MRK_OWNED_COMMAND_MODE="
+COMMAND_CASE_MODES = (
+    "body-return", "body-systemexit", "report-format-error", "reject-zero", "reject-eagain", "reject-error",
+    "reject-full", "reject-partial", "arm-missing", "arm-partial", "post-map-pre-ready",
+)
 COMMAND_ACCOUNT_FAILURE_CATEGORIES = {
     "AssertionError": "assertion-error", "ValueError": "value-error", "TypeError": "type-error",
     "KeyError": "key-error", "IndexError": "index-error", "AttributeError": "attribute-error",
@@ -132,6 +148,8 @@ COMMAND_ACCOUNT_FAILURE_FILES = {
         "local_signing", "owned_process", "_command_process", "_native_process", "cancellation", "errors",
     )},
 }
+COMMAND_FAILURE_FILES = (*COMMAND_ACCOUNT_FAILURE_FILES.values(),
+                         "tests/unit/test_owned_process.py", "src/mobile_release/_lifetime_evidence.py")
 FIXTURE_BOOTSTRAP_FAILURE_PREFIX = "MRK_FIXTURE_BOOTSTRAP_FAILURE="
 FIXTURE_BOOTSTRAP_FAILURE_CONDITIONS = {
     "configuration": ("directory_read", "record_read", "record_parse", "record_schema",
@@ -2329,11 +2347,65 @@ def command_account_failure(raw: bytes, *, deadline: float | None = None) -> dic
 
 def _command_account_failure_for_callbacks(raw: bytes, callbacks: list[dict], *,
                                            deadline: float | None = None) -> dict | None:
-    """Only a source-validated adverse prepared-positive callback is eligible."""
-    if any(row["id"] == COMMAND_ACCOUNT_FAILURE_ID and row["outcome"] in {"error", "failure"}
+    """Only source-validated adverse account-case callbacks are eligible."""
+    if any(row["id"] in COMMAND_ACCOUNT_FAILURE_IDS and row["outcome"] in {"error", "failure"}
            for row in callbacks):
         return command_account_failure(raw, deadline=deadline)
     return None
+
+
+def command_failure_context(raw: bytes, callbacks: list[dict], paths: Paths, phase: str, *,
+                            mode_output: bytes = b"", deadline: float | None = None) -> dict:
+    """Optional captured-text attribution, never a source or finality receipt.
+
+    The filename map uses only frozen controller paths and fixed source names.
+    No source lookup, traceback/linecache read, import or subject acquisition
+    follows a failed original. A matching header is still only reported text.
+    """
+    try:
+        if deadline is not None:
+            check_clock(deadline)
+        eligible = {row["id"] for row in callbacks if row["outcome"] in {"error", "failure"}}
+        if (not eligible.intersection(COMMAND_ACCOUNT_FAILURE_IDS | {COMMAND_CASE_FAILURE_ID})
+                or type(raw) is not bytes or len(raw) > 8 * 1024**2
+                or type(mode_output) is not bytes or len(mode_output) > 8 * 1024**2
+                or phase not in {"source", "wheel"}):
+            return {}
+        package = (paths.work / "source-build/src/mobile_release" if phase == "source"
+                   else paths.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
+        filenames = {str(package / name.removeprefix("src/mobile_release/"))
+                     if name.startswith("src/mobile_release/") else str(paths.source / name): name
+                     for name in COMMAND_FAILURE_FILES}
+        locations = []
+        pattern = (r'  File "([^"\r\n]{1,1024})", line ([1-9][0-9]{0,5}), '
+                   r'in (?:<module>|[A-Za-z_][A-Za-z0-9_]*)\r?\n')
+        for line in raw.splitlines(keepends=True):
+            if deadline is not None:
+                check_clock(deadline)
+            if len(locations) < 16:
+                match = re.fullmatch(pattern, line.decode("utf-8", "replace"))
+                if match is not None and match[1] in filenames:
+                    locations.append({"file": filenames[match[1]], "line": int(match[2])})
+        # Modes use stdout so they cannot split unittest's stderr success line.
+        # Never combine the two streams to invent cross-stream ordering.
+        mode_count, valid_modes = 0, True
+        prefix = COMMAND_CASE_MODE_PREFIX.encode("ascii")
+        for line in mode_output.splitlines(keepends=True) if COMMAND_CASE_FAILURE_ID in eligible else ():
+            if deadline is not None:
+                check_clock(deadline)
+            if line.startswith(prefix):
+                if (not valid_modes or mode_count >= len(COMMAND_CASE_MODES)
+                        or line != prefix + COMMAND_CASE_MODES[mode_count].encode("ascii") + b"\n"):
+                    valid_modes = False
+                else:
+                    mode_count += 1
+        result = {"command_failure_locations": locations} if locations else {}
+        if valid_modes and mode_count:
+            result["command_case_mode"] = COMMAND_CASE_MODES[mode_count - 1]
+        return result
+    finally:
+        if deadline is not None:
+            check_clock(deadline)
 
 
 def fixture_bootstrap_failure(raw: bytes, *, deadline: float | None = None) -> dict | None:
@@ -3175,6 +3247,9 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                             account = _command_account_failure_for_callbacks(result.stderr, callbacks, deadline=deadline)
                             if account is not None:
                                 value["command_account_failure"] = account
+                            value.update(command_failure_context(result.stderr, callbacks, paths,
+                                "source" if step.id == "python-full" else "wheel",
+                                mode_output=result.stdout, deadline=deadline))
                 except Exception:
                     # Optional diagnostics must not replace the original failure.
                     # Do not absorb expiry of the original aggregate timer.
@@ -3321,6 +3396,9 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                         account = _command_account_failure_for_callbacks(result.stderr, diagnostic["records"], deadline=deadline)
                         if account is not None:
                             value["command_account_failure"] = account
+                        value.update(command_failure_context(result.stderr, diagnostic["records"], paths,
+                            "source" if step.id in {"python-full", "native-profile-source"} else "wheel",
+                            mode_output=result.stdout, deadline=deadline))
         except Exception:
             if deadline is not None:
                 check_clock(deadline)

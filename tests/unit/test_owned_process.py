@@ -1454,6 +1454,10 @@ class OwnedProcessTests(unittest.TestCase):
         for mode in (*negative, "reject-full", *incomplete, "post-map-pre-ready"):
             # An assertion/finality failure leaves its root registered and stops
             # the batch; there is no healthy continuation after UNKNOWN.
+            # Separate stdout leaves unittest's stderr success line intact.
+            # Only this fixed enum is reported, before any case acquisition.
+            sys.stdout.write("\nMRK_OWNED_COMMAND_MODE=" + mode + "\n")
+            sys.stdout.flush()
             case = self._command_case(mode)
             with case:
                 if mode in negative:

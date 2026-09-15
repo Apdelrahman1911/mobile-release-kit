@@ -1179,6 +1179,14 @@ stderr-token labels report observed text, not a proven operating-system cause.
 Diagnostic failure preserves the original failure, and any failure marker prevents
 native success acceptance.
 
+The three account-lifecycle cases and guarded-command-tail case can additionally
+report at most16 exact-path-matched, first-party relative traceback locations.
+The guarded case reports only its last complete, ordered fixed-mode stdout marker,
+emitted before acquisition without splitting unittest's stderr success line.
+Messages, source excerpts, locals and raw paths stay private.
+These are captured-text observations, not authenticated source/finality evidence;
+malformed optional attribution never clears the original failure or its deadline.
+
 An AIA comparison failure may additionally publish a closed original-parent
 observation after successful capture/finality and responder close/join. It includes
 only fixed case labels, exact Boolean values, bounded trust-result/chain counts,
