@@ -963,6 +963,26 @@ def python_capture_ids(source_root: Path, selection: str, partition: str = "all"
     return _python_capture_partition(complete, partition, delegated)
 
 
+def python_capture_snapshot(source_root: Path, selection: str, *, deadline: float
+                            ) -> tuple[MappingProxyType, tuple[tuple[str, ...], MappingProxyType]]:
+    """One invocation-local outside-owner inventory, never execution evidence.
+
+    Subject discovery remains independent. Neither the map's backing dictionary
+    nor a module/cache alias survives this acquisition; every value is immutable.
+    """
+    _require(type(selection) is str and selection in {"full", "wheel"}, "PYTHON_CAPTURE_SELECTION")
+    _remaining(deadline, 3300)
+    complete = expected_python_ids(source_root, selection, deadline=deadline)
+    _remaining(deadline, 3300)
+    metadata = signing_regression_metadata(source_root, "ubuntu-24.04", deadline=deadline)
+    _remaining(deadline, 3300)
+    delegated, _requirements = metadata
+    partitions = {name: _python_capture_partition(complete, name, delegated)
+                  for name in ("all", "delegated", "healthy", *PYTHON_POISON_PARTITIONS)}
+    _remaining(deadline, 3300)
+    return MappingProxyType(partitions), metadata
+
+
 def native_partition_ids(source_root: Path, partition: str = "all", *, deadline: float | None = None) -> tuple[str, ...]:
     """macOS authority5/ordinary/singletons, plus data-only pending G obligations."""
     _require(type(partition) is str and partition in {"all", "ordinary", "authority", "delegated", *PYTHON_POISON_PARTITIONS},

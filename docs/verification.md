@@ -49,6 +49,10 @@ the complete matrix job set, and a successful proof reduction; failed, cancelled
 skipped, unavailable or queued is not success.
 Never bypass branch protection or dispatch release/Store workflows for testing.
 
+For an intermediate Linux correction, manual `verification_target: linux` runs
+the **same complete Linux source/wheel catalog and owner path**, without macOS or
+matrix jobs. The disposable hosted VM is required; a Linux OS or root access on
+the shared VPS does not admit the native/process suite or controller there.
 For an intermediate macOS-only correction, manual `verification_target: macos`
 omits Linux but runs the **same complete macOS catalog and owner path**. The
 partial selection, `signing-adapter`, runs only the two-OS smoke scope below.
@@ -60,10 +64,12 @@ and 28, and macOS shards 0, 1, 12 and 37. These probe each OS's largest planned
 command and worker counts plus the selected materialized cancellation, PREPARED
 no-dispatch and unrecorded-create recovery cases. They qualify capacity and
 integration, not full verification, and cannot satisfy the protected aggregate.
-Actions compares these string values without case sensitivity. Missing, empty or
-nonmatching values do not omit Linux. A partial dispatch's
-aggregate `test` deliberately **fails** because skipped Linux is not a
-pass. This supplies platform-specific candidate evidence, never full verification
+Actions compares these string values without case sensitivity. The UI default is
+`full`; missing, empty or nonmatching dispatched values select no prerequisite
+job, not an implicit full fallback. A partial dispatch's aggregate `test`
+deliberately **fails** because any skipped Linux, macOS or matrix prerequisite
+is not a pass. Linux-only success is Linux evidence, not complete CI success.
+This supplies platform-specific candidate evidence, never full verification
 or merge authority. Event/target-specific concurrency separates partial dispatches
 from full PR/main/manual runs.
 

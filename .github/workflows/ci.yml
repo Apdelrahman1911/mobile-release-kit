@@ -8,11 +8,11 @@ on:
   workflow_dispatch:
     inputs:
       verification_target:
-        description: Full verification, macOS-only evidence, signing-adapter smoke, or fixed-shard matrix canary (partial aggregate remains incomplete)
+        description: Full verification, Linux/macOS-only evidence, signing-adapter smoke, or fixed-shard matrix canary (partial aggregate remains incomplete)
         type: choice
         required: true
         default: full
-        options: [full, macos, signing-adapter, signing-adapter-macos, signing-matrix-canary]
+        options: [full, linux, macos, signing-adapter, signing-adapter-macos, signing-matrix-canary]
 
 permissions:
   contents: read
@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   test-linux:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.verification_target == 'full' }}
+    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'linux') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:

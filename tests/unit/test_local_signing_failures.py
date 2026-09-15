@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from contextlib import ExitStack, contextmanager, nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
-from types import SimpleNamespace
+from types import FunctionType, SimpleNamespace
 from unittest.mock import patch
 
 import mobile_release
@@ -87,9 +87,11 @@ class DescriptorFault:
 
     def close(self, fd):
         entry = self.active.pop(fd, None)
-        self.closed.append((fd, self.identity(fd)))
+        event = (fd, self.identity(fd))
+        close_index = len(self.closed)
+        self.closed.append(event)
         if entry is not None and self.armed and len(self.faults) < self.maximum and self.predicate(entry):
-            fault = {**entry, "retainedIdentity": entry["identity"], "closeIndex": len(self.closed) - 1}
+            fault = {**entry, "entry": entry, "retainedIdentity": entry["identity"], "closeIndex": close_index}
             self.faults.append(fault)
             if self.on_fault is not None:
                 self.on_fault()
@@ -103,7 +105,12 @@ class DescriptorFault:
                 os.write(fd, b"independent fictional descriptor")
                 fault["retainedIdentity"] = self.identity(fd)
             raise OSError("fictional-private-close-canary")
-        return os.close(fd)
+        result = os.close(fd)
+        if entry is not None and event == (entry["fd"], entry["identity"]):
+            # An attempted close or another acquisition's equal tuple is not
+            # evidence that this exact opened entry was successfully closed.
+            entry["normalCloseIndex"] = close_index
+        return result
 
     def assert_observed(self, testcase):
         testcase.assertEqual(len(self.faults), self.maximum)
@@ -112,11 +119,24 @@ class DescriptorFault:
             testcase.assertEqual(self.identity(fault["fd"]), fault["retainedIdentity"])
             testcase.assertEqual(self.closed[fault["closeIndex"]:].count((fault["fd"], fault["identity"])), 1)
             if self.after:
-                testcase.assertNotIn((fault["fd"], fault["retainedIdentity"]), self.closed)
+                testcase.assertNotIn((fault["fd"], fault["retainedIdentity"]),
+                                     self.closed[fault["closeIndex"] + 1:])
                 testcase.assertEqual(os.pread(fault["fd"], 100, 0), b"independent fictional descriptor")
         for entry in self.opened:
-            if not any(entry["fd"] == f["fd"] and entry["identity"] == f["identity"] for f in self.faults):
-                testcase.assertNotEqual(self.identity(entry["fd"]), entry["identity"])
+            if any(entry is fault["entry"] for fault in self.faults):
+                continue
+            identity = self.identity(entry["fd"])
+            close_index = entry.get("normalCloseIndex")
+            # FD/inode/type can recur after a prior handle and file disappear.
+            # Only this entry's returned close, before the retained replacement
+            # existed, can explain a currently equal historical identity.
+            recycled = self.after and close_index is not None and any(
+                0 <= close_index < fault["closeIndex"]
+                and self.closed[close_index] == (entry["fd"], entry["identity"])
+                and entry["fd"] == fault["fd"] and identity == fault["retainedIdentity"]
+                for fault in self.faults)
+            if not recycled:
+                testcase.assertNotEqual(identity, entry["identity"])
 
     def __enter__(self):
         return self
@@ -131,6 +151,118 @@ class DescriptorFault:
         for entry in self.active.values():
             if self.identity(entry["fd"]) == entry["identity"]:
                 os.close(entry["fd"])
+
+
+class DescriptorFaultHistoryTests(unittest.TestCase):
+    """Inert observation chronology, not native descriptor/recovery evidence."""
+
+    @staticmethod
+    def fixture():
+        state = SimpleNamespace(live={}, content=b"independent fictional descriptor")
+
+        def close(fd):
+            del state.live[fd]
+
+        modeled = SimpleNamespace(close=close, pread=lambda *_args: state.content)
+        seam = SimpleNamespace(opened=[], active={}, faults=[], closed=[], after=False,
+                               armed=True, maximum=1, on_fault=None,
+                               predicate=lambda entry: entry["name"] == "fault",
+                               identity=state.live.get)
+        # Bind the actual observation methods to an isolated, minimal namespace.
+        # Neither this fixture nor its doubles can call a real descriptor API;
+        # the native after-close replacement itself stays a separate G obligation.
+        for name in ("record", "close", "assert_observed"):
+            original = getattr(DescriptorFault, name)
+            method = FunctionType(original.__code__, {"os": modeled}, name, original.__defaults__)
+            setattr(seam, name, method.__get__(seam))
+        return seam, state, modeled
+
+    def test_recycled_identity_observation_is_acquisition_scoped(self):
+        fd, retained, other = 211, (1, 10, stat.S_IFREG), (1, 20, stat.S_IFREG)
+        mutations = (None, "retained-close", "original-close", "missing-success", "late-success",
+                     "wrong-success-event", "different-acquisition", "unrelated-live", "identity", "content")
+        for original_equals_retained in (False, True):
+            for mutation in mutations:
+                with self.subTest(original_equals_retained=original_equals_retained, mutation=mutation):
+                    seam, state, _ = self.fixture()
+                    state.live[fd] = retained
+                    seam.record(fd, "historical")
+                    historical = seam.opened[-1]
+                    seam.close(fd)
+                    self.assertEqual(historical["normalCloseIndex"], 0)
+                    original = retained if original_equals_retained else other
+                    state.live[fd] = original
+                    seam.record(fd, "fault")
+                    with self.assertRaisesRegex(OSError, "fictional-private-close-canary"):
+                        seam.close(fd)
+                    fault = seam.faults[0]
+                    self.assertIs(fault["entry"], seam.opened[-1])
+                    self.assertNotIn("normalCloseIndex", fault["entry"])
+                    # Model the already-created retained replacement, with no
+                    # native close/open call and no claim about OS allocation.
+                    state.live[fd] = fault["retainedIdentity"] = retained
+                    seam.after = True
+                    if mutation == "retained-close":
+                        seam.closed.append((fd, retained))
+                    elif mutation == "original-close":
+                        seam.closed.append((fd, original))
+                    elif mutation == "missing-success":
+                        del historical["normalCloseIndex"]
+                    elif mutation == "late-success":
+                        historical["normalCloseIndex"] = fault["closeIndex"]
+                    elif mutation == "wrong-success-event":
+                        seam.closed[0] = (fd, other)
+                    elif mutation == "different-acquisition":
+                        seam.opened.append({"fd": fd, "identity": retained, "name": "unclosed"})
+                    elif mutation == "unrelated-live":
+                        state.live[fd + 1] = retained
+                        seam.opened.append({"fd": fd + 1, "identity": retained, "name": "independent"})
+                    elif mutation == "identity":
+                        state.live[fd] = other
+                    elif mutation == "content":
+                        state.content = b"changed fictional descriptor"
+                    if mutation is None:
+                        seam.assert_observed(self)
+                    else:
+                        with self.assertRaises(AssertionError):
+                            seam.assert_observed(self)
+
+    def test_normal_close_success_is_exact_and_recorded_after_return(self):
+        fd, identity, other = 211, (1, 10, stat.S_IFREG), (1, 20, stat.S_IFREG)
+        for outcome in ("returned", "raised", "changed-identity"):
+            with self.subTest(outcome=outcome):
+                seam, state, modeled = self.fixture()
+                seam.maximum = 0
+                state.live[fd] = identity
+                seam.record(fd, "ordinary")
+                entry, delegate = seam.opened[-1], modeled.close
+                if outcome == "changed-identity":
+                    state.live[fd] = other
+
+                def closing(descriptor):
+                    self.assertNotIn("normalCloseIndex", entry)
+                    # Another observed event during the call cannot replace the
+                    # original call's captured index when that call returns.
+                    seam.closed.append((fd + 1, other))
+                    if outcome == "raised":
+                        raise OSError("inert ordinary close failure")
+                    return delegate(descriptor)
+
+                modeled.close = closing
+                if outcome == "raised":
+                    with self.assertRaisesRegex(OSError, "inert ordinary close failure"):
+                        seam.close(fd)
+                else:
+                    self.assertIsNone(seam.close(fd))
+                self.assertEqual(len(seam.closed), 2)
+                if outcome == "returned":
+                    self.assertEqual(entry["normalCloseIndex"], 0)
+                    seam.assert_observed(self)
+                else:
+                    self.assertNotIn("normalCloseIndex", entry)
+                    state.live[fd] = identity
+                    with self.assertRaises(AssertionError):
+                        seam.assert_observed(self)
 
 
 class SigningFailureTests(NativeCaseWorkspaceMixin, unittest.TestCase):

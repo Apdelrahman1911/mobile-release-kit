@@ -872,6 +872,56 @@ def _ruby_startup_error(result: CapturedRun, ruby: Path) -> dict | None:
     return note
 
 
+# Literal counterpart of verify_ci's capture projection; the inert contract
+# test binds both mappings and classifier ASTs without a runtime import cycle.
+CAPTURE_ERROR_CODE_LIMIT = 32
+_CAPTURE_ERROR_MESSAGES = {
+    "command/original aggregate deadline expired": "TIMEOUT",
+    "command cancellation": "CANCELLATION",
+    "late controller cancellation": "CANCELLATION",
+    "finality exceeded original command cutoff": "FINALITY_TIMEOUT",
+    "per-stream or whole-attempt persisted-output limit": "OUTPUT_LIMIT",
+    "subject per-process RSS limit exceeded": "RSS_LIMIT",
+    "native original-parent observation identity mismatch": "ORIGINAL_IDENTITY",
+    "native terminal status disagrees with original wait": "ORIGINAL_WAIT_STATUS",
+    "original wait or complete stream EOF missing": "WAIT_OR_EOF",
+    "stream EOF unavailable at bounded cleanup cutoff": "STREAM_EOF",
+    "late capture/cleanup/finality error": "FINALIZATION",
+    "capture persisted length differs from returned bytes": "CAPTURE_LENGTH",
+    # This also follows a missing original wait; do not invent a nonempty census.
+    "reserved identity did not reach finality": "DOMAIN_FINALITY",
+    "reserved-domain disposal failed": "RETAINED_DOMAIN_DISPOSAL",
+}
+_CAPTURE_EXCEPTION_PREFIXES = (
+    ("collection ", "COLLECTION"),
+    ("numerical cleanup ", "NUMERICAL_CLEANUP"),
+    ("reserved-domain cleanup ", "RETAINED_DOMAIN_CLEANUP"),
+    ("original child stop ", "ORIGINAL_STOP"),
+    ("original child wait ", "ORIGINAL_WAIT"),
+    ("stream close ", "STREAM_CLOSE"),
+    ("selector close ", "SELECTOR_CLOSE"),
+    ("capture fsync ", "CAPTURE_FSYNC"),
+    ("capture persist ", "CAPTURE_PERSIST"),
+    ("capture close ", "CAPTURE_CLOSE"),
+    ("reserved identity census ", "DOMAIN_CENSUS"),
+)
+
+
+def _capture_error_code(reason) -> str:
+    """Finite original-owner categories only; never copy messages or suffixes."""
+    if type(reason) is not str or len(reason) > 160:
+        return "UNCLASSIFIED"
+    code = _CAPTURE_ERROR_MESSAGES.get(reason)
+    if code is not None:
+        return code
+    if re.fullmatch(r"command exited (?:0|-?[1-9][0-9]{0,9})", reason):
+        return "COMMAND_EXIT"
+    for prefix, code in _CAPTURE_EXCEPTION_PREFIXES:
+        if reason.startswith(prefix) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", reason[len(prefix):]):
+            return code
+    return "UNCLASSIFIED"
+
+
 @dataclasses.dataclass(frozen=True)
 class CapturedRun:
     stdout: bytes
@@ -5235,11 +5285,16 @@ class Session:
     def _note_capture(self, name: str, result: CapturedRun, *, parse_child_notes: bool = True) -> dict:
         # Raw nested Mach stderr belongs only to its strict native parser, not
         # to the generic child-note format. Actual capture/error facts stay intact.
+        cleanup_codes = [_capture_error_code(reason) for reason in result.cleanup_errors[:CAPTURE_ERROR_CODE_LIMIT]]
         row = {"name": name, "ok": False, "subject_ok": result.ok,
                "returncode": result.returncode, "waited": result.waited,
                "stdout_eof": result.stdout_eof, "stderr_eof": result.stderr_eof,
                "domain_finality": result.domain_finality, "timed_out": result.timed_out,
                "cancelled": result.cancelled, "persisted": list(result.persisted),
+               "seconds": round(result.duration, 3), "cleanup_error_count": len(result.cleanup_errors),
+               "primary_error_code": None if result.primary_error is None else _capture_error_code(result.primary_error),
+               "cleanup_error_codes": cleanup_codes,
+               "cleanup_error_codes_omitted": len(result.cleanup_errors) - len(cleanup_codes),
                "error_count": len(result.cleanup_errors) + (result.primary_error is not None),
                "exceptions": _child_exception_notes(result.stderr) if parse_child_notes else []}
         launcher_error = _launcher_error(result.stderr, self.python, self.entry)
@@ -5364,8 +5419,11 @@ class Session:
                      ("over-limit", None, False), ("timeout", None, True),
                      ("cancel", None, False), ("held-pipe", None, False))
             for name, expected, timeout in cases:
+                # Linux can complete held-pipe through whole-namespace disposal;
+                # its successful full capture is not a short-timeout control.
+                seconds = 0.4 if name == "timeout" or (name == "held-pipe" and self.platform != "linux") else 10
                 result = self._run([*base, "--fixture", name], cwd=self.work, env={},
-                                   seconds=0.4 if name in {"timeout", "held-pipe"} else 10,
+                                   seconds=seconds,
                                    output_limit=1024, latch=False,
                                    cancel_after=0.15 if name == "cancel" else None)
                 capture_note = self._note_capture(name, result)

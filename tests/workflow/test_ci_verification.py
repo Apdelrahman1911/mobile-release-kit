@@ -116,7 +116,7 @@ _PYTHON_POISON_FIXTURES = (
 HOSTED_GUARD = '''set -euo pipefail
 [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == github-hosted ]]
 '''
-LINUX_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || inputs.verification_target == 'full' }}"
+LINUX_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'linux') }}"
 NATIVE_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'macos') }}"
 MATRIX_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'signing-matrix-canary') }}"
 MATRIX_SHARD_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[0]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47]') }}"
@@ -204,8 +204,8 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         self.assertEqual(workflow["true"], {
             "pull_request": None, "push": {"branches": ["main"]},
             "workflow_dispatch": {"inputs": {"verification_target": {
-                "description": "Full verification, macOS-only evidence, signing-adapter smoke, or fixed-shard matrix canary (partial aggregate remains incomplete)",
-                "type": "choice", "required": True, "default": "full", "options": ["full", "macos", "signing-adapter", "signing-adapter-macos", "signing-matrix-canary"],
+                "description": "Full verification, Linux/macOS-only evidence, signing-adapter smoke, or fixed-shard matrix canary (partial aggregate remains incomplete)",
+                "type": "choice", "required": True, "default": "full", "options": ["full", "linux", "macos", "signing-adapter", "signing-adapter-macos", "signing-matrix-canary"],
             }}},
         })
         self.assertEqual(workflow["concurrency"], {"group": VERIFICATION_CONCURRENCY, "cancel-in-progress": True})
@@ -303,7 +303,8 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         self.assertEqual(matrix["strategy"]["matrix"]["os"], ["ubuntu-24.04", "macos-26"])
         for event, ref in (("pull_request", "refs/pull/1/merge"), ("push", "refs/heads/main"),
                            ("workflow_dispatch", "refs/heads/qa006-native-candidate")):
-            for target in ("full", "macos", "signing-adapter", "signing-adapter-macos", "signing-matrix-canary", None, "", "unknown",
+            for target in ("full", "linux", "macos", "signing-adapter", "signing-adapter-macos", "signing-matrix-canary", None, "", "unknown",
+                           "LINUX", "LiNuX", "linux ", " linux",
                            "MACOS", "mAcOs", "SIGNING-ADAPTER-MACOS", "signing-adapter-macos ",
                            "SIGNING-MATRIX-CANARY", "signing-matrix-canary ", "[0]", "macos "):
                 with self.subTest(candidate_route=(event, target)):
@@ -315,14 +316,14 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                     if target is not None:
                         context["inputs"] = {"verification_target": compared}
                     dispatch = event == "workflow_dispatch"
-                    expected = {"test-linux": not dispatch or compared == "full",
+                    expected = {"test-linux": not dispatch or compared in {"full", "linux"},
                                 "test-native-profiles": not dispatch or compared in {"full", "macos"},
                                 "test-signing-matrix": not dispatch or compared in {"full", "signing-matrix-canary"},
                                 "test-signing-adapter": dispatch and compared in {"signing-adapter", "signing-adapter-macos"}}
                     for name, enabled in expected.items():
                         self.assertEqual(evaluate_condition(workflow["jobs"][name]["if"], context,
                                                             success=True, cancelled=False), enabled)
-                    if dispatch and compared not in {"full", "macos", "signing-adapter", "signing-adapter-macos", "signing-matrix-canary"}:
+                    if dispatch and compared not in {"full", "linux", "macos", "signing-adapter", "signing-adapter-macos", "signing-matrix-canary"}:
                         self.assertFalse(any(expected.values()))  # Skipped prerequisites cannot pass the pinned guard.
                     selected = canary_shards if evaluate_condition(canary_condition, context,
                         success=True, cancelled=False) else full_shards
@@ -390,10 +391,10 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                     .replace("${{ inputs.verification_target || 'full' }}", target or "full"))
 
         groups = {group_for("pull_request", None), group_for("push", None),
-                  group_for("workflow_dispatch", "full"), group_for("workflow_dispatch", "macos"),
+                  group_for("workflow_dispatch", "full"), group_for("workflow_dispatch", "linux"), group_for("workflow_dispatch", "macos"),
                   group_for("workflow_dispatch", "signing-adapter"), group_for("workflow_dispatch", "signing-adapter-macos"),
                   group_for("workflow_dispatch", "signing-matrix-canary")}
-        self.assertEqual(len(groups), 7)  # Partial dispatch cannot cancel any full event/target.
+        self.assertEqual(len(groups), 8)  # Partial dispatch cannot cancel any full event/target.
         self.assertTrue(all("${{" not in value for value in groups))
         for absent in (None, ""):
             self.assertEqual(group_for("workflow_dispatch", absent), group_for("workflow_dispatch", "full"))
@@ -626,7 +627,15 @@ class CIControllerContractTests(unittest.TestCase):
             rig.events.append(("inventory", partition, deadline))
             return rig.inventories[partition]
 
+        def snapshot(source, selection, *, deadline):
+            self.assertEqual((source, selection), (ROOT, "full" if phase == "source" else "wheel"))
+            rig.events.append(("snapshot", selection, deadline))
+            metadata = rig.checks.signing_regression_metadata(source, "ubuntu-24.04", deadline=deadline)
+            return MappingProxyType(dict(rig.inventories)), metadata
+
         rig.checks.python_capture_ids = identities
+        rig.checks.python_capture_snapshot = snapshot
+        rig.checks.PYTHON_POISON_CASES = _PYTHON_POISON_FIXTURES
         rig.checks.linux_allowed_skips = frozenset
         return rig
 
@@ -1073,6 +1082,9 @@ class CIControllerContractTests(unittest.TestCase):
                 self.assertNotIn("returncode", result.details)
                 calls = [event for event in rig.events if event[0] == "run"]
                 self.assertEqual(len(calls), len(parts))
+                self.assertEqual([event for event in rig.events if event[0] == "snapshot"],
+                                 [("snapshot", "full" if phase == "source" else "wheel", cutoff)])
+                self.assertFalse(any(event[0] == "inventory" for event in rig.events))
                 self.assertEqual([event for event in rig.events if event[0] == "delegation"], [("delegation", "ubuntu-24.04", cutoff)])
                 self.assertEqual(calls[0][1], list(rig.step.argv))
                 self.assertEqual(calls[0][1][-2:], ["--deadline", repr(original_deadline)])
@@ -1109,7 +1121,9 @@ class CIControllerContractTests(unittest.TestCase):
         for phase in ("source", "wheel"):
             for fault in ("argv", "profile-shape", "healthy-omission", "duplicate", "pooled", "missing", "origin",
                           "delegated-missing", "delegated-foreign", "delegated-duplicate", "delegated-overlap",
-                          "delegated-poison", "delegated-wrong-os", "obligation-missing", "obligation-empty", "obligation-foreign"):
+                          "delegated-poison", "delegated-wrong-os", "obligation-missing", "obligation-empty", "obligation-foreign",
+                          "snapshot-mutable", "snapshot-extra", "snapshot-missing", "snapshot-list", "snapshot-metadata",
+                          "singleton-swap"):
                 with self.subTest(phase=phase, fault=fault):
                     rig = self._python_gate_fixture(phase)
                     parts = ("healthy", *rig.controller.PYTHON_POISON_PARTITIONS)
@@ -1126,6 +1140,20 @@ class CIControllerContractTests(unittest.TestCase):
                         rig.inventories["poison-wait-loss"] += rig.inventories["poison-startup-error"]
                     elif fault == "missing":
                         rig.inventories["poison-startup-error"] = ()
+                    elif fault == "singleton-swap":
+                        rig.inventories["poison-startup-error"], rig.inventories["poison-wait-loss"] = (
+                            rig.inventories["poison-wait-loss"], rig.inventories["poison-startup-error"])
+                    elif fault.startswith("snapshot-"):
+                        if fault == "snapshot-extra":
+                            rig.inventories["foreign"] = ("unit.synthetic.Contracts.test_foreign",)
+                        elif fault == "snapshot-missing":
+                            del rig.inventories["all"]
+                        elif fault == "snapshot-list":
+                            rig.inventories["healthy"] = list(rig.inventories["healthy"])
+                        elif fault == "snapshot-metadata":
+                            rig.metadata = None
+                        else:
+                            rig.checks.python_capture_snapshot = lambda *args, **kwargs: (dict(rig.inventories), rig.metadata)
                     elif fault == "delegated-missing":
                         rig.inventories["delegated"] = rig.inventories["delegated"][:-1]
                     elif fault == "delegated-foreign":
@@ -1223,6 +1251,127 @@ class CIControllerContractTests(unittest.TestCase):
                 self.assertEqual([row["status"] for row in result.details["partitions"]], ["PASS"] * len(parts))
                 self.assertEqual(result.details["tests"], len(rig.inventories["all"]) - len(rig.inventories["delegated"]))
 
+    def test_python_failure_progress_is_bounded_prebound_and_non_authoritative(self):
+        controller = controller_module()
+        identifiers = ("unit.synthetic.ProgressTests.test_first", "unit.synthetic.ProgressTests.test_second")
+        first, second = identifiers
+        scope = controller.python_progress_scope(identifiers)
+        self.assertIs(type(scope), MappingProxyType)
+        with self.assertRaises(TypeError):
+            scope[b"foreign"] = first
+
+        def header(identifier, *, full=True):
+            owner, method = identifier.rsplit(".", 1)
+            return f"{method} ({identifier if full else owner})".encode()
+
+        def observation(raw):
+            value = controller.python_failure_progress(raw, scope)
+            self.assertEqual(value["semantics"], "reported-unittest-lines-only")
+            self.assertLessEqual(value["bytes_examined"], 256 * 1024)
+            self.assertLessEqual(value["lines_examined"], 2048)
+            return value
+
+        for token in ("ok", "FAIL", "ERROR", "expected failure", "unexpected success"):
+            with self.subTest(outcome=token):
+                raw = header(first, full=False) + b" ... " + token.encode() + b"\n" + header(second) + b" ... "
+                value = observation(raw)
+                self.assertEqual(value["last_observed_start"], {"id": second})
+                self.assertEqual(value["last_observed_outcome"], {"id": first, "outcome": token})
+                self.assertFalse(value["byte_truncated"] or value["lines_truncated"])
+        self.assertEqual(observation(header(first) + b" ... ok\r\n")["last_observed_outcome"],
+                         {"id": first, "outcome": "ok"})
+        private = b"PRIVATE_PROGRESS_CANARY /private/credentials pid=4242"
+        raw = (header(first) + b" ... ok\n" + header(second, full=False) + b"\n"
+               + private + b"\n... ERROR\n")
+        value = observation(raw)
+        self.assertEqual(value["last_observed_start"], {"id": second})
+        self.assertEqual(value["last_observed_outcome"], {"id": first, "outcome": "ok"})
+        self.assertNotIn(private.decode(), json.dumps(value))
+        invalid = (b"test_foreign (unit.foreign.Private.test_foreign) ... ok\n",
+            header(first) + b" ... ok", header(first) + b" ... o\n", header(first) + b" ... ok trailing\n",
+            header(first) + b" ... skipped '" + private + b"'\n", b" " + header(first) + b" ... ok\n",
+            header(first) + b" ... " + private + b"\n", b"x" * 1025 + b"\n", b"\xff\n", private)
+        for raw in invalid:
+            with self.subTest(invalid_rendering=invalid.index(raw)):
+                value = observation(raw)
+                self.assertIsNone(value["last_observed_start"])
+                self.assertIsNone(value["last_observed_outcome"])
+                self.assertNotIn(private.decode(), json.dumps(value))
+        self.assertIsNone(controller.python_failure_progress("not original bytes", scope))
+        self.assertIsNone(controller.python_failure_progress(b"", dict(scope)))
+        ambiguous = first + ".test_first"
+        collision = controller.python_progress_scope((first, ambiguous))
+        self.assertNotIn(header(first), collision)  # Class/full-ID ambiguity cannot misattribute an observation.
+        self.assertIn(header(first, full=False), collision)
+
+        old = header(first) + b" ... ok\n"
+        value = observation(old + b"x\n" * 2048 + header(second) + b" ... ")
+        self.assertTrue(value["lines_truncated"])
+        self.assertEqual(value["last_observed_start"], {"id": second})
+        self.assertIsNone(value["last_observed_outcome"])
+        value = observation(old + b"x" * (256 * 1024) + b"\n" + header(second) + b" ... ")
+        self.assertTrue(value["byte_truncated"] and value["dropped_partial_line"])
+        self.assertEqual(value["last_observed_start"], {"id": second})
+        self.assertIsNone(value["last_observed_outcome"])
+        value = observation(b"x" * (256 * 1024 + 1) + header(first) + b" ... ok")
+        self.assertTrue(value["byte_truncated"] and value["dropped_partial_line"])
+        self.assertIsNone(value["last_observed_start"])
+
+        for phase in ("source", "wheel"):
+            for diagnostic_error in (False, True):
+                with self.subTest(phase=phase, optional_diagnostic_error=diagnostic_error):
+                    rig = self._python_gate_fixture(phase)
+                    source_ids = rig.inventories["healthy"]
+                    raw = header(source_ids[0]) + b" ... ok\n" + header(source_ids[1]) + b" ... "
+                    rig.run_advance = 901.0
+                    rig.changes["healthy"] = dict(ok=False, returncode=None, waited=False, stdout_eof=False,
+                        stderr_eof=False, domain_finality=False, stdout=b"", stderr=raw,
+                        persisted=(0, len(raw)), timed_out=True,
+                        primary_error="command/original aggregate deadline expired", cleanup_errors=("original child wait TimeoutError",))
+                    original_failure = rig.controller.failure_details
+
+                    def failure(*args, **kwargs):
+                        self.assertGreaterEqual(rig.now, kwargs["deadline"])
+                        self.assertEqual(kwargs["_python_expected"], source_ids)
+                        if diagnostic_error:
+                            raise RuntimeError(private.decode())
+                        return original_failure(*args, **kwargs)
+
+                    with patch.object(rig.checks, "python_capture_ids", side_effect=AssertionError("late inventory")), \
+                            patch.object(rig.checks, "native_partition_ids", side_effect=AssertionError("late native inventory")), \
+                            patch.object(rig.controller, "failure_details", side_effect=failure):
+                        result = self._perform_native_fixture(rig, platform="linux")
+                    self.assertFalse(result.ok)
+                    self.assertEqual(result.error, "COMMAND_EXIT_OR_FINALITY")
+                    self.assertEqual(len(rig.captures), 1)
+                    rows = result.details["partitions"]
+                    self.assertEqual([row["status"] for row in rows], ["FAIL"] + ["UNEXECUTED"] * 56)
+                    self.assertEqual(rows[0]["python_progress"]["last_observed_start"], {"id": source_ids[1]})
+                    self.assertEqual(rows[0]["python_progress"]["last_observed_outcome"], {"id": source_ids[0], "outcome": "ok"})
+                    self.assertEqual("diagnostic_error" in rows[0], diagnostic_error)
+                    for key, observed in controller.capture_observations(rig.captures[0]).items():
+                        self.assertEqual(rows[0]["capture"][key], observed)
+                    self.assertNotIn(private.decode(), json.dumps(result.details))
+                    self.assertNotIn("completed", result.details)
+                    run_index = next(index for index, event in enumerate(rig.events) if event[0] == "run")
+                    self.assertTrue(all(event[0] == "idle" for event in rig.events[run_index + 1:]))
+
+        rig = self._python_gate_fixture()
+        with patch.object(rig.checks, "python_capture_ids", side_effect=AssertionError("parser rescan")), \
+                patch.object(rig.checks, "native_partition_ids", side_effect=AssertionError("parser native rescan")):
+            self.assertTrue(self._perform_native_fixture(rig, platform="linux").ok)
+        for changes, platform, expected in (({"id": "native-profile-source"}, "linux", identifiers),
+            ({"parser": "exit"}, "linux", identifiers), ({"native_partition": "healthy"}, "linux", identifiers),
+            ({}, "macos", identifiers), ({}, "linux", list(identifiers)), ({}, "linux", ()),
+            ({}, "linux", tuple(reversed(identifiers))), ({}, "linux", identifiers + identifiers[:1]),
+            ({"parser": "native", "native_partition": "poison-wait-loss"}, "linux", (first,)),
+            ({"parser": "native", "native_partition": "poison-wait-loss"}, "linux", rig.inventories["poison-startup-error"]),
+            ({"parser": "native", "native_partition": "all"}, "linux", identifiers)):
+            with self.subTest(prebound_role=(changes, platform, expected)), \
+                    self.assertRaisesRegex(controller.VerificationError, "PYTHON_PREBOUND_EXPECTATIONS"):
+                controller.parse_capture(dataclasses.replace(rig.step, **changes), rig.captures[0], rig.paths,
+                                         platform, rig.checks, _python_expected=expected)
+
     def test_python_failure_callbacks_are_source_bound_and_keep_private_errors_out(self):
         controller = controller_module()
         self.enterContext(patch.object(controller.time, "monotonic", return_value=999.0))
@@ -1256,6 +1405,11 @@ class CIControllerContractTests(unittest.TestCase):
         self.assertEqual(value["returncode"], 1)
         self.assertEqual(observed, [(ROOT, "full", "healthy", 1000.0)])
         self.assertNotIn(private, json.dumps(value))
+        with patch.object(checks, "python_capture_ids", side_effect=AssertionError("prebound callback rescan")):
+            reused = controller.failure_details(capture([callback]), step, paths, checks=checks,
+                deadline=1000.0, platform="linux", _python_expected=(identifier,))
+        self.assertEqual(reused["failure_callbacks"], [callback])
+        self.assertEqual(observed, [(ROOT, "full", "healthy", 1000.0)])
         valid = [callback, {**callback, "errno": None},
                  {**callback, "outcome": "failure", "category": "assertion-error", "errno": None},
                  {**callback, "outcome": "expected-failure", "category": "exception", "errno": None},
@@ -4668,6 +4822,78 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                     checks.signing_regression_metadata(ROOT, operating_system)
             reader.assert_not_called()
 
+    def test_python_capture_snapshot_reads_inventory_and_delegation_once_per_invocation(self):
+        checks = ci_module("ci_checks")
+        healthy = ("unit.synthetic.SnapshotTests.test_first", "unit.synthetic.SnapshotTests.test_second")
+        metadata = _g_metadata_fixture("ubuntu-24.04")
+        delegated = metadata[0]
+        complete = tuple(sorted(healthy + checks.PYTHON_POISON_IDS + delegated))
+        parts = ("all", "delegated", "healthy", *checks.PYTHON_POISON_PARTITIONS)
+        self.assertEqual(len(parts), 59)
+        for selection in ("full", "wheel"):
+            with self.subTest(selection=selection), \
+                    patch.object(checks, "time", SimpleNamespace(monotonic=lambda: 10.0)), \
+                    patch.object(checks, "expected_python_ids", return_value=complete) as source, \
+                    patch.object(checks, "signing_regression_metadata", return_value=metadata) as catalog:
+                snapshot = checks.python_capture_snapshot(ROOT, selection, deadline=42.0)
+                self.assertIs(type(snapshot), tuple)
+                inventories, captured_metadata = snapshot
+                self.assertIs(type(inventories), MappingProxyType)
+                self.assertIs(captured_metadata, metadata)
+                self.assertEqual(tuple(inventories), parts)
+                self.assertEqual(inventories["all"], complete)
+                self.assertEqual(inventories["healthy"], healthy)
+                self.assertEqual(inventories["delegated"], delegated)
+                self.assertEqual(tuple(inventories[name] for name in checks.PYTHON_POISON_PARTITIONS),
+                                 tuple((identifier,) for identifier in checks.PYTHON_POISON_IDS))
+                self.assertTrue(all(type(ids) is tuple and ids and tuple(sorted(set(ids))) == ids
+                                    for ids in inventories.values()))
+                joined = tuple(identifier for part in ("healthy", *checks.PYTHON_POISON_PARTITIONS, "delegated")
+                               for identifier in inventories[part])
+                self.assertEqual(tuple(sorted(joined)), complete)
+                self.assertEqual(len(joined), len(set(joined)))
+                source.assert_called_once_with(ROOT, selection, deadline=42.0)
+                catalog.assert_called_once_with(ROOT, "ubuntu-24.04", deadline=42.0)
+                for mapping, key in ((inventories, "healthy"), (captured_metadata[1], delegated[0])):
+                    with self.assertRaises(TypeError):
+                        mapping[key] = ()
+                fresh = "unit.synthetic.SnapshotTests.test_third"
+                source.return_value = tuple(sorted(complete + (fresh,)))
+                second, second_metadata = checks.python_capture_snapshot(ROOT, selection, deadline=42.0)
+                self.assertIsNot(second, inventories)
+                self.assertIs(second_metadata, metadata)
+                self.assertEqual(second["healthy"], healthy + (fresh,))
+                self.assertEqual(inventories["healthy"], healthy)
+                self.assertEqual(source.call_count, 2)
+                self.assertEqual(catalog.call_count, 2)
+
+        for expired_at, expected_calls in (("before", (0, 0)), ("inventory", (1, 0)), ("metadata", (1, 1))):
+            clock = [42.0 if expired_at == "before" else 10.0]
+
+            def acquire_source(*args, **kwargs):
+                if expired_at == "inventory":
+                    clock[0] = 42.0
+                return complete
+
+            def acquire_metadata(*args, **kwargs):
+                if expired_at == "metadata":
+                    clock[0] = 42.0
+                return metadata
+
+            with self.subTest(expired_at=expired_at), \
+                    patch.object(checks, "time", SimpleNamespace(monotonic=lambda: clock[0])), \
+                    patch.object(checks, "expected_python_ids", side_effect=acquire_source) as source, \
+                    patch.object(checks, "signing_regression_metadata", side_effect=acquire_metadata) as catalog, \
+                    patch.object(checks, "_python_capture_partition", side_effect=AssertionError("partition after acquisition expiry")):
+                with self.assertRaisesRegex(checks.CheckError, "DEADLINE_EXPIRED"):
+                    checks.python_capture_snapshot(ROOT, "full", deadline=42.0)
+                self.assertEqual((source.call_count, catalog.call_count), expected_calls)
+        for selection in ("native", "healthy", "all", None, True, []):
+            with self.subTest(invalid_selection=selection), \
+                    patch.object(checks, "expected_python_ids", side_effect=AssertionError("invalid acquisition")), \
+                    self.assertRaisesRegex(checks.CheckError, "PYTHON_CAPTURE_SELECTION"):
+                checks.python_capture_snapshot(ROOT, selection, deadline=42.0)
+
     def test_fixed_poison_partitions_preserve_full_wheel_and_authority_disjoint_union(self):
         checks = ci_module("ci_checks")
         poison = tuple(identifier for _name, identifier in _PYTHON_POISON_FIXTURES)
@@ -4862,9 +5088,10 @@ class CIProductEvidenceContractTests(unittest.TestCase):
         self.assertEqual(set(delegated) - set(linux_delegated), set(_G_DARWIN_ONLY_METHODS))
         self.assertTrue(set(linux_delegated) <= set(delegated))
         for selection in ("full", "wheel"):
-            actual = checks.python_capture_ids(ROOT, selection, "delegated", deadline=deadline)
-            self.assertEqual(actual, linux_delegated)
-            self.assertTrue(set(_G_DARWIN_ONLY_METHODS) <= set(checks.python_capture_ids(ROOT, selection, "healthy", deadline=deadline)))
+            linux, metadata = checks.python_capture_snapshot(ROOT, selection, deadline=deadline)
+            self.assertEqual(linux["delegated"], linux_delegated)
+            self.assertEqual(metadata[0], linux_delegated)
+            self.assertTrue(set(_G_DARWIN_ONLY_METHODS) <= set(linux["healthy"]))
         self.assertEqual(checks.native_partition_ids(ROOT, "all", deadline=deadline), complete)
         for prefix in ("unit.test_native_process.", "unit.test_profile_process_owner.", "unit.test_inspection_budget."):
             self.assertTrue(any(identifier.startswith(prefix) for identifier in ordinary))

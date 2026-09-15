@@ -1537,9 +1537,26 @@ def minitest_records(stdout: str, expected: tuple[str, ...], *, deadline: float 
                        "adverse_records_omitted": known_adverse - len(adverse_records)}
 
 
-def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, deadline: float | None = None) -> CheckResult:
+def _python_prebound_expectations(step: Step, platform: str, checks, expected: tuple[str, ...]) -> tuple[str, ...]:
+    """Only the closed Linux gate may reuse its admitted immutable snapshot."""
+    if (platform != "linux" or step.id not in {"python-full", "python-wheel"}
+            or type(expected) is not tuple or not expected or any(type(value) is not str for value in expected)
+            or tuple(sorted(set(expected))) != expected):
+        raise VerificationError("PYTHON_PREBOUND_EXPECTATIONS")
+    healthy = step.parser == "check" and step.native_partition == "all"
+    singleton = step.parser == "native" and step.native_partition in PYTHON_POISON_PARTITIONS
+    if (not (healthy or singleton) or singleton and
+            (len(expected) != 1 or (step.native_partition, expected[0]) not in checks.PYTHON_POISON_CASES)):
+        raise VerificationError("PYTHON_PREBOUND_EXPECTATIONS")
+    return expected
+
+
+def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, deadline: float | None = None,
+                  _python_expected: tuple[str, ...] | None = None) -> CheckResult:
     if deadline is not None:
         check_clock(deadline)
+    if _python_expected is not None:
+        _python_prebound_expectations(step, platform, checks, _python_expected)
     if (not result.ok or type(result.returncode) is not int or result.returncode != 0
             or result.waited is not True or result.stdout_eof is not True or result.stderr_eof is not True
             or result.domain_finality is not True or result.primary_error is not None or result.cleanup_errors):
@@ -1567,7 +1584,8 @@ def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, de
     elif step.parser == "native":
         if any(line.startswith(NATIVE_DIAGNOSTIC_PREFIX) for line in (stdout + "\n" + stderr).splitlines()):
             raise VerificationError("NATIVE_FAILURE_DIAGNOSTIC_ON_SUCCESS")
-        expected = checks.native_partition_ids(paths.source, step.native_partition, deadline=deadline)
+        expected = (_python_expected if _python_expected is not None else
+                    checks.native_partition_ids(paths.source, step.native_partition, deadline=deadline))
         footers = re.findall(r"(?m)^Ran (\d+) tests? in [0-9.]+s\s*$", stderr)
         if footers != [str(len(expected))] or not re.search(r"(?m)^OK\s*$", stderr) or "skipped" in stderr:
             raise VerificationError("NATIVE_PYTHON_RESULT")
@@ -1594,7 +1612,8 @@ def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, de
         # independently verifies expected complete identities after real finality.
         if step.id in ("python-full", "python-wheel"):
             selection = "full" if step.id == "python-full" else "wheel"
-            expected = checks.python_capture_ids(paths.source, selection, "healthy", deadline=deadline)
+            expected = (_python_expected if _python_expected is not None else
+                        checks.python_capture_ids(paths.source, selection, "healthy", deadline=deadline))
             tests = summary.get("tests")
             if (type(tests) is not list
                     or any(type(row) is not dict or set(row) != {"id", "outcome"}
@@ -1659,6 +1678,73 @@ def python_failure_callbacks(data: object, expected: tuple[str, ...]) -> list[di
             return None
         result.append({"id": identifier, "outcome": outcome, "category": category, "errno": number})
     return result
+
+
+def python_progress_scope(expected: tuple[str, ...]) -> MappingProxyType:
+    """Prebind renderings before capture; no diagnostic-time source acquisition."""
+    renderings = {}
+    ambiguous = set()
+    for identifier in expected:
+        if (type(identifier) is not str or len(identifier) > 384 or not re.fullmatch(
+                r"(?:[A-Za-z_][A-Za-z0-9_]*\.){2,}[A-Za-z_][A-Za-z0-9_]*\.test_[A-Za-z0-9_]+", identifier)):
+            continue
+        owner, method = identifier.rsplit(".", 1)
+        for display in (owner, identifier):
+            header = f"{method} ({display})".encode("ascii")
+            if header in renderings and renderings[header] != identifier:
+                ambiguous.add(header)
+            renderings[header] = identifier
+    return MappingProxyType({header: identifier for header, identifier in renderings.items() if header not in ambiguous})
+
+
+def python_failure_progress(raw: bytes, scope: MappingProxyType) -> dict | None:
+    """Bounded lexical observations, never a body/coverage/finality receipt.
+
+    Only original stderr and already-bound source IDs are inspected, even after
+    timeout. No deadline is renewed and no file, import or process is consulted.
+    """
+    if type(raw) is not bytes or type(scope) is not MappingProxyType:
+        return None
+    byte_limit, line_limit, candidate_limit = 256 * 1024, 2048, 1024
+    offset = max(0, len(raw) - byte_limit)
+    tail = raw[offset:]
+    dropped_partial_line = bool(offset and raw[offset - 1] != 10)
+    if dropped_partial_line:
+        end = tail.find(b"\n")
+        tail = tail[end + 1:] if end >= 0 else b""
+    terminated = tail.endswith(b"\n")
+    lines = tail.rsplit(b"\n", line_limit + 1) if tail else []
+    if terminated:
+        lines.pop()
+    lines_truncated = len(lines) > line_limit
+    lines = lines[-line_limit:]
+    value = {"semantics": "reported-unittest-lines-only", "bytes_examined": min(len(raw), byte_limit),
+             "byte_limit": byte_limit, "byte_truncated": bool(offset),
+             "dropped_partial_line": dropped_partial_line, "lines_examined": len(lines),
+             "line_limit": line_limit, "lines_truncated": lines_truncated,
+             "oversized_lines": 0, "last_observed_start": None, "last_observed_outcome": None}
+    outcomes = {b"ok": "ok", b"FAIL": "FAIL", b"ERROR": "ERROR",
+                b"expected failure": "expected failure", b"unexpected success": "unexpected success"}
+    for index, line in enumerate(lines):
+        if len(line) > candidate_limit:
+            value["oversized_lines"] += 1
+            continue
+        closed = index != len(lines) - 1 or terminated
+        if closed and line.endswith(b"\r"):
+            line = line[:-1]
+        identifier = scope.get(line)
+        outcome = None
+        if identifier is None:
+            header, separator, token = line.partition(b" ... ")
+            if not separator or token and (not closed or token not in outcomes):
+                continue
+            identifier = scope.get(header)
+            outcome = outcomes.get(token) if closed else None
+        if identifier is not None:
+            value["last_observed_start"] = {"id": identifier}
+            if outcome is not None:
+                value["last_observed_outcome"] = {"id": identifier, "outcome": outcome}
+    return value
 
 
 def signing_adapter_failure(raw: bytes, scope: SigningAdapterDiagnostic, *, deadline: float) -> dict | None:
@@ -2929,8 +3015,13 @@ def _native_entry_failure_locations(text: str, entry: Path, *, deadline: float |
 
 
 def failure_details(result, step: Step | None = None, paths: Paths | None = None,
-                    *, checks=None, deadline: float | None = None, platform: str | None = None) -> dict:
+                    *, checks=None, deadline: float | None = None, platform: str | None = None,
+                    _python_expected: tuple[str, ...] | None = None) -> dict:
     """Public-safe observations only; never forward raw child diagnostics."""
+    if _python_expected is not None:
+        if step is None or checks is None:
+            raise VerificationError("PYTHON_PREBOUND_EXPECTATIONS")
+        _python_prebound_expectations(step, platform, checks, _python_expected)
     value = capture_observations(result)
     # These are fixed source file/line and exception-class observations, not
     # raw exceptions, fixture logs, private paths, environment or signing data.
@@ -2976,8 +3067,11 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                     and data.get("check") == step.id and data.get("ok") is False
                     and "failure_callbacks" in detail):
                 try:
-                    expected = checks.python_capture_ids(paths.source,
-                        "full" if step.id == "python-full" else "wheel", "healthy", deadline=deadline)
+                    if deadline is not None:
+                        check_clock(deadline)
+                    expected = (_python_expected if _python_expected is not None else
+                        checks.python_capture_ids(paths.source,
+                            "full" if step.id == "python-full" else "wheel", "healthy", deadline=deadline))
                     callbacks = python_failure_callbacks(detail["failure_callbacks"], expected)
                     if callbacks is not None:
                         value["failure_callbacks"] = callbacks
@@ -3635,9 +3729,14 @@ def perform_compatibility_gate(step: Step, paths: Paths, session, checks, platfo
 
 
 def pending_signing_delegation(checks, source: Path, operating_system: str, inventories: dict,
-                               details: dict, code: str, *, deadline: float) -> tuple[str, ...]:
+                               details: dict, code: str, *, deadline: float, _metadata=None) -> tuple[str, ...]:
     """Source-only pending obligations, never appended to executed-test receipts."""
-    delegated, requirements = checks.signing_regression_metadata(source, operating_system, deadline=deadline)
+    check_clock(deadline)
+    if _metadata is None:
+        _metadata = checks.signing_regression_metadata(source, operating_system, deadline=deadline)
+    if type(_metadata) is not tuple or len(_metadata) != 2:
+        raise VerificationError(code)
+    delegated, requirements = _metadata
     if (type(delegated) is not tuple or not delegated or any(type(value) is not str for value in delegated)
             or tuple(sorted(set(delegated))) != delegated or type(requirements) is not MappingProxyType
             or tuple(requirements) != delegated or inventories["delegated"] != delegated):
@@ -3810,15 +3909,24 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
         check_clock(cutoff)
         check_capacity(paths.work, 64 * 1024**2)
         details["stage"] = "inventory"
-        inventories = {name: checks.python_capture_ids(paths.source, selection, name, deadline=cutoff)
-                       for name in ("all", "delegated", "healthy", *PYTHON_POISON_PARTITIONS)}
+        snapshot = checks.python_capture_snapshot(paths.source, selection, deadline=cutoff)
+        check_clock(cutoff)
+        if type(snapshot) is not tuple or len(snapshot) != 2:
+            raise VerificationError("PYTHON_CAPTURE_UNION")
+        inventories, metadata = snapshot
+        if (type(inventories) is not MappingProxyType or type(metadata) is not tuple or len(metadata) != 2
+                or set(inventories) != {"all", "delegated", "healthy", *PYTHON_POISON_PARTITIONS}
+                or any(type(ids) is not tuple or not ids or any(type(value) is not str for value in ids)
+                       or tuple(sorted(set(ids))) != ids for ids in inventories.values())):
+            raise VerificationError("PYTHON_CAPTURE_UNION")
         delegated = pending_signing_delegation(checks, paths.source, "ubuntu-24.04", inventories, details,
-                                               "PYTHON_CAPTURE_UNION", deadline=cutoff)
+                                               "PYTHON_CAPTURE_UNION", deadline=cutoff, _metadata=metadata)
         joined = tuple(identifier for row in details["partitions"] for identifier in inventories[row["partition"]]) + delegated
-        if (any(type(ids) is not tuple or not ids or tuple(sorted(set(ids))) != ids for ids in inventories.values())
-                or any(len(inventories[name]) != 1 for name in PYTHON_POISON_PARTITIONS)
+        if (tuple(name for name, _identifier in checks.PYTHON_POISON_CASES) != PYTHON_POISON_PARTITIONS
+                or any(inventories[name] != (identifier,) for name, identifier in checks.PYTHON_POISON_CASES)
                 or len(joined) != len(set(joined)) or tuple(sorted(joined)) != inventories["all"]):
             raise VerificationError("PYTHON_CAPTURE_UNION")
+        progress_scope = python_progress_scope(inventories["healthy"])
         details["stage"] = "package"
         package = (paths.work / "source-build/src/mobile_release" if phase == "source"
                    else paths.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
@@ -3844,7 +3952,8 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
             primary = None
             try:
                 require_original_finality(value)
-                parsed = parse_capture(part, value, paths, platform, checks, deadline=cutoff)
+                parsed = parse_capture(part, value, paths, platform, checks, deadline=cutoff,
+                                       _python_expected=inventories[partition])
                 if not healthy:
                     row["runtime"] = native_python_observation(value.stdout, paths, minor=11, phase=phase,
                         executable=python, prefix=paths.python.parent.parent)
@@ -3858,9 +3967,14 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
                 else:
                     row["idle_error"] = error_details(exc)
             if primary is not None:
+                if healthy:
+                    try:
+                        row["python_progress"] = python_failure_progress(value.stderr, progress_scope)
+                    except BaseException as exc:
+                        row["python_progress_error"] = error_details(exc)
                 try:
                     row["capture"] = failure_details(value, part, paths, checks=checks,
-                        deadline=cutoff, platform=platform)
+                        deadline=cutoff, platform=platform, _python_expected=inventories[partition])
                 except BaseException as exc:
                     row["diagnostic_error"] = error_details(exc)
                 raise primary

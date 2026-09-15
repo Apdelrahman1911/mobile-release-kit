@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 from mobile_release.config import load_config
 import mobile_release
+import mobile_release.credentials as credentials
 from mobile_release.credentials import (
     _temporary_apple_signing_environment, _temporary_profile_installation, _validate_apple_signing_material,
     _signing_profile_identity,
@@ -268,11 +269,21 @@ class ProfileInstallationTests(unittest.TestCase):
 
     def test_fallible_cleanup_observers_never_abandon_actual_owned_handles(self):
         real_open, real_close, real_fstat = os.open, os.close, os.fstat
+        real_owner = credentials.cancellation_owner
         handlers = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)}
+        self.assertIs(handlers[signal.SIGINT], signal.default_int_handler)
+        self.assertIs(handlers[signal.SIGTERM], signal.SIG_DFL)
         for phase in ("retry-observation", "resolved-observation", "retain-callback"):
             for error_type in (CredentialError, OSError, RuntimeError, KeyboardInterrupt):
                 records, closes, observations, stated, body = [], [], [], [], []
+                owners = []
+                first_stat_error = OSError("fictional first ownership inspection failure")
+                injected = error_type("fictional observer or retention inspection failure")
                 active_handles = {}
+                def observing_owner(*args, **kwargs):
+                    owned = real_owner(*args, **kwargs)
+                    owners.append(owned)
+                    return owned
                 def opening(path, *args, **kwargs):
                     descriptor = real_open(path, *args, **kwargs)
                     active_handles[descriptor] = None
@@ -285,7 +296,7 @@ class ProfileInstallationTests(unittest.TestCase):
                     if phase == "retry-observation" and any(record[0] == descriptor and record[3].startswith(".mobile-release-profile-") for record in records):
                         stated.append(descriptor)
                         if len(stated) == 1:
-                            raise OSError("fictional first ownership inspection failure")
+                            raise first_stat_error
                     return real_fstat(descriptor)
                 def closing(descriptor):
                     record = active_handles.pop(descriptor, None)
@@ -296,38 +307,76 @@ class ProfileInstallationTests(unittest.TestCase):
                     observations.append(event)
                     if (phase == "retry-observation" and event == "stage-created"
                             or phase == "resolved-observation" and event == "resolved"):
-                        raise error_type("fictional observer failure")
+                        raise injected
                 def retain():
                     if phase == "retain-callback":
-                        raise error_type("fictional retention inspection failure")
+                        raise injected
                     return False
-                expected = CredentialError if error_type is OSError else error_type
-                try:
-                    with self.subTest(phase=phase, error=error_type.__name__), \
-                         patch.object(os, "open", new=opening), patch.object(os, "fstat", new=stating), \
-                         patch.object(os, "close", new=closing), self.assertRaises(expected):
-                        with _temporary_profile_installation(self.content, self.uuid, self.home, observer=observer, retain=retain):
-                            body.append(True)
-                    self.assertEqual(bool(body), phase != "retry-observation")
-                    if phase == "retry-observation":
-                        self.assertEqual(len(stated), 2)
-                        self.assertNotIn("link-intent", observations)
-                    self.assertEqual(len(records), 2)
-                    self.assertCountEqual(closes, records)
-                    for descriptor, *_ in records:
-                        with self.assertRaises(OSError): real_fstat(descriptor)
-                    self.assertEqual({number: signal.getsignal(number) for number in handlers}, handlers)
-                    if phase == "retain-callback":
-                        self.assertEqual(self.destination.read_bytes(), self.content)
-                        self.destination.unlink()  # Independently owned fixture, after failed-retain observations.
-                    self.assert_no_files()
-                finally:
-                    for descriptor, device, inode, _ in records:
-                        try:
-                            details = real_fstat(descriptor)
-                            if (details.st_dev, details.st_ino) == (device, inode): real_close(descriptor)
-                        except OSError:
-                            pass
+                with self.subTest(phase=phase, error=error_type.__name__):
+                    try:
+                        caught = None
+                        with patch.object(os, "open", new=opening), patch.object(os, "fstat", new=stating), \
+                             patch.object(os, "close", new=closing), \
+                             patch.object(credentials, "cancellation_owner", new=observing_owner):
+                            try:
+                                with _temporary_profile_installation(self.content, self.uuid, self.home,
+                                                                     observer=observer, retain=retain):
+                                    body.append(True)
+                            except BaseException as error:
+                                caught = error
+                        # Assertions are outside the injected exception capture.
+                        # A cleanup abort is fatal even after every raw FD closes.
+                        fatal = phase != "retry-observation" or error_type is OSError
+                        self.assertIsNotNone(caught)
+                        if error_type is KeyboardInterrupt or not fatal:
+                            self.assertIs(caught, injected)
+                        else:
+                            self.assertIs(type(caught), ProcessError)
+                            self.assertTrue(caught.fatal and caught.contained)
+                            self.assertFalse(caught.cleanup_complete or caught.dispatched)
+                        self.assertEqual(len(owners), 1)
+                        guard, owns = owners[0]
+                        self.assertIs(owns, True)
+                        self.assertEqual(guard.handler_state, "RESTORED")
+                        self.assertEqual(set(guard._signals), set(handlers))
+                        for record in guard._signals.values():
+                            self.assertEqual((record.install, record.restore), ("INSTALLED", "RESTORED"))
+                        ledger = guard.lifetime_ledger
+                        verdict = ledger.verdict()
+                        self.assertEqual(ledger.fatal, fatal)
+                        self.assertEqual(verdict.fatal, fatal)
+                        self.assertTrue(verdict.complete and verdict.contained)
+                        self.assertEqual(verdict.cleanup_complete, not fatal)
+                        self.assertIs(verdict.profile_dispatched, False)
+                        self.assertIs(verdict.command_dispatched, False)
+                        self.assertEqual((verdict.profile_calls, verdict.commands), (0, 0))
+                        self.assertIsNone(ledger._profile)
+                        self.assertIsNone(ledger._command)
+                        # Retry's OSError observer is caught internally; the
+                        # original failed fstat remains the incoming primary.
+                        primary = (first_stat_error if phase == "retry-observation" and error_type is OSError
+                                   else injected)
+                        self.assertIs(ledger._primary, primary)
+                        self.assertEqual(bool(body), phase != "retry-observation")
+                        if phase == "retry-observation":
+                            self.assertEqual(len(stated), 2)
+                            self.assertNotIn("link-intent", observations)
+                        self.assertEqual(len(records), 2)
+                        self.assertCountEqual(closes, records)
+                        for descriptor, *_ in records:
+                            with self.assertRaises(OSError): real_fstat(descriptor)
+                        self.assertEqual({number: signal.getsignal(number) for number in handlers}, handlers)
+                        if phase == "retain-callback":
+                            self.assertEqual(self.destination.read_bytes(), self.content)
+                            self.destination.unlink()  # Fixture fallback only AFTER original cleanup assertions.
+                        self.assert_no_files()
+                    finally:
+                        for descriptor, device, inode, _ in records:
+                            try:
+                                details = real_fstat(descriptor)
+                                if (details.st_dev, details.st_ino) == (device, inode): real_close(descriptor)
+                            except OSError:
+                                pass
 
     def test_retry_observer_and_ambiguous_stage_close_never_retry_a_reused_descriptor(self):
         real_open, real_close, real_fstat = os.open, os.close, os.fstat
