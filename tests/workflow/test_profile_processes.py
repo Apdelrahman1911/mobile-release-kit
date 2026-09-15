@@ -22,6 +22,15 @@ from . import profile_process_fixture as fixture
 from .profile_process_fixture import PAYLOAD_MUTATION_MODES, FixtureWorkspace, backpressure_case, run_case
 
 
+def _inert_context(**state):
+    # No constructor, acquisition, lock or registry entry. Keep the real bound
+    # origin/deadline methods rather than incomplete namespace callbacks.
+    context = owner._Context.__new__(owner._Context)
+    context.__dict__.update(pid=os.getpid(), cleanup_limit=None, failure_limit=None)
+    context.__dict__.update(state)
+    return context
+
+
 @unittest.skipUnless(os.name == "posix", "release workers require POSIX process groups")
 class ProfileProcessTests(unittest.TestCase):
     def setUp(self):
@@ -196,7 +205,7 @@ class ProfileGroupCleanupTests(unittest.TestCase):
         # controls live with the actual owner unit tests, not retired Popen code.
         for outcomes in ((PermissionError(), ProcessLookupError()), (None, None, ProcessLookupError())):
             keeper = SimpleNamespace(pid=987654, numeric_retired=False)
-            context = SimpleNamespace(role="custodian", hard=10, cleanup_cutoff=lambda original: original)
+            context = _inert_context(role="custodian", hard=10)
             group = owner._GroupReservation(context, keeper)
             with self.subTest(outcomes=outcomes), patch.object(owner.time, "monotonic_ns", return_value=1), \
                     patch.object(owner.os, "killpg", side_effect=outcomes) as kill:
@@ -212,27 +221,39 @@ class ProfileGroupCleanupTests(unittest.TestCase):
             self.assertTrue(all(call.args == (keeper.pid, int(signal.SIGKILL)) for call in kill.call_args_list))
 
     def test_retired_mismatched_and_observer_mutated_routes_are_vetoed_before_numeric_syscall(self):
-        for mutation in ("group-retired", "child-retired", "identity", "observer"):
+        for mutation in ("group-retired", "child-retired", "identity", "observer", "owner-origin"):
             keeper = SimpleNamespace(pid=987654, numeric_retired=False)
-            context = SimpleNamespace(role="custodian", hard=10, cleanup_cutoff=lambda original: original)
+            context = _inert_context(role="custodian", hard=10)
             group = owner._GroupReservation(context, keeper)
+            original_pid = context.pid
             if mutation == "group-retired":
                 group.retire(absent=False)
             elif mutation == "child-retired":
                 keeper.numeric_retired = True
             elif mutation == "identity":
                 keeper.pid += 1
+            elif mutation == "owner-origin":
+                context.pid += 1
             def observe(_role, event, **_evidence):
                 if mutation == "observer" and event == "group_request":
                     keeper.numeric_retired = True
-            with self.subTest(mutation=mutation), patch.object(owner.time, "monotonic_ns", return_value=1), \
-                    patch.object(owner, "_role_event", side_effect=observe), patch.object(owner.os, "killpg") as kill:
-                with self.assertRaises(ValidationError):
-                    group.request(0)
+            try:
+                with self.subTest(mutation=mutation), patch.object(owner.time, "monotonic_ns", return_value=1), \
+                        patch.object(owner, "_role_event", side_effect=observe), \
+                        patch.object(context, "after_fork_child") as inherited, patch.object(owner.os, "killpg") as kill:
+                    with self.assertRaises(ValidationError) as rejected:
+                        group.request(0)
+                    self.assertEqual(str(rejected.exception), owner.CLEANUP_ERROR)
+                    if mutation == "owner-origin":
+                        inherited.assert_called_once_with()
+                    else:
+                        inherited.assert_not_called()
+            finally:
+                context.pid = original_pid
             kill.assert_not_called()
         for value in (-1, 1, True, "0"):
             keeper = SimpleNamespace(pid=987654, numeric_retired=False)
-            context = SimpleNamespace(role="custodian", hard=10, cleanup_cutoff=lambda original: original)
+            context = _inert_context(role="custodian", hard=10)
             group = owner._GroupReservation(context, keeper)
             with self.subTest(value=value), patch.object(owner.time, "monotonic_ns", return_value=1), \
                     patch.object(owner.os, "killpg") as kill, self.assertRaises(ValidationError):
@@ -606,11 +627,10 @@ class ProfileFixtureBookkeepingTests(unittest.TestCase):
             # cancellation authority. No handler is installed. Its deferred
             # latch may precede context.cancelled/primary, just as in capture.
             model.guard = owner.DefaultCancellation(ValidationError, "inert restoration")
-            context = model.context = SimpleNamespace(
+            context = model.context = _inert_context(
                 role=role, run=model.run, hard=9_000_000_000, parent_pid=model.parent,
                 primary=None, cancelled=False, cleanup_unknown=False, launch_closed=False,
                 cancellation=model.guard, cleanup_limit=None, failure_limit=None)
-            context.control_cutoff = lambda original: owner._Context.control_cutoff(context, original)
             acquisition = context.child_acquisition = SimpleNamespace(settled=True, cleanup_unknown=False, child=None)
             task = model.task = SimpleNamespace(child_role="validator", acquisition=acquisition,
                                                actual=object(), joined=True, body_done=True)
@@ -946,10 +966,9 @@ class ProfileFixtureBookkeepingTests(unittest.TestCase):
             model = SimpleNamespace(now=10, c_pid=101, k_pid=201, sid=101, group=201,
                                     logs=[], trace=[], takes=[], on_group_read=lambda: None)
             model.child = SimpleNamespace(pid=model.k_pid, wait_state="OWNED", receipt=None, numeric_retired=False)
-            model.context = SimpleNamespace(run=100, hard=130, failure_limit=None, cleanup_limit=None,
+            model.context = _inert_context(pid=model.c_pid, run=100, hard=130, failure_limit=None, cleanup_limit=None,
                                             primary=None, launch_closed=False,
                                             child_acquisition=SimpleNamespace(child=model.child))
-            model.context.cleanup_cutoff = lambda original: owner._Context.cleanup_cutoff(model.context, original)
             model.reader = SimpleNamespace(state="OPEN", unknown=False, fileno=lambda: 42)
             model.frame = {"v": 1, "type": "HELLO", "pid": model.k_pid, "ppid": model.c_pid,
                            "sid": model.c_pid, "pgid": model.k_pid, "fd_map_version": 1}
@@ -1065,7 +1084,7 @@ class ProfileFixtureBookkeepingTests(unittest.TestCase):
             with self.subTest(hello_gate_bypass=bypass), modeled() as model:
                 channel = model.channel
                 if bypass == "other-channel":
-                    channel = SimpleNamespace(incoming="o_to_c", frames=[{"type": "CANCEL"}])
+                    channel = SimpleNamespace(context=model.context, incoming="o_to_c", frames=[{"type": "CANCEL"}])
                 elif bypass == "other-role": model.binding.role = "keeper"
                 elif bypass == "other-mode": model.binding.mode = "success"
                 else: channel.frames = []
