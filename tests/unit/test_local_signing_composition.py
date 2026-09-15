@@ -16,6 +16,7 @@ from mobile_release.cancellation import DefaultCancellation, OwnedTemporaryDirec
 from mobile_release.config import load_config
 from mobile_release.errors import CredentialError
 from mobile_release.inspection import InspectionDeadline
+from mobile_release.owned_process import ProcessError
 from mobile_release.reporting import Report
 from .helpers import android_config, ios_config, write_project
 from .ios_entitlement_helpers import profile
@@ -66,9 +67,16 @@ class SigningCompositionTests(unittest.TestCase):
                     self.assertIs(cancellation_owner(None, CredentialError, 'restore')[0], lease.cancellation)
                     self.assertIs(signal.getsignal(signal.SIGTERM), foreign)
                 self.assertIs(signal.getsignal(signal.SIGTERM), foreign)
-                with self.assertRaisesRegex(CredentialError, 'handlers'):
+                with self.assertRaises(ProcessError) as caught:
                     with signing.local_signing_lease(home=home):
                         signal.signal(signal.SIGINT, foreign)
+                # Public lease failure retains fatal handler-cleanup facts,
+                # not the inner restoration error's message.
+                self.assertIs(type(caught.exception), ProcessError)
+                self.assertFalse(caught.exception.dispatched)
+                self.assertTrue(caught.exception.contained)
+                self.assertFalse(caught.exception.cleanup_complete)
+                self.assertTrue(caught.exception.fatal)
                 self.assertIs(signal.getsignal(signal.SIGINT), foreign)
                 self.assertEqual(signing.signing_status(home=home)['status'], 'idle')
                 a, b = (DefaultCancellation(CredentialError, 'restore') for _ in range(2))
