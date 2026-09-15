@@ -753,6 +753,8 @@ class PersistentWorkerRecorderTests(unittest.TestCase):
                 self.assertEqual(fixture._CASE_CUSTODY[str(root)], identity)
             recorder = PersistentSigningTests("test_one_real_model_command_bridge_finishes_before_success")
             recorder.root = Path(directory)
+            recorder._root_identity = fixture._directory_identity(recorder.root)
+            recorder._semantic_adapter_complete = None
             with self.assertRaisesRegex(AssertionError, "fixture files retained"):
                 recorder.tearDown()
             self.assertTrue(root.is_dir())
