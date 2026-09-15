@@ -632,7 +632,7 @@ class IosOperationRecoveryTests(unittest.TestCase):
         modernize_ipa_fixture(self.root / "app.ipa")
         native = NativeProfileSeam()
         native.claims["Reader.app"] = {**signed_entitlements(), "com.apple.developer.associated-domains": ["applinks:fictional.example"]}
-        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.subprocess.run", side_effect=native), patch("mobile_release.ios_profiles.authenticate_cms", side_effect=native.authenticate_cms), patch("mobile_release.cli.prepare_store_operation") as prepare, patch("mobile_release.cli.execute_store_operation") as mutate:
+        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.subprocess.run", side_effect=native), native.profile_authentication(), patch("mobile_release.cli.prepare_store_operation") as prepare, patch("mobile_release.cli.execute_store_operation") as mutate:
             with self.assertRaisesRegex(ValidationError, "final candidate artifact validation failed"):
                 self.invoke("prepare-operation")
         prepare.assert_not_called()
@@ -642,7 +642,7 @@ class IosOperationRecoveryTests(unittest.TestCase):
 
     def test_profile_issuer_rejection_stops_fresh_intent_before_any_store_access(self) -> None:
         native = NativeProfileSeam()
-        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.subprocess.run", side_effect=native), patch("mobile_release.ios_profiles.authenticate_cms", side_effect=ValidationError("fixed Apple issuer rejection")) as authentication, patch("mobile_release.cli.prepare_store_operation") as prepare, patch("mobile_release.cli.execute_store_operation") as mutate:
+        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.subprocess.run", side_effect=native), native.profile_authentication() as authentication, patch.object(native, "authenticate_cms", side_effect=ValidationError("fixed Apple issuer rejection")), patch("mobile_release.cli.prepare_store_operation") as prepare, patch("mobile_release.cli.execute_store_operation") as mutate:
             with self.assertRaisesRegex(ValidationError, "final candidate artifact validation failed"):
                 self.invoke("prepare-operation")
         authentication.assert_called_once(); prepare.assert_not_called(); mutate.assert_not_called()
@@ -653,16 +653,23 @@ class IosOperationRecoveryTests(unittest.TestCase):
 
         for error in (ProcessError("fictional group uncertainty", dispatched=True, contained=False),
                       ProcessCleanupError("fictional cleanup uncertainty", dispatched=True)):
+            native = NativeProfileSeam()
             with self.subTest(error=type(error).__name__), \
                  patch("mobile_release.ios.sys.platform", "darwin"), \
                  patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), \
-                 patch("mobile_release.ios_profiles.authenticate_cms", side_effect=error) as authentication, \
+                 native.profile_authentication() as authentication, \
+                 patch.object(native, "authenticate_cms", side_effect=error), \
                  patch("mobile_release.ios.subprocess.run", side_effect=AssertionError("later native inspection ran")), \
                  patch("mobile_release.cli.prepare_store_operation") as prepare, \
                  patch("mobile_release.cli.execute_store_operation") as mutate, \
                  self.assertRaises(ProcessError) as caught:
                 self.invoke("prepare-operation")
-            self.assertIs(caught.exception, error)
+            # Caller scopes preserve dispatch/containment, not error identity.
+            # The outer ExitStack's fatal unwind adds ledger cleanup uncertainty,
+            # so the aggregate cleanup receipt is false for both failures.
+            self.assertEqual(caught.exception.dispatched, error.dispatched)
+            self.assertEqual(caught.exception.contained, error.contained)
+            self.assertFalse(caught.exception.cleanup_complete)
             self.assertTrue(caught.exception.fatal)
             authentication.assert_called_once()
             prepare.assert_not_called()

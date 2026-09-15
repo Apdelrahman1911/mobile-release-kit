@@ -493,7 +493,7 @@ class IosArtifactTests(unittest.TestCase):
                 stack.enter_context(patch("mobile_release.ios.shutil.which", return_value="/usr/bin/tool"))
                 stack.enter_context(patch("mobile_release.ios._utc_now", return_value=now))
                 stack.enter_context(patch("mobile_release.ios.subprocess.run", side_effect=native))
-                stack.enter_context(patch("mobile_release.ios_profiles.authenticate_cms", side_effect=cms_seam.authenticate_cms))
+                stack.enter_context(cms_seam.profile_authentication())
                 findings, interval = validate_ipa_current_signing(
                     ipa, expected_bundle_id="com.example.reader", expected_team_id="ABCDE12345",
                     expected_fingerprint=fingerprint, release=ReleaseVersion("1.2.3", 42),

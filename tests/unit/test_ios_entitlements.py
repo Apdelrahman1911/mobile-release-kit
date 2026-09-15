@@ -390,7 +390,7 @@ class SignedEntitlementInventoryTests(unittest.TestCase):
         self.stack.enter_context(patch("mobile_release.ios.sys.platform", "darwin"))
         self.stack.enter_context(patch("mobile_release.ios.shutil.which", return_value="/fictional/native/tool"))
         self.stack.enter_context(patch("mobile_release.ios.subprocess.run", side_effect=self.native))
-        self.stack.enter_context(patch("mobile_release.ios_profiles.authenticate_cms", side_effect=self.native.authenticate_cms))
+        self.stack.enter_context(self.native.profile_authentication())
         self.install_profiles()
 
     def install_profiles(self):
@@ -425,15 +425,17 @@ class SignedEntitlementInventoryTests(unittest.TestCase):
         self.assertTrue(all(not path.exists() for path in self.native.extracted))
 
     def test_issuer_rejection_in_either_bundle_stops_current_validation_and_public_evidence(self):
+        original_payload = self.native.authenticate_cms
         for relative in ("", "PlugIns/Widget.appex"):
-            rejected = (self.exported / relative / "embedded.mobileprovision").read_bytes()
-            def authenticate(raw, *, deadline, cancellation=None):
-                if raw == rejected:
-                    raise ValidationError("fixed Apple issuer rejection")
-                return self.native.authenticate_cms(raw, deadline=deadline)
-            with self.subTest(bundle=relative), patch("mobile_release.ios_profiles.authenticate_cms", side_effect=authenticate):
-                self.assert_rejected("Apple issuer rejection")
-        with patch("mobile_release.ios_profiles.authenticate_cms", side_effect=ValidationError("fixed Apple issuer rejection")):
+            outer = (self.exported / relative / "embedded.mobileprovision").read_bytes()
+            for layer, rejected in (("outer", outer), ("inner", plistlib.loads(outer)["DER-Encoded-Profile"])):
+                def authenticate(raw, *, deadline, cancellation=None):
+                    if raw == rejected:
+                        raise ValidationError("fixed Apple issuer rejection")
+                    return original_payload(raw, deadline=deadline, cancellation=cancellation)
+                with self.subTest(bundle=relative, layer=layer), patch.object(self.native, "authenticate_cms", side_effect=authenticate):
+                    self.assert_rejected("Apple issuer rejection")
+        with patch.object(self.native, "authenticate_cms", side_effect=ValidationError("fixed Apple issuer rejection")):
             with self.assertRaisesRegex(ValidationError, "Apple issuer rejection"):
                 ipa_signing_evidence(self.paths["ios-ipa"])
 
@@ -537,6 +539,36 @@ class SignedEntitlementInventoryTests(unittest.TestCase):
         self.assertEqual(result["Entitlements"], profile()["Entitlements"])
         self.assertEqual(self.native.cms_calls, [location.read_bytes(), plistlib.loads(location.read_bytes())["DER-Encoded-Profile"]])
         self.assertTrue(location.is_file())
+        captures = self.native.cms_captures
+        self.assertEqual([item["binding"].role for item in captures], ["OUTER_CMS", "INNER_CMS"])
+        evidence = captures[0]["evidence"]
+        self.assertTrue(all(item["evidence"] is evidence for item in captures))
+        self.assertTrue(evidence._finished and evidence._published)
+        self.assertEqual(set(evidence._bindings), {"LOAD", "READER", "DECODE", "OUTER_CMS", "INNER_CMS"})
+        self.assertTrue(all(item.scope.lifetime_local_settled for item in evidence._bindings.values()))
+        self.assertTrue(all(item["finality"].native_attempt == "NOT_ATTEMPTED" for item in captures))
+
+    def test_mocked_authenticator_without_owner_publication_remains_fatal(self):
+        from mobile_release.owned_process import ProcessError
+
+        location = self.exported / "embedded.mobileprovision"
+        outer = location.read_bytes()
+        calls = []
+
+        def missing_publication(content, *, deadline, cancellation, _evidence, _evidence_role):
+            deadline.check()
+            cancellation.check()
+            calls.append((content, _evidence, _evidence_role))
+            return content  # Accepting the new kwargs is not owner publication.
+
+        with patch("mobile_release.ios_profiles.authenticate_cms", side_effect=missing_publication), self.assertRaises(ProcessError) as caught:
+            _profile_details(location)
+        self.assertTrue(caught.exception.fatal and caught.exception.dispatched)
+        self.assertFalse(caught.exception.contained or caught.exception.cleanup_complete)
+        self.assertEqual([item[0] for item in calls], [outer, plistlib.loads(outer)["DER-Encoded-Profile"]])
+        self.assertEqual([item[2] for item in calls], ["OUTER_CMS", "INNER_CMS"])
+        self.assertIs(calls[0][1], calls[1][1])
+        self.assertFalse(self.native.cms_captures or self.native.calls)
 
     def test_all_new_native_profile_slice_calls_receive_no_credentials_or_runtime_injection(self):
         canaries = {key: "private-native-canary" for key in (
