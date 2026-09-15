@@ -1271,9 +1271,9 @@ def execute_pipeline(steps: tuple[Step, ...], perform: Callable[[Step], CheckRes
             error = exc.code if isinstance(exc, VerificationError) else "CHECK_EXECUTION_FAILED"
             rows[index].update(status="FAIL", error=error)
             if not isinstance(exc, VerificationError):
-                frames = traceback.extract_tb(exc.__traceback__)
-                rows[index]["location"] = [Path(frames[-1].filename).name, frames[-1].lineno] if frames else []
-                rows[index]["exception"] = type(exc).__name__
+                # Keep the original sanitized errno/callsite without replacing
+                # the pipeline's execution-failure code with the generic one.
+                rows[index].update(error_details(exc), error=error)
             break
     return Report(error is None, tuple(rows), error)
 

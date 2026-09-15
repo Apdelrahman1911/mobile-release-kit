@@ -223,21 +223,22 @@ class CICensusTests(unittest.TestCase):
         seams = (("list", "/proc/42/task", 1), ("read", "/proc/42/task/42/stat", 1),
                  ("read", "/proc/42/task/42/status", 1), ("read", "/proc/42/task/42/stat", 2),
                  ("list", "/proc/42/task", 2))
-        for seam in seams:
-            with self.subTest(seam=seam):
-                tree, clock = _ProcTree(), _Clock()
-                error = FileNotFoundError(errno.ENOENT, "synthetic enumerated entry disappeared")
-                tree.hook = _fault(*seam, error)
-                with _pure(self.module, tree, clock), patch.object(
-                        self.module, "_linux_snapshot", wraps=self.module._linux_snapshot) as reader:
-                    with self.assertRaises(self.module._CensusUnstable) as raised:
-                        self.module._snapshot("linux", deadline=10.0)
-                self.assertIs(raised.exception.__cause__, error)
-                reader.assert_called_once_with(deadline=10.0)
-                self.assertEqual(tree.counts[("read", "/proc/41/task/41/stat")], 2)
-                self.assertEqual(tree.counts[("read", "/proc/41/task/41/status")], 1)
-                self.assertEqual(tree.counts[("list", "/proc")], 1)
-                self.assertEqual(clock.sleeps, [])
+        for number in (errno.ENOENT, errno.ESRCH):
+            for seam in seams:
+                with self.subTest(errno=number, seam=seam):
+                    tree, clock = _ProcTree(), _Clock()
+                    error = OSError(number, "synthetic enumerated entry disappeared")
+                    tree.hook = _fault(*seam, error)
+                    with _pure(self.module, tree, clock), patch.object(
+                            self.module, "_linux_snapshot", wraps=self.module._linux_snapshot) as reader:
+                        with self.assertRaises(self.module._CensusUnstable) as raised:
+                            self.module._snapshot("linux", deadline=10.0)
+                    self.assertIs(raised.exception.__cause__, error)
+                    reader.assert_called_once_with(deadline=10.0)
+                    self.assertEqual(tree.counts[("read", "/proc/41/task/41/stat")], 2)
+                    self.assertEqual(tree.counts[("read", "/proc/41/task/41/status")], 1)
+                    self.assertEqual(tree.counts[("list", "/proc")], 1)
+                    self.assertEqual(clock.sleeps, [])
 
     def test_membership_empty_task_and_valid_birth_churn_are_typed(self):
         cases = (
@@ -276,9 +277,10 @@ class CICensusTests(unittest.TestCase):
                 reader.assert_called_once_with(deadline=10.0)
                 self.assertEqual(clock.sleeps, [])
 
-        for count in (1, 2):
-            error = FileNotFoundError(errno.ENOENT, "synthetic root inventory unavailable")
-            check(f"root-enoent-{count}", _fault("list", "/proc", count, error), error)
+        for number in (errno.ENOENT, errno.ESRCH):
+            for count in (1, 2):
+                error = OSError(number, "synthetic root inventory unavailable")
+                check(("root", number, count), _fault("list", "/proc", count, error), error)
         for operation, path, count in (("list", "/proc/42/task", 1),
                                       ("read", "/proc/42/task/42/status", 1),
                                       ("read", "/proc/42/task/42/stat", 2),
@@ -288,9 +290,14 @@ class CICensusTests(unittest.TestCase):
                 check((operation, path, count, number), _fault(operation, path, count, error), error)
         for error in (FileNotFoundError(errno.EIO, "not ENOENT"),
                       FileNotFoundError("no errno is not ENOENT"),
+                      ProcessLookupError(errno.EIO, "not ESRCH"),
+                      ProcessLookupError("no errno is not ESRCH"),
+                      OSError(float(errno.ENOENT), "noninteger errno is not ENOENT"),
+                      OSError(float(errno.ESRCH), "noninteger errno is not ESRCH"),
                       RuntimeError("synthetic unknown observation failure"),
                       KeyboardInterrupt("synthetic cancellation")):
-            check(type(error).__name__, _fault("read", "/proc/42/task/42/status", 1, error), error)
+            check((type(error).__name__, getattr(error, "errno", None)),
+                  _fault("read", "/proc/42/task/42/status", 1, error), error)
 
         good_uid, good_gid = b"Uid:\t0 0 0 0\n", b"Gid:\t0 0 0 0\n"
         invalid_statuses = [good_uid, good_gid, good_uid * 2 + good_gid,
@@ -343,24 +350,26 @@ class CICensusTests(unittest.TestCase):
         check("aggregate-thread-count", _fault("list", "/proc/42/task", 1, range(1, 131073)))
 
     def test_finality_retry_restarts_from_a_fresh_complete_root(self):
-        tree, clock = _ProcTree(), _Clock()
+        for number in (errno.ENOENT, errno.ESRCH):
+            with self.subTest(errno=number):
+                tree, clock = _ProcTree(), _Clock()
 
-        def disappear(operation, path, count):
-            if (operation, path, count) == ("list", "/proc/42/task", 1):
-                tree.reset({(43, 43): ((7, 8, 9, 10), (11, 12, 13, 14), 4301, "S")})
-                raise FileNotFoundError(errno.ENOENT, "synthetic first-pass churn")
-            return _DEFAULT
+                def disappear(operation, path, count):
+                    if (operation, path, count) == ("list", "/proc/42/task", 1):
+                        tree.reset({(43, 43): ((7, 8, 9, 10), (11, 12, 13, 14), 4301, "S")})
+                        raise OSError(number, "synthetic first-pass churn")
+                    return _DEFAULT
 
-        tree.hook = disappear
-        with _pure(self.module, tree, clock), patch.object(
-                self.module, "_linux_snapshot", wraps=self.module._linux_snapshot) as reader:
-            rows = self.module._snapshot("linux", deadline=5.0, retry_churn=True)
-        self.assertEqual(rows, {(43, 43): ((7, 8, 9, 10), (11, 12, 13, 14), 4301)})
-        self.assertEqual(tree.counts[("read", "/proc/41/task/41/status")], 1)
-        self.assertEqual(tree.counts[("read", "/proc/43/task/43/status")], 1)
-        self.assertEqual(tree.counts[("list", "/proc")], 3)
-        self.assertEqual([call.kwargs for call in reader.call_args_list], [{"deadline": 5.0}] * 2)
-        self.assertEqual(clock.sleeps, [0.01])
+                tree.hook = disappear
+                with _pure(self.module, tree, clock), patch.object(
+                        self.module, "_linux_snapshot", wraps=self.module._linux_snapshot) as reader:
+                    rows = self.module._snapshot("linux", deadline=5.0, retry_churn=True)
+                self.assertEqual(rows, {(43, 43): ((7, 8, 9, 10), (11, 12, 13, 14), 4301)})
+                self.assertEqual(tree.counts[("read", "/proc/41/task/41/status")], 1)
+                self.assertEqual(tree.counts[("read", "/proc/43/task/43/status")], 1)
+                self.assertEqual(tree.counts[("list", "/proc")], 3)
+                self.assertEqual([call.kwargs for call in reader.call_args_list], [{"deadline": 5.0}] * 2)
+                self.assertEqual(clock.sleeps, [0.01])
 
     def test_finality_retry_has_eight_attempts_and_one_absolute_deadline(self):
         for succeeds in (True, False):
@@ -446,25 +455,30 @@ class CICensusTests(unittest.TestCase):
                 self.assertEqual(clock.sleeps, [])
 
     def test_collision_is_strict_and_finality_unions_two_complete_passes(self):
-        tree, clock, uid = _ProcTree(), _Clock(), 60001
-        tree.rows[(41, 41)] = ((0, 0, 0, uid), (0,) * 4, 4101, "Z")
+        uid = 60001
+        for number in (errno.ENOENT, errno.ESRCH):
+            with self.subTest(collision_churn_errno=number):
+                tree, clock = _ProcTree(), _Clock()
+                tree.rows[(41, 41)] = ((0, 0, 0, uid), (0,) * 4, 4101, "Z")
+                error = OSError(number, "synthetic collision-view churn")
 
-        def collision_churn(operation, path, count):
-            if (operation, path, count) == ("list", "/proc/42/task", 1):
-                tree.reset({})  # A hypothetical retry would erase the observed collision.
-                raise FileNotFoundError(errno.ENOENT, "synthetic collision-view churn")
-            return _DEFAULT
+                def collision_churn(operation, path, count):
+                    if (operation, path, count) == ("list", "/proc/42/task", 1):
+                        tree.reset({})  # A hypothetical retry would erase the observed collision.
+                        raise error
+                    return _DEFAULT
 
-        tree.hook = collision_churn
-        with _pure(self.module, tree, clock), patch.object(
-                self.module, "_linux_snapshot", wraps=self.module._linux_snapshot) as reader, patch.object(
-                self.module, "_snapshot", wraps=self.module._snapshot) as router:
-            with self.assertRaises(self.module._CensusUnstable):
-                self.module._domain("linux", uid, collision=True, deadline=10.0)
-        reader.assert_called_once_with(deadline=10.0)
-        router.assert_called_once_with("linux", deadline=10.0, retry_churn=False)
-        self.assertEqual(tree.counts[("read", "/proc/41/task/41/status")], 1)
-        self.assertEqual(clock.sleeps, [])
+                tree.hook = collision_churn
+                with _pure(self.module, tree, clock), patch.object(
+                        self.module, "_linux_snapshot", wraps=self.module._linux_snapshot) as reader, patch.object(
+                        self.module, "_snapshot", wraps=self.module._snapshot) as router:
+                    with self.assertRaises(self.module._CensusUnstable) as raised:
+                        self.module._domain("linux", uid, collision=True, deadline=10.0)
+                self.assertIs(raised.exception.__cause__, error)
+                reader.assert_called_once_with(deadline=10.0)
+                router.assert_called_once_with("linux", deadline=10.0, retry_churn=False)
+                self.assertEqual(tree.counts[("read", "/proc/41/task/41/status")], 1)
+                self.assertEqual(clock.sleeps, [])
 
         tree, clock = _ProcTree(), _Clock()
         positive = {(41, 411): ((0, 0, 0, uid), (0,) * 4, 4111)}

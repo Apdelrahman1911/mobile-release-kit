@@ -1900,9 +1900,11 @@ def _linux_snapshot(*, deadline: float | None = None) -> dict[tuple[int, int], t
             if tids != sorted(int(p.name) for p in task.iterdir() if p.name.isdecimal()):
                 raise _CensusUnstable("thread churn during complete census")
         except OSError as exc:
-            if exc.errno != errno.ENOENT:
+            if type(exc.errno) is not int or exc.errno not in (errno.ENOENT, errno.ESRCH):
                 raise
             # Only a path beneath an already enumerated PID/TID may disappear.
+            # Proc metadata can report ESRCH after a task disappears, including
+            # during a read. Neither errno supplies a complete or empty census.
             # Root enumeration failures below remain fatal, never empty passes.
             raise _CensusUnstable("enumerated process metadata disappeared") from exc
     if pids != sorted(int(p.name) for p in root.iterdir() if p.name.isdecimal()):

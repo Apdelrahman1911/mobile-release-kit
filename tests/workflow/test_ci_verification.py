@@ -10,6 +10,7 @@ import base64
 import contextlib
 import csv
 import dataclasses
+import errno
 import functools
 import importlib.util
 import hashlib
@@ -2169,6 +2170,7 @@ class CIControllerContractTests(unittest.TestCase):
 
     def test_every_early_or_final_failure_is_latched_and_later_gates_are_unexecuted(self):
         controller = controller_module()
+        private = "private-pipeline-diagnostic-canary"
         for platform in ("linux", "macos"):
             steps = controller.catalog(fixture_paths(controller), platform, deadline=1000.0)
             ids = [step.id for step in steps]
@@ -2176,12 +2178,14 @@ class CIControllerContractTests(unittest.TestCase):
                 for raised in (False, True):
                     with self.subTest(platform=platform, failed=failed, raised=raised):
                         seen = []
+                        original = ProcessLookupError(errno.ESRCH, private, "/private/" + private)
+                        original._mrk_provider_stat = ("python", 0, 1, ("missing-target",))
 
                         def perform(step):
                             seen.append(step.id)
                             if step.id == failed:
                                 if raised:
-                                    raise OSError("synthetic failure after success-shaped output")
+                                    raise original
                                 return controller.CheckResult(False, {"ok": True, "status": "PASS"}, "FIXTURE_FAILURE")
                             return controller.CheckResult(True, {"fixture": True})
 
@@ -2194,6 +2198,25 @@ class CIControllerContractTests(unittest.TestCase):
                         if failed is not None:
                             statuses += ["FAIL", *(["UNEXECUTED"] * (len(steps) - index - 1))]
                             self.assertEqual(report.error, "CHECK_EXECUTION_FAILED" if raised else "FIXTURE_FAILURE")
+                            row = report.rows[index]
+                            self.assertEqual(row["error"], report.error)
+                            if raised:
+                                self.assertEqual(row["exception"], "ProcessLookupError")
+                                self.assertEqual(row["errno"], errno.ESRCH)
+                                self.assertEqual(row["location"][0], "test_ci_verification.py")
+                                self.assertEqual(row["controller_location"][0], "verify_ci.py")
+                                self.assertGreater(row["controller_location"][1], 0)
+                                self.assertEqual(row["provider_stat"], {
+                                    "operation": "provider-stat", "runtime_role": "python",
+                                    "prefix_index": 0, "node_index": 1,
+                                    "relative_components": ["missing-target"],
+                                })
+                                self.assertNotIn("details", row)  # No invented capture or check result.
+                            else:
+                                self.assertEqual(row["details"], {"ok": True, "status": "PASS"})
+                                self.assertNotIn("errno", row)
+                            self.assertNotIn(private, json.dumps(row))
+                            self.assertNotIn("/private/", json.dumps(row))
                         else:
                             self.assertIsNone(report.error)
                         self.assertEqual([row["status"] for row in report.rows], statuses)
@@ -2220,6 +2243,12 @@ class CIControllerContractTests(unittest.TestCase):
 
         report = controller.execute_pipeline(steps, cancelled, platform="linux")
         self.assertFalse(report.ok)
+        self.assertEqual(report.error, "CHECK_EXECUTION_FAILED")
+        self.assertEqual(report.rows[0]["error"], report.error)
+        self.assertEqual(report.rows[0]["exception"], "KeyboardInterrupt")
+        self.assertEqual(report.rows[0]["controller_location"][0], "verify_ci.py")
+        self.assertNotIn("errno", report.rows[0])
+        self.assertNotIn("synthetic cancellation", json.dumps(report.rows))
         self.assertTrue(all(row["status"] == "UNEXECUTED" for row in report.rows[1:]))
 
     def test_environment_is_constructed_without_ambient_credentials_configuration_or_hooks(self):
