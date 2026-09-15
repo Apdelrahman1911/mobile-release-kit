@@ -10922,8 +10922,9 @@ class CISandboxPureTests(unittest.TestCase):
                     events.append(("nss",))
                     return b"unobserved\n" if case == "nss-bad" else b"MRK_NSS_ABSENT\n"
 
-                def domain(platform, uid, *, collision=False, deadline):
+                def domain(platform, uid, *, collision=False, deadline, admission=False):
                     self.assertEqual((platform, uid, deadline), ("linux", session.uid, session.deadline))
+                    self.assertIs(admission, collision)
                     self.module._remaining(deadline)
                     events.append(("domain", collision))
                     return {4242} if case == "collision" and collision else set()

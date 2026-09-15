@@ -800,6 +800,7 @@ def _publish_failure(phase: str, records: list[dict], original: BaseException | 
 
 
 def _result_class(expected, state):
+    expected_ids = frozenset(expected)
     allowed = _diagnostic_ids(expected)
 
     class Result(unittest.TextTestResult):
@@ -807,7 +808,36 @@ def _result_class(expected, state):
             if state["failed"]:
                 self.stop()
                 raise AssertionError("a native adverse callback prohibits a later test")
-            super().startTest(test)
+            # TextTestResult writes a partial header here. Native stderr during
+            # the body could split it from the later success token, so retain
+            # only the documented bookkeeping until the final callback.
+            try:
+                unittest.TestResult.startTest(self, test)
+            except BaseException:
+                state["failed"] = True
+                self.stop()
+                raise
+
+        def addSuccess(self, test):
+            try:
+                if state["failed"]:
+                    raise AssertionError("a native adverse callback prohibits later success")
+                unittest.TestResult.addSuccess(self, test)
+                identifier = test.id()
+                if type(identifier) is not str or identifier not in expected_ids or len(identifier) > 512:
+                    raise AssertionError("native success differs from the exact expected test IDs")
+                method = identifier.rsplit(".", 1)[-1]
+                line = f"\n{method} ({identifier}) ... ok\n"
+                written = self.stream.write(line)
+                if type(written) is not int or written != len(line):
+                    raise OSError("native success write was incomplete")
+                self.stream.flush()
+            except BaseException:
+                # Written bytes cannot be retracted. Failure/stop and the
+                # original exception prevent them from becoming gate evidence.
+                state["failed"] = True
+                self.stop()
+                raise
 
         def record_native(self, test, outcome, error=None):
             state["failed"] = True

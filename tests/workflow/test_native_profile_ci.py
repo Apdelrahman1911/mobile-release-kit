@@ -332,7 +332,10 @@ def _inert_native_suites(outcome="success", *, subtests=3, unknown_id=False):
     if outcome in {"expected-failure", "unexpected-success"}:
         Fixture.test_02_subject = unittest.expectedFailure(Fixture.test_02_subject)
     if unknown_id:
-        Fixture.id = lambda self: "PRIVATE_UNRECOGNIZED_ID"
+        # This case exercises unknown adverse attribution, not an earlier
+        # successful test presenting an unauthorized completion identity.
+        Fixture.id = lambda self: ("PRIVATE_UNRECOGNIZED_ID" if unittest.TestCase.id(self) == _FIXTURE_IDS[1]
+                                   else unittest.TestCase.id(self))
 
     def class_failure(_cls):
         raise OSError(errno.EACCES, "PRIVATE_NATIVE_CLASS_SETUP")
@@ -395,7 +398,7 @@ def _inert_native_gate(*, suites=None, stderr=None, platform="darwin", run_effec
     imported = Mock(side_effect=product_modules)
     process = SimpleNamespace(run=command, DEVNULL=subprocess.DEVNULL,
                               CalledProcessError=subprocess.CalledProcessError, TimeoutExpired=subprocess.TimeoutExpired)
-    framework = SimpleNamespace(TestSuite=unittest.TestSuite, TextTestResult=unittest.TextTestResult,
+    framework = SimpleNamespace(TestSuite=unittest.TestSuite, TestResult=unittest.TestResult, TextTestResult=unittest.TextTestResult,
                                 TextTestRunner=runner, TestLoader=loader)
     with patch.multiple(gate, subprocess=process, unittest=framework,
                         sys=SimpleNamespace(platform=platform, stderr=output),
@@ -843,6 +846,95 @@ class NativeProfileCITests(unittest.TestCase):
                     self.assertEqual(diagnostic["records"][1], {"id": _FIXTURE_IDS[1], "outcome": "error",
                         "category": "os-error", "errno": errno.EDQUOT, "returncode": None})
                 self.assertNotIn("PRIVATE", json.dumps(diagnostic))
+
+        # Success is a final callback, not permission to ignore a reporting
+        # failure. Real unittest must stop even if a partial/full line escaped.
+        class IntegerSubclass(int):
+            pass
+
+        for fault in ("short", "integer-subclass", "write", "flush", "interrupt"):
+            with self.subTest(success_reporting=fault):
+                original = (KeyboardInterrupt("PRIVATE_SUCCESS_REPORTING_INTERRUPT") if fault == "interrupt"
+                            else OSError(errno.EDQUOT, "PRIVATE_SUCCESS_REPORTING_FAILURE"))
+                state, retained = {"failed": False, "records": []}, []
+
+                class CompletionSink(io.StringIO):
+                    attempts = 0
+                    complete_written = False
+
+                    def write(self, text):
+                        if text.startswith("\n") and text.endswith(" ... ok\n"):
+                            self.attempts += 1
+                            if fault in {"write", "interrupt"}:
+                                raise original
+                            if fault == "short":
+                                return super().write(text[:-1])
+                            written = super().write(text)
+                            self.complete_written = True
+                            return IntegerSubclass(written) if fault == "integer-subclass" else written
+                        return super().write(text)
+
+                    def flush(self):
+                        if fault == "flush" and self.complete_written:
+                            raise original
+                        return super().flush()
+
+                class RetainingSuccessRunner(unittest.TextTestRunner):
+                    def _makeResult(self):
+                        result = super()._makeResult()
+                        retained.append(result)
+                        return result
+
+                suites, module, executed = _inert_native_suites()
+                output = CompletionSink()
+                runner = RetainingSuccessRunner(stream=output, verbosity=2, descriptions=False, failfast=True,
+                                                 resultclass=gate._result_class(_FIXTURE_IDS, state))
+                with self.assertRaises(type(original)) as raised:
+                    runner.run(unittest.TestSuite(suites))
+                if fault in {"write", "flush", "interrupt"}:
+                    self.assertIs(raised.exception, original)
+                else:
+                    self.assertEqual(str(raised.exception), "native success write was incomplete")
+                self.assertTrue(state["failed"])
+                self.assertEqual(executed, ["before"])
+                self.assertEqual(output.attempts, 1)
+                result, = retained
+                self.assertTrue(result.shouldStop)
+                self.assertEqual(result.testsRun, 1)
+                saved = output.getvalue()
+                if fault in {"short", "integer-subclass", "flush"}:
+                    self.assertIn(_FIXTURE_IDS[0], saved)  # Written bytes are not magically withdrawn.
+                self.assertNotIn("\nOK\n", saved)
+                for callback in (result.startTest, result.addSuccess):
+                    result.shouldStop = False
+                    with self.assertRaisesRegex(AssertionError, "prohibits"):
+                        callback(module.Fixture("test_03_after"))
+                    self.assertTrue(result.shouldStop)
+                    self.assertEqual(output.getvalue(), saved)
+                    self.assertEqual(output.attempts, 1)
+
+        # Lifecycle pseudo-IDs are allowed for failure attribution only; even a
+        # real expected ID must not emit success after an earlier failure.
+        for identifier, failed in (("PRIVATE_FOREIGN_ID", False), (None, False),
+                (f"setUpClass ({_FIXTURE_MODULE}.Fixture)", False), (_FIXTURE_IDS[0], True)):
+            with self.subTest(success_id=identifier, prior_failure=failed):
+                output, state = io.StringIO(), {"failed": failed, "records": []}
+                result = gate._result_class(_FIXTURE_IDS, state)(output, False, 2)
+                with self.assertRaises(AssertionError):
+                    result.addSuccess(SimpleNamespace(id=lambda: identifier))
+                self.assertTrue(state["failed"])
+                self.assertTrue(result.shouldStop)
+                self.assertEqual(output.getvalue(), "")
+        for exception in (OSError, KeyboardInterrupt, SystemExit):
+            original = exception("PRIVATE_SUCCESS_ID_FAILURE")
+            output, state = io.StringIO(), {"failed": False, "records": []}
+            result = gate._result_class(_FIXTURE_IDS, state)(output, False, 2)
+            with self.subTest(identity_failure=exception.__name__), self.assertRaises(exception) as raised:
+                result.addSuccess(SimpleNamespace(id=Mock(side_effect=original)))
+            self.assertIs(raised.exception, original)
+            self.assertTrue(state["failed"])
+            self.assertTrue(result.shouldStop)
+            self.assertEqual(output.getvalue(), "")
 
     def test_native_inventory_reuses_exact_fixed_source_authority_without_budget(self):
         gate = run_native_profile_checks
@@ -1489,13 +1581,15 @@ class NativeProfileCITests(unittest.TestCase):
         entries = (("public", None, public_id), ("ordinary", None, public_id),
                    *(("isolated", partition, identifier)
                      for partition, identifier in (_PYTHON_POISON_FIXTURES[0], *_PYTHON_FRESH_FIXTURES)))
-        for entrypoint, partition, identifier in entries:
-            with self.subTest(entrypoint=entrypoint, partition=partition):
+        for (entrypoint, partition, identifier), notice in itertools.product(entries,
+                ("SYNTHETIC_NATIVE_NOTICE\n", "SYNTHETIC_NATIVE_NOTICE")):
+            with self.subTest(entrypoint=entrypoint, partition=partition, terminated_notice=notice.endswith("\n")):
                 expected, executed = (identifier,), []
 
                 def documented(case):
                     """A documented inert case; never a product/native test."""
                     executed.append(case.id())
+                    runtime.stderr.write(notice)
 
                 module_name, owner, method = identifier.rsplit(".", 2)
                 fixture_type = type(owner, (unittest.TestCase,), {
@@ -1515,7 +1609,7 @@ class NativeProfileCITests(unittest.TestCase):
                 loader = SimpleNamespace(exec_module=Mock())
                 inventory = SimpleNamespace(spec_from_file_location=Mock(return_value=SimpleNamespace(loader=loader)),
                                             module_from_spec=Mock(return_value=checks))
-                framework = SimpleNamespace(TextTestResult=unittest.TextTestResult,
+                framework = SimpleNamespace(TestResult=unittest.TestResult, TextTestResult=unittest.TextTestResult,
                                              TextTestRunner=Mock(wraps=unittest.TextTestRunner))
                 process = SimpleNamespace(run=Mock(return_value=SimpleNamespace(returncode=0)), DEVNULL=subprocess.DEVNULL)
                 # Every import, inventory, origin and command boundary is inert.
@@ -1548,6 +1642,9 @@ class NativeProfileCITests(unittest.TestCase):
                 self.assertEqual(process.run.call_count, 2 if entrypoint == "ordinary" else 0)
                 text = runtime.stderr.getvalue()
                 self.assertNotIn(documented.__doc__, text)
+                completion = f"{method} ({identifier}) ... ok\n"
+                self.assertEqual(text.count(completion), 1)
+                self.assertIn(notice + "\n" + completion, text)
                 # Data-only original double: parsing this real formatter output
                 # does not assert hosted capture/finality or a native-test pass.
                 capture = SimpleNamespace(ok=True, returncode=0, waited=True, stdout_eof=True, stderr_eof=True,
@@ -1558,6 +1655,30 @@ class NativeProfileCITests(unittest.TestCase):
                     native_partition=partition if entrypoint == "isolated" else "ordinary")
                 parsed = controller.parse_capture(step, capture, paths, "macos", checks)
                 self.assertEqual(parsed.details["completed"], [identifier])
+                if entrypoint == "ordinary":
+                    # Reproduce the actual old formatter defect with stock
+                    # unittest, not a fabricated transcript or native tests.
+                    stock = io.StringIO()
+                    runtime.stderr = stock
+                    completed = unittest.TextTestRunner(stream=stock, verbosity=2, descriptions=False).run(
+                        unittest.TestSuite([fixture_type(method)]))
+                    self.assertTrue(completed.wasSuccessful())
+                    self.assertEqual(completed.testsRun, 1)
+                    self.assertNotIn(completion, stock.getvalue())
+                    mutations = {
+                        "original-split": stock.getvalue(),
+                        "missing": text.replace(completion, "", 1),
+                        "duplicate": text.replace(completion, completion * 2, 1),
+                        "wrong-id": text.replace(f"({identifier})", f"({identifier}_foreign)", 1),
+                    }
+                    for name, malformed in mutations.items():
+                        changed = SimpleNamespace(**{**vars(capture), "stderr": malformed.encode()})
+                        with self.subTest(malformed_completion=name), \
+                                self.assertRaisesRegex(controller.VerificationError, "NATIVE_PYTHON_INVENTORY"):
+                            controller.parse_capture(step, changed, paths, "macos", checks)
+                        with self.subTest(malformed_compatibility=name), \
+                                self.assertRaisesRegex(controller.VerificationError, "NATIVE_COMPATIBILITY_INVENTORY"):
+                            controller.parse_native_python_controls(changed, expected)
 
     def test_compatibility_metadata_measures_each_loaded_product_origin_and_rejects_workflow_imports(self):
         gate = run_native_profile_checks

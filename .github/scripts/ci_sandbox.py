@@ -221,7 +221,7 @@ class DeadlineExpired(SessionError):
 
 
 class _CensusUnstable(SessionError):
-    """An incomplete Linux pass; only finality may discard it and resnapshot."""
+    """Incomplete Linux pass; finality or collision-guarded admission may retry."""
 
 
 def _native_startup_stage(data: bytes) -> str:
@@ -1837,8 +1837,25 @@ def _nss_absent(uid: int) -> None:
         raise SessionError("direct NSS lookup collision")
 
 
-def _linux_snapshot(*, deadline: float | None = None) -> dict[tuple[int, int], tuple[tuple[int, ...], tuple[int, ...], int]]:
+def _linux_birth(raw: bytes) -> int:
+    if len(raw) > 65536:
+        raise SessionError("process metadata size")
+    # stat field22 follows the final ')' of the command field.
+    marker = raw.rfind(b") ")
+    tail = raw[marker + 2:].split() if marker >= 0 else []
+    if len(tail) <= 19 or not tail[19].isdigit():
+        raise SessionError("malformed process birth metadata")
+    birth = int(tail[19])
+    if birth >= 2**64:
+        raise SessionError("process birth metadata exceeds unsigned64")
+    return birth
+
+
+def _linux_snapshot(*, deadline: float | None = None, admission_uid: int | None = None) -> dict[tuple[int, int], tuple[tuple[int, ...], tuple[int, ...], int]]:
     """Complete bounded process AND thread credentials, including fs IDs."""
+    if admission_uid is not None and (type(admission_uid) is not int or not 60000 <= admission_uid < 65000
+                                      or deadline is None):
+        raise SessionError("collision admission requires a reserved identity and original cutoff")
     if deadline is not None:
         _remaining(deadline)
     root = Path("/proc")
@@ -1860,24 +1877,12 @@ def _linux_snapshot(*, deadline: float | None = None) -> dict[tuple[int, int], t
                 if deadline is not None:
                     _remaining(deadline)
                 base = task / str(tid)
-                before = (base / "stat").read_bytes()
+                # Validate each completed read before the next fallible read.
+                # Malformed bytes must not disappear behind later task churn.
+                before = _linux_birth((base / "stat").read_bytes())
                 raw = (base / "status").read_bytes()
-                after = (base / "stat").read_bytes()
-                if max(len(before), len(raw), len(after)) > 65536:
+                if len(raw) > 65536:
                     raise SessionError("process metadata size")
-                # stat field22 follows the final ')' of the command field.
-                # Validate BOTH identities and credentials before classifying a
-                # difference. Malformed data can never be retried as absence.
-                births = []
-                for entry in (before, after):
-                    marker = entry.rfind(b") ")
-                    tail = entry[marker + 2:].split() if marker >= 0 else []
-                    if len(tail) <= 19 or not tail[19].isdigit():
-                        raise SessionError("malformed process birth metadata")
-                    birth = int(tail[19])
-                    if birth >= 2**64:
-                        raise SessionError("process birth metadata exceeds unsigned64")
-                    births.append(birth)
                 fields = {}
                 for line in raw.splitlines():
                     if b":" not in line:
@@ -1894,9 +1899,14 @@ def _linux_snapshot(*, deadline: float | None = None) -> dict[tuple[int, int], t
                 uids, gids = (tuple(int(v) for v in fields[key]) for key in (b"Uid", b"Gid"))
                 if any(value >= 2**32 for values in (uids, gids) for value in values):
                     raise SessionError("process credentials exceed unsigned32")
-                if births[0] != births[1]:
+                # A positive collision is terminal, even if this task's next
+                # read or a later membership check would report disappearance.
+                if admission_uid is not None and (admission_uid in uids or admission_uid in gids):
+                    raise SessionError("reserved numeric identity collision during admission")
+                after = _linux_birth((base / "stat").read_bytes())
+                if before != after:
                     raise _CensusUnstable("process identity changed during census")
-                rows[(pid, tid)] = (uids, gids, births[0])
+                rows[(pid, tid)] = (uids, gids, before)
             if tids != sorted(int(p.name) for p in task.iterdir() if p.name.isdecimal()):
                 raise _CensusUnstable("thread churn during complete census")
         except OSError as exc:
@@ -1938,17 +1948,22 @@ def _mac_snapshot(*, deadline: float | None = None) -> dict[tuple[int, int], tup
     return rows
 
 
-def _snapshot(platform: str, *, deadline: float | None = None, retry_churn: bool = False):
+def _snapshot(platform: str, *, deadline: float | None = None, retry_churn: bool = False,
+              admission_uid: int | None = None):
+    if admission_uid is not None and (platform != "linux" or retry_churn is not True
+                                      or type(admission_uid) is not int or not 60000 <= admission_uid < 65000):
+        raise SessionError("reserved-identity resnapshot is only for Linux collision admission")
     if platform != "linux":
         return _mac_snapshot(deadline=deadline)  # Darwin observation is unchanged.
     if not retry_churn:
         return _linux_snapshot(deadline=deadline)
     if deadline is None:
         raise SessionError("finality resnapshot requires its original finite cutoff")
+    options = {} if admission_uid is None else {"admission_uid": admission_uid}
     for attempt in range(_CENSUS_PASSES):
         _remaining(deadline)
         try:
-            rows = _linux_snapshot(deadline=deadline)
+            rows = _linux_snapshot(deadline=deadline, **options)
         except _CensusUnstable:
             if attempt == _CENSUS_PASSES - 1:
                 raise
@@ -1958,13 +1973,19 @@ def _snapshot(platform: str, *, deadline: float | None = None, retry_churn: bool
             return rows
 
 
-def _domain(platform: str, uid: int, *, collision: bool = False, deadline: float | None = None) -> set[int]:
+def _domain(platform: str, uid: int, *, collision: bool = False, deadline: float | None = None,
+            admission: bool = False) -> set[int]:
     """Two full passes; no missing/truncated/unknown row is silently ignored."""
+    if (type(admission) is not bool or admission and (platform != "linux" or collision is not True
+            or type(uid) is not int or not 60000 <= uid < 65000 or deadline is None)):
+        raise SessionError("admission resnapshot requires Linux collision mode and its reserved identity")
+    options = {"admission_uid": uid} if admission else {}
     occupied = set()
     for _ in range(2):
         if deadline is not None:
             _remaining(deadline)
-        for (pid, _), (uids, gids, _) in _snapshot(platform, deadline=deadline, retry_churn=not collision).items():
+        for (pid, _), (uids, gids, _) in _snapshot(platform, deadline=deadline,
+                retry_churn=admission or not collision, **options).items():
             if uid in uids or (collision and uid in gids):
                 occupied.add(pid)
     if deadline is not None:
@@ -4595,7 +4616,8 @@ class Session:
             self._headroom()
             raw = _small_command([str(self.python), "-I", "-S", "-B", str(self.entry), "--nss", str(self.uid)],
                                  deadline=self.deadline)
-            if raw != b"MRK_NSS_ABSENT\n" or _domain(self.platform, self.uid, collision=True, deadline=self.deadline):
+            if raw != b"MRK_NSS_ABSENT\n" or _domain(self.platform, self.uid, collision=True,
+                    deadline=self.deadline, admission=self.platform == "linux"):
                 raise SessionError("numeric identity collision or incomplete admission")
             if self.platform == "linux":
                 self._prepare_userns_boundary()
