@@ -283,6 +283,133 @@ class CommandContractTests(unittest.TestCase):
              patch.object(command, "_pause", return_value=None):
             yield written
 
+    def _inert_custodian(self, expected=command.Tag.PREPARED, *, create=True):
+        owner = command._Custodian.__new__(command._Custodian)
+        owner.ctx = self.context("C")
+        owner.downstream = self.wire(owner.ctx)
+        owner._parent = lambda: None
+        owner.anchor_hello, owner.group_done_sent = True, False
+        owner.anchor_protocol_failed = False
+        owner.anchor_expected = owner.anchor_reply = None
+        owner.anchor_work = owner.anchor_terminal = None
+        owner.child = owner.wait = owner.seal = owner.group = None
+        owner.create_route = command._Route(command.Tag.CREATE_W)
+        owner.run_route = command._Route(command.Tag.RUN_TOOL)
+        owner.ctx.routes.extend((owner.create_route, owner.run_route))
+        owner._expect_anchor(command.Tag.PREPARED)
+        if expected is command.Tag.READY:
+            owner._anchor_frame(command.Tag.PREPARED, command._scalar(owner.ctx.nonce))
+            owner._receive_anchor(command.Tag.PREPARED)
+            owner._expect_anchor(command.Tag.READY)
+            if create:
+                owner.create_route.queue()
+                owner.create_route.attempt()
+        return owner
+
+    def _inert_custodian_settlement(self, owner):
+        created = owner.create_route.attempted
+        return command._scalar(owner.ctx.nonce, create=created, run=False,
+                               no_child=not created, moved=True, armed=False, rejected=None,
+                               wait={"kind": "signal", "code": signal.SIGKILL} if created else None,
+                               producer=True, result=True)
+
+    def test_custodian_handshake_wait_preserves_early_original_settlement(self):
+        for expected in (command.Tag.PREPARED, command.Tag.READY):
+            with self.subTest(expected=expected):
+                owner = self._inert_custodian(expected)
+                body = self._inert_custodian_settlement(owner)
+                with self._inert_anchor_transport(SimpleNamespace(upstream=owner.downstream),
+                                                  [(command.Tag.WORK_DONE, body)]) as writes:
+                    with self.assertRaises(owned.ProcessError) as raised:
+                        owner._receive_anchor(expected)
+                self.assertEqual(owner.anchor_work, command._settlement_fields(body, owner.ctx))
+                self.assertIs(owner.ctx.primary, raised.exception)
+                self.assertTrue(owner.ctx.stopped and owner.ctx.launch_retired)
+                self.assertTrue(owner.create_route.retired and owner.run_route.retired)
+                self.assertFalse(owner.downstream.poisoned or owner.anchor_reply is not None)
+                self.assertFalse(owner._producer_settled())  # DATA is not original lifetime proof.
+                self.assertIsNone(owner.seal)
+                self.assertEqual(writes, [])
+
+        # Reproduce the old generic-receive failure without native execution;
+        # its contract remains strict rather than accepting arbitrary frames.
+        owner = self._inert_custodian()
+        with self._inert_anchor_transport(SimpleNamespace(upstream=owner.downstream),
+                [(command.Tag.WORK_DONE, self._inert_custodian_settlement(owner))]):
+            with self.assertRaises(owned.ProcessError):
+                command._receive(owner.downstream, command.Tag.PREPARED, lambda: None)
+        self.assertTrue(owner.downstream.poisoned)
+        self.assertIsNone(owner.anchor_work)
+
+    def test_custodian_late_handshake_is_once_only_data_after_failure(self):
+        for expected in (command.Tag.PREPARED, command.Tag.READY):
+            for failed in (False, True):
+                with self.subTest(expected=expected, failed=failed):
+                    owner = self._inert_custodian(expected)
+                    reply = command._scalar(owner.ctx.nonce, **({"moved": True}
+                                            if expected is command.Tag.READY else {}))
+                    work = self._inert_custodian_settlement(owner)
+                    original = KeyboardInterrupt("original modeled cancellation") if failed else None
+                    if original is not None:
+                        owner.ctx.record(original)
+                    cutoff = owner.ctx.cutoff()
+                    with self._inert_anchor_transport(SimpleNamespace(upstream=owner.downstream),
+                            [(expected, reply), (command.Tag.WORK_DONE, work)]) as writes, \
+                         patch.object(command.os, "getpgid", side_effect=AssertionError("numeric query")), \
+                         patch.object(command.os, "getsid", side_effect=AssertionError("numeric query")):
+                        if failed:
+                            owner._anchor_frames()  # Cleanup uses the same phase-bound router.
+                        else:
+                            self.assertEqual(owner._receive_anchor(expected), reply)
+                        owner._anchor_frames()
+                        with self.assertRaises(KeyboardInterrupt if failed else owned.ProcessError) as raised:
+                            owner._receive_anchor(expected)
+                    self.assertEqual(owner.anchor_reply, reply)
+                    self.assertEqual(owner.anchor_work, command._settlement_fields(work, owner.ctx))
+                    self.assertFalse(owner.downstream.poisoned)
+                    self.assertFalse(owner.run_route.attempted or owner.group_done_sent)
+                    self.assertIs(owner.anchor_expected, expected)
+                    self.assertEqual(writes, [])
+                    if failed:
+                        self.assertIs(raised.exception, original)
+                        self.assertIs(owner.ctx.primary, original)
+                        self.assertEqual(owner.ctx.cutoff(), cutoff)
+
+    def test_custodian_router_rejects_unadmitted_wrong_phase_and_replayed_frames(self):
+        cases = ("unadmitted-prepared", "unadmitted-work", "unadmitted-terminal",
+                 "premature-ready", "no-create", "false-moved", "foreign-nonce",
+                 "malformed", "duplicate-prepared", "duplicate-ready", "after-work")
+        for case in cases:
+            with self.subTest(case=case):
+                expected = (command.Tag.READY if case in {"no-create", "false-moved", "duplicate-ready"}
+                            else command.Tag.PREPARED)
+                owner = self._inert_custodian(expected, create=case != "no-create")
+                tag = expected
+                fields = {"moved": case != "false-moved"} if expected is command.Tag.READY else {}
+                nonce = b"x" * 16 if case == "foreign-nonce" else owner.ctx.nonce
+                if case == "premature-ready":
+                    tag, fields = command.Tag.READY, {"moved": True}
+                elif case == "malformed":
+                    fields = {"unexpected": True}
+                body = command._scalar(nonce, **fields)
+                if case.startswith("unadmitted-"):
+                    owner.anchor_hello = False
+                    if case == "unadmitted-work":
+                        tag, body = command.Tag.WORK_DONE, self._inert_custodian_settlement(owner)
+                    elif case == "unadmitted-terminal":
+                        tag = command.Tag.TERMINAL
+                elif case.startswith("duplicate-"):
+                    owner._anchor_frame(tag, body)
+                elif case == "after-work":
+                    owner._anchor_frame(command.Tag.WORK_DONE, self._inert_custodian_settlement(owner))
+                with self._inert_anchor_transport(SimpleNamespace(upstream=owner.downstream), [(tag, body)]) as writes:
+                    with self.assertRaises(owned.ProcessError):
+                        owner._anchor_frames()
+                self.assertTrue(owner.downstream.poisoned and owner.anchor_protocol_failed)
+                self.assertTrue(owner.ctx.stopped and owner.ctx.launch_retired)
+                self.assertFalse(owner.run_route.attempted or owner.group_done_sent)
+                self.assertEqual(writes, [])
+
     def test_anchor_crossed_stop_preserves_original_settlement_and_failure(self):
         for order in ("no-stop", "before-work-done", "crossed", "crossed-prior-error"):
             with self.subTest(order=order):

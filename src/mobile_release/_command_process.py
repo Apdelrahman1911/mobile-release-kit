@@ -2394,6 +2394,9 @@ class _Custodian:
         self.source_failed = self.output_overflow = self.anchor_protocol_failed = False
         self.output = [bytearray(), bytearray()]
         self.source_counts = [0, 0]
+        self.anchor_hello = False
+        self.anchor_expected: Tag | None = None
+        self.anchor_reply: bytes | None = None
         self.anchor_work: dict[str, Any] | None = None
         self.anchor_terminal: dict[str, Any] | None = None
         self.wait: native.WaitReceipt | None = None
@@ -2431,6 +2434,35 @@ class _Custodian:
         self._source_io()
         _input_loss(self.ctx, self.upstream)
 
+    def _expect_anchor(self, expected: Tag) -> None:
+        self.ctx.check()
+        _require(self.anchor_hello and self.anchor_work is None and not self.group_done_sent
+                 and (expected is Tag.PREPARED and self.anchor_expected is None and self.anchor_reply is None
+                      or expected is Tag.READY and self.anchor_expected is Tag.PREPARED
+                      and self.anchor_reply is not None))
+        # Arm before CONFIG/CREATE_W can take effect. A reply crossing a later
+        # failure belongs to this same original phase, not a renewed grant.
+        self.anchor_expected, self.anchor_reply = expected, None
+
+    def _receive_anchor(self, expected: Tag) -> bytes:
+        _require(self.anchor_hello and expected in (Tag.PREPARED, Tag.READY)
+                 and self.anchor_expected is expected and self.downstream is not None)
+        wire, ctx = self.downstream, self.ctx
+        while True:
+            ctx.check()  # A retained reply cannot resume an already failed body.
+            if self.anchor_work is not None:
+                error = ProcessError(ERROR)
+                ctx.record(error)  # Retires launch before the normal body unwinds.
+                raise error
+            if self.anchor_reply is not None:
+                return self.anchor_reply
+            self._anchor_frames()
+            if self.anchor_work is not None or self.anchor_reply is not None:
+                continue
+            _require(not wire.eof)
+            self._parent()
+            _pause(ctx.run, readers=(wire.reader,))
+
     def _anchor_frames(self) -> None:
         wire = self.downstream
         if wire is None:
@@ -2451,7 +2483,17 @@ class _Custodian:
             raise
 
     def _anchor_frame(self, tag: Tag, body: bytes) -> None:
-        if tag is Tag.WORK_DONE:
+        _require(self.anchor_hello)
+        if tag in (Tag.PREPARED, Tag.READY):
+            _require(tag is self.anchor_expected and self.anchor_reply is None
+                     and self.anchor_work is None and not self.group_done_sent)
+            value = _scalar_fields(body, self.ctx.nonce, set() if tag is Tag.PREPARED else {"moved"})
+            if tag is Tag.READY:
+                _require(value["moved"] is True and self.create_route.attempted)
+            # Cleanup can retain a late handshake as data. Only the normal
+            # body below may check A's reserved numeric identity and forward it.
+            self.anchor_reply = body
+        elif tag is Tag.WORK_DONE:
             _require(self.anchor_work is None and not self.group_done_sent)
             value = _settlement_fields(body, self.ctx)
             _require((not value["create"] or self.create_route.attempted)
@@ -2500,10 +2542,13 @@ class _Custodian:
             ctx.close(lease)
         hello = _receive(self.downstream, Tag.HELLO, self._parent)
         _admit_hello(ctx, self.child, hello, "A", ctx.pid, self.child.pid)
+        self.anchor_hello = True
+        self._expect_anchor(Tag.PREPARED)
         _send(self.downstream, Tag.CONFIG, _config_bytes(ctx, manifest, self.policy), self._parent)
-        _scalar_fields(_receive(self.downstream, Tag.PREPARED, self._parent), ctx.nonce, set())
+        self._receive_anchor(Tag.PREPARED)
         _send(parent, Tag.PREPARED, _scalar(ctx.nonce, group=self.child.pid, signals=self.policy), self._parent)
         _scalar_fields(_receive(parent, Tag.CREATE_W, self._parent), ctx.nonce, set())
+        self._expect_anchor(Tag.READY)
         _send(self.downstream, Tag.CREATE_W, _scalar(ctx.nonce), self._parent, route=self.create_route)
         content = _receive(parent, Tag.MANIFEST, self._parent)
         _send(self.downstream, Tag.MANIFEST, content, self._parent)
@@ -2513,7 +2558,7 @@ class _Custodian:
             digest.update(content)
             _send(self.downstream, Tag.DATA, content, self._parent)
         _require(digest.digest() == manifest.digest)
-        ready = _scalar_fields(_receive(self.downstream, Tag.READY, self._parent), ctx.nonce, {"moved"})
+        ready = _scalar_fields(self._receive_anchor(Tag.READY), ctx.nonce, {"moved"})
         _require(ready["moved"] is True and self.child.wait_state == "OWNED" and not self.child.numeric_retired
                  and os.getsid(self.child.pid) == ctx.pid and os.getpgid(self.child.pid) == ctx.pid)
         _send(parent, Tag.READY, _scalar(ctx.nonce), self._parent)
