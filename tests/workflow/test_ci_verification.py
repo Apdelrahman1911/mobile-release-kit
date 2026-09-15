@@ -42,6 +42,16 @@ _G_DARWIN_ONLY_METHODS = (
     "unit.test_local_signing_composition.SigningCompositionTests.test_full_preflight_shares_one_guard_through_early_authentication_signing_build_and_late_authentication",
     "unit.test_local_signing_composition.SigningCompositionTests.test_real_early_and_late_profile_cleanup_signals_under_full_preflight_never_return_cancelled_content",
 )
+_WHEEL_DARWIN_SKIP_IDS = frozenset((*_G_DARWIN_ONLY_METHODS,
+    # The wheel inventory also retains all five native profile-authority tests.
+    # This expectation is independent of the production catalog/skip constants.
+    "unit.test_ios_profile_authority.NativeProfileAuthorityTests.test_actual_signature_integrity_and_exact_signer_are_checked_before_policy",
+    "unit.test_ios_profile_authority.NativeProfileAuthorityTests.test_complete_two_layer_synthetic_signature_succeeds_only_with_explicit_policy_seam",
+    "unit.test_ios_profile_authority.NativeProfileAuthorityTests.test_default_policy_rejects_even_valid_signature_with_production_looking_fake_issuer",
+    "unit.test_ios_profile_authority.NativeProfileAuthorityTests.test_real_production_policy_accepts_apple_public_issuer_not_test_or_macos_purpose",
+    "unit.test_ios_profile_authority.NativeProfileAuthorityTests.test_signed_outer_cannot_authorize_unsigned_or_substituted_inner_profile",
+    "unit.test_local_signing_native.SigningDarwinABITests.test_real_header_layout_and_local_volume_match_ctypes_without_private_state",
+))
 
 
 def _g_metadata_fixture(operating_system):
@@ -1804,8 +1814,7 @@ class CIControllerContractTests(unittest.TestCase):
     def test_python_parser_allows_only_exact_linux_full_and_wheel_skip_intersections(self):
         controller = controller_module()
         permitted = ci_module("ci_checks").linux_allowed_skips()
-        wheel_skips = set(_G_DARWIN_ONLY_METHODS) | {
-            "unit.test_local_signing_native.SigningDarwinABITests.test_real_header_layout_and_local_volume_match_ctypes_without_private_state"}
+        wheel_skips = _WHEEL_DARWIN_SKIP_IDS
         for phase, selected in (("source", permitted), ("wheel", wheel_skips)):
             rig = self._python_gate_fixture(phase)
             rig.checks.linux_allowed_skips = lambda: permitted
@@ -1823,7 +1832,7 @@ class CIControllerContractTests(unittest.TestCase):
 
             result = controller.parse_capture(rig.step, capture(summary["tests"]), rig.paths, "linux", rig.checks)
             self.assertTrue(result.ok)
-            self.assertEqual(sum(row["outcome"] == "skip" for row in summary["tests"]), 20 if phase == "source" else 3)
+            self.assertEqual(sum(row["outcome"] == "skip" for row in summary["tests"]), 20 if phase == "source" else 8)
             for platform in ("macos", "darwin"):
                 with self.subTest(phase=phase, platform=platform), \
                         self.assertRaisesRegex(controller.VerificationError, "PYTHON_UNEXPECTED_SKIP_OR_FAILURE"):
@@ -5089,8 +5098,32 @@ class CIProductEvidenceContractTests(unittest.TestCase):
         authority = checks.native_partition_ids(ROOT, "authority", deadline=deadline)
         ordinary = checks.native_partition_ids(ROOT, "ordinary", deadline=deadline)
         delegated = checks.native_partition_ids(ROOT, "delegated", deadline=deadline)
-        poison = tuple(identifier for name, _identifier in _PYTHON_POISON_FIXTURES
-                       for identifier in checks.native_partition_ids(ROOT, name, deadline=deadline))
+        native_metadata = checks.signing_regression_metadata(ROOT, "macos-26", deadline=deadline)
+
+        def observed_inventory(source_root, selection, *, deadline):
+            self.assertEqual((source_root, selection, deadline), (ROOT, "native", original_deadline))
+            checks._remaining(deadline, 3300)
+            return complete
+
+        def observed_metadata(source_root, platform, *, deadline):
+            self.assertEqual((source_root, platform, deadline), (ROOT, "macos-26", original_deadline))
+            checks._remaining(deadline, 3300)
+            return native_metadata
+
+        # Source acquisition is exercised above and below. Reuse those actual
+        # immutable observations for the classification matrix instead of parsing
+        # the same entire checkout and metadata once for every singleton.
+        original_deadline = deadline
+        poison = []
+        with patch.object(checks, "expected_python_ids", side_effect=observed_inventory) as inventory, \
+                patch.object(checks, "signing_regression_metadata", side_effect=observed_metadata) as metadata:
+            for name, identifier in _PYTHON_POISON_FIXTURES:
+                selected = checks.native_partition_ids(ROOT, name, deadline=deadline)
+                self.assertEqual(selected, (identifier,))
+                poison.extend(selected)
+            self.assertEqual(inventory.call_count, 72)
+            self.assertEqual(metadata.call_count, 72)
+        poison = tuple(poison)
         self.assertEqual(authority, checks.NATIVE_AUTHORITY_IDS)
         self.assertEqual(len(authority), 5)
         self.assertTrue(ordinary)
@@ -5098,7 +5131,7 @@ class CIProductEvidenceContractTests(unittest.TestCase):
         self.assertEqual(tuple(sorted(authority + ordinary + poison + delegated)), complete)
         self.assertEqual(set(poison), {identifier for _name, identifier in _PYTHON_POISON_FIXTURES})
         self.assertEqual(len(set(authority + ordinary + poison + delegated)), len(complete))
-        self.assertEqual(delegated, checks.signing_regression_metadata(ROOT, "macos-26", deadline=deadline)[0])
+        self.assertEqual(delegated, native_metadata[0])
         linux_delegated = checks.signing_regression_metadata(ROOT, "ubuntu-24.04", deadline=deadline)[0]
         self.assertEqual(len(delegated), 86)
         self.assertEqual(len(linux_delegated), 84)
@@ -5357,9 +5390,8 @@ class CIProductEvidenceContractTests(unittest.TestCase):
         self.assertEqual(len(native), 20)
         wheel = checks.expected_python_ids(ROOT, "wheel")
         wheel_skips = set(wheel) & native
-        self.assertEqual(wheel_skips, set(_G_DARWIN_ONLY_METHODS) | {
-            "unit.test_local_signing_native.SigningDarwinABITests.test_real_header_layout_and_local_volume_match_ctypes_without_private_state"})
-        self.assertEqual(len(wheel_skips), 3)
+        self.assertEqual(wheel_skips, _WHEEL_DARWIN_SKIP_IDS)
+        self.assertEqual(len(wheel_skips), 8)
         checks.validate_test_outcomes(wheel, [{"id": identifier, "outcome": "skip" if identifier in wheel_skips else "ok"}
                                              for identifier in wheel], "linux")
         ids = ("unit.fixture.Contracts.test_positive", *sorted(native))
