@@ -105,11 +105,20 @@ POISON_PARTITIONS = (
     ("poison-command-source-close", "unit.test_owned_process.CommandSourceOwnerTests.test_failed_close_latches_before_diagnostics_and_attempts_each_independent_slot_once"),
     ("poison-command-source-profile-conflict", "unit.test_owned_process.CommandSourceOwnerTests.test_original_profile_conflict_close_revokes_even_without_session_failure_flags"),
 )
+# These successful raw-fork fixtures require a fresh interpreter before their
+# first native command, not permission to retain UNKNOWN custody on return.
+FRESH_PARTITIONS = (
+    ("fresh-command-account-prepared", "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests.test_prepared_no_target_original_fence_and_same_lease_cleanup"),
+    ("fresh-model-command-bridge", "unit.test_local_signing_persistent.PersistentSigningTests.test_one_real_model_command_bridge_finishes_before_success"),
+)
+SINGLETON_PARTITIONS = POISON_PARTITIONS + FRESH_PARTITIONS
 ISOLATED_PROFILE_PRODUCTS = frozenset({
     "mobile_release", "mobile_release._native_process", "mobile_release._profile_process",
     "mobile_release.ios_profiles", "mobile_release.cancellation", "mobile_release.errors", "mobile_release.inspection",
     "mobile_release._lifetime_evidence",
 })
+# Historical private names are retained; these fixed families serve both
+# intentional-UNKNOWN proofs and clean fresh-interpreter prerequisites.
 ISOLATED_NEGATIVE_IMPORTS = (
     ("unit.test_native_process", ("unit",),
      frozenset({"unit", "unit.test_native_process"}),
@@ -123,7 +132,7 @@ ISOLATED_NEGATIVE_IMPORTS = (
      ISOLATED_PROFILE_PRODUCTS),
     ("workflow.test_local_signing_owner_loss", ("workflow",),
      frozenset({"workflow", "workflow.test_local_signing_owner_loss", "workflow.local_signing_launcher_loss_fixture",
-                "workflow.local_signing_case_owner", "workflow.local_signing_matrix_contract",
+                "workflow.local_signing_case_owner", "workflow.local_signing_matrix_contract", "workflow.local_signing_matrix_diagnostic",
                 "workflow.profile_process_fixture", "workflow.process_fixture"}),
      frozenset({"mobile_release", "mobile_release._native_process"})),
     ("workflow.test_command_loader_loss", ("workflow",),
@@ -135,7 +144,8 @@ ISOLATED_NEGATIVE_IMPORTS = (
     ("workflow.test_command_fence_failure", ("workflow", "unit"),
      frozenset({"workflow", "workflow.test_command_fence_failure", "workflow.command_bootstrap_fixture",
                 "workflow.command_fence_failure_fixture", "workflow.local_signing_case_owner",
-                "workflow.local_signing_matrix_contract", "workflow.local_signing_persistent_fixture", "workflow.local_signing_workload",
+                "workflow.local_signing_matrix_contract", "workflow.local_signing_matrix_diagnostic",
+                "workflow.local_signing_persistent_fixture", "workflow.local_signing_workload",
                 "workflow.profile_process_fixture", "workflow.process_fixture", "unit",
                 "unit.local_signing_persistent", "unit.ios_entitlement_helpers", "unit.local_signing_helpers"}),
      frozenset({"mobile_release", "mobile_release._native_process", "mobile_release._command_process",
@@ -146,7 +156,8 @@ ISOLATED_NEGATIVE_IMPORTS = (
     ("workflow.test_command_account_lifecycle", ("workflow", "unit"),
      frozenset({"workflow", "workflow.test_command_account_lifecycle", "workflow.command_bootstrap_fixture",
                 "workflow.command_fence_failure_fixture", "workflow.command_account_lifecycle_fixture", "workflow.local_signing_case_owner",
-                "workflow.local_signing_matrix_contract", "workflow.local_signing_persistent_fixture", "workflow.local_signing_workload",
+                "workflow.local_signing_matrix_contract", "workflow.local_signing_matrix_diagnostic",
+                "workflow.local_signing_persistent_fixture", "workflow.local_signing_workload",
                 "workflow.profile_process_fixture", "workflow.process_fixture", "unit",
                 "unit.local_signing_persistent", "unit.ios_entitlement_helpers", "unit.local_signing_helpers"}),
      frozenset({"mobile_release", "mobile_release._native_process", "mobile_release._command_process",
@@ -154,6 +165,17 @@ ISOLATED_NEGATIVE_IMPORTS = (
                 "mobile_release.errors", "mobile_release.local_signing", "mobile_release._profile_callers",
                 "mobile_release.credentials", "mobile_release.config", "mobile_release.reporting",
                 "mobile_release.tooling"})),
+    ("unit.test_local_signing_persistent", ("workflow", "unit"),
+     frozenset({"unit", "unit.ios_entitlement_helpers", "unit.local_signing_helpers", "unit.local_signing_persistent",
+                "unit.test_local_signing_persistent", "workflow", "workflow.local_signing_bridge",
+                "workflow.local_signing_case_owner", "workflow.local_signing_matrix_contract",
+                "workflow.local_signing_matrix_diagnostic", "workflow.local_signing_persistent_fixture",
+                "workflow.local_signing_semantic_catalog", "workflow.local_signing_semantic_fixture",
+                "workflow.local_signing_workload"}),
+     frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
+                "mobile_release._profile_callers", "mobile_release.cancellation", "mobile_release.config",
+                "mobile_release.credentials", "mobile_release.errors", "mobile_release.local_signing",
+                "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.tooling"})),
     ("unit.test_local_signing_composition", ("workflow", "unit"),
      frozenset({"unit", "unit.helpers", "unit.ios_entitlement_helpers", "unit.local_signing_helpers",
                 "unit.local_signing_persistent", "unit.test_local_signing_composition", "workflow",
@@ -238,7 +260,7 @@ ISOLATED_NEGATIVE_IMPORTS = (
                 "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.tooling"})),
 )
 # These selected methods reach fixed lazy dependencies. Own them before the
-# negative proof; never import the rest of a family just because it is allowed.
+# singleton proof; never import the rest of a family just because it is allowed.
 ISOLATED_NEGATIVE_PRIMES = (
     ("unit.test_ios_entitlements", ("mobile_release.ios_profiles", "mobile_release.ios_plist_binary")),
     ("unit.test_operation_recovery", ("mobile_release.ios_profiles", "mobile_release._profile_process",
@@ -578,12 +600,12 @@ def run_compatibility(*, minor: int, phase: str, operation: str) -> int:
 
 def _isolated_negative_contract(partition: str) -> tuple:
     """Only the literal singleton's fixed module family can own its bootstrap."""
-    if type(partition) is not str or partition not in dict(POISON_PARTITIONS):
-        raise AssertionError("isolated negative differs from its fixed entrypoint")
-    identifier = dict(POISON_PARTITIONS)[partition]
+    if type(partition) is not str or partition not in dict(SINGLETON_PARTITIONS):
+        raise AssertionError("isolated singleton differs from its fixed entrypoint")
+    identifier = dict(SINGLETON_PARTITIONS)[partition]
     matches = [row for row in ISOLATED_NEGATIVE_IMPORTS if row[0] == identifier.rsplit(".", 2)[0]]
     if len(matches) != 1:
-        raise AssertionError("isolated negative lacks its fixed module family")
+        raise AssertionError("isolated singleton lacks its fixed module family")
     _module, packages, test_modules, product_modules = matches[0]
     return identifier, packages, test_modules, product_modules
 
@@ -600,12 +622,12 @@ def _isolated_negative_origins(partition: str, phase: str, package: Path) -> dic
             or sys.executable != str(ROOT.parent / f"work/{phase}-venv/bin/python")
             or package != (ROOT.parent / "work/source-build/src/mobile_release" if phase == "source"
                            else ROOT.parent / "work/wheel-venv/lib/python3.11/site-packages/mobile_release")):
-        raise AssertionError("isolated negative origin phase differs from its fixed root")
+        raise AssertionError("isolated singleton origin phase differs from its fixed root")
     required = test_modules | product_modules
     loaded = {name for name in sys.modules if name in {"mobile_release", "unit", "workflow"}
               or name.startswith(("mobile_release.", "unit.", "workflow."))}
     if loaded != required:
-        raise AssertionError("isolated negative imports differ from its fixed family")
+        raise AssertionError("isolated singleton imports differ from its fixed family")
     origins = {}
     for name in sorted(required):
         product = name in product_modules
@@ -629,51 +651,57 @@ def _isolated_reporting_bindings(partition: str) -> tuple:
     A poison proof may leave uncertain resources rooted. After it returns, the
     runner only compares these pre-owned bindings and reports through its
     inherited streams; it must not acquire a replacement fixture or file owner.
+    Clean singletons use the same reporting limit, but must complete their own
+    normal cleanup; this data never authorizes retained-domain disposal.
     """
     _identifier, _packages, test_modules, product_modules = _isolated_negative_contract(partition)
     required = test_modules | product_modules
     loaded = {name for name in sys.modules if name in {"mobile_release", "unit", "workflow"}
               or name.startswith(("mobile_release.", "unit.", "workflow."))}
     if loaded != required:
-        raise AssertionError("isolated negative module bindings differ from its fixed family")
+        raise AssertionError("isolated singleton module bindings differ from its fixed family")
     bindings = []
     for name, module in tuple(sys.modules.items()):
         if name in required:
             if type(module) is not ModuleType:
-                raise AssertionError("isolated negative lost an original module binding")
+                raise AssertionError("isolated singleton lost an original module binding")
             values = module.__dict__
             spec = values.get("__spec__")
             if type(spec) is not importlib.machinery.ModuleSpec or type(spec.loader) is not importlib.machinery.SourceFileLoader:
-                raise AssertionError("isolated negative lost its original source loader")
+                raise AssertionError("isolated singleton lost its original source loader")
             bindings.append((name, module, spec, spec.loader, id(module), id(spec), id(spec.loader),
                              values.get("__name__"), values.get("__package__"), values.get("__file__"),
                              id(values.get("__loader__")), spec.name, spec.origin, spec.loader.name, spec.loader.path,
                              tuple(values.get("__path__", ())),
                              None if spec.submodule_search_locations is None else tuple(spec.submodule_search_locations)))
     if {row[0] for row in bindings} != required:
-        raise AssertionError("isolated negative module binding count differs")
+        raise AssertionError("isolated singleton module binding count differs")
     return (tuple(sorted(bindings)), tuple(sys.path), tuple(sys.meta_path), tuple(sys.path_hooks),
             sys.executable, sys.base_prefix, sys.base_exec_prefix, sys.prefix, sys.exec_prefix,
             sys.stdout, id(sys.stdout), sys.stderr, id(sys.stderr))
 
 
 def run_isolated_negative(*, partition: str, phase: str) -> int:
-    """One fixed intentional-UNKNOWN method; fresh ordinary Session owns disposal."""
-    if (type(partition) is not str or partition not in dict(POISON_PARTITIONS)
+    """One fixed method in a fresh ordinary Session, not a cleanup exemption.
+
+    Only the controller's original poison catalog permits retained-domain
+    disposal. A clean prerequisite must retain ordinary complete finality.
+    """
+    if (type(partition) is not str or partition not in dict(SINGLETON_PARTITIONS)
             or type(phase) is not str or phase not in {"source", "wheel"}):
-        raise AssertionError("isolated negative differs from its fixed entrypoint")
+        raise AssertionError("isolated singleton differs from its fixed entrypoint")
     _isolated_compatibility_runtime(11)
     if (sys.platform not in {"linux", "darwin"}
             or sys.executable != str(ROOT.parent / f"work/{phase}-venv/bin/python")
             or any(name in {"mobile_release", "unit", "workflow"}
                    or name.startswith(("mobile_release.", "unit.", "workflow.")) for name in sys.modules)):
-        raise AssertionError("isolated negative requires its original fresh phase interpreter")
+        raise AssertionError("isolated singleton requires its original fresh phase interpreter")
     package = (ROOT.parent / "work/source-build/src/mobile_release" if phase == "source"
                else ROOT.parent / "work/wheel-venv/lib/python3.11/site-packages/mobile_release")
     identifier, packages, _test_modules, _products = _isolated_negative_contract(partition)
     expected = _expected_native_ids(partition)
     if expected != (identifier,):
-        raise AssertionError("isolated negative source inventory is not its literal singleton")
+        raise AssertionError("isolated singleton source inventory is not its literal singleton")
     _fixed_package("mobile_release", package)
     importlib.import_module("mobile_release._native_process")
     for name in packages:
@@ -690,7 +718,7 @@ def run_isolated_negative(*, partition: str, phase: str) -> int:
         # Only pre-owned, in-memory reporting follows the proof. In particular
         # do not call an origin checker that resolves paths or import new code.
         if _isolated_reporting_bindings(partition) != bindings:
-            raise AssertionError("isolated negative changed its pre-owned reporting bindings")
+            raise AssertionError("isolated singleton changed its pre-owned reporting bindings")
         success = result.wasSuccessful() and not result.skipped and not state["failed"] and result.testsRun == 1
         _emit_runtime(metadata, sys.stdout)
     except BaseException as error:
@@ -868,7 +896,7 @@ def run(*, installed_wheel=False, partition="all") -> int:
             _publish_failure("prerequisite", records, error)
             raise
     expected = _expected_native_ids(partition)
-    if partition == "all" and any(identifier in expected for _name, identifier in POISON_PARTITIONS):
+    if partition == "all" and any(identifier in expected for _name, identifier in SINGLETON_PARTITIONS):
         raise AssertionError("mixed native discovery requires the original healthy and singleton Session captures")
     if package is not None:
         _fixed_package("mobile_release", package)
@@ -933,10 +961,10 @@ def main(arguments) -> int:
     if type(arguments) not in {list, tuple} or any(type(argument) is not str for argument in arguments):
         raise SystemExit("usage: run_native_profile_checks.py [--authority|--ordinary] [--installed-wheel]")
     isolated = {(f"--{partition}-{phase}",): (partition, phase)
-                for partition, _identifier in POISON_PARTITIONS for phase in ("source", "wheel")}
-    poison = isolated.get(tuple(arguments))
-    if poison is not None:
-        partition, phase = poison
+                for partition, _identifier in SINGLETON_PARTITIONS for phase in ("source", "wheel")}
+    singleton = isolated.get(tuple(arguments))
+    if singleton is not None:
+        partition, phase = singleton
         return run_isolated_negative(partition=partition, phase=phase)
     compatibility = {
         (f"--abi-3{minor}-{phase}",): (minor, phase, "declaration")

@@ -654,6 +654,11 @@ PYTHON_POISON_PARTITIONS = (
     "poison-command-source-close",
     "poison-command-source-profile-conflict",
 )
+PYTHON_FRESH_PARTITIONS = (
+    "fresh-command-account-prepared",
+    "fresh-model-command-bridge",
+)
+PYTHON_SINGLETON_PARTITIONS = PYTHON_POISON_PARTITIONS + PYTHON_FRESH_PARTITIONS
 RUBY_OWNER_POISON_PARTITIONS = (
     ("custodian-preoffer-close", "NativeUploadRoleTest#test_native_custodian_preoffer_close_fault_cannot_claim_settled_failure"),
     ("custodian-postoffer-tail", "NativeUploadRoleTest#test_native_custodian_postoffer_tail_fault_downgrades_intended_two_to_unknown_one"),
@@ -1593,9 +1598,9 @@ def _python_prebound_expectations(step: Step, platform: str, checks, expected: t
             or tuple(sorted(set(expected))) != expected):
         raise VerificationError("PYTHON_PREBOUND_EXPECTATIONS")
     healthy = step.parser == "check" and step.native_partition == "all"
-    singleton = step.parser == "native" and step.native_partition in PYTHON_POISON_PARTITIONS
+    singleton = step.parser == "native" and step.native_partition in PYTHON_SINGLETON_PARTITIONS
     if (not (healthy or singleton) or singleton and
-            (len(expected) != 1 or (step.native_partition, expected[0]) not in checks.PYTHON_POISON_CASES)):
+            (len(expected) != 1 or (step.native_partition, expected[0]) not in checks.PYTHON_SINGLETON_CASES)):
         raise VerificationError("PYTHON_PREBOUND_EXPECTATIONS")
     return expected
 
@@ -3286,7 +3291,7 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
     if (step is not None and paths is not None and checks is not None
             and (step.id in {"native-profile-source", "native-profile-wheel"}
                  or step.id in {"python-full", "python-wheel"} and step.parser == "native"
-                 and step.native_partition in PYTHON_POISON_PARTITIONS)):
+                 and step.native_partition in PYTHON_SINGLETON_PARTITIONS)):
         stderr = result.stderr.decode("utf-8", "replace")
         lowered = stderr.lower()
         # These fixed tokens are observations of captured text, not diagnoses
@@ -3865,7 +3870,7 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
     started = time.monotonic()
     details = {"stage": "contract", "partitions": [
         {"partition": name, "status": "UNEXECUTED"}
-        for name in ("authority", "ordinary", *PYTHON_POISON_PARTITIONS)
+        for name in ("authority", "ordinary", *PYTHON_SINGLETON_PARTITIONS)
     ]}
     active = None
     originals = []  # Root each original capture through the complete logical proof.
@@ -3890,14 +3895,15 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
         check_capacity(paths.work, 64 * 1024**2)
         details["stage"] = "inventory"
         inventories = {name: checks.native_partition_ids(paths.source, name, deadline=cutoff)
-                       for name in ("all", "delegated", "authority", "ordinary", *PYTHON_POISON_PARTITIONS)}
+                       for name in ("all", "delegated", "authority", "ordinary", *PYTHON_SINGLETON_PARTITIONS)}
         delegated = pending_signing_delegation(checks, paths.source, "macos-26", inventories, details,
                                                "NATIVE_PARTITION_UNION", deadline=cutoff)
         joined = tuple(identifier for row in details["partitions"] for identifier in inventories[row["partition"]]) + delegated
         if (any(type(ids) is not tuple or not ids or tuple(sorted(set(ids))) != ids
                 for ids in inventories.values())
                 or len(inventories["authority"]) != 5
-                or any(len(inventories[name]) != 1 for name in PYTHON_POISON_PARTITIONS)
+                or tuple(name for name, _identifier in checks.PYTHON_SINGLETON_CASES) != PYTHON_SINGLETON_PARTITIONS
+                or any(inventories[name] != (identifier,) for name, identifier in checks.PYTHON_SINGLETON_CASES)
                 or len(joined) != len(set(joined)) or tuple(sorted(joined)) != inventories["all"]):
             raise VerificationError("NATIVE_PARTITION_UNION")
         details["stage"] = "package"
@@ -3915,9 +3921,10 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
             session.ensure_idle(deadline=cutoff)
             authority = partition == "authority"
             poison = partition in PYTHON_POISON_PARTITIONS
+            singleton = partition in PYTHON_SINGLETON_PARTITIONS
             part = dataclasses.replace(step, native_partition=partition,
-                argv=(str(python), "-I", *(("-S",) if authority or poison else ()), "-B", str(entry),
-                      *((f"--{partition}-{phase}",) if poison else ("--" + partition, *tail))),
+                argv=(str(python), "-I", *(("-S",) if authority or singleton else ()), "-B", str(entry),
+                      *((f"--{partition}-{phase}",) if singleton else ("--" + partition, *tail))),
                 cwd=paths.work / f"native-authority-{phase}" if authority else step.cwd,
                 env=() if authority else step.env)
             row["status"] = "RUNNING"
@@ -3931,7 +3938,7 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
             try:
                 require_original_finality(value)
                 parsed = parse_capture(part, value, paths, platform, checks, deadline=cutoff)
-                if poison:
+                if singleton:
                     row["runtime"] = native_python_observation(value.stdout, paths, minor=11, phase=phase,
                         executable=python, prefix=paths.python.parent.parent)
             except BaseException as exc:
@@ -3983,7 +3990,7 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
     """
     started = time.monotonic()
     details = {"stage": "contract", "partitions": [
-        {"partition": name, "status": "UNEXECUTED"} for name in ("healthy", *PYTHON_POISON_PARTITIONS)
+        {"partition": name, "status": "UNEXECUTED"} for name in ("healthy", *PYTHON_SINGLETON_PARTITIONS)
     ]}
     active = None
     originals = []
@@ -4011,15 +4018,15 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
             raise VerificationError("PYTHON_CAPTURE_UNION")
         inventories, metadata = snapshot
         if (type(inventories) is not MappingProxyType or type(metadata) is not tuple or len(metadata) != 2
-                or set(inventories) != {"all", "delegated", "healthy", *PYTHON_POISON_PARTITIONS}
+                or set(inventories) != {"all", "delegated", "healthy", *PYTHON_SINGLETON_PARTITIONS}
                 or any(type(ids) is not tuple or not ids or any(type(value) is not str for value in ids)
                        or tuple(sorted(set(ids))) != ids for ids in inventories.values())):
             raise VerificationError("PYTHON_CAPTURE_UNION")
         delegated = pending_signing_delegation(checks, paths.source, "ubuntu-24.04", inventories, details,
                                                "PYTHON_CAPTURE_UNION", deadline=cutoff, _metadata=metadata)
         joined = tuple(identifier for row in details["partitions"] for identifier in inventories[row["partition"]]) + delegated
-        if (tuple(name for name, _identifier in checks.PYTHON_POISON_CASES) != PYTHON_POISON_PARTITIONS
-                or any(inventories[name] != (identifier,) for name, identifier in checks.PYTHON_POISON_CASES)
+        if (tuple(name for name, _identifier in checks.PYTHON_SINGLETON_CASES) != PYTHON_SINGLETON_PARTITIONS
+                or any(inventories[name] != (identifier,) for name, identifier in checks.PYTHON_SINGLETON_CASES)
                 or len(joined) != len(set(joined)) or tuple(sorted(joined)) != inventories["all"]):
             raise VerificationError("PYTHON_CAPTURE_UNION")
         progress_scope = python_progress_scope(inventories["healthy"])

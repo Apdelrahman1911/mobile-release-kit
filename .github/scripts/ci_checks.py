@@ -183,6 +183,17 @@ PYTHON_POISON_CASES = (
 )
 PYTHON_POISON_PARTITIONS = tuple(name for name, _identifier in PYTHON_POISON_CASES)
 PYTHON_POISON_IDS = tuple(identifier for _name, identifier in PYTHON_POISON_CASES)
+# Clean raw-fork prerequisites need a fresh interpreter too, but never acquire
+# the retained-domain disposal authority of intentional-UNKNOWN controls.
+PYTHON_FRESH_CASES = (
+    ("fresh-command-account-prepared", "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests.test_prepared_no_target_original_fence_and_same_lease_cleanup"),
+    ("fresh-model-command-bridge", "unit.test_local_signing_persistent.PersistentSigningTests.test_one_real_model_command_bridge_finishes_before_success"),
+)
+PYTHON_FRESH_PARTITIONS = tuple(name for name, _identifier in PYTHON_FRESH_CASES)
+PYTHON_FRESH_IDS = tuple(identifier for _name, identifier in PYTHON_FRESH_CASES)
+PYTHON_SINGLETON_CASES = PYTHON_POISON_CASES + PYTHON_FRESH_CASES
+PYTHON_SINGLETON_PARTITIONS = PYTHON_POISON_PARTITIONS + PYTHON_FRESH_PARTITIONS
+PYTHON_SINGLETON_IDS = PYTHON_POISON_IDS + PYTHON_FRESH_IDS
 # Exact method identities, not a count, file-wide exemption or skip-message match.
 LINUX_MACOS_SKIPS = frozenset({
     "unit.test_local_signing_native.SigningDarwinABITests.test_real_header_layout_and_local_volume_match_ctypes_without_private_state",
@@ -953,20 +964,20 @@ def signing_regression_metadata(source_root: Path, operating_system: str, *,
 def _python_capture_partition(complete: tuple[str, ...], partition: str,
                               delegated: tuple[str, ...]) -> tuple[str, ...]:
     """Exact healthy/singleton/G division; delegated is data, never a CLI role."""
-    _require(type(partition) is str and partition in {"all", "healthy", "delegated", *PYTHON_POISON_PARTITIONS},
+    _require(type(partition) is str and partition in {"all", "healthy", "delegated", *PYTHON_SINGLETON_PARTITIONS},
              "PYTHON_CAPTURE_PARTITION")
     _require(type(complete) is tuple and bool(complete)
              and all(type(identifier) is str for identifier in complete)
              and tuple(sorted(set(complete))) == complete
-             and set(PYTHON_POISON_IDS) <= set(complete), "PYTHON_POISON_INVENTORY")
+             and set(PYTHON_SINGLETON_IDS) <= set(complete), "PYTHON_POISON_INVENTORY")
     _require(type(delegated) is tuple and bool(delegated) and all(type(identifier) is str for identifier in delegated)
              and tuple(sorted(set(delegated))) == delegated and set(delegated) <= set(complete)
-             and not set(delegated) & set(PYTHON_POISON_IDS), "PYTHON_DELEGATED_INVENTORY")
-    healthy = tuple(identifier for identifier in complete if identifier not in PYTHON_POISON_IDS and identifier not in delegated)
-    joined = healthy + PYTHON_POISON_IDS + delegated
+             and not set(delegated) & set(PYTHON_SINGLETON_IDS), "PYTHON_DELEGATED_INVENTORY")
+    healthy = tuple(identifier for identifier in complete if identifier not in PYTHON_SINGLETON_IDS and identifier not in delegated)
+    joined = healthy + PYTHON_SINGLETON_IDS + delegated
     _require(bool(healthy) and len(joined) == len(set(joined))
              and tuple(sorted(joined)) == complete, "PYTHON_CAPTURE_UNION")
-    parts = {name: (identifier,) for name, identifier in zip(PYTHON_POISON_PARTITIONS, PYTHON_POISON_IDS)}
+    parts = {name: (identifier,) for name, identifier in zip(PYTHON_SINGLETON_PARTITIONS, PYTHON_SINGLETON_IDS)}
     return {"all": complete, "healthy": healthy, "delegated": delegated, **parts}[partition]
 
 
@@ -994,14 +1005,14 @@ def python_capture_snapshot(source_root: Path, selection: str, *, deadline: floa
     _remaining(deadline, 3300)
     delegated, _requirements = metadata
     partitions = {name: _python_capture_partition(complete, name, delegated)
-                  for name in ("all", "delegated", "healthy", *PYTHON_POISON_PARTITIONS)}
+                  for name in ("all", "delegated", "healthy", *PYTHON_SINGLETON_PARTITIONS)}
     _remaining(deadline, 3300)
     return MappingProxyType(partitions), metadata
 
 
 def native_partition_ids(source_root: Path, partition: str = "all", *, deadline: float | None = None) -> tuple[str, ...]:
     """macOS authority5/ordinary/singletons, plus data-only pending G obligations."""
-    _require(type(partition) is str and partition in {"all", "ordinary", "authority", "delegated", *PYTHON_POISON_PARTITIONS},
+    _require(type(partition) is str and partition in {"all", "ordinary", "authority", "delegated", *PYTHON_SINGLETON_PARTITIONS},
              "NATIVE_PARTITION")
     complete = expected_python_ids(source_root, "native", deadline=deadline)
     prefix = "unit.test_ios_profile_authority.NativeProfileAuthorityTests."
@@ -1010,7 +1021,7 @@ def native_partition_ids(source_root: Path, partition: str = "all", *, deadline:
     ordinary_complete = tuple(identifier for identifier in complete if identifier not in authority)
     delegated, _required = signing_regression_metadata(source_root, "macos-26", deadline=deadline)
     ordinary = _python_capture_partition(ordinary_complete, "healthy", delegated)
-    poison = {name: _python_capture_partition(ordinary_complete, name, delegated) for name in PYTHON_POISON_PARTITIONS}
+    poison = {name: _python_capture_partition(ordinary_complete, name, delegated) for name in PYTHON_SINGLETON_PARTITIONS}
     joined = authority + ordinary + delegated + tuple(identifier for ids in poison.values() for identifier in ids)
     _require(len(joined) == len(set(joined)) and tuple(sorted(joined)) == complete, "NATIVE_PARTITION_UNION")
     return {"all": complete, "ordinary": ordinary, "authority": authority, "delegated": delegated, **poison}[partition]

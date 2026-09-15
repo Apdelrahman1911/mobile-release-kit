@@ -14,7 +14,10 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 from . import run_native_profile_checks
-from .test_ci_verification import _PYTHON_POISON_FIXTURES, controller_module, coordinator_shell, fixture_paths
+from .test_ci_verification import (
+    _PYTHON_FRESH_FIXTURES, _PYTHON_POISON_FIXTURES, _PYTHON_SINGLETON_FIXTURES,
+    controller_module, coordinator_shell, fixture_paths,
+)
 from .workflow_harness import evaluate_condition, load_workflow
 
 
@@ -92,7 +95,7 @@ _ISOLATED_IMPORT_FIXTURES = (
      _PROFILE_PRODUCT_FIXTURES),
     ("workflow.test_local_signing_owner_loss", ("workflow",),
      frozenset({"workflow", "workflow.test_local_signing_owner_loss", "workflow.local_signing_launcher_loss_fixture",
-                "workflow.local_signing_case_owner", "workflow.local_signing_matrix_contract",
+                "workflow.local_signing_case_owner", "workflow.local_signing_matrix_contract", "workflow.local_signing_matrix_diagnostic",
                 "workflow.profile_process_fixture", "workflow.process_fixture"}),
      frozenset({"mobile_release", "mobile_release._native_process"})),
     ("workflow.test_command_loader_loss", ("workflow",),
@@ -104,7 +107,8 @@ _ISOLATED_IMPORT_FIXTURES = (
     ("workflow.test_command_fence_failure", ("workflow", "unit"),
      frozenset({"workflow", "workflow.test_command_fence_failure", "workflow.command_bootstrap_fixture",
                 "workflow.command_fence_failure_fixture", "workflow.local_signing_case_owner",
-                "workflow.local_signing_matrix_contract", "workflow.local_signing_persistent_fixture", "workflow.local_signing_workload",
+                "workflow.local_signing_matrix_contract", "workflow.local_signing_matrix_diagnostic",
+                "workflow.local_signing_persistent_fixture", "workflow.local_signing_workload",
                 "workflow.profile_process_fixture", "workflow.process_fixture", "unit",
                 "unit.local_signing_persistent", "unit.ios_entitlement_helpers", "unit.local_signing_helpers"}),
      frozenset({"mobile_release", "mobile_release._native_process", "mobile_release._command_process",
@@ -115,7 +119,8 @@ _ISOLATED_IMPORT_FIXTURES = (
     ("workflow.test_command_account_lifecycle", ("workflow", "unit"),
      frozenset({"workflow", "workflow.test_command_account_lifecycle", "workflow.command_bootstrap_fixture",
                 "workflow.command_fence_failure_fixture", "workflow.command_account_lifecycle_fixture", "workflow.local_signing_case_owner",
-                "workflow.local_signing_matrix_contract", "workflow.local_signing_persistent_fixture", "workflow.local_signing_workload",
+                "workflow.local_signing_matrix_contract", "workflow.local_signing_matrix_diagnostic",
+                "workflow.local_signing_persistent_fixture", "workflow.local_signing_workload",
                 "workflow.profile_process_fixture", "workflow.process_fixture", "unit",
                 "unit.local_signing_persistent", "unit.ios_entitlement_helpers", "unit.local_signing_helpers"}),
      frozenset({"mobile_release", "mobile_release._native_process", "mobile_release._command_process",
@@ -123,6 +128,17 @@ _ISOLATED_IMPORT_FIXTURES = (
                 "mobile_release.errors", "mobile_release.local_signing", "mobile_release._profile_callers",
                 "mobile_release.credentials", "mobile_release.config", "mobile_release.reporting",
                 "mobile_release.tooling"})),
+    ("unit.test_local_signing_persistent", ("workflow", "unit"),
+     frozenset({"unit", "unit.ios_entitlement_helpers", "unit.local_signing_helpers", "unit.local_signing_persistent",
+                "unit.test_local_signing_persistent", "workflow", "workflow.local_signing_bridge",
+                "workflow.local_signing_case_owner", "workflow.local_signing_matrix_contract",
+                "workflow.local_signing_matrix_diagnostic", "workflow.local_signing_persistent_fixture",
+                "workflow.local_signing_semantic_catalog", "workflow.local_signing_semantic_fixture",
+                "workflow.local_signing_workload"}),
+     frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
+                "mobile_release._profile_callers", "mobile_release.cancellation", "mobile_release.config",
+                "mobile_release.credentials", "mobile_release.errors", "mobile_release.local_signing",
+                "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.tooling"})),
     ("unit.test_local_signing_composition", ("workflow", "unit"),
      frozenset({"unit", "unit.helpers", "unit.ios_entitlement_helpers", "unit.local_signing_helpers",
                 "unit.local_signing_persistent", "unit.test_local_signing_composition", "workflow",
@@ -832,7 +848,7 @@ class NativeProfileCITests(unittest.TestCase):
         gate = run_native_profile_checks
         self.assertEqual(gate.PATTERNS, _NATIVE_PATTERN_FIXTURES)
         for case, partition in itertools.product(("success", "missing-loader", "pattern-drift", "inventory-error"),
-                ("all", "authority", "ordinary", "delegated", *(name for name, _identifier in _PYTHON_POISON_FIXTURES))):
+                ("all", "authority", "ordinary", "delegated", *(name for name, _identifier in _PYTHON_SINGLETON_FIXTURES))):
             with self.subTest(case=case, partition=partition):
                 events = []
                 original = ValueError("PRIVATE_SOURCE_INVENTORY_FAILURE")
@@ -898,8 +914,13 @@ class NativeProfileCITests(unittest.TestCase):
 
     def test_isolated_negative_entrypoints_bind_exact_singletons_without_mixed_discovery(self):
         gate = run_native_profile_checks
-        literals = _PYTHON_POISON_FIXTURES
-        self.assertEqual(gate.POISON_PARTITIONS, literals)
+        literals = _PYTHON_SINGLETON_FIXTURES
+        self.assertEqual(gate.POISON_PARTITIONS, _PYTHON_POISON_FIXTURES)
+        self.assertEqual(gate.FRESH_PARTITIONS, _PYTHON_FRESH_FIXTURES)
+        self.assertEqual(gate.SINGLETON_PARTITIONS, literals)
+        self.assertEqual(literals, _PYTHON_POISON_FIXTURES + _PYTHON_FRESH_FIXTURES)
+        self.assertEqual(len({name for name, _identifier in literals}), len(literals))
+        self.assertEqual(len({identifier for _name, identifier in literals}), len(literals))
         for (partition, _identifier), phase in itertools.product(literals, ("source", "wheel")):
             with self.subTest(partition=partition, phase=phase), \
                     patch.object(gate, "run_isolated_negative", return_value=7) as isolated, \
@@ -914,6 +935,14 @@ class NativeProfileCITests(unittest.TestCase):
                    ["--poison-wait-loss-source", "--deadline", "900"],
                    ["--poison-wait-loss-source", "--package", "/foreign/mobile_release"],
                    ["--poison-wait-loss-source", "--test", literals[0][1]])
+        invalid += tuple(arguments for partition, identifier in _PYTHON_FRESH_FIXTURES for arguments in (
+            [f"--{partition}"], [f"--{partition}-other"],
+            [f"--{partition}-source", "--installed-wheel"], [f"--{partition}-wheel", "--ordinary"],
+            [f"--{partition}-source", "--authority"], [f"--{partition}-source", "--deadline", "900"],
+            [f"--{partition}-source", "--package", "/foreign/mobile_release"],
+            [f"--{partition}-source", "--test", identifier],
+            [f"--{partition}-source", "--poison-wait-loss-source"],
+        ))
         for arguments in invalid:
             with self.subTest(arguments=arguments), patch.object(gate, "run_isolated_negative") as isolated, \
                     patch.object(gate, "run_compatibility") as compatibility, patch.object(gate, "run") as ordinary:
@@ -923,10 +952,10 @@ class NativeProfileCITests(unittest.TestCase):
                 compatibility.assert_not_called()
                 ordinary.assert_not_called()
         # A legacy direct mixed runner cannot import products/discover tests,
-        # even when every intentional negative is a valid source inventory ID.
-        for wheel in (False, True):
+        # even when a clean prerequisite is the only singleton in its inventory.
+        for selected, wheel in itertools.product((_PYTHON_POISON_FIXTURES, _PYTHON_FRESH_FIXTURES), (False, True)):
             with _inert_native_gate() as fixture, patch.object(gate, "_expected_native_ids",
-                    return_value=tuple(sorted(_FIXTURE_IDS + tuple(identifier for _, identifier in literals)))):
+                    return_value=tuple(sorted(_FIXTURE_IDS + tuple(identifier for _, identifier in selected)))):
                 with self.assertRaisesRegex(AssertionError, "mixed native discovery"):
                     gate.run(installed_wheel=wheel)
                 fixture.products.assert_not_called()
@@ -951,7 +980,7 @@ class NativeProfileCITests(unittest.TestCase):
         self.assertEqual(gate.ISOLATED_NEGATIVE_PRIMES, _ISOLATED_PRIME_FIXTURES)
         families = {row[0] for row in _ISOLATED_IMPORT_FIXTURES}
         self.assertEqual(len(families), len(_ISOLATED_IMPORT_FIXTURES))
-        self.assertEqual(families, {identifier.rsplit(".", 2)[0] for _, identifier in _PYTHON_POISON_FIXTURES})
+        self.assertEqual(families, {identifier.rsplit(".", 2)[0] for _, identifier in _PYTHON_SINGLETON_FIXTURES})
         self.assertEqual(len(dict(_ISOLATED_PRIME_FIXTURES)), len(_ISOLATED_PRIME_FIXTURES))
         for module_name, primes in _ISOLATED_PRIME_FIXTURES:
             self.assertIn(module_name, families)
@@ -959,12 +988,13 @@ class NativeProfileCITests(unittest.TestCase):
             self.assertTrue(primes)
             self.assertEqual(len(set(primes)), len(primes))
             self.assertLessEqual(set(primes), products)
-        for partition, identifier in _PYTHON_POISON_FIXTURES:
+        for partition, identifier in _PYTHON_SINGLETON_FIXTURES:
             row = next(row for row in _ISOLATED_IMPORT_FIXTURES if row[0] == identifier.rsplit(".", 2)[0])
             with self.subTest(partition=partition):
                 self.assertEqual(gate._isolated_negative_contract(partition), (identifier, *row[1:]))
-        for partition in (None, True, [], {}, "", "poison-unlisted", "--poison-wait-loss-source",
-                          _PYTHON_POISON_FIXTURES[0][1], "/foreign/test_native_process.py"):
+        for partition in (None, True, [], {}, "", "poison-unlisted", "fresh-unlisted", "--poison-wait-loss-source",
+                          "--fresh-model-command-bridge-source", _PYTHON_POISON_FIXTURES[0][1],
+                          _PYTHON_FRESH_FIXTURES[0][1], "/foreign/test_native_process.py"):
             with self.subTest(invalid_partition=partition), self.assertRaises(AssertionError):
                 gate._isolated_negative_contract(partition)
 
@@ -975,7 +1005,7 @@ class NativeProfileCITests(unittest.TestCase):
                            "nested-package", "runtime-path", "runtime-version", "runtime-cache-tag")
         for (module_name, _packages, test_modules, products), phase in itertools.product(
                 _ISOLATED_IMPORT_FIXTURES, ("source", "wheel")):
-            partition = next(name for name, identifier in _PYTHON_POISON_FIXTURES
+            partition = next(name for name, identifier in _PYTHON_SINGLETON_FIXTURES
                              if identifier.rsplit(".", 2)[0] == module_name)
             package = gate.ROOT.parent / ("work/source-build/src/mobile_release" if phase == "source"
                 else "work/wheel-venv/lib/python3.11/site-packages/mobile_release")
@@ -1070,7 +1100,7 @@ class NativeProfileCITests(unittest.TestCase):
         gate = run_native_profile_checks
         cases = (
             ((partition, identifier), phase, fault)
-            for (partition, identifier), phase in itertools.product(_PYTHON_POISON_FIXTURES, ("source", "wheel"))
+            for (partition, identifier), phase in itertools.product(_PYTHON_SINGLETON_FIXTURES, ("source", "wheel"))
             for fault in (None, "failure", "skip", "partial", "adverse-latch", "binding-drift", "interruption")
                 + dict(_ISOLATED_PRIME_FIXTURES).get(identifier.rsplit(".", 2)[0], ())
         )
@@ -1191,15 +1221,16 @@ class NativeProfileCITests(unittest.TestCase):
                 self.assertEqual(len(_native_envelopes(runtime.stderr.getvalue())),
                                  int(fault in {"adverse-latch", "interruption"}))
 
-        for fault in ("missing", "pooled", "wrong-id", "executable", "foreign-owner", "platform"):
-            with self.subTest(reject_before_bootstrap=fault):
-                partition, identifier = gate.POISON_PARTITIONS[0]
+        for (partition, identifier), fault in itertools.product(
+                (_PYTHON_POISON_FIXTURES[0], *_PYTHON_FRESH_FIXTURES),
+                ("missing", "pooled", "wrong-id", "executable", "foreign-owner", "platform")):
+            with self.subTest(partition=partition, reject_before_bootstrap=fault):
                 runtime = SimpleNamespace(platform="win32" if fault == "platform" else "linux",
                     executable="/foreign/bin/python" if fault == "executable" else
                         str(gate.ROOT.parent / "work/source-venv/bin/python"),
                     modules={"unit": object()} if fault == "foreign-owner" else {})
-                inventory = () if fault == "missing" else tuple(value for _, value in gate.POISON_PARTITIONS) if fault == "pooled" else (
-                    gate.POISON_PARTITIONS[1][1],) if fault == "wrong-id" else (identifier,)
+                inventory = () if fault == "missing" else tuple(value for _, value in _PYTHON_SINGLETON_FIXTURES) if fault == "pooled" else (
+                    next(value for _, value in _PYTHON_SINGLETON_FIXTURES if value != identifier),) if fault == "wrong-id" else (identifier,)
                 imported, bootstrap, selected, framework, process = Mock(), Mock(), Mock(), Mock(), Mock()
                 with patch.multiple(gate, sys=runtime, importlib=SimpleNamespace(import_module=imported),
                         _isolated_compatibility_runtime=Mock(), _expected_native_ids=Mock(return_value=inventory),
@@ -1219,7 +1250,7 @@ class NativeProfileCITests(unittest.TestCase):
                   "extra-product", "missing-product", "foreign-unit", "foreign-workflow", "sys-path", "stdout", "stderr")
         for (module_name, _packages, test_modules, products), fault in itertools.product(_ISOLATED_IMPORT_FIXTURES, faults):
             with self.subTest(module=module_name, fault=fault):
-                partition = next(name for name, identifier in _PYTHON_POISON_FIXTURES
+                partition = next(name for name, identifier in _PYTHON_SINGLETON_FIXTURES
                                  if identifier.rsplit(".", 2)[0] == module_name)
                 modules = {name: _inert_origin_module(name,
                     package if name in products else gate.ROOT / "tests" / name.partition(".")[0], package="." not in name)
@@ -1455,10 +1486,11 @@ class NativeProfileCITests(unittest.TestCase):
         gate, controller = run_native_profile_checks, controller_module()
         paths = fixture_paths(controller)
         public_id = "unit.test_native_process.NativeProcessCompatibilityTests.test_native_public_api_atomic_duplication"
-        poison_partition, poison_id = _PYTHON_POISON_FIXTURES[0]
-        for entrypoint in ("public", "isolated", "ordinary"):
-            with self.subTest(entrypoint=entrypoint):
-                identifier = poison_id if entrypoint == "isolated" else public_id
+        entries = (("public", None, public_id), ("ordinary", None, public_id),
+                   *(("isolated", partition, identifier)
+                     for partition, identifier in (_PYTHON_POISON_FIXTURES[0], *_PYTHON_FRESH_FIXTURES)))
+        for entrypoint, partition, identifier in entries:
+            with self.subTest(entrypoint=entrypoint, partition=partition):
                 expected, executed = (identifier,), []
 
                 def documented(case):
@@ -1501,7 +1533,7 @@ class NativeProfileCITests(unittest.TestCase):
                     if entrypoint == "public":
                         status = gate.run_compatibility(minor=11, phase="source", operation="public")
                     elif entrypoint == "isolated":
-                        status = gate.run_isolated_negative(partition=poison_partition, phase="source")
+                        status = gate.run_isolated_negative(partition=partition, phase="source")
                     else:
                         status = gate.run(partition="ordinary")
                 self.assertEqual(status, 0)
@@ -1523,7 +1555,7 @@ class NativeProfileCITests(unittest.TestCase):
                     stdout=runtime.stdout.getvalue().encode(), stderr=text.encode(), duration=.01)
                 self.assertEqual(controller.parse_native_python_controls(capture, expected), [identifier])
                 step = controller.Step("native-profile-source", parser="native",
-                    native_partition=poison_partition if entrypoint == "isolated" else "ordinary")
+                    native_partition=partition if entrypoint == "isolated" else "ordinary")
                 parsed = controller.parse_capture(step, capture, paths, "macos", checks)
                 self.assertEqual(parsed.details["completed"], [identifier])
 

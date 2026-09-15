@@ -327,8 +327,8 @@ order in both source and installed-wheel forms: `openssl-version`,
 `clang-discovery`, `dsymutil-discovery`, then `system-code`.
 
 Source and installed-wheel gates each require the original authority capture,
-the healthy ordinary capture and every selected fixed intentional-UNKNOWN
-singleton under ordinary policy. Their exact disjoint method union must be
+the healthy ordinary capture and every selected fixed singleton under ordinary
+policy: intentional-UNKNOWN controls and clean raw-fork prerequisites. Their exact disjoint method union must be
 complete, with no skips; the [isolation contract](#intentional-unknown-test-isolation)
 and source catalog determine the parts, not a historical capture count.
 Each original capture retains its own wait, EOF, exit, domain finality/disposal,
@@ -612,6 +612,16 @@ and platform adapter gates. The [fixed catalog](../.github/scripts/verify_ci.py)
 and literal runner inventories define the exact IDs and order. Their disjoint
 union must cover each approved selection exactly once; a global method total
 does not authorize expanding an installed-wheel selection or pooling negatives.
+
+Two positive raw-fork prerequisites also run in separate fresh interpreter
+captures: the prepared-no-target account lifetime and the real model-command
+bridge. A warm test interpreter can retain genuine completed command histories
+whose inherited native state is correctly quarantined after fork. These clean
+cases keep all original assertions and ordinary cleanup: they do **not** belong
+to the poison catalog, cannot request retained-domain disposal, and must prove
+original finality, idle state and the exact singleton result before acceptance.
+The complete source/wheel/native union includes both; no test is skipped, and
+all partitions share the original logical-gate deadline.
 
 Python singletons retain separate finite primitive, profile and default/resource
 family import closures, with exact selected source or actual installed-wheel

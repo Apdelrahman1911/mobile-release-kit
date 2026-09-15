@@ -579,7 +579,7 @@ class CIPythonProfileTests(unittest.TestCase):
             with self.subTest(selection=selection, platform=platform):
                 fixture, events = _Profile(), []
                 fixture.platform = platform
-                suite, expected, complete = _inert_suite(events, self.module.PYTHON_POISON_IDS, outcome="success")
+                suite, expected, complete = _inert_suite(events, self.module.PYTHON_SINGLETON_IDS, outcome="success")
                 discovered = []
 
                 def inventory(source, chosen, *, deadline):
@@ -628,7 +628,7 @@ class CIPythonProfileTests(unittest.TestCase):
 
     def test_actual_failfast_subtest_metadata_survives_main_and_controller_without_private_data(self):
         fixture, events = _Profile(), []
-        suite, expected, complete = _inert_suite(events, self.module.PYTHON_POISON_IDS)
+        suite, expected, complete = _inert_suite(events, self.module.PYTHON_SINGLETON_IDS)
         inventory = Mock(return_value=complete)
         loader = SimpleNamespace(errors=[], discover=Mock(return_value=suite))
         with _pure(self.module, fixture, expected_python_ids=inventory) as framework:
@@ -699,7 +699,7 @@ class CIPythonProfileTests(unittest.TestCase):
             with self.subTest(case=case):
                 fixture, events = _Profile(), []
                 suite, expected, complete = _inert_suite(
-                    events, self.module.PYTHON_POISON_IDS,
+                    events, self.module.PYTHON_SINGLETON_IDS,
                     outcome="skip" if case == "unexpected-skip" else "failure" if case == "assertion" else "os-error",
                     callback_count=20 if case == "bounded" else 1)
                 observations = []
@@ -732,7 +732,7 @@ class CIPythonProfileTests(unittest.TestCase):
         # Execute the actual in-memory profile and inert success suite first,
         # then expire the original clock at main's independent final check.
         fixture, events = _Profile(), []
-        suite, expected, complete = _inert_suite(events, self.module.PYTHON_POISON_IDS, outcome="success")
+        suite, expected, complete = _inert_suite(events, self.module.PYTHON_SINGLETON_IDS, outcome="success")
         actual_runner = self.module.run_python_tests
 
         def expire_after_actual_runner(*args, **kwargs):

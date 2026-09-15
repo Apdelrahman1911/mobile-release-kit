@@ -32,7 +32,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mobile_release import _native_process as m
-from mobile_release.owned_process import ProcessCleanupError
 
 
 class _World:
@@ -233,6 +232,8 @@ class NativeProcessTests(unittest.TestCase):
             self.assertEqual(owner._hold_slot.fileno(), original)
 
     def test_missing_account_duplicate_return_retains_original_borrow_without_retry(self):
+        from mobile_release.owned_process import ProcessCleanupError
+
         world = _World()
         with world.installed():
             owner, source, original = self.account_source(world)

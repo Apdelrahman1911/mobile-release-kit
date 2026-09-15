@@ -361,3 +361,10 @@ attestations. Local Darwin results do not imply that hosted Linux checks ran.
 This modeled coverage does not prove real Apple credential suitability, asynchronous
 OS-service quiescence, power-loss durability, or a consumer's Xcode build/export.
 Those remain separate protected, non-public activation checks.
+
+The verification runner gives the two positive raw-fork prerequisites (the real
+model-command bridge and prepared-no-target account lifetime) fresh original
+captures. This prevents earlier tests' retained native command histories from
+becoming inherited state in an unrelated fixture. Production fork quarantine is
+unchanged; these clean captures require ordinary cleanup and complete original
+finality, never the retained-domain disposal used by intentional-UNKNOWN tests.

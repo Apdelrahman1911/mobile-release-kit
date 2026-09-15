@@ -139,6 +139,11 @@ _PYTHON_POISON_FIXTURES = (
     ("poison-command-source-close", "unit.test_owned_process.CommandSourceOwnerTests.test_failed_close_latches_before_diagnostics_and_attempts_each_independent_slot_once"),
     ("poison-command-source-profile-conflict", "unit.test_owned_process.CommandSourceOwnerTests.test_original_profile_conflict_close_revokes_even_without_session_failure_flags"),
 )
+_PYTHON_FRESH_FIXTURES = (
+    ("fresh-command-account-prepared", "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests.test_prepared_no_target_original_fence_and_same_lease_cleanup"),
+    ("fresh-model-command-bridge", "unit.test_local_signing_persistent.PersistentSigningTests.test_one_real_model_command_bridge_finishes_before_success"),
+)
+_PYTHON_SINGLETON_FIXTURES = _PYTHON_POISON_FIXTURES + _PYTHON_FRESH_FIXTURES
 HOSTED_GUARD = '''set -euo pipefail
 [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == github-hosted ]]
 '''
@@ -553,9 +558,9 @@ class CIControllerContractTests(unittest.TestCase):
         authority = checks.NATIVE_AUTHORITY_IDS
         ordinary = ("unit.synthetic.OrdinaryTests.test_first", "unit.synthetic.OrdinaryTests.test_second")
         delegated, requirements = _g_metadata_fixture("macos-26")
-        poison = {name: (identifier,) for name, identifier in zip(checks.PYTHON_POISON_PARTITIONS, checks.PYTHON_POISON_IDS)}
+        poison = {name: (identifier,) for name, identifier in zip(checks.PYTHON_SINGLETON_PARTITIONS, checks.PYTHON_SINGLETON_IDS)}
         inventories = {"authority": authority, "ordinary": ordinary, "delegated": delegated,
-                       **poison, "all": tuple(sorted(authority + ordinary + checks.PYTHON_POISON_IDS + delegated))}
+                       **poison, "all": tuple(sorted(authority + ordinary + checks.PYTHON_SINGLETON_IDS + delegated))}
         python = paths.source_python if phase == "source" else paths.wheel_python
         step = controller.Step("native-profile-" + phase,
             argv=(str(python), "-I", "-B", str(ROOT / "tests/workflow/run_native_profile_checks.py"),
@@ -596,7 +601,7 @@ class CIControllerContractTests(unittest.TestCase):
 
         def run(argv, **options):
             partition = ("authority" if "--authority" in argv else "ordinary" if "--ordinary" in argv else
-                         next((name for name in controller.PYTHON_POISON_PARTITIONS if f"--{name}-{phase}" in argv), "healthy"))
+                         next((name for name in controller.PYTHON_SINGLETON_PARTITIONS if f"--{name}-{phase}" in argv), "healthy"))
             rig.events.append(("run", argv, options))
             if rig.run_error is not None:
                 raise rig.run_error
@@ -604,7 +609,7 @@ class CIControllerContractTests(unittest.TestCase):
             text = "".join(f"{name.rsplit('.', 1)[1]} ({name}) ... ok\n" for name in ids)
             text += f"\nRan {len(ids)} tests in 0.01s\n\nOK\n"
             stdout = b""
-            if partition in controller.PYTHON_POISON_PARTITIONS:
+            if partition in controller.PYTHON_SINGLETON_PARTITIONS:
                 package = (paths.work / "source-build/src/mobile_release" if phase == "source" else
                            paths.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
                 prefix = str(paths.python.parent.parent)
@@ -632,7 +637,8 @@ class CIControllerContractTests(unittest.TestCase):
             return capture
 
         rig.checks = SimpleNamespace(native_partition_ids=identities, inspect_native_package=package,
-                                     signing_regression_metadata=metadata)
+                                     signing_regression_metadata=metadata,
+                                     PYTHON_SINGLETON_CASES=_PYTHON_SINGLETON_FIXTURES)
         rig.session = SimpleNamespace(ensure_idle=idle, prepare_native_authority=prepare, run=run)
         return rig
 
@@ -643,7 +649,7 @@ class CIControllerContractTests(unittest.TestCase):
         rig.operating_system = "ubuntu-24.04"
         rig.metadata = _g_metadata_fixture(rig.operating_system)
         delegated = rig.metadata[0]
-        poison = {name: rig.inventories[name] for name in controller.PYTHON_POISON_PARTITIONS}
+        poison = {name: rig.inventories[name] for name in controller.PYTHON_SINGLETON_PARTITIONS}
         rig.inventories = {"healthy": healthy, "delegated": delegated, **poison,
             "all": tuple(sorted(healthy + delegated + tuple(identifier for ids in poison.values() for identifier in ids)))}
         name = "python-full" if phase == "source" else "python-wheel"
@@ -667,7 +673,7 @@ class CIControllerContractTests(unittest.TestCase):
 
         rig.checks.python_capture_ids = identities
         rig.checks.python_capture_snapshot = snapshot
-        rig.checks.PYTHON_POISON_CASES = _PYTHON_POISON_FIXTURES
+        rig.checks.PYTHON_SINGLETON_CASES = _PYTHON_SINGLETON_FIXTURES
         rig.checks.linux_allowed_skips = frozenset
         return rig
 
@@ -894,7 +900,7 @@ class CIControllerContractTests(unittest.TestCase):
         for phase, original_deadline, cutoff in (("source", 2500.0, 1000.0), ("wheel", 800.0, 800.0)):
             with self.subTest(phase=phase):
                 rig = self._native_gate_fixture(phase)
-                parts = ("authority", "ordinary", *rig.controller.PYTHON_POISON_PARTITIONS)
+                parts = ("authority", "ordinary", *rig.controller.PYTHON_SINGLETON_PARTITIONS)
                 result = self._perform_native_fixture(rig, deadline=original_deadline)
                 self.assertTrue(result.ok, result)
                 self.assertEqual(result.details["stage"], "complete")
@@ -917,7 +923,7 @@ class CIControllerContractTests(unittest.TestCase):
                 tail = [] if phase == "source" else ["--installed-wheel"]
                 self.assertEqual(calls[0][1], [str(python), "-I", "-S", "-B", entry, "--authority", *tail])
                 self.assertEqual(calls[1][1], [str(python), "-I", "-B", entry, "--ordinary", *tail])
-                for index, partition in enumerate(rig.controller.PYTHON_POISON_PARTITIONS, 2):
+                for index, partition in enumerate(rig.controller.PYTHON_SINGLETON_PARTITIONS, 2):
                     self.assertEqual(calls[index][1], [str(python), "-I", "-S", "-B", entry, f"--{partition}-{phase}"])
                     self.assertEqual(calls[index][2]["profile"], "ordinary")
                     self.assertEqual(calls[index][2]["cwd"], rig.paths.work)
@@ -957,7 +963,7 @@ class CIControllerContractTests(unittest.TestCase):
                 self.assertEqual(rig.events, [])
         self.assertEqual(self._perform_native_fixture(rig, platform="linux").error, "NATIVE_GATE_CONTRACT")
         self.assertEqual(rig.events, [])
-        for mutation in ("missing", "duplicate", "overlap", "expanded-authority", "pooled-poison", "missing-poison",
+        for mutation in ("missing", "duplicate", "overlap", "expanded-authority", "pooled-poison", "missing-poison", "pooled-fresh", "missing-fresh", "swapped-fresh",
                          "delegated-missing", "delegated-foreign", "delegated-duplicate", "delegated-overlap",
                          "delegated-poison", "delegated-wrong-os", "obligation-missing", "obligation-empty", "obligation-foreign"):
             with self.subTest(mutation=mutation):
@@ -974,6 +980,13 @@ class CIControllerContractTests(unittest.TestCase):
                     rig.inventories["poison-wait-loss"] += rig.inventories["poison-startup-error"]
                 elif mutation == "missing-poison":
                     rig.inventories["poison-startup-error"] = ()
+                elif mutation == "pooled-fresh":
+                    rig.inventories["fresh-command-account-prepared"] += rig.inventories["fresh-model-command-bridge"]
+                elif mutation == "missing-fresh":
+                    rig.inventories["fresh-model-command-bridge"] = ()
+                elif mutation == "swapped-fresh":
+                    rig.inventories["fresh-command-account-prepared"], rig.inventories["fresh-model-command-bridge"] = (
+                        rig.inventories["fresh-model-command-bridge"], rig.inventories["fresh-command-account-prepared"])
                 elif mutation == "delegated-missing":
                     rig.inventories["delegated"] = rig.inventories["delegated"][:-1]
                 elif mutation == "delegated-foreign":
@@ -998,11 +1011,11 @@ class CIControllerContractTests(unittest.TestCase):
                 self.assertEqual(result.error, "NATIVE_PARTITION_UNION")
                 self.assertFalse(any(event[0] in {"package", "prepare", "run"} for event in rig.events))
                 self.assertEqual([row["status"] for row in result.details["partitions"]],
-                                 ["UNEXECUTED"] * (2 + len(controller.PYTHON_POISON_PARTITIONS)))
+                                 ["UNEXECUTED"] * (2 + len(controller.PYTHON_SINGLETON_PARTITIONS)))
 
     def test_native_gate_failure_preserves_original_capture_and_never_runs_later_partition(self):
         failure = OSError("synthetic private failure; must not be published")
-        parts = ("authority", "ordinary", *controller_module().PYTHON_POISON_PARTITIONS)
+        parts = ("authority", "ordinary", *controller_module().PYTHON_SINGLETON_PARTITIONS)
         for mode in ("preparation", "launch", "exit", "wait", "stdout-eof", "stderr-eof", "finality",
                      "timeout", "cancel", "primary", "cleanup", "parser", "idle", "diagnostic", "ordinary",
                      *parts[2:], "poison-origin"):
@@ -1055,7 +1068,7 @@ class CIControllerContractTests(unittest.TestCase):
                     self.assertIn("diagnostic_error", records[0])
 
     def test_native_gate_deadline_covers_preparation_every_original_and_final_reconciliation(self):
-        parts = ("authority", "ordinary", *controller_module().PYTHON_POISON_PARTITIONS)
+        parts = ("authority", "ordinary", *controller_module().PYTHON_SINGLETON_PARTITIONS)
         for mode in ("preparation", *parts, "union"):
             with self.subTest(mode=mode):
                 rig = self._native_gate_fixture()
@@ -1098,7 +1111,7 @@ class CIControllerContractTests(unittest.TestCase):
         for phase, original_deadline, cutoff in (("source", 2500.0, 1000.0), ("wheel", 800.0, 800.0)):
             with self.subTest(phase=phase):
                 rig = self._python_gate_fixture(phase, deadline=original_deadline)
-                parts = ("healthy", *rig.controller.PYTHON_POISON_PARTITIONS)
+                parts = ("healthy", *rig.controller.PYTHON_SINGLETON_PARTITIONS)
                 result = self._perform_native_fixture(rig, platform="linux", deadline=original_deadline)
                 self.assertTrue(result.ok, result)
                 rows = result.details["partitions"]
@@ -1155,10 +1168,10 @@ class CIControllerContractTests(unittest.TestCase):
                           "delegated-missing", "delegated-foreign", "delegated-duplicate", "delegated-overlap",
                           "delegated-poison", "delegated-wrong-os", "obligation-missing", "obligation-empty", "obligation-foreign",
                           "snapshot-mutable", "snapshot-extra", "snapshot-missing", "snapshot-list", "snapshot-metadata",
-                          "singleton-swap"):
+                          "singleton-swap", "fresh-pooled", "fresh-missing", "fresh-swap"):
                 with self.subTest(phase=phase, fault=fault):
                     rig = self._python_gate_fixture(phase)
-                    parts = ("healthy", *rig.controller.PYTHON_POISON_PARTITIONS)
+                    parts = ("healthy", *rig.controller.PYTHON_SINGLETON_PARTITIONS)
                     step = rig.step
                     if fault == "argv":
                         step = dataclasses.replace(step, argv=(*step.argv[:-1], "1000.0"))
@@ -1175,6 +1188,13 @@ class CIControllerContractTests(unittest.TestCase):
                     elif fault == "singleton-swap":
                         rig.inventories["poison-startup-error"], rig.inventories["poison-wait-loss"] = (
                             rig.inventories["poison-wait-loss"], rig.inventories["poison-startup-error"])
+                    elif fault == "fresh-pooled":
+                        rig.inventories["fresh-command-account-prepared"] += rig.inventories["fresh-model-command-bridge"]
+                    elif fault == "fresh-missing":
+                        rig.inventories["fresh-model-command-bridge"] = ()
+                    elif fault == "fresh-swap":
+                        rig.inventories["fresh-command-account-prepared"], rig.inventories["fresh-model-command-bridge"] = (
+                            rig.inventories["fresh-model-command-bridge"], rig.inventories["fresh-command-account-prepared"])
                     elif fault.startswith("snapshot-"):
                         if fault == "snapshot-extra":
                             rig.inventories["foreign"] = ("unit.synthetic.Contracts.test_foreign",)
@@ -1230,7 +1250,7 @@ class CIControllerContractTests(unittest.TestCase):
                         self.assertEqual([row["status"] for row in result.details["partitions"]], ["UNEXECUTED"] * len(parts))
 
     def test_python_gate_stops_after_each_failed_original_and_keeps_one_cutoff(self):
-        parts = ("healthy", *controller_module().PYTHON_POISON_PARTITIONS)
+        parts = ("healthy", *controller_module().PYTHON_SINGLETON_PARTITIONS)
         for phase in ("source", "wheel"):
             for failed, partition in enumerate(parts):
                 for fault in ("exit", "wait", "stdout", "stderr", "domain", "timeout", "cancel", "cleanup", "idle", "deadline"):
@@ -1378,7 +1398,7 @@ class CIControllerContractTests(unittest.TestCase):
                     self.assertEqual(len(rig.captures), 1)
                     rows = result.details["partitions"]
                     self.assertEqual([row["status"] for row in rows],
-                                     ["FAIL"] + ["UNEXECUTED"] * len(_PYTHON_POISON_FIXTURES))
+                                     ["FAIL"] + ["UNEXECUTED"] * len(_PYTHON_SINGLETON_FIXTURES))
                     self.assertEqual(rows[0]["python_progress"]["last_observed_start"], {"id": source_ids[1]})
                     self.assertEqual(rows[0]["python_progress"]["last_observed_outcome"], {"id": source_ids[0], "outcome": "ok"})
                     self.assertEqual("diagnostic_error" in rows[0], diagnostic_error)
@@ -1584,7 +1604,7 @@ class CIControllerContractTests(unittest.TestCase):
                             native_capture([{**row, "id": wrong_owner}], stderr=encode(record)),
                             native_step, paths, checks=native_checks, deadline=1000.0))
 
-            poison_callbacks = [(partition, owner) for partition, owner in _PYTHON_POISON_FIXTURES
+            poison_callbacks = [(partition, owner) for partition, owner in _PYTHON_SINGLETON_FIXTURES
                                 if owner in callback_modes]
             self.assertEqual(len(poison_callbacks), 8)
             for partition, owner in poison_callbacks:
@@ -4941,9 +4961,9 @@ class CIProductEvidenceContractTests(unittest.TestCase):
         healthy = ("unit.synthetic.SnapshotTests.test_first", "unit.synthetic.SnapshotTests.test_second")
         metadata = _g_metadata_fixture("ubuntu-24.04")
         delegated = metadata[0]
-        complete = tuple(sorted(healthy + checks.PYTHON_POISON_IDS + delegated))
-        parts = ("all", "delegated", "healthy", *checks.PYTHON_POISON_PARTITIONS)
-        self.assertEqual(len(parts), 3 + len(_PYTHON_POISON_FIXTURES))
+        complete = tuple(sorted(healthy + checks.PYTHON_SINGLETON_IDS + delegated))
+        parts = ("all", "delegated", "healthy", *checks.PYTHON_SINGLETON_PARTITIONS)
+        self.assertEqual(len(parts), 3 + len(_PYTHON_SINGLETON_FIXTURES))
         for selection in ("full", "wheel"):
             with self.subTest(selection=selection), \
                     patch.object(checks, "time", SimpleNamespace(monotonic=lambda: 10.0)), \
@@ -4958,11 +4978,11 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                 self.assertEqual(inventories["all"], complete)
                 self.assertEqual(inventories["healthy"], healthy)
                 self.assertEqual(inventories["delegated"], delegated)
-                self.assertEqual(tuple(inventories[name] for name in checks.PYTHON_POISON_PARTITIONS),
-                                 tuple((identifier,) for identifier in checks.PYTHON_POISON_IDS))
+                self.assertEqual(tuple(inventories[name] for name in checks.PYTHON_SINGLETON_PARTITIONS),
+                                 tuple((identifier,) for identifier in checks.PYTHON_SINGLETON_IDS))
                 self.assertTrue(all(type(ids) is tuple and ids and tuple(sorted(set(ids))) == ids
                                     for ids in inventories.values()))
-                joined = tuple(identifier for part in ("healthy", *checks.PYTHON_POISON_PARTITIONS, "delegated")
+                joined = tuple(identifier for part in ("healthy", *checks.PYTHON_SINGLETON_PARTITIONS, "delegated")
                                for identifier in inventories[part])
                 self.assertEqual(tuple(sorted(joined)), complete)
                 self.assertEqual(len(joined), len(set(joined)))
@@ -5010,12 +5030,23 @@ class CIProductEvidenceContractTests(unittest.TestCase):
 
     def test_fixed_poison_partitions_preserve_full_wheel_and_authority_disjoint_union(self):
         checks = ci_module("ci_checks")
-        poison = tuple(identifier for _name, identifier in _PYTHON_POISON_FIXTURES)
-        parts = tuple(name for name, _identifier in _PYTHON_POISON_FIXTURES)
+        # Extending the neutral singleton union cannot expand UNKNOWN disposal.
         self.assertEqual(checks.PYTHON_POISON_CASES, _PYTHON_POISON_FIXTURES)
-        self.assertEqual(checks.PYTHON_POISON_IDS, poison)
-        self.assertEqual(checks.PYTHON_POISON_PARTITIONS, parts)
-        self.assertEqual(controller_module().PYTHON_POISON_PARTITIONS, parts)
+        self.assertEqual(checks.PYTHON_FRESH_CASES, _PYTHON_FRESH_FIXTURES)
+        self.assertEqual(checks.PYTHON_POISON_PARTITIONS, tuple(name for name, _ in _PYTHON_POISON_FIXTURES))
+        self.assertEqual(checks.PYTHON_FRESH_PARTITIONS, tuple(name for name, _ in _PYTHON_FRESH_FIXTURES))
+        self.assertEqual(checks.PYTHON_POISON_IDS, tuple(identifier for _, identifier in _PYTHON_POISON_FIXTURES))
+        self.assertEqual(checks.PYTHON_FRESH_IDS, tuple(identifier for _, identifier in _PYTHON_FRESH_FIXTURES))
+        self.assertEqual(controller_module().PYTHON_POISON_PARTITIONS, checks.PYTHON_POISON_PARTITIONS)
+        self.assertEqual(controller_module().PYTHON_FRESH_PARTITIONS, checks.PYTHON_FRESH_PARTITIONS)
+        self.assertFalse(set(checks.PYTHON_POISON_PARTITIONS) & set(checks.PYTHON_FRESH_PARTITIONS))
+        self.assertFalse(set(checks.PYTHON_POISON_IDS) & set(checks.PYTHON_FRESH_IDS))
+        poison = tuple(identifier for _name, identifier in _PYTHON_SINGLETON_FIXTURES)
+        parts = tuple(name for name, _identifier in _PYTHON_SINGLETON_FIXTURES)
+        self.assertEqual(checks.PYTHON_SINGLETON_CASES, _PYTHON_SINGLETON_FIXTURES)
+        self.assertEqual(checks.PYTHON_SINGLETON_IDS, poison)
+        self.assertEqual(checks.PYTHON_SINGLETON_PARTITIONS, parts)
+        self.assertEqual(controller_module().PYTHON_SINGLETON_PARTITIONS, parts)
         self.assertEqual(len(set(parts)), len(parts))
         self.assertEqual(len(set(poison)), len(poison))
         healthy = ("unit.synthetic.Contracts.test_first", "unit.synthetic.Contracts.test_second")
@@ -5083,7 +5114,7 @@ class CIProductEvidenceContractTests(unittest.TestCase):
 
     def test_python_healthy_discovery_withholds_poison_and_delegated_and_stops_on_actual_adverse_callbacks(self):
         checks = ci_module("ci_checks")
-        poison = checks.PYTHON_POISON_IDS
+        poison = checks.PYTHON_SINGLETON_IDS
         delegated, requirements = _g_metadata_fixture("ubuntu-24.04")
         healthy = tuple(f"unit.synthetic.HealthyContracts.test_{name}" for name in ("first", "subject", "third"))
         complete = tuple(sorted(healthy + poison + delegated))
@@ -5205,19 +5236,19 @@ class CIProductEvidenceContractTests(unittest.TestCase):
         poison = []
         with patch.object(checks, "expected_python_ids", side_effect=observed_inventory) as inventory, \
                 patch.object(checks, "signing_regression_metadata", side_effect=observed_metadata) as metadata:
-            for name, identifier in _PYTHON_POISON_FIXTURES:
+            for name, identifier in _PYTHON_SINGLETON_FIXTURES:
                 selected = checks.native_partition_ids(ROOT, name, deadline=deadline)
                 self.assertEqual(selected, (identifier,))
                 poison.extend(selected)
-            self.assertEqual(inventory.call_count, 72)
-            self.assertEqual(metadata.call_count, 72)
+            self.assertEqual(inventory.call_count, 74)
+            self.assertEqual(metadata.call_count, 74)
         poison = tuple(poison)
         self.assertEqual(authority, checks.NATIVE_AUTHORITY_IDS)
         self.assertEqual(len(authority), 5)
         self.assertTrue(ordinary)
         self.assertFalse(set(authority) & set(ordinary))
         self.assertEqual(tuple(sorted(authority + ordinary + poison + delegated)), complete)
-        self.assertEqual(set(poison), {identifier for _name, identifier in _PYTHON_POISON_FIXTURES})
+        self.assertEqual(set(poison), {identifier for _name, identifier in _PYTHON_SINGLETON_FIXTURES})
         self.assertEqual(len(set(authority + ordinary + poison + delegated)), len(complete))
         self.assertEqual(delegated, native_metadata[0])
         linux_delegated = checks.signing_regression_metadata(ROOT, "ubuntu-24.04", deadline=deadline)[0]
