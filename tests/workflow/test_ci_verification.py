@@ -1310,6 +1310,7 @@ class CIControllerContractTests(unittest.TestCase):
 
     def test_python_failure_progress_is_bounded_prebound_and_non_authoritative(self):
         controller = controller_module()
+        parts = (*(name for name, _identifier in _PYTHON_SINGLETON_FIXTURES), "healthy")
         identifiers = ("unit.synthetic.ProgressTests.test_first", "unit.synthetic.ProgressTests.test_second")
         first, second = identifiers
         scope = controller.python_progress_scope(identifiers)
@@ -1380,7 +1381,9 @@ class CIControllerContractTests(unittest.TestCase):
                     rig = self._python_gate_fixture(phase)
                     source_ids = rig.inventories["healthy"]
                     raw = header(source_ids[0]) + b" ... ok\n" + header(source_ids[1]) + b" ... "
-                    rig.run_advance = 901.0
+                    # The singleton prefix must finish before the same original
+                    # cutoff; only the intended healthy failure crosses it.
+                    rig.run_advance = 901.0 / len(parts)
                     rig.changes["healthy"] = dict(ok=False, returncode=None, waited=False, stdout_eof=False,
                         stderr_eof=False, domain_finality=False, stdout=b"", stderr=raw,
                         persisted=(0, len(raw)), timed_out=True,
@@ -1400,18 +1403,20 @@ class CIControllerContractTests(unittest.TestCase):
                         result = self._perform_native_fixture(rig, platform="linux")
                     self.assertFalse(result.ok)
                     self.assertEqual(result.error, "COMMAND_EXIT_OR_FINALITY")
-                    self.assertEqual(len(rig.captures), 1)
+                    self.assertEqual(len(rig.captures), len(parts))
                     rows = result.details["partitions"]
+                    self.assertEqual(tuple(row["partition"] for row in rows), parts)
                     self.assertEqual([row["status"] for row in rows],
-                                     ["FAIL"] + ["UNEXECUTED"] * len(_PYTHON_SINGLETON_FIXTURES))
-                    self.assertEqual(rows[0]["python_progress"]["last_observed_start"], {"id": source_ids[1]})
-                    self.assertEqual(rows[0]["python_progress"]["last_observed_outcome"], {"id": source_ids[0], "outcome": "ok"})
-                    self.assertEqual("diagnostic_error" in rows[0], diagnostic_error)
-                    for key, observed in controller.capture_observations(rig.captures[0]).items():
-                        self.assertEqual(rows[0]["capture"][key], observed)
+                                     ["PASS"] * (len(parts) - 1) + ["FAIL"])
+                    healthy = rows[-1]
+                    self.assertEqual(healthy["python_progress"]["last_observed_start"], {"id": source_ids[1]})
+                    self.assertEqual(healthy["python_progress"]["last_observed_outcome"], {"id": source_ids[0], "outcome": "ok"})
+                    self.assertEqual("diagnostic_error" in healthy, diagnostic_error)
+                    for key, observed in controller.capture_observations(rig.captures[-1]).items():
+                        self.assertEqual(healthy["capture"][key], observed)
                     self.assertNotIn(private.decode(), json.dumps(result.details))
                     self.assertNotIn("completed", result.details)
-                    run_index = next(index for index, event in enumerate(rig.events) if event[0] == "run")
+                    run_index = max(index for index, event in enumerate(rig.events) if event[0] == "run")
                     self.assertTrue(all(event[0] == "idle" for event in rig.events[run_index + 1:]))
 
         rig = self._python_gate_fixture()
@@ -1427,7 +1432,7 @@ class CIControllerContractTests(unittest.TestCase):
             ({"parser": "native", "native_partition": "all"}, "linux", identifiers)):
             with self.subTest(prebound_role=(changes, platform, expected)), \
                     self.assertRaisesRegex(controller.VerificationError, "PYTHON_PREBOUND_EXPECTATIONS"):
-                controller.parse_capture(dataclasses.replace(rig.step, **changes), rig.captures[0], rig.paths,
+                controller.parse_capture(dataclasses.replace(rig.step, **changes), rig.captures[-1], rig.paths,
                                          platform, rig.checks, _python_expected=expected)
 
     def test_python_failure_callbacks_are_source_bound_and_keep_private_errors_out(self):
