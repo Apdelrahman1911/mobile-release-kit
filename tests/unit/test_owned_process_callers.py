@@ -28,7 +28,7 @@ from mobile_release.config import load_config
 from mobile_release.errors import ValidationError
 from .helpers import ios_config, android_config, write_project
 from .ios_entitlement_helpers import profile
-from .local_signing_helpers import NativeSigningModel, fictional_signing_profile, model_result
+from .local_signing_helpers import NativeSigningModel, fictional_signing_profile
 from .test_owned_process import original_command_outcomes, all_original_commands_final
 
 
@@ -312,8 +312,6 @@ class BuildDiscoveryCallerTests(unittest.TestCase):
                 p12.write_bytes(b"fictional-p12")
                 source.write_bytes(b"fictional-profile")
                 model = NativeSigningModel(home)
-                model.result_policy = lambda argv: (model_result(perform_effect=False)
-                    if Path(argv[0]).name in {"fictional-prepare", "xcodebuild"} else None)
                 native_calls = []
 
                 def runner(argv, **kwargs):
@@ -322,7 +320,9 @@ class BuildDiscoveryCallerTests(unittest.TestCase):
                     # The production C/A/W owner still supplies the genuine
                     # scope outcome/fence. Only fictional artifact contents are
                     # projected after that command, never a synthetic receipt.
-                    result = model(argv, **kwargs)
+                    revision = model.revisions
+                    result = model(["build"], **kwargs)
+                    self.assertEqual(model.revisions, revision + 1)
                     native_calls.append(list(argv))
                     if argv[0] == "fictional-prepare":
                         original.mkdir(parents=True, exist_ok=True)
