@@ -284,7 +284,7 @@ checks. See
 required coverage, evidence and current limitations. Never dispatch a release
 workflow or use real Store/signing credentials to test this repository.
 
-The persistent local-signing matrix is also required: sixteen shards on each
+The persistent local-signing matrix is also required: forty-eight shards on each
 of Linux and macOS, with source and installed-wheel execution in every cell.
 The reviewed CI owner, not a raw fixture launcher, runs those phases under the
 original deadlines. One source-defined catalog combines primitive operation cuts,

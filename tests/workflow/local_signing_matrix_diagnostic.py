@@ -18,6 +18,11 @@ from subprocess import CompletedProcess
 
 PREFIX = "MRK_SIGNING_MATRIX_FAILURE="
 WORKER_PREFIX = "MRK_SIGNING_MATRIX_WORKER_FAILURE="
+PROGRESS_PREFIX = "MRK_SIGNING_MATRIX_PROGRESS="
+PROGRESS_EVENTS = 64
+PROGRESS_BYTES = 16 * 1024
+PROGRESS_LINE_BYTES = 256
+PROGRESS_ELAPSED_MS = 420_000
 STAGES = ("admission", "helper", "typed-result", "persist", "cleanup", "postconditions", "publication")
 SEMANTIC_STEPS = ("healthy", "seed", "recovery", "semantic-main", "semantic-resolution")
 PUBLIC_FILE = re.compile(r"(?:tests|\.github/scripts|src/mobile_release)/(?:[A-Za-z_][A-Za-z0-9_-]*/)*[A-Za-z_][A-Za-z0-9_-]*\.py\Z")
@@ -46,7 +51,7 @@ class Phase:
         _require(type(phase) is str and phase in {"source", "wheel"}
                  and type(deadline) is float and math.isfinite(deadline)
                  and type(operating_system) is str and operating_system in {"ubuntu-24.04", "macos-26"}
-                 and type(shard) is int and 0 <= shard < 16)
+                 and type(shard) is int and 0 <= shard < 48)
         _require(type(identifiers) is tuple and 0 < len(identifiers) <= 512
                  and all(type(value) is str and CASE_ID.fullmatch(value) for value in identifiers)
                  and len(set(identifiers)) == len(identifiers)
@@ -78,6 +83,12 @@ class Phase:
         # unavailable callback can renew the remaining parent budget.
         self.g_seen, self.g_failure, self.child, self.budget = False, None, None, [48]
         self.emitted, self.available = False, True
+        self.progress_started = time.monotonic()
+        self.progress_attempts = self.progress_bytes = self.progress_elapsed = 0
+        # Optional progress must fit the fixed budget for the entire selected
+        # list. An oversized list still runs with no progress DATA, not fewer
+        # cases, a renewed counter, or an altered admission/failure diagnostic.
+        self.progress_available = len(identifiers) * 2 <= PROGRESS_EVENTS
         _before(self)
 
 
@@ -283,6 +294,42 @@ def emit_worker(worker, error):
         return None
 
 
+def _progress(context, stage, case_id):
+    """At most two original-phase writes per case; returned is not finality."""
+    if (not _owned(context) or context.emitted or not context.progress_available
+            or stage not in {"helper", "typed-result"}):
+        return
+    attempt = context.progress_attempts
+    context.progress_attempts += 1  # Consume before formatting or attempting I/O.
+    context.progress_available = False  # Any failure is absorbing; never retry.
+    try:
+        index, half = divmod(attempt, 2)
+        _require(attempt < PROGRESS_EVENTS and index < len(context.identifiers)
+                 and case_id == context.identifiers[index]
+                 and stage == ("helper", "typed-result")[half])
+        now = time.monotonic()
+        _require(type(now) is float and math.isfinite(now) and now < context.deadline
+                 and type(context.progress_started) is float and math.isfinite(context.progress_started)
+                 and now >= context.progress_started)
+        elapsed = int((now - context.progress_started) * 1000)
+        _require(context.progress_elapsed <= elapsed <= PROGRESS_ELAPSED_MS)
+        record = {"schema": 1, "phase": context.phase, "caseId": case_id, "ordinal": index + 1,
+                  "event": ("helper-start", "helper-returned")[half], "elapsedMs": elapsed}
+        data = PROGRESS_PREFIX + json.dumps(record, sort_keys=True, separators=(",", ":"),
+                                             ensure_ascii=True, allow_nan=False) + "\n"
+        size = len(data.encode("ascii"))
+        _require(size <= PROGRESS_LINE_BYTES and context.progress_bytes + size <= PROGRESS_BYTES)
+        context.progress_bytes += size  # Failed/short writes retain their charge.
+        _before(context)
+        _require(sys.stderr.write(data) == len(data))
+        sys.stderr.flush()
+        _before(context)
+        context.progress_elapsed = elapsed
+        context.progress_available = context.progress_attempts < len(context.identifiers) * 2
+    except BaseException:
+        pass  # The existing helper/result/failure path is unchanged.
+
+
 def mark(stage, case_id=None):
     """Advance optional DATA immediately before an existing original action."""
     context = CURRENT
@@ -294,6 +341,7 @@ def mark(stage, case_id=None):
                  and (stage not in {"helper", "typed-result", "cleanup"} or case_id is not None)
                  and (stage not in {"admission", "postconditions", "publication"} or case_id is None))
         context.stage, context.case_id = stage, case_id
+        _progress(context, stage, case_id)
     except BaseException:
         context.available = False  # Never publish a stale/foreign case or change the original action.
 

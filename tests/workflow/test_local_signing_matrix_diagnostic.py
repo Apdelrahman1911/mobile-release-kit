@@ -179,7 +179,12 @@ class MatrixDiagnosticTests(unittest.TestCase):
                 "expectedExit": 0, "workerExit": 91, "anchorExit": 0, "terminalParsed": True, "anchorExpired": False})
             parse = lambda raw: controller.signing_matrix_failure(raw, scope, deadline=20.0)
             worker_wire, main_wire = wire(observed, worker=True), wire(record)
-            self.assertEqual(output.getvalue().encode("ascii"), worker_wire + main_wire)
+            transcript = output.getvalue().encode("ascii")
+            progress_wire = transcript.split(b"\n", 1)[0] + b"\n"
+            self.assertEqual(controller.signing_matrix_progress(progress_wire, scope, deadline=20.0), {
+                "eventCount": 1, "lastEvent": {"schema": 1, "phase": "source", "caseId": IDS[0],
+                    "ordinal": 1, "event": "helper-start", "elapsedMs": 0}})
+            self.assertEqual(transcript, progress_wire + worker_wire + main_wire)
             self.assertEqual(parse(worker_wire + main_wire), {**record, "workerFailure": observed})
             self.assertEqual(parse(main_wire), record)  # Missing W remains unknown, never guessed from91.
             self.assertEqual(sum(len(value["locations"]) for value in (observed, record)), 4)
@@ -214,7 +219,8 @@ class MatrixDiagnosticTests(unittest.TestCase):
                 patch.object(controller, "time", SimpleNamespace(monotonic=lambda: 10.0)), \
                 patch.object(diagnostic, "os", SimpleNamespace(getpid=lambda: pid[0])):
             selected, output = context(bindings), io.StringIO()
-            with patch.object(diagnostic, "CURRENT", selected):
+            with patch.object(diagnostic, "CURRENT", selected), \
+                    patch.object(diagnostic, "sys", SimpleNamespace(stderr=io.StringIO())):
                 diagnostic.mark("helper", IDS[0])
                 worker = diagnostic.prepare_worker("semantic-main", 18.0)
                 self.assertIsNone(diagnostic.prepare_worker("foreign-step", 18.0))
@@ -605,7 +611,8 @@ class MatrixDiagnosticTests(unittest.TestCase):
         function, = (node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "phase")
         for failed_projection in (False, True):
             with self.subTest(failed_projection=failed_projection), \
-                    patch.object(diagnostic, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+                    patch.object(diagnostic, "time", SimpleNamespace(monotonic=lambda: 10.0)), \
+                    patch.object(diagnostic, "sys", SimpleNamespace(stderr=io.StringIO())):
                 original, selected, events = ValueError("PRIVATE original"), context(), []
 
                 def inner(_args, _scope, binding):
@@ -641,7 +648,7 @@ class MatrixDiagnosticTests(unittest.TestCase):
 
     def test_failed_unknown_expired_and_optional_parser_error_never_read_outputs_or_become_pass(self):
         tests = controller_tests.SigningMatrixControllerTests()
-        for mode in ("failure", "unknown", "parser-error", "expired", "marker-on-zero"):
+        for mode in ("failure", "unknown", "parser-error", "expired", "pair-expired", "marker-on-zero"):
             with self.subTest(mode=mode):
                 rig = tests.rig()
                 identifier = next(value for value in rig.selected
@@ -661,13 +668,13 @@ class MatrixDiagnosticTests(unittest.TestCase):
                 if mode == "unknown":
                     rig.capture_changes["source"].update(waited=False, stdout_eof=False, domain_finality=False)
                     rig.idle_error = True
-                if mode == "expired":
+                if mode in {"expired", "pair-expired"}:
                     original_idle = rig.session.ensure_idle
 
                     def expire(*, deadline):
                         original_idle(deadline=deadline)
                         if rig.captures:
-                            rig.clock = deadline + 1.0
+                            rig.clock = 910.0 if mode == "pair-expired" else deadline + 1.0
 
                     rig.session.ensure_idle = expire
                 parser = patch.object(rig.controller, "signing_matrix_failure", side_effect=RuntimeError("PRIVATE parser")) \
@@ -682,10 +689,10 @@ class MatrixDiagnosticTests(unittest.TestCase):
                 self.assertFalse(any(event[0] in {"read", "finalized", "publish"} for event in rig.events[run + 1:]))
                 row = result.details["phases"][0]
                 self.assertEqual(row["status"], "FAIL")
-                self.assertEqual("matrix_failure" in row, mode in {"failure", "unknown"})
-                if mode in {"failure", "unknown"}:
+                self.assertEqual("matrix_failure" in row, mode in {"failure", "unknown", "expired"})
+                if mode in {"failure", "unknown", "expired"}:
                     self.assertEqual(row["matrix_failure"], {**value, "workerFailure": worker})
-                if mode in {"expired", "parser-error"}:
+                if mode in {"pair-expired", "parser-error"}:
                     self.assertEqual(row["matrix_diagnostic_error"], {"error": "SIGNING_MATRIX_DIAGNOSTIC_UNAVAILABLE"})
                 if mode == "unknown":
                     self.assertIs(row["capture"]["domain_finality"], False)
@@ -708,5 +715,6 @@ class MatrixDiagnosticTests(unittest.TestCase):
                 with self.subTest(argv=argv[-2:]), self.assertRaisesRegex(rig.controller.VerificationError,
                                                                           "SIGNING_MATRIX_DIAGNOSTIC_SCOPE"):
                     rig.controller.original_native_capture(rig.session, argv, rig.paths, [], "source",
-                        deadline=20.0, seconds=420, env={}, signing_matrix_diagnostic=scope)
+                        deadline=20.0, seconds=420, env={}, signing_matrix_diagnostic=scope,
+                        signing_matrix_pair_deadline=30.0)
         self.assertEqual(rig.events, [])

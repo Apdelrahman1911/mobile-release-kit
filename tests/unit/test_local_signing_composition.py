@@ -20,17 +20,8 @@ from mobile_release.reporting import Report
 from .helpers import android_config, ios_config, write_project
 from .ios_entitlement_helpers import profile
 from .local_signing_helpers import NativeSigningModel
+from .local_signing_persistent import _materializer_directory
 from workflow.local_signing_regression_catalog import PREFLIGHT_CANCELLATION_VARIANTS
-
-
-def _materializer_directory(original, private, created, *args, **kwargs):
-    """Route only this fixture's materializer into its real model input root."""
-    if kwargs.get('prefix') != 'mobile-release-build-inputs-':
-        return original(*args, **kwargs)
-    assert not args and set(kwargs) == {'prefix'}, 'materializer allocation contract changed'
-    owner = original(dir=private, **kwargs)
-    created.append(Path(owner.name))
-    return owner
 
 
 class SigningCompositionTests(unittest.TestCase):

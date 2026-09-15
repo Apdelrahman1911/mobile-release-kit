@@ -861,7 +861,7 @@ class SigningAdapterDiagnostic:
 
 @dataclasses.dataclass(frozen=True)
 class SigningMatrixDiagnostic:
-    """Source-selected failed-capture DATA scope; separate from fixed-four."""
+    """Source-selected matrix DATA scope; separate from fixed-four or proof."""
     phase: str
     operating_system: str
     shard: int
@@ -1830,7 +1830,7 @@ def _signing_matrix_diagnostic_scope(scope) -> bool:
     return (type(scope) is SigningMatrixDiagnostic
             and type(scope.phase) is str and scope.phase in {"source", "wheel"}
             and type(scope.operating_system) is str and scope.operating_system in {"ubuntu-24.04", "macos-26"}
-            and type(scope.shard) is int and 0 <= scope.shard < 16
+            and type(scope.shard) is int and 0 <= scope.shard < 48
             and type(scope.identifiers) is tuple and 0 < len(scope.identifiers) <= 512
             and all(type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) for value in scope.identifiers)
             and len(set(scope.identifiers)) == len(scope.identifiers)
@@ -1863,6 +1863,63 @@ def _signing_matrix_child_bindings(scope) -> bool:
             return False
         seen.add(row[0])
     return True
+
+
+def signing_matrix_progress(raw: bytes, scope: SigningMatrixDiagnostic, *, deadline: float,
+                            failed_capture: bool = False) -> dict | None:
+    """Strict optional original-phase prefix, never a case/cleanup receipt.
+
+    Success allows only this canonical transcript (including an empty prefix).
+    A failed original may additionally have unrelated trailing stderr: stop at
+    its first non-progress line, without projecting that text or scanning for
+    a later apparent marker. Both paths only examine returned immutable bytes.
+    """
+    check_clock(deadline)
+    try:
+        if (type(raw) is not bytes or len(raw) > 65536 or type(failed_capture) is not bool
+                or not _signing_matrix_diagnostic_scope(scope)):
+            return None
+        if not raw:
+            return {"eventCount": 0, "lastEvent": None}
+        if len(scope.identifiers) > 32 or not failed_capture and len(raw) > 16 * 1024:
+            return None
+        marker = b"MRK_SIGNING_MATRIX_PROGRESS="
+        count = total = elapsed = 0
+        last = None
+        for line in raw.splitlines(keepends=True):
+            check_clock(deadline)
+            if not line.startswith(marker):
+                return {"eventCount": count, "lastEvent": last} if failed_capture and count else None
+            if count >= 64 or len(line) > 256 or not line.endswith(b"\n"):
+                return None
+            total += len(line)
+            if total > 16 * 1024:
+                return None
+            try:
+                value = strict_json(line[len(marker):-1].decode("ascii"))
+            except (UnicodeError, ValueError, VerificationError, RecursionError):
+                return None
+            index, half = divmod(count, 2)
+            if (type(value) is not dict
+                    or set(value) != {"schema", "phase", "caseId", "ordinal", "event", "elapsedMs"}
+                    or type(value["schema"]) is not int or value["schema"] != 1
+                    or type(value["phase"]) is not str or value["phase"] != scope.phase
+                    or index >= len(scope.identifiers)
+                    or type(value["caseId"]) is not str or value["caseId"] != scope.identifiers[index]
+                    or type(value["ordinal"]) is not int or value["ordinal"] != index + 1
+                    or type(value["event"]) is not str
+                    or value["event"] != ("helper-start", "helper-returned")[half]
+                    or type(value["elapsedMs"]) is not int or not elapsed <= value["elapsedMs"] <= 420_000):
+                return None
+            canonical = json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                   ensure_ascii=True, allow_nan=False).encode("ascii")
+            if canonical != line[len(marker):-1]:
+                return None
+            count += 1
+            elapsed, last = value["elapsedMs"], value
+        return {"eventCount": count, "lastEvent": last}
+    finally:
+        check_clock(deadline)
 
 
 def signing_matrix_failure(raw: bytes, scope: SigningMatrixDiagnostic, *, deadline: float) -> dict | None:
@@ -2016,7 +2073,7 @@ def signing_matrix_failure(raw: bytes, scope: SigningMatrixDiagnostic, *, deadli
             observed = value
         return {**observed, "workerFailure": worker} if observed is not None and worker is not None else observed
     finally:
-        check_clock(deadline)  # No optional projection extends the original capture endpoint.
+        check_clock(deadline)  # Only the caller's already-bound endpoint, never renewed here.
 
 
 def python_storage_profile(data: object) -> dict | None:
@@ -2655,13 +2712,18 @@ def require_original_finality(result) -> None:
 def original_native_capture(session, argv, paths: Paths, rows: list[dict], name: str, *,
                             deadline: float, seconds: int, env: dict, output_limit: int = 65536,
                             cpu_seconds: int = 180, signing_adapter_diagnostic: SigningAdapterDiagnostic | None = None,
-                            signing_matrix_diagnostic: SigningMatrixDiagnostic | None = None):
+                            signing_matrix_diagnostic: SigningMatrixDiagnostic | None = None,
+                            signing_matrix_pair_deadline: float | None = None):
     """One original ordinary capture plus idle closure under the same cutoff.
 
     Never synthesize/merge CapturedRun objects. Semantic parsing follows this
     function; even later rejection retains the original wait/EOF facts.
+    Only an already-failed matrix capture may project returned bytes under its
+    prebound enclosing pair endpoint. Native work and idle never use that time.
     """
     check_clock(deadline)
+    if signing_matrix_pair_deadline is not None and signing_matrix_diagnostic is None:
+        raise VerificationError("SIGNING_MATRIX_DIAGNOSTIC_SCOPE")
     if signing_adapter_diagnostic is not None:
         scope = signing_adapter_diagnostic
         if (type(scope) is not SigningAdapterDiagnostic or scope.phase not in {"source", "wheel"}
@@ -2682,6 +2744,10 @@ def original_native_capture(session, argv, paths: Paths, rows: list[dict], name:
             if (arguments.count(option) != 1 or arguments.index(option) + 1 == len(arguments)
                     or arguments[arguments.index(option) + 1] != expected):
                 raise VerificationError("SIGNING_MATRIX_DIAGNOSTIC_SCOPE")
+        if (type(signing_matrix_pair_deadline) is not float or not math.isfinite(signing_matrix_pair_deadline)
+                or deadline > signing_matrix_pair_deadline
+                or not 0 < signing_matrix_pair_deadline - time.monotonic() <= MATRIX_PAIR_SECONDS):
+            raise VerificationError("SIGNING_MATRIX_DIAGNOSTIC_DEADLINE")
     session.ensure_idle(deadline=deadline)
     row = {"stage": name, "status": "RUNNING"}
     rows.append(row)
@@ -2719,11 +2785,19 @@ def original_native_capture(session, argv, paths: Paths, rows: list[dict], name:
                 row["phase_diagnostic_error"] = {"error": "SIGNING_ADAPTER_PHASE_DIAGNOSTIC_UNAVAILABLE"}
         if signing_matrix_diagnostic is not None and capture_failed:
             try:
-                diagnostic = signing_matrix_failure(result.stderr, signing_matrix_diagnostic, deadline=deadline)
+                diagnostic = signing_matrix_failure(result.stderr, signing_matrix_diagnostic,
+                                                    deadline=signing_matrix_pair_deadline)
                 if diagnostic is not None:
                     row["matrix_failure"] = diagnostic
             except BaseException:
                 row["matrix_diagnostic_error"] = {"error": "SIGNING_MATRIX_DIAGNOSTIC_UNAVAILABLE"}
+            try:
+                progress = signing_matrix_progress(result.stderr, signing_matrix_diagnostic,
+                                                   deadline=signing_matrix_pair_deadline, failed_capture=True)
+                if progress is not None and progress["eventCount"]:
+                    row["matrix_progress"] = progress
+            except BaseException:
+                row["matrix_progress_error"] = {"error": "SIGNING_MATRIX_PROGRESS_UNAVAILABLE"}
         raise primary
     check_clock(deadline)
     row["status"] = "FINALIZED"
@@ -4129,10 +4203,16 @@ def matrix_phase_argv(paths: Paths, selection: MatrixSelection, phase: str, *, d
     )))
 
 
-def parse_matrix_phase(result, phase: str, scope: dict, package: Path, shard: int) -> None:
+def parse_matrix_phase(result, phase: str, scope: dict, package: Path, shard: int, *,
+                       diagnostic: SigningMatrixDiagnostic, deadline: float) -> dict | None:
+    check_clock(deadline)
     require_original_finality(result)
+    if (not _signing_matrix_diagnostic_scope(diagnostic) or diagnostic.phase != phase
+            or diagnostic.shard != shard or diagnostic.operating_system != scope.get("os")):
+        raise VerificationError("MATRIX_PHASE_DIAGNOSTIC_SCOPE")
+    progress = signing_matrix_progress(result.stderr, diagnostic, deadline=deadline)
     prefix = b"MRK_MATRIX_PHASE="
-    if (result.stderr or type(result.stdout) is not bytes or not result.stdout.startswith(prefix)
+    if (progress is None or type(result.stdout) is not bytes or not result.stdout.startswith(prefix)
             or not result.stdout.endswith(b"\n") or result.stdout.count(b"\n") != 1 or len(result.stdout) > 65536):
         raise VerificationError("MATRIX_PHASE_CAPTURE_RECORD")
     record = strict_json(result.stdout[len(prefix):-1].decode("ascii"))
@@ -4143,6 +4223,8 @@ def parse_matrix_phase(result, phase: str, scope: dict, package: Path, shard: in
     if (json.dumps(record, sort_keys=True, allow_nan=False)
             != json.dumps(expected, sort_keys=True, allow_nan=False)):
         raise VerificationError("MATRIX_PHASE_CAPTURE_BINDING")
+    check_clock(deadline)
+    return progress if progress["eventCount"] else None
 
 
 def publish_matrix_proof(selection: MatrixSelection, proof: dict, contract, session, *, deadline: float) -> dict:
@@ -4238,7 +4320,7 @@ def perform_matrix_gate(step: Step, paths: Paths, session, checks, platform: str
         if step.id != "local-signing-matrix" or step.kind != "matrix" or type(selection) is not MatrixSelection:
             raise VerificationError("MATRIX_GATE_SELECTION")
         if (selection.operating_system != {"linux": "ubuntu-24.04", "macos": "macos-26"}[platform]
-                or type(selection.shard) is not int or not 0 <= selection.shard < 16):
+                or type(selection.shard) is not int or not 0 <= selection.shard < 48):
             raise VerificationError("MATRIX_GATE_HOST_OR_SHARD")
         contract = _module(paths.source / "tests/workflow", "local_signing_matrix_contract")
         scope = contract.scope_from_metadata(selection.metadata(), selection.operating_system, producer=True)
@@ -4274,13 +4356,17 @@ def perform_matrix_gate(step: Step, paths: Paths, session, checks, platform: str
             if phase == "wheel":
                 env["PATH"] = str(paths.wheel_python.parent) + ":" + env["PATH"]
                 env["MOBILE_RELEASE_TEST_PYTHON"] = str(paths.wheel_python)
+            diagnostic = SigningMatrixDiagnostic(phase, selection.operating_system, selection.shard,
+                                                 tuple(selected), regression_ids, diagnostic_files, child_bindings)
             capture = original_native_capture(session, matrix_phase_argv(paths, selection, phase, deadline=phase_deadline),
                 paths, rows, phase, deadline=phase_deadline, seconds=MATRIX_PHASE_SECONDS,
                 env=env, output_limit=65536, cpu_seconds=300,
-                signing_matrix_diagnostic=SigningMatrixDiagnostic(phase, selection.operating_system, selection.shard,
-                                                                 tuple(selected), regression_ids, diagnostic_files, child_bindings))
+                signing_matrix_diagnostic=diagnostic, signing_matrix_pair_deadline=pair_deadline)
             captures.append(capture)  # Retain originals through pair acceptance/publication.
-            parse_matrix_phase(capture, phase, scope, package, selection.shard)
+            progress = parse_matrix_phase(capture, phase, scope, package, selection.shard,
+                                          diagnostic=diagnostic, deadline=phase_deadline)
+            if progress is not None:
+                rows[-1]["matrix_progress"] = progress
             output = paths.work / "signing-matrix" / phase
             rows[-1]["outputs"] = finalized_matrix_outputs(output, session, deadline=phase_deadline)
             observed_catalog = strict_json(read_regular(output / "catalog.json", deadline=phase_deadline,
@@ -4328,7 +4414,7 @@ def perform_matrix_gate(step: Step, paths: Paths, session, checks, platform: str
         contract.validate_proof(proof, contract.artifact_name(scope, selection.shard), scope, package_sha, definitions_sha)
         details["proof"] = publish_matrix_proof(selection, proof, contract, session, deadline=pair_deadline)
         check_clock(pair_deadline)
-        details["scope"] = "partial; one of sixteen shards on one of two required platforms"
+        details["scope"] = "partial; one of forty-eight shards on one of two required platforms"
         return CheckResult(True, details)
     except BaseException as exc:
         if rows and rows[-1]["status"] in {"RUNNING", "FINALIZED"}:
@@ -4633,7 +4719,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scope", choices=("platform", "signing-matrix", "signing-adapter"), default="platform")
     parser.add_argument("--repository")
     parser.add_argument("--job", choices=("test-signing-matrix", "test-signing-adapter"))
-    parser.add_argument("--shard", type=int, choices=range(16))
+    parser.add_argument("--shard", type=int, choices=range(48))
     args = parser.parse_args(argv)
     start = time.monotonic()
     deadline = start + AGGREGATE_SECONDS

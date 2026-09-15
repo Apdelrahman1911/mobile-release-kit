@@ -17,7 +17,7 @@ import types
 from itertools import islice
 from pathlib import Path
 
-SHARDS = 16
+SHARDS = 48
 OPERATING_SYSTEMS = ("ubuntu-24.04", "macos-26")
 MAX_CASES = 100_000
 MAX_PROOF_BYTES = 8 * 1024 * 1024

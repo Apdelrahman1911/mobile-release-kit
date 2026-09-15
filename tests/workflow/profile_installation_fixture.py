@@ -39,6 +39,7 @@ from mobile_release.owned_process import ProcessError
 from unit.helpers import ios_config, write_project
 from unit.ios_entitlement_helpers import profile
 from unit.local_signing_helpers import NativeSigningModel, fictional_signing_profile, model_result
+from unit.local_signing_persistent import _materializer_directory
 
 
 @contextmanager
@@ -102,11 +103,13 @@ def run_case(mode: str, parent: Path) -> dict:
     standalone, materialized = mode.startswith("standalone-"), mode.startswith("material-")
     mode = mode.removeprefix("standalone-").removeprefix("material-")
     real_open, real_close, real_fstat, real_fdopen = os.open, os.close, os.fstat, os.fdopen
+    real_temporary_directory = tempfile.TemporaryDirectory
     real_signal = signal.signal
     previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
     assert previous == {signal.SIGINT: signal.default_int_handler, signal.SIGTERM: signal.SIG_DFL}
     captured, references, native_calls = {}, [], []
     post_result_cleanup = []
+    material_directories = []
     signals, reached, visits, cleanup_calls, target_scopes = [], [], [], [], []
     installation_code = credentials._temporary_profile_installation.__wrapped__.__code__
     signing_code = credentials._temporary_apple_signing_environment.__wrapped__.__code__
@@ -286,6 +289,9 @@ def run_case(mode: str, parent: Path) -> dict:
                         values = {"MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_BASE64": base64.b64encode(p12.read_bytes()).decode(),
                                   "MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_BASE64": base64.b64encode(supplied.read_bytes()).decode(),
                                   "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD": "fictional-password"}
+                        stack.enter_context(patch.object(credentials.tempfile, "TemporaryDirectory",
+                            side_effect=lambda *args, **kwargs: _materializer_directory(
+                                real_temporary_directory, private, material_directories, *args, **kwargs)))
                         stack.enter_context(patch.object(credentials, "local_signing_lease", side_effect=lambda **_kwargs: local_signing.local_signing_lease(home=home)))
                         context = credentials.materialize_build_inputs(config, values=values, platforms=("ios",), prepare_ios_signing=True)
                     else:
@@ -315,6 +321,9 @@ def run_case(mode: str, parent: Path) -> dict:
                     sys.settrace(None)
                     sys.setprofile(None)
             assert reached, "dangerous boundary was never reached"
+            assert len(material_directories) == int(materialized), "materializer allocation count changed"
+            assert all(path.parent == private and not os.path.lexists(path) for path in material_directories), \
+                "original materializer did not remove its private directory"
             if mode in {"unexpected-cleanup", "cleanup-error-signal"}:
                 status = local_signing.signing_status(home=home)
                 assert status["status"] == "pending", "ambiguous/failed cleanup must retain original authority"

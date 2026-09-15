@@ -28,6 +28,16 @@ class OwnerResolutionRefused(RuntimeError):
     """Independent fictional owner lacks authority; not a production exception."""
 
 
+def _materializer_directory(original, private, created, *args, **kwargs):
+    """Route only this fixture's materializer into its real model input root."""
+    if kwargs.get('prefix') != 'mobile-release-build-inputs-':
+        return original(*args, **kwargs)
+    assert not args and set(kwargs) == {'prefix'}, 'materializer allocation contract changed'
+    owner = original(dir=private, **kwargs)
+    created.append(Path(owner.name))
+    return owner
+
+
 def write_json(path: Path, value: object) -> None:
     pending = path.with_suffix(".writing")
     with pending.open("wb") as stream:

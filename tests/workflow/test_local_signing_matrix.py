@@ -1108,7 +1108,7 @@ class MatrixContractTests(unittest.TestCase):
         reduced = contract.scope_from_metadata({**metadata, "job": "test"}, "ubuntu-24.04", producer=False)
         self.assertEqual(reduced, self.scope)
         with redirect_stderr(io.StringIO()):
-            for arguments in (("--shard", "-1"), ("--shard", "16"), ("--shard", "true"),
+            for arguments in (("--shard", "-1"), ("--shard", "48"), ("--shard", "true"),
                               ("--shard", "1", "--all"), ("--phase", "other"),
                               ("--phase", "source", "--reduce", "/data")):
                 with self.subTest(arguments=arguments), self.assertRaises(SystemExit):
@@ -1118,9 +1118,9 @@ class MatrixContractTests(unittest.TestCase):
         workflow = load_workflow(runner.ROOT / ".github/workflows/ci.yml")
         job, aggregate = workflow["jobs"]["test-signing-matrix"], workflow["jobs"]["test"]
         self.assertEqual(job["strategy"]["matrix"], {"os": list(contract.OPERATING_SYSTEMS), "shard":
-            "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[12]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]') }}",
-            "include": "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[{\"os\":\"ubuntu-24.04\",\"shard\":11},{\"os\":\"macos-26\",\"shard\":7}]' || '[]') }}"})
-        self.assertEqual(job["strategy"]["max-parallel"], 4)
+            "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[0]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47]') }}",
+            "include": "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[{\"os\":\"ubuntu-24.04\",\"shard\":20},{\"os\":\"ubuntu-24.04\",\"shard\":28},{\"os\":\"macos-26\",\"shard\":1},{\"os\":\"macos-26\",\"shard\":12},{\"os\":\"macos-26\",\"shard\":37}]' || '[]') }}"})
+        self.assertEqual(job["strategy"]["max-parallel"], 8)
         self.assertIs(job["strategy"]["fail-fast"], False)
         self.assertEqual(job["timeout-minutes"], 60)
         self.assertEqual(job["permissions"], {"contents": "read"})

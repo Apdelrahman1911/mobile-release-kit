@@ -1000,7 +1000,7 @@ def recovery_flow(root: Path, trace: Trace, *, manual="none", expected_preferenc
     unknown = uncertainty(root, before)
     model = PersistentSigningModel(root, trace=trace, recovery=True)
     trace.phase = "recovery"
-    result, refused = None, None
+    result, refused, refusal_error = None, None, None
     with trace.installed():
         initial = signing.signing_status(home=root / "home")
         try:
@@ -1015,15 +1015,21 @@ def recovery_flow(root: Path, trace: Trace, *, manual="none", expected_preferenc
                                                     home=root / "home", runner=model, manual=True,
                                                     input_stream=input_stream, output_stream=output_stream)
         except CredentialError as error:
-            refused = str(error)
+            refusal_error, refused = error, str(error)
     after = snapshot(root)
     model.oracle.assert_sentinels()
     if refused is not None:
+        # Preserve an unexpected original production traceback for the existing
+        # bounded source-location diagnostic. A refusal cannot satisfy a
+        # declared positive, nor may an unknown refusal class become accepted
+        # merely because an unrelated unknown resource was observed at entry.
+        if expected_status not in {None, "refused-unknown-resource"} or not any(
+                text in refused for text in ("unknown native staging", "native transaction identity is unknown",
+                    "unproven profile stage", "owned profile bytes changed", "private profile stage was replaced")):
+            raise refusal_error
         # Only independent unknown resources justify a refused base-matrix cut.
         # A typed exception or a reassuring message alone is never acceptance.
         assert unknown, {"unexplainedRecoveryRefusal": refused, "before": before, "after": after}
-        assert any(text in refused for text in ("unknown native staging", "native transaction identity is unknown",
-                   "unproven profile stage", "owned profile bytes changed", "private profile stage was replaced")), refused
         assert_pending(root)
         assert all(facts(root / path) == identity for path, identity in unknown.items()), "unknown resource was adopted/deleted"
         assert before["controls"].get("intent.json") == after["controls"].get("intent.json"), "refusal changed immutable intent"
@@ -1263,7 +1269,7 @@ def replay_shard(root, original, recovery, shard):
             counts["manual/" + outcome["manual"]] += 1
     assert actual == expected and actual, "incomplete assigned execution"
     assert package_manifest(package) == before_package and definitions_manifest(ROOT) == before_definitions, "source changed during execution"
-    return {"shard": shard, "scope": "partial; one of sixteen required shards", "expectedCaseIds": list(cases),
+    return {"shard": shard, "scope": "partial; one of forty-eight required shards", "expectedCaseIds": list(cases),
             "executedCaseIds": actual, "inventorySha256": matrix_inventory_digest(cases, original, recovery),
             "packageSha256": digest(before_package), "definitionsSha256": digest(before_definitions),
             "counts": dict(counts), "productionRoot": str(package), "recoveryGroups": sorted(recovery["groups"]),

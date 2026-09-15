@@ -329,7 +329,7 @@ production recovery predicates, never a recorded-PID absence check, constrain
 case disposal. Expected worker exit 73 cannot authorize whole-phase residual
 disposal or remove retained product UNKNOWN.
 
-CI requires the full Linux/macOS × sixteen-shard × source/wheel product, in addition
+CI requires the full Linux/macOS × forty-eight-shard × source/wheel product, in addition
 to the native authority/ABI checks. The phase executes only its source-defined
 assignment, without a repeated native discovery prefix. Deterministic scheduling
 weights are planning estimates, not measured capacity; complete packing must be

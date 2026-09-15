@@ -178,22 +178,104 @@ class SigningRecoveryTests(NativeCaseWorkspaceMixin, unittest.TestCase):
         # Seed the PREPARED write through the real session path, then make the
         # explicitly selected runner fail before it invokes the command owner.
         # No public error flags or invented completion permit same-call cleanup.
-        with self.assertRaisesRegex(CredentialError, 'fixture pre-owner boundary'):
-            with signing.local_signing_lease(home=self.home) as lease:
-                session = lease.session(token=self.token)
-                session.open(create=True)
-                session.bind_runner(self.model)
-                session.prepare(b'fictional-profile', self.uuid)
-                calls = len(self.model.calls)
-                session.bind_runner(lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                    CredentialError('fixture pre-owner boundary')))
-                session.run(['security', 'list-keychains', '-d', 'user'], kind='observe')
+        from mobile_release import owned_process
+
+        injected = CredentialError('fixture pre-owner boundary')
+        invoked, closed, handles = [], [], {}
+        handlers = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
+        real_close = signing._close
+        def close(descriptor):
+            tracked, identity = descriptor in handles, None
+            if tracked:
+                try:
+                    observed = os.fstat(descriptor)
+                    identity = (observed.st_dev, observed.st_ino)
+                except OSError:
+                    pass  # An unavailable observation must not prevent the real close.
+            result = real_close(descriptor)
+            if tracked:
+                closed.append((descriptor, identity))
+            return result
+        with patch.object(signing, '_close', new=close):
+            with self.assertRaises(owned_process.ProcessError) as projected:
+                with signing.local_signing_lease(home=self.home) as lease:
+                    session = lease.session(token=self.token)
+                    session.open(create=True)
+                    session.bind_runner(self.model)
+                    session.prepare(b'fictional-profile', self.uuid)
+                    calls = len(self.model.calls)
+                    intent = (self.session_path/'intent.json').read_bytes()
+                    for descriptor in (lease.home_fd, lease.fd, session.fd, session.native_fd):
+                        identity = os.fstat(descriptor)
+                        handles[descriptor] = (identity.st_dev, identity.st_ino)
+                    self.assertEqual(len(handles), 4)
+                    def refuse(_argv, **kwargs):
+                        invoked.append((kwargs['execution_scope'], kwargs['journal_binding']))
+                        raise injected
+                    session.bind_runner(refuse)
+                    try:
+                        session.run(['security', 'list-keychains', '-d', 'user'], kind='observe')
+                    except CredentialError as error:
+                        self.assertIs(error, injected)  # Before real lease-exit projection.
+                        raise
+                    else:
+                        self.fail('original pre-owner failure did not propagate')
+        self.assertIs(type(projected.exception), owned_process.ProcessError)
+        self.assertIsNot(projected.exception, injected)
+        self.assertTrue(projected.exception.fatal)
+        self.assertFalse(projected.exception.cleanup_complete)
+        guard, ledger = lease.cancellation, lease.cancellation.lifetime_ledger
+        self.assertTrue(ledger.fatal)
+        self.assertEqual(guard.handler_state, 'RESTORED')
+        self.assertTrue(all(signal.getsignal(signum) is handler for signum, handler in handlers.items()))
+        self.assertCountEqual(closed, list(handles.items()))
+        self.assertEqual(lease._hold_slot.state, 'CLOSED')
+        self.assertFalse(lease.locked)
+        self.assertIsNone(lease.active)
+        self.assertTrue(session.closed)
+        self.assertEqual((lease.home_fd, lease.fd, session.fd, session.native_fd), (None,) * 4)
+        self.assertEqual(invoked, [(session._command_scope, session._command_binding)])
+        scope, binding = invoked[0]
+        self.assertIs(scope._binding, binding)
+        self.assertFalse(scope._used)
+        self.assertIsNone(scope.outcome._engine)
+        self.assertIsNone(scope.outcome.read())
+        self.assertIsNone(ledger._command)
+        self.assertIsNone(ledger._profile)
         state = json.loads((self.session_path/'state.json').read_bytes())
         self.assertEqual(state['inflight']['phase'], 'PREPARED')
+        self.assertEqual(state['token'], self.token)
+        self.assertEqual((self.session_path/'intent.json').read_bytes(), intent)
+        self.assertEqual(state['native'], {})
+        self.assertIsNone(self.model.keychain)
+        self.assertEqual(state['profile']['phase'], 'not-started')
+        self.assertEqual(list((self.session_path/'keychain').iterdir()), [])
         self.assertTrue(session.unresolved)
         self.assertEqual(len(self.model.calls), calls)
         self.assertFalse(any((self.session_path/name).exists() for name in signing.FENCE_CONTROLS))
-        self.assertEqual(self.recover()['status'], 'recovered')
+        # This is a white-box no-owner/no-native-resource case, not generic
+        # permission to recover an unhealthy process or a new-interpreter test.
+        # The old failed guard remains failed; a distinct public call owns only
+        # its newly admitted lease, handlers and real command targets.
+        recovered = []
+        real_recover = signing.SigningSession.recover
+        def recover(fresh_session, *args, **kwargs):
+            recovered.append((fresh_session.lease, fresh_session.cancellation))
+            self.assertIsNot(fresh_session.lease, lease)
+            self.assertIsNot(fresh_session.cancellation, guard)
+            self.assertTrue(ledger.fatal)
+            self.assertTrue(session.unresolved)
+            return real_recover(fresh_session, *args, **kwargs)
+        with patch.object(signing.SigningSession, 'recover', new=recover):
+            self.assertEqual(self.recover()['status'], 'recovered')
+        self.assertEqual(len(recovered), 1)
+        self.assertEqual(recovered[0][1].handler_state, 'RESTORED')
+        self.assertIs(guard.lifetime_ledger, ledger)
+        self.assertTrue(ledger.fatal)
+        self.assertTrue(session.unresolved)
+        self.assertEqual(signing.signing_status(home=self.home)['status'], 'idle')
+        with signing.local_signing_lease(home=self.home):
+            pass  # Genuine renewed normal admission, not a reset of the old guard.
 
     def test_failed_real_recovery_query_revokes_manual_recheck_without_journalling_a_new_operation(self):
         self.create()
@@ -445,7 +527,7 @@ class SigningRecoveryTests(NativeCaseWorkspaceMixin, unittest.TestCase):
 
 
 class SigningCrashMatrixTests(unittest.TestCase):
-    """Finite bare-home contrasts; full32 owns the duplicate all-IO replay."""
+    """Finite bare-home contrasts; full96 owns the duplicate all-IO replay."""
 
     def setUp(self):
         from workflow import local_signing_persistent_fixture as owner

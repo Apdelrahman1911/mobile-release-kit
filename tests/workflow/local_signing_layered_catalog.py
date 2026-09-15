@@ -15,7 +15,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 OPERATING_SYSTEMS = ("ubuntu-24.04", "macos-26")
-SHARDS = 16
+SHARDS = 48
 SCHEMA = "mrk-signing-layered-catalog-v2"
 
 

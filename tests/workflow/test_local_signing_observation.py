@@ -147,7 +147,12 @@ class ObservationContractTests(unittest.TestCase):
         self.assertEqual(session._committed_controls, {'state.json': b'PREPARED'})
 
     def test_composition_materializer_routes_only_its_private_directory_and_keeps_real_cleanup(self):
-        from unit.test_local_signing_composition import _materializer_directory
+        from unit import test_local_signing_composition as composition
+        from workflow import profile_installation_fixture as profile_fixture
+
+        _materializer_directory = persistent._materializer_directory
+        self.assertIs(composition._materializer_directory, _materializer_directory)
+        self.assertIs(profile_fixture._materializer_directory, _materializer_directory)
 
         with tempfile.TemporaryDirectory(prefix='mrk-materializer-route-inert-') as name:
             root, created = Path(name), []
@@ -160,18 +165,21 @@ class ObservationContractTests(unittest.TestCase):
                     actual = Path(owner.name)
                     self.assertEqual(actual.parent, private)
                     self.assertEqual(created[-1], actual)
+                    body_error = ValueError('inert body interruption')
                     try:
                         with owner:
                             (actual / 'fictional-input').write_bytes(b'fixture')
                             if fail_body:
-                                raise ValueError('inert body interruption')
+                                raise body_error
                     except ValueError as error:
                         self.assertTrue(fail_body)
-                        self.assertEqual(str(error), 'inert body interruption')
+                        self.assertIs(error, body_error)
                     self.assertFalse(os.path.lexists(actual))
-            failing = Mock(side_effect=OSError('inert allocation failure'))
-            with self.assertRaisesRegex(OSError, 'allocation failure'):
+            allocation_error = OSError('inert allocation failure')
+            failing = Mock(side_effect=allocation_error)
+            with self.assertRaisesRegex(OSError, 'allocation failure') as caught:
                 _materializer_directory(failing, private, created, prefix='mobile-release-build-inputs-')
+            self.assertIs(caught.exception, allocation_error)
             failing.assert_called_once_with(dir=private, prefix='mobile-release-build-inputs-')
             untouched = Mock()
             with self.assertRaisesRegex(AssertionError, 'allocation contract changed'):
@@ -377,3 +385,98 @@ class ObservationContractTests(unittest.TestCase):
                 changed["events"][-1]["index"] = 450
             with self.subTest(variant=variant), self.assertRaises(AssertionError):
                 semantic.assert_healthy_observation(root, changed)
+
+
+class RecoveryRefusalContractTests(unittest.TestCase):
+    @staticmethod
+    def inert_refusal(error, expected, *, unknown=True, unchanged=True,
+                      intent_unchanged=True, manual_events=()):
+        """Exercise recovery_flow arbitration with every account/native entry vetoed.
+
+        These are inert classifier inputs, not journals, TTYs or recovery receipts.
+        No production lease, command owner, filesystem fact or timer is acquired.
+        """
+        from contextlib import ExitStack, nullcontext
+        from workflow import local_signing_case_owner as case_owner
+
+        root, token = Path('/fictional-inert-recovery'), 'a' * 32
+        before = {'session': token, 'controls': {'intent.json': {'fictional': 'original'}}}
+        after = copy.deepcopy(before)
+        if not intent_unchanged:
+            after['controls']['intent.json'] = {'fictional': 'changed'}
+        identity = {'device': 1, 'inode': 2, 'sha256': 'fictional-classifier-data'}
+        unknown_files = {'owned-item': identity} if unknown else {}
+        actual = identity if unchanged else {**identity, 'inode': 3}
+        order, issued = [], []
+        snapshots = iter((before, after))
+        def snapshot(_root):
+            order.append('snapshot')
+            return next(snapshots)
+        def refuse(*_args, **_kwargs):
+            try:
+                raise error
+            except CredentialError as original:
+                issued.append(original.__traceback__)
+                raise
+        oracle = SimpleNamespace(assert_sentinels=Mock(side_effect=lambda: order.append('sentinels')))
+        trace = SimpleNamespace(events=list(manual_events), installed=lambda: nullcontext(), result=lambda: {})
+        result, caught, original_traceback = None, None, None
+        with ExitStack() as patches:
+            patches.enter_context(patch.object(case_owner, 'CASE_DEADLINE', 1000.0))
+            patches.enter_context(patch.object(case_owner, 'remaining', return_value=1.0))
+            patches.enter_context(patch.object(case_owner, 'adapter_progress'))
+            patches.enter_context(patch.object(signing, 'signing_status',
+                return_value={'status': 'pending', 'session': token}))
+            patches.enter_context(patch.object(signing, 'recover_signing', new=refuse))
+            patches.enter_context(patch.object(fixture, 'snapshot', new=snapshot))
+            patches.enter_context(patch.object(fixture, 'uncertainty', return_value=unknown_files))
+            patches.enter_context(patch.object(fixture, 'PersistentSigningModel',
+                return_value=SimpleNamespace(oracle=oracle)))
+            pending = patches.enter_context(patch.object(fixture, 'assert_pending'))
+            facts = patches.enter_context(patch.object(fixture, 'facts', return_value=actual))
+            try:
+                result = fixture.recovery_flow(root, trace, original_token=token, expected_status=expected)
+            except BaseException as original:
+                caught, original_traceback = original, original.__traceback__
+        return SimpleNamespace(result=result, error=caught, traceback=original_traceback,
+            issued=issued, order=order, oracle=oracle, pending=pending, facts=facts, root=root)
+
+    def test_unexpected_recovery_refusal_keeps_original_error_and_traceback(self):
+        for expected, message in (
+            (catalog.RECOVERED, 'unknown native staging remains; fictional input'),
+            (catalog.REFUSED, 'fictional unrecognized private recovery failure'),
+            (None, 'fictional unrecognized private recovery failure'),
+        ):
+            with self.subTest(expected=expected, recognized='unknown native staging' in message):
+                original = CredentialError(message)
+                observed = self.inert_refusal(original, expected)
+                self.assertIs(observed.error, original)
+                self.assertIsNone(observed.result)
+                self.assertEqual(len(observed.issued), 1)
+                frames, frame = [], observed.traceback
+                while frame is not None:
+                    frames.append(frame)
+                    frame = frame.tb_next
+                self.assertTrue(any(frame is observed.issued[0] for frame in frames))
+                self.assertEqual(observed.order, ['snapshot', 'snapshot', 'sentinels'])
+                observed.oracle.assert_sentinels.assert_called_once_with()
+                observed.pending.assert_not_called()
+                observed.facts.assert_not_called()
+
+    def test_known_negative_recovery_still_requires_resource_intent_and_manual_invariants(self):
+        original = CredentialError('native transaction identity is unknown; fictional input')
+        observed = self.inert_refusal(original, catalog.REFUSED)
+        self.assertIsNone(observed.error)
+        self.assertEqual(observed.result['refused'], str(original))
+        self.assertEqual(observed.result['expectedStatus'], catalog.REFUSED)
+        self.assertFalse(observed.result['idleAndRenewedAdmission'])
+        self.assertEqual(observed.order, ['snapshot', 'snapshot', 'sentinels'])
+        observed.pending.assert_called_once_with(observed.root)
+        observed.facts.assert_called_once_with(observed.root / 'owned-item')
+        for changed in ({'unknown': False}, {'unchanged': False}, {'intent_unchanged': False},
+                        {'manual_events': ({'operation': 'manual/input'},)}):
+            with self.subTest(changed=changed):
+                observed = self.inert_refusal(CredentialError(str(original)), catalog.REFUSED, **changed)
+                self.assertIsInstance(observed.error, AssertionError)
+                self.assertIsNone(observed.result)
+                self.assertEqual(observed.order, ['snapshot', 'snapshot', 'sentinels'])

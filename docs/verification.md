@@ -55,10 +55,11 @@ partial selection, `signing-adapter`, runs only the two-OS smoke scope below.
 `signing-adapter-macos` selects the identical source/wheel smoke on macOS only
 when a Darwin-only change does not invalidate previously recorded Linux evidence.
 It does not supply fresh Linux evidence or satisfy the full protected gate.
-`signing-matrix-canary` runs exactly four source/wheel cells: Linux shards 0 and
-11, and macOS shards 0 and 9. These probe shard-zero integration and each OS's
-largest planned-command shard for capacity qualification, not full verification;
-they also cannot satisfy the protected aggregate.
+`signing-matrix-canary` runs exactly seven source/wheel cells: Linux shards 0, 20
+and 28, and macOS shards 0, 1, 12 and 37. These probe each OS's largest planned
+command and worker counts plus the selected materialized cancellation, PREPARED
+no-dispatch and unrecorded-create recovery cases. They qualify capacity and
+integration, not full verification, and cannot satisfy the protected aggregate.
 Actions compares these string values without case sensitivity. Missing, empty or
 nonmatching values do not omit Linux. A partial dispatch's
 aggregate `test` deliberately **fails** because skipped Linux is not a
@@ -69,7 +70,7 @@ from full PR/main/manual runs.
 For fail-fast signing integration, manual `verification_target: signing-adapter`
 runs exactly four fixed signing methods in both source and installed wheel on
 each disposable Linux/macOS runner. It omits the full platform catalogs and
-32-cell matrix; its protected aggregate intentionally cannot pass. Results are
+96-cell matrix; its protected aggregate intentionally cannot pass. Results are
 labelled `adapter-only`, have no matrix-proof/reducer authority, and cannot replace
 the full verification required for delivery. Arbitrary test selectors are not
 supported. The ordinary owner path, source/package checks, original finality and
@@ -87,8 +88,8 @@ invented full result or count an unexecuted gate as passed.
 
 ### Required account-signing matrix
 
-Full verification's `test-signing-matrix` selects exactly sixteen shards on each supported OS,
-maximum four concurrent cells. Each cell prepares only its required offline
+Full verification's `test-signing-matrix` selects exactly forty-eight shards on each supported OS,
+maximum eight concurrent cells on independent disposable VMs. Each cell prepares only its required offline
 Python inputs, builds/freezes/inspects the same complete source and installed
 package, then invokes both phases through `verify_ci.py --scope signing-matrix`.
 This is a finite catalog, not permission to run arbitrary subsets or commands.
@@ -96,6 +97,12 @@ The primary interpreter and complete native-provider admission remain required.
 The 420-second phase and 900-second pair cutoffs include finality, parsing,
 persisted-output accounting and compact proof publication. The original ordinary
 Session does not enable retained-domain disposal for a matrix phase.
+Optional progress contains only bound case IDs, ordinals, helper start/return
+and elapsed milliseconds, with fixed event/byte limits. A helper return is not
+case completion or cleanup evidence. Successful phases reject arbitrary stderr;
+they may contain only an empty or strictly ordered canonical progress prefix.
+After an original capture failure, diagnostics may inspect its returned bytes
+under the already-bound pair cutoff, never extend native work or infer finality.
 The adapter uses the same phase/pair cutoffs. Scope-specific preparation and
 teardown consume those endpoints; preceding offline-input/install/catalog gates
 remain under the unchanged aggregate deadline, not inside the 900-second pair.

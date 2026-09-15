@@ -2361,6 +2361,115 @@ class SigningMatrixControllerTests(unittest.TestCase):
             return rig.controller.perform_matrix_gate(rig.step, rig.paths, rig.session, rig.checks,
                                                        "linux", rig.selection, deadline=2000.0)
 
+    def progress(self, rig, *, events=1, phase="source"):
+        """Canonical public DATA, not an original capture or a result receipt."""
+        return b"".join(b"MRK_SIGNING_MATRIX_PROGRESS=" + rig.contract.canonical({
+            "schema": 1, "phase": phase, "caseId": rig.selected[index // 2], "ordinal": index // 2 + 1,
+            "event": ("helper-start", "helper-returned")[index % 2], "elapsedMs": index}) + b"\n"
+            for index in range(events))
+
+    def test_optional_progress_preserves_all_original_proofs_and_rejects_unknown_success_stderr(self):
+        for mode in ("prefix", "complete", "unknown-stderr", "failure-marker", "missing-cleanup", "missing-original-wait"):
+            with self.subTest(mode=mode):
+                rig = self.rig()
+                rig.capture_changes["source"] = {"stderr": self.progress(
+                    rig, events=2 * len(rig.selected) if mode == "complete" else 1)}
+                if mode == "unknown-stderr":
+                    rig.capture_changes["source"]["stderr"] += b"PRIVATE unrecognized stderr\n"
+                if mode == "failure-marker":
+                    rig.capture_changes["source"]["stderr"] += b"MRK_SIGNING_MATRIX_FAILURE={}\n"
+                if mode == "missing-cleanup":
+                    rig.changes["source"] = {"allCasePathsRemoved": False}
+                if mode == "missing-original-wait":
+                    rig.capture_changes["source"].update(waited=False, domain_finality=False)
+                result = self.execute(rig)
+                self.assertEqual(result.ok, mode in {"prefix", "complete"})
+                self.assertEqual(len(rig.captures), 2 if result.ok else 1)
+                if result.ok:
+                    count = 2 * len(rig.selected) if mode == "complete" else 1
+                    self.assertEqual(result.details["phases"][0]["matrix_progress"]["eventCount"], count)
+                    self.assertEqual(len([event for event in rig.events if event[0] == "actual"]), 2)
+                    self.assertTrue(any(event[0] == "publish" for event in rig.events))
+                else:
+                    self.assertFalse(any(event[0] == "publish" for event in rig.events))
+                    if mode != "missing-cleanup":
+                        self.assertFalse(any(event[0] in {"read", "finalized", "actual"} for event in rig.events))
+                self.assertNotIn("PRIVATE", json.dumps(result.details))
+
+    def test_only_failed_original_matrix_bytes_use_the_prebound_pair_after_phase_expiry(self):
+        for mode in ("phase-expired", "pair-expired", "parser-error", "positive-expired"):
+            with self.subTest(mode=mode):
+                rig = self.rig()
+                rig.capture_changes["source"] = {"stderr": self.progress(rig)}
+                if mode != "positive-expired":
+                    rig.capture_changes["source"].update(ok=False, returncode=None, waited=False, stdout_eof=False,
+                        stderr_eof=False, domain_finality=False, timed_out=True, primary_error="command deadline expired")
+                original_run, original_idle = rig.session.run, rig.session.ensure_idle
+
+                def run(*args, **kwargs):
+                    value = original_run(*args, **kwargs)
+                    rig.clock = 910.0 if mode == "pair-expired" else 431.0
+                    return value
+
+                def idle(*, deadline):
+                    original_idle(deadline=deadline)
+                    rig.controller.check_clock(deadline)
+
+                rig.session.run, rig.session.ensure_idle = run, idle
+                parser = (patch.object(rig.controller, "signing_matrix_progress", side_effect=RuntimeError("PRIVATE parser"))
+                          if mode == "parser-error" else nullcontext())
+                with parser:
+                    result = self.execute(rig)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error, "AGGREGATE_DEADLINE" if mode == "positive-expired" else "COMMAND_EXIT_OR_FINALITY")
+                self.assertEqual(len(rig.captures), 1)
+                row = result.details["phases"][0]
+                self.assertEqual("matrix_progress" in row, mode == "phase-expired")
+                self.assertEqual("matrix_progress_error" in row, mode in {"pair-expired", "parser-error"})
+                if mode != "positive-expired":
+                    self.assertIsNone(row["capture"]["returncode"])
+                    for name in ("waited", "stdout_eof", "stderr_eof", "domain_finality"):
+                        self.assertIs(row["capture"][name], False)
+                    self.assertIn("idle_error", row)
+                run_index = next(index for index, event in enumerate(rig.events) if event[0] == "run")
+                options = rig.events[run_index][3]
+                self.assertEqual((options["seconds"], options["absolute_deadline"]), (420, 430.0))
+                self.assertEqual([event for event in rig.events[run_index + 1:] if event[0] == "idle"], [("idle", 430.0)])
+                self.assertFalse(any(event[0] in {"read", "inspect", "actual", "finalized", "publish"}
+                                     for event in rig.events[run_index + 1:]))
+                self.assertNotIn("PRIVATE", json.dumps(result.details))
+
+    def test_matrix_pair_admission_is_finite_specific_and_diagnostics_preserve_the_identical_primary(self):
+        rig = self.rig()
+        controller = rig.controller
+        diagnostic = controller.SigningMatrixDiagnostic("source", "ubuntu-24.04", 0, tuple(rig.selected), (), ())
+        argv = controller.matrix_phase_argv(rig.paths, rig.selection, "source", deadline=20.0)
+        with rig.scope_context():
+            for pair in (None, True, float("nan"), float("inf"), 19.0, 911.0):
+                with self.subTest(pair=pair), self.assertRaisesRegex(controller.VerificationError,
+                                                                    "SIGNING_MATRIX_DIAGNOSTIC_DEADLINE"):
+                    controller.original_native_capture(rig.session, argv, rig.paths, [], "source",
+                        deadline=20.0, seconds=420, env={}, signing_matrix_diagnostic=diagnostic,
+                        signing_matrix_pair_deadline=pair)
+            with self.assertRaisesRegex(controller.VerificationError, "SIGNING_MATRIX_DIAGNOSTIC_SCOPE"):
+                controller.original_native_capture(rig.session, argv, rig.paths, [], "source",
+                    deadline=20.0, seconds=420, env={}, signing_matrix_pair_deadline=30.0)
+            self.assertEqual(rig.events, [])
+            original = ValueError("PRIVATE original failure")
+            rows = []
+            with patch.object(controller, "require_original_finality", side_effect=original), \
+                    patch.object(controller, "signing_matrix_failure", side_effect=RuntimeError("PRIVATE diagnostic")) as failure, \
+                    patch.object(controller, "signing_matrix_progress", side_effect=RuntimeError("PRIVATE progress")) as progress, \
+                    self.assertRaises(ValueError) as caught:
+                controller.original_native_capture(rig.session, argv, rig.paths, rows, "source",
+                    deadline=20.0, seconds=420, env={}, signing_matrix_diagnostic=diagnostic,
+                    signing_matrix_pair_deadline=30.0)
+            self.assertIs(caught.exception, original)
+            self.assertEqual(failure.call_args.kwargs, {"deadline": 30.0})
+            self.assertEqual(progress.call_args.kwargs, {"deadline": 30.0, "failed_capture": True})
+            self.assertEqual(rows[0]["status"], "FAIL")
+            self.assertNotIn("PRIVATE", json.dumps(rows))
+
     def test_two_original_ordinary_captures_share_fixed_cutoffs_and_publish_after_finality(self):
         rig = self.rig()
         result = self.execute(rig)
@@ -2722,7 +2831,11 @@ class SigningAdapterControllerTests(unittest.TestCase):
                           "origins": adapter.origins, "casePathsRemoved": True}
         def parse_matrix(value):
             capture = native_capture_fixture(stdout=b"MRK_MATRIX_PHASE=" + matrix.contract.canonical(value) + b"\n")
-            matrix.controller.parse_matrix_phase(capture, "source", matrix.scope, package, 0)
+            diagnostic = matrix.controller.SigningMatrixDiagnostic("source", "ubuntu-24.04", 0,
+                                                                    tuple(matrix.selected), (), ())
+            with patch.object(matrix.controller, "time", SimpleNamespace(monotonic=lambda: 10.0)):
+                matrix.controller.parse_matrix_phase(capture, "source", matrix.scope, package, 0,
+                                                      diagnostic=diagnostic, deadline=20.0)
         parse_matrix(matrix_record)
         adapter.contract.validate_adapter_record(adapter_record, adapter.scope, "source", package)
         for attempt in (True, 1.0):

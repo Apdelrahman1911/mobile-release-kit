@@ -12,30 +12,34 @@ from . import local_signing_matrix_contract as contract
 
 
 class SigningCatalogAdmissionTests(unittest.TestCase):
-    def test_capacity_canary_adds_each_platforms_maximum_planned_command_shard(self):
+    def test_capacity_canary_covers_command_worker_peaks_and_original_failed_cases(self):
         catalog = contract.layered_catalog()
-        for operating_system, heavy_shard in (("ubuntu-24.04", 11), ("macos-26", 7)):
+        self.assertEqual((contract.SHARDS, catalog.SHARDS), (48, 48))
+        for operating_system, heavy_shard, command_max in (("ubuntu-24.04", 20, 361), ("macos-26", 1, 363)):
             with self.subTest(operating_system=operating_system):
                 cases = {item.identifier: item for item in catalog.cases_for(operating_system)}
                 groups, _weights = catalog.assignment(operating_system)
                 estimates = [sum(cases[identifier].estimated_commands for identifier in group)
                              for group in groups]
-                self.assertEqual(estimates[heavy_shard], max(estimates))
-                self.assertGreater(estimates[heavy_shard], estimates[12])
-                # The other canary cell keeps an actual fatal G before a later
-                # semantic fork and the original seven-cut bare-home G fork.
-                ordered = [cases[identifier] for identifier in groups[12]]
-                names = [(catalog.REGRESSION.case(item.name).original_method
-                          if item.kind == "regression" else "") for item in ordered]
-                bare, = (index for index, name in enumerate(names)
-                         if name.endswith(".test_seven_bare_home_parent_and_empty_native_prefix_cuts_recover_automatically"))
-                fatal = [index for index, name in enumerate(names)
-                         if name.endswith(".test_genuine_nonzero_command_result_cannot_hide_later_independent_fatal_close")
-                         or name.endswith(".test_actual_handler_restoration_cannot_mask_retained_resource_failure")]
-                self.assertTrue(any(index < bare and any(item.kind == "semantic"
-                    for item in ordered[index + 1:bare]) for index in fatal))
+                workers = [sum(cases[identifier].owned_workers for identifier in group) for group in groups]
+                self.assertEqual((estimates[heavy_shard], max(estimates)), (command_max, command_max))
+                self.assertEqual((workers[0], max(workers)), (99, 99))
+                self.assertIn("A/installer-owned", {cases[identifier].name for identifier in groups[0]})
                 # Planning arithmetic selects useful probes; it is not measured
-                # capacity or permission to omit the complete sixteen shards.
+                # capacity or permission to omit any of the forty-eight shards.
+        for operating_system, shard, identifier, name in (
+            ("ubuntu-24.04", 28, "626776edad3a2c9ba7ef48a7d457e9dcbe556e51fe8082dcea814208280472d7",
+             "G/unit.test_ios_profile_installation.ProfileInstallationSignalTests."
+             "test_late_setup_and_actual_materialized_body_cancellation_never_execute_following_build_code/variant/material-body:TERM"),
+            ("macos-26", 12, "b67561fee0d342c81aadbd88dee9d48aacf5653274556ba4c814f6b141a920eb",
+             "G/unit.test_local_signing_recovery.SigningRecoveryTests."
+             "test_prepared_without_any_command_dispatch_needs_a_fresh_attempt_before_cleanup/whole"),
+            ("macos-26", 37, "224b4cdf58e40ff3b8e9b008b7ba5ebfa9fb856cf9850613515e7350e6b2c75a",
+             "S/native-unrecorded-create/resolve"),
+        ):
+            with self.subTest(original_failure=(operating_system, shard)):
+                self.assertIn(identifier, catalog.shard_ids(operating_system, shard))
+                self.assertEqual(catalog.case(identifier, operating_system).name, name)
 
     def loaders(self):
         catalog = contract.layered_catalog()

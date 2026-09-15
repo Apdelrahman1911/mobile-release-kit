@@ -1357,7 +1357,7 @@ def _private_pty_command(argv: list[str], root: Path, python: Path, uid: int) ->
             or fields["--output"] != str(root / "work" / ("signing-matrix" if matrix else "signing-adapter") / phase)
             or fields["--os"] != "macos-26"
             or fields["--job"] not in ({"test", "test-signing-matrix"} if matrix else {"test-signing-adapter"})
-            or matrix and re.fullmatch(r"(?:[0-9]|1[0-5])", fields["--shard"]) is None
+            or matrix and re.fullmatch(r"(?:[0-9]|[1-3][0-9]|4[0-7])", fields["--shard"]) is None
             or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", fields["--repository"]) is None
             or re.fullmatch(r"[0-9a-f]{40}", fields["--commit"]) is None
             or any(re.fullmatch(r"[1-9][0-9]{0,19}", fields[label]) is None for label in ("--run-id", "--run-attempt"))):

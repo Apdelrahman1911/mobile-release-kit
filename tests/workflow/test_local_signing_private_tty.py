@@ -360,12 +360,22 @@ class PrivateTTYContractTests(unittest.TestCase):
                     str(session.source / "tests/workflow/run_local_signing_matrix.py"), flag, phase,
                     "--package-root", str(package), "--output",
                     str(session.work / ("signing-matrix" if matrix else "signing-adapter") / phase),
-                    *(["--shard", "15"] if matrix else []), "--deadline", "50.0", "--os", "macos-26",
+                    *(["--shard", "47"] if matrix else []), "--deadline", "50.0", "--os", "macos-26",
                     "--repository", "synthetic/project", "--commit", "a" * 40, "--run-id", "1", "--run-attempt", "1",
                     "--job", "test-signing-matrix" if matrix else "test-signing-adapter"])
         for command in vectors:
             self.assertTrue(self.module._private_pty_command(command, session.root, session.python, session.uid))
             self.assertEqual(session._argv(command, 10)[0][5], "--enter-private-pty")
+        # The expanded assignment is still a closed canonical 0..47 role, not
+        # arbitrary numeric or alternate textual shard authority.
+        shard_index = vectors[1].index("--shard") + 1
+        for shard in ("0", "15", "16", "39", "40", "47", "48", "49", "-1", "00", "+1", "1.0"):
+            selected = list(vectors[1])
+            selected[shard_index] = shard
+            with self.subTest(shard=shard):
+                accepted = shard in {"0", "15", "16", "39", "40", "47"}
+                self.assertEqual(self.module._private_pty_command(selected, session.root, session.python, session.uid), accepted)
+                self.assertEqual(session._argv(selected, 10)[0][5], "--enter-private-pty" if accepted else "--enter")
         invalid = [probe[:-1] + [json.dumps({**data, "private_pty_required": False})],
                    probe[:-1] + [json.dumps({**data, "probe_scratch": "/inert"})],
                    [str(session.ruby), "--inert"], [str(session.python), "-m", "pip"],
