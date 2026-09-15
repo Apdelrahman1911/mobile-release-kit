@@ -789,6 +789,7 @@ class PersistentWorkerRecorderTests(unittest.TestCase):
                                    is_alive=Mock(return_value=False), join=Mock())
         model = object.__new__(PersistentSigningModel)
         model.root = Path("/inert/original-case")
+        model.trace = None
         retained = []
         with patch.object(bridge, "Namespace", return_value=namespace), \
                 patch.object(persistent_model, "threading", SimpleNamespace(Event=persistent_model.threading.Event,
