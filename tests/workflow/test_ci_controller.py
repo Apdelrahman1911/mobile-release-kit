@@ -371,7 +371,7 @@ class NativeProcessCIIntegrationTests(unittest.TestCase):
         # workflow-directory observation, including the packaged argv cases.
         with patch.object(controller, "ruby_expected_ids", side_effect=lambda source, gate:
                           catalog_ids.get(gate, ("CatalogFixture#test_other",))) as source, \
-                patch.object(Path, "exists", return_value=False) as exists, \
+                patch.object(Path, "exists", side_effect=AssertionError("catalog must not probe runtime paths")) as exists, \
                 patch.object(Path, "glob", return_value=()) as glob:
             for platform in ("linux", "macos"):
                 steps = {step.id: step for step in controller.catalog(paths, platform, deadline=1000.0)}
@@ -379,7 +379,7 @@ class NativeProcessCIIntegrationTests(unittest.TestCase):
                     self.assertEqual((steps[gate].seconds, steps[gate].expected_tests), (seconds, total))
                 for gate in ("ruby-native-spawn", "ruby-native-signal-observation"):
                     self.assertEqual(steps[gate].seconds, 180)
-            self.assertEqual(exists.call_count, 2)
+            exists.assert_not_called()
             self.assertEqual(glob.call_count, 4)
             self.assertTrue({"ruby-packaged-capture-source", "ruby-packaged-capture-wheel"}
                             <= {call.args[1] for call in source.call_args_list})
@@ -1921,10 +1921,8 @@ class CICoordinatorResultTests(unittest.TestCase):
                 'MRK_CHECK_RESULT={"details":{},"details":{}}\n'
                 'MRK_CHECK_RESULT={"details":null}\n'
                 'MRK_CHECK_RESULT={"details":{"error":NaN}}\n')
-        captured = SimpleNamespace(returncode=7, waited=True, stdout_eof=True, stderr_eof=True,
-                                   domain_finality=True, timed_out=False, cancelled=False,
-                                   stdout=text.encode(), stderr=b"",
-                                   persisted=(len(text), 0), duration=0.2, primary_error="command exited 7", cleanup_errors=())
+        captured = native_capture_fixture(ok=False, returncode=7, stdout=text.encode(),
+                                          stderr=b"", duration=0.2, primary_error="command exited 7")
         details = controller.failure_details(captured, step, paths)
         self.assertEqual(details["returncode"], 7)
         self.assertEqual(details["failed_tests"], sorted([known, assertion]))
