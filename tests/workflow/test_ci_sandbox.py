@@ -2739,11 +2739,11 @@ class CISandboxPureTests(unittest.TestCase):
         helper = (ROOT / ".github/scripts/ci_sandbox.py").read_text(encoding="utf-8")
         imports = ("import dataclasses", "import errno", "import grp", "import hashlib", "import importlib.util",
             "import json", "import math", "import os", "from pathlib import Path", "import pwd", "import re",
-            "import resource", "import secrets", "import selectors", "import signal", "import socket", "import stat",
-            "import subprocess", "import sys", "import time")
+            "import resource", "import secrets", "import select", "import selectors", "import signal", "import socket", "import stat",
+            "import subprocess", "import sys", "import termios", "import time", "import tty")
         future = "from __future__ import annotations"
         tokens = ["MRK_NATIVE_PYTHON_BOOT", *(f"MRK_NATIVE_IMPORT_{index:02}_{edge}"
-            for index in range(1, 21) for edge in ("BEFORE", "AFTER")), "MRK_NATIVE_PYTHON_DONE"]
+            for index in range(1, 24) for edge in ("BEFORE", "AFTER")), "MRK_NATIVE_PYTHON_DONE"]
         expected = "".join(token + "\n" for token in tokens).encode("ascii")
 
         def shape(node):
@@ -2755,11 +2755,11 @@ class CISandboxPureTests(unittest.TestCase):
             actual_imports = [node for node in source_tree.body if isinstance(node, (ast.Import, ast.ImportFrom))]
             fixed_imports = ast.parse(future + "\n" + "\n".join(imports)).body
             self.assertEqual([shape(node) for node in actual_imports], [shape(node) for node in fixed_imports])
-            self.assertEqual(len(program_tree.body), 63)
+            self.assertEqual(len(program_tree.body), 72)
             self.assertEqual(shape(program_tree.body[0]), shape(fixed_imports[0]))
-            prints = [program_tree.body[1], *(node for index in range(20)
+            prints = [program_tree.body[1], *(node for index in range(23)
                 for node in (program_tree.body[2 + 3 * index], program_tree.body[4 + 3 * index])), program_tree.body[-1]]
-            self.assertEqual([shape(program_tree.body[3 + 3 * index]) for index in range(20)],
+            self.assertEqual([shape(program_tree.body[3 + 3 * index]) for index in range(23)],
                              [shape(node) for node in fixed_imports[1:]])
             for node, token in zip(prints, tokens, strict=True):
                 self.assertEqual(shape(node), shape(ast.parse(f'print("{token}", flush=True)').body[0]))
@@ -2768,7 +2768,7 @@ class CISandboxPureTests(unittest.TestCase):
         literal_contract(program, helper)
         self.assertEqual(self.module._NATIVE_STARTUP_CASES, ("startup-true", "startup-python"))
         self.assertEqual(self.module._NATIVE_STARTUP_STDOUT, expected)
-        self.assertEqual(len(expected.splitlines()), 42)
+        self.assertEqual(len(expected.splitlines()), 48)
         self.assertLess(len(expected), 2048)
         assignments = {node.targets[0].id: node.value for node in ast.parse(helper).body
             if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)}
@@ -2803,7 +2803,7 @@ class CISandboxPureTests(unittest.TestCase):
 
         lines = expected.splitlines(keepends=True)
         stages = ["no-body-marker", "body", *(f"{edge}-import-{index:02}"
-            for index in range(1, 21) for edge in ("before", "after")), "imports-finished"]
+            for index in range(1, 24) for edge in ("before", "after")), "imports-finished"]
         self.assertEqual(len(stages), len(lines) + 1)
         for count, stage in enumerate(stages):
             with self.subTest(native_startup_exact_prefix=count):

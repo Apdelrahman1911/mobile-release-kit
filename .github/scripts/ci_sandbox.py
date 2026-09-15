@@ -113,26 +113,35 @@ print("MRK_NATIVE_IMPORT_13_BEFORE", flush=True)
 import secrets
 print("MRK_NATIVE_IMPORT_13_AFTER", flush=True)
 print("MRK_NATIVE_IMPORT_14_BEFORE", flush=True)
-import selectors
+import select
 print("MRK_NATIVE_IMPORT_14_AFTER", flush=True)
 print("MRK_NATIVE_IMPORT_15_BEFORE", flush=True)
-import signal
+import selectors
 print("MRK_NATIVE_IMPORT_15_AFTER", flush=True)
 print("MRK_NATIVE_IMPORT_16_BEFORE", flush=True)
-import socket
+import signal
 print("MRK_NATIVE_IMPORT_16_AFTER", flush=True)
 print("MRK_NATIVE_IMPORT_17_BEFORE", flush=True)
-import stat
+import socket
 print("MRK_NATIVE_IMPORT_17_AFTER", flush=True)
 print("MRK_NATIVE_IMPORT_18_BEFORE", flush=True)
-import subprocess
+import stat
 print("MRK_NATIVE_IMPORT_18_AFTER", flush=True)
 print("MRK_NATIVE_IMPORT_19_BEFORE", flush=True)
-import sys
+import subprocess
 print("MRK_NATIVE_IMPORT_19_AFTER", flush=True)
 print("MRK_NATIVE_IMPORT_20_BEFORE", flush=True)
-import time
+import sys
 print("MRK_NATIVE_IMPORT_20_AFTER", flush=True)
+print("MRK_NATIVE_IMPORT_21_BEFORE", flush=True)
+import termios
+print("MRK_NATIVE_IMPORT_21_AFTER", flush=True)
+print("MRK_NATIVE_IMPORT_22_BEFORE", flush=True)
+import time
+print("MRK_NATIVE_IMPORT_22_AFTER", flush=True)
+print("MRK_NATIVE_IMPORT_23_BEFORE", flush=True)
+import tty
+print("MRK_NATIVE_IMPORT_23_AFTER", flush=True)
 print("MRK_NATIVE_PYTHON_DONE", flush=True)
 '''
 _NATIVE_STARTUP_STDOUT = b'''MRK_NATIVE_PYTHON_BOOT
@@ -176,6 +185,12 @@ MRK_NATIVE_IMPORT_19_BEFORE
 MRK_NATIVE_IMPORT_19_AFTER
 MRK_NATIVE_IMPORT_20_BEFORE
 MRK_NATIVE_IMPORT_20_AFTER
+MRK_NATIVE_IMPORT_21_BEFORE
+MRK_NATIVE_IMPORT_21_AFTER
+MRK_NATIVE_IMPORT_22_BEFORE
+MRK_NATIVE_IMPORT_22_AFTER
+MRK_NATIVE_IMPORT_23_BEFORE
+MRK_NATIVE_IMPORT_23_AFTER
 MRK_NATIVE_PYTHON_DONE
 '''
 _ENV_KEYS = frozenset("""
@@ -221,7 +236,7 @@ def _native_startup_stage(data: bytes) -> str:
         if data == prefix:
             if index == 0:
                 return "body"
-            if index == 41:
+            if index == 47:
                 return "imports-finished"
             return f"{'before' if index % 2 else 'after'}-import-{(index + 1) // 2:02d}"
     return "unclassified"
