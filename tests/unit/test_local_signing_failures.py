@@ -128,9 +128,11 @@ class DescriptorFault:
             identity = self.identity(entry["fd"])
             close_index = entry.get("normalCloseIndex")
             # FD/inode/type can recur after a prior handle and file disappear.
-            # Only this entry's returned close, before the retained replacement
-            # existed, can explain a currently equal historical identity.
-            recycled = self.after and close_index is not None and any(
+            # Only this entry's returned close, before the later fault, can
+            # explain a currently equal historical identity. A before-close
+            # fault can retain a reopened original just as an after-close fault
+            # can retain a replacement with that same descriptor and identity.
+            recycled = close_index is not None and any(
                 0 <= close_index < fault["closeIndex"]
                 and self.closed[close_index] == (entry["fd"], entry["identity"])
                 and entry["fd"] == fault["fd"] and identity == fault["retainedIdentity"]
@@ -181,9 +183,11 @@ class DescriptorFaultHistoryTests(unittest.TestCase):
         fd, retained, other = 211, (1, 10, stat.S_IFREG), (1, 20, stat.S_IFREG)
         mutations = (None, "retained-close", "original-close", "missing-success", "late-success",
                      "wrong-success-event", "different-acquisition", "unrelated-live", "identity", "content")
-        for original_equals_retained in (False, True):
+        for after, original_equals_retained in ((False, True), (True, False), (True, True)):
             for mutation in mutations:
-                with self.subTest(original_equals_retained=original_equals_retained, mutation=mutation):
+                if not after and mutation == "content":
+                    continue  # Only the after-close replacement has canary bytes.
+                with self.subTest(after=after, original_equals_retained=original_equals_retained, mutation=mutation):
                     seam, state, _ = self.fixture()
                     state.live[fd] = retained
                     seam.record(fd, "historical")
@@ -198,10 +202,16 @@ class DescriptorFaultHistoryTests(unittest.TestCase):
                     fault = seam.faults[0]
                     self.assertIs(fault["entry"], seam.opened[-1])
                     self.assertNotIn("normalCloseIndex", fault["entry"])
-                    # Model the already-created retained replacement, with no
-                    # native close/open call and no claim about OS allocation.
-                    state.live[fd] = fault["retainedIdentity"] = retained
-                    seam.after = True
+                    if after:
+                        # Model the already-created retained replacement, with no
+                        # native close/open call or claim about OS allocation.
+                        state.live[fd] = fault["retainedIdentity"] = retained
+                        seam.after = True
+                    else:
+                        # The injected before-close failure leaves this original
+                        # acquisition live; no replacement is created or claimed.
+                        self.assertEqual(state.live[fd], original)
+                        self.assertEqual(fault["retainedIdentity"], original)
                     if mutation == "retained-close":
                         seam.closed.append((fd, retained))
                     elif mutation == "original-close":

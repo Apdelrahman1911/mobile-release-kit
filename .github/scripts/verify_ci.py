@@ -716,7 +716,7 @@ RUBY_NATIVE_CAPTURE_BUDGETS = (
 RUBY_NATIVE_CAPTURE_SHARED_SECONDS = 10
 RUBY_PARTITION_CONTRACTS = (
     ("ruby-native-owner", "test_native_upload_process.rb", 52, 44, 120, None),
-    ("ruby-native-capture", "test_native_upload_validation.rb", 21, 17, 310, "NativeUploadValidationTest"),
+    ("ruby-native-capture", "test_native_upload_validation.rb", 22, 18, 310, "NativeUploadValidationTest"),
     ("ruby-ios_upload_validation", "test_ios_upload_validation.rb", 32, 23, 300, "IosUploadValidationTest"),
     ("ruby-android_upload_validation", "test_android_upload_validation.rb", 32, 23, 300, "AndroidUploadValidationTest"),
 )
@@ -4951,12 +4951,91 @@ def error_details(exc: BaseException) -> dict:
     return details
 
 
+def public_summary_projection(report: dict) -> dict:
+    """Schema2 removes only checked, redundant completion lists; schema1 stays intact.
+
+    ``summary.tests`` expands to sorted test IDs, and ``partitions`` expands to
+    their duplicate-free sorted completion union. Delegated obligations are not
+    executed completions. This presentation step never grants a passing result.
+    """
+    if (type(report) is not dict or type(report.get("schema")) is not int or report["schema"] != 1
+            or type(report.get("rows")) is not list):
+        raise VerificationError("PUBLIC_SUMMARY_PROJECTION")
+
+    def completed(value: dict) -> list[str]:
+        ids = value.get("completed")
+        if ("completed_from" in value or type(ids) is not list or not ids
+                or any(type(identifier) is not str or not identifier for identifier in ids)
+                or type(value.get("tests")) is not int or value["tests"] != len(ids)
+                or ids != sorted(set(ids))):
+            raise VerificationError("PUBLIC_SUMMARY_PROJECTION")
+        return ids
+
+    rows, seen = [], set()
+    for row in report["rows"]:
+        if type(row) is not dict or type(row.get("id")) is not str:
+            raise VerificationError("PUBLIC_SUMMARY_PROJECTION")
+        gate = row["id"]
+        if gate not in ("python-full", "python-wheel", "native-profile-source", "native-profile-wheel"):
+            rows.append(row)
+            continue
+        if gate in seen or type(row.get("status")) is not str:
+            raise VerificationError("PUBLIC_SUMMARY_PROJECTION")
+        seen.add(gate)
+        if row["status"] in ("FAIL", "RUNNING", "UNEXECUTED"):
+            rows.append(row)  # Keep incomplete/failed diagnostics verbatim.
+            continue
+        details = row.get("details")
+        if (row["status"] != "PASS" or type(details) is not dict
+                or type(details.get("stage")) is not str or details["stage"] != "complete"
+                or "failure" in details or type(details.get("partitions")) is not list):
+            raise VerificationError("PUBLIC_SUMMARY_PROJECTION")
+        expected = ((*PYTHON_SINGLETON_PARTITIONS, "healthy") if gate in ("python-full", "python-wheel")
+                    else ("authority", "ordinary", *PYTHON_SINGLETON_PARTITIONS))
+        partitions = details["partitions"]
+        if (any(type(part) is not dict or type(part.get("partition")) is not str for part in partitions)
+                or tuple(part["partition"] for part in partitions) != expected):
+            raise VerificationError("PUBLIC_SUMMARY_PROJECTION")
+        projected, joined = [], []
+        for part in partitions:
+            if type(part.get("status")) is not str or part["status"] != "PASS":
+                raise VerificationError("PUBLIC_SUMMARY_PROJECTION")
+            ids = completed(part)
+            joined.extend(ids)
+            if part["partition"] == "healthy":
+                summary = part.get("summary")
+                if (type(summary) is not dict or set(summary) != {"check", "ok", "tests", "details"}
+                        or type(summary["check"]) is not str or summary["check"] != gate
+                        or summary["ok"] is not True or type(summary["details"]) is not dict
+                        or type(summary["tests"]) is not list
+                        or any(type(test) is not dict or set(test) != {"id", "outcome"}
+                               or type(test["id"]) is not str or type(test["outcome"]) is not str
+                               or test["outcome"] not in ("ok", "skip") for test in summary["tests"])):
+                    raise VerificationError("PUBLIC_SUMMARY_PROJECTION")
+                summary_ids = [test["id"] for test in summary["tests"]]
+                if len(summary_ids) != len(set(summary_ids)) or ids != sorted(summary_ids):
+                    raise VerificationError("PUBLIC_SUMMARY_PROJECTION")
+                part = dict(part)
+                del part["completed"]
+                part["completed_from"] = "summary.tests"
+            projected.append(part)
+        if len(joined) != len(set(joined)) or completed(details) != sorted(joined):
+            raise VerificationError("PUBLIC_SUMMARY_PROJECTION")
+        details = dict(details, partitions=projected)
+        del details["completed"]
+        details["completed_from"] = "partitions"
+        rows.append(dict(row, details=details))
+    return dict(report, schema=2, rows=rows)
+
+
 def publish_summary(path: Path, report: dict, *, runner_temp: Path, deadline: float) -> None:
     check_clock(deadline)
     if (path.resolve(strict=True) != path or not path.is_relative_to(runner_temp)
             or not re.fullmatch(r"step_summary_[A-Za-z0-9_-]+", path.name)):
         raise VerificationError("SUMMARY_DESTINATION")
-    encoded = json.dumps(report, sort_keys=True, ensure_ascii=True, allow_nan=False).encode("ascii")
+    encoded = json.dumps(public_summary_projection(report), sort_keys=True, ensure_ascii=True,
+                         allow_nan=False, separators=(",", ":")).encode("ascii")
+    check_clock(deadline)
     if len(encoded) > 768 * 1024:
         raise VerificationError("PUBLIC_SUMMARY_BOUND")
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK)

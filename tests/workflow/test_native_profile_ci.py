@@ -497,7 +497,7 @@ class NativeProfileCITests(unittest.TestCase):
             "ruby-ios_upload_validation": ("test_ios_upload_validation.rb", 32),
             "ruby-native-spawn": ("test_native_process_spawn.rb", 52),
             "ruby-native-owner": ("test_native_upload_process.rb", 52),
-            "ruby-native-capture": ("test_native_upload_validation.rb", 21),
+            "ruby-native-capture": ("test_native_upload_validation.rb", 22),
             "ruby-native-signal-observation": ("test_native_signal_observation.rb", 1),
             "ruby-android_upload_validation": ("test_android_upload_validation.rb", 32),
         }

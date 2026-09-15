@@ -1132,6 +1132,8 @@ class MatrixContractTests(unittest.TestCase):
     def test_ci_requires_fixed_full_matrix_both_imports_and_mandatory_unmerged_proofs(self):
         workflow = load_workflow(runner.ROOT / ".github/workflows/ci.yml")
         job, aggregate = workflow["jobs"]["test-signing-matrix"], workflow["jobs"]["test"]
+        self.assertEqual(job["name"], "test-signing-matrix (${{ matrix.os }}, ${{ matrix.shard }})")
+        self.assertEqual(tuple(job["strategy"]["matrix"]), ("shard", "os", "include"))
         self.assertEqual(job["strategy"]["matrix"], {"os": list(contract.OPERATING_SYSTEMS), "shard":
             "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[0]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47]') }}",
             "include": "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[{\"os\":\"ubuntu-24.04\",\"shard\":20},{\"os\":\"ubuntu-24.04\",\"shard\":28},{\"os\":\"macos-26\",\"shard\":1},{\"os\":\"macos-26\",\"shard\":12},{\"os\":\"macos-26\",\"shard\":37}]' || '[]') }}"})

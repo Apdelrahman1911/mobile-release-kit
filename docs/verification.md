@@ -632,7 +632,7 @@ There is no generic caller-supplied method selector or broad workflow import gra
 All parts retain one fixed gate endpoint: 900 seconds for the affected Python
 gates, 120 for the Ruby owner, 310 for native capture and 300 for each adapter,
 always clamped to the original 3300-second job endpoint. Native capture additionally
-caps its healthy 17-test partition at 180 seconds and each of its four fixed singletons
+caps its healthy 18-test partition at 180 seconds and each of its four fixed singletons
 at 30 seconds, including preparation, capture, result parsing and finality. Each
 singleton keeps its original 15-second driver and 5-second cleanup limits; another 10 seconds
 is bounded outer framework/startup/result/finality headroom, not a native deadline
@@ -956,6 +956,20 @@ attempt, not transferable execution permissions. Retain the workflow/run URL and
 actual Actions job outcome; a late publication failure invalidates an earlier
 success-shaped summary. Later gates after failure stay `UNEXECUTED`.
 
+Public reports use schema 2 without changing the original in-memory gate records.
+Successful Python/native gates omit only exactly checked duplicate completion
+lists: `completed_from: summary.tests` expands to the sorted IDs of that
+partition's retained test/outcome records; `completed_from: partitions` expands
+to the duplicate-free sorted union of its partitions' completion IDs (expanding
+the first reference where present). Counts must match, every partition must have
+passed, and delegated matrix obligations remain separate. Every observed test ID
+and outcome, original capture/finality result, failure diagnostic and source
+binding remains present. Failed and unexecuted rows are not abbreviated. These
+references are lossless presentation, not new validation authority or permission
+to reuse another run's evidence. Compact JSON retains the unchanged 768 KiB public
+bound; inconsistent references, excess nonredundant output or a publication error
+still fail the job. A gate-start log line alone is never a passing gate result.
+
 Failure diagnostics may identify the fixed ACL attribute or whitelisted Ruby
 startup tokens from already captured stderr. They disclose no raw ACL entries,
 messages or paths. Ruby tokens are observations, not proof of an operating-system
@@ -1152,9 +1166,14 @@ RUN, unchanged five-second cleanup grace and 18-second capture watchdog. Only an
 eligible direct original-body
 observation can hand the already-selected timeout object into the existing run
 ensure; nested writes and entered cleanup cannot consume that one-shot. A body
-that reaches ensure naturally needs no handoff. The four-second delay never
-renews the cutoff or substitutes for actual blocked
-waiting. Original cleanup is called once even if the delay guard or sleep fails;
+that reaches ensure naturally needs no handoff. Original native cleanup runs
+promptly, before padding the same wrapper to its original entry plus four seconds.
+Only the remaining interval is slept; cleanup already taking four seconds needs
+no further delay. Native cleanup and the padded wrapper must both finish, in
+order, strictly before the same original cleanup cutoff. This preserves the
+native cleanup budget rather than spending its first four seconds asleep.
+The padding never renews that cutoff or substitutes for actual blocked waiting.
+Original cleanup is called once even if a clock, delay guard or sleep fails;
 a separate fixture failure latch rejects that failure even when the earlier
 timeout remains primary and native cleanup settles. Duration alone cannot prove
 the delay succeeded. Immediate-timeout controls must still reject premature

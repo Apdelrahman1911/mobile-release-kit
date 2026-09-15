@@ -87,7 +87,7 @@ def minitest_fixture(identifiers):
 
 _RUBY_PARTITION_FIXTURES = (
     ("ruby-native-owner", "test_native_upload_process.rb", 52, 44, 120, None),
-    ("ruby-native-capture", "test_native_upload_validation.rb", 21, 17, 310, "NativeUploadValidationTest"),
+    ("ruby-native-capture", "test_native_upload_validation.rb", 22, 18, 310, "NativeUploadValidationTest"),
     ("ruby-ios_upload_validation", "test_ios_upload_validation.rb", 32, 23, 300, "IosUploadValidationTest"),
     ("ruby-android_upload_validation", "test_android_upload_validation.rb", 32, 23, 300, "AndroidUploadValidationTest"),
 )
@@ -1949,7 +1949,7 @@ class CICoordinatorResultTests(unittest.TestCase):
             "ruby-native-spawn": ("test_native_process_spawn.rb", {"NativeProcessSpawnTests"}, 52),
             "ruby-native-owner": ("test_native_upload_process.rb",
                                   {"NativeUploadProtocolTest", "NativeUploadTaskSlotTest", "NativeUploadRoleTest"}, 52),
-            "ruby-native-capture": ("test_native_upload_validation.rb", {"NativeUploadValidationTest"}, 21),
+            "ruby-native-capture": ("test_native_upload_validation.rb", {"NativeUploadValidationTest"}, 22),
             "ruby-native-signal-observation": ("test_native_signal_observation.rb", {"NativeSignalObservationTest"}, 1),
             "ruby-play_store": ("test_play_store.rb", {"PreservingSupplyUploaderTests"}, 35),
             "ruby-play_lanes": ("test_play_lanes.rb", {"PlayReleaseLanesTest", "BoundedPlayImageTest"}, 46),
@@ -2194,6 +2194,186 @@ class CICoordinatorResultTests(unittest.TestCase):
                 self.assertFalse(report["ok"])
                 self.assertEqual(report["error"], "AGGREGATE_DEADLINE")
                 self.assertEqual(events, [("close", True), ("publish", 20.0), ("finish",)])
+
+    def test_public_summary_projection_is_lossless_bounded_and_refuses_conflicting_evidence(self):
+        controller = controller_module()
+        gates = ("python-full", "python-wheel", "native-profile-source", "native-profile-wheel")
+
+        def gate_fixture(gate, healthy_count=1316):
+            python = gate in gates[:2]
+            names = ((*controller.PYTHON_SINGLETON_PARTITIONS, "healthy") if python else
+                     ("authority", "ordinary", *controller.PYTHON_SINGLETON_PARTITIONS))
+            partitions = []
+            for name in names:
+                count = healthy_count if name == "healthy" else 5 if name == "authority" else 180 if name == "ordinary" else 1
+                ids = [f"workflow.synthetic_{name.replace('-', '_')}.PublicationContract."
+                       f"test_preserves_original_completion_and_lifecycle_evidence_{number:04d}" for number in range(count)]
+                part = {"partition": name, "status": "PASS", "tests": count, "completed": ids,
+                        "capture": {"synthetic": True, "returncode": 0, "waited": True, "stdout_eof": True,
+                                    "stderr_eof": True, "domain_finality": True, "persisted": [73, 47], "seconds": 0.01}}
+                if name == "healthy":
+                    part["summary"] = {"check": gate, "ok": True,
+                        "tests": [{"id": identifier, "outcome": "skip" if number % 100 == 0 else "ok"}
+                                  for number, identifier in reversed(list(enumerate(ids)))],
+                        "details": {"failure_callbacks": [], "storage_profile": {"synthetic": True},
+                                    "source_provenance": {"synthetic": True, "digest": "a" * 64}}}
+                else:
+                    part["runtime"] = {"synthetic": True, "phase": gate, "version": [3, 11, 1]}
+                partitions.append(part)
+            completed = sorted(identifier for part in partitions for identifier in part["completed"])
+            delegated = ["workflow.synthetic.Delegated.test_requires_separate_matrix"]
+            return {"id": gate, "status": "PASS", "details": {
+                "stage": "complete", "tests": len(completed), "completed": completed, "partitions": partitions,
+                "package": {"synthetic": True, "phase": gate, "digest": "b" * 64},
+                "source_obligation_count": len(completed) + len(delegated),
+                "pending_delegation": {"methods": delegated, "requirements": {delegated[0]: ["G/" + delegated[0] + "/fixture"]}},
+                "coverage": "partial-until-layered-matrix"}}
+
+        clock = SimpleNamespace(value=12.0)
+        with tempfile.TemporaryDirectory(prefix="mrk-ci-public-summary-") as temporary, \
+                patch.object(controller, "time", SimpleNamespace(monotonic=lambda: clock.value)):
+            root = Path(temporary).resolve()
+
+            def publish(value, name):
+                path = root / ("step_summary_" + name)
+                path.write_bytes(b"")
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    controller.publish_summary(path, value, runner_temp=root, deadline=20.0)
+                self.assertTrue(output.getvalue().startswith("MRK_CI_RESULT="))
+                self.assertEqual(output.getvalue().count("\n"), 1)
+                encoded = output.getvalue().removeprefix("MRK_CI_RESULT=").removesuffix("\n").encode("ascii")
+                self.assertEqual(path.read_bytes(), b"## Mobile Release Kit isolated verification\n\n```json\n" + encoded + b"\n```\n")
+                public = json.loads(encoded)
+                self.assertEqual(encoded, json.dumps(public, sort_keys=True, ensure_ascii=True,
+                                                     allow_nan=False, separators=(",", ":")).encode("ascii"))
+                self.assertLessEqual(len(encoded), 768 * 1024)
+                return public
+
+            def reject(value, name, code="PUBLIC_SUMMARY_PROJECTION"):
+                original = copy.deepcopy(value)
+                path = root / ("step_summary_" + name)
+                path.write_bytes(b"")
+                opened = Mock(side_effect=AssertionError("refused publication must not open output"))
+                facade = SimpleNamespace(open=opened, O_WRONLY=os.O_WRONLY, O_APPEND=os.O_APPEND,
+                                         O_NOFOLLOW=os.O_NOFOLLOW, O_NONBLOCK=os.O_NONBLOCK)
+                output = io.StringIO()
+                with patch.object(controller, "os", facade), redirect_stdout(output), \
+                        self.assertRaisesRegex(controller.VerificationError, code):
+                    controller.publish_summary(path, value, runner_temp=root, deadline=20.0)
+                opened.assert_not_called()
+                self.assertEqual(output.getvalue(), "")
+                self.assertEqual(path.read_bytes(), b"")
+                self.assertEqual(value, original)
+
+            report = report_fixture()
+            report.update(finality=True, persisted_capture_bytes=480, seconds=0.25)
+            report["rows"].extend(gate_fixture(gate) for gate in gates)
+            original = copy.deepcopy(report)
+            # Synthetic ordinary-sized full/wheel summaries; no copied private
+            # report, actual test execution, or Linux substitute for native proof.
+            for row in report["rows"][1:3]:
+                self.assertLess(len(json.dumps(row["details"]["partitions"][-1]["summary"])), 256 * 1024)
+            for separators in ((", ", ": "), (",", ":")):
+                self.assertGreater(len(json.dumps(report, sort_keys=True, ensure_ascii=True, allow_nan=False,
+                                                  separators=separators).encode("ascii")), 768 * 1024)
+            public = publish(report, "large")
+            self.assertEqual(public["schema"], 2)
+            reconstructed = copy.deepcopy(public)
+            reconstructed["schema"] = 1
+            for row in reconstructed["rows"][1:]:
+                details = row["details"]
+                self.assertEqual(details.pop("completed_from"), "partitions")
+                joined = []
+                for part in details["partitions"]:
+                    if part["partition"] == "healthy":
+                        self.assertNotIn("completed", part)
+                        self.assertEqual(part.pop("completed_from"), "summary.tests")
+                        part["completed"] = sorted(test["id"] for test in part["summary"]["tests"])
+                    else:
+                        self.assertNotIn("completed_from", part)
+                    self.assertEqual(part["tests"], len(part["completed"]))
+                    joined.extend(part["completed"])
+                self.assertNotIn("completed", details)
+                details["completed"] = sorted(joined)
+                self.assertEqual(len(joined), len(set(joined)))
+                self.assertEqual(details["tests"], len(joined))
+                self.assertTrue(set(joined).isdisjoint(details["pending_delegation"]["methods"]))
+            self.assertEqual(reconstructed, original)  # IDs, outcomes, captures and every other field.
+            self.assertEqual(report, original)
+
+            failed = report_fixture(False)
+            failed.update(finality=False, cleanup_errors=[{"synthetic": True, "error": "FIXTURE_CLEANUP_FAILURE"}])
+            failed["rows"] = [
+                {"id": "python-full", "status": "FAIL", "error": "FIXTURE_FAILURE", "details": {
+                    "stage": "healthy", "failure": {"error": "FIXTURE_FAILURE", "diagnostic": "retain me"},
+                    "partitions": [{"partition": "completed-before-failure", "status": "PASS", "tests": 1,
+                                    "completed": ["workflow.synthetic.test_finished"], "capture": {"synthetic": True}},
+                                   {"partition": "healthy", "status": "FAIL", "python_progress": {"synthetic": True},
+                                    "capture": {"stdout_bytes": 17, "stderr_bytes": 23}}]}},
+                {"id": "native-profile-source", "status": "UNEXECUTED"},
+                {"id": "python-wheel", "status": "RUNNING", "details": {"stage": "inventory"}},
+                {"id": "fixture-unrelated", "status": "PASS", "details": {
+                    "stage": "complete", "tests": 1, "completed": ["unrelated"], "capture": {"synthetic": True}}}]
+            failed_original = copy.deepcopy(failed)
+            self.assertEqual(publish(failed, "failed"), dict(failed_original, schema=2))
+            self.assertEqual(failed, failed_original)
+
+            small = report_fixture()
+            small["rows"] = [gate_fixture("python-full", healthy_count=2)]
+            detail_path = ("rows", 0, "details")
+            healthy_path = (*detail_path, "partitions", -1)
+            healthy = small["rows"][0]["details"]["partitions"][-1]
+            completion = small["rows"][0]["details"]["completed"]
+            mutations = (
+                ("summary_duplicate", (*healthy_path, "summary", "tests", 1, "id"), healthy["summary"]["tests"][0]["id"]),
+                ("summary_id_type", (*healthy_path, "summary", "tests", 0, "id"), 7),
+                ("summary_outcome", (*healthy_path, "summary", "tests", 0, "outcome"), True),
+                ("summary_list_type", (*healthy_path, "summary", "tests"), tuple(healthy["summary"]["tests"])),
+                ("summary_pass_type", (*healthy_path, "summary", "ok"), 1),
+                ("healthy_count", (*healthy_path, "tests"), 3),
+                ("partition_count_type", (*detail_path, "partitions", 0, "tests"), True),
+                ("healthy_ids", (*healthy_path, "completed"), ["synthetic.a", "synthetic.b"]),
+                ("healthy_reference", (*healthy_path, "completed_from"), "summary.tests"),
+                ("gate_reference", (*detail_path, "completed_from"), "partitions"),
+                ("gate_duplicate", (*detail_path, "completed"), [completion[0], *completion[:-1]]),
+                ("gate_union", (*detail_path, "completed"), [*completion[:-1], "zzz.synthetic.other"]),
+                ("gate_count", (*detail_path, "tests"), len(completion) + 1),
+                ("partition_state", (*detail_path, "partitions", 0, "status"), "UNEXECUTED"),
+                ("partition_inventory", (*detail_path, "partitions", 0, "partition"), "unknown"),
+                ("gate_state", (*detail_path, "stage"), "union"),
+                ("already_projected", ("schema",), 2),
+                ("duplicate_gate", ("rows",), [small["rows"][0], small["rows"][0]]),
+            )
+            for name, keys, value in mutations:
+                with self.subTest(inconsistent_evidence=name):
+                    mutated = copy.deepcopy(small)
+                    target = mutated
+                    for key in keys[:-1]:
+                        target = target[key]
+                    target[keys[-1]] = value
+                    reject(mutated, name)
+            native_overlap = report_fixture()
+            native_overlap["rows"] = [gate_fixture("native-profile-source")]
+            details = native_overlap["rows"][0]["details"]
+            details["partitions"][1]["completed"][0] = details["partitions"][0]["completed"][0]
+            details["partitions"][1]["completed"].sort()
+            # Even a self-consistent gate count/set must not hide two partitions
+            # claiming the same original method as separately completed.
+            details["completed"] = sorted({identifier for part in details["partitions"] for identifier in part["completed"]})
+            details["tests"] = len(details["completed"])
+            reject(native_overlap, "native_overlap")
+            oversized = report_fixture(False)
+            oversized["diagnostic"] = "x" * (768 * 1024)
+            reject(oversized, "nonredundant_bound", "PUBLIC_SUMMARY_BOUND")
+
+            def late_encoding(*args, **kwargs):
+                encoded = json.dumps(*args, **kwargs)
+                clock.value = 20.0
+                return encoded
+
+            with patch.object(controller, "json", SimpleNamespace(dumps=late_encoding)):
+                reject(report_fixture(), "encoding_deadline", "AGGREGATE_DEADLINE")
 
     def test_summary_write_sync_close_and_print_aftereffects_are_bounded_by_original_deadline(self):
         controller = controller_module()
