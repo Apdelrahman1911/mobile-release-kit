@@ -1111,7 +1111,7 @@ class CIControllerContractTests(unittest.TestCase):
         for phase, original_deadline, cutoff in (("source", 2500.0, 1000.0), ("wheel", 800.0, 800.0)):
             with self.subTest(phase=phase):
                 rig = self._python_gate_fixture(phase, deadline=original_deadline)
-                parts = ("healthy", *rig.controller.PYTHON_SINGLETON_PARTITIONS)
+                parts = (*rig.controller.PYTHON_SINGLETON_PARTITIONS, "healthy")
                 result = self._perform_native_fixture(rig, platform="linux", deadline=original_deadline)
                 self.assertTrue(result.ok, result)
                 rows = result.details["partitions"]
@@ -1131,15 +1131,17 @@ class CIControllerContractTests(unittest.TestCase):
                                  [("snapshot", "full" if phase == "source" else "wheel", cutoff)])
                 self.assertFalse(any(event[0] == "inventory" for event in rig.events))
                 self.assertEqual([event for event in rig.events if event[0] == "delegation"], [("delegation", "ubuntu-24.04", cutoff)])
-                self.assertEqual(calls[0][1], list(rig.step.argv))
-                self.assertEqual(calls[0][1][-2:], ["--deadline", repr(original_deadline)])
+                healthy_index = parts.index("healthy")
+                self.assertEqual(healthy_index, len(parts) - 1)
+                self.assertEqual(calls[healthy_index][1], list(rig.step.argv))
+                self.assertEqual(calls[healthy_index][1][-2:], ["--deadline", repr(original_deadline)])
                 python = rig.paths.source_python if phase == "source" else rig.paths.wheel_python
                 entry = str(ROOT / "tests/workflow/run_native_profile_checks.py")
                 for index, (_, argv, options) in enumerate(calls):
                     profiles.append(options["profile"])
                     self.assertIs(options["dispose_retained_domain"], parts[index] in dict(_PYTHON_POISON_FIXTURES))
-                    self.assertEqual(options["profile"], "python-full" if index == 0 and phase == "source" else "ordinary")
-                    self.assertEqual(options["cpu_seconds"], 300 if index == 0 and phase == "source" else 180)
+                    self.assertEqual(options["profile"], "python-full" if parts[index] == "healthy" and phase == "source" else "ordinary")
+                    self.assertEqual(options["cpu_seconds"], 300 if parts[index] == "healthy" and phase == "source" else 180)
                     self.assertEqual(options["seconds"], 900)
                     self.assertEqual(options["absolute_deadline"], cutoff)
                     self.assertEqual(options["output_limit"], 8 * 1024**2)
@@ -1147,12 +1149,12 @@ class CIControllerContractTests(unittest.TestCase):
                     self.assertEqual(options["env"], dict(rig.step.env))
                     self.assertIs(rig.parsed[index], rig.captures[index])
                     self.assertEqual(rows[index]["capture"], rig.controller.capture_observations(rig.captures[index]))
-                    if index:
+                    if parts[index] != "healthy":
                         self.assertEqual(argv, [str(python), "-I", "-S", "-B", entry,
                                                f"--{rows[index]['partition']}-{phase}"])
                         self.assertEqual(rows[index]["tests"], 1)
                         self.assertEqual(rows[index]["runtime"]["phase"], phase)
-                self.assertEqual("storage_profile" in rows[0]["summary"]["details"], phase == "source")
+                self.assertEqual("storage_profile" in rows[healthy_index]["summary"]["details"], phase == "source")
                 self.assertFalse(any(event[0] == "prepare" for event in rig.events))
                 self.assertTrue(all(event[-1] == cutoff for event in rig.events if event[0] != "run"))
                 positions = [index for index, event in enumerate(rig.events) if event[0] == "run"]
@@ -1171,7 +1173,7 @@ class CIControllerContractTests(unittest.TestCase):
                           "singleton-swap", "fresh-pooled", "fresh-missing", "fresh-swap"):
                 with self.subTest(phase=phase, fault=fault):
                     rig = self._python_gate_fixture(phase)
-                    parts = ("healthy", *rig.controller.PYTHON_SINGLETON_PARTITIONS)
+                    parts = (*rig.controller.PYTHON_SINGLETON_PARTITIONS, "healthy")
                     step = rig.step
                     if fault == "argv":
                         step = dataclasses.replace(step, argv=(*step.argv[:-1], "1000.0"))
@@ -1240,17 +1242,20 @@ class CIControllerContractTests(unittest.TestCase):
                         rig.session.run = run
                     result = self._perform_native_fixture(rig, step=step, platform="linux")
                     self.assertFalse(result.ok)
-                    self.assertEqual(len(rig.captures), 2 if fault == "origin" else 0)
+                    failed_index = parts.index("poison-wait-loss")
+                    self.assertEqual(len(rig.captures), failed_index + 1 if fault == "origin" else 0)
                     if fault == "origin":
                         self.assertEqual(result.error, "NATIVE_PYTHON_RUNTIME_ORIGIN")
                         self.assertEqual([row["status"] for row in result.details["partitions"]],
-                                         ["PASS", "FAIL", *(["UNEXECUTED"] * (len(parts) - 2))])
+                                         ["PASS"] * failed_index + ["FAIL"] + ["UNEXECUTED"] * (len(parts) - failed_index - 1))
+                        self.assertEqual(result.details["partitions"][-1]["partition"], "healthy")
+                        self.assertEqual(result.details["partitions"][-1]["status"], "UNEXECUTED")
                     else:
                         self.assertEqual(result.error, "PYTHON_GATE_CONTRACT" if fault in {"argv", "profile-shape"} else "PYTHON_CAPTURE_UNION")
                         self.assertEqual([row["status"] for row in result.details["partitions"]], ["UNEXECUTED"] * len(parts))
 
     def test_python_gate_stops_after_each_failed_original_and_keeps_one_cutoff(self):
-        parts = ("healthy", *controller_module().PYTHON_SINGLETON_PARTITIONS)
+        parts = (*controller_module().PYTHON_SINGLETON_PARTITIONS, "healthy")
         for phase in ("source", "wheel"):
             for failed, partition in enumerate(parts):
                 for fault in ("exit", "wait", "stdout", "stderr", "domain", "timeout", "cancel", "cleanup", "idle", "deadline"):
@@ -1969,11 +1974,11 @@ class CIControllerContractTests(unittest.TestCase):
                       "ruby-packaged-capture-source", "fastfile", "actionlint", "jdk-signers", *wheel,
                       "native-process-abi-wheel", *compatibility_wheel, "wheel-smoke", "wheel-consumer",
                       "ruby-packaged-capture-wheel", "python-wheel", "source-integrity"),
-            "macos": (*before, "native-tools", "native-process-abi-source", *compatibility_source,
+            "macos": (*before, "native-tools", "native-process-abi-source", *compatibility_source, "native-profile-source",
                       "ruby-ios_upload_validation", "ruby-native-spawn", "ruby-native-owner", "ruby-native-capture",
                       "ruby-native-signal-observation",
                       "ruby-android_upload_validation", "ruby-packaged-capture-source",
-                      "native-profile-source", *wheel, "native-process-abi-wheel", *compatibility_wheel,
+                      *wheel, "native-process-abi-wheel", *compatibility_wheel,
                       "wheel-smoke", "wheel-consumer", "ruby-packaged-capture-wheel", "native-profile-wheel", "source-integrity"),
         }
         for platform in expected:
@@ -1985,12 +1990,13 @@ class CIControllerContractTests(unittest.TestCase):
                 if platform == "macos":
                     ids = tuple(step.id for step in steps)
                     for prerequisite in ("native-tools", "native-process-abi-source", *compatibility_source):
-                        self.assertLess(ids.index(prerequisite), ids.index("ruby-ios_upload_validation"))
+                        self.assertLess(ids.index(prerequisite), ids.index("native-profile-source"))
+                    self.assertLess(ids.index("native-profile-source"), ids.index("ruby-ios_upload_validation"))
                     self.assertLess(ids.index("ruby-ios_upload_validation"), ids.index("ruby-native-spawn"))
                     for gate in ("ruby-native-capture", "ruby-native-signal-observation",
                                  "ruby-ios_upload_validation", "ruby-android_upload_validation"):
                         self.assertLess(ids.index("native-tools"), ids.index(gate))
-                        self.assertLess(ids.index(gate), ids.index("native-profile-source"))
+                        self.assertLess(ids.index("native-profile-source"), ids.index(gate))
                     self.assertLess(ids.index("native-profile-source"), ids.index("native-profile-wheel"))
             altered = [(), steps[:-1], (*steps, steps[-1]), (steps[1], steps[0], *steps[2:]),
                        (dataclasses.replace(steps[0], id="unknown-gate"), *steps[1:])]

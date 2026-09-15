@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 import json
 import math
 import os
@@ -10,6 +11,7 @@ import signal
 import sys
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import mobile_release
 from mobile_release import _native_process  # Preload before intentional UNKNOWN.
@@ -79,6 +81,84 @@ def _encode(rows):
 
 
 class SigningLauncherLossObservationTests(unittest.TestCase):
+    def check_entry_forwarding(self, role, *, supplied, failure):
+        # No observation constructor, pipe, fork, signal or genuine exit. The
+        # local os proxy affects this fixture only, not the case-owner module.
+        observation = fixture._Observation.__new__(fixture._Observation)
+        calls, error = [], OSError("inert entry failure")
+        handles, task, deadline, hard, writer = (object() for _ in range(5))
+        original = fixture.owner._anchor if role == "A" else fixture.owner._worker
+        entry = fixture._Observation.anchor if role == "A" else fixture._Observation.worker_entry
+        keywords = ("progress", "matrix_context") if role == "A" else ("hard", "progress", "matrix_context")
+        for function in (original, entry):
+            parameters = inspect.signature(function).parameters
+            self.assertEqual(tuple(name for name, value in parameters.items()
+                                   if value.kind is inspect.Parameter.KEYWORD_ONLY), keywords)
+            self.assertTrue(all(parameters[name].default is None for name in keywords))
+        options = {name: object() for name in keywords} if supplied else {}
+        expected = {name: options.get(name) for name in keywords}
+        arguments = ((handles, 30, 29, Path("inert-root"), "inert", task, deadline, hard, writer) if role == "A" else
+                     (handles, 31, 31, Path("inert-root"), "inert", task, deadline, writer))
+        inspect.signature(original).bind(*arguments, **expected)
+
+        class Exited(BaseException):
+            pass
+
+        def close(value):
+            calls.append(("close", value))
+            if failure == "setup":
+                raise error
+
+        def delegate(*actual, **options):
+            self.assertEqual(actual, arguments)
+            self.assertEqual(options, expected)
+            self.assertEqual(observation.role, role)
+            self.assertIs(observation.handles, handles)
+            self.assertIs(observation.deadline, deadline)
+            if role == "A":
+                self.assertIs(observation.hard, hard)
+                self.assertEqual((observation.launcher, observation.home_group), (30, 29))
+            else:
+                self.assertIsNone(observation.held)
+            calls.append(("delegate",))
+            if failure == "delegate":
+                raise error
+
+        def exit_original(code):
+            calls.append(("exit", code))
+            raise Exited
+
+        observation.real_exit = exit_original
+        if role == "A":
+            observation.readiness = SimpleNamespace(close=close, errors=[])
+            observation.real_anchor = delegate
+        else:
+            observation.held = 71  # Only the inert local proxy sees this number.
+            observation.real_worker = delegate
+            observation.emit = lambda event, **fields: calls.append(("emit", event, fields))
+        with patch.object(fixture, "os", SimpleNamespace(close=close)), self.assertRaises(Exited) as raised:
+            entry(observation, *arguments, **options)
+        self.assertIs(raised.exception.__context__, error if failure is not None else None)
+        expected_calls = [("close", "startedr" if role == "A" else 71)]
+        if failure != "setup":
+            if role == "W":
+                expected_calls.append(("emit", "inherited_writer_closed", {"anchor": 31, "group": 31}))
+            expected_calls.append(("delegate",))
+        expected_calls.append(("exit", fixture.owner.WORKER_ERROR))
+        self.assertEqual(calls, expected_calls)
+
+    def test_anchor_entry_preserves_original_keyword_contract_and_exit_custody(self):
+        for supplied in (False, True):
+            for failure in (None, "setup", "delegate"):
+                with self.subTest(supplied=supplied, failure=failure):
+                    self.check_entry_forwarding("A", supplied=supplied, failure=failure)
+
+    def test_worker_entry_preserves_original_keyword_contract_and_exit_custody(self):
+        for supplied in (False, True):
+            for failure in (None, "setup", "delegate"):
+                with self.subTest(supplied=supplied, failure=failure):
+                    self.check_entry_forwarding("W", supplied=supplied, failure=failure)
+
     def test_captured_oracle_rejects_missing_misbound_nonloss_and_laundered_finality(self):
         baseline = _events()
         result = fixture.validate_events(_encode(baseline), b"", 30)

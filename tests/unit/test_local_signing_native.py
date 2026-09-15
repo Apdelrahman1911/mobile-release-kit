@@ -7,10 +7,12 @@ import json
 import math
 import os
 import sys
+import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import mobile_release
@@ -48,6 +50,46 @@ def _inherited_timeout(deadline):
     remaining = math.floor(deadline - time.monotonic())
     assert remaining >= 1, "inherited fixture capture budget exhausted"
     return remaining
+
+
+class InertAccountHomeAdmissionTests(unittest.TestCase):
+    def test_missing_account_record_has_sanitized_error_and_no_home_fallback(self):
+        import pwd
+
+        observed_os = SimpleNamespace(getuid=lambda: 13001, geteuid=lambda: 13001,
+                                      environ={"HOME": "/fictional-fallback-must-not-be-used"})
+        with patch.object(signing.sys, "platform", "darwin"), patch.object(signing, "os", observed_os), \
+                patch.object(pwd, "getpwuid", side_effect=KeyError("private account details")) as lookup, \
+                patch.object(signing, "Path", side_effect=AssertionError("path admission reached")) as paths, \
+                patch.object(signing, "_directory", side_effect=AssertionError("directory admission reached")) as directory:
+            with self.assertRaises(CredentialError) as raised:
+                signing.account_home()
+        lookup.assert_called_once_with(13001)
+        paths.assert_not_called()
+        directory.assert_not_called()
+        self.assertEqual(str(raised.exception), "local signing: real macOS login account is unavailable")
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertTrue(raised.exception.__suppress_context__)
+
+    def test_mapped_account_rejects_conflicting_home_before_directory_admission(self):
+        import pwd
+
+        with tempfile.TemporaryDirectory(prefix="mrk-account-admission-") as temporary:
+            root = Path(temporary)
+            home, other = root / "mapped-home", root / "other-home"
+            home.mkdir(mode=0o700)
+            other.mkdir(mode=0o700)
+            observed_os = SimpleNamespace(getuid=lambda: 13001, geteuid=lambda: 13001,
+                                          environ={"HOME": str(other)})
+            with patch.object(signing.sys, "platform", "darwin"), patch.object(signing, "os", observed_os), \
+                    patch.object(pwd, "getpwuid", return_value=SimpleNamespace(pw_dir=str(home))) as lookup, \
+                    patch.object(signing, "_directory", side_effect=AssertionError("directory admission reached")) as directory:
+                with self.assertRaisesRegex(CredentialError, "HOME differs from the real signing account home"):
+                    signing.account_home()
+            lookup.assert_called_once_with(13001)
+            directory.assert_not_called()
+            self.assertEqual(list(home.iterdir()), [])
+            self.assertEqual(list(other.iterdir()), [])
 
 
 @unittest.skipUnless(os.name == 'posix', 'local signing lease requires POSIX')

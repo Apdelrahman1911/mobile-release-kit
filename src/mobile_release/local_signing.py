@@ -137,7 +137,11 @@ def account_home(home: Path | None = None) -> Path:
         import pwd
 
         _require(os.getuid() != 0 and os.getuid() == os.geteuid(), "use a non-root, unmapped macOS login account")
-        path = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve(strict=True)
+        try:
+            account = pwd.getpwuid(os.getuid())
+        except KeyError:
+            raise CredentialError("local signing: real macOS login account is unavailable") from None
+        path = Path(account.pw_dir).resolve(strict=True)
         supplied = os.environ.get("HOME")
         _require(supplied is None or (Path(supplied).is_absolute() and Path(supplied).resolve(strict=True) == path),
                  "HOME differs from the real signing account home")

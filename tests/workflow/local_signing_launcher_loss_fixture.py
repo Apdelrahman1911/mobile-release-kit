@@ -213,26 +213,30 @@ class _Observation:
         if self.role == "L" and name == "l-controlr":
             self.handles = handles
 
-    def anchor(self, handles, launcher, home_group, root, name, task, deadline, hard, write_json):
+    def anchor(self, handles, launcher, home_group, root, name, task, deadline, hard, write_json, *, progress=None,
+               matrix_context=None):
         try:
             self.role, self.handles = "A", handles
             self.launcher, self.home_group, self.deadline, self.hard = launcher, home_group, deadline, hard
             self.readiness.close("startedr")
             require(not self.readiness.errors, "anchor readiness reader close")
-            self.real_anchor(handles, launcher, home_group, root, name, task, deadline, hard, write_json)
+            self.real_anchor(handles, launcher, home_group, root, name, task, deadline, hard, write_json,
+                             progress=progress, matrix_context=matrix_context)
         finally:
             # Includes instrumentation failures before entering the real owner.
             # Never fall into the copied launcher branch or its cleanup.
             self.real_exit(owner.WORKER_ERROR)
 
-    def worker_entry(self, handles, parent, group, root, name, task, deadline, write_json):
+    def worker_entry(self, handles, parent, group, root, name, task, deadline, write_json, *, hard=None, progress=None,
+                     matrix_context=None):
         try:
             self.role, self.handles, self.deadline = "W", handles, deadline
             require(self.held is not None, "worker did not inherit original duplicate")
             descriptor, self.held = self.held, None
             os.close(descriptor)
             self.emit("inherited_writer_closed", anchor=parent, group=group)
-            self.real_worker(handles, parent, group, root, name, task, deadline, write_json)
+            self.real_worker(handles, parent, group, root, name, task, deadline, write_json,
+                             hard=hard, progress=progress, matrix_context=matrix_context)
         finally:
             # A W setup/witness failure must self-exit, never enter A's copied
             # parent branch and accidentally use its wait/group ownership.

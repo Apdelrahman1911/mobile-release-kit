@@ -513,12 +513,13 @@ inventory; it does not waive the product behaviors that inventory was meant to t
 | Platform | Required gate families |
 |---|---|
 | Linux | Offline source installation; ABI/runtime compatibility gates; full Python discovery; all listed Ruby suites, including native/iOS/Android descendant regressions and actual packaged capture; Fastfile validation; first-party/template actionlint; real JDK signer checks; wheel build/inspection/install/smoke/consumer and selected installed-wheel Python checks; source integrity. |
-| macOS | Offline source installation; exact Xcode 26.3/native tools; ABI/runtime compatibility gates; all fixed Ruby primitive/helper/capture/adapter suites and separate native signal-observation proof; source native-profile gate; wheel build/inspection/install/smoke/consumer, including actual installed Ruby capture; installed-wheel native-profile gate; source integrity. |
+| macOS | Offline source installation; exact Xcode 26.3/native tools; ABI/runtime compatibility gates; source native-profile gate; all fixed Ruby primitive/helper/capture/adapter suites and separate native signal-observation proof; wheel build/inspection/install/smoke/consumer, including actual installed Ruby capture; installed-wheel native-profile gate; source integrity. |
 
-The macOS Ruby gates depend on ordinary admission, including the admitted
-process observer, but not profile-authority admission, so run before the source
-native-profile gate. The source catalog selects **51 Linux gates and 39 macOS
-gates**; these are required inventory counts, not completed or passing runs.
+The macOS Ruby and source native-profile gates have no inter-suite dependency;
+both retain their own admission. The native-profile gate runs first after source
+ABI/compatibility so Python failures surface before the Ruby suites. The source
+catalog selects **51 Linux gates and 39 macOS gates**; these are required inventory
+counts, not completed or passing runs.
 Every selected gate remains required and any failure stops later gates. Recompute
 inventories when source changes; historical native totals cannot stand in for
 the complete current source-derived method identities and outcomes.
@@ -642,11 +643,13 @@ ceilings, not guarantees of a passing run. Other gates retain their shared-cutof
 behavior. The macOS authority capture and 2+2 prerequisite routing remain unchanged.
 These splits add no logical gates, jobs, builds, permission profiles or observers.
 
-On macOS the fixed iOS adapter gate runs immediately after the same native-tools,
-source ABI and compatibility prerequisites, before the other Ruby native gates.
-The remaining native gates keep their relative order; Linux order, all 51 Linux
-and 39 macOS gates, and every required partition remain unchanged. Earlier failure
-does not waive the still-unexecuted native gates.
+On macOS the source native-profile gate runs immediately after native-tools,
+source ABI and compatibility prerequisites, then the fixed iOS adapter and other
+Ruby native gates retain their relative order. Linux runs its fixed 74 singleton
+Python partitions before the healthy source/wheel capture to expose small failures
+earlier. Name-based profiles, poison-only disposal, original finality and idle,
+all 51 Linux and 39 macOS gates, every partition and the original aggregate cutoffs
+remain mandatory. Earlier failure leaves later work explicitly unexecuted.
 
 The synthetic adapter process controls use a separate fixed timing profile:
 10 seconds for complete readiness (the existing five-second startup allowance,

@@ -942,7 +942,7 @@ def required_gate_ids(platform: str, scope: str = "platform") -> tuple[str, ...]
                 "python-wheel", "source-integrity")
     if platform == "macos":
         return (*_BEFORE_TESTS, "native-tools", "native-process-abi-source", *COMPATIBILITY_SOURCE_GATES,
-                *NATIVE_RUBY_IDS, "ruby-packaged-capture-source", "native-profile-source",
+                "native-profile-source", *NATIVE_RUBY_IDS, "ruby-packaged-capture-source",
                 *_WHEEL, "native-process-abi-wheel", *COMPATIBILITY_WHEEL_GATES,
                 "wheel-smoke", "wheel-consumer", "ruby-packaged-capture-wheel",
                 "native-profile-wheel", "source-integrity")
@@ -3982,7 +3982,7 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
 
 def perform_python_gate(step: Step, paths: Paths, session, checks,
                         platform: str, *, deadline: float) -> CheckResult:
-    """Healthy Linux full/wheel plus fixed original ordinary singleton domains.
+    """Fixed original Linux singleton domains, then healthy full/wheel discovery.
 
     The full healthy capture keeps its exact admitted aggregate-deadline argv
     and storage profile. The original gate cutoff is an independent, tighter
@@ -3990,7 +3990,7 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
     """
     started = time.monotonic()
     details = {"stage": "contract", "partitions": [
-        {"partition": name, "status": "UNEXECUTED"} for name in ("healthy", *PYTHON_SINGLETON_PARTITIONS)
+        {"partition": name, "status": "UNEXECUTED"} for name in (*PYTHON_SINGLETON_PARTITIONS, "healthy")
     ]}
     active = None
     originals = []
