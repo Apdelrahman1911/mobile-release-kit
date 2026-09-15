@@ -33,6 +33,18 @@ _PROFILE_PRODUCT_FIXTURES = frozenset({
     "mobile_release", "mobile_release._native_process", "mobile_release._profile_process",
     "mobile_release._lifetime_evidence", "mobile_release.ios_profiles", "mobile_release.cancellation", "mobile_release.errors", "mobile_release.inspection",
 })
+_AUTHORITY_CORE_FIXTURES = frozenset({
+    "mobile_release", "mobile_release.cancellation", "mobile_release.ios_profiles",
+    "mobile_release.ios_profile_auth", "mobile_release.ios_profile_trust",
+    "mobile_release._native_process", "mobile_release._profile_process",
+    "mobile_release.errors", "mobile_release.inspection", "mobile_release._lifetime_evidence",
+})
+_AUTHORITY_DEFERRED_FIXTURES = frozenset({
+    "mobile_release.ios_der", "mobile_release.ios_entitlements", "mobile_release.ios_plist_binary",
+})
+_AUTHORITY_UNIT_FIXTURES = frozenset({
+    "unit", "unit.test_ios_profile_authority", "unit.ios_profile_helpers", "unit.ios_entitlement_helpers",
+})
 _ISOLATED_IMPORT_FIXTURES = (
     ("unit.test_native_process", ("unit",), frozenset({"unit", "unit.test_native_process"}),
      frozenset({"mobile_release", "mobile_release._native_process"})),
@@ -1356,6 +1368,9 @@ class NativeProfileCITests(unittest.TestCase):
                         self.assertEqual(origins.call_count, 3 if outcome == "success" else 2)
                         self.assertEqual(origins.call_args_list[0].args, (package,))
                         self.assertEqual(origins.call_args_list[1].kwargs, {"tests_loaded": True})
+                        if outcome == "success":
+                            self.assertEqual(origins.call_args_list[2].kwargs,
+                                             {"tests_loaded": True, "tests_completed": True})
                         self.assertEqual(fixture.events[:6], ["authority-runtime"] + ["prerequisite"] * 2
                                          + ["inventory", "bootstrap:mobile_release", "bootstrap:unit"])
                     else:
@@ -1538,6 +1553,108 @@ class NativeProfileCITests(unittest.TestCase):
                 self.assertEqual(runtime.modules, {"mobile_release": other} if fault == "custody-changed" else {})
                 self.assertEqual(run.call_count, 0 if fault in {"early-origin", "missing-loader"} else 1)
 
+    def test_native_authority_deferred_parser_closure_is_phase_bound_and_exact(self):
+        gate = run_native_profile_checks
+        self.assertEqual(gate.AUTHORITY_PRODUCT_MODULES, _AUTHORITY_CORE_FIXTURES)
+        self.assertEqual(gate.AUTHORITY_DEFERRED_PRODUCT_MODULES, _AUTHORITY_DEFERRED_FIXTURES)
+        self.assertEqual(gate.AUTHORITY_UNIT_MODULES, _AUTHORITY_UNIT_FIXTURES)
+        for wheel in (False, True):
+            with self.subTest(wheel=wheel):
+                runtime = _inert_authority_runtime(installed_wheel=wheel)
+                with patch.object(gate, "sys", runtime):
+                    package = gate._authority_package_root(wheel)
+                    for name in _AUTHORITY_CORE_FIXTURES | {"unit"}:
+                        runtime.modules[name] = _inert_origin_module(name,
+                            package if name != "unit" else gate.ROOT / "tests/unit", package="." not in name)
+                    gate._authority_origins(package)
+                    for loaded, completed in ((False, True), (1, False), (True, 1)):
+                        with self.assertRaises(AssertionError):
+                            gate._authority_origins(package, tests_loaded=loaded, tests_completed=completed)
+                    for name in _AUTHORITY_DEFERRED_FIXTURES:
+                        runtime.modules[name] = _inert_origin_module(name, package)
+                        with self.assertRaises(AssertionError):
+                            gate._authority_origins(package)  # No early lazy-import permission.
+                        del runtime.modules[name]
+                    for name in _AUTHORITY_UNIT_FIXTURES - {"unit"}:
+                        runtime.modules[name] = _inert_origin_module(name, gate.ROOT / "tests/unit")
+                    gate._authority_origins(package, tests_loaded=True)  # No lazy import required yet.
+                    for name in sorted(_AUTHORITY_DEFERRED_FIXTURES):
+                        with self.assertRaises(AssertionError):
+                            gate._authority_origins(package, tests_loaded=True, tests_completed=True)
+                        runtime.modules[name] = _inert_origin_module(name, package)
+                        gate._authority_origins(package, tests_loaded=True)
+                    gate._authority_origins(package, tests_loaded=True, tests_completed=True)
+                    other = gate.ROOT.parent / ("work/source-build/src/mobile_release" if wheel else
+                        "work/wheel-venv/lib/python3.11/site-packages/mobile_release")
+                    for name in sorted(_AUTHORITY_DEFERRED_FIXTURES):
+                        original = runtime.modules.pop(name)
+                        gate._authority_origins(package, tests_loaded=True)
+                        with self.assertRaises(AssertionError):
+                            gate._authority_origins(package, tests_loaded=True, tests_completed=True)
+                        runtime.modules[name] = _inert_origin_module(name, other)
+                        for completed in (False, True):
+                            with self.assertRaises(AssertionError):
+                                gate._authority_origins(package, tests_loaded=True, tests_completed=completed)
+                        runtime.modules[name] = original
+                    core = runtime.modules.pop("mobile_release.ios_profiles")
+                    with self.assertRaises(AssertionError):
+                        gate._authority_origins(package, tests_loaded=True, tests_completed=True)
+                    runtime.modules["mobile_release.ios_profiles"] = core
+                    for name in ("mobile_release.owned_process", "mobile_release.local_signing", "mobile_release.stores"):
+                        runtime.modules[name] = _inert_origin_module(name, package)
+                        for completed in (False, True):
+                            with self.assertRaises(AssertionError):
+                                gate._authority_origins(package, tests_loaded=True, tests_completed=completed)
+                        del runtime.modules[name]
+
+    def test_native_authority_real_origin_checker_accepts_only_actual_late_parser_observation(self):
+        gate = run_native_profile_checks
+        for wheel in (False, True):
+            with self.subTest(wheel=wheel):
+                suites, module, events = _inert_native_suites()
+                runtime = _inert_authority_runtime(installed_wheel=wheel)
+                package = gate.ROOT.parent / ("work/wheel-venv/lib/python3.11/site-packages/mobile_release" if wheel
+                                              else "work/source-build/src/mobile_release")
+
+                def bootstrap(name, directory):
+                    self.assertIn(name, {"mobile_release", "unit"})
+                    self.assertNotIn(name, runtime.modules)
+                    runtime.modules[name] = _inert_origin_module(name, directory, package=True)
+
+                def products():
+                    for name in _AUTHORITY_CORE_FIXTURES - {"mobile_release"}:
+                        runtime.modules[name] = _inert_origin_module(name, package)
+                    return fixture.product_values
+
+                def selected(expected):
+                    self.assertEqual(expected, _FIXTURE_IDS)
+                    for name in _AUTHORITY_UNIT_FIXTURES - {"unit"}:
+                        runtime.modules[name] = _inert_origin_module(name, gate.ROOT / "tests/unit")
+                    return unittest.TestSuite(suites)
+
+                original = module.Fixture.test_02_subject
+                def decode(test):
+                    original(test)
+                    self.assertTrue(_AUTHORITY_DEFERRED_FIXTURES.isdisjoint(runtime.modules))
+                    for name in _AUTHORITY_DEFERRED_FIXTURES:
+                        runtime.modules[name] = _inert_origin_module(name, package)
+                    events.append("observed-lazy-parsers")
+
+                module.Fixture.test_02_subject = decode
+                with patch.dict(sys.modules, {_FIXTURE_MODULE: module}), _inert_native_gate() as fixture:
+                    runtime.stderr = fixture.stderr
+                    fixture.products.side_effect = products
+                    with patch.object(gate, "sys", runtime), \
+                            patch.object(gate, "_fixed_package", side_effect=bootstrap), \
+                            patch.object(gate, "_selected_suite", side_effect=selected), \
+                            patch.object(gate.importlib, "import_module", side_effect=AssertionError("no product imports")), \
+                            patch.object(gate, "_authority_origins", wraps=gate._authority_origins) as origins:
+                        self.assertEqual(gate.run(partition="authority", installed_wheel=wheel), 0)
+                    self.assertEqual([call.kwargs for call in origins.call_args_list],
+                                     [{}, {"tests_loaded": True}, {"tests_loaded": True, "tests_completed": True}])
+                    self.assertEqual(_native_envelopes(fixture.stderr.getvalue()), [])
+                self.assertEqual(events, ["before", "subject", "observed-lazy-parsers", "after"])
+
     def test_native_authority_origins_reject_mixed_packages_and_unrelated_test_code(self):
         gate = run_native_profile_checks
         for wheel, fault in itertools.product((False, True), (
@@ -1660,6 +1777,9 @@ class NativeProfileCITests(unittest.TestCase):
                 else:
                     self.assertEqual(gate.run(partition="authority"), 1)
             self.assertEqual(origins.call_count, 3 if outcome == "success" else 2)
+            if outcome == "success":
+                self.assertEqual(origins.call_args_list[-1].kwargs,
+                                 {"tests_loaded": True, "tests_completed": True})
             envelopes = _native_envelopes(fixture.stderr.getvalue())
             self.assertEqual(len(envelopes), 0 if outcome == "success" else 1)
             if envelopes:

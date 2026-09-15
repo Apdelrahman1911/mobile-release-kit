@@ -1,7 +1,9 @@
 """Original launcher loss stays UNKNOWN despite positive A/W cleanup witnesses."""
 from __future__ import annotations
 
+import ast
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -145,3 +147,146 @@ class SigningLauncherLossObservationTests(unittest.TestCase):
             fixture._Observation.wait(observation, slot)
         self.assertIs(raised.exception, original_error)
         self.assertEqual(calls, [slot, slot])
+
+
+class InheritedForkFixtureContractTests(unittest.TestCase):
+    """Actual small helper definitions with inert clock/wait/context inputs only."""
+
+    class Clock:
+        def __init__(self):
+            self.now, self.sleeps = 100.0, []
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.sleeps.append(seconds)
+            self.now += seconds
+
+    def helpers(self, clock, waiting=None):
+        def forbidden_wait(*args):
+            raise AssertionError("inert wait was not supplied")
+        namespace = {"math": math, "time": clock,
+                     "os": SimpleNamespace(waitpid=waiting or forbidden_wait, WNOHANG=1,
+                                           waitstatus_to_exitcode=lambda status: status // 256),
+                     "case_owner": SimpleNamespace(CASE_DEADLINE=None),
+                     "worker_timeout": lambda name: {"account-native-flow": 120}[name]}
+        root = Path(__file__).resolve().parents[1]
+        for path, names in (
+                (root / "workflow/local_signing_fork_fixture.py",
+                 {"_remaining", "_wait_released", "reap", "_exit_context", "_cleanup"}),
+                (root / "unit/test_local_signing_native.py", {"_inherited_cutoff", "_inherited_timeout"})):
+            tree = ast.parse(path.read_bytes(), filename=str(path))
+            selected = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+            self.assertEqual({node.name for node in selected}, names)
+            self.assertEqual(len(selected), len(names))
+            self.assertTrue(all(not node.decorator_list for node in selected))
+            # Never import the raw fixture/native unittest graph or execute its
+            # entrypoint, class bodies, original OS module or resource setup.
+            exec(compile(ast.Module(body=selected, type_ignores=[]), str(path), "exec"), namespace)
+        return namespace
+
+    def test_caller_cutoff_caps_original_budget_and_capture_uses_remaining(self):
+        clock = self.Clock()
+        helpers = self.helpers(clock)
+        self.assertEqual(helpers["_inherited_cutoff"](), 220.0)
+        helpers["case_owner"].CASE_DEADLINE = 108.9
+        cutoff = helpers["_inherited_cutoff"]()
+        self.assertEqual(cutoff, 108.9)
+        clock.now = 101.1
+        self.assertEqual(helpers["_inherited_timeout"](cutoff), 7)
+        for invalid in (float("inf"), float("nan"), 110, "110"):
+            helpers["case_owner"].CASE_DEADLINE = invalid
+            with self.subTest(invalid=invalid), self.assertRaises(AssertionError):
+                helpers["_inherited_cutoff"]()
+        for expired in (101.1, 101.9, 99.0):
+            with self.subTest(expired=expired), self.assertRaises(AssertionError):
+                helpers["_inherited_timeout"](expired)
+
+    def test_release_wait_requires_timely_observation_without_short_timer_or_renewal(self):
+        clock = self.Clock()
+        helpers = self.helpers(clock)
+        helpers["_wait_released"](SimpleNamespace(exists=lambda: clock.now >= 105.0), 109.0)
+        self.assertGreaterEqual(clock.now, 105.0)  # Beyond the removed4s timer.
+        self.assertLess(clock.now, 109.0)
+        clock.now = 100.0
+        with self.assertRaises(AssertionError):
+            helpers["_wait_released"](SimpleNamespace(exists=lambda: False), 100.02)
+        self.assertEqual(clock.now, 100.02)
+        def late_release():
+            clock.now = 110.0
+            return True
+        clock.now = 109.0
+        with self.assertRaises(AssertionError):
+            helpers["_wait_released"](SimpleNamespace(exists=late_release), 110.0)
+        calls = []
+        with self.assertRaises(AssertionError):
+            helpers["_wait_released"](SimpleNamespace(exists=lambda: calls.append(True)), 109.0)
+        self.assertEqual(calls, [])
+
+    def test_reap_retires_consumed_unknown_and_late_results_without_retry(self):
+        pid = 41
+        for variant in ("no-result", "nonzero", "wrong-pid", "wrong-zero", "wrong-type", "raised", "late-status", "late-zero"):
+            with self.subTest(variant=variant):
+                clock, pending, calls = self.Clock(), [pid], []
+                original = OSError("inert wait return unavailable")
+                def waiting(actual, flags):
+                    self.assertEqual((actual, flags), (pid, 1))
+                    self.assertNotIn(pid, pending)  # Already retired at the effect boundary.
+                    calls.append(actual)
+                    if variant == "raised": raise original
+                    if variant.startswith("late-"): clock.now = 101.0
+                    return ((0, 0) if variant == "no-result" and len(calls) == 1 or variant == "late-zero"
+                            else (pid, 256) if variant == "nonzero" else (pid + 1, 0) if variant == "wrong-pid"
+                            else (0, 1) if variant == "wrong-zero" else (pid, False) if variant == "wrong-type"
+                            else (pid, 0))
+                helpers = self.helpers(clock, waiting)
+                if variant == "no-result":
+                    helpers["reap"](pid, pending, 101.0)
+                    self.assertEqual(calls, [pid, pid])
+                    self.assertEqual(pending, [])
+                    continue
+                with self.assertRaises((AssertionError, OSError)) as raised:
+                    helpers["reap"](pid, pending, 101.0)
+                primary = raised.exception
+                if variant == "raised": self.assertIs(primary, original)
+                self.assertEqual(pending, [pid] if variant == "late-zero" else [])
+                secondary = helpers["_cleanup"](primary, [lambda: helpers["reap"](pid, pending, 101.0)])
+                self.assertEqual(len(secondary), 1)
+                self.assertEqual(primary.fork_fixture_cleanup_errors, secondary)
+                self.assertEqual(calls, [pid])  # No ambiguous/consumed or expired retry.
+
+    def test_cleanup_retires_contexts_and_preserves_first_error_with_all_secondary_errors(self):
+        helpers = self.helpers(self.Clock())
+        primary, first, second = AssertionError("original body"), OSError("first exit"), RuntimeError("second exit")
+        calls, owners = [], {}
+        def context(name, error):
+            def close(*info):
+                self.assertNotIn(name, owners)
+                self.assertIs(info[1], primary)
+                calls.append(name)
+                raise error
+            return SimpleNamespace(__exit__=close)
+        owners.update(signing=context("signing", first), lease=context("lease", second))
+        actions = [lambda: helpers["_exit_context"](owners, "signing", (AssertionError, primary, None)),
+                   lambda: helpers["_exit_context"](owners, "lease", (AssertionError, primary, None)),
+                   lambda: calls.append("independent")]
+        with self.assertRaises(AssertionError) as raised:
+            try:
+                raise primary
+            finally:
+                secondary = helpers["_cleanup"](sys.exc_info()[1], actions)
+        self.assertIs(raised.exception, primary)
+        self.assertEqual(secondary, (first, second))
+        self.assertEqual(primary.fork_fixture_cleanup_errors, secondary)
+        self.assertEqual(calls, ["signing", "lease", "independent"])
+        self.assertEqual(owners, {})
+        self.assertEqual(helpers["_cleanup"](None, actions[:2]), ())
+        self.assertEqual(calls, ["signing", "lease", "independent"])
+        def fail(error):
+            raise error
+        with self.assertRaises(OSError) as raised:
+            helpers["_cleanup"](None, [lambda: fail(first), lambda: fail(second), lambda: calls.append("last")])
+        self.assertIs(raised.exception, first)
+        self.assertEqual(first.fork_fixture_cleanup_errors, (second,))
+        self.assertEqual(calls[-1], "last")

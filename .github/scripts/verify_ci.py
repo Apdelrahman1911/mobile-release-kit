@@ -2910,6 +2910,24 @@ def native_ruby_observation(raw: bytes, paths: Paths, *, phase: str, bundled: bo
             "helper_sha256": data["helper_sha256"], "feature_sha256": feature_hashes}
 
 
+def _native_entry_failure_locations(text: str, entry: Path, *, deadline: float | None = None) -> list:
+    """Reported frames from one prebound entry, not execution or failure authority."""
+    if deadline is not None:
+        check_clock(deadline)
+    locations = []
+    if entry.is_absolute():
+        pattern = (r'(?m)^  File "' + re.escape(str(entry))
+                   + r'", line ([1-9][0-9]{0,5}), in (?:<module>|[A-Za-z_][A-Za-z0-9_]*)\r?$')
+        for match in re.finditer(pattern, text):
+            if deadline is not None:
+                check_clock(deadline)
+            locations.append(["tests/workflow/run_native_profile_checks.py", int(match[1])])
+            del locations[:-8]
+    if deadline is not None:
+        check_clock(deadline)
+    return locations
+
+
 def failure_details(result, step: Step | None = None, paths: Paths | None = None,
                     *, checks=None, deadline: float | None = None, platform: str | None = None) -> dict:
     """Public-safe observations only; never forward raw child diagnostics."""
@@ -2920,6 +2938,18 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
     value["locations"] = [[name, int(line)] for name, line in re.findall(
         r'File "[^"\r\n]*/(ci_sandbox\.py|ci_checks\.py)", line ([0-9]{1,6})', text)][-8:]
     value["exception_types"] = re.findall(r"(?m)^([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception)):", text)[-8:]
+    if (result.ok is False and step is not None and paths is not None and step.parser == "native"
+            and step.id in {"native-profile-source", "native-profile-wheel"}):
+        try:
+            locations = _native_entry_failure_locations(text,
+                paths.source / "tests/workflow/run_native_profile_checks.py", deadline=deadline)
+            if locations:
+                value["native_entry_locations"] = locations
+        except Exception:
+            # Optional attribution must not replace the original capture failure.
+            # Expiry still consumes the same original deadline, never a new one.
+            if deadline is not None:
+                check_clock(deadline)
     for line in result.stdout.decode("utf-8", "replace").splitlines():
         if not line.startswith("MRK_CHECK_RESULT=") or len(line) > 256 * 1024:
             continue

@@ -381,7 +381,9 @@ class IosArtifactTests(unittest.TestCase):
             deadline.check()
             _validity_intervals.append(leaf)
             return signer
-        def nested_codesign(_app, _temporary, *, _validity_intervals=None, deadline=None):
+        def nested_codesign(_app, _temporary, *, _validity_intervals=None, deadline=None, cancellation=None):
+            self.assertIsNotNone(cancellation)
+            cancellation.check()
             self.assertIsNotNone(deadline)
             deadline.check()
             _validity_intervals.append(nested)

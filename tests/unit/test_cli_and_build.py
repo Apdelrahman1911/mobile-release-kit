@@ -852,8 +852,9 @@ class CliBuildTests(unittest.TestCase):
             captured: dict[str, str] = {}
 
             def fake_checks(
-                _config: object, phase: str, *, environ: dict[str, str]
+                _config: object, phase: str, *, environ: dict[str, str], execution_source=None
             ) -> list[Finding]:
+                self.assertIsNone(execution_source)
                 if phase == "androidArtifact":
                     captured.update(environ)
                 return []
@@ -1421,8 +1422,9 @@ class CliBuildTests(unittest.TestCase):
             captured_environment: dict[str, str] = {}
 
             def fake_project_checks(
-                _config: object, _phase: str, *, environ: dict[str, str]
+                _config: object, _phase: str, *, environ: dict[str, str], execution_source=None
             ) -> list[object]:
+                self.assertIsNone(execution_source)
                 captured_environment.update(environ)
                 return []
 

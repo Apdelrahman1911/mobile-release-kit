@@ -667,7 +667,8 @@ class IOSPreflightCorrespondenceTests(unittest.TestCase):
             root = Path(tmp)
             config = load_config(write_project(root, ios_config(), platform="ios"))
             paths = artifact_set(root)
-            def checks(_config, phase, *, environ):
+            def checks(_config, phase, *, environ, execution_source=None):
+                self.assertIsNone(execution_source)
                 self.assertNotIn("GOOGLE_APPLICATION_CREDENTIALS", environ)
                 self.assertNotIn("MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64", environ)
                 if phase == "iosArtifact":

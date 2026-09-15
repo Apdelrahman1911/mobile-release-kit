@@ -744,6 +744,111 @@ class CIControllerContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
                     controller.require_original_finality(original)
 
+    def test_failed_native_entry_locations_are_exact_bounded_private_and_not_finality(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        relative = "tests/workflow/run_native_profile_checks.py"
+        entry = paths.source / relative
+        private = "PRIVATE_NATIVE_ENTRY_CANARY"
+
+        def frame(filename, line, function=private):
+            return f'  File "{filename}", line {line}, in {function}\n'
+
+        rejected = (frame(entry.parent / "other.py", 81), frame("/other/" + relative, 82),
+            frame(relative, 83), frame(entry, 0), frame(entry, -1), frame(entry, 1000000),
+            frame(entry, "01"), frame(entry, "+1"), frame(entry, 84, "not a function"),
+            frame(entry, 85, "\u03bb"), frame(entry, 86).replace("\n", " trailing\n"),
+            frame(entry, 87).lstrip())
+        stderr = ("Traceback (most recent call last):\n" + "".join(rejected)
+            + "".join(frame(entry, line, "<module>" if line == 1 else private) for line in range(1, 13))
+            + frame(entry, 999999).replace("\n", "\r\n")
+            + "    private_source(" + private + ")\nAssertionError: " + private + " /private/signing\n").encode()
+        stdout = ("private argv=" + private + "\n").encode()
+        fields = dict(ok=False, returncode=1, waited=True, stdout_eof=True, stderr_eof=True,
+            domain_finality=True, timed_out=False, cancelled=False, primary_error="command exited 1",
+            cleanup_errors=(), stdout=stdout, stderr=stderr, persisted=(len(stdout), len(stderr)), duration=0.01)
+        expected = [[relative, line] for line in (*range(6, 13), 999999)]
+        self.assertEqual(controller._native_entry_failure_locations("".join(rejected), entry), [])
+        self.assertEqual(controller._native_entry_failure_locations(frame(relative, 1), Path(relative)), [])
+
+        for phase in ("source", "wheel"):
+            for changes in ({}, {"waited": False, "stderr_eof": False, "domain_finality": False,
+                    "timed_out": True, "cancelled": True, "cleanup_errors": ("stream close OSError",)}):
+                with self.subTest(phase=phase, lost_finality=bool(changes)):
+                    original = SimpleNamespace(**{**fields, **changes})
+                    before = dict(vars(original))
+                    step = controller.Step("native-profile-" + phase, parser="native")
+                    reported = controller.failure_details(original, step, paths)
+                    self.assertEqual(reported["native_entry_locations"], expected)
+                    for key, value in controller.capture_observations(original).items():
+                        self.assertEqual(reported[key], value)
+                    for hidden in (private, str(entry), "/private/signing", "private_source", "private argv"):
+                        self.assertNotIn(hidden, json.dumps(reported))
+                    self.assertEqual(vars(original), before)
+                    with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                        controller.require_original_finality(original)
+                    reported["native_entry_locations"].clear()
+                    self.assertEqual(vars(original), before)
+
+        original = SimpleNamespace(**fields)
+        step = controller.Step("native-profile-source", parser="native")
+        for excluded_step, excluded_paths in ((None, paths), (step, None),
+                (dataclasses.replace(step, id="python-full"), paths),
+                (dataclasses.replace(step, parser="check"), paths),
+                (dataclasses.replace(step, id="native-profile-wheel", parser="exit"), paths)):
+            with self.subTest(step=excluded_step, paths_present=excluded_paths is not None), \
+                    patch.object(controller, "_native_entry_failure_locations") as diagnostic:
+                self.assertNotIn("native_entry_locations", controller.failure_details(original, excluded_step, excluded_paths))
+                diagnostic.assert_not_called()
+        for ok in (True, None, 0):
+            with self.subTest(ok=ok), patch.object(controller, "_native_entry_failure_locations") as diagnostic:
+                capture = SimpleNamespace(**{**fields, "ok": ok, "returncode": 0, "primary_error": None})
+                self.assertNotIn("native_entry_locations", controller.failure_details(capture, step, paths))
+                diagnostic.assert_not_called()
+                if ok is True:
+                    controller.require_original_finality(capture)
+
+    def test_failed_native_entry_diagnostics_keep_original_deadline_and_failure(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        entry = paths.source / "tests/workflow/run_native_profile_checks.py"
+        step = controller.Step("native-profile-source", parser="native")
+        stderr = f'  File "{entry}", line 123, in run\n'.encode()
+        original = SimpleNamespace(ok=False, returncode=1, waited=True, stdout_eof=True, stderr_eof=True,
+            domain_finality=True, timed_out=False, cancelled=False, primary_error="command exited 1",
+            cleanup_errors=(), stdout=b"", stderr=stderr, persisted=(0, len(stderr)), duration=0.01)
+        before = dict(vars(original))
+        for stage, ticks in (("before", (1000.0,)), ("during", (999.0, 1000.0)),
+                             ("after", (999.0, 999.0, 1000.0))):
+            clock_values = iter(ticks)
+            with self.subTest(stage=stage), \
+                    patch.object(controller.time, "monotonic", side_effect=lambda: next(clock_values, 1000.0)), \
+                    patch.object(controller, "check_clock", wraps=controller.check_clock) as checked, \
+                    self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                controller.failure_details(original, step, paths, deadline=1000.0)
+            self.assertEqual([call.args for call in checked.call_args_list], [(1000.0,)] * (len(ticks) + 1))
+            self.assertEqual(vars(original), before)
+
+        private = "PRIVATE_OPTIONAL_NATIVE_DIAGNOSTIC_ERROR"
+        with patch.object(controller, "_native_entry_failure_locations", side_effect=ValueError(private)) as diagnostic, \
+                patch.object(controller.time, "monotonic", return_value=999.0), \
+                patch.object(controller, "check_clock", wraps=controller.check_clock) as checked:
+            reported = controller.failure_details(original, step, paths, deadline=1000.0)
+        diagnostic.assert_called_once_with(stderr.decode(), entry, deadline=1000.0)
+        checked.assert_called_once_with(1000.0)
+        self.assertNotIn("native_entry_locations", reported)
+        self.assertNotIn(private, json.dumps(reported))
+        for key, value in controller.capture_observations(original).items():
+            self.assertEqual(reported[key], value)
+        self.assertEqual(vars(original), before)
+        with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+            controller.require_original_finality(original)
+        with patch.object(controller, "_native_entry_failure_locations", side_effect=ValueError(private)), \
+                patch.object(controller.time, "monotonic", return_value=1000.0), \
+                self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+            controller.failure_details(original, step, paths, deadline=1000.0)
+        self.assertEqual(vars(original), before)
+
     def test_native_gate_keeps_every_original_capture_record_and_one_source_wheel_cutoff(self):
         for phase, original_deadline, cutoff in (("source", 2500.0, 1000.0), ("wheel", 800.0, 800.0)):
             with self.subTest(phase=phase):

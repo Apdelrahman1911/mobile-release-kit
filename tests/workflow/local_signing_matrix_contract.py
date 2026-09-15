@@ -787,8 +787,8 @@ def _primitive_record(item, observation, evidence):
             _object(row, ("variant", "originalError", "journalFailed", "faults", "initial", "generations",
                           "retainedIdentities", "physical", "nativeCommands"), "primitive failure observation")
             variant = row["variant"]
-            expected_error = (None if variant == "short-write" else "ProcessError" if variant in {
-                "close-after", "reader-close-after"} else "OSError" if variant.endswith(("-before", "-after"))
+            expected_error = (None if variant == "short-write" else "ProcessCleanupError" if variant == "close-after"
+                else "ProcessError" if variant == "reader-close-after" else "OSError" if variant.endswith(("-before", "-after"))
                 or variant == "partial-write-error" else "FileExistsError" if variant.startswith("pending-")
                 else "CredentialError")
             require(row["originalError"] == expected_error

@@ -810,8 +810,11 @@ class IosOperationRecoveryTests(unittest.TestCase):
             snapshots = []
 
             @contextmanager
-            def capture_snapshot(paths):
-                with ios_artifacts.snapshot_ios_artifacts(paths) as snapshot:
+            def capture_snapshot(paths, *, cancellation=None):
+                self.assertIsNotNone(cancellation)
+                cancellation.check()
+                with ios_artifacts.snapshot_ios_artifacts(paths, cancellation=cancellation) as snapshot:
+                    self.assertIs(snapshot.cancellation, cancellation)
                     snapshots.append(snapshot)
                     yield snapshot
 
@@ -858,8 +861,11 @@ class IosOperationRecoveryTests(unittest.TestCase):
         before[self.root / "app.ipa"] = (self.root / "app.ipa").read_bytes()
 
         @contextmanager
-        def capture_snapshot(inputs):
-            with ios_artifacts.snapshot_ios_artifacts(inputs) as snapshot:
+        def capture_snapshot(inputs, *, cancellation=None):
+            self.assertIsNotNone(cancellation)
+            cancellation.check()
+            with ios_artifacts.snapshot_ios_artifacts(inputs, cancellation=cancellation) as snapshot:
+                self.assertIs(snapshot.cancellation, cancellation)
                 snapshots.append(snapshot)
                 yield snapshot
 

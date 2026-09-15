@@ -1036,7 +1036,8 @@ class MatrixContractTests(unittest.TestCase):
                     fault["replacement"] = {"device": 1, "inode": 3, "mode": 0o600, "size": 1,
                                             "sha256": hashlib.sha256(b"x").hexdigest()}
                     generations["1:3"] = {"fixtureReplacement": variant}
-                error = (None if variant == "short-write" else "ProcessError" if variant in {"close-after", "reader-close-after"}
+                error = (None if variant == "short-write" else "ProcessCleanupError" if variant == "close-after"
+                         else "ProcessError" if variant == "reader-close-after"
                          else "OSError" if variant.endswith(("-before", "-after")) or variant == "partial-write-error"
                          else "FileExistsError" if variant.startswith("pending-") else "CredentialError")
                 rows.append({"variant": variant, "originalError": error,
@@ -1052,6 +1053,20 @@ class MatrixContractTests(unittest.TestCase):
                 "evidence": {"component-evidence.json": rows}, "regressionParts": []}
             self.assertEqual(contract.validate_layered_record(row, operating_system), item.identifier)
             primitive_rows[family] = row
+        # The writer retains its concrete close error; the reader deliberately
+        # projects the shared guard into a ProcessError. Neither is an alias for
+        # the other, a generic IO error, or a missing failure observation.
+        for family, variant, wrong in (
+                ("writer-failures", "close-after", ("ProcessError", "OSError", None)),
+                ("reader-failures", "reader-close-after", ("ProcessCleanupError", "OSError", None))):
+            for error in wrong:
+                with self.subTest(close_variant=variant, wrong_error=error):
+                    changed = copy.deepcopy(primitive_rows[family])
+                    rows = changed["evidence"]["component-evidence.json"]
+                    next(row for row in rows if row["variant"] == variant)["originalError"] = error
+                    changed["observation"]["resultsSha256"] = contract.digest(rows)
+                    with self.assertRaises(ValueError):
+                        contract.validate_layered_record(changed, operating_system)
         for variant in ("missing-outcome", "short-latched", "writer-unlatched", "reader-latched", "remover-success",
                         "missing-fault", "repeated-fault", "wrong-effect", "missing-physical"):
             with self.subTest(primitive_variant=variant):

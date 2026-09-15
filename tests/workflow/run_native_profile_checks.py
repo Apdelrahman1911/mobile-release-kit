@@ -147,6 +147,9 @@ AUTHORITY_PRODUCT_MODULES = frozenset({
     "mobile_release._native_process", "mobile_release._profile_process",
     "mobile_release.errors", "mobile_release.inspection", "mobile_release._lifetime_evidence",
 })
+AUTHORITY_DEFERRED_PRODUCT_MODULES = frozenset({
+    "mobile_release.ios_der", "mobile_release.ios_entitlements", "mobile_release.ios_plist_binary",
+})
 
 
 def _expected_native_ids(partition="all") -> tuple[str, ...]:
@@ -270,14 +273,22 @@ def _fixed_package(name, directory) -> None:
         raise
 
 
-def _authority_origins(package, *, tests_loaded=False) -> None:
+def _authority_origins(package, *, tests_loaded=False, tests_completed=False) -> None:
+    if (type(tests_loaded) is not bool or type(tests_completed) is not bool
+            or tests_completed and not tests_loaded):
+        raise AssertionError("native authority origin phase differs from its fixed lifecycle")
     _authority_runtime()
+    # The admitted two-layer decode loads these parsers lazily. They are not
+    # startup imports, and no command/caller module gains their lifetime grant.
+    allowed = AUTHORITY_PRODUCT_MODULES | (AUTHORITY_DEFERRED_PRODUCT_MODULES if tests_loaded else frozenset())
     required = AUTHORITY_PRODUCT_MODULES | (AUTHORITY_UNIT_MODULES if tests_loaded else {"unit"})
+    if tests_completed:
+        required |= AUTHORITY_DEFERRED_PRODUCT_MODULES
     if not required <= sys.modules.keys():
         raise AssertionError("native authority lost its fixed package imports")
     for name, module in tuple(sys.modules.items()):
         if name == "mobile_release" or name.startswith("mobile_release."):
-            if name not in AUTHORITY_PRODUCT_MODULES:
+            if name not in allowed:
                 raise AssertionError("native authority imported an ordinary caller/command module")
             _check_module_origin(name, module, package, package=name == "mobile_release")
         elif name == "unit" or name.startswith("unit."):
@@ -789,7 +800,7 @@ def run(*, installed_wheel=False, partition="all") -> int:
             print("FAIL: required native verification must not contain skipped tests", file=sys.stderr)
         success = result.wasSuccessful() and not result.skipped and not state["failed"] and result.testsRun == len(expected)
         if success and package is not None:
-            _authority_origins(package, tests_loaded=True)
+            _authority_origins(package, tests_loaded=True, tests_completed=True)
         elif success and partition == "ordinary":
             _ordinary_product_origins(installed_wheel)
     except BaseException as error:

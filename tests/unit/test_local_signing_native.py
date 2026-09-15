@@ -4,9 +4,11 @@ from __future__ import annotations
 import ctypes
 import errno
 import json
+import math
 import os
 import sys
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -16,6 +18,7 @@ from mobile_release import local_signing as signing
 from mobile_release.errors import CredentialError
 from mobile_release.owned_process import run_owned
 from workflow import local_signing_bridge as bridge
+from workflow import local_signing_case_owner as case_owner
 from workflow.local_signing_workload import worker_timeout
 from workflow.local_signing_regression_catalog import HANDOFF_MODES, inherited_modes
 from .local_signing_helpers import completed_case_directory
@@ -28,6 +31,23 @@ def capture(argv, root, *, timeout):
     return run_owned(argv, cwd=root, timeout=timeout, capture=True, output_limit=64 * 1024,
                      environ={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C", "LANG": "C",
                               "HOME": str(root), "TMPDIR": str(root)})
+
+
+def _inherited_cutoff():
+    deadline = time.monotonic() + worker_timeout("account-native-flow")
+    original = case_owner.CASE_DEADLINE
+    if original is not None:
+        assert type(original) is float and math.isfinite(original), "invalid original case cutoff"
+        deadline = min(deadline, original)
+    assert math.isfinite(deadline), "invalid inherited fixture cutoff"
+    return deadline
+
+
+def _inherited_timeout(deadline):
+    assert type(deadline) is float and math.isfinite(deadline), "invalid inherited fixture cutoff"
+    remaining = math.floor(deadline - time.monotonic())
+    assert remaining >= 1, "inherited fixture capture budget exhausted"
+    return remaining
 
 
 @unittest.skipUnless(os.name == 'posix', 'local signing lease requires POSIX')
@@ -80,9 +100,10 @@ class SigningAccountNativeTests(unittest.TestCase):
         self.assertIn(mode, inherited_modes('macos-26' if sys.platform == 'darwin' else 'ubuntu-24.04'))
         fixture=Path(__file__).parents[1]/'workflow/local_signing_fork_fixture.py'
         with completed_case_directory(prefix='mrk-fork-account-') as root:
+            deadline = _inherited_cutoff()
             process = capture([sys.executable,'-I','-S','-B',str(fixture),
-                               str(Path(mobile_release.__file__).resolve().parent.parent),str(root),mode],
-                              root, timeout=worker_timeout("account-native-flow"))
+                               str(Path(mobile_release.__file__).resolve().parent.parent),str(root),mode,repr(deadline)],
+                              root, timeout=_inherited_timeout(deadline))
             self.assertEqual(process.returncode,0,process.stderr)
             self.assertFalse(process.stderr)
             result=json.loads(process.stdout)

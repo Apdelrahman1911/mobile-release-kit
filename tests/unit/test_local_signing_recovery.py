@@ -369,71 +369,155 @@ class SigningRecoveryTests(NativeCaseWorkspaceMixin, unittest.TestCase):
         self.assertEqual(self.recover()['status'], 'recovered')
 
     def test_retry_stage_observation_failed_real_borrowed_checkpoint_closes_handles_and_recovers(self):
+        from mobile_release import owned_process
+
         real_open, real_close, real_fstat, real_write = os.open, os.close, os.fstat, os.write
         handles, active_handles, closed, stat_calls, failed_writes = [], {}, [], [], []
-        stage_name = '.mobile-release-profile-' + self.token
-        with signing.local_signing_lease(home=self.home) as lease:
-            session = lease.session(token=self.token)
-            session.open(create=True); session.bind_runner(self.model)
-            session.prepare(b'fictional-profile', self.uuid)
-            guard = lease.cancellation
-            def opening(path, *args, **kwargs):
-                descriptor = real_open(path, *args, **kwargs)
-                active_handles[descriptor] = str(path)
-                if str(path) in (stage_name, 'Provisioning Profiles'):
+        account_handles, account_closed = {}, []
+        installer_body, checked_before_lease_exit = [], False
+        unexpected_body_error = None
+        handlers = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
+        real_account_close = signing._close
+        def close_account(descriptor):
+            tracked, identity = descriptor in account_handles, None
+            if tracked:
+                try:
                     details = real_fstat(descriptor)
-                    handles.append((descriptor, details.st_dev, details.st_ino, str(path)))
-                return descriptor
-            def stating(descriptor):
-                if active_handles.get(descriptor) == stage_name:
-                    stat_calls.append(descriptor)
-                    if len(stat_calls) == 1: raise OSError('fictional first stage fstat failure')
-                return real_fstat(descriptor)
-            def writing(descriptor, content):
-                if (active_handles.get(descriptor) == 'state.pending'
-                        and session.state['profile']['phase'] == 'stage-created' and not failed_writes):
-                    failed_writes.append(descriptor)
-                    return 0  # Real protected writer rejects this incomplete write; no checkpoint stub.
-                return real_write(descriptor, content)
-            def closing(descriptor):
-                name = active_handles.pop(descriptor, None)
-                if name in (stage_name, 'Provisioning Profiles'): closed.append((descriptor, name))
-                return real_close(descriptor)
+                    identity = (details.st_dev, details.st_ino)
+                except OSError:
+                    pass  # Failed observation must not prevent the original close.
+            result = real_account_close(descriptor)
+            if tracked:
+                account_closed.append((descriptor, identity))
+            return result
+        stage_name = '.mobile-release-profile-' + self.token
+        with self.assertRaises(owned_process.ProcessError) as lease_failure, \
+                patch.object(signing, '_close', new=close_account), \
+                signing.local_signing_lease(home=self.home) as lease:
             try:
-                with patch.object(os, 'open', new=opening), patch.object(os, 'fstat', new=stating), \
-                     patch.object(os, 'write', new=writing), patch.object(os, 'close', new=closing), \
-                     self.assertRaises(CredentialError):
-                    with _temporary_profile_installation(b'fictional-profile', self.uuid, self.home,
-                            cancellation=guard, observer=session.profile_event, reserved_stage=stage_name):
-                        self.fail('failed ownership checkpoint admitted installer body')
-                self.assertEqual(len(stat_calls), 2)
-                self.assertEqual(len(failed_writes), 1)
-                self.assertTrue(session.journal_failed)
-                self.assertIs(lease.cancellation, guard)
-                self.assertEqual(len(handles), 2)
-                self.assertCountEqual(closed, [(fd, name) for fd, _, _, name in handles])
-                for descriptor, *_ in handles:
-                    with self.assertRaises(OSError): real_fstat(descriptor)
-                self.assertTrue((self.session_path/'intent.json').is_file())
-                self.assertEqual((self.session_path/'state.pending').read_bytes(), b'')
-                committed = json.loads((self.session_path/'state.json').read_bytes())
-                self.assertEqual(committed['profile']['phase'], 'stage-intent')
-                self.assertEqual(committed['profile']['stageIdentity'], None)
-                directory = self.home/'Library/MobileDevice/Provisioning Profiles'
-                self.assertEqual(list(directory.iterdir()), [])
-                lease.assert_owner()
-            finally:
-                for descriptor, device, inode, _ in handles:
-                    try:
+                session = lease.session(token=self.token)
+                session.open(create=True); session.bind_runner(self.model)
+                session.prepare(b'fictional-profile', self.uuid)
+                guard = lease.cancellation
+                ledger = guard.lifetime_ledger
+                calls_before = len(self.model.calls)
+                self.assertFalse(ledger.fatal)
+                for descriptor in (lease.home_fd, lease.fd, session.fd, session.native_fd):
+                    details = real_fstat(descriptor)
+                    account_handles[descriptor] = (details.st_dev, details.st_ino)
+                self.assertEqual(len(account_handles), 4)
+                def opening(path, *args, **kwargs):
+                    descriptor = real_open(path, *args, **kwargs)
+                    active_handles[descriptor] = str(path)
+                    if str(path) in (stage_name, 'Provisioning Profiles'):
                         details = real_fstat(descriptor)
-                        if (details.st_dev, details.st_ino) == (device, inode): real_close(descriptor)
-                    except OSError:
-                        pass
+                        handles.append((descriptor, details.st_dev, details.st_ino, str(path)))
+                    return descriptor
+                def stating(descriptor):
+                    if active_handles.get(descriptor) == stage_name:
+                        stat_calls.append(descriptor)
+                        if len(stat_calls) == 1: raise OSError('fictional first stage fstat failure')
+                    return real_fstat(descriptor)
+                def writing(descriptor, content):
+                    if (active_handles.get(descriptor) == 'state.pending'
+                            and session.state['profile']['phase'] == 'stage-created' and not failed_writes):
+                        failed_writes.append(descriptor)
+                        return 0  # Real protected writer rejects this incomplete write; no checkpoint stub.
+                    return real_write(descriptor, content)
+                def closing(descriptor):
+                    name = active_handles.pop(descriptor, None)
+                    if name in (stage_name, 'Provisioning Profiles'): closed.append((descriptor, name))
+                    return real_close(descriptor)
+                try:
+                    with patch.object(os, 'open', new=opening), patch.object(os, 'fstat', new=stating), \
+                         patch.object(os, 'write', new=writing), patch.object(os, 'close', new=closing), \
+                         self.assertRaises(owned_process.ProcessError) as installer_failure:
+                        with _temporary_profile_installation(b'fictional-profile', self.uuid, self.home,
+                                cancellation=guard, observer=session.profile_event, reserved_stage=stage_name):
+                            installer_body.append(True)
+                            self.fail('failed ownership checkpoint admitted installer body')
+                    self.assertFalse(installer_body)
+                    self.assertIs(type(installer_failure.exception), owned_process.ProcessError)
+                    self.assertTrue(installer_failure.exception.fatal)
+                    self.assertFalse(installer_failure.exception.cleanup_complete)
+                    self.assertTrue(ledger.fatal)
+                    self.assertEqual(len(stat_calls), 2)
+                    self.assertEqual(len(failed_writes), 1)
+                    self.assertTrue(session.journal_failed)
+                    self.assertIs(lease.cancellation, guard)
+                    self.assertEqual(len(handles), 2)
+                    self.assertCountEqual(closed, [(fd, name) for fd, _, _, name in handles])
+                    for descriptor, *_ in handles:
+                        with self.assertRaises(OSError): real_fstat(descriptor)
+                    self.assertTrue((self.session_path/'intent.json').is_file())
+                    self.assertEqual((self.session_path/'state.pending').read_bytes(), b'')
+                    committed = json.loads((self.session_path/'state.json').read_bytes())
+                    self.assertEqual(committed['profile']['phase'], 'stage-intent')
+                    self.assertEqual(committed['profile']['stageIdentity'], None)
+                    directory = self.home/'Library/MobileDevice/Provisioning Profiles'
+                    self.assertEqual(list(directory.iterdir()), [])
+                    lease.assert_owner()
+                    checked_before_lease_exit = True
+                finally:
+                    for descriptor, device, inode, _ in handles:
+                        try:
+                            details = real_fstat(descriptor)
+                            if (details.st_dev, details.st_ino) == (device, inode): real_close(descriptor)
+                        except OSError:
+                            pass
+            except BaseException as error:
+                unexpected_body_error = (error, error.__traceback__)
+                raise
+        if unexpected_body_error is not None:
+            error, traceback = unexpected_body_error
+            raise error.with_traceback(traceback)
+        # Fatal projection must not turn a failed assertion inside the lease
+        # into the expected outer error and silently skip the original checks.
+        self.assertTrue(checked_before_lease_exit)
+        self.assertIs(type(lease_failure.exception), owned_process.ProcessError)
+        self.assertTrue(lease_failure.exception.fatal)
+        self.assertFalse(lease_failure.exception.cleanup_complete)
+        self.assertTrue(ledger.fatal)
+        self.assertTrue(session.journal_failed)
+        self.assertEqual(guard.handler_state, 'RESTORED')
+        self.assertTrue(all(signal.getsignal(signum) is handler for signum, handler in handlers.items()))
+        self.assertCountEqual(account_closed, list(account_handles.items()))
+        self.assertEqual(lease._hold_slot.state, 'CLOSED')
+        self.assertFalse(lease.locked)
+        self.assertIsNone(lease.active)
+        self.assertTrue(session.closed)
+        self.assertEqual((lease.home_fd, lease.fd, session.fd, session.native_fd), (None,) * 4)
+        for descriptor in account_handles:
+            with self.assertRaises(OSError): real_fstat(descriptor)
+        self.assertIsNone(ledger._command)
+        self.assertIsNone(ledger._profile)
+        verdict = ledger.verdict()
+        self.assertTrue(verdict.complete and verdict.contained)
+        self.assertEqual(len(self.model.calls), calls_before)
         self.assertEqual(signing.signing_status(home=self.home)['status'], 'pending')
         with self.assertRaises(signing.SigningPending):
             with signing.local_signing_lease(home=self.home): self.fail('pending checkpoint was ignored')
         before = len(self.model.calls)
-        self.assertEqual(self.recover()['status'], 'recovered')
+        # Only this white-box fixture proved all original handles/command
+        # records settled. Its failed journal/guard stays failed; fresh recovery
+        # is not a reset or permission to reuse an arbitrary unhealthy process.
+        recovered = []
+        real_recover = signing.SigningSession.recover
+        def recover(fresh_session, *args, **kwargs):
+            recovered.append((fresh_session.lease, fresh_session.cancellation))
+            self.assertIsNot(fresh_session, session)
+            self.assertIsNot(fresh_session.lease, lease)
+            self.assertIsNot(fresh_session.cancellation, guard)
+            self.assertTrue(ledger.fatal)
+            self.assertTrue(session.journal_failed)
+            return real_recover(fresh_session, *args, **kwargs)
+        with patch.object(signing.SigningSession, 'recover', new=recover):
+            self.assertEqual(self.recover()['status'], 'recovered')
+        self.assertEqual(len(recovered), 1)
+        self.assertEqual(recovered[0][1].handler_state, 'RESTORED')
+        self.assertIs(guard.lifetime_ledger, ledger)
+        self.assertTrue(ledger.fatal)
+        self.assertTrue(session.journal_failed)
         self.assertTrue(all(argv[1] in {'list-keychains', 'default-keychain'} and '-s' not in argv
                             for argv in self.model.calls[before:]))
         self.assertEqual(self.model.preferences, self.model.original)
