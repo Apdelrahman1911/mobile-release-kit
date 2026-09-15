@@ -76,6 +76,8 @@ class _InertLease:
 class CommandContractTests(unittest.TestCase):
     """Finite protocols/ordering only: no native child, thread, FD or signal."""
     def setUp(self):
+        from .test_lifetime_evidence import fork_registry_model
+        self.enterContext(fork_registry_model())
         for name in ("create",):
             blocked = patch.object(command.native, name, side_effect=AssertionError("inert check attempted native creation"))
             blocked.start(); self.addCleanup(blocked.stop)

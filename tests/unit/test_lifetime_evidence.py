@@ -9,6 +9,7 @@ import inspect
 import signal
 import threading
 import unittest
+import weakref
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import PropertyMock, patch
@@ -22,6 +23,22 @@ from mobile_release.owned_process import ProcessError
 
 
 @contextmanager
+def fork_registry_model():
+    """Route only inert model registrations, never discard real fork custody.
+
+    Both profile modules import the registry by value. Import them before the
+    boundary so their aliases are restored too, including nested/error exits.
+    Real resource/process tests must not use this model-only context.
+    """
+    from mobile_release import _profile_process, ios_profiles
+    registry = weakref.WeakSet()
+    with patch.object(cancellation, "_FORK_RESOURCES", registry), \
+            patch.object(ios_profiles, "_FORK_RESOURCES", registry), \
+            patch.object(_profile_process, "_FORK_RESOURCES", registry):
+        yield registry
+
+
+@contextmanager
 def handler_model():
     handlers = {signal.SIGINT: signal.default_int_handler, signal.SIGTERM: signal.SIG_DFL}
     calls = []
@@ -29,7 +46,8 @@ def handler_model():
         calls.append(signum)
         previous, handlers[signum] = handlers[signum], token
         return previous
-    with patch.object(cancellation.signal, "getsignal", side_effect=handlers.__getitem__), \
+    with fork_registry_model(), \
+            patch.object(cancellation.signal, "getsignal", side_effect=handlers.__getitem__), \
             patch.object(cancellation.signal, "signal", side_effect=setter):
         yield handlers, calls, setter
 
@@ -253,6 +271,55 @@ class LifetimeEvidenceTests(unittest.TestCase):
 
 
 class InertCancellationLifecycleTests(unittest.TestCase):
+    def test_model_registries_restore_original_aliases_without_repairing_retained_failures(self):
+        from mobile_release import _profile_process, ios_profiles
+        modules = (cancellation, ios_profiles, _profile_process)
+        originals = tuple(module._FORK_RESOURCES for module in modules)
+        members = tuple(tuple(registry) for registry in originals)  # Keep original members alive.
+        unsafe_before = cancellation._FORK_UNSAFE
+        retained = []
+        with handler_model():
+            enclosing = cancellation._FORK_RESOURCES
+            enclosing_owner = guard()
+            for primary in (None, KeyboardInterrupt("modeled boundary interruption")):
+                with self.subTest(interrupted=primary is not None):
+                    try:
+                        with handler_model():
+                            registry = cancellation._FORK_RESOURCES
+                            self.assertIsNot(registry, enclosing)
+                            for module in modules:
+                                self.assertIs(module._FORK_RESOURCES, registry)
+                            owner = guard()
+                            retained.append(owner)
+                            owner._abort(CredentialError("modeled cleanup failure"))
+                            owner.restore()
+                            self.assertEqual(owner.handler_state, "RESTORED")
+                            self.assertTrue(owner.lifetime_ledger.fatal)
+                            self.assertIn(owner, registry)
+                            # Exercise the actual inherited-failure decision without
+                            # forking, resetting global state, or changing its result.
+                            with patch.object(cancellation.os, "getpid", return_value=owner.pid + 1), \
+                                    patch.object(cancellation, "_mark_fork_unsafe") as unsafe:
+                                owner.after_fork_child()
+                            unsafe.assert_called_once_with()
+                            if primary is not None:
+                                raise primary
+                    except BaseException as error:
+                        self.assertIs(error, primary)
+                    else:
+                        self.assertIsNone(primary)
+                    for module in modules:
+                        self.assertIs(module._FORK_RESOURCES, enclosing)
+                    self.assertIn(enclosing_owner, enclosing)
+                    self.assertNotIn(owner, enclosing)
+                    self.assertTrue(owner.lifetime_ledger.fatal)
+            enclosing_owner.restore()
+        for module, original, previous in zip(modules, originals, members):
+            self.assertIs(module._FORK_RESOURCES, original)
+            self.assertEqual(set(original), set(previous))
+            self.assertTrue(all(owner not in original for owner in retained))
+        self.assertIs(cancellation._FORK_UNSAFE, unsafe_before)
+
     def test_fatal_projection_rejects_foreign_guard_before_any_parent_property(self):
         from mobile_release import _profile_callers as callers
 

@@ -13,7 +13,8 @@ from types import ModuleType
 
 ROOT = Path(__file__).resolve().parents[2]
 PATTERNS = ("test_ios_profile_authority.py", "test_ios_profile_trust.py", "test_ios_profile_installation.py",
-            "test_default_cancellation.py", "test_profile_processes.py", "test_macho_native.py",
+            "test_ios_entitlements.py", "test_operation_recovery.py", "test_default_cancellation.py",
+            "test_profile_processes.py", "test_macho_native.py",
             "test_native_process.py", "test_profile_process_owner.py", "test_inspection_budget.py",
             "test_local_signing.py", "test_local_signing_recovery.py", "test_local_signing_native.py",
             "test_local_signing_composition.py", "test_owned_process.py", "test_owned_process_callers.py",
@@ -87,6 +88,22 @@ POISON_PARTITIONS = (
     ("poison-command-fence-foreign-pending-collision", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_foreign_pending_collision"),
     ("poison-command-prepared-prefix-input-loss", "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests.test_prepared_input_withdrawal_c_loss_fresh_prefix_recovery"),
     ("poison-command-account-hold-parent-loss", "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests.test_original_hold_survives_true_parent_loss_and_is_absent_from_worker_map"),
+    ("poison-signing-foreign-mixed-handlers", "unit.test_local_signing_composition.SigningCompositionTests.test_foreign_and_mixed_signal_owners_are_never_silently_overwritten_or_borrowed"),
+    ("poison-profile-authenticator-publication", "unit.test_ios_entitlements.SignedEntitlementInventoryTests.test_mocked_authenticator_without_owner_publication_remains_fatal"),
+    ("poison-recovery-profile-cleanup", "unit.test_operation_recovery.IosOperationRecoveryTests.test_profile_cleanup_uncertainty_stops_actual_fresh_validation_before_any_store_access"),
+    ("poison-profile-authentication-order", "unit.test_ios_profile_authority.CMSFramingTests.test_profile_requires_both_authentications_in_order_then_complete_correlation"),
+    ("poison-profile-setup-unlink", "unit.test_ios_profile_installation.ProfileInstallationTests.test_ambiguous_setup_stage_unlink_is_not_implicitly_retried_or_resolved"),
+    ("poison-profile-collision", "unit.test_ios_profile_installation.ProfileInstallationTests.test_collision_symlink_fifo_and_invalid_input_never_overwrite_existing_state"),
+    ("poison-profile-partial-handler-install", "unit.test_ios_profile_installation.ProfileInstallationTests.test_custom_handlers_worker_threads_and_partial_handler_registration_preserve_host_state"),
+    ("poison-profile-cleanup-observer", "unit.test_ios_profile_installation.ProfileInstallationTests.test_fallible_cleanup_observers_never_abandon_actual_owned_handles"),
+    ("poison-profile-fstat", "unit.test_ios_profile_installation.ProfileInstallationTests.test_initial_fstat_failure_recovers_only_from_owned_fd_or_reports_empty_private_residue"),
+    ("poison-profile-fsync-cleanup", "unit.test_ios_profile_installation.ProfileInstallationTests.test_partial_write_flush_fsync_and_link_failures_leave_no_owned_files"),
+    ("poison-profile-replacement", "unit.test_ios_profile_installation.ProfileInstallationTests.test_replacement_or_edit_is_preserved_and_failed_cleanup_cannot_report_success"),
+    ("poison-profile-directory-close", "unit.test_ios_profile_installation.ProfileInstallationTests.test_retained_normal_body_cannot_hide_directory_close_uncertainty"),
+    ("poison-signing-content-conflict", "unit.test_local_signing_failures.SigningFailureTests.test_ordinary_content_conflict_keeps_safe_predispatch_cleanup"),
+    ("poison-signing-profile-identity-conflict", "unit.test_local_signing_profile_identity.ProfileIdentityTests.test_direct_installer_preserves_all_real_owned_and_borrowed_conflicts"),
+    ("poison-command-source-close", "unit.test_owned_process.CommandSourceOwnerTests.test_failed_close_latches_before_diagnostics_and_attempts_each_independent_slot_once"),
+    ("poison-command-source-profile-conflict", "unit.test_owned_process.CommandSourceOwnerTests.test_original_profile_conflict_close_revokes_even_without_session_failure_flags"),
 )
 ISOLATED_PROFILE_PRODUCTS = frozenset({
     "mobile_release", "mobile_release._native_process", "mobile_release._profile_process",
@@ -137,6 +154,98 @@ ISOLATED_NEGATIVE_IMPORTS = (
                 "mobile_release.errors", "mobile_release.local_signing", "mobile_release._profile_callers",
                 "mobile_release.credentials", "mobile_release.config", "mobile_release.reporting",
                 "mobile_release.tooling"})),
+    ("unit.test_local_signing_composition", ("workflow", "unit"),
+     frozenset({"unit", "unit.helpers", "unit.ios_entitlement_helpers", "unit.local_signing_helpers",
+                "unit.local_signing_persistent", "unit.test_local_signing_composition", "workflow",
+                "workflow.local_signing_regression_catalog"}),
+     frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
+                "mobile_release._profile_callers", "mobile_release.android", "mobile_release.cancellation",
+                "mobile_release.cli", "mobile_release.config", "mobile_release.credentials", "mobile_release.discovery",
+                "mobile_release.errors", "mobile_release.init_transaction", "mobile_release.inspection",
+                "mobile_release.ios", "mobile_release.ios_artifacts", "mobile_release.ios_entitlements",
+                "mobile_release.ios_profiles", "mobile_release.local_signing", "mobile_release.macho",
+                "mobile_release.metadata", "mobile_release.owned_process", "mobile_release.preflight",
+                "mobile_release.provenance", "mobile_release.reporting", "mobile_release.stores",
+                "mobile_release.tooling", "mobile_release.workflow"})),
+    ("unit.test_ios_entitlements", ("unit",),
+     frozenset({"unit", "unit.ios_artifact_helpers", "unit.ios_entitlement_helpers", "unit.test_ios_entitlements"}),
+     frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
+                "mobile_release._profile_callers", "mobile_release.cancellation", "mobile_release.config",
+                "mobile_release.credentials", "mobile_release.discovery", "mobile_release.errors",
+                "mobile_release.init_transaction", "mobile_release.inspection", "mobile_release.ios",
+                "mobile_release.ios_der", "mobile_release.ios_entitlements", "mobile_release.ios_plist_binary",
+                "mobile_release.ios_profiles", "mobile_release.local_signing", "mobile_release.owned_process",
+                "mobile_release.reporting", "mobile_release.tooling"})),
+    ("unit.test_operation_recovery", ("unit",),
+     frozenset({"unit", "unit.evidence_helpers", "unit.helpers", "unit.ios_artifact_helpers",
+                "unit.ios_entitlement_helpers", "unit.test_operation_recovery"}),
+     frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
+                "mobile_release._profile_callers", "mobile_release._profile_process", "mobile_release.android",
+                "mobile_release.cancellation", "mobile_release.cli", "mobile_release.config", "mobile_release.credentials",
+                "mobile_release.discovery", "mobile_release.errors", "mobile_release.init_transaction",
+                "mobile_release.inspection", "mobile_release.ios", "mobile_release.ios_artifacts", "mobile_release.ios_der",
+                "mobile_release.ios_entitlements", "mobile_release.ios_plist_binary", "mobile_release.ios_profiles",
+                "mobile_release.local_signing", "mobile_release.macho", "mobile_release.metadata",
+                "mobile_release.owned_process", "mobile_release.preflight", "mobile_release.provenance",
+                "mobile_release.reporting", "mobile_release.stores", "mobile_release.tooling", "mobile_release.workflow"})),
+    ("unit.test_ios_profile_authority", ("unit",),
+     frozenset({"unit", "unit.ios_entitlement_helpers", "unit.ios_profile_helpers", "unit.test_ios_profile_authority"}),
+     frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
+                "mobile_release.cancellation", "mobile_release.errors", "mobile_release.inspection",
+                "mobile_release.ios_der", "mobile_release.ios_entitlements", "mobile_release.ios_plist_binary",
+                "mobile_release.ios_profile_auth", "mobile_release.ios_profile_trust", "mobile_release.ios_profiles"})),
+    ("unit.test_ios_profile_installation", ("workflow", "unit"),
+     frozenset({"unit", "unit.helpers", "unit.ios_entitlement_helpers", "unit.local_signing_workspace",
+                "unit.test_ios_profile_installation", "workflow", "workflow.local_signing_regression_catalog",
+                "workflow.local_signing_workload"}),
+     frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
+                "mobile_release._profile_callers", "mobile_release.cancellation", "mobile_release.config",
+                "mobile_release.credentials", "mobile_release.errors", "mobile_release.local_signing",
+                "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.tooling"})),
+    ("unit.test_local_signing_failures", ("workflow", "unit"),
+     frozenset({"unit", "unit.ios_entitlement_helpers", "unit.local_signing_algorithm_helpers",
+                "unit.local_signing_helpers", "unit.local_signing_persistent", "unit.local_signing_workspace",
+                "unit.test_local_signing_failures", "workflow", "workflow.local_signing_regression_catalog",
+                "workflow.local_signing_workload"}),
+     frozenset({"mobile_release", "mobile_release._command_process", "mobile_release._lifetime_evidence",
+                "mobile_release._native_process", "mobile_release._profile_callers", "mobile_release.android",
+                "mobile_release.cancellation", "mobile_release.cli", "mobile_release.config", "mobile_release.credentials",
+                "mobile_release.discovery", "mobile_release.errors", "mobile_release.init_transaction",
+                "mobile_release.inspection", "mobile_release.ios", "mobile_release.ios_artifacts",
+                "mobile_release.ios_entitlements", "mobile_release.local_signing", "mobile_release.macho",
+                "mobile_release.metadata", "mobile_release.owned_process", "mobile_release.preflight",
+                "mobile_release.provenance", "mobile_release.reporting", "mobile_release.stores",
+                "mobile_release.tooling", "mobile_release.workflow"})),
+    ("unit.test_local_signing_profile_identity", ("workflow", "unit"),
+     frozenset({"unit", "unit.ios_entitlement_helpers", "unit.local_signing_algorithm_helpers",
+                "unit.local_signing_helpers", "unit.local_signing_persistent", "unit.local_signing_workspace",
+                "unit.test_local_signing_failures", "unit.test_local_signing_profile_identity", "workflow",
+                "workflow.local_signing_regression_catalog", "workflow.local_signing_workload"}),
+     frozenset({"mobile_release", "mobile_release._command_process", "mobile_release._lifetime_evidence",
+                "mobile_release._native_process", "mobile_release._profile_callers", "mobile_release.android",
+                "mobile_release.cancellation", "mobile_release.cli", "mobile_release.config", "mobile_release.credentials",
+                "mobile_release.discovery", "mobile_release.errors", "mobile_release.init_transaction",
+                "mobile_release.inspection", "mobile_release.ios", "mobile_release.ios_artifacts",
+                "mobile_release.ios_entitlements", "mobile_release.local_signing", "mobile_release.macho",
+                "mobile_release.metadata", "mobile_release.owned_process", "mobile_release.preflight",
+                "mobile_release.provenance", "mobile_release.reporting", "mobile_release.stores",
+                "mobile_release.tooling", "mobile_release.workflow"})),
+    ("unit.test_owned_process", ("unit",),
+     frozenset({"unit", "unit.test_owned_process"}),
+     frozenset({"mobile_release", "mobile_release._command_process", "mobile_release._lifetime_evidence",
+                "mobile_release._native_process", "mobile_release._profile_callers", "mobile_release.cancellation",
+                "mobile_release.config", "mobile_release.credentials", "mobile_release.errors", "mobile_release.local_signing",
+                "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.tooling"})),
+)
+# These selected methods reach fixed lazy dependencies. Own them before the
+# negative proof; never import the rest of a family just because it is allowed.
+ISOLATED_NEGATIVE_PRIMES = (
+    ("unit.test_ios_entitlements", ("mobile_release.ios_profiles", "mobile_release.ios_plist_binary")),
+    ("unit.test_operation_recovery", ("mobile_release.ios_profiles", "mobile_release._profile_process",
+                                      "mobile_release.ios_der", "mobile_release.ios_plist_binary")),
+    ("unit.test_ios_profile_authority", ("mobile_release.ios_der", "mobile_release.ios_entitlements",
+                                         "mobile_release.ios_plist_binary")),
+    ("unit.test_owned_process", ("mobile_release.credentials",)),
 )
 AUTHORITY_UNIT_MODULES = frozenset({
     "unit", "unit.test_ios_profile_authority", "unit.ios_profile_helpers", "unit.ios_entitlement_helpers",
@@ -482,8 +591,8 @@ def _isolated_negative_contract(partition: str) -> tuple:
 def _isolated_negative_origins(partition: str, phase: str, package: Path) -> dict:
     """Measure only this literal family's origins, before its single proof.
 
-    This is separate from compatibility/authority loaders: admitting the two
-    profile fixture families never admits workflow imports to primitive2.
+    This is separate from compatibility/authority loaders: admitting an
+    ordinary fixture family never admits workflow imports to primitive2.
     """
     _isolated_compatibility_runtime(11)
     _identifier, _packages, test_modules, product_modules = _isolated_negative_contract(partition)
@@ -570,6 +679,8 @@ def run_isolated_negative(*, partition: str, phase: str) -> int:
     for name in packages:
         _fixed_package(name, ROOT / "tests" / name)
     suite = _selected_suite(expected)
+    for name in dict(ISOLATED_NEGATIVE_PRIMES).get(identifier.rsplit(".", 2)[0], ()):
+        importlib.import_module(name)
     metadata = _isolated_negative_origins(partition, phase, package)
     bindings = _isolated_reporting_bindings(partition)
     state = {"failed": False, "records": []}

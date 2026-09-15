@@ -35,6 +35,8 @@ from .test_owned_process import original_command_outcomes, all_original_commands
 
 class InertCommandFailureTests(unittest.TestCase):
     def setUp(self):
+        from .test_lifetime_evidence import fork_registry_model
+        self.enterContext(fork_registry_model())
         self.engines = []
         self.stack = ExitStack(); self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.object(signal, "getsignal", return_value=lambda *_: None))

@@ -63,7 +63,7 @@ WHEEL_PATTERNS = (
     "test_init_transaction.py", "test_ios_entitlements.py", "test_ios_plist_binary.py",
     "test_native_process.py", "test_profile_process_owner.py", "test_default_cancellation.py",
     "test_profile_processes.py", "test_inspection_budget.py", "test_ios_profile_installation.py",
-    "test_ios_profile_trust.py",
+    "test_ios_profile_trust.py", "test_ios_profile_authority.py", "test_operation_recovery.py",
     "test_local_signing.py", "test_local_signing_recovery.py", "test_local_signing_native.py",
     "test_local_signing_composition.py", "test_owned_process.py", "test_owned_process_callers.py",
     "test_owned_process_failures.py", "test_local_signing_failures.py", "test_local_signing_profile_identity.py",
@@ -72,7 +72,7 @@ WHEEL_PATTERNS = (
 )
 NATIVE_PATTERNS = (
     "test_ios_profile_authority.py", "test_ios_profile_trust.py",
-    "test_ios_profile_installation.py", "test_default_cancellation.py",
+    "test_ios_profile_installation.py", "test_ios_entitlements.py", "test_operation_recovery.py", "test_default_cancellation.py",
     "test_profile_processes.py", "test_macho_native.py",
     "test_native_process.py", "test_profile_process_owner.py", "test_inspection_budget.py",
     "test_local_signing.py", "test_local_signing_recovery.py", "test_local_signing_native.py",
@@ -164,6 +164,22 @@ PYTHON_POISON_CASES = (
     ("poison-command-fence-foreign-pending-collision", "workflow.test_command_fence_failure.CommandFenceFailureTests.test_original_c_foreign_pending_collision"),
     ("poison-command-prepared-prefix-input-loss", "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests.test_prepared_input_withdrawal_c_loss_fresh_prefix_recovery"),
     ("poison-command-account-hold-parent-loss", "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests.test_original_hold_survives_true_parent_loss_and_is_absent_from_worker_map"),
+    ("poison-signing-foreign-mixed-handlers", "unit.test_local_signing_composition.SigningCompositionTests.test_foreign_and_mixed_signal_owners_are_never_silently_overwritten_or_borrowed"),
+    ("poison-profile-authenticator-publication", "unit.test_ios_entitlements.SignedEntitlementInventoryTests.test_mocked_authenticator_without_owner_publication_remains_fatal"),
+    ("poison-recovery-profile-cleanup", "unit.test_operation_recovery.IosOperationRecoveryTests.test_profile_cleanup_uncertainty_stops_actual_fresh_validation_before_any_store_access"),
+    ("poison-profile-authentication-order", "unit.test_ios_profile_authority.CMSFramingTests.test_profile_requires_both_authentications_in_order_then_complete_correlation"),
+    ("poison-profile-setup-unlink", "unit.test_ios_profile_installation.ProfileInstallationTests.test_ambiguous_setup_stage_unlink_is_not_implicitly_retried_or_resolved"),
+    ("poison-profile-collision", "unit.test_ios_profile_installation.ProfileInstallationTests.test_collision_symlink_fifo_and_invalid_input_never_overwrite_existing_state"),
+    ("poison-profile-partial-handler-install", "unit.test_ios_profile_installation.ProfileInstallationTests.test_custom_handlers_worker_threads_and_partial_handler_registration_preserve_host_state"),
+    ("poison-profile-cleanup-observer", "unit.test_ios_profile_installation.ProfileInstallationTests.test_fallible_cleanup_observers_never_abandon_actual_owned_handles"),
+    ("poison-profile-fstat", "unit.test_ios_profile_installation.ProfileInstallationTests.test_initial_fstat_failure_recovers_only_from_owned_fd_or_reports_empty_private_residue"),
+    ("poison-profile-fsync-cleanup", "unit.test_ios_profile_installation.ProfileInstallationTests.test_partial_write_flush_fsync_and_link_failures_leave_no_owned_files"),
+    ("poison-profile-replacement", "unit.test_ios_profile_installation.ProfileInstallationTests.test_replacement_or_edit_is_preserved_and_failed_cleanup_cannot_report_success"),
+    ("poison-profile-directory-close", "unit.test_ios_profile_installation.ProfileInstallationTests.test_retained_normal_body_cannot_hide_directory_close_uncertainty"),
+    ("poison-signing-content-conflict", "unit.test_local_signing_failures.SigningFailureTests.test_ordinary_content_conflict_keeps_safe_predispatch_cleanup"),
+    ("poison-signing-profile-identity-conflict", "unit.test_local_signing_profile_identity.ProfileIdentityTests.test_direct_installer_preserves_all_real_owned_and_borrowed_conflicts"),
+    ("poison-command-source-close", "unit.test_owned_process.CommandSourceOwnerTests.test_failed_close_latches_before_diagnostics_and_attempts_each_independent_slot_once"),
+    ("poison-command-source-profile-conflict", "unit.test_owned_process.CommandSourceOwnerTests.test_original_profile_conflict_close_revokes_even_without_session_failure_flags"),
 )
 PYTHON_POISON_PARTITIONS = tuple(name for name, _identifier in PYTHON_POISON_CASES)
 PYTHON_POISON_IDS = tuple(identifier for _name, identifier in PYTHON_POISON_CASES)

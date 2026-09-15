@@ -92,6 +92,8 @@ def isolated_profile_records():
 class DefaultCancellationTests(unittest.TestCase):
     def setUp(self):
         assert_fixture_idle()
+        from .test_lifetime_evidence import fork_registry_model
+        self.enterContext(fork_registry_model())
 
     def guard(self):
         assert_fixture_idle()

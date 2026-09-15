@@ -23,6 +23,13 @@ from mobile_release.cancellation import DefaultCancellation
 from mobile_release.errors import ValidationError
 
 
+def setUpModule():
+    # Every resource below is an inert model, including direct constructors
+    # outside _context. Keep their deliberately UNKNOWN state out of real forks.
+    from .test_lifetime_evidence import fork_registry_model
+    unittest.enterModuleContext(fork_registry_model())
+
+
 class _Acquisition:
     def __init__(self, *, failure_recorder=None):
         self.failure_recorder = failure_recorder

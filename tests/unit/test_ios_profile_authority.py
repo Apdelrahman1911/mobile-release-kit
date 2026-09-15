@@ -238,7 +238,9 @@ class ProfileCompositionTests(unittest.TestCase):
     def test_late_inherited_results_close_only_the_child_fd_and_never_remove_scratch(self):
         from mobile_release import ios_profiles
         from mobile_release._profile_process import CaptureFinality
+        from .test_lifetime_evidence import fork_registry_model
 
+        self.enterContext(fork_registry_model())
         descriptor = ios_profiles._ProfileDescriptor()
         def late_open(*_args, **_kwargs):
             descriptor.pid -= 1  # Inert child-copy model, not a real fork.

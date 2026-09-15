@@ -88,6 +88,96 @@ _ISOLATED_IMPORT_FIXTURES = (
                 "mobile_release.errors", "mobile_release.local_signing", "mobile_release._profile_callers",
                 "mobile_release.credentials", "mobile_release.config", "mobile_release.reporting",
                 "mobile_release.tooling"})),
+    ("unit.test_local_signing_composition", ("workflow", "unit"),
+     frozenset({"unit", "unit.helpers", "unit.ios_entitlement_helpers", "unit.local_signing_helpers",
+                "unit.local_signing_persistent", "unit.test_local_signing_composition", "workflow",
+                "workflow.local_signing_regression_catalog"}),
+     frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
+                "mobile_release._profile_callers", "mobile_release.android", "mobile_release.cancellation",
+                "mobile_release.cli", "mobile_release.config", "mobile_release.credentials", "mobile_release.discovery",
+                "mobile_release.errors", "mobile_release.init_transaction", "mobile_release.inspection",
+                "mobile_release.ios", "mobile_release.ios_artifacts", "mobile_release.ios_entitlements",
+                "mobile_release.ios_profiles", "mobile_release.local_signing", "mobile_release.macho",
+                "mobile_release.metadata", "mobile_release.owned_process", "mobile_release.preflight",
+                "mobile_release.provenance", "mobile_release.reporting", "mobile_release.stores",
+                "mobile_release.tooling", "mobile_release.workflow"})),
+    ("unit.test_ios_entitlements", ("unit",),
+     frozenset({"unit", "unit.ios_artifact_helpers", "unit.ios_entitlement_helpers", "unit.test_ios_entitlements"}),
+     frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
+                "mobile_release._profile_callers", "mobile_release.cancellation", "mobile_release.config",
+                "mobile_release.credentials", "mobile_release.discovery", "mobile_release.errors",
+                "mobile_release.init_transaction", "mobile_release.inspection", "mobile_release.ios",
+                "mobile_release.ios_der", "mobile_release.ios_entitlements", "mobile_release.ios_plist_binary",
+                "mobile_release.ios_profiles", "mobile_release.local_signing", "mobile_release.owned_process",
+                "mobile_release.reporting", "mobile_release.tooling"})),
+    ("unit.test_operation_recovery", ("unit",),
+     frozenset({"unit", "unit.evidence_helpers", "unit.helpers", "unit.ios_artifact_helpers",
+                "unit.ios_entitlement_helpers", "unit.test_operation_recovery"}),
+     frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
+                "mobile_release._profile_callers", "mobile_release._profile_process", "mobile_release.android",
+                "mobile_release.cancellation", "mobile_release.cli", "mobile_release.config", "mobile_release.credentials",
+                "mobile_release.discovery", "mobile_release.errors", "mobile_release.init_transaction",
+                "mobile_release.inspection", "mobile_release.ios", "mobile_release.ios_artifacts", "mobile_release.ios_der",
+                "mobile_release.ios_entitlements", "mobile_release.ios_plist_binary", "mobile_release.ios_profiles",
+                "mobile_release.local_signing", "mobile_release.macho", "mobile_release.metadata",
+                "mobile_release.owned_process", "mobile_release.preflight", "mobile_release.provenance",
+                "mobile_release.reporting", "mobile_release.stores", "mobile_release.tooling", "mobile_release.workflow"})),
+    ("unit.test_ios_profile_authority", ("unit",),
+     frozenset({"unit", "unit.ios_entitlement_helpers", "unit.ios_profile_helpers", "unit.test_ios_profile_authority"}),
+     frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
+                "mobile_release.cancellation", "mobile_release.errors", "mobile_release.inspection",
+                "mobile_release.ios_der", "mobile_release.ios_entitlements", "mobile_release.ios_plist_binary",
+                "mobile_release.ios_profile_auth", "mobile_release.ios_profile_trust", "mobile_release.ios_profiles"})),
+    ("unit.test_ios_profile_installation", ("workflow", "unit"),
+     frozenset({"unit", "unit.helpers", "unit.ios_entitlement_helpers", "unit.local_signing_workspace",
+                "unit.test_ios_profile_installation", "workflow", "workflow.local_signing_regression_catalog",
+                "workflow.local_signing_workload"}),
+     frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
+                "mobile_release._profile_callers", "mobile_release.cancellation", "mobile_release.config",
+                "mobile_release.credentials", "mobile_release.errors", "mobile_release.local_signing",
+                "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.tooling"})),
+    ("unit.test_local_signing_failures", ("workflow", "unit"),
+     frozenset({"unit", "unit.ios_entitlement_helpers", "unit.local_signing_algorithm_helpers",
+                "unit.local_signing_helpers", "unit.local_signing_persistent", "unit.local_signing_workspace",
+                "unit.test_local_signing_failures", "workflow", "workflow.local_signing_regression_catalog",
+                "workflow.local_signing_workload"}),
+     frozenset({"mobile_release", "mobile_release._command_process", "mobile_release._lifetime_evidence",
+                "mobile_release._native_process", "mobile_release._profile_callers", "mobile_release.android",
+                "mobile_release.cancellation", "mobile_release.cli", "mobile_release.config", "mobile_release.credentials",
+                "mobile_release.discovery", "mobile_release.errors", "mobile_release.init_transaction",
+                "mobile_release.inspection", "mobile_release.ios", "mobile_release.ios_artifacts",
+                "mobile_release.ios_entitlements", "mobile_release.local_signing", "mobile_release.macho",
+                "mobile_release.metadata", "mobile_release.owned_process", "mobile_release.preflight",
+                "mobile_release.provenance", "mobile_release.reporting", "mobile_release.stores",
+                "mobile_release.tooling", "mobile_release.workflow"})),
+    ("unit.test_local_signing_profile_identity", ("workflow", "unit"),
+     frozenset({"unit", "unit.ios_entitlement_helpers", "unit.local_signing_algorithm_helpers",
+                "unit.local_signing_helpers", "unit.local_signing_persistent", "unit.local_signing_workspace",
+                "unit.test_local_signing_failures", "unit.test_local_signing_profile_identity", "workflow",
+                "workflow.local_signing_regression_catalog", "workflow.local_signing_workload"}),
+     frozenset({"mobile_release", "mobile_release._command_process", "mobile_release._lifetime_evidence",
+                "mobile_release._native_process", "mobile_release._profile_callers", "mobile_release.android",
+                "mobile_release.cancellation", "mobile_release.cli", "mobile_release.config", "mobile_release.credentials",
+                "mobile_release.discovery", "mobile_release.errors", "mobile_release.init_transaction",
+                "mobile_release.inspection", "mobile_release.ios", "mobile_release.ios_artifacts",
+                "mobile_release.ios_entitlements", "mobile_release.local_signing", "mobile_release.macho",
+                "mobile_release.metadata", "mobile_release.owned_process", "mobile_release.preflight",
+                "mobile_release.provenance", "mobile_release.reporting", "mobile_release.stores",
+                "mobile_release.tooling", "mobile_release.workflow"})),
+    ("unit.test_owned_process", ("unit",),
+     frozenset({"unit", "unit.test_owned_process"}),
+     frozenset({"mobile_release", "mobile_release._command_process", "mobile_release._lifetime_evidence",
+                "mobile_release._native_process", "mobile_release._profile_callers", "mobile_release.cancellation",
+                "mobile_release.config", "mobile_release.credentials", "mobile_release.errors", "mobile_release.local_signing",
+                "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.tooling"})),
+)
+_ISOLATED_PRIME_FIXTURES = (
+    ("unit.test_ios_entitlements", ("mobile_release.ios_profiles", "mobile_release.ios_plist_binary")),
+    ("unit.test_operation_recovery", ("mobile_release.ios_profiles", "mobile_release._profile_process",
+                                      "mobile_release.ios_der", "mobile_release.ios_plist_binary")),
+    ("unit.test_ios_profile_authority", ("mobile_release.ios_der", "mobile_release.ios_entitlements",
+                                         "mobile_release.ios_plist_binary")),
+    ("unit.test_owned_process", ("mobile_release.credentials",)),
 )
 
 
@@ -766,6 +856,17 @@ class NativeProfileCITests(unittest.TestCase):
         gate = run_native_profile_checks
         self.assertEqual(gate.ISOLATED_PROFILE_PRODUCTS, _PROFILE_PRODUCT_FIXTURES)
         self.assertEqual(gate.ISOLATED_NEGATIVE_IMPORTS, _ISOLATED_IMPORT_FIXTURES)
+        self.assertEqual(gate.ISOLATED_NEGATIVE_PRIMES, _ISOLATED_PRIME_FIXTURES)
+        families = {row[0] for row in _ISOLATED_IMPORT_FIXTURES}
+        self.assertEqual(len(families), len(_ISOLATED_IMPORT_FIXTURES))
+        self.assertEqual(families, {identifier.rsplit(".", 2)[0] for _, identifier in _PYTHON_POISON_FIXTURES})
+        self.assertEqual(len(dict(_ISOLATED_PRIME_FIXTURES)), len(_ISOLATED_PRIME_FIXTURES))
+        for module_name, primes in _ISOLATED_PRIME_FIXTURES:
+            self.assertIn(module_name, families)
+            products = next(row[3] for row in _ISOLATED_IMPORT_FIXTURES if row[0] == module_name)
+            self.assertTrue(primes)
+            self.assertEqual(len(set(primes)), len(primes))
+            self.assertLessEqual(set(primes), products)
         for partition, identifier in _PYTHON_POISON_FIXTURES:
             row = next(row for row in _ISOLATED_IMPORT_FIXTURES if row[0] == identifier.rsplit(".", 2)[0])
             with self.subTest(partition=partition):
@@ -792,10 +893,10 @@ class NativeProfileCITests(unittest.TestCase):
             # Check every missing binding and every other family's extra module.
             # In particular primitive2 never gains either profile workflow closure.
             faults = [(None, None)] + [("missing", name) for name in sorted(required)]
-            faults += [("extra", name) for name in sorted((all_family_modules - required)
+            faults += [("extra", name) for name in sorted((all_family_modules
                                                         | {"mobile_release.extra", "unit.foreign", "workflow.foreign",
                                                            "workflow.local_signing_regression_catalog",
-                                                           "workflow.local_signing_regression_fixture", "unit.local_signing_workspace"})]
+                                                           "workflow.local_signing_regression_fixture", "unit.local_signing_workspace"}) - required)]
             faults += [(name, None) for name in metadata_faults]
             for fault, subject in faults:
                 with self.subTest(module=module_name, phase=phase, fault=fault, subject=subject):
@@ -875,12 +976,20 @@ class NativeProfileCITests(unittest.TestCase):
 
     def test_isolated_negative_bootstrap_and_reporting_have_no_post_proof_acquisition(self):
         gate = run_native_profile_checks
-        for (partition, identifier), phase, fault in itertools.product(_PYTHON_POISON_FIXTURES, ("source", "wheel"),
-                (None, "failure", "skip", "partial", "adverse-latch", "binding-drift", "interruption")):
+        cases = (
+            ((partition, identifier), phase, fault)
+            for (partition, identifier), phase in itertools.product(_PYTHON_POISON_FIXTURES, ("source", "wheel"))
+            for fault in (None, "failure", "skip", "partial", "adverse-latch", "binding-drift", "interruption")
+                + dict(_ISOLATED_PRIME_FIXTURES).get(identifier.rsplit(".", 2)[0], ())
+        )
+        for (partition, identifier), phase, fault in cases:
             with self.subTest(partition=partition, phase=phase, fault=fault):
                 events, states = [], []
                 proved = False
-                packages = next(row[1] for row in _ISOLATED_IMPORT_FIXTURES if row[0] == identifier.rsplit(".", 2)[0])
+                module_name = identifier.rsplit(".", 2)[0]
+                packages = next(row[1] for row in _ISOLATED_IMPORT_FIXTURES if row[0] == module_name)
+                primes = dict(_ISOLATED_PRIME_FIXTURES).get(module_name, ())
+                prime_failure = fault in primes
                 package = gate.ROOT.parent / ("work/source-build/src/mobile_release" if phase == "source"
                     else "work/wheel-venv/lib/python3.11/site-packages/mobile_release")
                 runtime = SimpleNamespace(platform="linux" if phase == "source" else "darwin", modules={},
@@ -888,7 +997,8 @@ class NativeProfileCITests(unittest.TestCase):
                     stdout=io.StringIO(), stderr=io.StringIO())
                 metadata = {"phase": phase, "version": [3, 11, 1], "origins": {"inert": "pre-proof"}}
                 bindings, suite, result_type = (object(),), object(), object()
-                original = KeyboardInterrupt("PRIVATE_SINGLETON_INTERRUPT")
+                original = (ImportError("PRIVATE_SINGLETON_IMPORT") if prime_failure
+                            else KeyboardInterrupt("PRIVATE_SINGLETON_INTERRUPT"))
 
                 def before(event, value=None):
                     self.assertFalse(proved, "only reporting may follow the singleton proof")
@@ -923,7 +1033,14 @@ class NativeProfileCITests(unittest.TestCase):
                     return (object(),) if proved and fault == "binding-drift" else bindings
 
                 native = SimpleNamespace(declared_abi=Mock(), acquire=Mock())
-                imported = Mock(side_effect=lambda name: before(("import", name), native))
+
+                def import_module(name):
+                    before(("import", name))
+                    if prime_failure and name == fault:
+                        raise original
+                    return native
+
+                imported = Mock(side_effect=import_module)
                 bootstrap = Mock(side_effect=lambda name, directory: before(("bootstrap", name, directory)))
                 origins = Mock(side_effect=lambda *_args: before("origins", metadata))
                 inventory = Mock(side_effect=lambda name: before(("inventory", name), (identifier,)))
@@ -939,7 +1056,11 @@ class NativeProfileCITests(unittest.TestCase):
                         _selected_suite=selected, _isolated_compatibility_runtime=isolated,
                         _isolated_reporting_bindings=Mock(side_effect=snapshot), _result_class=result_class,
                         unittest=framework, subprocess=process):
-                    if fault == "interruption":
+                    if prime_failure:
+                        with self.assertRaises(ImportError) as raised:
+                            gate.run_isolated_negative(partition=partition, phase=phase)
+                        self.assertIs(raised.exception, original)
+                    elif fault == "interruption":
                         with self.assertRaises(KeyboardInterrupt) as raised:
                             gate.run_isolated_negative(partition=partition, phase=phase)
                         self.assertIs(raised.exception, original)
@@ -948,20 +1069,29 @@ class NativeProfileCITests(unittest.TestCase):
                             gate.run_isolated_negative(partition=partition, phase=phase)
                     else:
                         self.assertEqual(gate.run_isolated_negative(partition=partition, phase=phase), int(fault is not None))
-                self.assertEqual(events, [("runtime", 11), ("inventory", partition),
+                before_primes = [("runtime", 11), ("inventory", partition),
                     ("bootstrap", "mobile_release", package), ("import", "mobile_release._native_process"),
-                    *(("bootstrap", name, gate.ROOT / "tests" / name) for name in packages), ("select", (identifier,)),
-                    "origins", "bindings-before", "result-class", "proof"]
-                    + ([] if fault == "interruption" else ["bindings-after"]))
-                origins.assert_called_once_with(partition, phase, package)
+                    *(("bootstrap", name, gate.ROOT / "tests" / name) for name in packages), ("select", (identifier,))]
+                if prime_failure:
+                    self.assertEqual(events, before_primes + [("import", name) for name in primes[:primes.index(fault) + 1]])
+                    self.assertFalse(proved)
+                    self.assertEqual(states, [])
+                    origins.assert_not_called()
+                    runner.run.assert_not_called()
+                    framework.TextTestRunner.assert_not_called()
+                else:
+                    self.assertEqual(events, before_primes + [("import", name) for name in primes]
+                        + ["origins", "bindings-before", "result-class", "proof"]
+                        + ([] if fault == "interruption" else ["bindings-after"]))
+                    origins.assert_called_once_with(partition, phase, package)
+                    runner.run.assert_called_once_with(suite)
+                    framework.TextTestRunner.assert_called_once_with(stream=runtime.stderr, verbosity=2,
+                                                                     failfast=True, descriptions=False, resultclass=result_type)
                 compatibility.assert_not_called()
-                runner.run.assert_called_once_with(suite)
-                framework.TextTestRunner.assert_called_once_with(stream=runtime.stderr, verbosity=2,
-                                                                 failfast=True, descriptions=False, resultclass=result_type)
                 native.declared_abi.assert_not_called()
                 native.acquire.assert_not_called()
                 process.run.assert_not_called()
-                if fault in {"binding-drift", "interruption"}:
+                if prime_failure or fault in {"binding-drift", "interruption"}:
                     self.assertEqual(runtime.stdout.getvalue(), "")
                 else:
                     self.assertEqual(runtime.stdout.getvalue(), gate.RUNTIME_PREFIX +
