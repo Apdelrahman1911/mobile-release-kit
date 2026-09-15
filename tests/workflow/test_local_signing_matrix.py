@@ -487,8 +487,8 @@ class WorkloadContractTests(unittest.TestCase):
         tree = ast.parse(path.read_text())
         declared = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "PersistentSigningTests")
         methods = {node.name: node for node in declared.body if isinstance(node, ast.FunctionDef)}
-        self.assertEqual(len(contract.ADAPTER_TEST_IDS), 4)
-        for identifier in contract.ADAPTER_TEST_IDS:
+        self.assertEqual(len(contract.ADAPTER_TEST_IDS), 5)
+        for identifier in contract.ADAPTER_TEST_IDS[:4]:
             self.assertIn(identifier.rsplit(".", 1)[1], methods)
         for name, identifier in (
             ("test_original_c_prefix_cut_uses_real_fence_and_fresh_recovery", "C/fence/04"),
@@ -1257,9 +1257,27 @@ class SigningAdapterAdmissionTests(unittest.TestCase):
             "test_actual_case_wait_eof_barrier_crash_and_deadline_settle_before_return",
             "test_original_c_prefix_cut_uses_real_fence_and_fresh_recovery",
             "test_genuine_model_inventory_active_build_pending_contrast",
-        ))
+        )) + ("workflow.test_command_account_lifecycle.CommandAccountLifecycleTests."
+              "test_prepared_no_target_original_fence_and_same_lease_cleanup",)
         self.assertEqual(contract.ADAPTER_TEST_IDS, expected)
-        self.assertEqual(len(set(contract.ADAPTER_TEST_IDS)), 4)
+        self.assertEqual(len(set(contract.ADAPTER_TEST_IDS)), 5)
+        self.assertEqual(contract.ADAPTER_TEST_FILES, {
+            **dict.fromkeys(expected[:4], "tests/unit/test_local_signing_persistent.py"),
+            expected[4]: "tests/workflow/test_command_account_lifecycle.py",
+        })
+        # The additional literal method must be defined in its own exact class
+        # and file, not merely named in the old four-method source module.
+        account_path = runner.ROOT / "tests/workflow/test_command_account_lifecycle.py"
+        original_read = Path.read_bytes
+        method = expected[4].rsplit(".", 1)[1]
+        member = "    def " + method + "(self):\n        pass\n"
+        for content in ("class Other:\n" + member, "class CommandAccountLifecycleTests:\n    pass\n",
+                        "class CommandAccountLifecycleTests:\n" + member * 2,
+                        ("class CommandAccountLifecycleTests:\n" + member) * 2):
+            def changed(path, content=content):
+                return content.encode() if path == account_path else original_read(path)
+            with patch.object(Path, "read_bytes", new=changed), self.assertRaises(ValueError):
+                contract.adapter_test_ids(runner.ROOT)
         value = self.metadata()
         scope = contract.adapter_scope_from_metadata(value, "ubuntu-24.04")
         self.assertEqual(scope["schema"], "mrk-signing-adapter-scope-v1")
@@ -1959,22 +1977,27 @@ class SigningAdapterPhaseDiagnosticTests(unittest.TestCase):
         self.assertEqual(output.getvalue(), "")
 
     def test_actual_adapter_emits_separate_parent_and_command_worker_origins_through_publication(self):
+        from . import profile_process_fixture as profile_fixture
         flags = SimpleNamespace(**{name: 1 for name in (
             "isolated", "ignore_environment", "no_user_site", "no_site", "safe_path", "dont_write_bytecode")})
         parent = {name: "__init__.py" if name == "mobile_release" else name.split(".")[-1] + ".py"
                   for name in ("mobile_release", "mobile_release.local_signing", "mobile_release.owned_process",
                                "mobile_release._native_process")}
         worker = {**parent, "mobile_release._command_process": "_command_process.py"}
-        namespace = {}
-        exec(compile("def method(self):\n    raise AssertionError('inert emitter must not execute native tests')\n",
-                     str(runner.ROOT / "tests/unit/test_local_signing_persistent.py"), "exec"), namespace)
+        methods = {}
+        for identifier, filename in contract.ADAPTER_TEST_FILES.items():
+            namespace = {}
+            exec(compile("def method(self):\n    raise AssertionError('inert emitter must not execute native tests')\n",
+                         str(runner.ROOT / filename), "exec"), namespace)
+            methods[identifier] = namespace["method"]
 
         class SelectedTest:
-            method = namespace["method"]
             _testMethodName = "method"
 
             def __init__(self, identifier):
                 self.identifier = identifier
+                selected = contract.ADAPTER_TEST_IDS[0] if defect == "wrong-fifth-origin" else identifier
+                self.method = methods[selected].__get__(self, type(self))
                 self._adapter_command_worker_origins = (
                     dict(worker) if identifier == contract.ADAPTER_TEST_IDS[0] and defect != "missing-worker" else None)
 
@@ -1999,7 +2022,9 @@ class SigningAdapterPhaseDiagnosticTests(unittest.TestCase):
                 result.stopTest(test)
 
         model = sys.modules[fixture.PersistentSigningModel.__module__]
-        for phase, defect in (("source", None), ("wheel", None), ("source", "parent-escape"), ("source", "missing-worker")):
+        for phase, defect in (("source", None), ("wheel", None), ("source", "parent-escape"),
+                              ("source", "missing-worker"), ("source", "wrong-fifth-origin"),
+                              ("source", "retained-workspace")):
             with self.subTest(phase=phase, defect=defect):
                 package = runner.ROOT.parent / ("work/source-build/src/mobile_release" if phase == "source" else
                                                "work/wheel-venv/lib/python3.11/site-packages/mobile_release")
@@ -2027,6 +2052,8 @@ class SigningAdapterPhaseDiagnosticTests(unittest.TestCase):
                         patch.object(fixture, "PHASE_DEADLINE", None),
                         patch.object(fixture, "_CASE_CUSTODY", {}), patch.object(fixture, "_CASE_RECOVERY_DEBT", {}),
                         patch.object(model, "_RETAINED_MODEL_LIFETIMES", ()),
+                        patch.object(profile_fixture, "assert_fixture_idle"),
+                        patch.object(profile_fixture, "_RETAINED_WORKSPACES", [object()] if defect == "retained-workspace" else []),
                         patch.object(runner.case_owner, "ADAPTER_DIAGNOSTIC_CONTEXT", None),
                         patch.object(Path, "resolve", new=lambda path, **_kw: path),
                         patch.object(Path, "exists", return_value=False), patch.object(Path, "is_symlink", return_value=False),
@@ -2056,16 +2083,18 @@ class SigningAdapterPhaseDiagnosticTests(unittest.TestCase):
             "isolated", "ignore_environment", "no_user_site", "no_site", "safe_path", "dont_write_bytecode")})
         package = runner.ROOT.parent / "work/source-build/src/mobile_release"
         output_path = runner.ROOT.parent / "work/signing-adapter/source"
-        namespace = {}
-        exec(compile("def method(self):\n    pass\n",
-                     str(runner.ROOT / "tests/unit/test_local_signing_persistent.py"), "exec"), namespace)
+        methods = {}
+        for identifier, filename in contract.ADAPTER_TEST_FILES.items():
+            namespace = {}
+            exec(compile("def method(self):\n    pass\n", str(runner.ROOT / filename), "exec"), namespace)
+            methods[identifier] = namespace["method"]
 
         class SelectedTest:
-            method = namespace["method"]
             _testMethodName = "method"
 
             def __init__(self, identifier):
                 self.identifier = identifier
+                self.method = methods[identifier].__get__(self, type(self))
 
             def id(self):
                 return self.identifier

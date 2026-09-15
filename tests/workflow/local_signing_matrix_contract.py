@@ -34,7 +34,16 @@ ADAPTER_TEST_IDS = tuple(
         "test_original_c_prefix_cut_uses_real_fence_and_fresh_recovery",
         "test_genuine_model_inventory_active_build_pending_contrast",
     )
+) + (
+    "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests."
+    "test_prepared_no_target_original_fence_and_same_lease_cleanup",
 )
+ADAPTER_TEST_DEFINITIONS = (
+    ("tests/unit/test_local_signing_persistent.py", "PersistentSigningTests", ADAPTER_TEST_IDS[:4]),
+    ("tests/workflow/test_command_account_lifecycle.py", "CommandAccountLifecycleTests", ADAPTER_TEST_IDS[4:]),
+)
+ADAPTER_TEST_FILES = {identifier: filename for filename, _class, identifiers in ADAPTER_TEST_DEFINITIONS
+                      for identifier in identifiers}
 ADAPTER_PARENT_MODULES = frozenset({
     "mobile_release", "mobile_release.local_signing", "mobile_release.owned_process",
     "mobile_release._native_process",
@@ -67,6 +76,9 @@ ADAPTER_FAILURE_TEST_FILES = (
     "tests/workflow/local_signing_bridge.py", "tests/workflow/local_signing_model_target.py",
     "tests/workflow/local_signing_semantic_fixture.py", "tests/workflow/local_signing_semantic_catalog.py",
     "tests/workflow/local_signing_workload.py",
+    "tests/workflow/test_command_account_lifecycle.py", "tests/workflow/command_account_lifecycle_fixture.py",
+    "tests/workflow/command_bootstrap_fixture.py", "tests/workflow/command_fence_failure_fixture.py",
+    "tests/workflow/profile_process_fixture.py",
 )
 ADAPTER_PHASE_FAILURE_PREFIX = "MRK_SIGNING_ADAPTER_PHASE_FAILURE="
 ADAPTER_PHASE_FAILURE_STAGES = (
@@ -472,17 +484,19 @@ def definitions_manifest(root, *, deadline=None):
 
 
 def adapter_test_ids(root, *, deadline=None):
-    """Closed four-method preparation check; not full matrix coverage."""
+    """Closed five-method/two-definition-file smoke; not full matrix coverage."""
     before_deadline(deadline)
-    path = root / "tests/unit/test_local_signing_persistent.py"
-    require(path.is_file() and not path.is_symlink() and path.stat().st_size <= 1024**2,
-            "adapter test definition missing or oversized")
-    tree = ast.parse(path.read_bytes(), filename=str(path))
-    classes = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "PersistentSigningTests"]
-    require(len(classes) == 1, "adapter class inventory")
-    methods = [node.name for node in classes[0].body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
-    require(all(methods.count(identifier.rsplit(".", 1)[1]) == 1 for identifier in ADAPTER_TEST_IDS),
-            "adapter literal method missing or duplicated")
+    for filename, class_name, identifiers in ADAPTER_TEST_DEFINITIONS:
+        before_deadline(deadline)
+        path = root / filename
+        require(path.is_file() and not path.is_symlink() and path.stat().st_size <= 1024**2,
+                "adapter test definition missing or oversized")
+        tree = ast.parse(path.read_bytes(), filename=str(path))
+        classes = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name]
+        require(len(classes) == 1, "adapter class inventory")
+        methods = [node.name for node in classes[0].body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        require(all(methods.count(identifier.rsplit(".", 1)[1]) == 1 for identifier in identifiers),
+                "adapter literal method missing or duplicated")
     before_deadline(deadline)
     return ADAPTER_TEST_IDS
 

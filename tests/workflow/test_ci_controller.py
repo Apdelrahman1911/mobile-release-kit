@@ -2635,7 +2635,7 @@ class SigningMatrixControllerTests(unittest.TestCase):
 
 
 class SigningAdapterControllerTests(unittest.TestCase):
-    """Inert original captures exercise only the new finite4 controller path."""
+    """Inert original captures exercise only the fixed adapter controller path."""
 
     def diagnostic(self, rig, **changes):
         value = {"schema": 1, "phase": "source", "testId": rig.contract.ADAPTER_TEST_IDS[0], "layer": "unittest",
@@ -2816,6 +2816,43 @@ class SigningAdapterControllerTests(unittest.TestCase):
                     self.assertNotIn("adapter_failure", row)
                 self.assertNotIn("PRIVATE", json.dumps(result.details))
 
+    def test_account_marker_requires_failed_exact_prepared_callback_without_weakening_finality(self):
+        marker = (b'\nMRK_C_FENCE_FIXTURE_FAILURE={"category":"AssertionError",'
+                  b'"frames":[["command_account_lifecycle_fixture.py",192],["PRIVATE.py",7]]}\n')
+        for mode in ("failure", "unknown", "unrelated", "worker-only", "no-callback", "on-success", "malformed", "parser-error"):
+            with self.subTest(mode=mode):
+                rig = self.rig()
+                identifier = rig.contract.ADAPTER_TEST_IDS[-1]
+                callback = self.diagnostic(rig, testId=rig.contract.ADAPTER_TEST_IDS[0] if mode == "unrelated" else identifier,
+                                           layer="worker" if mode == "worker-only" else "unittest")
+                raw = (marker[:-1] if mode == "malformed" else marker) + (b"" if mode == "no-callback" else callback)
+                rig.capture_changes["source"] = {"stderr": raw}
+                if mode != "on-success":
+                    rig.capture_changes["source"].update(ok=False, returncode=91)
+                if mode == "unknown":
+                    rig.capture_changes["source"].update(waited=False, domain_finality=False, stdout_eof=False)
+                    rig.idle_error = True
+                parser = (patch.object(rig.controller, "command_account_failure", side_effect=RuntimeError("PRIVATE parser"))
+                          if mode == "parser-error" else nullcontext())
+                with parser:
+                    result = self.execute(rig)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error, "SIGNING_ADAPTER_UNEXPECTED_STDERR" if mode == "on-success"
+                                 else "COMMAND_EXIT_OR_FINALITY")
+                self.assertEqual(len(rig.captures), 1)
+                row = result.details["phases"][0]
+                if mode in {"failure", "unknown"}:
+                    self.assertEqual(row["command_account_failure"], {"category": "assertion-error", "locations": [
+                        {"file": "tests/workflow/command_account_lifecycle_fixture.py", "line": 192}]})
+                else:
+                    self.assertNotIn("command_account_failure", row)
+                if mode == "unknown":
+                    self.assertFalse(row["capture"]["domain_finality"])
+                run_index = next(index for index, event in enumerate(rig.events) if event[0] == "run")
+                self.assertFalse(any(event[0] in {"inspect", "read", "output", "finalized", "publish"}
+                                     for event in rig.events[run_index + 1:]))
+                self.assertNotIn("PRIVATE", json.dumps(result.details))
+
     def test_child_phase_scope_rejects_bool_and_float_attempt_aliases_in_both_roles(self):
         matrix = SigningMatrixControllerTests().rig()
         adapter = self.rig()
@@ -2823,7 +2860,7 @@ class SigningAdapterControllerTests(unittest.TestCase):
         matrix_record = {"schema": 2, "phase": "source", "shard": 0, "scope": matrix.scope,
                          "status": "phase-finished", "productionRoot": str(package)}
         adapter_record = {"schema": "mrk-signing-adapter-phase-v2", "phase": "source", "scope": adapter.scope,
-                          "status": "adapter-only", "productionRoot": str(package), "testsRun": 4,
+                          "status": "adapter-only", "productionRoot": str(package), "testsRun": 5,
                           "startedIds": list(adapter.contract.ADAPTER_TEST_IDS),
                           "successfulIds": list(adapter.contract.ADAPTER_TEST_IDS),
                           "origins": adapter.origins, "casePathsRemoved": True}
@@ -2863,7 +2900,7 @@ class SigningAdapterControllerTests(unittest.TestCase):
             package = rig.paths.work / ("source-build/src/mobile_release" if phase == "source" else
                                         "wheel-venv/lib/python3.11/site-packages/mobile_release")
             record = {"schema": "mrk-signing-adapter-phase-v2", "phase": phase, "scope": rig.scope,
-                      "status": "adapter-only", "productionRoot": str(package), "testsRun": 4,
+                      "status": "adapter-only", "productionRoot": str(package), "testsRun": 5,
                       "startedIds": list(rig.contract.ADAPTER_TEST_IDS), "successfulIds": list(rig.contract.ADAPTER_TEST_IDS),
                       "origins": rig.origins, "casePathsRemoved": True, **rig.changes.get(phase, {})}
             capture = native_capture_fixture(stdout=b"MRK_SIGNING_ADAPTER_PHASE=" + rig.contract.canonical(record) + b"\n",
@@ -2912,10 +2949,18 @@ class SigningAdapterControllerTests(unittest.TestCase):
                                 if event[0] == "output" and event[1].name == phase)
             self.assertEqual(rig.events[output_index - 1], ("idle", options["absolute_deadline"]))
         self.assertFalse(any(event[0] == "publish" for event in rig.events))
+        truncated = self.rig()
+        truncated.contract.adapter_test_ids = Mock(return_value=truncated.contract.ADAPTER_TEST_IDS[:4])
+        rejected = self.execute(truncated)
+        self.assertFalse(rejected.ok)
+        self.assertEqual(rejected.error, "SIGNING_ADAPTER_DIAGNOSTIC_SCOPE")
+        self.assertEqual(truncated.captures, [])
 
     def test_source_failure_missing_duplicate_skip_retained_output_or_late_preparation_stops_wheel(self):
         origins = self.rig().origins
-        for changes in ({"successfulIds": []}, {"successfulIds": ["wrong"] * 4}, {"testsRun": True},
+        for changes in ({"successfulIds": []}, {"successfulIds": ["wrong"] * 5}, {"testsRun": True},
+                        {"testsRun": 4}, {"startedIds": list(self.rig().contract.ADAPTER_TEST_IDS[:4]),
+                                          "successfulIds": list(self.rig().contract.ADAPTER_TEST_IDS[:4]), "testsRun": 4},
                         {"casePathsRemoved": False}, {"status": "complete"}, {"origins": {}},
                         {"schema": "mrk-signing-adapter-phase-v1"}, {"origins": origins["parent"]},
                         {"origins": {"parent": origins["parent"]}},

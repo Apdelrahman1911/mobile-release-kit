@@ -99,6 +99,39 @@ PROFILE_FIXTURE_FAILURE_FILES = (
     *("src/mobile_release/" + name + ".py" for name in
       ("_profile_process", "_native_process", "ios_profiles", "inspection", "errors")),
 )
+COMMAND_ACCOUNT_FAILURE_PREFIX = "MRK_C_FENCE_FIXTURE_FAILURE="
+COMMAND_ACCOUNT_FAILURE_ID = (
+    "workflow.test_command_account_lifecycle.CommandAccountLifecycleTests."
+    "test_prepared_no_target_original_fence_and_same_lease_cleanup"
+)
+COMMAND_ACCOUNT_FAILURE_CATEGORIES = {
+    "AssertionError": "assertion-error", "ValueError": "value-error", "TypeError": "type-error",
+    "KeyError": "key-error", "IndexError": "index-error", "AttributeError": "attribute-error",
+    "NameError": "name-error", "UnboundLocalError": "name-error", "RuntimeError": "runtime-error",
+    "RecursionError": "recursion-error", "MemoryError": "memory-error", "OSError": "os-error",
+    "BlockingIOError": "os-error", "BrokenPipeError": "os-error", "ChildProcessError": "os-error",
+    "FileExistsError": "os-error", "FileNotFoundError": "os-error", "InterruptedError": "os-error",
+    "IsADirectoryError": "os-error", "NotADirectoryError": "os-error", "PermissionError": "os-error",
+    "ProcessLookupError": "os-error", "TimeoutError": "os-error", "ImportError": "import-error",
+    "ModuleNotFoundError": "import-error", "KeyboardInterrupt": "interrupt", "SystemExit": "system-exit",
+    "Exception": "exception", "BaseException": "base-exception",
+    "ExceptionGroup": "exception-group", "BaseExceptionGroup": "base-exception-group",
+    "ProcessError": "process-error", "ProcessCleanupError": "process-cleanup-error",
+    "ProcessOutcomeUnknown": "process-outcome-unknown", "ProcessInterrupted": "interrupt",
+    "NativeProcessError": "native-process-error", "CredentialError": "credential-error",
+    "SigningBusy": "signing-busy", "SigningPending": "signing-pending",
+}
+COMMAND_ACCOUNT_FAILURE_FILES = {
+    **{name + ".py": "tests/workflow/" + name + ".py" for name in (
+        "test_command_account_lifecycle", "command_account_lifecycle_fixture", "command_bootstrap_fixture",
+        "command_fence_failure_fixture", "local_signing_persistent_fixture", "local_signing_case_owner",
+        "local_signing_bridge", "local_signing_model_target", "profile_process_fixture",
+    )},
+    "local_signing_persistent.py": "tests/unit/local_signing_persistent.py",
+    **{name + ".py": "src/mobile_release/" + name + ".py" for name in (
+        "local_signing", "owned_process", "_command_process", "_native_process", "cancellation", "errors",
+    )},
+}
 FIXTURE_BOOTSTRAP_FAILURE_PREFIX = "MRK_FIXTURE_BOOTSTRAP_FAILURE="
 FIXTURE_BOOTSTRAP_FAILURE_CONDITIONS = {
     "configuration": ("directory_read", "record_read", "record_parse", "record_schema",
@@ -877,7 +910,7 @@ class SigningAdapterDiagnostic:
 
 @dataclasses.dataclass(frozen=True)
 class SigningMatrixDiagnostic:
-    """Source-selected matrix DATA scope; separate from fixed-four or proof."""
+    """Source-selected matrix DATA scope; separate from fixed adapter or proof."""
     phase: str
     operating_system: str
     shard: int
@@ -2265,6 +2298,39 @@ def _profile_failure_for_callbacks(raw: bytes, callbacks: list[dict], *, deadlin
     return None
 
 
+def command_account_failure(raw: bytes, *, deadline: float | None = None) -> dict | None:
+    """Existing worker marker only; no private report read or custody claim."""
+    data = _fixture_failure_record(raw, COMMAND_ACCOUNT_FAILURE_PREFIX, 2048, deadline=deadline,
+                                   canonical_fields=("category", "frames"))
+    if (type(data) is not dict or type(data["category"]) is not str
+            or data["category"] not in COMMAND_ACCOUNT_FAILURE_CATEGORIES
+            or type(data["frames"]) is not list or len(data["frames"]) > 12):
+        return None
+    locations = []
+    for frame in data["frames"]:
+        if (type(frame) is not list or len(frame) != 2 or type(frame[0]) is not str
+                or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,127}\.py", frame[0]) is None
+                or type(frame[1]) is not int or not 0 < frame[1] < 1_000_000):
+            return None
+        # The emitter records basenames, not authenticated source origins.
+        # Unknown/stdlib/private names are omitted, never echoed or resolved.
+        name = COMMAND_ACCOUNT_FAILURE_FILES.get(frame[0])
+        if name is not None:
+            locations.append({"file": name, "line": frame[1]})
+    if deadline is not None:
+        check_clock(deadline)
+    return {"category": COMMAND_ACCOUNT_FAILURE_CATEGORIES[data["category"]], "locations": locations}
+
+
+def _command_account_failure_for_callbacks(raw: bytes, callbacks: list[dict], *,
+                                           deadline: float | None = None) -> dict | None:
+    """Only a source-validated adverse prepared-positive callback is eligible."""
+    if any(row["id"] == COMMAND_ACCOUNT_FAILURE_ID and row["outcome"] in {"error", "failure"}
+           for row in callbacks):
+        return command_account_failure(raw, deadline=deadline)
+    return None
+
+
 def fixture_bootstrap_failure(raw: bytes, *, deadline: float | None = None) -> dict | None:
     data = _fixture_failure_record(raw, FIXTURE_BOOTSTRAP_FAILURE_PREFIX, 256, deadline=deadline)
     if (type(data) is not dict or set(data) != {"schema", "stage", "condition"}
@@ -2829,7 +2895,7 @@ def original_native_capture(session, argv, paths: Paths, rows: list[dict], name:
     if signing_adapter_diagnostic is not None:
         scope = signing_adapter_diagnostic
         if (type(scope) is not SigningAdapterDiagnostic or scope.phase not in {"source", "wheel"}
-                or scope.phase != name or type(scope.identifiers) is not tuple or len(scope.identifiers) != 4
+                or scope.phase != name or type(scope.identifiers) is not tuple or len(scope.identifiers) != 5
                 or type(scope.files) is not tuple or not scope.files
                 or "--adapter-phase" not in argv
                 or str(paths.source / "tests/workflow/run_local_signing_matrix.py") not in argv):
@@ -2877,6 +2943,12 @@ def original_native_capture(session, argv, paths: Paths, rows: list[dict], name:
                 diagnostic = signing_adapter_failure(result.stderr, signing_adapter_diagnostic, deadline=deadline)
                 if diagnostic is not None:
                     row["adapter_failure"] = diagnostic
+                    if result.ok is False:
+                        callbacks = [{"id": item["testId"], "outcome": item["outcome"]}
+                                     for item in diagnostic["observations"] if item["layer"] == "unittest"]
+                        account = _command_account_failure_for_callbacks(result.stderr, callbacks, deadline=deadline)
+                        if account is not None:
+                            row["command_account_failure"] = account
             except BaseException:
                 row["diagnostic_error"] = {"error": "SIGNING_ADAPTER_DIAGNOSTIC_UNAVAILABLE"}
             try:
@@ -3094,6 +3166,10 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                         diagnostic = _profile_failure_for_callbacks(result.stderr, callbacks, deadline=deadline)
                         if diagnostic is not None:
                             value["profile_fixture_failure"] = diagnostic
+                        if result.ok is False:
+                            account = _command_account_failure_for_callbacks(result.stderr, callbacks, deadline=deadline)
+                            if account is not None:
+                                value["command_account_failure"] = account
                 except Exception:
                     # Optional diagnostics must not replace the original failure.
                     # Do not absorb expiry of the original aggregate timer.
@@ -3236,6 +3312,10 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                     profile = _profile_failure_for_callbacks(result.stderr, diagnostic["records"], deadline=deadline)
                     if profile is not None:
                         value["profile_fixture_failure"] = profile
+                    if result.ok is False:
+                        account = _command_account_failure_for_callbacks(result.stderr, diagnostic["records"], deadline=deadline)
+                        if account is not None:
+                            value["command_account_failure"] = account
         except Exception:
             if deadline is not None:
                 check_clock(deadline)
@@ -4599,7 +4679,7 @@ def signing_adapter_argv(paths: Paths, selection: SigningAdapterSelection, phase
 
 
 def finalized_adapter_output(directory: Path, session, *, deadline: float) -> dict:
-    """No surviving fixture DATA is accepted by this four-method smoke."""
+    """No surviving fixture DATA is accepted by this fixed five-method smoke."""
     check_clock(deadline)
     info = directory.lstat()
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != session.uid

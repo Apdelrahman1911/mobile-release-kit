@@ -59,6 +59,8 @@ partial selection, `signing-adapter`, runs only the two-OS smoke scope below.
 `signing-adapter-macos` selects the identical source/wheel smoke on macOS only
 when a Darwin-only change does not invalidate previously recorded Linux evidence.
 It does not supply fresh Linux evidence or satisfy the full protected gate.
+`signing-adapter-linux` selects that same fixed source/wheel smoke on Linux only
+for focused Linux diagnosis; it supplies no macOS or full-platform evidence.
 `signing-matrix-canary` runs exactly seven source/wheel cells: Linux shards 0, 20
 and 28, and macOS shards 0, 1, 12 and 37. These probe each OS's largest planned
 command and worker counts plus the selected materialized cancellation, PREPARED
@@ -74,13 +76,15 @@ or merge authority. Event/target-specific concurrency separates partial dispatch
 from full PR/main/manual runs.
 
 For fail-fast signing integration, manual `verification_target: signing-adapter`
-runs exactly four fixed signing methods in both source and installed wheel on
+runs exactly five fixed signing methods in both source and installed wheel on
 each disposable Linux/macOS runner. It omits the full platform catalogs and
 96-cell matrix; its protected aggregate intentionally cannot pass. Results are
 labelled `adapter-only`, have no matrix-proof/reducer authority, and cannot replace
 the full verification required for delivery. Arbitrary test selectors are not
 supported. The ordinary owner path, source/package checks, original finality and
-cleanup requirements are unchanged.
+cleanup requirements are unchanged. The fifth method is the existing positive
+PREPARED/no-target case, including the original C fence and same-lease cleanup;
+the original four methods and their order are retained.
 
 Publish intermediate candidates to a task-owned branch without an open PR and
 explicitly dispatch that reviewed ref; verify the actual source commit, workflow,

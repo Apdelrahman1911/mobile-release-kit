@@ -313,10 +313,12 @@ Session capture. Missing metadata cannot silently select a local fallback.
 Native/process suites and isolation setup must not run on a shared VPS.
 
 Before the full matrix, the reviewed workflow's manual `signing-adapter` target
-can run four fixed source/wheel checks on each disposable Linux/macOS runner:
+can run five fixed source/wheel checks on each disposable Linux/macOS runner:
 real model-command completion, original case wait/EOF/crash/deadline settlement,
 an original C-fence prefix cut followed by fresh recovery, and active-versus-pending
-account exclusion. It emits only adapter results, never a matrix proof or a full
+account exclusion, followed by the existing PREPARED/no-target original-fence and
+same-lease cleanup case. `signing-adapter-linux` and `signing-adapter-macos` select
+the same checks on just the named platform. It emits only adapter results, never a matrix proof or a full
 CI pass. A case's original C recovery debt is registered before its seed; an
 anchor/worker/group receipt alone cannot authorize deletion. Outstanding debt or
 UNKNOWN must fail teardown, not merely retain files while reporting success.

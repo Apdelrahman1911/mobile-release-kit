@@ -24,10 +24,45 @@ _NATIVE_COMMANDS = (
     ("dsymutil-discovery", ("/usr/bin/xcrun", "--find", "dsymutil")),
     ("system-code", ("/usr/bin/codesign", "--verify", "--strict", "/usr/bin/true")),
 )
+_NATIVE_PATTERN_FIXTURES = (
+    "test_ios_profile_authority.py",
+    "test_ios_profile_trust.py",
+    "test_ios_profile_installation.py",
+    "test_ios_entitlements.py",
+    "test_operation_recovery.py",
+    "test_default_cancellation.py",
+    "test_profile_processes.py",
+    "test_macho_native.py",
+    "test_native_process.py",
+    "test_profile_process_owner.py",
+    "test_inspection_budget.py",
+    "test_local_signing.py",
+    "test_local_signing_recovery.py",
+    "test_local_signing_native.py",
+    "test_local_signing_composition.py",
+    "test_owned_process.py",
+    "test_owned_process_callers.py",
+    "test_owned_process_failures.py",
+    "test_local_signing_failures.py",
+    "test_local_signing_profile_identity.py",
+    "test_local_signing_persistent.py",
+    "test_local_signing_matrix.py",
+    "test_local_signing_owner_loss.py",
+    "test_command_loader_loss.py",
+    "test_command_fence_failure.py",
+    "test_local_signing_attempts.py",
+    "test_command_account_lifecycle.py",
+)
 _FIXTURE_MODULE = "unit.native_diagnostic_fixture"
 _FIXTURE_METHODS = ("test_01_before", "test_02_subject", "test_03_after",
                     "test_04_support", "test_05_support", "test_06_support",
-                    "test_07_support", "test_08_support", "test_09_support")
+                    "test_07_support", "test_08_support", "test_09_support",
+                    "test_10_support", "test_11_support", "test_12_support",
+                    "test_13_support", "test_14_support", "test_15_support",
+                    "test_16_support", "test_17_support", "test_18_support",
+                    "test_19_support", "test_20_support", "test_21_support",
+                    "test_22_support", "test_23_support", "test_24_support",
+                    "test_25_support", "test_26_support", "test_27_support")
 _FIXTURE_IDS = tuple(f"{_FIXTURE_MODULE}.Fixture.{name}" for name in _FIXTURE_METHODS)
 _PROFILE_PRODUCT_FIXTURES = frozenset({
     "mobile_release", "mobile_release._native_process", "mobile_release._profile_process",
@@ -182,7 +217,7 @@ _ISOLATED_PRIME_FIXTURES = (
 
 
 def _inert_native_suites(outcome="success", *, subtests=3, unknown_id=False):
-    """Nine explicitly supplied inert tests, never native discovery or imports."""
+    """Twenty-seven explicitly supplied inert tests, never native discovery or imports."""
     events = []
 
     class Fixture(unittest.TestCase):
@@ -223,6 +258,60 @@ def _inert_native_suites(outcome="success", *, subtests=3, unknown_id=False):
         def test_09_support(self):
             pass
 
+        def test_10_support(self):
+            pass
+
+        def test_11_support(self):
+            pass
+
+        def test_12_support(self):
+            pass
+
+        def test_13_support(self):
+            pass
+
+        def test_14_support(self):
+            pass
+
+        def test_15_support(self):
+            pass
+
+        def test_16_support(self):
+            pass
+
+        def test_17_support(self):
+            pass
+
+        def test_18_support(self):
+            pass
+
+        def test_19_support(self):
+            pass
+
+        def test_20_support(self):
+            pass
+
+        def test_21_support(self):
+            pass
+
+        def test_22_support(self):
+            pass
+
+        def test_23_support(self):
+            pass
+
+        def test_24_support(self):
+            pass
+
+        def test_25_support(self):
+            pass
+
+        def test_26_support(self):
+            pass
+
+        def test_27_support(self):
+            pass
+
     Fixture.__module__, Fixture.__qualname__ = _FIXTURE_MODULE, "Fixture"
     if outcome in {"expected-failure", "unexpected-success"}:
         Fixture.test_02_subject = unittest.expectedFailure(Fixture.test_02_subject)
@@ -255,6 +344,7 @@ def _inert_native_gate(*, suites=None, stderr=None, platform="darwin", run_effec
     the focused fake-only batch that uses this context manager.
     """
     gate = run_native_profile_checks
+    assert gate.PATTERNS == _NATIVE_PATTERN_FIXTURES
     events, calls = [], []
     output = io.StringIO() if stderr is None else stderr
 
@@ -277,7 +367,7 @@ def _inert_native_gate(*, suites=None, stderr=None, platform="darwin", run_effec
         events.append("product-import")
         return products
 
-    pending = iter(suites if suites is not None else [unittest.TestSuite()] * len(gate.PATTERNS))
+    pending = iter(suites if suites is not None else [unittest.TestSuite()] * len(_NATIVE_PATTERN_FIXTURES))
 
     def discover(path, *, pattern):
         events.append("discover")
@@ -593,9 +683,10 @@ class NativeProfileCITests(unittest.TestCase):
                 self.assertEqual(status, 0 if outcome == "success" else 1)
                 self.assertEqual(fixture.calls, [(command, {"stdin": subprocess.DEVNULL, "check": True, "timeout": 30})
                                                 for _, command in _NATIVE_COMMANDS])
-                self.assertEqual(fixture.events, ["prerequisite"] * 4 + ["inventory", "product-import"] + ["discover"] * 9)
+                self.assertEqual(fixture.events, ["prerequisite"] * 4 + ["inventory", "product-import"]
+                                 + ["discover"] * len(_NATIVE_PATTERN_FIXTURES))
                 self.assertEqual([call.kwargs for call in fixture.discover.call_args_list],
-                                 [{"pattern": pattern} for pattern in gate.PATTERNS])
+                                 [{"pattern": pattern} for pattern in _NATIVE_PATTERN_FIXTURES])
                 if outcome == "success":
                     self.assertEqual(_native_envelopes(fixture.stderr.getvalue()), [])
                     self.assertEqual(events, ["before", "subject", "after"])
@@ -739,6 +830,7 @@ class NativeProfileCITests(unittest.TestCase):
 
     def test_native_inventory_reuses_exact_fixed_source_authority_without_budget(self):
         gate = run_native_profile_checks
+        self.assertEqual(gate.PATTERNS, _NATIVE_PATTERN_FIXTURES)
         for case, partition in itertools.product(("success", "missing-loader", "pattern-drift", "inventory-error"),
                 ("all", "authority", "ordinary", "delegated", *(name for name, _identifier in _PYTHON_POISON_FIXTURES))):
             with self.subTest(case=case, partition=partition):
@@ -751,7 +843,7 @@ class NativeProfileCITests(unittest.TestCase):
                         raise original
                     return _FIXTURE_IDS
 
-                checks = SimpleNamespace(NATIVE_PATTERNS=gate.PATTERNS if case != "pattern-drift" else (),
+                checks = SimpleNamespace(NATIVE_PATTERNS=_NATIVE_PATTERN_FIXTURES if case != "pattern-drift" else (),
                                          native_partition_ids=expected)
                 loader = SimpleNamespace(exec_module=lambda module: events.append(("definitions", module)))
                 spec = SimpleNamespace(loader=None if case == "missing-loader" else loader)

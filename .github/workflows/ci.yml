@@ -12,7 +12,7 @@ on:
         type: choice
         required: true
         default: full
-        options: [full, linux, macos, signing-adapter, signing-adapter-macos, signing-matrix-canary]
+        options: [full, linux, macos, signing-adapter, signing-adapter-linux, signing-adapter-macos, signing-matrix-canary]
 
 permissions:
   contents: read
@@ -270,7 +270,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
   test-signing-adapter:
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.verification_target == 'signing-adapter' || inputs.verification_target == 'signing-adapter-macos') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.verification_target == 'signing-adapter' || inputs.verification_target == 'signing-adapter-linux' || inputs.verification_target == 'signing-adapter-macos') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     permissions:
@@ -279,7 +279,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        os: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-adapter-macos' && '["macos-26"]' || '["ubuntu-24.04","macos-26"]') }}
+        os: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-adapter-linux' && '["ubuntu-24.04"]' || github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-adapter-macos' && '["macos-26"]' || '["ubuntu-24.04","macos-26"]') }}
     steps:
       - name: Require a disposable GitHub-hosted runner
         env:
@@ -331,7 +331,7 @@ jobs:
               --yes --no-install-recommends bubblewrap
           fi
           [[ -x /usr/bin/bwrap && -x /usr/bin/setpriv ]]
-      - name: Require only the four original signing-adapter methods in source and wheel
+      - name: Require the four original signing-adapter methods and prepared-positive in source and wheel
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           MRK_PYTHON_312: ${{ steps.python312.outputs.python-path }}

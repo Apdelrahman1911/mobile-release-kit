@@ -147,8 +147,8 @@ NATIVE_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inpu
 MATRIX_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'signing-matrix-canary') }}"
 MATRIX_SHARD_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[0]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47]') }}"
 MATRIX_INCLUDE_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[{\"os\":\"ubuntu-24.04\",\"shard\":20},{\"os\":\"ubuntu-24.04\",\"shard\":28},{\"os\":\"macos-26\",\"shard\":1},{\"os\":\"macos-26\",\"shard\":12},{\"os\":\"macos-26\",\"shard\":37}]' || '[]') }}"
-ADAPTER_TARGET_CONDITION = "${{ github.event_name == 'workflow_dispatch' && (inputs.verification_target == 'signing-adapter' || inputs.verification_target == 'signing-adapter-macos') }}"
-ADAPTER_OS_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-adapter-macos' && '[\"macos-26\"]' || '[\"ubuntu-24.04\",\"macos-26\"]') }}"
+ADAPTER_TARGET_CONDITION = "${{ github.event_name == 'workflow_dispatch' && (inputs.verification_target == 'signing-adapter' || inputs.verification_target == 'signing-adapter-linux' || inputs.verification_target == 'signing-adapter-macos') }}"
+ADAPTER_OS_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-adapter-linux' && '[\"ubuntu-24.04\"]' || github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-adapter-macos' && '[\"macos-26\"]' || '[\"ubuntu-24.04\",\"macos-26\"]') }}"
 VERIFICATION_CONCURRENCY = "release-kit-ci-${{ github.ref }}-${{ github.event_name }}-${{ inputs.verification_target || 'full' }}"
 AGGREGATE_GUARD = '''set -euo pipefail
 [[ "$LINUX_RESULT" == success && "$NATIVE_RESULT" == success && "$MATRIX_RESULT" == success ]]
@@ -231,7 +231,7 @@ class CIWorkflowIsolationTests(unittest.TestCase):
             "pull_request": None, "push": {"branches": ["main"]},
             "workflow_dispatch": {"inputs": {"verification_target": {
                 "description": "Full verification, Linux/macOS-only evidence, signing-adapter smoke, or fixed-shard matrix canary (partial aggregate remains incomplete)",
-                "type": "choice", "required": True, "default": "full", "options": ["full", "linux", "macos", "signing-adapter", "signing-adapter-macos", "signing-matrix-canary"],
+                "type": "choice", "required": True, "default": "full", "options": ["full", "linux", "macos", "signing-adapter", "signing-adapter-linux", "signing-adapter-macos", "signing-matrix-canary"],
             }}},
         })
         self.assertEqual(workflow["concurrency"], {"group": VERIFICATION_CONCURRENCY, "cancel-in-progress": True})
@@ -329,9 +329,10 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         self.assertEqual(matrix["strategy"]["matrix"]["os"], ["ubuntu-24.04", "macos-26"])
         for event, ref in (("pull_request", "refs/pull/1/merge"), ("push", "refs/heads/main"),
                            ("workflow_dispatch", "refs/heads/qa006-native-candidate")):
-            for target in ("full", "linux", "macos", "signing-adapter", "signing-adapter-macos", "signing-matrix-canary", None, "", "unknown",
+            for target in ("full", "linux", "macos", "signing-adapter", "signing-adapter-linux", "signing-adapter-macos", "signing-matrix-canary", None, "", "unknown",
                            "LINUX", "LiNuX", "linux ", " linux",
                            "MACOS", "mAcOs", "SIGNING-ADAPTER-MACOS", "signing-adapter-macos ",
+                           "SIGNING-ADAPTER-LINUX", "signing-adapter-linux ",
                            "SIGNING-MATRIX-CANARY", "signing-matrix-canary ", "[0]", "macos "):
                 with self.subTest(candidate_route=(event, target)):
                     context = {"github": {"event_name": event, "ref": ref}}
@@ -345,11 +346,11 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                     expected = {"test-linux": not dispatch or compared in {"full", "linux"},
                                 "test-native-profiles": not dispatch or compared in {"full", "macos"},
                                 "test-signing-matrix": not dispatch or compared in {"full", "signing-matrix-canary"},
-                                "test-signing-adapter": dispatch and compared in {"signing-adapter", "signing-adapter-macos"}}
+                                "test-signing-adapter": dispatch and compared in {"signing-adapter", "signing-adapter-linux", "signing-adapter-macos"}}
                     for name, enabled in expected.items():
                         self.assertEqual(evaluate_condition(workflow["jobs"][name]["if"], context,
                                                             success=True, cancelled=False), enabled)
-                    if dispatch and compared not in {"full", "linux", "macos", "signing-adapter", "signing-adapter-macos", "signing-matrix-canary"}:
+                    if dispatch and compared not in {"full", "linux", "macos", "signing-adapter", "signing-adapter-linux", "signing-adapter-macos", "signing-matrix-canary"}:
                         self.assertFalse(any(expected.values()))  # Skipped prerequisites cannot pass the pinned guard.
                     selected = canary_shards if evaluate_condition(canary_condition, context,
                         success=True, cancelled=False) else full_shards
@@ -418,9 +419,10 @@ class CIWorkflowIsolationTests(unittest.TestCase):
 
         groups = {group_for("pull_request", None), group_for("push", None),
                   group_for("workflow_dispatch", "full"), group_for("workflow_dispatch", "linux"), group_for("workflow_dispatch", "macos"),
-                  group_for("workflow_dispatch", "signing-adapter"), group_for("workflow_dispatch", "signing-adapter-macos"),
+                  group_for("workflow_dispatch", "signing-adapter"), group_for("workflow_dispatch", "signing-adapter-linux"),
+                  group_for("workflow_dispatch", "signing-adapter-macos"),
                   group_for("workflow_dispatch", "signing-matrix-canary")}
-        self.assertEqual(len(groups), 8)  # Partial dispatch cannot cancel any full event/target.
+        self.assertEqual(len(groups), 9)  # Partial dispatch cannot cancel any full event/target.
         self.assertTrue(all("${{" not in value for value in groups))
         for absent in (None, ""):
             self.assertEqual(group_for("workflow_dispatch", absent), group_for("workflow_dispatch", "full"))
@@ -432,19 +434,23 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         self.assertEqual(job["runs-on"], "${{ matrix.os }}")
         self.assertEqual(job["strategy"], {"fail-fast": False, "max-parallel": 2,
                                            "matrix": {"os": ADAPTER_OS_SELECTION}})
-        # Pin the whole expression before interpreting its one fixed selector.
+        # Pin the whole expression before interpreting its two fixed selectors.
         selection = job["strategy"]["matrix"]["os"]
-        left, otherwise = selection.removeprefix("${{ fromJSON(").removesuffix(") }}").rsplit(" || ", 1)
-        condition, selected = left.rsplit(" && ", 1)
-        macos_only, both = (json.loads(literal[1:-1]) for literal in (selected, otherwise))
-        self.assertEqual((macos_only, both), (["macos-26"], ["ubuntu-24.04", "macos-26"]))
+        linux_branch, macos_branch, otherwise = selection.removeprefix("${{ fromJSON(").removesuffix(") }}").split(" || ")
+        linux_condition, linux_selected = linux_branch.rsplit(" && ", 1)
+        macos_condition, macos_selected = macos_branch.rsplit(" && ", 1)
+        linux_only, macos_only, both = (json.loads(literal[1:-1]) for literal in (linux_selected, macos_selected, otherwise))
+        self.assertEqual((linux_only, macos_only, both), (["ubuntu-24.04"], ["macos-26"], ["ubuntu-24.04", "macos-26"]))
         for event in ("workflow_dispatch", "pull_request", "push"):
             for target in ("signing-adapter", "signing-adapter-macos", "SIGNING-ADAPTER-MACOS",
-                           "signing-adapter-macos ", "full", "macos", "signing-matrix-canary", "unknown", ""):
+                           "signing-adapter-linux", "SIGNING-ADAPTER-LINUX", "signing-adapter-linux ",
+                           "signing-adapter-macos ", "full", "macos", "linux", "signing-matrix-canary", "unknown", ""):
                 context = {"github": {"event_name": event}, "inputs": {"verification_target": target.lower()}}
-                systems = macos_only if evaluate_condition(condition, context, success=True, cancelled=False) else both
-                self.assertEqual(systems, macos_only if event == "workflow_dispatch"
-                                 and target.lower() == "signing-adapter-macos" else both)
+                systems = (linux_only if evaluate_condition(linux_condition, context, success=True, cancelled=False)
+                           else macos_only if evaluate_condition(macos_condition, context, success=True, cancelled=False) else both)
+                expected = (linux_only if event == "workflow_dispatch" and target.lower() == "signing-adapter-linux"
+                            else macos_only if event == "workflow_dispatch" and target.lower() == "signing-adapter-macos" else both)
+                self.assertEqual(systems, expected)
         self.assertEqual(job["permissions"], {"contents": "read"})
         self.assertEqual(job["steps"][0]["run"], HOSTED_GUARD)
         self.assertFalse(any("actions/upload-artifact" in step.get("uses", "") for step in job["steps"]))
@@ -1750,6 +1756,88 @@ class CIControllerContractTests(unittest.TestCase):
                 patch.object(controller.time, "monotonic", return_value=1000.0):
             with self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
                 controller.failure_details(capture([callback]), step, paths, checks=checks, deadline=1000.0)
+
+    def test_command_account_failure_is_closed_bounded_and_bound_to_failed_original_callbacks(self):
+        controller = controller_module()
+        self.enterContext(patch.object(controller.time, "monotonic", return_value=999.0))
+        paths = fixture_paths(controller)
+        identifier = ("workflow.test_command_account_lifecycle.CommandAccountLifecycleTests."
+                      "test_prepared_no_target_original_fence_and_same_lease_cleanup")
+        unrelated = "unit.synthetic.Other.test_case"
+        self.assertEqual(controller.COMMAND_ACCOUNT_FAILURE_ID, identifier)
+        checks = SimpleNamespace(python_capture_ids=lambda *_, **__: (identifier, unrelated),
+                                 native_partition_ids=lambda *_, **__: (identifier, unrelated))
+        callback = {"id": identifier, "outcome": "failure", "category": "assertion-error", "errno": None}
+        packet = {"category": "AssertionError", "frames": [["command_account_lifecycle_fixture.py", 192],
+                  ["contextlib.py", 144], ["PRIVATE.py", 123], ["local_signing.py", 1170]]}
+
+        def encode(value):
+            return b"\nMRK_C_FENCE_FIXTURE_FAILURE=" + json.dumps(value, separators=(",", ":")).encode("ascii") + b"\n"
+
+        marker = encode(packet)
+        expected = {"category": "assertion-error", "locations": [
+            {"file": "tests/workflow/command_account_lifecycle_fixture.py", "line": 192},
+            {"file": "src/mobile_release/local_signing.py", "line": 1170}]}
+        self.assertEqual(controller.command_account_failure(marker, deadline=1000.0), expected)
+        for category, public in (("ProcessCleanupError", "process-cleanup-error"),
+                                 ("ProcessOutcomeUnknown", "process-outcome-unknown")):
+            self.assertEqual(controller.command_account_failure(encode({**packet, "category": category}),
+                             deadline=1000.0), {**expected, "category": public})
+        malformed = [encode({**packet, "category": "PRIVATE_ERROR"}), encode({**packet, "category": True}),
+                     encode({**packet, "message": "PRIVATE"}), encode({**packet, "frames": {}}),
+                     encode({**packet, "frames": [["local_signing.py", 1]] * 13}),
+                     *(encode({**packet, "frames": [row]}) for row in (
+                         ["local_signing.py", True], ["local_signing.py", 0], ["local_signing.py", 1_000_000],
+                         ["local_signing.py", 1, "PRIVATE"], [True, 1], "PRIVATE")),
+                     *(encode({**packet, "frames": [[name, 1]]}) for name in (
+                         "", "PRIVATE", "/PRIVATE/local_signing.py", "../local_signing.py", "dir\\local_signing.py",
+                         "private\n.py", "private\x00.py", "privat\u00e9.py", "x" * 129 + ".py")),
+                     marker + marker, marker[:-1], marker.replace(b'{', b'{ ', 1),
+                     marker.replace(b'"category":', b'"category":"AssertionError","category":', 1),
+                     b"MRK_C_FENCE_FIXTURE_FAILURE=" + b" " * 2048 + b"\n",
+                     b"MRK_C_FENCE_FIXTURE_FAILURE=\xff\n", bytearray(marker)]
+        for raw in malformed:
+            with self.subTest(raw=repr(raw[:80])):
+                self.assertIsNone(controller.command_account_failure(raw, deadline=1000.0))
+
+        def capture(records, gate, *, raw=marker, ok=False, finality=True, phase="tests"):
+            envelope = ({"schema": 1, "phase": phase, "records": [{**row, "returncode": None} for row in records]}
+                        if gate.startswith("native-") else
+                        {"check": gate, "ok": False, "details": {"error": "TEST_OUTCOME_COUNT", "failure_callbacks": records}})
+            prefix = controller.NATIVE_DIAGNOSTIC_PREFIX if gate.startswith("native-") else "MRK_CHECK_RESULT="
+            stdout = (prefix + json.dumps(envelope) + "\n").encode()
+            return SimpleNamespace(ok=ok, returncode=0 if ok else 1, waited=True, stdout_eof=True, stderr_eof=True,
+                domain_finality=finality, timed_out=False, cancelled=False, stdout=stdout, stderr=raw,
+                persisted=(len(stdout), len(raw)), duration=0.1,
+                primary_error=None if ok else "command exited 1", cleanup_errors=())
+
+        for gate in ("python-full", "python-wheel", "native-profile-source", "native-profile-wheel"):
+            step = controller.Step(gate, parser="native" if gate.startswith("native-") else "check")
+            def details(records, **options):
+                return controller.failure_details(capture(records, gate, **options), step, paths,
+                                                  checks=checks, deadline=1000.0)
+            for finality in (False, True):
+                observed = details([callback], finality=finality)
+                self.assertEqual(observed["command_account_failure"], expected)
+                self.assertEqual(observed["returncode"], 1)
+                self.assertIs(observed["domain_finality"], finality)
+                self.assertNotIn("PRIVATE", json.dumps(observed))
+            for rows, options in (([], {}), ([callback], {"ok": True}), ([callback], {"raw": marker[:-1]}),
+                                  ([{**callback, "id": unrelated}], {}), ([{**callback, "id": "PRIVATE"}], {}),
+                                  ([{**callback, "outcome": "expected-failure"}], {}),
+                                  ([{**callback, "outcome": "skip", "category": "none"}], {})):
+                self.assertNotIn("command_account_failure", details(rows, **options))
+            with patch.object(controller, "command_account_failure", side_effect=RuntimeError("PRIVATE parser")):
+                observed = details([callback])
+            self.assertEqual(observed["returncode"], 1)
+            self.assertNotIn("command_account_failure", observed)
+            self.assertNotIn("PRIVATE", json.dumps(observed))
+            if gate.startswith("native-"):
+                self.assertNotIn("command_account_failure", details([callback], phase="prerequisite"))
+        with patch.object(controller.time, "monotonic", return_value=1000.0):
+            for raw in (marker, marker[:-1]):
+                with self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                    controller.command_account_failure(raw, deadline=1000.0)
 
     def test_native_storage_observations_require_exact_profile_and_original_finality(self):
         controller = controller_module()

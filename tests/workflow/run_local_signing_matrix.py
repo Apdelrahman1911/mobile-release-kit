@@ -148,7 +148,7 @@ def _phase(args, scope, diagnostic_context):
 
 
 class SigningAdapterResult(unittest.TestResult):
-    """First finite4 failure is latched before optional diagnostic projection."""
+    """First fixed-smoke failure is latched before optional diagnostic projection."""
     def __init__(self, phase, deadline, source_map):
         super().__init__()
         self.phase, self.deadline, self.source_map = phase, deadline, source_map
@@ -303,6 +303,7 @@ def _adapter_phase(args, scope, stage):
     stage[0] = "imports"
     sys.path[:0] = [str(package.parent), str(ROOT / "tests")]
     from workflow import local_signing_persistent_fixture as fixture
+    from workflow import profile_process_fixture as profile_fixture
     from mobile_release import local_signing
     from unit import local_signing_persistent as model
     contract.require(Path(local_signing.__file__).resolve().parent == package, "wrong adapter production import")
@@ -325,7 +326,7 @@ def _adapter_phase(args, scope, stage):
             test = next(iter(suite))
             method = getattr(test, test._testMethodName)
             contract.require(test.id() == identifier and Path(method.__func__.__code__.co_filename).resolve()
-                             == ROOT / "tests/unit/test_local_signing_persistent.py", "adapter actual method origin")
+                             == ROOT / contract.ADAPTER_TEST_FILES[identifier], "adapter actual method origin")
         stage[0] = "suite"
         result = SigningAdapterResult(selected, deadline, source_map)
         result.failfast = True
@@ -333,8 +334,11 @@ def _adapter_phase(args, scope, stage):
         stage[0] = "postconditions"
         contract.before_deadline(deadline)
         contract.require(not result.failed and result.wasSuccessful() and not fixture._CASE_CUSTODY
-                         and not fixture._CASE_RECOVERY_DEBT and not model._RETAINED_MODEL_LIFETIMES
-                         and not any(output.iterdir()), "adapter failed or retained cases")
+                         and not fixture._CASE_RECOVERY_DEBT and not model._RETAINED_MODEL_LIFETIMES,
+                         "adapter failed or retained cases")
+        profile_fixture.assert_fixture_idle()
+        contract.require(not profile_fixture._RETAINED_WORKSPACES, "adapter retained fixture workspace")
+        contract.require(not any(output.iterdir()), "adapter retained output")
         stage[0] = "origins"
         origins = {"parent": contract.actual_adapter_origins(package, "parent", deadline=deadline),
                    "commandWorker": result.command_worker_origins}
