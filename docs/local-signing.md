@@ -85,6 +85,12 @@ locked open-file description is loaned only to custodian/anchor helpers; the
 arbitrary tool and profile workers never inherit it. Exports retire before close,
 and helper loans are released only after their required ownership tail settles.
 
+If the custodian's stop crosses the anchor's already-sent producer-completion
+report, the anchor latches failure and keeps the original or tighter cutoff while
+awaiting the custodian's actual group-retirement confirmation. Stop alone cannot
+confirm cleanup, renew time or make the command successful. Duplicate/malformed
+controls, missing confirmation or unknown original waits still prevent settlement.
+
 A self-contained completion marker survives teardown. Resumed terminal cleanup
 never restores historical preferences again or forgets an original profile inode.
 After safely resolving owned resources, a foreign conflict can clear the session

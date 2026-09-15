@@ -801,6 +801,7 @@ class _Context:
         self.failure_cutoff: int | None = None
         self.cleanup_cutoff: int | None = None
         self.stopped = self.launch_retired = self.cleanup_unknown = self.exited = False
+        self.stop_received = False
         self.error_epoch = self.signal_epoch = 0
         self.exit_armed = False
         self.acquisitions: list[native.Acquisition] = []
@@ -1344,8 +1345,7 @@ def _receive(wire: _Wire, expected: Tag, pump: Callable[[], None], *, normal: bo
             tag, body = frame
             try:
                 if tag is Tag.STOP:
-                    value = _scalar_fields(body, wire.ctx.nonce, {"cutoff"})
-                    _require(_integer(value["cutoff"], 1, wire.ctx.hard))
+                    _accept_stop(wire.ctx, body)
                 else:
                     _require(tag is expected)
             except BaseException as error:
@@ -1353,8 +1353,6 @@ def _receive(wire: _Wire, expected: Tag, pump: Callable[[], None], *, normal: bo
                 wire.ctx.record(error)
                 raise
             if tag is Tag.STOP:
-                wire.ctx.record(ProcessError(ERROR))
-                wire.ctx.failure_cutoff = min(wire.ctx.cutoff(), value["cutoff"])
                 raise wire.ctx.primary  # type: ignore[misc]
             return body
         _require(not wire.eof)
@@ -1586,17 +1584,24 @@ def _input_loss(context: _Context, wire: _Wire) -> None:
         raise ProcessError("owned command original parent ended")
 
 
+def _accept_stop(context: _Context, content: bytes) -> ProcessError:
+    context.owner_check()
+    _require(not context.stop_received)
+    fields = _scalar_fields(content, context.nonce, {"cutoff"})
+    _require(_integer(fields["cutoff"], 1, context.hard))
+    context.stop_received = True  # Before failure recording can itself fail.
+    error = ProcessError(ERROR)
+    context.record(error)
+    context.failure_cutoff = min(context.cutoff(), fields["cutoff"])
+    return error
+
+
 def _check_stop(context: _Context, wire: _Wire) -> None:
     frame = wire.read()
     if frame is not None:
         tag, body = frame
         _require(tag is Tag.STOP)
-        fields = _scalar_fields(body, context.nonce, {"cutoff"})
-        _require(_integer(fields["cutoff"], 1, context.hard))
-        error = ProcessError(ERROR)
-        context.record(error)
-        context.failure_cutoff = min(context.cutoff(), fields["cutoff"])
-        raise error
+        raise _accept_stop(context, body)
     _input_loss(context, wire)
 
 
@@ -2251,6 +2256,40 @@ class _Anchor:
                 and self.ctx.settled((self.producer, self.ctx.child_acquisition))
                 and all(self.mapping[fd].state == "CLOSED" for fd in (6, 7)))
 
+    def _await_group_done(self) -> None:
+        ctx, parent = self.ctx, self.upstream
+        ctx.owner_check()
+        _require(ctx.role == "A" and self._local_producers() and not self.group_done
+                 and self.work_done is not None and parent.sent[-1:] == [Tag.WORK_DONE]
+                 and parent.out is None and not parent.write_failed and not parent.write_in_flight)
+        original = self.work_done
+        while True:
+            ctx.check_tail()
+            frame = parent.read()
+            if frame is not None:
+                tag, body = frame
+                try:
+                    if tag is Tag.STOP:
+                        # C's STOP can cross the original WORK_DONE. It remains
+                        # a failure, but cannot substitute for or prevent the
+                        # genuine group-retirement confirmation still owed by C.
+                        _accept_stop(ctx, body)
+                    else:
+                        _require(tag is Tag.GROUP_DONE)
+                        _scalar_fields(body, ctx.nonce, set())
+                except BaseException as error:
+                    parent.poisoned = True
+                    ctx.record(error)
+                    raise
+                if tag is Tag.STOP:
+                    continue
+                _require(self.work_done is original)
+                ctx.check_tail()  # A complete frame can arrive at the cutoff.
+                self.group_done = True
+                return
+            _require(not parent.eof)
+            _pause(ctx.cutoff(), readers=(parent.reader,))
+
     def finish(self) -> int:
         ctx, parent = self.ctx, self.upstream
         ctx.begin_cleanup()
@@ -2301,9 +2340,7 @@ class _Anchor:
         if producer and not parent.eof and not ctx.parent_lost():
             try:
                 _send(parent, Tag.WORK_DONE, self.work_done, lambda: None, normal=False)
-                body = _receive(parent, Tag.GROUP_DONE, lambda: None, normal=False)
-                _scalar_fields(body, ctx.nonce, set())
-                self.group_done = True
+                self._await_group_done()
             except BaseException as error:
                 ctx.record(error)
         self.group.retired = True

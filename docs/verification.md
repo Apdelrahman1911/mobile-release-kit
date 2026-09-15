@@ -89,7 +89,8 @@ invented full result or count an unexecuted gate as passed.
 ### Required account-signing matrix
 
 Full verification's `test-signing-matrix` selects exactly forty-eight shards on each supported OS,
-maximum eight concurrent cells on independent disposable VMs. Each cell prepares only its required offline
+maximum twenty concurrent cells on independent disposable VMs, subject to provider,
+account and OS-specific quotas. Each cell prepares only its required offline
 Python inputs, builds/freezes/inspects the same complete source and installed
 package, then invokes both phases through `verify_ci.py --scope signing-matrix`.
 This is a finite catalog, not permission to run arbitrary subsets or commands.

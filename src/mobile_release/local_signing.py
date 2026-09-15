@@ -1067,8 +1067,9 @@ class SigningSession:
     def _read_fence_pair(self, operation: dict) -> dict:
         pending = self._fence_file("command-final.pending", links=2)
         final = self._fence_file("command-final.json", links=2)
-        _require(pending is not None and final is not None and pending[0] == final[0]
-                 and _same_file_state(pending[1], final[1]), "complete original custodian fence is missing")
+        _require(pending is not None and final is not None, "complete original custodian fence is missing")
+        _require(pending[0] == final[0], "original custodian fence contents differ")
+        _require(_same_file_state(pending[1], final[1]), "original custodian fence file states differ")
         record = _parse(final[0])
         expected = self._fence_binding(operation)
         outcome = record.get("outcome")

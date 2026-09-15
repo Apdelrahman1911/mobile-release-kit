@@ -237,6 +237,237 @@ class CommandContractTests(unittest.TestCase):
         self.assertEqual(ctx.cutoff(), 0)
         self.assertTrue(ctx.cleanup_unknown)
 
+    def _inert_no_child_anchor(self):
+        # Real finish/parser/terminal code around an explicitly resource-free
+        # no-child branch. No invented native process or wait receipt is used.
+        ctx = self.context("A")
+        owner = command._Anchor.__new__(command._Anchor)
+        owner.ctx, owner.upstream = ctx, self.wire(ctx)
+        owner.relay, owner.account, owner.producer = (ctx.acquisition() for _ in range(3))
+        owner.mapping = {6: _InertLease(103), 7: _InertLease(104)}
+        owner.group = SimpleNamespace(retired=False)
+        owner.child = owner.downstream = owner.wait = owner.rejection = owner.work_done = None
+        owner.moved = True
+        owner.armed = owner.no_child = owner.worker_protocol_failed = owner.group_done = False
+        owner.create_route = command._Route(command.Tag.CREATE_W)
+        owner.run_route = command._Route(command.Tag.RUN_TOOL)
+        ctx.routes.extend((owner.create_route, owner.run_route))
+        return owner
+
+    @contextmanager
+    def _inert_anchor_transport(self, owner, frames, *, clock=None, after_read=None):
+        pending = bytearray(b"".join(bytes((tag,)) + len(body).to_bytes(4, "big") + body
+                                   for tag, body in frames))
+        written = []
+
+        def read(descriptor, maximum):
+            self.assertEqual(descriptor, owner.upstream.reader.number)
+            data = bytes(pending[:maximum])
+            del pending[:maximum]
+            if after_read is not None:
+                after_read(pending)
+            return data
+
+        def write(descriptor, data):
+            self.assertEqual(descriptor, owner.upstream.writer.number)
+            self.assertEqual(int.from_bytes(data[1:5], "big"), len(data) - 5)
+            written.append((command.Tag(data[0]), bytes(data[5:])))
+            return len(data)
+
+        clock = [time.monotonic_ns()] if clock is None else clock
+        with patch.object(command.os, "read", side_effect=read), \
+             patch.object(command.os, "write", side_effect=write), \
+             patch.object(command.time, "monotonic_ns", side_effect=lambda: clock[0]), \
+             patch.object(command, "_pause", return_value=None):
+            yield written
+
+    def test_anchor_crossed_stop_preserves_original_settlement_and_failure(self):
+        for order in ("no-stop", "before-work-done", "crossed", "crossed-prior-error"):
+            with self.subTest(order=order):
+                owner = self._inert_no_child_anchor()
+                ctx, wire = owner.ctx, owner.upstream
+                now = time.monotonic_ns()
+                stop_at = now + command.NANOSECOND
+                stop = (command.Tag.STOP, command._scalar(ctx.nonce, cutoff=stop_at))
+                done = (command.Tag.GROUP_DONE, command._scalar(ctx.nonce))
+                frames = [done] if order == "no-stop" else [stop, done]
+                first = ValueError("prior original failure") if order == "crossed-prior-error" else None
+                with self._inert_anchor_transport(owner, frames, clock=[now]) as written:
+                    if first is not None:
+                        ctx.record(first)
+                    if order == "before-work-done":
+                        with self.assertRaises(owned.ProcessError):
+                            command._check_stop(ctx, wire)
+                        first = ctx.primary
+                    code = owner.finish()
+                self.assertEqual([tag for tag, _body in written], [command.Tag.WORK_DONE, command.Tag.TERMINAL])
+                self.assertEqual(written[0][1], written[1][1])
+                self.assertEqual(written[0][1], owner.work_done)
+                self.assertTrue(owner.group_done and owner.group.retired and owner._local_producers())
+                self.assertEqual(code, command.HELPER_OK if order == "no-stop" else command.HELPER_FAILED)
+                self.assertEqual(ctx.stop_received, order != "no-stop")
+                if order != "no-stop":
+                    self.assertTrue(ctx.stopped and ctx.launch_retired)
+                    self.assertEqual(ctx.cutoff(), stop_at)
+                    self.assertIsNotNone(ctx.primary)
+                if first is not None:
+                    self.assertIs(ctx.primary, first)
+                self.assertEqual(wire.writer.calls, 1)
+                self.assertTrue(all(lease.calls == 1 for lease in owner.mapping.values()))
+
+        custodian = command._Custodian.__new__(command._Custodian)
+        custodian.ctx, custodian.downstream = self.context("C"), SimpleNamespace(writer=_InertLease())
+        custodian.anchor_work = {"observed": "original WORK_DONE"}
+        with patch.object(command, "_send", side_effect=AssertionError("no stop after observed WORK_DONE")):
+            custodian._stop_anchor()
+
+    def test_anchor_settlement_requires_original_group_done_and_unrenewed_cutoff(self):
+        for case in ("eof", "stop-eof", "truncated", "expiry-after-read", "already-expired"):
+            with self.subTest(case=case):
+                owner = self._inert_no_child_anchor()
+                ctx = owner.ctx
+                clock = [time.monotonic_ns()]
+                stop_at = clock[0] + command.NANOSECOND
+                stop = (command.Tag.STOP, command._scalar(ctx.nonce, cutoff=stop_at))
+                done = (command.Tag.GROUP_DONE, command._scalar(ctx.nonce))
+                frames = [] if case == "eof" else [stop] if case == "stop-eof" else [stop, done]
+                if case == "already-expired":
+                    ctx.failure_cutoff = clock[0]
+
+                def after_read(pending):
+                    if case == "expiry-after-read" and not pending:
+                        clock[0] = stop_at
+
+                with self._inert_anchor_transport(owner, frames, clock=clock, after_read=after_read) as written:
+                    if case == "truncated":
+                        with patch.object(command.os, "read", side_effect=[b"\x0a\x00", b""]):
+                            code = owner.finish()
+                    else:
+                        code = owner.finish()
+                self.assertEqual(code, command.HELPER_UNKNOWN)
+                self.assertFalse(owner.group_done)
+                self.assertNotIn(command.Tag.TERMINAL, [tag for tag, _body in written])
+                self.assertEqual(owner.upstream.writer.calls, 1)
+                if case == "expiry-after-read":
+                    self.assertEqual(ctx.cutoff(), stop_at)
+                    self.assertTrue(ctx.stop_received)
+
+    def test_stop_admission_is_one_use_canonical_and_normal_receivers_still_abort(self):
+        for receiver in ("receive", "check-stop"):
+            for cutoff in ("earlier", "later"):
+                with self.subTest(receiver=receiver, cutoff=cutoff):
+                    owner = self._inert_no_child_anchor()
+                    ctx = owner.ctx
+                    now = time.monotonic_ns()
+                    advertised = now + (1 if cutoff == "earlier" else 10) * command.NANOSECOND
+                    stop = (command.Tag.STOP, command._scalar(ctx.nonce, cutoff=advertised))
+                    with self._inert_anchor_transport(owner, [stop], clock=[now]):
+                        first = ValueError("preserve first error")
+                        ctx.record(first)
+                        endpoint = ctx.cutoff()
+                        with self.assertRaises(owned.ProcessError if receiver == "check-stop" else ValueError):
+                            if receiver == "receive":
+                                command._receive(owner.upstream, command.Tag.GROUP_DONE, lambda: None, normal=False)
+                            else:
+                                command._check_stop(ctx, owner.upstream)
+                        self.assertTrue(ctx.stop_received)
+                        self.assertIs(ctx.primary, first)
+                        self.assertEqual(ctx.cutoff(), min(endpoint, advertised))
+                        with self.assertRaises(owned.ProcessError):
+                            command._accept_stop(ctx, stop[1])
+                        self.assertEqual(ctx.cutoff(), min(endpoint, advertised))
+
+        owner = self._inert_no_child_anchor()
+        ctx = owner.ctx
+        body = command._scalar(ctx.nonce, cutoff=ctx.run)
+        with patch.object(ctx, "record", side_effect=RuntimeError("lost failure-record return")):
+            with self.assertRaises(RuntimeError):
+                command._accept_stop(ctx, body)
+        self.assertTrue(ctx.stop_received)
+        with self.assertRaises(owned.ProcessError):
+            command._accept_stop(ctx, body)
+        ctx = self.context("A")
+        with patch.object(command.os, "getpid", return_value=ctx.pid + 1):
+            with self.assertRaises(owned.ProcessCleanupError):
+                command._accept_stop(ctx, body)
+        self.assertFalse(ctx.stop_received)
+
+    def test_anchor_tail_rejects_invalid_or_replayed_controls_without_terminal(self):
+        cases = ("duplicate", "cross-phase-duplicate", "wrong-nonce", "noncanonical", "extra-field",
+                 "bool-cutoff", "zero-cutoff", "past-hard", "wrong-tag", "wrong-done-nonce")
+        for case in cases:
+            with self.subTest(case=case):
+                owner = self._inert_no_child_anchor()
+                ctx, wire = owner.ctx, owner.upstream
+                fields = {"cutoff": ctx.run}
+                nonce = b"x" * 16 if case == "wrong-nonce" else ctx.nonce
+                if case == "extra-field": fields["extra"] = 1
+                if case == "bool-cutoff": fields["cutoff"] = True
+                if case == "zero-cutoff": fields["cutoff"] = 0
+                if case == "past-hard": fields["cutoff"] = ctx.hard + 1
+                content = command._scalar(nonce, **fields) + (b"\n" if case == "noncanonical" else b"")
+                stop = (command.Tag.STOP, content)
+                done = (command.Tag.GROUP_DONE, command._scalar(
+                    b"x" * 16 if case == "wrong-done-nonce" else ctx.nonce))
+                frames = [stop, stop, done] if case in {"duplicate", "cross-phase-duplicate"} else [stop, done]
+                if case == "wrong-tag": frames = [(command.Tag.HELLO, command._scalar(ctx.nonce)), done]
+                with self._inert_anchor_transport(owner, frames) as written:
+                    if case == "cross-phase-duplicate":
+                        with self.assertRaises(owned.ProcessError):
+                            command._check_stop(ctx, wire)
+                    code = owner.finish()
+                self.assertEqual(code, command.HELPER_UNKNOWN)
+                self.assertFalse(owner.group_done)
+                self.assertTrue(wire.poisoned)
+                self.assertNotIn(command.Tag.TERMINAL, [tag for tag, _body in written])
+
+        for condition in ("unsettled", "unsent", "pending-write", "failed-write", "in-flight-write"):
+            owner = self._inert_no_child_anchor()
+            owner.no_child, owner.work_done = True, b"inert already-sent payload"
+            for lease in owner.mapping.values(): lease.close()
+            owner.upstream.sent.append(command.Tag.WORK_DONE)
+            if condition == "unsettled": owner.no_child = False
+            if condition == "unsent": owner.upstream.sent.clear()
+            if condition == "pending-write": owner.upstream.out = b"pending"
+            if condition == "failed-write": owner.upstream.write_failed = True
+            if condition == "in-flight-write": owner.upstream.write_in_flight = True
+            with self.subTest(condition=condition), \
+                 patch.object(command.os, "read", side_effect=AssertionError("inadmissible tail read")):
+                with self.assertRaises(owned.ProcessError):
+                    owner._await_group_done()
+                self.assertFalse(owner.group_done)
+
+    def test_fence_pair_distinguishes_absence_content_and_state_without_weakening(self):
+        from mobile_release import local_signing as signing
+        session = signing.SigningSession.__new__(signing.SigningSession)
+        session._fence_binding = lambda operation: {"version": 2}
+        record = {"version": 2, "outcome": "producer-settled"}
+        content = signing._fence_json(record)
+        details = dict(st_dev=11, st_ino=12, st_mode=stat.S_IFREG | 0o600, st_nlink=2,
+                       st_uid=13, st_gid=14, st_size=len(content), st_mtime_ns=15, st_ctime_ns=16,
+                       st_atime_ns=17)
+        pending = (content, SimpleNamespace(**details))
+        cases = ["pending-absent", "final-absent", "contents", *details]
+        for case in cases:
+            with self.subTest(case=case):
+                changed = dict(details)
+                if case in changed: changed[case] += 1
+                final = (content + b" " if case == "contents" else content, SimpleNamespace(**changed))
+                inputs = [None if case == "pending-absent" else pending,
+                          None if case == "final-absent" else final]
+                session._fence_file = Mock(side_effect=inputs)
+                if case == "st_atime_ns":
+                    result = session._read_fence_pair({"phase": "ARMED"})
+                    self.assertEqual(result["fence"]["identity"], {"device": 11, "inode": 12})
+                    self.assertEqual(result["outcome"], "producer-settled")
+                else:
+                    message = ("fence is missing" if case.endswith("absent") else
+                               "fence contents differ" if case == "contents" else "fence file states differ")
+                    with self.assertRaisesRegex(signing.CredentialError, message):
+                        session._read_fence_pair({"phase": "ARMED"})
+                self.assertEqual([call.args[0] for call in session._fence_file.call_args_list],
+                                 ["command-final.pending", "command-final.json"])
+
     def test_close_custody_is_retired_once_even_when_return_is_lost(self):
         ctx, lease = self.context(), _InertLease()
         def failed_close():
@@ -339,7 +570,7 @@ class CommandContractTests(unittest.TestCase):
     def test_c_result_and_terminal_status_preserve_signal_during_fence_or_publication(self):
         # Inert orchestration only: native producer/fence prerequisites are
         # isolated here, never presented as original process or disk evidence.
-        for edge in ("none", "fence", "serialization", "publication"):
+        for edge in ("none", "failed-anchor", "fence", "serialization", "publication"):
             with self.subTest(edge=edge):
                 ctx = self.context("C")
                 owner = command._Custodian.__new__(command._Custodian)
@@ -355,7 +586,8 @@ class CommandContractTests(unittest.TestCase):
                 owner._relay_output = lambda: True
                 owner.anchor_work = dict(result=True, no_child=False, run=True, rejected=None,
                                          wait={"kind": "exit", "code": 0})
-                owner.wait = SimpleNamespace(status_code=command.HELPER_OK)
+                owner.wait = SimpleNamespace(status_code=(command.HELPER_FAILED if edge == "failed-anchor"
+                                                         else command.HELPER_OK))
                 owner.output_overflow = owner.source_failed = False
                 owner.output = [b"", b""]
                 owner.create_route = owner.run_route = SimpleNamespace(attempted=True)
@@ -373,10 +605,10 @@ class CommandContractTests(unittest.TestCase):
                 with patch.object(command, "_scalar", new=scalar), patch.object(command, "_send", new=send):
                     result = owner.finish()
                 self.assertEqual(len(frames), 1)
-                self.assertIs(frames[0]["result"], edge != "fence")
+                self.assertIs(frames[0]["result"], edge not in {"fence", "failed-anchor"})
                 self.assertTrue(frames[0]["producer"] and frames[0]["fence"])
                 self.assertEqual(result, command.HELPER_OK if edge == "none" else
-                                 command.HELPER_FAILED if edge == "fence" else command.HELPER_UNKNOWN)
+                                 command.HELPER_FAILED if edge in {"fence", "failed-anchor"} else command.HELPER_UNKNOWN)
 
     def event(self, ordinal, operation, edge, *, written=0, flags=0, outcome=None, identity=True):
         if outcome is None:
