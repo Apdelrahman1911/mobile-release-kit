@@ -1,9 +1,10 @@
 # Initialization and local recovery
 
-`mobile-release init` is a read-only discovery preview. `init --apply` installs configuration,
+`mobile-release init` is a read-only discovery preview, including separate read-only Git
+discovery. `init --apply` uses filesystem-only project discovery to install configuration,
 thin workflow callers, empty metadata prompts and ignore lines; it never builds an application
-or contacts a Store. Git discovery remains a separate read-only subprocess. This filesystem
-recovery protocol is unrelated to [Store-operation recovery](recovery.md).
+or contacts a Store. Recovery performs neither project discovery nor template lookup. This
+filesystem recovery protocol is unrelated to [Store-operation recovery](recovery.md).
 
 ## Applying an integration
 

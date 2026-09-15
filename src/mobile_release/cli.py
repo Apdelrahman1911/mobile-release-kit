@@ -311,8 +311,8 @@ def _metadata_skeleton(configuration: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(sorted(paths))
 
 
-def _init_proposal(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
-    discovered = discover_project(root)
+def _init_proposal(root: Path, *, include_git: bool = True) -> tuple[dict[str, Any], dict[str, Any]]:
+    discovered = discover_project(root, include_git=include_git)
     proposed = default_config(root, discovered)
     if not any(proposed[platform].get("enabled") for platform in ("android", "ios")):
         raise ValidationError("no supported Android application or iOS application project was discovered")
@@ -335,7 +335,7 @@ def _init(args: argparse.Namespace) -> int:
                 print(json.dumps({"recovery": outcome, "requiresReview": True}, indent=2))
                 return 0
             workspace.require_clean()
-            _, proposed = _init_proposal(root)
+            _, proposed = _init_proposal(root, include_git=False)
             return _init_apply(args, root, proposed, workspace)
     except OSError as error:
         raise ValidationError(

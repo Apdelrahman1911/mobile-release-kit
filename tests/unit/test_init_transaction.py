@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 from mobile_release import cli
 from mobile_release import init_transaction as tx
+from mobile_release.discovery import GitContext
 from mobile_release.errors import ValidationError
 
 
@@ -184,9 +185,37 @@ class InitTransactionTests(unittest.TestCase):
                 workspace.rename(workspace.fd, "a", workspace.fd, "new")
                 self.assertEqual((root / "new").stat().st_ino, a)
 
+    def test_preview_retains_git_metadata_and_static_proposal_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            fixture(root, platforms=("android", "ios"))
+            before = snapshot(root)
+            git = GitContext(
+                repository="example/consumer", repository_id="123456",
+                commit="b" * 40, tree="c" * 40, ref="refs/heads/main",
+                branch="main", dirty=False,
+            )
+            with patch("mobile_release.discovery.git_context", return_value=git) as provider:
+                code, output, error = invoke(["init", "--root", str(root)])
+            self.assertEqual(code, 0, error)
+            provider.assert_called_once_with(root, execution_source=None, cancellation=None)
+            report = json.loads(output)
+            self.assertEqual(set(report), {"discovery", "proposedConfiguration"})
+            self.assertEqual(report["discovery"]["git"], git.as_dict())
+            self.assertEqual(snapshot(root), before)
+            with patch("mobile_release.discovery.git_context", side_effect=AssertionError("static proposal must not query Git")):
+                discovered, proposed = cli._init_proposal(root, include_git=False)
+            self.assertEqual(discovered, {key: value for key, value in report["discovery"].items() if key != "git"})
+            self.assertEqual(proposed, report["proposedConfiguration"])
+            self.assertEqual(snapshot(root), before)
+
     def test_single_combined_platforms_and_idempotent_force_preserve_existing_files(self) -> None:
         for platforms in (("android",), ("ios",), ("android", "ios")):
-            with self.subTest(platforms=platforms), tempfile.TemporaryDirectory() as temporary:
+            with (
+                self.subTest(platforms=platforms),
+                tempfile.TemporaryDirectory() as temporary,
+                patch("mobile_release.discovery.git_context", side_effect=AssertionError("apply must not query Git")),
+            ):
                 root = Path(temporary).resolve()
                 args = fixture(root, force=True, platforms=platforms)
                 code, output, error = invoke(args)
