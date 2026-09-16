@@ -17,6 +17,7 @@ if __name__ == '__main__':
     sys.path[:0] = [sys.argv.pop(1), str(ROOT/'tests')]
 
 from mobile_release import credentials, ios_profiles, local_signing
+from mobile_release.build_inputs import BuildInputError
 from mobile_release.cancellation import OwnedTemporaryDirectory
 from mobile_release.errors import CredentialError
 from mobile_release.inspection import InspectionDeadline
@@ -66,6 +67,19 @@ def _exit_context(owners, name, error_info=(None, None, None)):
     context = owners.pop(name, None)
     if context is not None:
         context.__exit__(*error_info)  # An ambiguous exit never restores this slot.
+
+
+def _exit_inherited_signing(owners):
+    # Child-copy descriptors may retire, but the enclosing finite input owner
+    # must never report successful completion of its parent's signing scope.
+    try:
+        _exit_context(owners, 'signing')
+    except BuildInputError as error:
+        if (type(error) is not BuildInputError
+                or str(error) != 'build inputs: inherited scope cannot publish parent completion'):
+            raise
+    else:
+        raise AssertionError('inherited signing context unexpectedly completed')
 
 
 def _cleanup(primary, actions):
@@ -125,7 +139,7 @@ def main(root: Path, mode: str, deadline: float):
                 if pid == 0:
                     assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
                     if mode == 'explicit-exit':
-                        _exit_context(owners, 'signing')
+                        _exit_inherited_signing(owners)
                         _exit_context(owners, 'lease')
                     else:
                         owners.clear()

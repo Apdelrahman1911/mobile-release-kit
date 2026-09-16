@@ -2182,6 +2182,46 @@ class SigningAdapterPhaseDiagnosticTests(unittest.TestCase):
 class RegressionIsolationContractTests(unittest.TestCase):
     """Real unittest lifecycle plus inert owner seams, never native receipts."""
 
+    def test_inherited_signing_exit_requires_exact_refusal_and_one_attempt(self):
+        from . import local_signing_fork_fixture as inherited
+        from mobile_release.build_inputs import BuildInputError
+        from mobile_release.errors import CredentialError
+
+        class OtherBuildInputError(BuildInputError):
+            pass
+
+        message = 'build inputs: inherited scope cannot publish parent completion'
+        accepted = BuildInputError(message)
+        for outcome in (accepted, None, BuildInputError('different refusal'),
+                        OtherBuildInputError(message), CredentialError(message),
+                        RuntimeError('original exit failed')):
+            with self.subTest(outcome=type(outcome).__name__):
+                calls = []
+
+                class Context:
+                    def __exit__(self, *info):
+                        calls.append(info)
+                        if outcome is not None:
+                            raise outcome
+
+                lease, other = object(), object()
+                owners = {'signing': Context(), 'lease': lease, 'other': other}
+                if outcome is accepted:
+                    self.assertIsNone(inherited._exit_inherited_signing(owners))
+                elif outcome is None:
+                    with self.assertRaisesRegex(AssertionError, 'unexpectedly completed'):
+                        inherited._exit_inherited_signing(owners)
+                else:
+                    with self.assertRaises(type(outcome)) as raised:
+                        inherited._exit_inherited_signing(owners)
+                    self.assertIs(raised.exception, outcome)
+                self.assertEqual(calls, [(None, None, None)])
+                self.assertEqual(owners, {'lease': lease, 'other': other})
+                with self.assertRaisesRegex(AssertionError, 'unexpectedly completed'):
+                    inherited._exit_inherited_signing(owners)
+                self.assertEqual(calls, [(None, None, None)])
+                self.assertEqual(owners, {'lease': lease, 'other': other})
+
     def exercise(self, mode):
         from . import local_signing_regression_fixture as regression
         descriptor = next(item for item in regression.catalog.cases_for("ubuntu-24.04") if item.kind == "execution")
